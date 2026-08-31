@@ -578,6 +578,8 @@ private slots:
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
     void spectrogramCenteredEofDetachmentDisablesSubpixelScrolling();
     void spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof();
+    void spectrogramStoppedZoomResetRefillsCanvas();
+    void spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail();
     void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
     void spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChunk();
     void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
@@ -6544,6 +6546,165 @@ void QmlSmokeTest::spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBefor
     QVERIFY(item.m_precomputedCanvasDisplayLeft > decodedColumns);
 }
 
+void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
+    // Contract for the stopped zoom-reset flow: with playback stopped at
+    // position 0, a middle-click zoom reset (deep zoom-out hop -> reference
+    // hop) restarts the decode session from the track start.  The widget
+    // must leave the zoom-fill state and show the refilled canvas instead
+    // of a frozen or black view.
+    SpectrogramItem item;
+    item.setWidth(1162);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 1025;
+    constexpr quint64 token = 7;
+    constexpr int hopZoomedOut = 10'240;
+    constexpr int hopNormal = 1'024;
+    constexpr int sampleRate = 44'100;
+    constexpr int estZoomedOut = 1'247;
+    constexpr int estNormal = 13'618;
+    constexpr int zoomedOutDecoded = 1'240;
+    constexpr int normalDecoded = 2'755;
+    constexpr int staleStart = 11'611;
+    constexpr int staleDecoded = 1'943;
+
+    // --- Phase 1: zoomed-out session (post-stop restart at 0) ---
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, estZoomedOut,
+        sampleRate, hopZoomedOut, false, true, token, true, 1);
+    for (int start = 0; start < zoomedOutDecoded; start += 124) {
+        const int cols = qMin(124, zoomedOutDecoded - start);
+        QByteArray data(cols * bins, '\x40');
+        item.feedPrecomputedChunk(
+            data, bins, 0, cols, start, estZoomedOut,
+            sampleRate, hopZoomedOut, false, false, token, false, 1);
+    }
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1024.0 / static_cast<double>(hopZoomedOut);
+    }
+    item.setPositionSeconds(0.0);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(!item.m_canvas.isNull());
+    QVERIFY(item.m_canvasFilledCols > 0);
+
+    // --- Phase 2: middle-click zoom reset (zoom 1.0 session) ---
+    item.m_zoomLevel = 1.0;
+    item.m_awaitingZoomData = true;
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, staleStart, estNormal,
+        sampleRate, hopNormal, false, true, token, true, 2);
+    for (int offset = 0; offset < staleDecoded; offset += 32) {
+        const int cols = qMin(32, staleDecoded - offset);
+        QByteArray data(cols * bins, '\x40');
+        item.feedPrecomputedChunk(
+            data, bins, 0, cols, staleStart + offset, estNormal,
+            sampleRate, hopNormal, false, false, token, false, 2);
+    }
+    // This mirrors the trace's bad backend window: it has more than a
+    // screenful of data and a very large max column, but none of the stopped
+    // viewport around column 0.  Keep the old non-black canvas frozen rather
+    // than accepting a fully black rebuild.
+    QCOMPARE(item.m_zoomFillActive, true);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(node != nullptr);
+    bool frozenCanvasHasContent = false;
+    for (int y = 0; y < item.m_canvas.height() && !frozenCanvasHasContent; ++y) {
+        for (int x = 0; x < item.m_canvas.width(); ++x) {
+            if (item.m_canvas.pixel(x, y) != qRgb(0, 0, 0)) {
+                frozenCanvasHasContent = true;
+                break;
+            }
+        }
+    }
+    QVERIFY2(frozenCanvasHasContent,
+             "non-overlapping refill must preserve the previous visible canvas");
+
+    // Corrected backend restart for the stopped viewport.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, estNormal,
+        sampleRate, hopNormal, false, true, token, true, 3);
+    for (int start = 0; start < normalDecoded; start += 32) {
+        const int cols = qMin(32, normalDecoded - start);
+        QByteArray data(cols * bins, '\x40');
+        item.feedPrecomputedChunk(
+            data, bins, 0, cols, start, estNormal,
+            sampleRate, hopNormal, false, false, token, false, 3);
+    }
+    // The zoom-fill freeze must release once the ring covers the display
+    // again, and the next paint must rebuild the canvas with content.
+    QCOMPARE(item.m_zoomFillActive, false);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(!item.m_canvas.isNull());
+    QVERIFY2(item.m_canvasFilledCols > 0,
+             qPrintable(QStringLiteral("canvas refill produced %1 columns")
+                            .arg(item.m_canvasFilledCols)));
+    bool refilledCanvasHasContent = false;
+    for (int y = 0; y < item.m_canvas.height() && !refilledCanvasHasContent; ++y) {
+        for (int x = 0; x < item.m_canvas.width(); ++x) {
+            if (item.m_canvas.pixel(x, y) != qRgb(0, 0, 0)) {
+                refilledCanvasHasContent = true;
+                break;
+            }
+        }
+    }
+    QVERIFY2(refilledCanvasHasContent,
+             "stopped zoom reset must render non-background spectrogram pixels");
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail() {
+    // Regression for viewport racing on zoom-out near the end of a track.
+    // During the post-zoom refill the decoded tail lags far behind the
+    // playhead, which makes the EOF-detach precondition trivially true;
+    // with a window-scaled slack the clamp then engaged mid-fill and
+    // dragged the viewport rightward with the decode head.  The display
+    // range must stay pinned to the estimate until the decode is genuinely
+    // within ~2 s of the track end.
+    SpectrogramItem item;
+    item.setWidth(1162);
+    item.setHeight(180);
+    item.setDisplayMode(1); // Centered
+
+    constexpr int bins = 8;
+    constexpr int sampleRate = 44'100;
+    constexpr int hop = 10'240;           // deep zoom-out
+    constexpr int totalEstimate = 1'247;  // 288 s track at hop 10240 (+fudge)
+    // Within the old hard 64-column tolerance but still roughly 13 s from
+    // the estimate at this coarse hop.  A genuinely two-second tolerance
+    // must keep treating this as an in-progress refill.
+    constexpr int decodedColumns = totalEstimate - 57;
+    constexpr quint64 token = 7;
+
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, totalEstimate,
+        sampleRate, hop, false, true, token);
+    QByteArray data(decodedColumns * bins, '\x40');
+    item.feedPrecomputedChunk(
+        data, bins, 0, decodedColumns, 0, totalEstimate,
+        sampleRate, hop, false, false, token);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1024.0 / static_cast<double>(hop);
+    }
+    item.setPositionSeconds(280.0); // playhead near EOF, decode head lags
+
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+
+    QMutexLocker lock(&item.m_stateMutex);
+    // The full-track display lock pins the range to the estimate; the
+    // lagging decoded tail must not clamp it mid-fill.  (The stored
+    // canvas range is truncated to the widget width: one column per
+    // pixel at effectiveZoom 1.0.)
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
+    QCOMPARE(item.m_precomputedCanvasDisplayRight,
+             static_cast<qint64>(1162 - 1));
+}
+
 void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
     // Regression: the centered ring resets on every session restart
     // (e.g. zoom change on fullscreen toggle) and recomputes its cap
@@ -8468,10 +8629,16 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
     QVERIFY2(!item.m_zoomFillActive,
              "zoom-out should not freeze on the old centered cache while the coarser restart fills");
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
-    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(zoomedOutDecodedColumns - 1));
+    // The range pins to the estimate-based full-track extent; the decoded
+    // tail (32 cols) no longer clamps it because the EOF-detach tolerance
+    // is time-based and the decode is nowhere near the track end.
+    QCOMPARE(item.m_precomputedCanvasDisplayRight,
+             static_cast<qint64>(zoomedOutTotalColumns - 1));
     QVERIFY(item.m_precomputedCanvasDisplayLeft < initialDisplayLeft);
     QVERIFY(!item.m_canvas.isNull());
-    QCOMPARE(item.m_canvasFilledCols, zoomedOutDecodedColumns);
+    // The rebuild covers the whole estimate-pinned range; only the first
+    // zoomedOutDecodedColumns columns carry real content.
+    QCOMPARE(item.m_canvasFilledCols, zoomedOutTotalColumns);
     QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 0.001);
 
     delete updatedNode;

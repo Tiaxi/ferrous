@@ -227,6 +227,11 @@ pub(super) struct SpectrogramWorkerHandles {
     pub(super) cmd_tx: Sender<SpectrogramWorkerCommand>,
     pub(super) decode_generation: Arc<AtomicU64>,
     pub(super) columns_produced: Arc<AtomicU64>,
+    /// Track duration (milliseconds) published by the active worker
+    /// session after its file probe.  0 = unknown.  Read by the analysis
+    /// thread to model the centered display's visible window (full-track
+    /// lock / EOF detach) when choosing session decode windows.
+    pub(super) track_duration_ms: Arc<AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +530,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
     active_token: Arc<AtomicU64>,
     generation: Arc<AtomicU64>,
     columns_produced: Arc<AtomicU64>,
+    track_duration_ms: Arc<AtomicU64>,
 ) {
     let _ = std::thread::Builder::new()
         .name("ferrous-spectrogram-decode".to_string())
@@ -535,6 +541,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
                 &active_token,
                 &generation,
                 &columns_produced,
+                &track_duration_ms,
             );
         });
 }
@@ -558,6 +565,7 @@ fn spectrogram_worker_loop(
     active_token: &AtomicU64,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
+    track_duration_ms_out: &AtomicU64,
 ) {
     let mut next_cmd: Option<SpectrogramWorkerCommand> = None;
     let mut last_params: Option<LastSessionParams> = None;
@@ -600,6 +608,7 @@ fn spectrogram_worker_loop(
                     active_token,
                     generation,
                     columns_produced_out,
+                    track_duration_ms_out,
                 );
                 if matches!(next_cmd, Some(SpectrogramWorkerCommand::Stop)) {
                     break;
@@ -641,6 +650,7 @@ fn spectrogram_worker_loop(
                         active_token,
                         generation,
                         columns_produced_out,
+                        track_duration_ms_out,
                     );
                     if matches!(next_cmd, Some(SpectrogramWorkerCommand::Stop)) {
                         break;
@@ -796,6 +806,7 @@ fn run_spectrogram_session(
     active_token: &AtomicU64,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
+    track_duration_ms_out: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
     let &SpectrogramWorkerCommand::NewTrack {
         track_token,
@@ -835,6 +846,9 @@ fn run_spectrogram_session(
     let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
     let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
     let effective_rate = u32::try_from(native_sample_rate / divisor_u64.max(1)).unwrap_or(48_000);
+
+    publish_track_duration_ms(total_columns, effective_rate, track_duration_ms_out);
+
     let actual_channel_count = match view_mode {
         SpectrogramViewMode::Downmix => 1,
         SpectrogramViewMode::PerChannel => native_channels,
@@ -998,6 +1012,16 @@ fn run_spectrogram_session(
                     source = new_source;
                     session.track_token = track_token;
                     session.total_columns_estimate = new_est;
+                    // handle_track_change invalidates the outgoing duration
+                    // before dispatching ContinueWithFile.  A compatible
+                    // continuation stays inside this worker session, so it
+                    // must republish here; otherwise the duration remains
+                    // unknown for every later centered seek/zoom restart.
+                    publish_track_duration_ms(
+                        new_est,
+                        session.effective_rate,
+                        track_duration_ms_out,
+                    );
                     warmup_remaining = 0;
                     session.target_chunk_columns = 1;
                     session.session_start_time = std::time::Instant::now();
@@ -1074,6 +1098,27 @@ fn run_spectrogram_session(
             }
         }
     }
+}
+
+/// Publish the file-metadata duration represented by a reference-hop column
+/// estimate.  `total_columns` includes the same +64 STFT-edge allowance used
+/// by Qt's estimate, so retaining it keeps full-track-lock and EOF-detach math
+/// aligned across the worker and analysis threads.
+fn publish_track_duration_ms(
+    total_columns: u32,
+    effective_rate: u32,
+    track_duration_ms_out: &AtomicU64,
+) {
+    let duration_ms = if effective_rate > 0 {
+        f64_to_u64_saturating(
+            f64::from(total_columns) * usize_to_f64_approx(REFERENCE_HOP)
+                / f64::from(effective_rate)
+                * 1000.0,
+        )
+    } else {
+        0
+    };
+    track_duration_ms_out.store(duration_ms, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -2416,6 +2461,21 @@ mod tests {
             gst_duration_requeried: false,
             pending_continue: None,
         }
+    }
+
+    #[test]
+    fn continued_file_republishes_track_duration() {
+        // Compatible ContinueWithFile handoffs do not create a new worker
+        // session.  Publishing the next file's estimate must therefore
+        // replace the zero written by handle_track_change rather than leave
+        // centered restart math in its unknown-duration fallback.
+        let published_duration_ms = AtomicU64::new(0);
+
+        publish_track_duration_ms(2_000, 48_000, &published_duration_ms);
+        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 42_666);
+
+        publish_track_duration_ms(4_000, 48_000, &published_duration_ms);
+        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 85_333);
     }
 
     #[test]

@@ -79,12 +79,23 @@ bool claimMonotonicGeneration(std::atomic<quint64> *lastClaimed, quint64 generat
 bool centeredDecodedTailLooksFinal(
     qint64 decodedColumnCount,
     qint64 estimatedColumnCount,
-    qint64 visibleWindowColumns) {
+    double columnsPerSecond) {
     if (decodedColumnCount <= 0 || estimatedColumnCount <= 0) {
         return false;
     }
-    const qint64 eofSlackColumns =
-        std::max<qint64>(64, std::max<qint64>(1, visibleWindowColumns));
+    // The decoded tail only "looks final" when the gap to the estimate is
+    // small in TIME: the estimate overshoots real audio by trailing
+    // container padding (~1 s) and the finalize chunk shrinks the
+    // estimate to the decoded extent at EOF anyway.  The tolerance must
+    // therefore scale with the column RATE, not with the visible window:
+    // a window-scaled slack was tens of seconds wide at deep zoom-out, so
+    // this clamp fired during zoom-out refills and dragged the viewport
+    // along with the decode head (the decoded tail lagging the playhead
+    // makes the second condition below trivially true mid-fill).
+    const qint64 eofSlackColumns = columnsPerSecond > 0.0
+        ? std::max<qint64>(
+              1, static_cast<qint64>(std::ceil(columnsPerSecond * 2.0)))
+        : 1;
     return decodedColumnCount + eofSlackColumns >= estimatedColumnCount;
 }
 
@@ -1659,6 +1670,37 @@ void SpectrogramItem::feedPrecomputedChunk(
         const bool ringCoversDisplayRight =
             m_precomputedMaxColumnIndex + 1 >= displayRightCapped - 16;
 
+        // A large absolute max column does not prove that the ring contains
+        // the LEFT edge of this viewport.  In particular, a stale backend
+        // target can refill thousands of columns near EOF while the stopped
+        // Qt viewport is at column 0.  Releasing the freeze in that state
+        // rebuilds every requested pixel from missing slots and turns the
+        // widget fully black.  Require the active token to retain the
+        // viewport's first source column before handing off to the new zoom.
+        const int visibleWindowCols = static_cast<int>(std::ceil(
+            static_cast<double>(screenWidth)
+            / std::max(0.001, effectiveZoomLocked())));
+        const qint64 estimateCount = std::max<qint64>(
+            static_cast<qint64>(m_precomputedTotalColumnsEstimate), 1);
+        const qint64 nowCol = static_cast<qint64>(
+            std::max(0.0, m_positionSeconds) * cps);
+        qint64 displayLeftCol;
+        if (static_cast<qint64>(visibleWindowCols) * 100 / estimateCount >= 90) {
+            displayLeftCol = 0;
+        } else {
+            const qint64 halfWindowCols = visibleWindowCols / 2;
+            displayLeftCol = std::max<qint64>(0, nowCol - halfWindowCols);
+            const qint64 displayRightColForEstimate = std::min(
+                estimateCount - 1,
+                displayLeftCol + static_cast<qint64>(visibleWindowCols) - 1);
+            displayLeftCol = std::max<qint64>(
+                0,
+                displayRightColForEstimate
+                    - static_cast<qint64>(visibleWindowCols) + 1);
+        }
+        const bool ringCoversDisplayLeft =
+            ringSlotForDisplayIndexLocked(displayLeftCol, false) >= 0;
+
         // Decode tail-end: the STFT window truncates the last few
         // columns so maxCol+1 stops short of the estimate by ~20–30
         // columns.  At max zoom-out in wide fullscreen views,
@@ -1675,8 +1717,9 @@ void SpectrogramItem::feedPrecomputedChunk(
             && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 64
                 >= static_cast<qint64>(m_precomputedTotalColumnsEstimate);
 
-        if ((ringHasEnoughColumns && ringCoversDisplayRight)
-            || decodeReachedEnd) {
+        if (ringCoversDisplayLeft
+            && ((ringHasEnoughColumns && ringCoversDisplayRight)
+                || decodeReachedEnd)) {
             m_zoomFillActive = false;
             // Don't invalidateCanvas() here — the canvas must stay
             // non-null so the NEXT zoom transition can activate its
@@ -2300,7 +2343,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 // keeps the time axis bounded by audible content.
                 const bool decodedTailLooksFinal =
                     centeredDecodedTailLooksFinal(
-                        maxColCount, estimateCount, visibleWindowCols);
+                        maxColCount, estimateCount, columnsPerSecond);
                 centeredDecodedTailLooksFinalForFrame = decodedTailLooksFinal;
                 if (decodedTailLooksFinal
                     && static_cast<qint64>(maxColCount) - 1
@@ -3096,7 +3139,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
         }
         const bool decodedTailLooksFinal =
             centeredDecodedTailLooksFinal(
-                maxColCount, estimateCount, visibleWindowCols);
+                maxColCount, estimateCount, columnsPerSecond);
         if (decodedTailLooksFinal
             && maxColCount - 1
                 < static_cast<qint64>(nowCol) + static_cast<qint64>(halfWindowCols)) {
