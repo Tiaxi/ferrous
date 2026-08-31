@@ -465,7 +465,12 @@ private slots:
     void rootRowsStartExpandedByDefault();
     void artistExpansionPopulatesInBatches();
     void lazyArtistRowRequestsBackendExpansion();
+    void libraryTreeSeedsExpandedKeysBeforeFirstFrame();
     void artistPrefixSearchUsesModelLookup();
+    void libraryControllerRestoresExpandedSelectionAndViewport();
+    void libraryControllerUsesDelegateCoordinatesForViewportAnchor();
+    void libraryControllerForwardsShowTrackRequest();
+    void libraryControllerCentersBridgeRevealAfterExpansion();
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
@@ -1862,6 +1867,22 @@ void QmlSmokeTest::lazyArtistRowRequestsBackendExpansion() {
     QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::ExpandedRole).toBool(), true);
 }
 
+void QmlSmokeTest::libraryTreeSeedsExpandedKeysBeforeFirstFrame() {
+    LibraryTreeModel model;
+    QSignalSpy expansionSpy(&model, SIGNAL(nodeExpansionRequested(QString,bool)));
+
+    model.setExpandedKeys(QStringList{
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    });
+    model.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary());
+
+    QTRY_COMPARE(model.rowCount(), 3);
+    QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::ExpandedRole).toBool(), true);
+    QCOMPARE(model.data(model.index(1, 0), LibraryTreeModel::ExpandedRole).toBool(), true);
+    QCOMPARE(expansionSpy.count(), 0);
+}
+
 void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
     LibraryTreeModel model;
     model.setLibraryTreeFromBinary(multiRootBinary());
@@ -1870,6 +1891,274 @@ void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("artist b"), 0), 3);
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("artist a"), 2), 1);
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("missing"), 0), -1);
+}
+
+void QmlSmokeTest::libraryControllerRestoresExpandedSelectionAndViewport() {
+    LibraryTreeModel model;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("treeBytes"),
+        sampleArtistAlbumTreeBinary());
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    width: 320
+    height: 24
+    property alias controllerRef: controller
+    property alias viewRef: view
+    property alias saveCount: bridge.saveCount
+    property alias restoreStartedBeforePublish: publishTimer.restoreStartedBeforePublish
+
+    QtObject {
+        id: bridge
+        property int libraryTrackCount: 1
+        property bool libraryViewStateAvailable: false
+        property var libraryExpandedKeys: ["artist|Artist A", "album|Artist A|Album A"]
+        property string libraryViewSelectionKey: "track|/music/artist/album/track01.flac"
+        property string libraryViewAnchorKey: "album|Artist A|Album A"
+        property real libraryViewAnchorOffset: 3
+        property int saveCount: 0
+        function setLibraryViewState(selectionKey, anchorKey, anchorOffset) { saveCount += 1 }
+        function setLibraryNodeExpanded(key, expanded) {}
+        function showTrackInLibrary(path) {}
+    }
+
+    QtObject {
+        id: tagEditorApi
+        function openSelection(selections) { return false }
+    }
+
+    Controllers.LibraryController {
+        id: controller
+        uiBridge: bridge
+        libraryModel: testLibraryModel
+        tryCaptureGlobalSearchPrefill: function(event) { return false }
+        tagEditorApi: tagEditorApi
+        openTagEditorDialog: function() {}
+    }
+
+    ListView {
+        id: view
+        anchors.fill: parent
+        model: testLibraryModel
+        delegate: Item { width: view.width; height: 24 }
+        Component.onCompleted: controller.registerView(view)
+    }
+
+    Timer {
+        id: publishTimer
+        interval: 40
+        repeat: false
+        property bool restoreStartedBeforePublish: false
+        onTriggered: {
+            restoreStartedBeforePublish = controller.restoredViewStateApplied
+            bridge.libraryViewStateAvailable = true
+            controller.tryApplyPersistedViewState()
+        }
+    }
+
+    Component.onCompleted: {
+        controller.requestTreeApply(1, treeBytes)
+        controller.tryApplyPersistedViewState()
+        publishTimer.start()
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = qvariant_cast<QObject *>(root->property("controllerRef"));
+    QObject *view = qvariant_cast<QObject *>(root->property("viewRef"));
+    QVERIFY(controller != nullptr);
+    QVERIFY(view != nullptr);
+    QTRY_COMPARE(model.rowCount(), 3);
+    QCOMPARE(root->property("restoreStartedBeforePublish").toBool(), false);
+    QTRY_COMPARE(
+        controller->property("selectedSelectionKey").toString(),
+        QStringLiteral("track|/music/artist/album/track01.flac"));
+    QTRY_VERIFY(std::abs(view->property("contentY").toDouble() - 27.0) < 0.5);
+    QTRY_COMPARE(root->property("saveCount").toInt(), 1);
+}
+
+void QmlSmokeTest::libraryControllerUsesDelegateCoordinatesForViewportAnchor() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    property alias controllerRef: controller
+    property alias contentY: mockView.contentY
+    property var capturedAnchor: ({})
+
+    function restoreCapturedAnchor() {
+        mockView.contentY = 0
+        controller.restoreViewAnchor(capturedAnchor)
+    }
+
+    QtObject {
+        id: bridge
+        property int libraryTrackCount: 1
+        function setLibraryViewState(selectionKey, anchorKey, anchorOffset) {}
+    }
+    QtObject {
+        id: model
+        property int count: 20
+        function selectionKeyForRow(row) { return row === 10 ? "anchor-key" : "other-key" }
+        function indexForSelectionKey(key) { return key === "anchor-key" ? 10 : -1 }
+    }
+    QtObject { id: tagEditorApi }
+    QtObject {
+        id: mockView
+        property real contentY: 350
+        property real contentHeight: 1000
+        property real height: 100
+        property real originY: 100
+        property bool activeFocus: false
+        function indexAt(x, y) { return 10 }
+        function itemAtIndex(index) { return index === 10 ? ({ y: 340 }) : null }
+        function positionViewAtIndex(index, mode) { contentY = index === 10 ? 340 : 0 }
+    }
+
+    Controllers.LibraryController {
+        id: controller
+        uiBridge: bridge
+        libraryModel: model
+        tryCaptureGlobalSearchPrefill: function(event) { return false }
+        tagEditorApi: tagEditorApi
+        openTagEditorDialog: function() {}
+    }
+
+    Component.onCompleted: {
+        controller.registerView(mockView)
+        capturedAnchor = controller.captureViewAnchor()
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    const QVariantMap anchor = root->property("capturedAnchor").toMap();
+    QCOMPARE(anchor.value(QStringLiteral("key")).toString(), QStringLiteral("anchor-key"));
+    QCOMPARE(anchor.value(QStringLiteral("offset")).toDouble(), 10.0);
+    QVERIFY(QMetaObject::invokeMethod(root.get(), "restoreCapturedAnchor"));
+    QTRY_COMPARE(root->property("contentY").toDouble(), 350.0);
+}
+
+void QmlSmokeTest::libraryControllerForwardsShowTrackRequest() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    property alias controllerRef: controller
+    property alias shownPath: bridge.shownPath
+
+    QtObject {
+        id: bridge
+        property string shownPath: ""
+        function showTrackInLibrary(path) { shownPath = path }
+    }
+    QtObject {
+        id: model
+        property int count: 0
+    }
+    QtObject {
+        id: tagEditorApi
+    }
+    Controllers.LibraryController {
+        id: controller
+        uiBridge: bridge
+        libraryModel: model
+        tryCaptureGlobalSearchPrefill: function(event) { return false }
+        tagEditorApi: tagEditorApi
+        openTagEditorDialog: function() {}
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = qvariant_cast<QObject *>(root->property("controllerRef"));
+    QVERIFY(controller != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "showTrackInLibrary",
+        Q_ARG(QVariant, QStringLiteral("/music/song.flac"))));
+    QCOMPARE(root->property("shownPath").toString(), QStringLiteral("/music/song.flac"));
+}
+
+void QmlSmokeTest::libraryControllerCentersBridgeRevealAfterExpansion() {
+    LibraryTreeModel model;
+    model.setLibraryTreeFromBinary(artistWithManyAlbumsBinary(20));
+    QTRY_COMPARE(model.rowCount(), 1);
+
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    width: 320
+    height: 120
+    property alias controllerRef: controller
+    property alias viewRef: view
+
+    QtObject {
+        id: bridge
+        property int libraryTrackCount: 20
+        function setLibraryViewState(selectionKey, anchorKey, anchorOffset) {}
+        function setLibraryNodeExpanded(key, expanded) {}
+        function showTrackInLibrary(path) {}
+    }
+    QtObject { id: tagEditorApi }
+
+    Controllers.LibraryController {
+        id: controller
+        uiBridge: bridge
+        libraryModel: testLibraryModel
+        tryCaptureGlobalSearchPrefill: function(event) { return false }
+        tagEditorApi: tagEditorApi
+        openTagEditorDialog: function() {}
+    }
+
+    ListView {
+        id: view
+        anchors.fill: parent
+        model: testLibraryModel
+        delegate: Item { width: view.width; height: 24 }
+        Component.onCompleted: controller.registerView(view)
+    }
+
+    Component.onCompleted: controller.requestBridgeReveal(
+        ["artist|Artist A", "album|Artist A|Album 20"],
+        "track|/music/artist/album20/track.flac")
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = qvariant_cast<QObject *>(root->property("controllerRef"));
+    QObject *view = qvariant_cast<QObject *>(root->property("viewRef"));
+    QVERIFY(controller != nullptr);
+    QVERIFY(view != nullptr);
+    QTRY_COMPARE(
+        controller->property("selectedSelectionKey").toString(),
+        QStringLiteral("track|/music/artist/album20/track.flac"));
+    QTRY_VERIFY(view->property("contentY").toDouble() > 300.0);
 }
 
 void QmlSmokeTest::playbackControllerSeekImmediatelyUpdatesSpectrogramPosition() {

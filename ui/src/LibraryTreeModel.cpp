@@ -345,6 +345,24 @@ void LibraryTreeModel::setLibraryTreeFromBinary(const QByteArray &treeBytes) {
     m_parseWatcher.setFuture(future);
 }
 
+void LibraryTreeModel::setExpandedKeys(const QStringList &keys) {
+    QHash<QString, bool> expandedByKey;
+    expandedByKey.reserve(keys.size());
+    for (const QString &key : keys) {
+        const QString normalized = key.trimmed();
+        if (!normalized.isEmpty()) {
+            expandedByKey.insert(normalized, true);
+        }
+    }
+    if (m_expandedByKey == expandedByKey) {
+        return;
+    }
+    m_expandedByKey = std::move(expandedByKey);
+    if (!m_tree.isEmpty()) {
+        rebuildRows();
+    }
+}
+
 void LibraryTreeModel::setSearchText(const QString &text) {
     const QString next = toLower(text.trimmed());
     if (next == m_searchLower) {
@@ -363,7 +381,7 @@ void LibraryTreeModel::toggleKey(const QString &key) {
         if (row.key == key && row.hasChildren) {
             const bool nextExpanded = !row.expanded;
             m_expandedByKey.insert(key, nextExpanded);
-            if (row.rowType == QStringLiteral("artist") || row.rowType == QStringLiteral("album")) {
+            if (row.rowType != QStringLiteral("root")) {
                 emit nodeExpansionRequested(key, nextExpanded);
             }
             rebuildRows();

@@ -226,6 +226,11 @@ ApplicationWindow {
         property int libraryTrackCount: 0
         property int libraryArtistCount: 0
         property int libraryAlbumCount: 0
+        property var libraryExpandedKeys: []
+        property bool libraryViewStateAvailable: false
+        property string libraryViewSelectionKey: ""
+        property string libraryViewAnchorKey: ""
+        property real libraryViewAnchorOffset: 0
         property var libraryRoots: []
         property var libraryRootEntries: []
         property int librarySortMode: 0
@@ -256,6 +261,7 @@ ApplicationWindow {
         signal snapshotChanged()
         signal analysisChanged()
         signal libraryTreeFrameReceived(int version, var treeBytes)
+        signal libraryRevealRequested(var expandKeys, string selectionKey)
         signal globalSearchResultsChanged()
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
@@ -320,6 +326,8 @@ ApplicationWindow {
         function rescanLibraryRoot(path) {}
         function rescanAllLibraryRoots() {}
         function setLibraryNodeExpanded(key, expanded) {}
+        function setLibraryViewState(selectionKey, anchorKey, anchorOffset) {}
+        function showTrackInLibrary(path) {}
         function setLibrarySortMode(mode) {}
         function setGlobalSearchQuery(query) {}
         function searchCurrentTrackArtworkSuggestions() {}
@@ -1160,11 +1168,15 @@ ApplicationWindow {
         sourceSize.height: root.albumArtViewerDecodeHeight
     }
 
-    onClosing: function(close) { uiBridge.shutdown() }
+    onClosing: function(close) {
+        libraryController.persistLibraryViewState()
+        uiBridge.shutdown()
+    }
 
     Connections {
         target: uiBridge
         function onSnapshotChanged() {
+            libraryController.tryApplyPersistedViewState()
             if (uiBridge.profileLogsEnabled) {
                 const t0 = Date.now()
                 playbackController.handleSnapshotChanged(
@@ -1227,6 +1239,9 @@ ApplicationWindow {
         function onLibraryTreeFrameReceived(version, treeBytes) {
             libraryController.requestTreeApply(version, treeBytes || "")
         }
+        function onLibraryRevealRequested(expandKeys, selectionKey) {
+            libraryController.requestBridgeReveal(expandKeys || [], selectionKey || "")
+        }
         function onGlobalSearchResultsChanged() {
             globalSearchController.syncSelectionAfterResultsChange()
         }
@@ -1248,6 +1263,7 @@ ApplicationWindow {
         function onTreeApplied() {
             libraryController.finishPendingTreeApply()
             libraryController.applyPendingReveal()
+            libraryController.tryApplyPersistedViewState()
         }
         function onNodeExpansionRequested(key, expanded) {
             uiBridge.setLibraryNodeExpanded(key, expanded)

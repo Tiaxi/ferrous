@@ -77,6 +77,7 @@ Rectangle {
             pixelAligned: true
 
             Component.onCompleted: root.controller.registerView(libraryAlbumView)
+            onContentYChanged: root.controller.scheduleLibraryViewStatePersist()
 
             onContentHeightChanged: {
                 if (root.controller.pendingExpandFitKey.length > 0) {

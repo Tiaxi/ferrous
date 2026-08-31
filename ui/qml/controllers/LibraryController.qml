@@ -32,11 +32,22 @@ QtObject {
     property string pendingRevealSelectionKey: ""
     property var pendingRevealExpandKeys: []
     property int pendingRevealAttempts: 0
+    property bool pendingRevealCentersSelection: false
+    property string pendingCenteredRevealKey: ""
+    property int pendingCenteredRevealAttempts: 0
     property string pendingExpandFitKey: ""
     property int pendingExpandFitAttempts: 0
     property string pendingSearchOpenSelectionKey: ""
     property var pendingSearchOpenExpandKeys: []
     property int pendingSearchOpenAttempts: 0
+    property bool restoredViewStateApplied: false
+    property string pendingRestoredSelectionKey: ""
+    property string pendingRestoredAnchorKey: ""
+    property real pendingRestoredAnchorOffset: 0
+    property var pendingRestoredExpandKeys: []
+    property int pendingRestoredAttempts: 0
+    property int pendingRestoredSettleAttempts: 0
+    property bool restoringViewState: false
     property var view: null
     readonly property bool viewHasActiveFocus: !!root.view && root.view.activeFocus
 
@@ -58,8 +69,54 @@ QtObject {
         onTriggered: root.applyPendingSearchOpen()
     }
 
+    property Timer viewStatePersistTimer: Timer {
+        interval: 250
+        repeat: false
+        onTriggered: root.persistLibraryViewState()
+    }
+
+    property Timer restoredViewRetryTimer: Timer {
+        interval: 80
+        repeat: false
+        onTriggered: root.applyPendingRestoredViewState()
+    }
+
+    property Timer restoredViewSettleTimer: Timer {
+        interval: 60
+        repeat: false
+        onTriggered: root.settleRestoredViewState()
+    }
+
+    property Timer centeredRevealTimer: Timer {
+        interval: 60
+        repeat: false
+        onTriggered: root.applyPendingCenteredReveal()
+    }
+
     function registerView(view) {
         root.view = view
+    }
+
+    function scheduleLibraryViewStatePersist() {
+        if (root.restoredViewStateApplied
+                && !root.restoringViewState
+                && root.pendingCenteredRevealKey.length === 0) {
+            viewStatePersistTimer.restart()
+        }
+    }
+
+    function persistLibraryViewState() {
+        if (!root.restoredViewStateApplied
+                || root.restoringViewState
+                || root.pendingCenteredRevealKey.length > 0
+                || !root.uiBridge.setLibraryViewState) {
+            return
+        }
+        const anchor = root.captureViewAnchor()
+        root.uiBridge.setLibraryViewState(
+            root.selectedSelectionKey || "",
+            anchor.key || "",
+            anchor.offset || 0)
     }
 
     function isSelectionKeySelected(key) {
@@ -303,6 +360,7 @@ QtObject {
         root.selectedTrackPath = ""
         root.selectedOpenPath = ""
         root.selectedPlayPaths = []
+        root.scheduleLibraryViewStatePersist()
     }
 
     function applyPrimaryRow(rowMap) {
@@ -314,6 +372,7 @@ QtObject {
         root.selectedTrackPath = rowMap.trackPath || ""
         root.selectedOpenPath = rowMap.openPath || ""
         root.selectedPlayPaths = rowMap.playPaths || []
+        root.scheduleLibraryViewStatePersist()
     }
 
     function applyPrimaryFromIndex(index) {
@@ -440,29 +499,46 @@ QtObject {
             }
         }
         const rowHeight = 24
-        const topIndex = Math.max(0, Math.min(
-            root.libraryModel.count - 1,
-            Math.floor(root.view.contentY / rowHeight)))
+        let topIndex = root.view.indexAt(1, root.view.contentY + 1)
+        if (topIndex < 0) {
+            topIndex = Math.floor(root.view.contentY / rowHeight)
+        }
+        topIndex = Math.max(0, Math.min(root.libraryModel.count - 1, topIndex))
+        const rowTop = root.rowContentY(topIndex)
         return {
             key: root.libraryModel.selectionKeyForRow(topIndex) || "",
-            offset: root.view.contentY - (topIndex * rowHeight),
+            offset: root.view.contentY - rowTop,
             fallbackY: root.view.contentY
         }
+    }
+
+    function rowContentY(index) {
+        if (!root.view || index < 0) {
+            return 0
+        }
+        if (typeof root.view.itemAtIndex === "function") {
+            const item = root.view.itemAtIndex(index)
+            if (item && isFinite(item.y)) {
+                return item.y
+            }
+        }
+        const origin = isFinite(root.view.originY) ? root.view.originY : 0
+        return origin + (index * 24)
     }
 
     function restoreViewAnchor(anchor) {
         if (!root.view) {
             return
         }
-        const rowHeight = 24
-        let targetY = anchor && anchor.fallbackY !== undefined ? anchor.fallbackY : 0
-        if (anchor && anchor.key && anchor.key.length > 0) {
-            const index = root.libraryModel.indexForSelectionKey(anchor.key)
-            if (index >= 0) {
-                targetY = (index * rowHeight) + (anchor.offset || 0)
-            }
-        }
         const restoreY = function() {
+            let targetY = anchor && anchor.fallbackY !== undefined ? anchor.fallbackY : 0
+            if (anchor && anchor.key && anchor.key.length > 0) {
+                const index = root.libraryModel.indexForSelectionKey(anchor.key)
+                if (index >= 0) {
+                    root.view.positionViewAtIndex(index, ListView.Beginning)
+                    targetY = root.rowContentY(index) + (anchor.offset || 0)
+                }
+            }
             const maxYNow = Math.max(0, root.view.contentHeight - root.view.height)
             root.view.contentY = Math.max(0, Math.min(targetY, maxYNow))
         }
@@ -524,8 +600,8 @@ QtObject {
             return
         }
 
-        const blockTop = rowIndex * rowHeight
-        const blockBottom = (lastDescendantIndex + 1) * rowHeight
+        const blockTop = root.rowContentY(rowIndex)
+        const blockBottom = root.rowContentY(lastDescendantIndex) + rowHeight
         if ((blockBottom - blockTop) > viewHeight) {
             root.view.positionViewAtIndex(rowIndex, ListView.Beginning)
         } else {
@@ -563,6 +639,13 @@ QtObject {
         if (root.pendingExpandFitKey.length > 0) {
             root.applyPendingExpansionFit()
         }
+        root.tryApplyPersistedViewState()
+        if (root.restoredViewStateApplied
+                && (root.pendingRestoredSelectionKey.length > 0
+                    || root.pendingRestoredAnchorKey.length > 0
+                    || root.pendingRestoredExpandKeys.length > 0)) {
+            root.applyPendingRestoredViewState()
+        }
     }
 
     function requestTreeApply(version, treeBytes) {
@@ -575,6 +658,7 @@ QtObject {
         if (version === root.lastAppliedVersion && root.pendingVersion < 0) {
             return
         }
+        root.preparePersistedViewState()
         const anchor = root.captureViewAnchor()
         root.pendingAnchorKey = anchor.key || ""
         root.pendingAnchorOffset = anchor.offset || 0
@@ -844,7 +928,147 @@ QtObject {
         root.pendingRevealExpandKeys = expandKeys
         root.pendingRevealSelectionKey = (row.trackKey || row.albumKey || row.artistKey || "")
         root.pendingRevealAttempts = 80
+        root.pendingRevealCentersSelection = false
         Qt.callLater(root.applyPendingReveal)
+    }
+
+    function requestBridgeReveal(expandKeys, selectionKey) {
+        const target = (selectionKey || "").trim()
+        if (target.length === 0) {
+            return
+        }
+        root.cancelPendingRestoredViewState()
+        viewStatePersistTimer.stop()
+        centeredRevealTimer.stop()
+        root.pendingCenteredRevealKey = ""
+        root.pendingCenteredRevealAttempts = 0
+        root.restoredViewStateApplied = true
+        root.pendingRevealExpandKeys = expandKeys || []
+        root.pendingRevealSelectionKey = target
+        root.pendingRevealAttempts = 80
+        root.pendingRevealCentersSelection = true
+        Qt.callLater(root.applyPendingReveal)
+    }
+
+    function cancelPendingRestoredViewState() {
+        restoredViewRetryTimer.stop()
+        restoredViewSettleTimer.stop()
+        root.pendingRestoredSelectionKey = ""
+        root.pendingRestoredAnchorKey = ""
+        root.pendingRestoredExpandKeys = []
+        root.pendingRestoredAttempts = 0
+        root.pendingRestoredSettleAttempts = 0
+        root.restoringViewState = false
+    }
+
+    function showTrackInLibrary(path) {
+        const normalized = (path || "").trim()
+        if (normalized.length > 0 && root.uiBridge.showTrackInLibrary) {
+            root.uiBridge.showTrackInLibrary(normalized)
+        }
+    }
+
+    function preparePersistedViewState() {
+        if (root.restoredViewStateApplied
+                || root.uiBridge.libraryTrackCount <= 0
+                || root.uiBridge.libraryViewStateAvailable === false) {
+            return false
+        }
+        root.restoredViewStateApplied = true
+        root.restoringViewState = true
+        root.pendingRestoredSelectionKey = root.uiBridge.libraryViewSelectionKey || ""
+        root.pendingRestoredAnchorKey = root.uiBridge.libraryViewAnchorKey || ""
+        root.pendingRestoredAnchorOffset = root.uiBridge.libraryViewAnchorOffset || 0
+        root.pendingRestoredExpandKeys = root.uiBridge.libraryExpandedKeys || []
+        root.pendingRestoredAttempts = 80
+        if (root.libraryModel.setExpandedKeys) {
+            root.libraryModel.setExpandedKeys(root.pendingRestoredExpandKeys)
+        }
+        return true
+    }
+
+    function tryApplyPersistedViewState() {
+        if (!root.hasReceivedTreeFrame) {
+            return
+        }
+        if (!root.preparePersistedViewState() && !root.restoringViewState) {
+            return
+        }
+        Qt.callLater(root.applyPendingRestoredViewState)
+    }
+
+    function applyPendingRestoredViewState() {
+        for (let i = 0; i < root.pendingRestoredExpandKeys.length; ++i) {
+            root.ensureKeyExpanded(root.pendingRestoredExpandKeys[i] || "")
+        }
+
+        let selectionReady = root.pendingRestoredSelectionKey.length === 0
+        if (!selectionReady) {
+            const selectionIndex = root.libraryModel.indexForSelectionKey(
+                root.pendingRestoredSelectionKey)
+            if (selectionIndex >= 0) {
+                const rowMap = root.libraryModel.rowDataForRow(selectionIndex)
+                root.setSingleSelection(selectionIndex, rowMap)
+                selectionReady = true
+            }
+        }
+
+        let anchorReady = root.pendingRestoredAnchorKey.length === 0
+        if (!anchorReady && root.view) {
+            const anchorIndex = root.libraryModel.indexForSelectionKey(
+                root.pendingRestoredAnchorKey)
+            if (anchorIndex >= 0) {
+                root.restoreViewAnchor({
+                    key: root.pendingRestoredAnchorKey,
+                    offset: root.pendingRestoredAnchorOffset,
+                    fallbackY: anchorIndex * 24
+                })
+                anchorReady = true
+            }
+        }
+
+        if (selectionReady && anchorReady) {
+            root.pendingRestoredAttempts = 0
+            if (root.pendingRestoredSettleAttempts <= 0) {
+                root.pendingRestoredSettleAttempts = 4
+            }
+            root.settleRestoredViewState()
+            return
+        }
+        if (root.pendingRestoredAttempts <= 0) {
+            root.cancelPendingRestoredViewState()
+            root.scheduleLibraryViewStatePersist()
+            return
+        }
+        root.pendingRestoredAttempts -= 1
+        restoredViewRetryTimer.restart()
+    }
+
+    function settleRestoredViewState() {
+        if (!root.restoringViewState) {
+            return
+        }
+        if (root.pendingRestoredAnchorKey.length > 0 && root.view) {
+            const anchorIndex = root.libraryModel.indexForSelectionKey(
+                root.pendingRestoredAnchorKey)
+            if (anchorIndex >= 0) {
+                root.restoreViewAnchor({
+                    key: root.pendingRestoredAnchorKey,
+                    offset: root.pendingRestoredAnchorOffset,
+                    fallbackY: anchorIndex * 24
+                })
+            }
+        }
+        root.pendingRestoredSettleAttempts -= 1
+        if (root.pendingRestoredSettleAttempts > 0) {
+            restoredViewSettleTimer.restart()
+            return
+        }
+        root.pendingRestoredSelectionKey = ""
+        root.pendingRestoredAnchorKey = ""
+        root.pendingRestoredExpandKeys = []
+        root.restoringViewState = false
+        root.scheduleLibraryViewStatePersist()
     }
 
     function ensureKeyExpanded(key) {
@@ -881,11 +1105,22 @@ QtObject {
         }
         const index = root.libraryModel.indexForSelectionKey(root.pendingRevealSelectionKey)
         if (index >= 0) {
-            root.selectIndex(index)
+            const selectionKey = root.pendingRevealSelectionKey
+            const centerSelection = root.pendingRevealCentersSelection
+            if (centerSelection) {
+                const rowMap = root.libraryModel.rowDataForRow(index)
+                root.setSingleSelection(index, rowMap)
+                root.pendingCenteredRevealKey = selectionKey
+                root.pendingCenteredRevealAttempts = 4
+                root.applyPendingCenteredReveal()
+            } else {
+                root.selectIndex(index)
+            }
             root.focusViewForNavigation()
             root.pendingRevealSelectionKey = ""
             root.pendingRevealExpandKeys = []
             root.pendingRevealAttempts = 0
+            root.pendingRevealCentersSelection = false
             return
         }
         if (root.pendingRevealAttempts <= 0) {
@@ -895,6 +1130,26 @@ QtObject {
         }
         root.pendingRevealAttempts -= 1
         revealRetryTimer.restart()
+    }
+
+    function applyPendingCenteredReveal() {
+        if (!root.view || root.pendingCenteredRevealKey.length === 0) {
+            return
+        }
+        const index = root.libraryModel.indexForSelectionKey(root.pendingCenteredRevealKey)
+        if (index < 0) {
+            root.pendingCenteredRevealKey = ""
+            root.pendingCenteredRevealAttempts = 0
+            return
+        }
+        root.view.positionViewAtIndex(index, ListView.Center)
+        root.pendingCenteredRevealAttempts -= 1
+        if (root.pendingCenteredRevealAttempts > 0) {
+            centeredRevealTimer.restart()
+            return
+        }
+        root.pendingCenteredRevealKey = ""
+        root.scheduleLibraryViewStatePersist()
     }
 
     function applyPendingSearchOpen() {

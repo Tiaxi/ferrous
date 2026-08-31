@@ -129,6 +129,7 @@ private slots:
     void testSoloedChannelDecoding();
     void testSoloedChannelDecodingNone();
     void testChannelButtonsVisibilityDecoding();
+    void libraryViewStateAvailabilityFollowsSnapshot();
     void searchModelDelegateTypeRoleIsExposed();
     void searchModelDelegateTypeValuesCorrect();
     void clearSearchQueryRetainsModelRows();
@@ -1290,6 +1291,27 @@ void BridgeClientTest::testChannelButtonsVisibilityDecoding()
              qPrintable(error));
     QCOMPARE(decoded.settings.channelButtonsVisibility, 2);
     QCOMPARE(decoded.settings.preventDisplaySleepInFullscreen, true);
+}
+
+void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QCOMPARE(client.libraryViewStateAvailable(), false);
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.library.present = true;
+    snapshot.library.viewStatePresent = true;
+    snapshot.library.expandedKeys = QStringList{QStringLiteral("artist|/music|Artist")};
+    snapshot.library.viewSelectionKey = QStringLiteral("album|/music|Artist|Album");
+    snapshot.library.viewAnchorKey = QStringLiteral("artist|/music|Artist");
+    snapshot.library.viewAnchorOffset = 5.0;
+
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.libraryViewStateAvailable(), true);
+    QCOMPARE(client.libraryExpandedKeys(), snapshot.library.expandedKeys);
+    QCOMPARE(client.libraryViewSelectionKey(), snapshot.library.viewSelectionKey);
+    QCOMPARE(client.libraryViewAnchorKey(), snapshot.library.viewAnchorKey);
+    QCOMPARE(client.libraryViewAnchorOffset(), 5.0);
 }
 
 void BridgeClientTest::searchModelDelegateTypeRoleIsExposed() {

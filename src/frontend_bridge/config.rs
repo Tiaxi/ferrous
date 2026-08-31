@@ -10,12 +10,16 @@ use crate::playback::{PlaybackCommand, PlaybackEngine};
 
 use super::{BridgeSettings, BridgeState, LibrarySortMode, ViewerFullscreenMode};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(super) struct SessionSnapshot {
     pub(super) queue: Vec<PathBuf>,
     pub(super) selected_queue_index: Option<usize>,
     pub(super) current_queue_index: Option<usize>,
     pub(super) current_path: Option<PathBuf>,
+    pub(super) library_expanded_keys: Vec<String>,
+    pub(super) library_view_selection_key: String,
+    pub(super) library_view_anchor_key: String,
+    pub(super) library_view_anchor_offset: f32,
 }
 
 pub(super) fn config_base_path() -> Option<PathBuf> {
@@ -61,11 +65,17 @@ pub(super) fn session_snapshot_for_state(state: &BridgeState) -> SessionSnapshot
         state.playback.current_queue_index,
         current_path.as_ref(),
     );
+    let mut library_expanded_keys = state.expanded_keys.iter().cloned().collect::<Vec<_>>();
+    library_expanded_keys.sort_unstable();
     SessionSnapshot {
         queue: state.queue.clone(),
         selected_queue_index: state.selected_queue_index,
         current_queue_index,
         current_path,
+        library_expanded_keys,
+        library_view_selection_key: state.library_view_selection_key.clone(),
+        library_view_anchor_key: state.library_view_anchor_key.clone(),
+        library_view_anchor_offset: state.library_view_anchor_offset,
     }
 }
 
@@ -98,6 +108,14 @@ pub(super) fn apply_session_restore(
         .selected_queue_index
         .filter(|idx| *idx < state.queue.len())
         .or(restored_current_index);
+    state.expanded_keys = session.library_expanded_keys.iter().cloned().collect();
+    state
+        .library_view_selection_key
+        .clone_from(&session.library_view_selection_key);
+    state
+        .library_view_anchor_key
+        .clone_from(&session.library_view_anchor_key);
+    state.library_view_anchor_offset = session.library_view_anchor_offset;
     if state.queue.is_empty() {
         return;
     }
@@ -136,11 +154,41 @@ pub(super) fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
         .get("current_path")
         .and_then(serde_json::Value::as_str)
         .map(PathBuf::from);
+    let library_expanded_keys = value
+        .get("library_expanded_keys")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let library_view_selection_key = value
+        .get("library_view_selection_key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let library_view_anchor_key = value
+        .get("library_view_anchor_key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let library_view_anchor_offset = value
+        .get("library_view_anchor_offset")
+        .and_then(|offset| offset.to_string().parse::<f32>().ok())
+        .filter(|offset| offset.is_finite())
+        .map_or(0.0, |offset| offset.clamp(-24.0, 24.0));
     Some(SessionSnapshot {
         queue,
         selected_queue_index,
         current_queue_index,
         current_path,
+        library_expanded_keys,
+        library_view_selection_key,
+        library_view_anchor_key,
+        library_view_anchor_offset,
     })
 }
 
@@ -157,6 +205,10 @@ pub(super) fn format_session_text(session: &SessionSnapshot) -> String {
             .current_path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
+        "library_expanded_keys": &session.library_expanded_keys,
+        "library_view_selection_key": &session.library_view_selection_key,
+        "library_view_anchor_key": &session.library_view_anchor_key,
+        "library_view_anchor_offset": session.library_view_anchor_offset,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
 }
@@ -502,6 +554,13 @@ mod tests {
             selected_queue_index: Some(1),
             current_queue_index: Some(0),
             current_path: Some(p("/a.flac")),
+            library_expanded_keys: vec![
+                "album|/music|Artist|Album".to_string(),
+                "artist|/music|Artist".to_string(),
+            ],
+            library_view_selection_key: "track|/music/Artist/Album/a.flac".to_string(),
+            library_view_anchor_key: "album|/music|Artist|Album".to_string(),
+            library_view_anchor_offset: 7.5,
         };
         let text = format_session_text(&session);
         let parsed = parse_session_text(&text).expect("parse session text");
