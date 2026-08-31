@@ -227,6 +227,11 @@ pub(super) struct SpectrogramWorkerHandles {
     pub(super) cmd_tx: Sender<SpectrogramWorkerCommand>,
     pub(super) decode_generation: Arc<AtomicU64>,
     pub(super) columns_produced: Arc<AtomicU64>,
+    /// Track duration (milliseconds) published by the active worker
+    /// session after its file probe.  0 = unknown.  Read by the analysis
+    /// thread to model the centered display's visible window (full-track
+    /// lock / EOF detach) when choosing session decode windows.
+    pub(super) track_duration_ms: Arc<AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +530,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
     active_token: Arc<AtomicU64>,
     generation: Arc<AtomicU64>,
     columns_produced: Arc<AtomicU64>,
+    track_duration_ms: Arc<AtomicU64>,
 ) {
     let _ = std::thread::Builder::new()
         .name("ferrous-spectrogram-decode".to_string())
@@ -535,6 +541,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
                 &active_token,
                 &generation,
                 &columns_produced,
+                &track_duration_ms,
             );
         });
 }
@@ -558,6 +565,7 @@ fn spectrogram_worker_loop(
     active_token: &AtomicU64,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
+    track_duration_ms_out: &AtomicU64,
 ) {
     let mut next_cmd: Option<SpectrogramWorkerCommand> = None;
     let mut last_params: Option<LastSessionParams> = None;
@@ -600,6 +608,7 @@ fn spectrogram_worker_loop(
                     active_token,
                     generation,
                     columns_produced_out,
+                    track_duration_ms_out,
                 );
                 if matches!(next_cmd, Some(SpectrogramWorkerCommand::Stop)) {
                     break;
@@ -641,6 +650,7 @@ fn spectrogram_worker_loop(
                         active_token,
                         generation,
                         columns_produced_out,
+                        track_duration_ms_out,
                     );
                     if matches!(next_cmd, Some(SpectrogramWorkerCommand::Stop)) {
                         break;
@@ -796,6 +806,7 @@ fn run_spectrogram_session(
     active_token: &AtomicU64,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
+    track_duration_ms_out: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
     let &SpectrogramWorkerCommand::NewTrack {
         track_token,
@@ -835,6 +846,26 @@ fn run_spectrogram_session(
     let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
     let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
     let effective_rate = u32::try_from(native_sample_rate / divisor_u64.max(1)).unwrap_or(48_000);
+
+    // Publish the track duration (milliseconds) for the analysis thread.
+    // `total_columns` counts reference-hop columns over the effective-rate
+    // timeline (with a +64 STFT-edge fudge), so dividing by the
+    // reference-hop column rate recovers the file-metadata duration with
+    // the same slight overestimate the Qt-side `total_columns_estimate`
+    // carries — keeping lock/detach window math consistent across threads.
+    // 0 is only stored when the estimate is degenerate; the analysis
+    // thread treats 0 as "unknown" and falls back to centered-only margins.
+    let track_duration_ms = if effective_rate > 0 {
+        f64_to_u64_saturating(
+            f64::from(total_columns) * usize_to_f64_approx(REFERENCE_HOP)
+                / f64::from(effective_rate)
+                * 1000.0,
+        )
+    } else {
+        0
+    };
+    track_duration_ms_out.store(track_duration_ms, Ordering::Relaxed);
+
     let actual_channel_count = match view_mode {
         SpectrogramViewMode::Downmix => 1,
         SpectrogramViewMode::PerChannel => native_channels,
