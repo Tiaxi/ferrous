@@ -79,12 +79,22 @@ bool claimMonotonicGeneration(std::atomic<quint64> *lastClaimed, quint64 generat
 bool centeredDecodedTailLooksFinal(
     qint64 decodedColumnCount,
     qint64 estimatedColumnCount,
-    qint64 visibleWindowColumns) {
+    double columnsPerSecond) {
     if (decodedColumnCount <= 0 || estimatedColumnCount <= 0) {
         return false;
     }
-    const qint64 eofSlackColumns =
-        std::max<qint64>(64, std::max<qint64>(1, visibleWindowColumns));
+    // The decoded tail only "looks final" when the gap to the estimate is
+    // small in TIME: the estimate overshoots real audio by trailing
+    // container padding (~1 s) and the finalize chunk shrinks the
+    // estimate to the decoded extent at EOF anyway.  The tolerance must
+    // therefore scale with the column RATE, not with the visible window:
+    // a window-scaled slack was tens of seconds wide at deep zoom-out, so
+    // this clamp fired during zoom-out refills and dragged the viewport
+    // along with the decode head (the decoded tail lagging the playhead
+    // makes the second condition below trivially true mid-fill).
+    const qint64 eofSlackColumns = columnsPerSecond > 0.0
+        ? std::max<qint64>(64, static_cast<qint64>(columnsPerSecond * 2.0))
+        : 64;
     return decodedColumnCount + eofSlackColumns >= estimatedColumnCount;
 }
 
@@ -2300,7 +2310,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 // keeps the time axis bounded by audible content.
                 const bool decodedTailLooksFinal =
                     centeredDecodedTailLooksFinal(
-                        maxColCount, estimateCount, visibleWindowCols);
+                        maxColCount, estimateCount, columnsPerSecond);
                 centeredDecodedTailLooksFinalForFrame = decodedTailLooksFinal;
                 if (decodedTailLooksFinal
                     && static_cast<qint64>(maxColCount) - 1
@@ -3096,7 +3106,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
         }
         const bool decodedTailLooksFinal =
             centeredDecodedTailLooksFinal(
-                maxColCount, estimateCount, visibleWindowCols);
+                maxColCount, estimateCount, columnsPerSecond);
         if (decodedTailLooksFinal
             && maxColCount - 1
                 < static_cast<qint64>(nowCol) + static_cast<qint64>(halfWindowCols)) {
