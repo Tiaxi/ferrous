@@ -372,6 +372,33 @@ void LibraryTreeModel::setSearchText(const QString &text) {
     rebuildRows();
 }
 
+void LibraryTreeModel::collapseAll() {
+    QStringList expandedKeys;
+    expandedKeys.reserve(m_expandedByKey.size());
+    for (auto it = m_expandedByKey.begin(); it != m_expandedByKey.end(); ++it) {
+        if (it.value()) {
+            expandedKeys.push_back(it.key());
+            it.value() = false;
+        }
+    }
+
+    bool changed = !expandedKeys.isEmpty();
+    for (const TreeNode &node : m_tree) {
+        if (node.rowType == QStringLiteral("root") && isExpanded(node, false)) {
+            m_expandedByKey.insert(node.key, false);
+            changed = true;
+        }
+    }
+
+    if (!changed) {
+        return;
+    }
+    for (const QString &key : expandedKeys) {
+        emit nodeExpansionRequested(key, false);
+    }
+    rebuildRows();
+}
+
 void LibraryTreeModel::toggleKey(const QString &key) {
     if (key.isEmpty() || !m_searchLower.isEmpty()) {
         return;

@@ -58,6 +58,12 @@ Rectangle {
                 color: Kirigami.Theme.disabledTextColor
                 elide: Text.ElideRight
             }
+
+            ToolButton {
+                text: "Collapse all"
+                enabled: root.libraryModel.count > 0
+                onClicked: root.controller.collapseAll()
+            }
         }
 
         ListView {

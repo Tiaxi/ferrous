@@ -466,7 +466,9 @@ private slots:
     void artistExpansionPopulatesInBatches();
     void lazyArtistRowRequestsBackendExpansion();
     void libraryTreeSeedsExpandedKeysBeforeFirstFrame();
+    void libraryTreeCollapsesAllExpandedBranches();
     void artistPrefixSearchUsesModelLookup();
+    void libraryControllerExtendsSelectionWithShiftArrows();
     void libraryControllerRestoresExpandedSelectionAndViewport();
     void libraryControllerUsesDelegateCoordinatesForViewportAnchor();
     void libraryControllerForwardsShowTrackRequest();
@@ -1883,6 +1885,31 @@ void QmlSmokeTest::libraryTreeSeedsExpandedKeysBeforeFirstFrame() {
     QCOMPARE(expansionSpy.count(), 0);
 }
 
+void QmlSmokeTest::libraryTreeCollapsesAllExpandedBranches() {
+    LibraryTreeModel model;
+    model.setExpandedKeys(QStringList{
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    });
+    model.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary());
+    QTRY_COMPARE(model.rowCount(), 3);
+
+    QSignalSpy expansionSpy(&model, SIGNAL(nodeExpansionRequested(QString,bool)));
+    model.collapseAll();
+
+    QCOMPARE(model.rowCount(), 1);
+    QCOMPARE(expansionSpy.count(), 2);
+    for (const QList<QVariant> &arguments : expansionSpy) {
+        QCOMPARE(arguments.value(1).toBool(), false);
+    }
+
+    LibraryTreeModel rootedModel;
+    rootedModel.setLibraryTreeFromBinary(multiRootBinary());
+    QTRY_COMPARE(rootedModel.rowCount(), 4);
+    rootedModel.collapseAll();
+    QCOMPARE(rootedModel.rowCount(), 2);
+}
+
 void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
     LibraryTreeModel model;
     model.setLibraryTreeFromBinary(multiRootBinary());
@@ -1891,6 +1918,89 @@ void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("artist b"), 0), 3);
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("artist a"), 2), 1);
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("missing"), 0), -1);
+}
+
+void QmlSmokeTest::libraryControllerExtendsSelectionWithShiftArrows() {
+    LibraryTreeModel model;
+    model.setExpandedKeys(QStringList{
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    });
+    model.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary());
+    QTRY_COMPARE(model.rowCount(), 3);
+
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    property alias controllerRef: controller
+    property bool lastAccepted: false
+
+    function pressShiftDown() {
+        const event = { key: Qt.Key_Down, modifiers: Qt.ShiftModifier, text: "", accepted: false }
+        controller.handleKeyPress(event)
+        lastAccepted = event.accepted
+    }
+
+    function pressShiftUp() {
+        const event = { key: Qt.Key_Up, modifiers: Qt.ShiftModifier, text: "", accepted: false }
+        controller.handleKeyPress(event)
+        lastAccepted = event.accepted
+    }
+
+    QtObject {
+        id: bridge
+        property int libraryTrackCount: 1
+        function setLibraryViewState(selectionKey, anchorKey, anchorOffset) {}
+    }
+    QtObject { id: tagEditorApi }
+
+    Controllers.LibraryController {
+        id: controller
+        uiBridge: bridge
+        libraryModel: testLibraryModel
+        tryCaptureGlobalSearchPrefill: function(event) { return false }
+        tagEditorApi: tagEditorApi
+        openTagEditorDialog: function() {}
+    }
+
+    Component.onCompleted: controller.selectIndex(0)
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = qvariant_cast<QObject *>(root->property("controllerRef"));
+    QVERIFY(controller != nullptr);
+    QCOMPARE(controller->property("selectedSelectionKeys").toStringList(), QStringList({
+        QStringLiteral("artist|Artist A"),
+    }));
+
+    QVERIFY(QMetaObject::invokeMethod(root.get(), "pressShiftDown"));
+    QCOMPARE(root->property("lastAccepted").toBool(), true);
+    QCOMPARE(controller->property("selectedSelectionKeys").toStringList(), QStringList({
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    }));
+
+    QVERIFY(QMetaObject::invokeMethod(root.get(), "pressShiftDown"));
+    QCOMPARE(controller->property("selectedSelectionKeys").toStringList(), QStringList({
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+        QStringLiteral("track|/music/artist/album/track01.flac"),
+    }));
+
+    QVERIFY(QMetaObject::invokeMethod(root.get(), "pressShiftUp"));
+    QCOMPARE(controller->property("selectedSelectionKeys").toStringList(), QStringList({
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    }));
+    QCOMPARE(controller->property("selectionAnchorIndex").toInt(), 0);
 }
 
 void QmlSmokeTest::libraryControllerRestoresExpandedSelectionAndViewport() {

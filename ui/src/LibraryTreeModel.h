@@ -46,6 +46,7 @@ public:
     Q_INVOKABLE void setLibraryTreeFromBinary(const QByteArray &treeBytes);
     Q_INVOKABLE void setExpandedKeys(const QStringList &keys);
     Q_INVOKABLE void setSearchText(const QString &text);
+    Q_INVOKABLE void collapseAll();
     Q_INVOKABLE void toggleKey(const QString &key);
     Q_INVOKABLE void toggleArtist(const QString &artist);
     Q_INVOKABLE void toggleAlbum(const QString &albumKey);
