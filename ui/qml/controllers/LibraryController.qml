@@ -764,14 +764,31 @@ QtObject {
         })
     }
 
-    function selectRelative(delta) {
+    function selectRelative(delta, extendSelection) {
         if (root.libraryModel.count <= 0) {
             return
         }
         const current = root.currentSelectionIndex()
         const base = current >= 0 ? current : 0
         const next = Math.max(0, Math.min(root.libraryModel.count - 1, base + delta))
+        if (extendSelection) {
+            if (root.selectionAnchorIndex < 0) {
+                root.selectionAnchorIndex = base
+            }
+            root.setRangeSelection(next)
+            const rowMap = root.libraryModel.rowDataForRow(next)
+            root.scrollSelectionKeyIntoView(rowMap.selectionKey || "")
+            return
+        }
         root.selectIndex(next)
+    }
+
+    function collapseAll() {
+        root.pendingAnchorValid = false
+        root.pendingExpandFitKey = ""
+        root.pendingExpandFitAttempts = 0
+        root.libraryModel.collapseAll()
+        root.syncSelectionToVisibleRows()
     }
 
     function expandSelection() {
@@ -862,13 +879,14 @@ QtObject {
         if (root.libraryModel.count <= 0) {
             return
         }
+        const extendSelection = (event.modifiers & Qt.ShiftModifier) !== 0
         if (event.key === Qt.Key_Up) {
-            root.selectRelative(-1)
+            root.selectRelative(-1, extendSelection)
             event.accepted = true
             return
         }
         if (event.key === Qt.Key_Down) {
-            root.selectRelative(1)
+            root.selectRelative(1, extendSelection)
             event.accepted = true
             return
         }
