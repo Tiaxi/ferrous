@@ -1,3 +1,10 @@
+ferrous (0.1.16-1) unstable; urgency=low
+
+  * Keep the centered spectrogram filled when zooming out near track end.
+  * Preserve visible spectrogram content while stopped zoom resets refill.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Mon, 31 Aug 2026 20:10:22 +0300
+
 ferrous (0.1.15-1) unstable; urgency=low
 
   * Continue playback when tracks are added after reaching the end of the queue.
