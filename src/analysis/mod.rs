@@ -1906,6 +1906,130 @@ where
 mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
+    use std::io::Write as IoWrite;
+    use std::time::Duration;
+
+    /// Write a mono 16-bit PCM WAV and return its path.  Used by the
+    /// end-to-end engine tests below to drive the real decode worker.
+    fn write_engine_test_wave(seconds: u32, sample_rate: u32) -> std::path::PathBuf {
+        let samples_len = usize::try_from(seconds * sample_rate).unwrap_or(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "ferrous-analysis-engine-{}-{}.wav",
+            std::process::id(),
+            samples_len
+        ));
+        let data_bytes = u32::try_from(samples_len.saturating_mul(2)).unwrap();
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&sample_rate.to_le_bytes()).unwrap();
+        file.write_all(&(sample_rate * 2).to_le_bytes()).unwrap();
+        file.write_all(&2_u16.to_le_bytes()).unwrap();
+        file.write_all(&16_u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_bytes.to_le_bytes()).unwrap();
+        for i in 0..samples_len {
+            let t = i as f32 / sample_rate as f32;
+            let sample = (t * 440.0).sin() * 0.5;
+            let value = (sample * 32_767.0) as i16;
+            file.write_all(&value.to_le_bytes()).unwrap();
+        }
+        path
+    }
+
+    fn drain_events(rx: &Receiver<AnalysisEvent>, dur: Duration) -> Vec<AnalysisEvent> {
+        let mut out = Vec::new();
+        let deadline = std::time::Instant::now() + dur;
+        loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match rx.recv_timeout(deadline - now) {
+                Ok(event) => out.push(event),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
+    fn summarize(events: &[AnalysisEvent]) -> String {
+        events
+            .iter()
+            .map(|e| match e {
+                AnalysisEvent::PrecomputedSpectrogramChunk(c) => format!(
+                    "chunk(cols={}, start={}, est={}, hop={}, reset={}, clear={}, complete={})",
+                    c.column_count,
+                    c.start_column_index,
+                    c.total_columns_estimate,
+                    c.hop_size,
+                    c.buffer_reset,
+                    c.clear_history,
+                    c.complete,
+                ),
+                AnalysisEvent::Snapshot(_) => "snapshot".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // End-to-end: while stopped, the middle-click zoom reset must still
+    // produce spectrogram data chunks for the new zoom level (the worker
+    // decodes from the track start and parks after its lookahead), so the
+    // UI can refill instead of staying black.
+    #[test]
+    fn stopped_zoom_reset_pipeline_produces_data_chunks() {
+        let path = write_engine_test_wave(60, 8_000);
+        let (engine, event_rx) = AnalysisEngine::new();
+
+        engine.command(AnalysisCommand::SetTrack {
+            path: path.clone(),
+            reset_spectrogram: true,
+            track_token: 1,
+            gapless: false,
+        });
+        engine.command(AnalysisCommand::SetSpectrogramDisplayMode(
+            SpectrogramDisplayMode::Centered,
+        ));
+        engine.command(AnalysisCommand::SetSpectrogramWidgetWidth(1_165));
+        engine.command(AnalysisCommand::SetSpectrogramZoomLevel(0.1));
+        engine.command(AnalysisCommand::PositionUpdate(52.0));
+        let _ = drain_events(&event_rx, Duration::from_millis(600));
+
+        eprintln!("=== STOP (RestartCurrentTrack at 0) ===");
+        engine.command(AnalysisCommand::RestartCurrentTrack {
+            position_seconds: 0.0,
+            clear_history: true,
+        });
+        let stop_events = drain_events(&event_rx, Duration::from_millis(600));
+        eprintln!("after stop:\n{}", summarize(&stop_events));
+
+        eprintln!("=== MIDDLE-CLICK ZOOM RESET (1.0) ===");
+        engine.command(AnalysisCommand::SetSpectrogramZoomLevel(1.0));
+        let reset_events = drain_events(&event_rx, Duration::from_millis(1_500));
+        eprintln!("after zoom reset:\n{}", summarize(&reset_events));
+
+        let data_chunks = reset_events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AnalysisEvent::PrecomputedSpectrogramChunk(c)
+                        if c.column_count > 0
+                )
+            })
+            .count();
+        let _ = std::fs::remove_file(path);
+        assert!(
+            data_chunks > 0,
+            "zoom reset while stopped should produce data chunks"
+        );
+    }
 
     #[test]
     fn emit_snapshot_respects_force_and_waveform_dirty() {
