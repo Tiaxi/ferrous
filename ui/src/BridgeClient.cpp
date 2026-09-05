@@ -3635,6 +3635,24 @@ void BridgeClient::refreshEditedPaths(const QStringList &paths) {
         sanitized));
 }
 
+void BridgeClient::refreshRenamedPaths(const QStringList &pairs) {
+    QStringList batch;
+    qsizetype bytes = 2;
+    for (qsizetype index = 0; index + 1 < pairs.size(); index += 2) {
+        const qsizetype pairBytes = pairs[index].toUtf8().size() + pairs[index + 1].toUtf8().size() + 4;
+        if (!batch.isEmpty() && bytes + pairBytes > 48'000) {
+            sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
+                BinaryBridgeCodec::CmdRefreshRenamedPaths, batch));
+            batch.clear();
+            bytes = 2;
+        }
+        batch << pairs[index] << pairs[index + 1];
+        bytes += pairBytes;
+    }
+    if (!batch.isEmpty()) sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
+        BinaryBridgeCodec::CmdRefreshRenamedPaths, batch));
+}
+
 QByteArray BridgeClient::renameEditedFiles(const QByteArray &payload) {
     if (m_ffiBridge == nullptr || payload.isEmpty()) {
         return {};

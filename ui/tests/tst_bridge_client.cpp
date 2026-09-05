@@ -7,12 +7,17 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QSignalSpy>
+#include <QSemaphore>
+#include <QFutureWatcher>
+#include <functional>
+#include <memory>
 #include <QTemporaryDir>
 #include <QUrl>
 #include <QtTest/QtTest>
 
 #define private public
 #include "../src/BridgeClient.h"
+#include "../src/TagEditorController.h"
 #include "../src/CoverImageProvider.h"
 #include "../src/GlobalSearchResultsModel.h"
 #include "../src/MprisController.h"
@@ -92,6 +97,8 @@ class BridgeClientTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
+    void tagEditorAsyncFileRoundTrip();
     void playAtDoesNotEmitImmediateSnapshotChanged();
     void playAtClearsPendingSeekAndPublishesRestartPosition();
     void queueSnapshotKeepsRawCoverPathsInRows();
@@ -147,6 +154,78 @@ private slots:
     void coverImageProviderCancelDoesNotCrash();
     void coverImageProviderUrlForPathFormat();
 };
+
+void BridgeClientTest::tagJobsKeepUiResponsiveAndDiscardClosedLoads() {
+    TagEditorController editor(nullptr);
+    auto gate = std::make_shared<QSemaphore>();
+    auto started = std::make_shared<QSemaphore>();
+    editor.m_executeOperation = [gate, started](TagEditorController::Operation, const QByteArray &) {
+        started->release();
+        gate->tryAcquire(1, 5000);
+        return QByteArray(R"({"resolvedPaths":["/fixture/song.ac3"],"rows":[]})");
+    };
+    for (const auto operation : {TagEditorController::Operation::Load,
+                                TagEditorController::Operation::Save,
+                                TagEditorController::Operation::Rename}) {
+        bool completed = false;
+        editor.runOperation(operation, {}, [&](const QByteArray &) { completed = true; });
+        QTRY_VERIFY(started->available() > 0);
+        started->acquire();
+        bool uiTick = false;
+        QTimer::singleShot(0, &editor, [&]() { uiTick = true; });
+        QTRY_VERIFY(uiTick);
+        QVERIFY(!completed);
+        gate->release();
+        QTRY_VERIFY(completed);
+    }
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/song.ac3")}));
+    QVERIFY(editor.loading());
+    editor.close();
+    gate->release();
+    QTRY_VERIFY(editor.findChildren<QFutureWatcherBase *>().isEmpty());
+    QVERIFY(!editor.isOpen());
+    QVERIFY(!editor.loading());
+    QVERIFY(editor.loadedPaths().isEmpty());
+}
+
+void BridgeClientTest::tagEditorAsyncFileRoundTrip() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("original.ac3"));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write(QByteArray(128, '\0')), qint64(128));
+    file.close();
+    BridgeClient bridge;
+    isolateBridgeClient(bridge);
+    TagEditorController editor(&bridge);
+    QVERIFY(editor.openForPaths({path}));
+    QVERIFY(editor.loading());
+    QTRY_VERIFY(!editor.loading());
+    QCOMPARE(editor.loadedPaths(), QStringList{path});
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("Renamed"));
+    editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("1"));
+    QVERIFY(editor.dirty());
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QVERIFY(editor.saving());
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("Must not overwrite"));
+    QTRY_COMPARE(saved.size(), 1);
+    QVERIFY(saved.first().first().toBool());
+    QVERIFY(!editor.dirty());
+    editor.setSelectedRows({0});
+    QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+    QVERIFY(editor.renameSelectedFiles());
+    QVERIFY(editor.saving());
+    QTRY_COMPARE(renamed.size(), 1);
+    QVERIFY(!QFile::exists(path));
+    const QString renamedPath = editor.loadedPaths().first();
+    QVERIFY(QFile::exists(renamedPath));
+    QVERIFY(renamedPath.contains(QStringLiteral("Renamed")));
+    editor.reload();
+    QTRY_VERIFY(!editor.loading());
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Renamed"));
+}
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
     BridgeClient client;

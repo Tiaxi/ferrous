@@ -87,6 +87,7 @@ enum CommandId : quint16 {
     CmdSetPreventDisplaySleepInFullscreen = 59,
     CmdSetLibraryViewState = 60,
     CmdShowTrackInLibrary = 61,
+    CmdRefreshRenamedPaths = 62,
 };
 
 struct DecodedPlayback {

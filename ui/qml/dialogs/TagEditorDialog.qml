@@ -19,6 +19,7 @@ Dialog {
     property int totalRows: 0
     property bool operationInFlight: false
     property string operationText: ""
+    property bool closeAfterSave: false
     readonly property string keepText: "<keep>"
     readonly property color uiSurfaceColor: root.uiPalette.uiSurfaceColor
     readonly property color uiSurfaceRaisedColor: root.uiPalette.uiPaneColor
@@ -83,31 +84,23 @@ Dialog {
         root.commitPendingEditorEdits()
         root.operationInFlight = true
         root.operationText = "Saving tags..."
-        Qt.callLater(function() {
-            const ok = root.tagEditorApi.save()
+        root.closeAfterSave = closeAfterSuccess
+        if (!root.tagEditorApi.save()) {
             root.operationInFlight = false
             root.operationText = ""
-            if (ok && closeAfterSuccess) {
-                tagEditorCloseConfirmDialog.close()
-                root.closeEditor()
-            }
-            tagEditorStatusFlash.restart()
-        })
+            root.closeAfterSave = false
+        }
     }
 
     function triggerRename() {
-        if (root.tagEditorApi.loading || root.tagEditorApi.saving || root.selectedRows.length === 0) {
-            return
-        }
+        if (root.tagEditorApi.loading || root.tagEditorApi.saving || root.selectedRows.length === 0) return
         root.commitPendingEditorEdits()
         root.operationInFlight = true
         root.operationText = "Renaming files..."
-        Qt.callLater(function() {
-            root.tagEditorApi.renameSelectedFiles()
+        if (!root.tagEditorApi.renameSelectedFiles()) {
             root.operationInFlight = false
             root.operationText = ""
-            tagEditorStatusFlash.restart()
-        })
+        }
     }
 
     function requestClose() {
@@ -260,6 +253,24 @@ Dialog {
             }
         }
 
+        function onLoadingChanged() {
+            if (!root.tagEditorApi.loading) root.initializeSelection()
+        }
+        function onSaveFinished(success) {
+            root.operationInFlight = false
+            root.operationText = ""
+            if (success && root.closeAfterSave) {
+                tagEditorCloseConfirmDialog.close()
+                root.closeEditor()
+            }
+            root.closeAfterSave = false
+            tagEditorStatusFlash.restart()
+        }
+        function onRenameFinished() {
+            root.operationInFlight = false
+            root.operationText = ""
+            tagEditorStatusFlash.restart()
+        }
         function onStatusChanged() {
             if (!root.tagEditorApi.statusText.length) {
                 tagEditorStatusFlash.stop()
@@ -356,7 +367,7 @@ Dialog {
 
                     Label {
                         text: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
-                            ? root.operationText
+                            ? (root.tagEditorApi.loading ? "Loading tags..." : root.operationText)
                             : root.tagEditorApi.statusText
                         color: root.statusHasFailure
                             ? Kirigami.Theme.negativeTextColor

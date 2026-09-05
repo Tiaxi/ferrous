@@ -357,6 +357,7 @@ public:
     Q_INVOKABLE void shutdown();
     Q_INVOKABLE void clearDiagnostics();
     Q_INVOKABLE void reloadDiagnosticsFromDisk();
+    void refreshRenamedPaths(const QStringList &pairs);
     QByteArray renameEditedFiles(const QByteArray &payload);
 
 signals:

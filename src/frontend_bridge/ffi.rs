@@ -1072,6 +1072,37 @@ pub unsafe extern "C" fn ferrous_ffi_tag_editor_save(
 }
 
 #[no_mangle]
+/// Rename files without retaining a bridge handle. The caller publishes successful pairs later.
+///
+/// # Safety
+/// `data` must contain `len` readable bytes; `len_out` must be null or writable.
+pub unsafe extern "C" fn ferrous_ffi_tag_editor_rename(
+    data: *const c_uchar,
+    len: usize,
+    len_out: *mut usize,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        // SAFETY: The caller supplies a writable output length.
+        unsafe {
+            *len_out = 0;
+        }
+    }
+    if data.is_null() || len == 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: The caller guarantees the input remains readable for this call.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    let Ok(request) = tag_editor::parse_rename_request(bytes) else {
+        return std::ptr::null_mut();
+    };
+    let response = tag_editor::rename_rows(request);
+    let Ok(bytes) = tag_editor::serialize_rename_response(&response) else {
+        return std::ptr::null_mut();
+    };
+    into_raw_buffer(bytes, len_out)
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
@@ -1431,6 +1462,18 @@ fn parse_library_collection_command(
         20 => BridgeLibraryCommand::AppendArtistByKey {
             artist: reader.read_u16_string()?,
         },
+        62 => {
+            let paths = read_path_vec(reader)?;
+            if paths.len() % 2 != 0 {
+                return Err("rename paths must be pairs".into());
+            }
+            BridgeLibraryCommand::RefreshRenamedPaths(
+                paths
+                    .chunks_exact(2)
+                    .map(|pair| (pair[0].clone(), pair[1].clone()))
+                    .collect(),
+            )
+        }
         37 => BridgeLibraryCommand::ReplaceAllTracks,
         38 => BridgeLibraryCommand::AppendAllTracks,
         48 => BridgeLibraryCommand::ReplaceRootByPath {
@@ -2570,6 +2613,22 @@ mod tests {
         let mut runtime = shared.runtime.lock().expect("runtime");
         assert!(runtime.pop_binary_event().is_some());
         assert!(runtime.pop_analysis_frame().is_some());
+    }
+
+    #[test]
+    fn renamed_paths_command_preserves_pairs_and_rejects_incomplete_pairs() {
+        let mut payload = Vec::new();
+        push_u16(&mut payload, 2);
+        push_u16_string(&mut payload, "/fixture/old.ac3");
+        push_u16_string(&mut payload, "/fixture/new.ac3");
+        let parsed = parse_binary_command(&encode_command(62, &payload)).expect("valid pairs");
+        assert!(matches!(parsed, Some(BridgeCommand::Library(
+            BridgeLibraryCommand::RefreshRenamedPaths(pairs))) if pairs == vec![
+                (PathBuf::from("/fixture/old.ac3"), PathBuf::from("/fixture/new.ac3"))]));
+        let mut incomplete = Vec::new();
+        push_u16(&mut incomplete, 1);
+        push_u16_string(&mut incomplete, "/fixture/old.ac3");
+        assert!(parse_binary_command(&encode_command(62, &incomplete)).is_err());
     }
 
     #[test]
