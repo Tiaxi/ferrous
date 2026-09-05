@@ -33,9 +33,7 @@ use cache::{
     PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL,
 };
 use decoders::{open_symphonia_file, SymphoniaFile};
-use fft::{
-    ensure_sample_buffer, peak_across_channels, waveform_sample_rate_divisor, WaveformAccumulator,
-};
+use fft::{ensure_sample_buffer, peak_across_channels, WaveformAccumulator};
 #[cfg(feature = "gst")]
 use gst_waveform::decode_waveform_peaks_stream_gst;
 use session::{
@@ -1867,22 +1865,18 @@ where
 
         let spec = *decoded_audio.spec();
         let channels = spec.channels.count().max(1);
-        let base_sample_stride = if channels >= 2 { 8usize } else { 4usize };
-        let sample_rate_divisor =
-            usize::try_from(waveform_sample_rate_divisor(sample_rate_hz)).unwrap_or(1);
-        let sample_stride = base_sample_stride.saturating_mul(sample_rate_divisor);
         let decoded_capacity = decoded_audio.capacity();
         let buf = ensure_sample_buffer(&mut sample_buf, decoded_capacity, spec);
         buf.copy_interleaved_ref(decoded_audio);
 
         let samples = buf.samples();
-        let frame_width = channels.saturating_mul(sample_stride).max(1);
+        let frame_width = channels;
         for base in (0..samples.len()).step_by(frame_width) {
             if base.is_multiple_of(4096) && is_cancelled() {
                 return Ok(());
             }
             let peak = peak_across_channels(samples, base, channels);
-            if !waveform.push_sample(peak, sample_stride, &mut on_update) {
+            if !waveform.push_sample(peak, 1, &mut on_update) {
                 return Ok(());
             }
         }
@@ -1905,6 +1899,47 @@ mod tests {
     use crossbeam_channel::unbounded;
     use std::io::Write as IoWrite;
     use std::time::Duration;
+
+    #[test]
+    fn overview_preserves_transients_at_every_sample_offset() {
+        use std::io::{Seek, SeekFrom};
+        for rate in [48_000, 192_000] {
+            let path = write_engine_test_wave(1, rate);
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("fixture");
+            file.seek(SeekFrom::Start(44)).expect("PCM start");
+            file.write_all(&vec![0_u8; rate as usize * 2])
+                .expect("silence");
+            for frame in 0..16 {
+                file.seek(SeekFrom::Start(44 + frame * 2))
+                    .expect("transient position");
+                file.write_all(&30_000_i16.to_le_bytes())
+                    .expect("transient");
+                let mut maximum = 0.0_f32;
+                decode_waveform_peaks_stream(
+                    &path,
+                    1024,
+                    |peaks, _, complete| {
+                        if complete {
+                            maximum = peaks.iter().copied().fold(0.0_f32, f32::max);
+                        }
+                        true
+                    },
+                    || false,
+                )
+                .expect("overview decode");
+                assert!(maximum > 0.91, "missing frame {frame} at {rate} Hz");
+                file.seek(SeekFrom::Start(44 + frame * 2))
+                    .expect("clear position");
+                file.write_all(&0_i16.to_le_bytes())
+                    .expect("clear transient");
+            }
+            drop(file);
+            std::fs::remove_file(path).expect("remove fixture");
+        }
+    }
 
     /// Write a mono 16-bit PCM WAV and return its path.  Used by the
     /// end-to-end engine tests below to drive the real decode worker.

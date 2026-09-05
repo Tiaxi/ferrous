@@ -273,22 +273,6 @@ pub(super) fn ensure_sample_buffer(
         .expect("sample buffer is initialized above")
 }
 
-pub(super) fn waveform_sample_rate_divisor(sample_rate_hz: u64) -> u64 {
-    const TARGET_48KHZ: u64 = 48_000;
-    const TARGET_44K1HZ: u64 = 44_100;
-
-    if sample_rate_hz <= TARGET_48KHZ {
-        return 1;
-    }
-    if sample_rate_hz.is_multiple_of(TARGET_48KHZ) {
-        return sample_rate_hz / TARGET_48KHZ;
-    }
-    if sample_rate_hz.is_multiple_of(TARGET_44K1HZ) {
-        return sample_rate_hz / TARGET_44K1HZ;
-    }
-    1
-}
-
 /// Return the maximum absolute sample value across `channels` interleaved
 /// channels starting at `base` in `samples`.  Used by the waveform decoder
 /// so the seekbar peak represents the loudest channel, not just channel 0.
@@ -319,8 +303,9 @@ pub(super) fn reduce_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32
 
     let mut reduced = Vec::with_capacity(max_points);
     for i in 0..max_points {
-        let idx = i.saturating_mul(peaks.len()) / max_points;
-        reduced.push(peaks[idx.min(peaks.len() - 1)]);
+        let start = i.saturating_mul(peaks.len()) / max_points;
+        let end = (i + 1).saturating_mul(peaks.len()) / max_points;
+        reduced.push(peaks[start..end].iter().copied().fold(0.0_f32, f32::max));
     }
     reduced
 }
@@ -328,6 +313,21 @@ pub(super) fn reduce_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waveform_reduction_preserves_peaks_between_bins_and_at_tail() {
+        assert_eq!(
+            reduce_waveform_peaks(&[0.0, 0.9, 0.0, 0.0, 0.7], 2),
+            [0.9, 0.7]
+        );
+        for index in 0..33 {
+            let mut peaks = vec![0.0; 33];
+            peaks[index] = 1.0;
+            let reduced = reduce_waveform_peaks(&peaks, 8);
+            assert_eq!(reduced.len(), 8);
+            assert_eq!(reduced.iter().copied().fold(0.0_f32, f32::max), 1.0);
+        }
+    }
 
     #[test]
     fn stft_computer_produces_rows_from_samples() {
@@ -379,25 +379,6 @@ mod tests {
 
         // Exact expected: floor((4096 - 512) / 256) + 1 = 15
         assert_eq!(rows, 15);
-    }
-
-    #[test]
-    fn waveform_sample_rate_divisor_targets_common_high_rate_multiples() {
-        assert_eq!(waveform_sample_rate_divisor(44_100), 1);
-        assert_eq!(waveform_sample_rate_divisor(48_000), 1);
-        assert_eq!(waveform_sample_rate_divisor(88_200), 2);
-        assert_eq!(waveform_sample_rate_divisor(96_000), 2);
-        assert_eq!(waveform_sample_rate_divisor(176_400), 4);
-        assert_eq!(waveform_sample_rate_divisor(192_000), 4);
-        assert_eq!(waveform_sample_rate_divisor(384_000), 8);
-    }
-
-    #[test]
-    fn waveform_sample_rate_divisor_leaves_non_matching_rates_untouched() {
-        assert_eq!(waveform_sample_rate_divisor(32_000), 1);
-        assert_eq!(waveform_sample_rate_divisor(44_000), 1);
-        assert_eq!(waveform_sample_rate_divisor(50_000), 1);
-        assert_eq!(waveform_sample_rate_divisor(64_000), 1);
     }
 
     #[test]

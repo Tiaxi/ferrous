@@ -9,7 +9,8 @@ use rusqlite::{params, Connection};
 pub(super) const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 pub(super) const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
 pub(super) const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
-const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 1;
+// Version 2 preserves every sample peak; version 1 could omit transients.
+const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WaveformSourceStamp {
@@ -250,6 +251,22 @@ pub(super) fn insert_waveform_cache_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waveform_cache_rejects_sample_skipping_format() {
+        let conn = Connection::open_in_memory().expect("database");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let stamp = WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+        };
+        let path = Path::new("fixture.wav");
+        persist_waveform_to_db(&conn, path, stamp, &[0.5]).expect("cache fixture");
+        conn.execute("UPDATE waveform_cache SET format_version = 1", [])
+            .expect("legacy version");
+        assert!(load_waveform_from_db(&conn, path, stamp).is_none());
+    }
 
     #[test]
     fn peaks_blob_roundtrip() {
