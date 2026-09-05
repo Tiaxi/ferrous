@@ -122,8 +122,8 @@ struct PendingPrecomputedSpectrogramFrame {
 
 struct FfiRuntime {
     command_tx: crossbeam_channel::Sender<BridgeCommand>,
-    analysis_state: AnalysisEmitState,
-    queue_section_cache: QueueSectionCache,
+    #[cfg(test)]
+    encoder: FfiEncoder,
     pending_binary_events: VecDeque<Vec<u8>>,
     pending_analysis_frames: VecDeque<Vec<u8>>,
     pending_precomputed_spectrogram: VecDeque<PendingPrecomputedSpectrogramFrame>,
@@ -145,8 +145,8 @@ impl FfiRuntime {
     ) -> Self {
         Self {
             command_tx,
-            analysis_state: AnalysisEmitState::default(),
-            queue_section_cache: QueueSectionCache::default(),
+            #[cfg(test)]
+            encoder: FfiEncoder::default(),
             pending_binary_events: VecDeque::with_capacity(MAX_PENDING_BINARY_EVENTS),
             pending_analysis_frames: VecDeque::with_capacity(MAX_PENDING_ANALYSIS_FRAMES),
             pending_precomputed_spectrogram: VecDeque::with_capacity(
@@ -282,20 +282,26 @@ impl FfiRuntime {
         }
     }
 
+    #[cfg(test)]
     fn push_precomputed_spectrogram(&mut self, chunk: &PrecomputedSpectrogramChunk) {
-        if chunk.generation != 0 {
-            if chunk.generation < self.latest_precomputed_generation {
+        self.push_precomputed_frame(
+            chunk.generation,
+            encode_precomputed_spectrogram_chunk(chunk),
+        );
+    }
+
+    fn push_precomputed_frame(&mut self, generation: u64, frame: Vec<u8>) {
+        if generation != 0 {
+            if generation < self.latest_precomputed_generation {
                 return;
             }
-            if chunk.generation > self.latest_precomputed_generation {
-                self.latest_precomputed_generation = chunk.generation;
-                self.pending_precomputed_spectrogram.retain(|pending| {
-                    pending.generation == 0 || pending.generation >= chunk.generation
-                });
+            if generation > self.latest_precomputed_generation {
+                self.latest_precomputed_generation = generation;
+                self.pending_precomputed_spectrogram
+                    .retain(|pending| pending.generation == 0 || pending.generation >= generation);
             }
         }
 
-        let frame = encode_precomputed_spectrogram_chunk(chunk);
         if frame.is_empty() {
             return;
         }
@@ -307,17 +313,14 @@ impl FfiRuntime {
             let Some(front) = self.pending_precomputed_spectrogram.front() else {
                 break;
             };
-            if chunk.generation != 0
-                && front.generation != 0
-                && front.generation >= chunk.generation
-            {
+            if generation != 0 && front.generation != 0 && front.generation >= generation {
                 break;
             }
             self.pending_precomputed_spectrogram.pop_front();
         }
         self.pending_precomputed_spectrogram
             .push_back(PendingPrecomputedSpectrogramFrame {
-                generation: chunk.generation,
+                generation,
                 bytes: frame,
             });
         if was_empty {
@@ -375,61 +378,29 @@ impl FfiRuntime {
         Ok(())
     }
 
+    #[cfg(test)]
     fn process_bridge_events<I>(&mut self, events: I)
     where
         I: IntoIterator<Item = BridgeEvent>,
     {
-        if self.stopped {
-            return;
-        }
+        let prepared = self.encoder.prepare(events);
+        self.publish(prepared);
+    }
 
-        let mut latest_snapshot: Option<BridgeSnapshot> = None;
-        let mut latest_queue_snapshot: Option<BridgeSnapshot> = None;
-        let mut latest_tree_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
+    fn publish(&mut self, events: Vec<PreparedEvent>) {
         for event in events {
             match event {
-                BridgeEvent::Snapshot(snapshot) => {
-                    if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
-                        latest_tree_bytes = Some(tree_bytes.clone());
-                    }
-                    if snapshot.queue_included {
-                        latest_queue_snapshot = Some((*snapshot).clone());
-                    }
-                    latest_snapshot = Some(*snapshot);
+                PreparedEvent::Binary(bytes) => self.push_binary_event(bytes),
+                PreparedEvent::Analysis(bytes) => self.push_analysis_frame(bytes),
+                PreparedEvent::Tree(bytes) => self.push_library_tree_frame(bytes),
+                PreparedEvent::Search(seq, bytes) => self.push_search_results_frame(seq, bytes),
+                PreparedEvent::Precomputed(generation, bytes) => {
+                    self.push_precomputed_frame(generation, bytes);
                 }
-                BridgeEvent::PrecomputedSpectrogramChunk(chunk) => {
-                    self.push_precomputed_spectrogram(&chunk);
-                }
-                BridgeEvent::Error(message) => {
-                    self.push_binary_event(encode_error_event(&message));
-                }
-                BridgeEvent::SearchResults(frame) => {
-                    self.push_search_results_frame(frame.seq, encode_search_results_frame(&frame));
-                }
-                BridgeEvent::Stopped => {
+                PreparedEvent::Stopped => {
                     self.stopped = true;
-                    self.push_binary_event(encode_stopped_event());
                 }
             }
-        }
-
-        if let Some(tree_bytes) = latest_tree_bytes.as_ref() {
-            self.push_library_tree_frame(tree_bytes.as_ref().clone());
-        }
-        if let Some(mut snapshot) =
-            latest_snapshot.map(|snapshot| merge_queue_snapshot(snapshot, latest_queue_snapshot))
-        {
-            if latest_tree_bytes.is_some() {
-                snapshot.pre_built_tree_bytes = latest_tree_bytes;
-            }
-            let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
-            self.push_analysis_frame(encode_analysis_frame(&analysis_delta));
-            let queue_section = if snapshot.queue_included {
-                Some(self.queue_section_for_snapshot(&snapshot))
-            } else {
-                None
-            };
-            self.push_binary_event(encode_binary_snapshot(&snapshot, queue_section.as_ref()));
         }
     }
 
@@ -448,7 +419,96 @@ impl FfiRuntime {
     fn pop_search_results_frame(&mut self) -> Option<SearchResultsFrame> {
         self.pending_search_results.pop_front()
     }
+}
 
+enum PreparedEvent {
+    Binary(Vec<u8>),
+    Analysis(Vec<u8>),
+    Tree(Vec<u8>),
+    Search(u32, Vec<u8>),
+    Precomputed(u64, Vec<u8>),
+    Stopped,
+}
+
+#[derive(Default)]
+struct FfiEncoder {
+    analysis_state: AnalysisEmitState,
+    queue_section_cache: QueueSectionCache,
+    stopped: bool,
+}
+
+impl FfiEncoder {
+    fn prepare<I>(&mut self, events: I) -> Vec<PreparedEvent>
+    where
+        I: IntoIterator<Item = BridgeEvent>,
+    {
+        if self.stopped {
+            return Vec::new();
+        }
+
+        let mut prepared = Vec::new();
+        let mut latest_snapshot: Option<BridgeSnapshot> = None;
+        let mut latest_queue_snapshot: Option<BridgeSnapshot> = None;
+        let mut latest_tree_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
+        for event in events {
+            match event {
+                BridgeEvent::Snapshot(snapshot) => {
+                    if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
+                        latest_tree_bytes = Some(tree_bytes.clone());
+                    }
+                    if snapshot.queue_included {
+                        latest_queue_snapshot = Some((*snapshot).clone());
+                    }
+                    latest_snapshot = Some(*snapshot);
+                }
+                BridgeEvent::PrecomputedSpectrogramChunk(chunk) => {
+                    prepared.push(PreparedEvent::Precomputed(
+                        chunk.generation,
+                        encode_precomputed_spectrogram_chunk(&chunk),
+                    ));
+                }
+                BridgeEvent::Error(message) => {
+                    prepared.push(PreparedEvent::Binary(encode_error_event(&message)));
+                }
+                BridgeEvent::SearchResults(frame) => {
+                    prepared.push(PreparedEvent::Search(
+                        frame.seq,
+                        encode_search_results_frame(&frame),
+                    ));
+                }
+                BridgeEvent::Stopped => {
+                    self.stopped = true;
+                    prepared.push(PreparedEvent::Binary(encode_stopped_event()));
+                    prepared.push(PreparedEvent::Stopped);
+                }
+            }
+        }
+
+        if let Some(tree_bytes) = latest_tree_bytes.as_ref() {
+            prepared.push(PreparedEvent::Tree(tree_bytes.as_ref().clone()));
+        }
+        if let Some(mut snapshot) =
+            latest_snapshot.map(|snapshot| merge_queue_snapshot(snapshot, latest_queue_snapshot))
+        {
+            if latest_tree_bytes.is_some() {
+                snapshot.pre_built_tree_bytes = latest_tree_bytes;
+            }
+            let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
+            prepared.push(PreparedEvent::Analysis(encode_analysis_frame(
+                &analysis_delta,
+            )));
+            let queue_section = if snapshot.queue_included {
+                Some(self.queue_section_for_snapshot(&snapshot))
+            } else {
+                None
+            };
+            prepared.push(PreparedEvent::Binary(encode_binary_snapshot(
+                &snapshot,
+                queue_section.as_ref(),
+            )));
+        }
+        prepared
+    }
     fn queue_section_for_snapshot(&mut self, snapshot: &BridgeSnapshot) -> QueueSectionData {
         if snapshot.queue.is_empty() {
             return QueueSectionData::default();
@@ -512,6 +572,7 @@ fn merge_queue_snapshot(
 // Receiver is consumed by this thread's main loop — ownership transfer is intentional.
 #[allow(clippy::needless_pass_by_value)]
 fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Receiver<BridgeEvent>) {
+    let mut encoder = FfiEncoder::default();
     loop {
         if shared.stop_requested.load(Ordering::Relaxed) {
             break;
@@ -524,19 +585,30 @@ fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Recei
         };
 
         let mut events = vec![first_event];
-        while let Ok(event) = event_rx.try_recv() {
-            events.push(event);
-        }
-
-        let Ok(mut runtime) = shared.runtime.lock() else {
+        events.extend(event_rx.try_iter().take(63));
+        if !prepare_and_publish(&shared, &mut encoder, events) {
             break;
-        };
-        runtime.process_bridge_events(events);
-        if runtime.stopped {
+        }
+        if encoder.stopped {
             shared.stop_requested.store(true, Ordering::Relaxed);
             break;
         }
     }
+}
+
+fn prepare_and_publish(
+    shared: &FfiShared,
+    encoder: &mut FfiEncoder,
+    events: impl IntoIterator<Item = BridgeEvent>,
+) -> bool {
+    // Serialization and metadata indexing belong exclusively to the relay thread.
+    // The UI mutex protects only publication and removal of completed buffers.
+    let prepared = encoder.prepare(events);
+    let Ok(mut runtime) = shared.runtime.lock() else {
+        return false;
+    };
+    runtime.publish(prepared);
+    true
 }
 
 #[repr(C)]
@@ -2471,6 +2543,33 @@ mod tests {
         let end = start + len;
         *offset = end;
         String::from_utf8_lossy(&bytes[start..end]).to_string()
+    }
+
+    #[test]
+    fn relay_preparation_does_not_lock_ui_command_or_output_queues() {
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let shared = FfiShared {
+            runtime: Mutex::new(FfiRuntime::new(command_tx, -1, -1)),
+            stop_requested: AtomicBool::new(false),
+        };
+        let mut encoder = FfiEncoder::default();
+        let events = std::iter::once_with(|| {
+            let mut runtime = shared
+                .runtime
+                .try_lock()
+                .expect("UI can lock during encoding");
+            runtime
+                .send_binary_command(&encode_command(1, &[]))
+                .expect("send playback command");
+            runtime.push_binary_event(encode_error_event("existing"));
+            assert!(runtime.pop_binary_event().is_some());
+            BridgeEvent::Snapshot(Box::new(sample_snapshot()))
+        });
+        assert!(prepare_and_publish(&shared, &mut encoder, events));
+        assert!(command_rx.try_recv().is_ok());
+        let mut runtime = shared.runtime.lock().expect("runtime");
+        assert!(runtime.pop_binary_event().is_some());
+        assert!(runtime.pop_analysis_frame().is_some());
     }
 
     #[test]
