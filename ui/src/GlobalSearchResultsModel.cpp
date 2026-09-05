@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "GlobalSearchResultsModel.h"
-#include <QRegularExpression>
+#include <utility>
 
 #include <algorithm>
 #include <limits>
@@ -34,6 +34,8 @@ QVariant GlobalSearchResultsModel::data(const QModelIndex &index, int role) cons
         return row.label;
     }
     switch (role) {
+    case MatchDetailRole:
+        return row.matchDetail;
     case KindRole:
         return row.kind;
     case RowTypeRole:
@@ -104,6 +106,7 @@ QVariant GlobalSearchResultsModel::data(const QModelIndex &index, int role) cons
 
 QHash<int, QByteArray> GlobalSearchResultsModel::roleNames() const {
     return {
+        {MatchDetailRole, "matchDetail"},
         {KindRole, "kind"},
         {RowTypeRole, "rowType"},
         {SectionTitleRole, "sectionTitle"},
@@ -364,6 +367,7 @@ QVariantMap GlobalSearchResultsModel::rowDataAt(int index) const {
     const SearchDisplayRow &row = m_rows[static_cast<qsizetype>(index)];
     QVariantMap out;
     if (!row.kind.isEmpty()) {
+        out.insert(QStringLiteral("matchDetail"), row.matchDetail);
         out.insert(QStringLiteral("kind"), row.kind);
     }
     if (!row.rowType.isEmpty()) {
@@ -500,8 +504,23 @@ QString GlobalSearchResultsModel::highlightText(const QString &text, const QStri
         for (qsizetype j = 0; j < fragment.size(); ++j) positions.push_back(i);
     }
     QVector<bool> matched(text.size(), false);
-    for (const auto &rawTerm : query.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts)) {
-        const auto term = fold(rawTerm);
+    QStringList tokens;
+    QString token;
+    bool quoted = false;
+    for (auto ch : query) {
+        if (ch == '"') quoted = !quoted;
+        else if (ch.isSpace() && !quoted) {
+            if (!token.isEmpty()) tokens.push_back(std::exchange(token, QString{}));
+        } else token += ch;
+    }
+    if (!token.isEmpty()) tokens.push_back(token);
+    static const QStringList fields{"title", "artist", "album", "albumartist", "album_artist", "album-artist",
+        "genre", "year", "date", "composer", "conductor", "performer", "label", "publisher", "comment", "lyrics",
+        "path", "filename", "root", "track", "disc"};
+    for (auto rawTerm : tokens) {
+        const auto colon = rawTerm.indexOf(':');
+        if (colon > 0 && fields.contains(rawTerm.left(colon).toLower())) rawTerm = rawTerm.mid(colon + 1);
+        const auto term = fold(rawTerm.trimmed());
         if (term.isEmpty()) continue;
         qsizetype offset = 0;
         while ((offset = normalized.indexOf(term, offset)) >= 0) {

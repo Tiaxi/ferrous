@@ -5,6 +5,8 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QHoverEvent>
 #include <QImage>
 #include <QMouseEvent>
@@ -10190,6 +10192,7 @@ void QmlSmokeTest::globalSearchKeyboardAndResponsiveResults() {
     for (int i = 0; i < 5; ++i) {
         GlobalSearchResultsModel::SearchDisplayRow row;
         row.kind = "item"; row.rowType = "track"; row.label = i == 0 ? "Blue" : "Blue Skies";
+        row.matchDetail = "Comment: remaster";
         row.artist = "Example Ensemble"; row.album = "Collected Songs"; row.genre = "Jazz";
         row.trackPath = QStringLiteral("/fixture/%1.flac").arg(i); row.score = i == 0 ? 0 : 1;
         rows.push_back(row);
@@ -10284,6 +10287,13 @@ ApplicationWindow {
 }
 
 int main(int argc, char **argv) {
+    // Bridge construction starts library workers; keep scans and tag operations
+    // independent of saved application data and concurrent test processes.
+    QTemporaryDir testStorage;
+    if (!testStorage.isValid()) return 1;
+    qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
+    qputenv("XDG_CONFIG_HOME", QFile::encodeName(testStorage.filePath("config")));
+    qputenv("XDG_CACHE_HOME", QFile::encodeName(testStorage.filePath("cache")));
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
 

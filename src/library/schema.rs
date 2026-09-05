@@ -219,6 +219,11 @@ fn run_schema_migrations(conn: &Connection) {
     );
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN track_no INTEGER", []);
+    let _ = conn.execute("ALTER TABLE tracks ADD COLUMN search_tags TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE external_tracks ADD COLUMN search_tags TEXT",
+        [],
+    );
 }
 
 fn create_library_indexes(conn: &Connection) -> anyhow::Result<()> {
@@ -274,13 +279,22 @@ fn rebuild_fts_if_needed(conn: &Connection) {
     }
 }
 
+pub(super) fn needs_search_tag_backfill(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tracks WHERE search_tags IS NULL)",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
 pub(super) fn load_snapshot(conn: &Connection, snapshot: &mut super::LibrarySnapshot) {
     snapshot.roots = load_roots(conn);
     snapshot.tracks.clear();
 
     if let Ok(mut stmt) = conn.prepare(
         r"
-        SELECT path, root_path, title, artist, album, cover_path, genre, year, track_no, duration_secs
+        SELECT path, root_path, title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags
         FROM tracks
         ORDER BY
             root_path COLLATE NOCASE,
@@ -289,6 +303,7 @@ pub(super) fn load_snapshot(conn: &Connection, snapshot: &mut super::LibrarySnap
     ) {
         if let Ok(rows) = stmt.query_map([], |row| {
             Ok(LibraryTrack {
+                search_tags: serde_json::from_str(&row.get::<_, Option<String>>(10)?.unwrap_or_default()).unwrap_or_default(),
                 path: PathBuf::from(row.get::<_, String>(0)?),
                 root_path: PathBuf::from(row.get::<_, String>(1)?),
                 title: row.get::<_, String>(2)?,

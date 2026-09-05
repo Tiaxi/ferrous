@@ -15,6 +15,7 @@ class GlobalSearchResultsModel : public QAbstractListModel {
 
 public:
     struct SearchDisplayRow {
+        QString matchDetail;
         QString kind;
         QString rowType;
         QString sectionTitle;
@@ -38,7 +39,7 @@ public:
         QString lengthText;
 
         bool operator==(const SearchDisplayRow &other) const {
-            return kind == other.kind
+            return matchDetail == other.matchDetail && kind == other.kind
                 && rowType == other.rowType
                 && sectionTitle == other.sectionTitle
                 && score == other.score
@@ -66,7 +67,7 @@ public:
         }
 
         bool equivalentForView(const SearchDisplayRow &other) const {
-            return kind == other.kind
+            return matchDetail == other.matchDetail && kind == other.kind
                 && rowType == other.rowType
                 && sectionTitle == other.sectionTitle
                 && label == other.label
@@ -90,7 +91,8 @@ public:
     };
 
     enum Role {
-        KindRole = Qt::UserRole + 1,
+        MatchDetailRole = Qt::UserRole + 1,
+        KindRole,
         RowTypeRole,
         SectionTitleRole,
         ScoreRole,

@@ -21,8 +21,12 @@ pub(crate) use scan::{read_library_snapshot_from_db, ExternalTrackCache};
 pub use schema::search_tracks_fts;
 use schema::{init_schema, load_snapshot, open_library_db};
 
+/// Additional, potentially repeated text tags collected during library scans.
+pub type SearchTags = std::collections::BTreeMap<String, Vec<String>>;
+
 #[derive(Debug, Clone, Default)]
 pub struct LibraryTrack {
+    pub search_tags: SearchTags,
     pub path: PathBuf,
     pub root_path: PathBuf,
     pub title: String,
@@ -130,6 +134,7 @@ pub enum LibraryEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IndexedTrack {
+    pub(crate) search_tags: SearchTags,
     pub(crate) title: String,
     pub(crate) artist: String,
     pub(crate) album: String,
@@ -169,6 +174,21 @@ impl LibraryService {
                         load_snapshot(&conn, &mut snapshot);
                         snapshot.bump_search_revision();
                         emit_snapshot(&event_tx, &snapshot);
+
+                        // Publish the cached library first, then fill new tag columns on this
+                        // library worker. Existing libraries need no manual rescan after upgrade.
+                        if schema::needs_search_tag_backfill(&conn) {
+                            if let Err(err) =
+                                scan::backfill_search_tags(&conn, &mut snapshot, &event_tx)
+                            {
+                                snapshot.last_error = Some(err);
+                            }
+                            load_snapshot(&conn, &mut snapshot);
+                            snapshot.bump_search_revision();
+                            snapshot.scan_in_progress = false;
+                            snapshot.scan_progress = None;
+                            emit_snapshot(&event_tx, &snapshot);
+                        }
 
                         while let Ok(cmd) = cmd_rx.recv() {
                             snapshot.last_error = None;

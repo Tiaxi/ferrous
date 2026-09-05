@@ -1215,6 +1215,10 @@ fn update_library_track_details(
             track.cover_path.clone_from(&indexed.cover_path);
             changed = true;
         }
+        if track.search_tags != indexed.search_tags {
+            track.search_tags.clone_from(&indexed.search_tags);
+            changed = true;
+        }
         if track.genre != indexed.genre {
             track.genre.clone_from(&indexed.genre);
             changed = true;
@@ -1375,6 +1379,10 @@ fn apply_renamed_library_paths(
             }
             if track.cover_path != indexed.cover_path {
                 track.cover_path.clone_from(&indexed.cover_path);
+                changed = true;
+            }
+            if track.search_tags != indexed.search_tags {
+                track.search_tags.clone_from(&indexed.search_tags);
                 changed = true;
             }
             if track.genre != indexed.genre {
@@ -1560,6 +1568,7 @@ mod tests {
                     name: String::new(),
                 }],
                 tracks: vec![LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     path: track_path.clone(),
                     root_path,
                     artist: "Artist".to_string(),
@@ -1605,6 +1614,7 @@ mod tests {
         track_no: Option<u32>,
     ) -> LibraryTrack {
         LibraryTrack {
+            search_tags: crate::library::SearchTags::default(),
             path: p(path),
             root_path: root.clone(),
             title: String::new(),
@@ -1748,6 +1758,7 @@ mod tests {
                 path: request.path.clone(),
                 fingerprint: request.fingerprint,
                 indexed: IndexedTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     title: "song".to_string(),
                     artist: String::new(),
                     album: String::new(),
@@ -1789,6 +1800,7 @@ mod tests {
         let mut state = BridgeState::default();
         state.library = Arc::new(LibrarySnapshot {
             tracks: vec![LibraryTrack {
+                search_tags: crate::library::SearchTags::default(),
                 path: track.clone(),
                 ..LibraryTrack::default()
             }],
@@ -1873,6 +1885,7 @@ mod tests {
         Arc::make_mut(&mut state.queue_details).insert(
             track.clone(),
             IndexedTrack {
+                search_tags: crate::library::SearchTags::default(),
                 title: "Old".to_string(),
                 artist: String::new(),
                 album: String::new(),
@@ -1911,6 +1924,7 @@ mod tests {
         state.queue = vec![track.clone()];
         state.library = Arc::new(LibrarySnapshot {
             tracks: vec![LibraryTrack {
+                search_tags: crate::library::SearchTags::default(),
                 path: track.clone(),
                 title: "Library Title".to_string(),
                 ..LibraryTrack::default()
@@ -1927,6 +1941,7 @@ mod tests {
                 path: track.clone(),
                 fingerprint,
                 indexed: IndexedTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     title: "External Title".to_string(),
                     artist: String::new(),
                     album: String::new(),
@@ -2373,5 +2388,36 @@ mod tests {
         assert_eq!(state.metadata.title, "New Title");
         assert_eq!(state.metadata.artist, "New Artist");
         assert_eq!(state.metadata.album, "New Album");
+    }
+    #[test]
+    fn metadata_only_tag_edits_invalidate_search_snapshot() {
+        let path = p("/music/Artist/Album/song.flac");
+        let mut state = BridgeState::default();
+        state.library = Arc::new(crate::library::LibrarySnapshot {
+            tracks: vec![LibraryTrack {
+                path: path.clone(),
+                root_path: p("/music"),
+                ..LibraryTrack::default()
+            }],
+            ..crate::library::LibrarySnapshot::default()
+        });
+        let tags =
+            crate::library::SearchTags::from([("comment".into(), vec!["Remastered".into()])]);
+        let indexed = IndexedTrack {
+            search_tags: tags.clone(),
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            cover_path: String::new(),
+            genre: String::new(),
+            year: None,
+            track_no: None,
+            duration_secs: None,
+        };
+        let updates = HashMap::from([(path, indexed)]);
+        assert!(update_library_track_details(&mut state, &updates));
+        assert_eq!(state.library.search_revision, 1);
+        assert_eq!(state.library.tracks[0].search_tags, tags);
+        assert!(!update_library_track_details(&mut state, &updates));
     }
 }

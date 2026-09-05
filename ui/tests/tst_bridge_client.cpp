@@ -155,6 +155,7 @@ private slots:
     void testSoloedChannelDecodingNone();
     void testChannelButtonsVisibilityDecoding();
     void libraryViewStateAvailabilityFollowsSnapshot();
+    void searchExtendedMatchDetailsDecodeAndHighlight();
     void searchResultsRankFilterAndHighlight();
     void searchProtocolTotalsAndExpansion();
     void searchDeferredResultsRejectSupersededQuery();
@@ -284,7 +285,7 @@ void BridgeClientTest::tagEditorAsyncFileRoundTrip() {
     QVERIFY(editor.renameSelectedFiles());
     QVERIFY(editor.saving());
     QTRY_COMPARE(renamed.size(), 1);
-    QVERIFY(!QFile::exists(path));
+    QVERIFY2(!QFile::exists(path), qPrintable(editor.statusText() + " " + editor.statusDetails()));
     const QString renamedPath = editor.loadedPaths().first();
     QVERIFY(QFile::exists(renamedPath));
     QVERIFY(renamedPath.contains(QStringLiteral("Renamed")));
@@ -1828,6 +1829,29 @@ void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {
 }
 
 
+void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {
+    QByteArray bytes;
+    const auto append = [&bytes](auto value) { auto le = qToLittleEndian(value); bytes.append(reinterpret_cast<const char *>(&le), sizeof(le)); };
+    const auto text = [&bytes, &append](const QString &value) { const auto utf8 = value.toUtf8(); append(quint16(utf8.size())); bytes.append(utf8); };
+    append(quint8('S')); append(quint8(4)); append(quint16(1)); append(quint32(9));
+    append(quint32(0)); append(quint32(0)); append(quint32(1));
+    append(quint8(3)); append(quint32(0)); append(qint32(1997)); append(quint16(1)); append(quint32(0)); append(quint32(0));
+    for (const auto &value : QStringList{"Song", "Artist", "Album", "", "", "", "", "", "", "track|/fixture/song", "/fixture/song", "Comment: remaster"}) text(value);
+    BinaryBridgeCodec::DecodedSearchResults decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSearchResultsFrame(bytes, &decoded, &error), qPrintable(error));
+    QCOMPARE(decoded.rows[0].matchDetail, QStringLiteral("Comment: remaster"));
+    BridgeClient client; isolateBridgeClient(client);
+    client.m_latestGlobalSearchSeqSent = 9;
+    QVERIFY(client.processSearchResultsFrame(decoded));
+    client.applyDeferredSearchDisplayRows();
+    QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(1), GlobalSearchResultsModel::MatchDetailRole).toString(), QStringLiteral("Comment: remaster"));
+    QCOMPARE(client.m_globalSearchModel.highlightText("Comment: anniversary remaster", "comment:\"anniversary remaster\""), QStringLiteral("Comment: <b>anniversary remaster</b>"));
+    QCOMPARE(client.m_globalSearchModel.highlightText("live:oslo", "live:oslo"), QStringLiteral("<b>live:oslo</b>"));
+    bytes.chop(1);
+    QVERIFY(!BinaryBridgeCodec::decodeSearchResultsFrame(bytes, &decoded, &error));
+}
+
 void BridgeClientTest::searchResultsRankFilterAndHighlight() {
     GlobalSearchResultsModel model;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
@@ -2197,6 +2221,13 @@ void BridgeClientTest::coverImageProviderUrlForPathFormat() {
 }
 
 int main(int argc, char **argv) {
+    // Bridge construction starts library workers; keep scans and tag operations
+    // independent of saved application data and concurrent test processes.
+    QTemporaryDir testStorage;
+    if (!testStorage.isValid()) return 1;
+    qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
+    qputenv("XDG_CONFIG_HOME", QFile::encodeName(testStorage.filePath("config")));
+    qputenv("XDG_CACHE_HOME", QFile::encodeName(testStorage.filePath("cache")));
     QApplication app(argc, argv);
     BridgeClientTest test;
     return QTest::qExec(&test, argc, argv);
