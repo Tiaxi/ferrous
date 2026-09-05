@@ -1296,9 +1296,13 @@ fn into_raw_buffer(bytes: Vec<u8>, len_out: *mut usize) -> *mut c_uchar {
 
 fn encode_waveform_window(window: &crate::analysis::WaveformWindow) -> Vec<u8> {
     const HEADER_BYTES: usize = 36;
-    let mut bytes =
-        Vec::with_capacity(HEADER_BYTES.saturating_add(window.extrema.len().saturating_mul(4)));
-    bytes.extend_from_slice(b"WVF1");
+    let values = window
+        .extrema
+        .len()
+        .saturating_add(window.downmix_extrema.len());
+    let mut bytes = Vec::with_capacity(HEADER_BYTES.saturating_add(values.saturating_mul(4)));
+    // WVF2 appends point_count mono min/max pairs after native channel extrema.
+    bytes.extend_from_slice(b"WVF2");
     bytes.extend_from_slice(&window.sample_rate_hz.to_le_bytes());
     bytes.extend_from_slice(&window.channel_count.to_le_bytes());
     bytes.extend_from_slice(&0_u16.to_le_bytes());
@@ -1315,7 +1319,7 @@ fn encode_waveform_window(window: &crate::analysis::WaveformWindow) -> Vec<u8> {
             .unwrap_or(u32::MAX)
             .to_le_bytes(),
     );
-    for value in &window.extrema {
+    for value in window.extrema.iter().chain(&window.downmix_extrema) {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     bytes
@@ -2586,6 +2590,28 @@ mod tests {
         let end = start + len;
         *offset = end;
         String::from_utf8_lossy(&bytes[start..end]).to_string()
+    }
+
+    #[test]
+    fn waveform_window_protocol_appends_true_downmix_extrema() {
+        let window = crate::analysis::WaveformWindow {
+            sample_rate_hz: 48_000,
+            channel_count: 2,
+            start_seconds: 0.0,
+            end_seconds: 0.1,
+            frames_per_point: 2400,
+            extrema: vec![-0.5, 0.5, -0.5, 0.5, -0.25, 0.75, -0.25, 0.75],
+            downmix_extrema: vec![0.0, 0.0, -0.25, 0.75],
+        };
+        let bytes = encode_waveform_window(&window);
+        assert_eq!(&bytes[..4], b"WVF2");
+        assert_eq!(bytes.len(), 36 + 12 * 4);
+        assert_eq!(
+            u32::from_le_bytes(bytes[32..36].try_into().expect("point count")),
+            2
+        );
+        assert_eq!(&bytes[68..72], &0.0_f32.to_le_bytes());
+        assert_eq!(&bytes[80..84], &0.75_f32.to_le_bytes());
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub(crate) struct WaveformWindow {
     /// Interleaved `[minimum, maximum]` pairs for every point and channel.
     /// At sample resolution `minimum == maximum == sample`.
     pub(crate) extrema: Vec<f32>,
+    /// Extrema of the arithmetic channel mix, computed before aggregation.
+    pub(crate) downmix_extrema: Vec<f32>,
 }
 
 struct WindowAccumulator {
@@ -27,6 +29,8 @@ struct WindowAccumulator {
     minima: Vec<f32>,
     maxima: Vec<f32>,
     seen: Vec<bool>,
+    downmix_minima: Vec<f32>,
+    downmix_maxima: Vec<f32>,
 }
 
 impl WindowAccumulator {
@@ -58,6 +62,8 @@ impl WindowAccumulator {
             minima: vec![f32::INFINITY; value_count],
             maxima: vec![f32::NEG_INFINITY; value_count],
             seen: vec![false; value_count],
+            downmix_minima: vec![f32::INFINITY; point_count],
+            downmix_maxima: vec![f32::NEG_INFINITY; point_count],
         }
     }
 
@@ -75,8 +81,10 @@ impl WindowAccumulator {
             let Ok(point) = usize::try_from(point_u64) else {
                 continue;
             };
+            let mut sum = 0.0;
             for channel in 0..self.channels {
                 let value = frame.get(channel).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+                sum += value;
                 let index = point.saturating_mul(self.channels).saturating_add(channel);
                 let Some(minimum) = self.minima.get_mut(index) else {
                     continue;
@@ -89,10 +97,30 @@ impl WindowAccumulator {
                     *seen = true;
                 }
             }
+            let mixed = sum / super::usize_to_f32_approx(self.channels);
+            if let Some(minimum) = self.downmix_minima.get_mut(point) {
+                *minimum = minimum.min(mixed);
+            }
+            if let Some(maximum) = self.downmix_maxima.get_mut(point) {
+                *maximum = maximum.max(mixed);
+            }
         }
     }
 
     fn finish(self, sample_rate_hz: u32) -> WaveformWindow {
+        let downmix_extrema = self
+            .downmix_minima
+            .iter()
+            .zip(&self.downmix_maxima)
+            .enumerate()
+            .flat_map(|(point, (&minimum, &maximum))| {
+                if self.seen[point * self.channels] {
+                    [minimum, maximum]
+                } else {
+                    [0.0, 0.0]
+                }
+            })
+            .collect();
         let mut extrema = Vec::with_capacity(self.minima.len().saturating_mul(2));
         for ((minimum, maximum), seen) in self.minima.into_iter().zip(self.maxima).zip(self.seen) {
             if seen {
@@ -111,6 +139,7 @@ impl WindowAccumulator {
             end_seconds: frame_seconds(self.end_frame, sample_rate),
             frames_per_point: u32::try_from(self.frames_per_point).unwrap_or(u32::MAX),
             extrema,
+            downmix_extrema,
         }
     }
 }
@@ -183,6 +212,28 @@ fn decode_window(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn waveform_downmix_cancels_opposite_channels_before_peak_aggregation() {
+        let samples = [16_384, -16_384, -8_192, 8_192, 24_576, -24_576];
+        let path = write_test_wave(&samples, 3, 2);
+        for points in [1, 3] {
+            let window = decode_waveform_window(&path, 0.0, 1.0, points).expect("decode mix");
+            assert!(window
+                .downmix_extrema
+                .iter()
+                .all(|value| value.abs() < f32::EPSILON));
+            assert!(window.extrema.iter().any(|value| value.abs() > 0.49));
+        }
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn waveform_downmix_preserves_in_phase_signal_amplitude() {
+        let mut accumulator = WindowAccumulator::new(0, 2, 1, 2);
+        accumulator.push_interleaved(0, &[0.75, 0.75, -0.25, -0.25], 2);
+        assert_eq!(accumulator.finish(48_000).downmix_extrema, [-0.25, 0.75]);
+    }
 
     #[test]
     fn compressed_seek_window_matches_the_absolute_sample_grid() {

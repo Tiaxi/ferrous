@@ -516,6 +516,7 @@ private slots:
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
     void waveformEditorParsesSignedSampleWindow();
+    void waveformEditorDownmixUsesMixedExtremaAtEveryZoom();
     void waveformEditorCancelsAndBoundsObsoleteDecodes();
     void waveformEditorSampleMarkersRequireSampleResolution();
     void waveformEditorFormatsViewportDuration();
@@ -4422,7 +4423,7 @@ void QmlSmokeTest::waveformEditorParsesSignedSampleWindow() {
         appendLe<quint32>(out, bits);
     };
     QByteArray frame;
-    frame.append("WVF1", 4);
+    frame.append("WVF2", 4);
     appendLe<quint32>(frame, 48'000);
     appendLe<quint16>(frame, 2);
     appendLe<quint16>(frame, 0);
@@ -4438,6 +4439,10 @@ void QmlSmokeTest::waveformEditorParsesSignedSampleWindow() {
     appendF32(frame, 0.5F);
     appendF32(frame, -0.125F);
     appendF32(frame, -0.125F);
+    appendF32(frame, -0.25F);
+    appendF32(frame, -0.25F);
+    appendF32(frame, 0.1875F);
+    appendF32(frame, 0.1875F);
 
     WaveformEditorItem::DetailWindow window;
     QVERIFY(WaveformEditorItem::parseWindow(frame, &window));
@@ -4447,6 +4452,40 @@ void QmlSmokeTest::waveformEditorParsesSignedSampleWindow() {
     QCOMPARE(window.pointCount, 2);
     QCOMPARE(window.extrema.at(0), -0.75F);
     QCOMPARE(window.extrema.at(6), -0.125F);
+    QCOMPARE(window.downmixExtrema.at(0), -0.25F);
+    QCOMPARE(window.downmixExtrema.at(2), 0.1875F);
+    QVERIFY(!WaveformEditorItem::parseWindow(frame.chopped(4), &window));
+}
+
+void QmlSmokeTest::waveformEditorDownmixUsesMixedExtremaAtEveryZoom() {
+    WaveformEditorItem item;
+    item.m_detail.channelCount = 2;
+    item.m_detail.pointCount = 4;
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        item.m_detail.extrema.insert(item.m_detail.extrema.end(), {0.5F, 0.5F, -0.5F, -0.5F});
+    }
+    item.m_detail.downmixExtrema.assign(8, 0.0F);
+    for (int framesPerPoint : {1, 2}) {
+        item.m_detail.framesPerPoint = framesPerPoint;
+        item.m_detail.sampleRateHz = 4 * framesPerPoint;
+        QImage image(400, 100, QImage::Format_RGB32);
+        image.fill(Qt::black);
+        QPainter painter(&image);
+        item.drawDetailLocked(painter, 400, 100, 0.0, 1.0, 1);
+        painter.end();
+        int signalPixels = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                if (image.pixelColor(x, y).green() > 150) {
+                    ++signalPixels;
+                    QVERIFY(y >= 47 && y <= 52);
+                }
+            }
+        }
+        QVERIFY(signalPixels > 0);
+    }
 }
 
 void QmlSmokeTest::waveformEditorSampleMarkersRequireSampleResolution() {
