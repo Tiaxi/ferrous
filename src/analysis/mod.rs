@@ -326,7 +326,6 @@ impl AnalysisEngine {
         spawn_spectrogram_decode_worker(
             spectrogram_cmd_rx,
             event_tx.clone(),
-            Arc::clone(&waveform_decode_active_token),
             Arc::clone(&spectrogram_decode_generation),
             Arc::clone(&worker_columns_produced),
             Arc::clone(&worker_track_duration_ms),
