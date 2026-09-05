@@ -7,9 +7,11 @@ use std::time::{Duration, SystemTime};
 
 use super::decoders::{open_audio_file, AudioFrameSource, AudioFrames, AudioRead};
 use super::usize_to_u64;
+use super::waveform_pyramid::PyramidTile;
 
 pub(super) const TILE_FRAMES: u64 = 16_384;
 const PCM_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const SUMMARY_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 // Calls originate on the Qt worker pool. Share one active-track decoder and
 // cache across those threads instead of depending on thread-local affinity.
@@ -50,6 +52,55 @@ impl PcmTile {
     }
 }
 
+struct TileCache<T> {
+    tiles: HashMap<u64, (Arc<T>, usize, u64)>,
+    bytes: usize,
+    budget: usize,
+    access: u64,
+}
+
+impl<T> TileCache<T> {
+    fn new(budget: usize) -> Self {
+        Self {
+            tiles: HashMap::new(),
+            bytes: 0,
+            budget,
+            access: 0,
+        }
+    }
+
+    fn get(&mut self, index: u64) -> Option<Arc<T>> {
+        self.access = self.access.saturating_add(1);
+        self.tiles.get_mut(&index).map(|(tile, _, accessed)| {
+            *accessed = self.access;
+            Arc::clone(tile)
+        })
+    }
+
+    fn insert(&mut self, index: u64, tile: Arc<T>, bytes: usize) {
+        if bytes > self.budget {
+            return;
+        }
+        while self.bytes + bytes > self.budget {
+            let Some(oldest) = self
+                .tiles
+                .iter()
+                .min_by_key(|(_, (_, _, access))| access)
+                .map(|(&index, _)| index)
+            else {
+                break;
+            };
+            if let Some((_, removed_bytes, _)) = self.tiles.remove(&oldest) {
+                self.bytes -= removed_bytes;
+            }
+        }
+        if let Some((_, previous_bytes, _)) = self.tiles.insert(index, (tile, bytes, self.access)) {
+            self.bytes -= previous_bytes;
+        }
+        self.bytes += bytes;
+    }
+}
+
 pub(super) struct WaveformSession {
     identity: SourceIdentity,
     source: AudioFrameSource,
@@ -58,10 +109,8 @@ pub(super) struct WaveformSession {
     next_frame: u64,
     pending: Option<AudioFrames>,
     eof_frame: Option<u64>,
-    tiles: HashMap<u64, (Arc<PcmTile>, u64)>,
-    cache_bytes: usize,
-    cache_budget: usize,
-    access: u64,
+    pcm: TileCache<PcmTile>,
+    summaries: TileCache<PyramidTile>,
     #[cfg(test)]
     pub(super) decoded_tiles: usize,
 }
@@ -79,10 +128,8 @@ impl WaveformSession {
             next_frame: 0,
             pending: None,
             eof_frame: None,
-            tiles: HashMap::new(),
-            cache_bytes: 0,
-            cache_budget: PCM_CACHE_BYTES,
-            access: 0,
+            pcm: TileCache::new(PCM_CACHE_BYTES),
+            summaries: TileCache::new(SUMMARY_CACHE_BYTES),
             #[cfg(test)]
             decoded_tiles: 0,
         })
@@ -94,31 +141,37 @@ impl WaveformSession {
         cancelled: &impl Fn() -> bool,
     ) -> anyhow::Result<Arc<PcmTile>> {
         anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-        self.access = self.access.saturating_add(1);
-        if let Some((tile, accessed)) = self.tiles.get_mut(&index) {
-            *accessed = self.access;
-            return Ok(Arc::clone(tile));
+        if let Some(tile) = self.pcm.get(index) {
+            return Ok(tile);
         }
         let tile = Arc::new(self.decode_tile(index, cancelled)?);
-        let bytes = tile.bytes();
-        if !tile.segments.is_empty() && bytes <= self.cache_budget {
-            while self.cache_bytes + bytes > self.cache_budget {
-                let Some(oldest) = self
-                    .tiles
-                    .iter()
-                    .min_by_key(|(_, (_, access))| access)
-                    .map(|(&index, _)| index)
-                else {
-                    break;
-                };
-                if let Some((removed, _)) = self.tiles.remove(&oldest) {
-                    self.cache_bytes -= removed.bytes();
-                }
-            }
-            self.cache_bytes += bytes;
-            self.tiles.insert(index, (Arc::clone(&tile), self.access));
+        if !tile.segments.is_empty() {
+            self.pcm.insert(index, Arc::clone(&tile), tile.bytes());
         }
         Ok(tile)
+    }
+
+    pub(super) fn summary(
+        &mut self,
+        index: u64,
+        cancelled: &impl Fn() -> bool,
+    ) -> anyhow::Result<Arc<PyramidTile>> {
+        anyhow::ensure!(!cancelled(), "waveform decode cancelled");
+        if let Some(tile) = self.summaries.get(index) {
+            return Ok(tile);
+        }
+        let pcm = self.tile(index, cancelled)?;
+        let summary = Arc::new(PyramidTile::new(&pcm, index, self.channels));
+        if !pcm.segments.is_empty() {
+            self.summaries
+                .insert(index, Arc::clone(&summary), summary.bytes());
+        }
+        Ok(summary)
+    }
+
+    #[cfg(test)]
+    pub(super) fn discard_pcm(&mut self) {
+        self.pcm = TileCache::new(0);
     }
 
     pub(super) fn reached_eof(&self, frame: u64) -> bool {
@@ -231,7 +284,7 @@ mod tests {
         let again = session.tile(0, &|| false).expect("cached tile");
         assert!(Arc::ptr_eq(&first, &again));
         assert_eq!(session.decoded_tiles, 1);
-        session.cache_budget = first.bytes() * 2;
+        session.pcm.budget = first.bytes() * 2;
         for index in [1, 2, 3, 0] {
             let tile = session.tile(index, &|| false).expect("read tile");
             for segment in &tile.segments {
@@ -240,9 +293,26 @@ mod tests {
                     assert!((actual - f32::from(expected) / 32768.0).abs() < 0.000_001);
                 }
             }
-            assert!(session.cache_bytes <= session.cache_budget);
+            assert!(session.pcm.bytes <= session.pcm.budget);
         }
         assert_eq!(session.decoded_tiles, 5, "evicted prefix must decode again");
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn summary_cache_obeys_its_own_byte_budget() {
+        let path = write_test_wave(&vec![8_192; 70_009], 48_000, 1);
+        let mut session = WaveformSession::open(&path).expect("open fixture");
+        let first = session.summary(0, &|| false).expect("summary");
+        session.summaries.budget = first.bytes();
+        for index in [1, 2, 3, 0] {
+            let summary = session
+                .summary(index, &|| false)
+                .expect("summary after eviction");
+            assert_eq!(summary.rows(TILE_FRAMES).0, &[[0.25, 0.25], [0.25, 0.25]]);
+            assert!(session.summaries.bytes <= session.summaries.budget);
+            assert_eq!(session.summaries.tiles.len(), 1);
+        }
         std::fs::remove_file(path).expect("remove fixture");
     }
 
@@ -256,7 +326,7 @@ mod tests {
             calls.get() >= 3
         });
         assert!(result.is_err());
-        assert!(session.tiles.is_empty());
+        assert!(session.pcm.tiles.is_empty());
         let tile = session.tile(0, &|| false).expect("retry cancelled tile");
         assert_eq!(
             tile.segments

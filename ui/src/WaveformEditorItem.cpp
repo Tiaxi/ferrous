@@ -860,10 +860,11 @@ double WaveformEditorItem::detailRequestMarginLocked(double visibleSpan) const {
             * static_cast<double>(m_sampleRateHz);
         const double targetFramesPerPoint = rawSampleCurve
             ? 1.0
-            : std::max(1.0, std::floor(visibleFrames / requiredPoints));
+            : std::exp2(std::floor(std::log2(std::max(1.0, visibleFrames / requiredPoints))));
         // Keep the requested frame count inside the bin size selected for the
         // viewport.  Otherwise a capped request can cross the next integer bin
         // boundary and remain permanently too coarse for the current zoom.
+        // Match Rust's power-of-two summary levels without losing pixel density.
         const int pointCapacity = kMaximumDetailPoints
             - (rawSampleCurve ? 2 : 1);
         const double quantizedSpan = static_cast<double>(pointCapacity)
@@ -901,8 +902,8 @@ int WaveformEditorItem::detailRequestPointCountLocked(
             requestedPoints = std::max(
                 requestedPoints, static_cast<int>(requestFrames));
         } else {
-            const double targetFramesPerPoint = std::max(
-                1.0, std::floor(requestFrames / std::max(1.0, required)));
+            const double targetFramesPerPoint = std::exp2(std::floor(std::log2(std::max(
+                1.0, requestFrames / std::max(1.0, required)))));
             requestedPoints = std::max(
                 requestedPoints,
                 static_cast<int>(std::ceil(

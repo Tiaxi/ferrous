@@ -4466,6 +4466,25 @@ void QmlSmokeTest::waveformEditorCachedDecoderPreservesOverlappingSamples() {
         }
         for (float mixed : item.m_detail.downmixExtrema) QCOMPARE(mixed, 0.0F);
     }
+    for (int width : {128, 400, 3'440}) {
+        for (double zoom : {1.0, 2.0, 8.0}) {
+            WaveformEditorItem item;
+            item.setWidth(width);
+            item.setDurationSeconds(static_cast<double>(frames) / 48'000.0);
+            item.setPositionSeconds(0.3);
+            item.m_sampleRateHz = 48'000;
+            item.setZoomLevel(zoom);
+            const auto [start, end] = item.visibleRangeLocked();
+            const auto [requestStart, requestEnd] = item.requestRangeLocked(start, end);
+            const int points = item.detailRequestPointCountLocked(requestStart, requestEnd);
+            QVERIFY(WaveformEditorItem::parseWindow(WaveformEditorItem::decodeWindow(
+                file.fileName(), requestStart, requestEnd, points, cancelled), &item.m_detail));
+            const quint32 bin = item.m_detail.framesPerPoint;
+            QVERIFY(bin != 0 && (bin & (bin - 1)) == 0);
+            QVERIFY(item.m_detail.pointCount <= points);
+            QVERIFY(item.detailResolutionCoversLocked(start, end));
+        }
+    }
     cancelled->store(true);
     QVERIFY(WaveformEditorItem::decodeWindow(
         file.fileName(), 0.25, 0.5, 12'000, cancelled).isEmpty());
