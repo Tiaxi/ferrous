@@ -218,6 +218,39 @@ void WaveformEditorItem::setOverviewData(const QByteArray &value) {
     emit overviewDataChanged(); update();
 }
 
+double WaveformEditorItem::overviewCoverageSeconds() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_overviewCoverageSeconds;
+}
+
+bool WaveformEditorItem::overviewComplete() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_overviewComplete;
+}
+
+void WaveformEditorItem::setOverviewCoverageSeconds(double value) {
+    value = std::isfinite(value) ? std::max(0.0, value) : 0.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_overviewCoverageSeconds == value) return;
+        m_overviewCoverageSeconds = value;
+        if (!m_zoomOutHandoffPending) invalidateCacheLocked();
+    }
+    emit overviewCoverageChanged();
+    update();
+}
+
+void WaveformEditorItem::setOverviewComplete(bool value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_overviewComplete == value) return;
+        m_overviewComplete = value;
+        if (!m_zoomOutHandoffPending) invalidateCacheLocked();
+    }
+    emit overviewCoverageChanged();
+    update();
+}
+
 void WaveformEditorItem::setPositionSeconds(double value) {
     updatePositionSeconds(value, false);
 }
@@ -2121,7 +2154,12 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
 
 void WaveformEditorItem::drawOverviewLocked(QPainter &painter, int width, int height,
                                              double visibleStart, double visibleEnd, int channels) const {
-    if (m_overviewData.isEmpty() || m_durationSeconds <= 0.0) return;
+    // The overview is a combined peak envelope, with no channel identity.
+    if (m_overviewData.isEmpty() || m_durationSeconds <= 0.0
+        || (m_viewMode == 1 && channels > 1)) return;
+    const double coverage = m_overviewComplete ? m_durationSeconds
+        : std::min(m_durationSeconds, m_overviewCoverageSeconds);
+    if (coverage <= 0.0) return;
     const auto *peaks = reinterpret_cast<const uchar *>(m_overviewData.constData());
     const int count = m_overviewData.size();
     const double span = visibleEnd - visibleStart;
@@ -2134,10 +2172,12 @@ void WaveformEditorItem::drawOverviewLocked(QPainter &painter, int width, int he
         const double half = (bottom - top) * 0.5 - 1.0;
         painter.setPen(QPen(channelIsMutedLocked(channel) ? kMutedWaveform : kWaveform, 1.0));
         for (int x = 0; x < width; ++x) {
-            const double time = visibleStart
-                + (static_cast<double>(x) + 0.5) * secondsPerPixel;
-            const int index = std::clamp(static_cast<int>(time / m_durationSeconds * count), 0, count - 1);
-            const double peak = static_cast<double>(peaks[index]) / 255.0;
+            const double start = std::max(0.0, visibleStart + x * secondsPerPixel);
+            const double end = std::min(coverage, visibleStart + (x + 1) * secondsPerPixel);
+            if (start >= end) continue;
+            const int first = std::clamp(static_cast<int>(std::floor(start / coverage * count)), 0, count - 1);
+            const int last = std::clamp(static_cast<int>(std::ceil(end / coverage * count)), first + 1, count);
+            const double peak = static_cast<double>(*std::max_element(peaks + first, peaks + last)) / 255.0;
             painter.drawLine(x, static_cast<int>(center - peak * half), x, static_cast<int>(center + peak * half));
         }
     }

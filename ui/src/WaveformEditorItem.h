@@ -34,6 +34,8 @@ class WaveformEditorItem : public QQuickPaintedItem {
     Q_OBJECT
     Q_PROPERTY(QString sourcePath READ sourcePath WRITE setSourcePath NOTIFY sourcePathChanged)
     Q_PROPERTY(QByteArray overviewData READ overviewData WRITE setOverviewData NOTIFY overviewDataChanged)
+    Q_PROPERTY(double overviewCoverageSeconds READ overviewCoverageSeconds WRITE setOverviewCoverageSeconds NOTIFY overviewCoverageChanged)
+    Q_PROPERTY(bool overviewComplete READ overviewComplete WRITE setOverviewComplete NOTIFY overviewCoverageChanged)
     Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
     Q_PROPERTY(double zoomLevel READ zoomLevel WRITE setZoomLevel NOTIFY zoomLevelChanged)
@@ -58,6 +60,10 @@ public:
     void setSourcePath(const QString &value);
     QByteArray overviewData() const;
     void setOverviewData(const QByteArray &value);
+    double overviewCoverageSeconds() const;
+    void setOverviewCoverageSeconds(double value);
+    bool overviewComplete() const;
+    void setOverviewComplete(bool value);
     double positionSeconds() const;
     void setPositionSeconds(double value);
     double durationSeconds() const;
@@ -97,6 +103,7 @@ public:
 signals:
     void sourcePathChanged();
     void overviewDataChanged();
+    void overviewCoverageChanged();
     void positionSecondsChanged();
     void durationSecondsChanged();
     void zoomLevelChanged();
@@ -280,6 +287,8 @@ private:
     mutable QMutex m_stateMutex;
     QString m_sourcePath;
     QByteArray m_overviewData;
+    double m_overviewCoverageSeconds{0.0};
+    bool m_overviewComplete{false};
     double m_positionSeconds{0.0};
     std::chrono::steady_clock::time_point m_positionUpdatedAt;
     double m_durationSeconds{0.0};
