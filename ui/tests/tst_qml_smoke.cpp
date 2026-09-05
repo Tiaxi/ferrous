@@ -12,7 +12,9 @@
 #include <QPainter>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QScreen>
 #include <QSGSimpleTextureNode>
+#include <QSGRendererInterface>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -38,6 +40,7 @@
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/SpectrogramSeekTrace.h"
+#include "../src/WaveformSceneGraph.h"
 #define protected public
 #define private public
 #include "../src/SpectrogramItem.h"
@@ -576,7 +579,11 @@ private slots:
     void waveformEditorReferenceLineContrastsWaveform();
     void waveformEditorContrastLinesUseFboSafeCompositionModes();
     void waveformEditorFpsOverlayTracksPaintRate();
-    void waveformEditorUsesSafeRasterTargetAndNativeFrameInterpolation();
+    void waveformEditorUsesSceneGraphAndNativeFrameInterpolation();
+    void waveformSceneGraphReusesTextures();
+    void waveformSceneGraphMatchesRaster_data();
+    void waveformSceneGraphMatchesRaster();
+    void waveformSceneGraphBenchmark();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
     void spectrogramStaleTokenChunksAreDropped();
     void spectrogramGaplessTokenChunksPassFilter();
@@ -6267,19 +6274,225 @@ void QmlSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
     QVERIFY(rightmostOverlayPixel >= canvas.width() - 12);
 }
 
-void QmlSmokeTest::waveformEditorUsesSafeRasterTargetAndNativeFrameInterpolation() {
+void QmlSmokeTest::waveformSceneGraphReusesTextures() {
+    QQuickWindow window;
+    window.resize(64, 64);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setWidth(3440);
+    item.setHeight(180);
+    item.setGridEnabled(true);
+    item.setDurationSeconds(60.0);
+    item.setPositionSeconds(30.0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    const auto initial = WaveformSceneGraph::statistics(node);
+    QVERIFY(initial.uploadedBytes >= 3440 * 180 * 4);
+    for (int frame = 0; frame < 20; ++frame) {
+        item.setPositionSeconds(30.0 + frame * 0.01);
+        node = item.updatePaintNode(node, nullptr);
+        QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, quint64{0});
+    }
+    item.setGridEnabled(false);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(WaveformSceneGraph::statistics(node).residentBytes < initial.residentBytes);
+    item.setHeight(1440);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(WaveformSceneGraph::statistics(node).uploadedBytes >= 3440 * 1440 * 4);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(32)));
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(WaveformSceneGraph::statistics(node).textureUploads > 0);
+    const auto resident = WaveformSceneGraph::statistics(node).residentBytes;
+    // Rebuilding the scene graph (e.g. another fullscreen window) recreates
+    // render resources without retaining textures from the previous window.
+    delete node;
+    node = item.updatePaintNode(nullptr, nullptr);
+    QCOMPARE(WaveformSceneGraph::statistics(node).residentBytes, resident);
+    delete node;
+
+    // Oversized source caches must be divided into bounded textures. A pan
+    // inside their resident tiles must only update source coordinates.
+    QImage wideCache(9000, 180, QImage::Format_RGB32);
+    wideCache.fill(Qt::green);
+    double sourceX = 2500;
+    node = nullptr;
+    auto pan = [&]() {
+        node = WaveformSceneGraph::render(node, &window, QSize(3440, 180), [&](QPainter *painter) {
+            painter->drawImage(QRectF(0, 0, 3440, 180), wideCache, QRectF(sourceX, 0, 3440, 180));
+        });
+    };
+    pan();
+    const bool native = window.rendererInterface()->graphicsApi() != QSGRendererInterface::Software;
+    QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, native ? quint64{2} : quint64{1});
+    sourceX += 0.5;
+    pan();
+    QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, quint64{0});
+    sourceX = 4500;
+    pan();
+    QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, native ? quint64{1} : quint64{0});
+    if (native) QCOMPARE(WaveformSceneGraph::statistics(node).residentBytes, quint64{4096 * 180 * 4});
+    delete node;
+}
+
+void QmlSmokeTest::waveformSceneGraphMatchesRaster_data() {
+    QTest::addColumn<bool>("samples");
+    QTest::addColumn<bool>("splitChannels");
+    QTest::addColumn<QSize>("size");
+    QTest::newRow("overview") << false << false << QSize(640, 240);
+    QTest::newRow("channel-rulers") << false << true << QSize(640, 240);
+    QTest::newRow("sample-curves") << true << false << QSize(640, 240);
+    QTest::newRow("muted-sample-curves") << true << true << QSize(640, 240);
+    QTest::newRow("wide-overview") << false << true << QSize(3440, 360);
+    QTest::newRow("wide-samples") << true << true << QSize(3440, 360);
+}
+
+void QmlSmokeTest::waveformSceneGraphMatchesRaster() {
+    QFETCH(bool, samples);
+    QFETCH(bool, splitChannels);
+    QFETCH(QSize, size);
+    QQuickWindow window;
+    // Window managers may clamp a 3440-logical-pixel window at 2x scale.
+    // Fit the desktop while keeping the source cache wider than the pane.
+    size.setWidth(std::min(size.width(), window.screen()->availableGeometry().width()));
+    window.resize(size);
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setWidth(size.width());
+    item.setHeight(size.height());
+    item.setDurationSeconds(10.0);
+    item.setPositionSeconds(5.0);
+    item.setOverviewComplete(true);
+    QByteArray overview(8192, Qt::Uninitialized);
+    for (int i = 0; i < overview.size(); ++i) overview[i] = static_cast<char>(80 + 60 * std::sin(i * 0.03));
+    item.setOverviewData(overview);
+    item.setGridEnabled(true);
+    item.setViewMode(splitChannels ? 1 : 0);
+    item.setChannelCountHint(splitChannels ? 2 : 1);
+    item.setMutedChannelsMask(splitChannels ? 2 : 0);
+    if (size.width() > 640 && !samples) item.setZoomLevel(2.0);
+    if (samples) {
+        item.m_sampleRateHz = 1000;
+        item.m_detail.sampleRateHz = 1000;
+        item.m_detail.channelCount = splitChannels ? 2 : 1;
+        item.m_detail.startSeconds = 4.0;
+        item.m_detail.endSeconds = 6.0;
+        item.m_detail.framesPerPoint = 1;
+        item.m_detail.pointCount = 2000;
+        item.m_detail.extrema.resize(4000 * item.m_detail.channelCount);
+        for (int point = 0; point < 2000; ++point) {
+            for (int channel = 0; channel < item.m_detail.channelCount; ++channel) {
+                const float value = static_cast<float>(std::sin(point * 0.18 + channel) * 0.8);
+                const int index = (point * item.m_detail.channelCount + channel) * 2;
+                item.m_detail.extrema[index] = value;
+                item.m_detail.extrema[index + 1] = value;
+            }
+        }
+        item.setZoomLevel(100.0);
+    }
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    item.setHoverPosition(220, 100, true);
+    QImage actual = window.grabWindow();
+    QVERIFY(!actual.isNull());
+    const qreal scale = window.effectiveDevicePixelRatio();
+    QImage expected((QSizeF(size) * scale).toSize(), QImage::Format_RGB32);
+    expected.setDevicePixelRatio(scale);
+    QPainter painter(&expected); item.paint(&painter); painter.end();
+    actual = actual.convertToFormat(QImage::Format_RGB32);
+    QCOMPARE(actual.size(), expected.size());
+    quint64 error = 0;
+    int different = 0;
+    for (int y = 0; y < expected.height(); ++y) {
+        for (int x = 0; x < expected.width(); ++x) {
+            const QColor a = actual.pixelColor(x, y);
+            const QColor b = expected.pixelColor(x, y);
+            const int delta = std::abs(a.red() - b.red()) + std::abs(a.green() - b.green()) + std::abs(a.blue() - b.blue());
+            error += delta;
+            if (delta > 45) ++different;
+        }
+    }
+    const int pixels = expected.width() * expected.height();
+    const double mean = static_cast<double>(error) / (pixels * 3);
+    // Geometry AA can differ from QPainter at curve edges, but not in the
+    // waveform shape, ruler positions, clipping, labels or channel colors.
+    if (mean >= 2.0 || different >= pixels / 40) {
+        actual.save(QStringLiteral("/tmp/ferrous-waveform-actual.png"));
+        expected.save(QStringLiteral("/tmp/ferrous-waveform-expected.png"));
+    }
+    QVERIFY2(mean < 2.0 && different < pixels / 40,
+        qPrintable(QStringLiteral("mean=%1 differing_pixels=%2").arg(mean).arg(different)));
+}
+
+void QmlSmokeTest::waveformSceneGraphBenchmark() {
+    if (!qEnvironmentVariableIsSet("FERROUS_BENCHMARK_WAVEFORM")) QSKIP("optional render benchmark");
+    QQuickWindow window;
+    window.resize(64, 64); window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    for (const QSize size : {QSize(1200, 180), QSize(3440, 1440)}) {
+        for (const double zoom : {1.0, 8.0, 4000.0}) {
+            WaveformEditorItem item;
+            item.setWidth(size.width()); item.setHeight(size.height());
+            item.setDurationSeconds(60.0); item.setPositionSeconds(30.0);
+            item.setOverviewComplete(true);
+            item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+            item.m_sampleRateHz = 48000;
+            if (zoom > 100) {
+                item.m_detail.sampleRateHz = 48000; item.m_detail.channelCount = 1;
+                item.m_detail.startSeconds = 29.5; item.m_detail.endSeconds = 30.5;
+                item.m_detail.framesPerPoint = 1; item.m_detail.pointCount = 48000;
+                item.m_detail.extrema.resize(96000);
+                for (int i = 0; i < 48000; ++i) {
+                    const float value = static_cast<float>(std::sin(i * 0.04) * 0.8);
+                    item.m_detail.extrema[i * 2] = value; item.m_detail.extrema[i * 2 + 1] = value;
+                }
+            }
+            item.setZoomLevel(zoom);
+            QImage canvas(size, QImage::Format_RGB32);
+            QPainter raster(&canvas);
+            for (int i = 0; i < 10; ++i) item.paint(&raster);
+            constexpr int frames = 180;
+            QElapsedTimer timer; timer.start();
+            for (int i = 0; i < frames; ++i) {
+                item.m_positionSeconds = 30.0 + i * 0.00001;
+                item.paint(&raster);
+            }
+            const double rasterMs = timer.nsecsElapsed() / 1.0e6 / frames;
+            QSGNode *node = nullptr;
+            auto prepare = [&]() {
+                const auto [start, end] = item.visibleRangeLocked();
+                const bool rasterize = window.rendererInterface()->graphicsApi() == QSGRendererInterface::Software
+                    && item.renderDetailDirectlyLocked(start, end);
+                node = WaveformSceneGraph::render(node, &window, size, [&](QPainter *p) { item.paint(p); }, rasterize);
+            };
+            for (int i = 0; i < 10; ++i) prepare();
+            quint64 uploads = 0; quint64 bytes = 0;
+            timer.restart();
+            for (int i = 0; i < frames; ++i) {
+                item.m_positionSeconds = 30.0 + i * 0.00001; prepare();
+                const auto stats = WaveformSceneGraph::statistics(node);
+                uploads += stats.textureUploads; bytes += stats.uploadedBytes;
+            }
+            const double sceneMs = timer.nsecsElapsed() / 1.0e6 / frames;
+            qInfo("waveform %dx%d zoom=%.0f raster_ms=%.4f scene_ms=%.4f uploads=%llu bytes=%llu",
+                size.width(), size.height(), zoom, rasterMs, sceneMs,
+                static_cast<unsigned long long>(uploads), static_cast<unsigned long long>(bytes));
+            delete node;
+        }
+    }
+}
+
+void QmlSmokeTest::waveformEditorUsesSceneGraphAndNativeFrameInterpolation() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setDurationSeconds(10.0);
     item.setPositionSeconds(5.0);
     item.setZoomLevel(2.0);
 
-    QCOMPARE(item.renderTarget(), QQuickPaintedItem::Image);
-    QVERIFY(item.opaquePainting());
-    QCOMPARE(item.fillColor(), QColor(5, 9, 7));
-    QCOMPARE(
-        item.performanceHints(),
-        QQuickPaintedItem::PerformanceHints{});
+    QVERIFY(item.flags().testFlag(QQuickItem::ItemHasContents));
 
     item.setPlaying(true);
     const double before = item.visibleRangeLocked().first;

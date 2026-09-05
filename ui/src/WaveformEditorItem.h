@@ -14,7 +14,7 @@
 #include <QPainterPath>
 #include <QPointF>
 #include <QPolygonF>
-#include <QQuickPaintedItem>
+#include <QQuickItem>
 #include <QRectF>
 #include <QString>
 #include <QTimer>
@@ -30,7 +30,7 @@ class QPainter;
 class QQuickWindow;
 class QWheelEvent;
 
-class WaveformEditorItem : public QQuickPaintedItem {
+class WaveformEditorItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(QString sourcePath READ sourcePath WRITE setSourcePath NOTIFY sourcePathChanged)
     Q_PROPERTY(QByteArray overviewData READ overviewData WRITE setOverviewData NOTIFY overviewDataChanged)
@@ -98,7 +98,8 @@ public:
     Q_INVOKABLE QString formatViewportDuration(double seconds) const;
     Q_INVOKABLE void setHoverPosition(double x, double y, bool active);
 
-    void paint(QPainter *painter) override;
+    // Shared drawing reference used by the scene graph adapter and raster tests.
+    void paint(QPainter *painter);
 
 signals:
     void sourcePathChanged();
@@ -122,6 +123,7 @@ signals:
     void seekRequested(double seconds);
 
 protected:
+    QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
     void hoverMoveEvent(QHoverEvent *event) override;
     void hoverEnterEvent(QHoverEvent *event) override;
