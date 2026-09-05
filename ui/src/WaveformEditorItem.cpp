@@ -451,7 +451,7 @@ QByteArray WaveformEditorItem::decodeWindow(const QString &path, double startSec
 }
 
 bool WaveformEditorItem::parseWindow(const QByteArray &bytes, DetailWindow *window) {
-    if (window == nullptr || bytes.size() < kWindowHeaderBytes || bytes.first(4) != QByteArrayLiteral("WVF1")) return false;
+    if (window == nullptr || bytes.size() < kWindowHeaderBytes || bytes.first(4) != QByteArrayLiteral("WVF2")) return false;
     const char *data = bytes.constData();
     const quint32 sampleRate = qFromLittleEndian<quint32>(reinterpret_cast<const uchar *>(data + 4));
     const quint16 channels = qFromLittleEndian<quint16>(reinterpret_cast<const uchar *>(data + 8));
@@ -460,7 +460,8 @@ bool WaveformEditorItem::parseWindow(const QByteArray &bytes, DetailWindow *wind
     const quint32 framesPerPoint = qFromLittleEndian<quint32>(reinterpret_cast<const uchar *>(data + 28));
     const quint32 pointCount = qFromLittleEndian<quint32>(reinterpret_cast<const uchar *>(data + 32));
     const quint64 valueCount = static_cast<quint64>(channels) * pointCount * 2U;
-    const quint64 expected = static_cast<quint64>(kWindowHeaderBytes) + valueCount * 4U;
+    const quint64 downmixCount = static_cast<quint64>(pointCount) * 2U;
+    const quint64 expected = static_cast<quint64>(kWindowHeaderBytes) + (valueCount + downmixCount) * 4U;
     if (sampleRate == 0 || channels == 0 || pointCount == 0 || expected != static_cast<quint64>(bytes.size())) return false;
     window->sampleRateHz = static_cast<int>(sampleRate);
     window->channelCount = static_cast<int>(channels);
@@ -471,6 +472,11 @@ bool WaveformEditorItem::parseWindow(const QByteArray &bytes, DetailWindow *wind
     window->extrema.resize(static_cast<std::size_t>(valueCount));
     for (quint64 index = 0; index < valueCount; ++index) {
         window->extrema[static_cast<std::size_t>(index)] = readF32(data + kWindowHeaderBytes + static_cast<qsizetype>(index * 4U));
+    }
+    window->downmixExtrema.resize(static_cast<std::size_t>(downmixCount));
+    for (quint64 index = 0; index < downmixCount; ++index) {
+        window->downmixExtrema[static_cast<std::size_t>(index)] = readF32(
+            data + kWindowHeaderBytes + static_cast<qsizetype>((valueCount + index) * 4U));
     }
     return true;
 }
@@ -2225,6 +2231,11 @@ void WaveformEditorItem::drawDetailSliceLocked(
                 const std::size_t index = (static_cast<std::size_t>(point) * m_detail.channelCount + sourceChannel) * 2U;
                 minimum = std::min(minimum, m_detail.extrema[index]);
                 maximum = std::max(maximum, m_detail.extrema[index + 1]);
+            }
+            if (m_viewMode == 0 && !m_detail.downmixExtrema.empty()) {
+                const auto index = static_cast<std::size_t>(point) * 2U;
+                minimum = m_detail.downmixExtrema[index];
+                maximum = m_detail.downmixExtrema[index + 1];
             }
             if (sampleCurve) {
                 polyline.append(QPointF(

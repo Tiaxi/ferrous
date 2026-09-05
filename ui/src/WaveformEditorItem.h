@@ -166,6 +166,7 @@ private:
         quint32 framesPerPoint{0};
         int pointCount{0};
         std::vector<float> extrema;
+        std::vector<float> downmixExtrema;
     };
 
     struct CacheGrid {
