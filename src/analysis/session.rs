@@ -295,6 +295,46 @@ impl StagingChunkState {
 // Staging decode (centered-mode gapless pre-decode)
 // ---------------------------------------------------------------------------
 
+/// Consume one synchronized row across channels directly into the byte batch.
+/// Returns None when more audio is needed, or whether resampling emitted a column.
+fn append_stft_column(
+    stfts: &mut [StftComputer],
+    resamplers: &mut [PeakHoldResampler],
+    chunk: &mut Vec<u8>,
+    bins: usize,
+    fft_size: usize,
+) -> Option<bool> {
+    if stfts.is_empty() || !stfts.iter().all(StftComputer::has_row) {
+        return None;
+    }
+    let start = chunk.len();
+    let mut emitted = true;
+    for (channel, stft) in stfts.iter_mut().enumerate() {
+        let row = stft.take_row().expect("all channel windows checked above");
+        let output = resamplers
+            .get_mut(channel)
+            .map_or(Some(row), |resampler| resampler.push(row));
+        if let Some(output) = output {
+            append_quantized_spectrum(chunk, output, bins, fft_size);
+        } else {
+            emitted = false;
+        }
+    }
+    if !emitted {
+        chunk.truncate(start);
+    }
+    Some(emitted)
+}
+
+fn append_quantized_spectrum(chunk: &mut Vec<u8>, row: &[f32], bins: usize, fft_size: usize) {
+    chunk.extend(
+        row.iter()
+            .take(bins)
+            .map(|&power| precomputed_to_u8_spectrum(power, fft_size)),
+    );
+    chunk.extend(std::iter::repeat_n(0, bins.saturating_sub(row.len())));
+}
+
 /// Drain STFT rows from the staging pipeline, quantize, and emit
 /// chunks via the channel.  Extracted from `centered_staging_decode`
 /// to stay within clippy's line limit.
@@ -305,46 +345,15 @@ fn staging_drain_stft_rows(
     state: &mut StagingChunkState,
     tx: &Sender<PrecomputedSpectrogramChunk>,
 ) -> bool {
-    loop {
-        let mut rows: Vec<Vec<f32>> = Vec::with_capacity(state.channel_count);
-        let mut all_have_row = true;
-        for stft in stfts.iter_mut() {
-            let row = stft.take_rows(1);
-            if row.is_empty() {
-                all_have_row = false;
-                break;
-            }
-            rows.push(row.into_iter().next().unwrap());
-        }
-        if !all_have_row {
-            break;
-        }
-
-        let mut decimated_rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(state.channel_count);
-        for (ch, row) in rows.iter().enumerate() {
-            if let Some(resampler) = resamplers.get_mut(ch) {
-                decimated_rows.push(resampler.push(row));
-            } else {
-                decimated_rows.push(Some(row.clone()));
-            }
-        }
-
-        if !decimated_rows.iter().all(Option::is_some) {
+    while let Some(emitted) = append_stft_column(
+        stfts,
+        resamplers,
+        &mut state.chunk_buf,
+        state.bins_per_column,
+        state.fft_size,
+    ) {
+        if !emitted {
             continue;
-        }
-
-        for maybe_row in &decimated_rows {
-            let row = maybe_row.as_ref().unwrap();
-            for &v in row.iter().take(state.bins_per_column) {
-                state
-                    .chunk_buf
-                    .push(precomputed_to_u8_spectrum(v, state.fft_size));
-            }
-            if row.len() < state.bins_per_column {
-                state
-                    .chunk_buf
-                    .extend(std::iter::repeat_n(0u8, state.bins_per_column - row.len()));
-            }
         }
         state.chunk_columns += 1;
         state.columns_produced += 1;
@@ -478,7 +487,7 @@ fn centered_staging_decode(
 
         for (ch, channel_samples) in per_channel.iter().enumerate() {
             if let Some(stft) = stfts.get_mut(ch) {
-                stft.enqueue_samples(channel_samples, effective_rate);
+                stft.enqueue_samples(channel_samples);
             }
         }
 
@@ -1278,7 +1287,7 @@ fn session_decode_loop(
 
         for (ch, channel_samples) in per_channel.iter().enumerate() {
             if let Some(stft) = session.stfts.get_mut(ch) {
-                stft.enqueue_samples(channel_samples, session.effective_rate);
+                stft.enqueue_samples(channel_samples);
             }
         }
 
@@ -1704,55 +1713,23 @@ fn session_drain_stft_rows(
     columns_produced_out: &AtomicU64,
 ) {
     loop {
-        let mut rows: Vec<Vec<f32>> = Vec::with_capacity(session.channel_count);
-        let mut all_have_row = true;
-        for stft in &mut session.stfts {
-            let row = stft.take_rows(1);
-            if row.is_empty() {
-                all_have_row = false;
-                break;
-            }
-            rows.push(row.into_iter().next().unwrap());
-        }
-        if !all_have_row {
+        let start = session.chunk_buf.len();
+        let Some(emitted) = append_stft_column(
+            &mut session.stfts,
+            &mut session.resamplers,
+            &mut session.chunk_buf,
+            session.bins_per_column,
+            session.fft_size,
+        ) else {
             break;
-        }
-
-        // Push through resamplers.
-        let mut decimated_rows: Vec<Option<Vec<f32>>> = Vec::with_capacity(session.channel_count);
-        for (ch, row) in rows.iter().enumerate() {
-            if let Some(resampler) = session.resamplers.get_mut(ch) {
-                decimated_rows.push(resampler.push(row));
-            } else {
-                decimated_rows.push(Some(row.clone()));
-            }
-        }
-
-        let all_decimated = decimated_rows.iter().all(Option::is_some);
-        if !all_decimated {
+        };
+        if !emitted {
             continue;
         }
-
-        // Skip warmup columns (pre-seek: feed STFT without emitting).
         if *warmup_remaining > 0 {
             *warmup_remaining -= 1;
+            session.chunk_buf.truncate(start);
             continue;
-        }
-
-        // Quantize and append to chunk buffer.
-        for maybe_row in &decimated_rows {
-            let row = maybe_row.as_ref().unwrap();
-            for &v in row.iter().take(session.bins_per_column) {
-                session
-                    .chunk_buf
-                    .push(precomputed_to_u8_spectrum(v, session.fft_size));
-            }
-            if row.len() < session.bins_per_column {
-                session.chunk_buf.extend(std::iter::repeat_n(
-                    0u8,
-                    session.bins_per_column - row.len(),
-                ));
-            }
         }
         session.chunk_columns += 1;
         session.columns_produced += 1;
@@ -1891,7 +1868,7 @@ fn session_flush_chunk(
     // All channels must flush together — if any channel has no
     // partial data, skip the flush (same synchronization as the
     // drain loop).
-    let flushed: Vec<Option<Vec<f32>>> = session
+    let flushed: Vec<Option<&[f32]>> = session
         .resamplers
         .iter_mut()
         .map(PeakHoldResampler::flush)
@@ -2132,6 +2109,27 @@ mod tests {
     use symphonia::core::meta::MetadataOptions;
     #[cfg(not(feature = "gst"))]
     use symphonia::core::probe::Hint;
+
+    #[test]
+    fn synchronized_stft_does_not_consume_a_channel_before_all_are_ready() {
+        let mut stfts = vec![StftComputer::new(512, 1_024), StftComputer::new(512, 1_024)];
+        let mut resamplers = vec![PeakHoldResampler::new(1.0), PeakHoldResampler::new(1.0)];
+        let mut bytes = Vec::new();
+        stfts[0].enqueue_samples(&[0.25; 512]);
+        assert_eq!(
+            append_stft_column(&mut stfts, &mut resamplers, &mut bytes, 257, 512),
+            None
+        );
+        assert!(stfts[0].has_row());
+        stfts[1].enqueue_samples(&[0.25; 512]);
+        assert_eq!(
+            append_stft_column(&mut stfts, &mut resamplers, &mut bytes, 257, 512),
+            Some(true)
+        );
+        assert_eq!(bytes.len(), 514);
+        assert_eq!(bytes[..257], bytes[257..]);
+        assert!(!stfts.iter().any(StftComputer::has_row));
+    }
 
     #[test]
     fn precomputed_encoding_preserves_full_dynamic_range_and_silence() {
@@ -3086,7 +3084,7 @@ mod tests {
         let samples: Vec<f32> = (0u32..32_768)
             .map(|i| (2.0 * std::f32::consts::PI * 440.0 * (i as f32 / sample_rate as f32)).sin())
             .collect();
-        stft.enqueue_samples(&samples, sample_rate);
+        stft.enqueue_samples(&samples);
 
         // output_interval >= 1.0 and hop_size is small, so the product fits.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

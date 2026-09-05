@@ -3,12 +3,15 @@
 use realfft::{num_complex::Complex32, RealFftPlanner, RealToComplex};
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 
-use super::{seconds_from_frames, small_usize_to_f32, u32_to_usize, usize_to_u64};
+use super::{seconds_from_frames, small_usize_to_f32, usize_to_u64};
 
 pub(super) struct StftComputer {
     r2c: std::sync::Arc<dyn RealToComplex<f32>>,
     fft_in: Vec<f32>,
     fft_out: Vec<Complex32>,
+    scratch: Vec<Complex32>,
+    row: Vec<f32>,
+    pending_skip: usize,
     pending: Vec<f32>,
     pending_start: usize,
     window: Vec<f32>,
@@ -22,6 +25,8 @@ impl StftComputer {
         let r2c = planner.plan_fft_forward(fft_size);
         let fft_in = r2c.make_input_vec();
         let fft_out = r2c.make_output_vec();
+        let scratch = r2c.make_scratch_vec();
+        let row = vec![0.0; fft_out.len()];
         // Blackman-Harris (as in DeaDBeeF spectrogram) gives cleaner bin separation.
         let window = blackman_harris_window(fft_size);
 
@@ -29,55 +34,57 @@ impl StftComputer {
             r2c,
             fft_in,
             fft_out,
+            scratch,
+            row,
+            pending_skip: 0,
             pending: Vec::with_capacity(fft_size * 2),
             pending_start: 0,
             window,
             fft_size,
-            hop_size,
+            hop_size: hop_size.max(1),
         }
     }
 
-    pub(super) fn enqueue_samples(&mut self, samples: &[f32], sample_rate_hz: u32) {
+    pub(super) fn enqueue_samples(&mut self, samples: &[f32]) {
         self.compact_pending_if_needed();
-        self.pending.extend_from_slice(samples);
-        // Keep pending bounded to avoid latency creep: max ~0.5s audio.
-        let max_pending = (u32_to_usize(sample_rate_hz) / 2).max(self.fft_size * 4);
-        let available = self.pending_available();
-        if available > max_pending {
-            let drop = available - max_pending;
-            self.pending_start = self.pending_start.saturating_add(drop);
-            self.compact_pending_if_needed();
-        }
+        let skip = self.pending_skip.min(samples.len());
+        self.pending_skip -= skip;
+        // Decode workers drain each packet before reading the next. Never drop
+        // queued audio: packet size must not change the absolute FFT grid.
+        self.pending.extend_from_slice(&samples[skip..]);
     }
 
+    pub(super) fn has_row(&self) -> bool {
+        self.pending_available() >= self.fft_size
+    }
+
+    pub(super) fn take_row(&mut self) -> Option<&[f32]> {
+        if !self.has_row() {
+            return None;
+        }
+        for i in 0..self.fft_size {
+            self.fft_in[i] = self.pending[self.pending_start + i] * self.window[i];
+        }
+        self.r2c
+            .process_with_scratch(&mut self.fft_in, &mut self.fft_out, &mut self.scratch)
+            .expect("FFT buffers match the plan that allocated them");
+        for (power, bin) in self.row.iter_mut().zip(&self.fft_out) {
+            *power = bin.norm_sqr();
+        }
+        let advance = self.hop_size.min(self.pending_available());
+        self.pending_start += advance;
+        // A hop wider than the FFT can cross packet boundaries. Carry that
+        // gap into subsequent enqueues instead of shortening the hop.
+        self.pending_skip = self.hop_size - advance;
+        self.compact_pending_if_needed();
+        Some(&self.row)
+    }
+
+    #[cfg(test)]
     pub(super) fn take_rows(&mut self, max_rows: usize) -> Vec<Vec<f32>> {
-        let mut rows = Vec::new();
-
-        while self.pending_available() >= self.fft_size && rows.len() < max_rows {
-            for i in 0..self.fft_size {
-                self.fft_in[i] = self.pending[self.pending_start + i] * self.window[i];
-            }
-
-            if self
-                .r2c
-                .process(&mut self.fft_in, &mut self.fft_out)
-                .is_ok()
-            {
-                let row: Vec<f32> = self
-                    .fft_out
-                    .iter()
-                    .map(realfft::num_complex::Complex::norm_sqr)
-                    .collect();
-                rows.push(row);
-            }
-
-            let advance = self.hop_size.min(self.pending_available());
-            self.pending_start = self.pending_start.saturating_add(advance);
-        }
-
-        self.compact_pending_if_needed();
-
-        rows
+        (0..max_rows)
+            .map_while(|_| self.take_row().map(<[f32]>::to_vec))
+            .collect()
     }
 
     #[allow(dead_code)]
@@ -116,6 +123,7 @@ pub(super) struct PeakHoldResampler {
     output_interval: f64,
     accumulator: f64,
     peak: Vec<f32>,
+    output: Vec<f32>,
 }
 
 impl PeakHoldResampler {
@@ -124,10 +132,11 @@ impl PeakHoldResampler {
             output_interval: output_interval.max(1.0),
             accumulator: 0.0,
             peak: Vec::new(),
+            output: Vec::new(),
         }
     }
 
-    pub(super) fn push(&mut self, row: &[f32]) -> Option<Vec<f32>> {
+    pub(super) fn push(&mut self, row: &[f32]) -> Option<&[f32]> {
         if self.peak.len() != row.len() {
             self.peak = vec![f32::NEG_INFINITY; row.len()];
             self.accumulator = 0.0;
@@ -141,7 +150,7 @@ impl PeakHoldResampler {
 
         if self.accumulator >= self.output_interval {
             self.accumulator -= self.output_interval;
-            let output = self.peak.clone();
+            self.output.clone_from(&self.peak);
             // The boundary row contributes to the NEXT interval too
             // (peak-hold is idempotent — including a value twice is safe).
             if self.accumulator > 0.0 {
@@ -149,21 +158,21 @@ impl PeakHoldResampler {
             } else {
                 self.peak.fill(f32::NEG_INFINITY);
             }
-            Some(output)
+            Some(&self.output)
         } else {
             None
         }
     }
 
-    pub(super) fn flush(&mut self) -> Option<Vec<f32>> {
+    pub(super) fn flush(&mut self) -> Option<&[f32]> {
         if self.accumulator > 0.0
             && !self.peak.is_empty()
             && self.peak.iter().any(|&v| v > f32::NEG_INFINITY)
         {
             self.accumulator = 0.0;
-            let output = self.peak.clone();
+            self.output.clone_from(&self.peak);
             self.peak.fill(f32::NEG_INFINITY);
-            Some(output)
+            Some(&self.output)
         } else {
             None
         }
@@ -330,6 +339,53 @@ mod tests {
     }
 
     #[test]
+    fn stft_matches_absolute_windows_for_large_packets_and_wide_hops() {
+        let samples: Vec<f32> = (0u16..32_768)
+            .map(|i| (f32::from(i) * 0.031).sin())
+            .collect();
+        for hop in [128, 512, 2_048] {
+            let expected: Vec<Vec<f32>> = (0..=samples.len() - 512)
+                .step_by(hop)
+                .map(|start| {
+                    let mut oracle = StftComputer::new(512, hop);
+                    oracle.enqueue_samples(&samples[start..start + 512]);
+                    oracle.take_row().unwrap().to_vec()
+                })
+                .collect();
+            for packet_size in [1, 7, 511, 513, 4_096, 32_768] {
+                let mut stft = StftComputer::new(512, hop);
+                let mut actual = Vec::new();
+                for packet in samples.chunks(packet_size) {
+                    stft.enqueue_samples(packet);
+                    while let Some(row) = stft.take_row() {
+                        actual.push(row.to_vec());
+                    }
+                }
+                assert_eq!(actual, expected, "hop {hop}, packet {packet_size}");
+            }
+        }
+    }
+
+    #[test]
+    fn stft_and_peak_hold_reuse_output_and_scratch_buffers() {
+        let mut stft = StftComputer::new(512, 128);
+        let scratch = stft.scratch.as_ptr();
+        let row_storage = stft.row.as_ptr();
+        let mut resampler = PeakHoldResampler::new(1.5);
+        let mut output_storage = None;
+        stft.enqueue_samples(&[0.25; 4_096]);
+        while let Some(row) = stft.take_row() {
+            assert_eq!(row.as_ptr(), row_storage);
+            if let Some(output) = resampler.push(row) {
+                let storage = output_storage.get_or_insert(output.as_ptr());
+                assert_eq!(output.as_ptr(), *storage);
+            }
+        }
+        assert_eq!(stft.scratch.as_ptr(), scratch);
+        assert!(output_storage.is_some());
+    }
+
+    #[test]
     fn stft_computer_produces_rows_from_samples() {
         let mut stft = StftComputer::new(512, 128);
         let mut samples = Vec::new();
@@ -337,7 +393,7 @@ mod tests {
             let x = (2.0 * std::f32::consts::PI * 440.0 * (small_usize_to_f32(i) / 48_000.0)).sin();
             samples.push(x);
         }
-        stft.enqueue_samples(&samples, 48_000);
+        stft.enqueue_samples(&samples);
         let rows = stft.take_rows(4);
         assert!(!rows.is_empty());
         assert_eq!(rows[0].len(), 257);
@@ -350,7 +406,7 @@ mod tests {
         let mut rows = 0usize;
 
         for chunk in input.chunks(3) {
-            stft.enqueue_samples(chunk, 48_000);
+            stft.enqueue_samples(chunk);
             rows += stft.take_rows(1).len();
         }
         rows += stft.take_rows(64).len();
@@ -366,7 +422,7 @@ mod tests {
         // at a time (the pattern used by session_drain_stft_rows).
         let mut stft = StftComputer::new(512, 256);
         let samples: Vec<f32> = (0u32..4096).map(|i| (i as f32).sin()).collect();
-        stft.enqueue_samples(&samples, 44_100);
+        stft.enqueue_samples(&samples);
 
         let mut rows = 0usize;
         loop {
