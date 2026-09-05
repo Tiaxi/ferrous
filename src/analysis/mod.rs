@@ -679,7 +679,9 @@ impl AnalysisRuntimeState {
                 .fetch_add(1, Ordering::Relaxed);
             self.clear_early_continuation(ctx);
             self.cancel_centered_staging();
-            let _ = ctx.spectrogram_cmd_tx.send(SpectrogramWorkerCommand::Stop);
+            let _ = ctx
+                .spectrogram_cmd_tx
+                .send(SpectrogramWorkerCommand::StopSession);
         }
     }
 
@@ -2218,6 +2220,65 @@ mod tests {
     }
 
     #[test]
+    fn hidden_spectrogram_worker_produces_data_after_repeated_resume() {
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            let paths = [0, 1].map(|index| {
+                std::env::temp_dir().join(format!(
+                    "ferrous-resume-{}-{mode:?}-{index}.mp3",
+                    std::process::id()
+                ))
+            });
+            for path in &paths {
+                std::fs::write(path, include_bytes!("fixtures/seek-tone.mp3")).unwrap();
+            }
+            // A single output slot also exercises cancellation while the producer
+            // is backpressured, not just the idle/EOF path.
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let (engine, _) =
+                AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
+                    sender: tx,
+                    generation: Arc::new(AtomicU64::new(0)),
+                }));
+            engine.command(AnalysisCommand::SetSpectrogramDisplayMode(mode));
+            let mut previous_generation = 0;
+            for token in 1..=4 {
+                engine.command(AnalysisCommand::SetSpectrogramActive(false));
+                engine.command(AnalysisCommand::SetTrack {
+                    path: paths[usize::try_from(token % 2).unwrap()].clone(),
+                    reset_spectrogram: true,
+                    track_token: token,
+                    gapless: false,
+                });
+                engine.command(AnalysisCommand::SeekPosition(0.25));
+                engine.command(AnalysisCommand::SetSpectrogramActive(true));
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                loop {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "{mode:?}: worker did not resume for track {token}"
+                    );
+                    if let Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) =
+                        rx.recv_timeout(Duration::from_millis(20))
+                    {
+                        if chunk.track_token == token && chunk.column_count > 0 {
+                            assert!(chunk.generation > previous_generation);
+                            previous_generation = chunk.generation;
+                            break;
+                        }
+                    }
+                }
+            }
+            engine.command(AnalysisCommand::SetSpectrogramActive(false));
+            for path in paths {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn hidden_spectrogram_resumes_latest_track_and_position_in_both_modes() {
         let path = write_engine_test_wave(1, 16_000);
         for mode in [
@@ -2246,7 +2307,7 @@ mod tests {
             state.handle_command(AnalysisCommand::SetSpectrogramActive(false), &ctx);
             assert!(matches!(
                 spectrogram_cmd_rx.try_recv().unwrap(),
-                SpectrogramWorkerCommand::Stop
+                SpectrogramWorkerCommand::StopSession
             ));
             assert_eq!(spectrogram_decode_generation.load(Ordering::Relaxed), 1);
             state.handle_command(AnalysisCommand::SetSpectrogramActive(false), &ctx);

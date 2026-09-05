@@ -250,7 +250,9 @@ pub(super) enum SpectrogramWorkerCommand {
     },
     #[allow(dead_code)]
     SetDisplayMode(SpectrogramDisplayMode),
-    Stop,
+    /// Release the current decoder and wait for another session. The worker
+    /// itself lives until its command channel disconnects.
+    StopSession,
 }
 
 pub(super) struct SpectrogramWorkerHandles {
@@ -655,9 +657,6 @@ fn spectrogram_worker_loop(
                     columns_produced_out,
                     track_duration_ms_out,
                 );
-                if matches!(next_cmd, Some(SpectrogramWorkerCommand::Stop)) {
-                    break;
-                }
             }
             SpectrogramWorkerCommand::ContinueWithFile { path, track_token } => {
                 // No active session — convert to NewTrack fallback.
@@ -696,16 +695,13 @@ fn spectrogram_worker_loop(
                         columns_produced_out,
                         track_duration_ms_out,
                     );
-                    if matches!(next_cmd, Some(SpectrogramWorkerCommand::Stop)) {
-                        break;
-                    }
                 } else {
                     eprintln!(
                         "[ferrous] ContinueWithFile outside session with no prior params — ignoring"
                     );
                 }
             }
-            SpectrogramWorkerCommand::Stop => break,
+            SpectrogramWorkerCommand::StopSession => last_params = None,
             _ => {} // UpdateTrackToken, CancelPendingContinue, etc. — stale outside session
         }
     }
@@ -726,7 +722,9 @@ fn coalesce_queued_new_track_command(
             SpectrogramWorkerCommand::NewTrack { .. } => {
                 latest_new_track = cmd;
             }
-            SpectrogramWorkerCommand::Stop => return Some(SpectrogramWorkerCommand::Stop),
+            SpectrogramWorkerCommand::StopSession => {
+                return Some(SpectrogramWorkerCommand::StopSession)
+            }
             _ => {}
         }
     }
@@ -1175,7 +1173,7 @@ fn session_decode_loop(
                 SessionAction::FlushToken => {
                     session_flush_token(session, event_tx, columns_produced_out);
                 }
-                SessionAction::Stop => return Some(SpectrogramWorkerCommand::Stop),
+                SessionAction::Stop => return Some(SpectrogramWorkerCommand::StopSession),
                 SessionAction::NewSession(cmd) => return Some(cmd),
                 SessionAction::SeekRequired { position_seconds } => {
                     return Some(SpectrogramWorkerCommand::Seek { position_seconds });
@@ -1203,7 +1201,7 @@ fn session_decode_loop(
                         continue;
                     }
                     SessionAction::Stop => {
-                        return Some(SpectrogramWorkerCommand::Stop);
+                        return Some(SpectrogramWorkerCommand::StopSession);
                     }
                     SessionAction::NewSession(cmd) => return Some(cmd),
                     SessionAction::SeekRequired { position_seconds } => {
@@ -1234,7 +1232,7 @@ fn session_decode_loop(
                                 continue;
                             }
                             SessionAction::Stop => {
-                                return Some(SpectrogramWorkerCommand::Stop);
+                                return Some(SpectrogramWorkerCommand::StopSession);
                             }
                             SessionAction::NewSession(cmd) => {
                                 return Some(cmd);
@@ -1340,7 +1338,7 @@ fn session_decode_loop(
                 SessionAction::FlushToken => {
                     session_flush_token(session, event_tx, columns_produced_out);
                 }
-                SessionAction::Stop => return Some(SpectrogramWorkerCommand::Stop),
+                SessionAction::Stop => return Some(SpectrogramWorkerCommand::StopSession),
                 SessionAction::NewSession(cmd) => return Some(cmd),
                 SessionAction::SeekRequired { position_seconds } => {
                     return Some(SpectrogramWorkerCommand::Seek { position_seconds });
@@ -1399,7 +1397,7 @@ fn process_session_commands(
                     refresh_lookahead(session);
                 }
             }
-            SpectrogramWorkerCommand::Stop => {
+            SpectrogramWorkerCommand::StopSession => {
                 return Some(SessionAction::Stop);
             }
         }
@@ -1507,7 +1505,7 @@ fn handle_single_command(
             }
             SessionAction::Continue
         }
-        SpectrogramWorkerCommand::Stop => SessionAction::Stop,
+        SpectrogramWorkerCommand::StopSession => SessionAction::Stop,
     }
 }
 
@@ -1997,6 +1995,73 @@ mod tests {
     use crossbeam_channel::unbounded;
 
     #[test]
+    fn stopping_a_session_keeps_the_worker_alive_until_disconnect() {
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "ferrous-worker-lifetime-{}-{mode:?}.mp3",
+                std::process::id()
+            ));
+            std::fs::write(&path, include_bytes!("fixtures/seek-tone.mp3")).unwrap();
+            let (commands, command_rx) = unbounded();
+            let (events, event_rx) = unbounded();
+            let worker = std::thread::spawn(move || {
+                spectrogram_worker_loop(
+                    &command_rx,
+                    &events,
+                    &AtomicU64::new(1),
+                    &AtomicU64::new(0),
+                    &AtomicU64::new(0),
+                )
+            });
+            for token in 1..=3 {
+                // First stop is idle; subsequent stops interrupt an EOF-parked
+                // session. Queue the restart immediately to cover coalescing.
+                commands
+                    .send(SpectrogramWorkerCommand::StopSession)
+                    .unwrap();
+                commands
+                    .send(SpectrogramWorkerCommand::NewTrack {
+                        track_token: token,
+                        generation: 1,
+                        path: path.clone(),
+                        fft_size: 512,
+                        hop_size: 1024,
+                        zoom_level: 1.0,
+                        widget_width: 320,
+                        channel_count: 1,
+                        start_seconds: 0.0,
+                        target_position_seconds: 0.0,
+                        emit_initial_reset: true,
+                        clear_history_on_reset: true,
+                        view_mode: SpectrogramViewMode::Downmix,
+                        display_mode: mode,
+                    })
+                    .unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                loop {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "worker stopped permanently"
+                    );
+                    if let Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) =
+                        event_rx.recv_timeout(Duration::from_millis(20))
+                    {
+                        if chunk.track_token == token && chunk.complete {
+                            break;
+                        }
+                    }
+                }
+            }
+            drop(commands);
+            worker.join().unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn resumed_rolling_session_fills_history_before_throttling() {
         assert_eq!(
             initial_unthrottled_columns(SpectrogramDisplayMode::Rolling, 100, 5.0, 100.0),
@@ -2071,7 +2136,7 @@ mod tests {
                 .expect("backward seek");
             let second = wait_for_eof();
             commands
-                .send(SpectrogramWorkerCommand::Stop)
+                .send(SpectrogramWorkerCommand::StopSession)
                 .expect("stop worker");
             worker.join().expect("join worker");
             std::fs::remove_file(path).expect("remove fixture");
@@ -2218,7 +2283,9 @@ mod tests {
                         );
                     }
                 }
-                commands.send(SpectrogramWorkerCommand::Stop).unwrap();
+                commands
+                    .send(SpectrogramWorkerCommand::StopSession)
+                    .unwrap();
                 worker.join().unwrap();
                 let mut initial = initial;
                 if let SpectrogramWorkerCommand::NewTrack {
@@ -2243,7 +2310,9 @@ mod tests {
                     )
                 });
                 let actual = collect_session_columns(&event_rx);
-                commands.send(SpectrogramWorkerCommand::Stop).unwrap();
+                commands
+                    .send(SpectrogramWorkerCommand::StopSession)
+                    .unwrap();
                 worker.join().unwrap();
                 assert!(!actual.is_empty());
                 for (index, bytes) in actual {
