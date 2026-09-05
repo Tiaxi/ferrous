@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,6 +10,8 @@ use crossbeam_channel::{Receiver, Sender};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::library::{LibraryRoot, LibrarySearchTrack, LibrarySnapshot};
+
+use super::search_query::SearchQuery;
 
 use super::{
     BridgeSearchResultRow, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeState,
@@ -46,6 +48,7 @@ pub(super) struct TreePathContext {
 
 #[derive(Default)]
 struct HitAlbumAcc {
+    match_detail: String,
     artist_name: String,
     album_title: String,
     artist_key: String,
@@ -99,7 +102,8 @@ impl SearchRowAccumulator {
     fn push_hit(
         &mut self,
         hit: &LibrarySearchTrack,
-        query_terms: &[String],
+        query: &SearchQuery,
+        fields: &BTreeMap<String, String>,
     ) -> Option<BridgeSearchResultRow> {
         let context = derive_hit_context(hit, &self.roots, &self.roots_by_path)?;
         self.track_count = self.track_count.saturating_add(1);
@@ -118,9 +122,11 @@ impl SearchRowAccumulator {
             hit.album.trim().to_string()
         };
         let album_key = context.album_key.clone();
-        if query_terms_match_text(query_terms, &context.artist_name) {
+        let artist_fields =
+            BTreeMap::from([("artist".into(), normalize_for_search(&context.artist_name))]);
+        if query.matches(&artist_fields) {
             let score = entity_score(
-                query_terms,
+                &query.name_terms("artist"),
                 &normalize_for_search(&context.artist_name),
                 &[],
             );
@@ -138,37 +144,7 @@ impl SearchRowAccumulator {
                 artist_entry.2.clone_from(&context.root_label);
             }
         }
-        if let Some(album_key_value) = album_key.clone() {
-            let album_query = format!("{} {} {}", context.artist_name, hit_artist, hit_album);
-            if query_terms_match_text(query_terms, &album_query) {
-                let score = entity_score(
-                    query_terms,
-                    &normalize_for_search(&hit_album),
-                    &[
-                        &normalize_for_search(&hit_artist),
-                        &normalize_for_search(&context.artist_name),
-                    ],
-                );
-                let album_entry = self.album_groups.entry(album_key_value.clone()).or_insert((
-                    score,
-                    hit_album.clone(),
-                    context.root_label.clone(),
-                ));
-                if score < album_entry.0 {
-                    album_entry.0 = score;
-                    album_entry.1.clone_from(&hit_album);
-                    album_entry.2.clone_from(&context.root_label);
-                }
-                update_album_hit_stats(
-                    &mut self.album_hit_stats,
-                    album_key_value,
-                    &context,
-                    &hit_album,
-                    hit.year,
-                    hit.genre.trim(),
-                );
-            }
-        }
+        self.push_album(hit, &context, &hit_artist, &hit_album, query, fields);
         let row_cover_path = if let Some(album_key_value) = album_key.clone() {
             if !hit.cover_path.is_empty() {
                 self.album_cover_paths
@@ -191,6 +167,69 @@ impl SearchRowAccumulator {
             hit_path_string,
             row_cover_path,
         ))
+    }
+
+    fn push_album(
+        &mut self,
+        hit: &LibrarySearchTrack,
+        context: &TreePathContext,
+        hit_artist: &str,
+        hit_album: &str,
+        query: &SearchQuery,
+        fields: &BTreeMap<String, String>,
+    ) {
+        if let Some(album_key_value) = context.album_key.clone() {
+            let context_artist = normalize_for_search(&context.artist_name);
+            let album_name = normalize_for_search(hit_album);
+            if query.matches_with(
+                fields,
+                |key| !matches!(key, "title" | "path" | "track" | "disc"),
+                &[("artist", &context_artist), ("album", &album_name)],
+            ) {
+                let score = entity_score(
+                    &query.name_terms("album"),
+                    &normalize_for_search(hit_album),
+                    &[
+                        &normalize_for_search(hit_artist),
+                        &normalize_for_search(&context.artist_name),
+                    ],
+                );
+                let score = metadata_score(query, fields, score, false);
+                let album_entry = self.album_groups.entry(album_key_value.clone()).or_insert((
+                    score,
+                    hit_album.to_string(),
+                    context.root_label.clone(),
+                ));
+                if score < album_entry.0 {
+                    album_entry.0 = score;
+                    album_entry.1 = hit_album.to_string();
+                    album_entry.2.clone_from(&context.root_label);
+                }
+                update_album_hit_stats(
+                    &mut self.album_hit_stats,
+                    album_key_value.clone(),
+                    context,
+                    hit_album,
+                    hit.year,
+                    hit.genre.trim(),
+                );
+                if let Some(stats) = self.album_hit_stats.get_mut(&album_key_value) {
+                    stats.match_detail = hidden_match_detail(
+                        query,
+                        fields,
+                        &[
+                            ("artist", hit_artist),
+                            ("album", hit_album),
+                            ("genre", &hit.genre),
+                            (
+                                "year",
+                                &hit.year.map_or_else(String::new, |year| year.to_string()),
+                            ),
+                        ],
+                    );
+                }
+            }
+        }
     }
 
     fn finish(self) -> SearchRowBuckets {
@@ -220,8 +259,7 @@ struct PreparedSearchTrack {
     title_l: String,
     artist_l: String,
     album_l: String,
-    genre_l: String,
-    haystack_l: String,
+    fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -408,7 +446,8 @@ pub(super) fn split_search_terms(query: &str) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
-pub(super) fn query_terms_match_text(terms: &[String], text: &str) -> bool {
+#[cfg(test)]
+fn query_terms_match_text(terms: &[String], text: &str) -> bool {
     if terms.is_empty() {
         return false;
     }
@@ -596,6 +635,7 @@ fn build_track_search_result_row(
     cover_path: String,
 ) -> BridgeSearchResultRow {
     BridgeSearchResultRow {
+        match_detail: String::new(),
         row_type: BridgeSearchResultRowType::Track,
         score: hit.score,
         year: hit.year,
@@ -697,6 +737,7 @@ fn finalize_search_rows(
         .into_iter()
         .map(
             |(artist_key, (score, artist_name, root_label))| BridgeSearchResultRow {
+                match_detail: String::new(),
                 row_type: BridgeSearchResultRowType::Artist,
                 score,
                 year: None,
@@ -724,6 +765,7 @@ fn finalize_search_rows(
             let stats = album_hit_stats.get(&album_key)?;
             let inventory = album_inventory.get(&album_key);
             Some(BridgeSearchResultRow {
+                match_detail: stats.match_detail.clone(),
                 row_type: BridgeSearchResultRowType::Album,
                 score,
                 year: choose_most_common_year(&stats.year_counts),
@@ -842,7 +884,31 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
         let album_l = normalize_for_search(&album);
         let genre_l = normalize_for_search(&genre);
         let path_n = normalize_for_search(&path_string);
-        let haystack_l = format!("{title_l} {artist_l} {album_l} {genre_l} {path_n}");
+        let mut fields: BTreeMap<String, String> = track
+            .search_tags
+            .iter()
+            .map(|(key, values)| (key.clone(), normalize_for_search(&values.join(" "))))
+            .collect();
+        for (key, value) in [
+            ("title", &title_l),
+            ("artist", &artist_l),
+            ("album", &album_l),
+            ("genre", &genre_l),
+            ("path", &path_n),
+        ] {
+            let field = fields.entry(key.into()).or_default();
+            field.push(' ');
+            field.push_str(value);
+        }
+        if let Some(year) = track.year {
+            fields.insert("year".into(), year.to_string());
+        }
+        if let Some(number) = track.track_no {
+            fields.insert("track".into(), number.to_string());
+        }
+        if let Some(root) = roots_by_path.get(&track.root_path) {
+            fields.insert("root".into(), normalize_for_search(&root.root_label));
+        }
 
         if let Some(context) = roots_by_path
             .get(&track.root_path)
@@ -878,8 +944,7 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
             title_l,
             artist_l,
             album_l,
-            genre_l,
-            haystack_l,
+            fields,
         });
     }
 
@@ -896,6 +961,9 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
 /// Rank an entity by its own name before supporting metadata. Scores are
 /// independent of library size, tag repetition, and filesystem path length.
 fn entity_score(terms: &[String], name: &str, secondary: &[&str]) -> f32 {
+    if terms.is_empty() {
+        return 5.0;
+    }
     let phrase = terms.join(" ");
     if name == phrase {
         return 0.0;
@@ -903,11 +971,19 @@ fn entity_score(terms: &[String], name: &str, secondary: &[&str]) -> f32 {
     if name.starts_with(&phrase) {
         return 1.0;
     }
-    if name.contains(&phrase) {
+    if name.match_indices(&phrase).any(|(offset, _)| {
+        name[..offset]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric())
+    }) {
         return 2.0;
     }
-    if terms.iter().all(|term| name.contains(term)) {
+    if name.contains(&phrase) {
         return 3.0;
+    }
+    if terms.iter().all(|term| name.contains(term)) {
+        return 3.5;
     }
     if terms
         .iter()
@@ -918,6 +994,104 @@ fn entity_score(terms: &[String], name: &str, secondary: &[&str]) -> f32 {
     5.0
 }
 
+fn metadata_score(
+    query: &SearchQuery,
+    fields: &BTreeMap<String, String>,
+    score: f32,
+    include_title: bool,
+) -> f32 {
+    if score < 5.0 {
+        return score;
+    }
+    if query.matches_with(
+        fields,
+        |key| {
+            (include_title || key != "title")
+                && !matches!(key, "comment" | "lyrics" | "path" | "root")
+        },
+        &[],
+    ) {
+        return 5.0;
+    }
+    if query.matches_with(
+        fields,
+        |key| (include_title || key != "title") && !matches!(key, "path" | "root"),
+        &[],
+    ) {
+        return 6.0;
+    }
+    7.0
+}
+
+fn hidden_match_detail(
+    query: &SearchQuery,
+    fields: &BTreeMap<String, String>,
+    visible: &[(&str, &str)],
+) -> String {
+    let mut reasons = Vec::new();
+    for term in &query.terms {
+        if visible
+            .iter()
+            .any(|(key, value)| term.matches(key, &normalize_for_search(value)))
+        {
+            continue;
+        }
+        let priority = [
+            "title",
+            "artist",
+            "album",
+            "albumartist",
+            "genre",
+            "year",
+            "date",
+            "composer",
+            "conductor",
+            "performer",
+            "label",
+            "comment",
+            "lyrics",
+            "track",
+            "disc",
+            "path",
+            "root",
+        ];
+        if let Some(field) = priority.iter().find(|field| {
+            fields
+                .get(**field)
+                .is_some_and(|value| term.matches(field, value))
+        }) {
+            let label = match *field {
+                "albumartist" => "Album artist",
+                "artist" => "Artist",
+                "title" => "Title",
+                "composer" => "Composer",
+                "conductor" => "Conductor",
+                "performer" => "Performer",
+                "comment" => "Comment",
+                "lyrics" => "Lyrics",
+                "label" => "Label",
+                "date" => "Date",
+                "path" => "Path",
+                "root" => "Library",
+                "track" => "Track number",
+                "disc" => "Disc",
+                _ => field,
+            };
+            let reason = format!(
+                "{label}: {}",
+                term.value.chars().take(80).collect::<String>()
+            );
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+        if reasons.len() >= 3 {
+            break;
+        }
+    }
+    reasons.join(" · ")
+}
+
 fn search_tracks_prepared(
     query: &str,
     prepared: &PreparedSearchLibrary,
@@ -925,7 +1099,8 @@ fn search_tracks_prepared(
     limit: usize,
     query_rx: &Receiver<SearchWorkerQuery>,
 ) -> PreparedSearchOutcome {
-    let terms = split_search_terms(query);
+    let query = SearchQuery::parse(query);
+    let terms = query.name_terms("title");
     let mut accumulator = SearchRowAccumulator::new(roots.to_vec());
     let mut ranked = std::collections::BinaryHeap::<RankedSearchRow>::new();
     let cancel_poll_rows = search_cancel_poll_rows();
@@ -935,20 +1110,15 @@ fn search_tracks_prepared(
                 return PreparedSearchOutcome::Cancelled(next);
             }
         }
-        if terms.is_empty() || !terms.iter().all(|term| track.haystack_l.contains(term)) {
+        if !query.matches(&track.fields) {
             continue;
         }
-        let mut score = entity_score(&terms, &track.title_l, &[&track.artist_l, &track.album_l]);
-        if score >= 5.0
-            && !terms.iter().all(|term| {
-                track.title_l.contains(term)
-                    || track.artist_l.contains(term)
-                    || track.album_l.contains(term)
-                    || track.genre_l.contains(term)
-            })
-        {
-            score = 6.0;
-        }
+        let score = metadata_score(
+            &query,
+            &track.fields,
+            entity_score(&terms, &track.title_l, &[&track.artist_l, &track.album_l]),
+            true,
+        );
         let hit = LibrarySearchTrack {
             path: track.path.clone(),
             root_path: track.root_path.clone(),
@@ -964,7 +1134,21 @@ fn search_tracks_prepared(
         };
         // Collect every matching group before bounding track rows: one large
         // album must not consume the candidate budget for all other albums.
-        if let Some(row) = accumulator.push_hit(&hit, &terms) {
+        if let Some(mut row) = accumulator.push_hit(&hit, &query, &track.fields) {
+            row.match_detail = hidden_match_detail(
+                &query,
+                &track.fields,
+                &[
+                    ("title", &hit.title),
+                    ("artist", &hit.artist),
+                    ("album", &hit.album),
+                    ("genre", &hit.genre),
+                    (
+                        "year",
+                        &hit.year.map_or_else(String::new, |year| year.to_string()),
+                    ),
+                ],
+            );
             let candidate = RankedSearchRow(row);
             if ranked.len() < limit {
                 ranked.push(candidate);
@@ -1057,6 +1241,11 @@ pub(super) fn run_search_worker(
     let profile_search = search_profile_enabled();
     loop {
         while let Ok(next) = query_rx.try_recv() {
+            // Cache warmups are advisory; a library refresh must never erase
+            // the response owed to an interactive query (including a clear).
+            if next.seq == 0 && next.query.is_empty() && query.seq != 0 {
+                continue;
+            }
             query = next;
         }
 
@@ -1130,7 +1319,9 @@ pub(super) fn drain_search_results(
 fn poll_latest_search_query(query_rx: &Receiver<SearchWorkerQuery>) -> Option<SearchWorkerQuery> {
     let mut latest = None;
     while let Ok(next) = query_rx.try_recv() {
-        latest = Some(next);
+        if next.seq != 0 || !next.query.is_empty() {
+            latest = Some(next);
+        }
     }
     latest
 }
@@ -1164,6 +1355,7 @@ mod tests {
         track_no: Option<u32>,
     ) -> crate::library::LibraryTrack {
         crate::library::LibraryTrack {
+            search_tags: crate::library::SearchTags::default(),
             path: p(path),
             root_path: root.clone(),
             title: String::new(),
@@ -1196,6 +1388,7 @@ mod tests {
             roots: vec![library_root(&root)],
             tracks: vec![
                 crate::library::LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     path: p("/music/Artist/Album/01 - Intro.flac"),
                     root_path: root.clone(),
                     title: "Intro".to_string(),
@@ -1208,6 +1401,7 @@ mod tests {
                     duration_secs: Some(100.0),
                 },
                 crate::library::LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     path: p("/music/Artist/Album/CD1/02 - Song.flac"),
                     root_path: root.clone(),
                     title: "Song".to_string(),
@@ -1220,6 +1414,7 @@ mod tests {
                     duration_secs: Some(120.0),
                 },
                 crate::library::LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     path: p("/music/Artist/Album/Bonus/03 - Extra.flac"),
                     root_path: root.clone(),
                     title: "Extra".to_string(),
@@ -1252,6 +1447,7 @@ mod tests {
         let snapshot = LibrarySnapshot {
             roots: vec![library_root(&root)],
             tracks: vec![crate::library::LibraryTrack {
+                search_tags: crate::library::SearchTags::default(),
                 path: p("/music/Artist/Album/01 - Song.flac"),
                 root_path: root,
                 title: "Song".to_string(),
@@ -1356,6 +1552,7 @@ mod tests {
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
             tracks: vec![crate::library::LibraryTrack {
+                search_tags: crate::library::SearchTags::default(),
                 path: track,
                 root_path: root,
                 title: "Song".to_string(),
@@ -1427,6 +1624,7 @@ mod tests {
         file: &str,
     ) -> crate::library::LibraryTrack {
         crate::library::LibraryTrack {
+            search_tags: crate::library::SearchTags::default(),
             path: p(&format!("/music/{artist}/{album}/{file}.flac")),
             root_path: p("/music"),
             title: title.into(),
@@ -1593,5 +1791,163 @@ mod tests {
             assert_eq!(frame.totals, [0, 0, 65]);
             assert_eq!(frame.rows.len(), expected);
         }
+    }
+    #[test]
+    fn searches_extended_tags_filters_and_phrases_with_match_details() {
+        let mut track = fixture_track("Blue Skies", "Soloist", "Concert", "01");
+        track.year = Some(1997);
+        track.track_no = Some(1);
+        track.search_tags = crate::library::SearchTags::from([
+            (
+                "albumartist".into(),
+                vec!["London Symphony Orchestra".into()],
+            ),
+            (
+                "artist".into(),
+                vec!["Guest Singer".into(), "Second Singer".into()],
+            ),
+            ("genre".into(), vec!["Classical".into(), "Choral".into()]),
+            ("composer".into(), vec!["Jean Sibelius".into()]),
+            ("conductor".into(), vec!["Esa-Pekka Salonen".into()]),
+            ("performer".into(), vec!["Helsinki Choir".into()]),
+            ("label".into(), vec!["Example Records".into()]),
+            ("comment".into(), vec!["Anniversary remaster".into()]),
+            ("lyrics".into(), vec!["The silver moon is rising".into()]),
+            ("date".into(), vec!["1997-05-12".into()]),
+            ("disc".into(), vec!["2".into()]),
+        ]);
+        for query in [
+            r#"albumartist:"london symphony" year:1997"#,
+            "second singer",
+            "genre:choral",
+            "composer:sibelius",
+            "conductor:salonen",
+            "performer:helsinki",
+            "label:records",
+            "comment:remaster",
+            r#"lyrics:"silver moon""#,
+            "date:1997-05",
+            "track:1 disc:2",
+            r#""blue skies""#,
+            "root:music",
+        ] {
+            let rows = fixture_search(query, vec![track.clone()], 20);
+            assert!(
+                rows.iter()
+                    .any(|row| row.row_type == BridgeSearchResultRowType::Track),
+                "missing {query}"
+            );
+        }
+        for query in [
+            "year:199",
+            "track:10",
+            "disc:1",
+            "artist:sibelius",
+            r#""skies blue""#,
+        ] {
+            assert!(
+                fixture_search(query, vec![track.clone()], 20).is_empty(),
+                "unexpected {query}"
+            );
+        }
+        let rows = fixture_search("comment:remaster", vec![track], 20);
+        assert!(rows
+            .iter()
+            .any(|row| row.row_type == BridgeSearchResultRowType::Album));
+        assert!(rows
+            .iter()
+            .all(|row| row.match_detail.contains("Comment: remaster")));
+    }
+
+    #[test]
+    fn long_comments_and_lyrics_cannot_outrank_title_matches() {
+        let mut comment = fixture_track("Intro", "A", "A", "01");
+        comment
+            .search_tags
+            .insert("comment".into(), vec!["blue ".repeat(1000)]);
+        let mut lyrics = fixture_track("Another Song", "B", "B", "01");
+        lyrics
+            .search_tags
+            .insert("lyrics".into(), vec!["blue ".repeat(1000)]);
+        let rows = fixture_search(
+            "blue",
+            vec![comment, lyrics, fixture_track("Blue", "C", "C", "01")],
+            20,
+        );
+        let first_track = rows
+            .iter()
+            .find(|row| row.row_type == BridgeSearchResultRowType::Track)
+            .expect("track");
+        assert_eq!(first_track.label, "Blue");
+    }
+    #[test]
+    fn word_prefixes_rank_before_infix_substrings() {
+        let rows = fixture_search(
+            "light",
+            vec![
+                fixture_track("Moonlight", "Artist", "Album", "01"),
+                fixture_track("Years of Light", "Artist", "Album", "02"),
+            ],
+            20,
+        );
+        let titles: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+            .map(|row| row.label.as_str())
+            .collect();
+        assert_eq!(titles, ["Years of Light", "Moonlight"]);
+    }
+    #[test]
+    fn cache_warmup_does_not_replace_a_queued_query() {
+        let library = Arc::new(LibrarySnapshot {
+            roots: vec![library_root(&p("/music"))],
+            tracks: vec![fixture_track("Blue", "Artist", "Album", "01")],
+            ..LibrarySnapshot::default()
+        });
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (results_tx, results_rx) = crossbeam_channel::unbounded();
+        tx.send(SearchWorkerQuery {
+            limit: 0,
+            seq: 42,
+            query: "blue".into(),
+            library: Arc::clone(&library),
+        })
+        .expect("query");
+        tx.send(SearchWorkerQuery {
+            limit: 0,
+            seq: 0,
+            query: String::new(),
+            library,
+        })
+        .expect("warmup");
+        drop(tx);
+        run_search_worker(&rx, &results_tx);
+        let frame = results_rx.try_recv().expect("interactive response");
+        assert_eq!(frame.seq, 42);
+        assert_eq!(frame.totals[2], 1);
+    }
+
+    #[test]
+    fn cache_warmup_does_not_cancel_in_progress_search() {
+        let library = LibrarySnapshot {
+            roots: vec![library_root(&p("/music"))],
+            tracks: vec![fixture_track("Blue", "Artist", "Album", "01")],
+            ..LibrarySnapshot::default()
+        };
+        let prepared = prepare_search_library(&library);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        tx.send(SearchWorkerQuery {
+            limit: 0,
+            seq: 0,
+            query: String::new(),
+            library: Arc::new(library.clone()),
+        })
+        .expect("warmup");
+        let PreparedSearchOutcome::Hits(rows) =
+            search_tracks_prepared("blue", &prepared, &library.roots, 20, &rx)
+        else {
+            panic!("warmup cancelled query")
+        };
+        assert_eq!(rows.track_count, 1);
     }
 }

@@ -1790,6 +1790,7 @@ void BridgeClient::searchApplyWorkerLoop() {
                 item.kind = QStringLiteral("item");
                 item.rowType = rowTypeLabel;
                 item.score = row.score;
+                item.matchDetail = row.matchDetail;
                 item.label = row.label;
                 item.artist = row.artist;
                 item.album = row.album;
@@ -3908,6 +3909,7 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
         item.kind = QStringLiteral("item");
         item.rowType = rowTypeLabel;
         item.score = row.score;
+        item.matchDetail = row.matchDetail;
         item.label = row.label;
         item.artist = row.artist;
         item.album = row.album;

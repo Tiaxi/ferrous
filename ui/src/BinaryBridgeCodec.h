@@ -224,6 +224,7 @@ enum SearchRowType : quint8 {
 };
 
 struct DecodedSearchRow {
+    QString matchDetail;
     int rowType{0};
     float score{0.0f};
     int year{std::numeric_limits<int>::min()};

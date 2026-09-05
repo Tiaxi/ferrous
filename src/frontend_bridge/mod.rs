@@ -33,6 +33,7 @@ pub mod library_tree;
 mod queue;
 mod queue_validation;
 mod search;
+mod search_query;
 mod tree_worker;
 mod workers;
 
@@ -344,6 +345,7 @@ pub enum BridgeSearchResultRowType {
 
 #[derive(Debug, Clone)]
 pub struct BridgeSearchResultRow {
+    pub match_detail: String,
     pub row_type: BridgeSearchResultRowType,
     pub score: f32,
     pub year: Option<i32>,
@@ -1779,6 +1781,7 @@ mod tests {
         track_no: Option<u32>,
     ) -> crate::library::LibraryTrack {
         crate::library::LibraryTrack {
+            search_tags: crate::library::SearchTags::default(),
             path: p(path),
             root_path: root.clone(),
             title: String::new(),
@@ -1850,6 +1853,7 @@ mod tests {
         Arc::make_mut(&mut state.queue_details).insert(
             path.clone(),
             IndexedTrack {
+                search_tags: crate::library::SearchTags::default(),
                 title: "Before".into(),
                 artist: String::new(),
                 album: String::new(),
@@ -1883,6 +1887,7 @@ mod tests {
 
         state.library = Arc::new(LibrarySnapshot {
             tracks: vec![LibraryTrack {
+                search_tags: crate::library::SearchTags::default(),
                 path: p("/music/a.flac"),
                 ..LibraryTrack::default()
             }],

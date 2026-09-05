@@ -93,13 +93,19 @@ Dialog {
             id: queryField
             objectName: "globalSearchQueryField"
             Layout.fillWidth: true
-            placeholderText: "Search title, artist, album, genre, or filename"
+            placeholderText: "Search music, tags, or filenames"
             onTextChanged: {
                 root.controller.selectedDisplayIndex = -1
                 root.controller.uiBridge.setGlobalSearchQuery(text)
                 if (!root.searching) root.controller.selectFirstItem()
             }
             Keys.onPressed: function(event) { root.handleResultKeys(event) }
+        }
+        Label {
+            Layout.fillWidth: true
+            text: 'Filters: artist:, albumartist:, genre:, year:, composer:, comment: · Use "quotes" for phrases'
+            color: root.uiPalette.uiMutedTextColor
+            wrapMode: Text.Wrap
         }
         RowLayout {
             Layout.fillWidth: true
@@ -160,7 +166,7 @@ Dialog {
                         if (model.year !== undefined && model.year !== null) parts.push(String(model.year))
                         if (model.genre) parts.push(model.genre)
                         if (root.globalSearchShowsRootColumn && model.rootLabel) parts.push(model.rootLabel)
-                        if (model.score >= 6 && model.trackPath) parts.push("Matched path: " + model.trackPath)
+                        if (model.matchDetail) parts.push(model.matchDetail)
                         return parts.filter(function(value) { return value.length > 0 }).join(" · ")
                     }
                     width: resultsView.width - (resultScrollBar.visible ? resultScrollBar.width : 0)

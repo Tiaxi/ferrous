@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::prelude::Accessor;
+use lofty::prelude::{Accessor, ItemKey};
 use rusqlite::{params, Connection};
 use walkdir::WalkDir;
 
@@ -290,6 +290,85 @@ pub(super) fn handle_rescan_all(
     run_scans(conn, &roots, snapshot, event_tx)
 }
 
+pub(super) fn backfill_search_tags(
+    conn: &Connection,
+    snapshot: &mut LibrarySnapshot,
+    event_tx: &Sender<LibraryEvent>,
+) -> Result<(), String> {
+    backfill_search_tags_using(conn, snapshot, event_tx, |path| {
+        let before = track_file_fingerprint(path)?;
+        fs::File::open(path).ok()?;
+        let indexed = read_track_info(path);
+        (track_file_fingerprint(path) == Some(before)).then_some(indexed.search_tags)
+    })
+}
+
+fn backfill_search_tags_using(
+    conn: &Connection,
+    snapshot: &mut LibrarySnapshot,
+    event_tx: &Sender<LibraryEvent>,
+    mut read_tags: impl FnMut(&Path) -> Option<super::SearchTags>,
+) -> Result<(), String> {
+    let paths = conn
+        .prepare("SELECT path FROM tracks WHERE search_tags IS NULL ORDER BY path")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut last_emit = Instant::now();
+    for (batch_index, batch) in paths.chunks(256).enumerate() {
+        // Metadata I/O must finish before taking a write lock: tag edits and
+        // renames remain available while an existing library is backfilled.
+        let mut pending = Vec::new();
+        for path in batch {
+            let path = PathBuf::from(path);
+            if let Some(tags) = read_tags(&path) {
+                let json = serde_json::to_string(&tags).map_err(|error| error.to_string())?;
+                pending.push((path, tags, json));
+            }
+        }
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        let mut updates = HashMap::new();
+        for (path, tags, json) in pending {
+            // A concurrent tag edit may have already populated these tags.
+            if tx
+                .execute(
+                    "UPDATE tracks SET search_tags=?2 WHERE path=?1 AND search_tags IS NULL",
+                    params![path.to_string_lossy(), json],
+                )
+                .map_err(|error| error.to_string())?
+                > 0
+            {
+                updates.insert(path, tags);
+            }
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        if !updates.is_empty() {
+            for track in &mut snapshot.tracks {
+                if let Some(tags) = updates.remove(&track.path) {
+                    track.search_tags = tags;
+                }
+            }
+            snapshot.bump_search_revision();
+        }
+        if last_emit.elapsed() >= scan_snapshot_emit_interval() {
+            snapshot.scan_in_progress = true;
+            snapshot.scan_progress = Some(LibraryScanProgress {
+                roots_total: snapshot.roots.len(),
+                supported_files_discovered: paths.len(),
+                supported_files_processed: ((batch_index + 1) * 256).min(paths.len()),
+                ..LibraryScanProgress::default()
+            });
+            emit_snapshot(event_tx, snapshot);
+            last_emit = Instant::now();
+        }
+    }
+    Ok(())
+}
+
 fn run_scans(
     conn: &Connection,
     roots: &[PathBuf],
@@ -390,6 +469,7 @@ fn apply_pending_upserts_for_root(
     snapshot.bump_search_revision();
     for (task, indexed) in updates.drain(..) {
         let as_snapshot_track = LibraryTrack {
+            search_tags: indexed.search_tags,
             path: task.path.clone(),
             root_path: root.to_path_buf(),
             title: indexed.title,
@@ -496,7 +576,7 @@ fn load_external_track_cache_from_conn(
 ) -> Option<IndexedTrack> {
     conn.query_row(
         r"
-        SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs
+        SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags
         FROM external_tracks
         WHERE path = ?1
           AND mtime_ns = ?2
@@ -509,6 +589,10 @@ fn load_external_track_cache_from_conn(
         ],
         |row| {
             Ok(IndexedTrack {
+                search_tags: serde_json::from_str(
+                    &row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                )
+                .unwrap_or_default(),
                 title: row.get::<_, String>(0)?,
                 artist: row.get::<_, String>(1)?,
                 album: row.get::<_, String>(2)?,
@@ -596,9 +680,10 @@ fn store_external_track_cache_in_conn(
             duration_secs,
             mtime_ns,
             size_bytes,
-            indexed_at
+            indexed_at,
+            search_tags
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
         ON CONFLICT(path) DO UPDATE SET
             title = excluded.title,
             artist = excluded.artist,
@@ -610,7 +695,8 @@ fn store_external_track_cache_in_conn(
             duration_secs = excluded.duration_secs,
             mtime_ns = excluded.mtime_ns,
             size_bytes = excluded.size_bytes,
-            indexed_at = excluded.indexed_at
+            indexed_at = excluded.indexed_at,
+            search_tags = excluded.search_tags
         ",
         params![
             path.to_string_lossy().to_string(),
@@ -625,6 +711,7 @@ fn store_external_track_cache_in_conn(
             fingerprint.mtime_ns,
             fingerprint.size_bytes,
             unix_ts_i64(),
+            serde_json::to_string(&indexed.search_tags).ok(),
         ],
     )
     .map_err(|e| format!("failed to store external track cache: {e}"))?;
@@ -661,7 +748,8 @@ pub(crate) fn refresh_indexed_metadata_for_paths(
                 duration_secs = ?9,
                 mtime_ns = COALESCE(?10, mtime_ns),
                 size_bytes = COALESCE(?11, size_bytes),
-                indexed_at = ?12
+                indexed_at = ?12,
+                search_tags = ?13
             WHERE path = ?1
             ",
             params![
@@ -677,6 +765,7 @@ pub(crate) fn refresh_indexed_metadata_for_paths(
                 fingerprint.map(|value| value.mtime_ns),
                 fingerprint.map(|value| value.size_bytes),
                 now,
+                serde_json::to_string(&indexed.search_tags).ok(),
             ],
         )
         .map_err(|e| format!("failed to refresh indexed track metadata: {e}"))?;
@@ -1012,7 +1101,8 @@ pub(crate) fn rename_indexed_metadata_paths(
                 duration_secs = ?10,
                 mtime_ns = ?11,
                 size_bytes = ?12,
-                indexed_at = ?13
+                indexed_at = ?13,
+                search_tags = ?14
             WHERE path = ?1
             ",
             params![
@@ -1029,6 +1119,7 @@ pub(crate) fn rename_indexed_metadata_paths(
                 fingerprint.mtime_ns,
                 fingerprint.size_bytes,
                 now,
+                serde_json::to_string(&indexed.search_tags).ok(),
             ],
         )
         .map_err(|e| format!("failed to update renamed track row: {e}"))?;
@@ -1182,7 +1273,7 @@ fn load_existing_tracks_for_root(
     let mut existing = HashMap::new();
     if let Ok(mut stmt) = conn.prepare(
         r"
-        SELECT path, title, track_no, mtime_ns, size_bytes, cover_checked, duration_secs
+        SELECT path, title, track_no, mtime_ns, size_bytes, cover_checked, duration_secs, search_tags IS NULL
         FROM tracks
         WHERE root_path = ?1
            OR (root_path = '' AND (path = ?1 OR path LIKE ?1 || '/%'))
@@ -1197,6 +1288,7 @@ fn load_existing_tracks_for_root(
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, Option<f64>>(6)?,
+                row.get::<_, bool>(7)?,
             ))
         });
         if let Ok(rows) = mapped {
@@ -1207,7 +1299,7 @@ fn load_existing_tracks_for_root(
                     .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
                 let filename_fallback = !item.1.trim().is_empty() && item.1 == file_stem;
                 let missing_duration = item.6.is_none() || item.6.is_some_and(|d| d <= 0.0);
-                let suspicious_metadata = item.1.trim().is_empty()
+                let suspicious_metadata = item.7 || item.1.trim().is_empty()
                     || (item.2.is_none()
                         && filename_fallback
                         && leading_track_number(&file_stem).is_some())
@@ -1246,9 +1338,10 @@ fn prepare_track_upsert_statement<'conn>(
             duration_secs,
             mtime_ns,
             size_bytes,
-            indexed_at
+            indexed_at,
+            search_tags
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         ON CONFLICT(path) DO UPDATE SET
             root_path=excluded.root_path,
             title=excluded.title,
@@ -1262,7 +1355,8 @@ fn prepare_track_upsert_statement<'conn>(
             duration_secs=excluded.duration_secs,
             mtime_ns=excluded.mtime_ns,
             size_bytes=excluded.size_bytes,
-            indexed_at=excluded.indexed_at
+            indexed_at=excluded.indexed_at,
+            search_tags=excluded.search_tags
         ",
     )
     .map_err(|e| format!("failed to prepare track upsert statement: {e}"))
@@ -1294,6 +1388,7 @@ fn apply_metadata_result<U>(
         task.mtime_ns,
         task.size_bytes,
         now,
+        serde_json::to_string(&indexed.search_tags).ok(),
     ]);
     on_upsert(&task, &indexed);
 }
@@ -1439,8 +1534,47 @@ pub(crate) fn is_supported_audio(path: &Path) -> bool {
     )
 }
 
+fn add_search_tag(tags: &mut super::SearchTags, key: &str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    let values = tags.entry(key.to_string()).or_default();
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn collect_search_tags(tag: &lofty::tag::Tag, tags: &mut super::SearchTags) {
+    for (key, item) in [
+        ("title", ItemKey::TrackTitle),
+        ("artist", ItemKey::TrackArtist),
+        ("artist", ItemKey::TrackArtists),
+        ("album", ItemKey::AlbumTitle),
+        ("albumartist", ItemKey::AlbumArtist),
+        ("albumartist", ItemKey::AlbumArtists),
+        ("genre", ItemKey::Genre),
+        ("composer", ItemKey::Composer),
+        ("conductor", ItemKey::Conductor),
+        ("performer", ItemKey::Performer),
+        ("label", ItemKey::Label),
+        ("label", ItemKey::Publisher),
+        ("comment", ItemKey::Comment),
+        ("lyrics", ItemKey::Lyrics),
+        ("lyrics", ItemKey::UnsyncLyrics),
+        ("date", ItemKey::RecordingDate),
+        ("date", ItemKey::OriginalReleaseDate),
+        ("disc", ItemKey::DiscNumber),
+    ] {
+        for value in tag.get_strings(item) {
+            add_search_tag(tags, key, value);
+        }
+    }
+}
+
 pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
     let mut out = IndexedTrack {
+        search_tags: crate::library::SearchTags::default(),
         title: path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -1456,6 +1590,9 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
     };
 
     if let Ok(tagged) = lofty::read_from_path(path) {
+        for tag in tagged.tags() {
+            collect_search_tags(tag, &mut out.search_tags);
+        }
         if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
             if let Some(title) = tag.title() {
                 out.title = title.into_owned();
@@ -1477,6 +1614,17 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
 
     if is_raw_surround_file(path) {
         if let Some(tagged) = read_appended_apev2_text_metadata(path) {
+            for (key, value) in [
+                ("albumartist", tagged.album_artist.as_deref()),
+                ("comment", tagged.comment.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    add_search_tag(&mut out.search_tags, key, value);
+                }
+            }
+            if let Some(disc) = tagged.disc_no {
+                add_search_tag(&mut out.search_tags, "disc", &disc.to_string());
+            }
             if let Some(title) = tagged.title {
                 out.title = title;
             }
@@ -1697,6 +1845,7 @@ mod tests {
 
         let fingerprint_a = track_file_fingerprint(&path).expect("fingerprint a");
         let indexed_a = IndexedTrack {
+            search_tags: crate::library::SearchTags::default(),
             title: "Song A".to_string(),
             artist: "Artist".to_string(),
             album: "Album".to_string(),
@@ -1777,6 +1926,7 @@ mod tests {
             size_bytes: 1337,
         };
         let indexed = IndexedTrack {
+            search_tags: crate::library::SearchTags::default(),
             title: "Outside Song".to_string(),
             artist: "Outside Artist".to_string(),
             album: "Outside Album".to_string(),
@@ -1801,6 +1951,7 @@ mod tests {
         init_schema(&conn).expect("schema");
         let path = PathBuf::from("/outside/song.flac");
         let indexed = IndexedTrack {
+            search_tags: crate::library::SearchTags::default(),
             title: "Outside Song".to_string(),
             artist: "Outside Artist".to_string(),
             album: "Outside Album".to_string(),
@@ -1848,6 +1999,7 @@ mod tests {
             size_bytes: 200,
         };
         let indexed_a = IndexedTrack {
+            search_tags: crate::library::SearchTags::default(),
             title: "Track A".to_string(),
             artist: "Artist A".to_string(),
             album: "Album A".to_string(),
@@ -2102,5 +2254,159 @@ mod tests {
 
         let _ = fs::remove_dir_all(root_a);
         let _ = fs::remove_dir_all(root_b);
+    }
+    #[test]
+    fn collects_all_repeated_and_credit_tags() {
+        use lofty::tag::{ItemValue, Tag, TagItem, TagType};
+        let mut tag = Tag::new(TagType::VorbisComments);
+        for (key, value) in [
+            (ItemKey::TrackArtist, "First"),
+            (ItemKey::TrackArtist, "Second"),
+            (ItemKey::Genre, "Rock"),
+            (ItemKey::Genre, "Ambient"),
+            (ItemKey::Composer, "Composer"),
+            (ItemKey::Conductor, "Conductor"),
+            (ItemKey::Performer, "Performer"),
+            (ItemKey::Label, "Label"),
+            (ItemKey::AlbumArtist, "Album Artist"),
+            (ItemKey::Comment, "Comment"),
+            (ItemKey::Lyrics, "Lyrics"),
+        ] {
+            tag.push_unchecked(TagItem::new(key, ItemValue::Text(value.into())));
+        }
+        let mut tags = super::super::SearchTags::default();
+        collect_search_tags(&tag, &mut tags);
+        collect_search_tags(&tag, &mut tags);
+        assert_eq!(tags["artist"], ["First", "Second"]);
+        assert_eq!(tags["genre"], ["Rock", "Ambient"]);
+        for key in [
+            "composer",
+            "conductor",
+            "performer",
+            "label",
+            "albumartist",
+            "comment",
+            "lyrics",
+        ] {
+            assert_eq!(tags[key].len(), 1, "{key}");
+        }
+    }
+
+    #[test]
+    fn search_tags_round_trip_and_backfill_without_file_changes() {
+        use lofty::config::WriteOptions;
+        use lofty::tag::{ItemValue, Tag, TagExt, TagItem, TagType};
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("search-tags");
+        fs::create_dir_all(&root).expect("directory");
+        let path = root.join("song.wav");
+        let mut wave = Vec::new();
+        wave.extend_from_slice(b"RIFF");
+        wave.extend_from_slice(&2036_u32.to_le_bytes());
+        wave.extend_from_slice(b"WAVEfmt ");
+        wave.extend_from_slice(&16_u32.to_le_bytes());
+        wave.extend_from_slice(&1_u16.to_le_bytes());
+        wave.extend_from_slice(&1_u16.to_le_bytes());
+        wave.extend_from_slice(&1000_u32.to_le_bytes());
+        wave.extend_from_slice(&2000_u32.to_le_bytes());
+        wave.extend_from_slice(&2_u16.to_le_bytes());
+        wave.extend_from_slice(&16_u16.to_le_bytes());
+        wave.extend_from_slice(b"data");
+        wave.extend_from_slice(&2000_u32.to_le_bytes());
+        wave.resize(2044, 0);
+        write_stub(&path, &wave);
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_title("Song".into());
+        tag.insert_text(ItemKey::AlbumArtist, "Orchestra".into());
+        tag.insert_text(ItemKey::Comment, "Anniversary remaster".into());
+        tag.push_unchecked(TagItem::new(
+            ItemKey::TrackArtist,
+            ItemValue::Text("First".into()),
+        ));
+        tag.push_unchecked(TagItem::new(
+            ItemKey::TrackArtist,
+            ItemValue::Text("Second".into()),
+        ));
+        tag.save_to_path(&path, WriteOptions::new())
+            .expect("tag fixture");
+        scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("scan");
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let tags = snapshot.tracks[0].search_tags.clone();
+        assert_eq!(tags["albumartist"], ["Orchestra"]);
+        assert_eq!(tags["comment"], ["Anniversary remaster"]);
+        assert!(tags["artist"].iter().any(|value| value.contains("Second")));
+        let indexed = read_track_info(&path);
+        let fingerprint = track_file_fingerprint(&path).expect("fingerprint");
+        store_external_track_cache_in_conn(&conn, &path, fingerprint, &indexed).expect("cache");
+        assert_eq!(
+            load_external_track_cache_from_conn(&conn, &path, fingerprint)
+                .expect("cached")
+                .search_tags,
+            tags
+        );
+        conn.execute("UPDATE tracks SET search_tags=NULL", [])
+            .expect("simulate legacy rows");
+        assert!(super::super::schema::needs_search_tag_backfill(&conn));
+        let (tx, _rx) = unbounded();
+        backfill_search_tags(&conn, &mut snapshot, &tx).expect("backfill");
+        load_snapshot(&conn, &mut snapshot);
+        assert_eq!(snapshot.tracks[0].search_tags, tags);
+        assert!(!super::super::schema::needs_search_tag_backfill(&conn));
+        assert_eq!(track_file_fingerprint(&path), Some(fingerprint));
+        let mut updates = 0;
+        scan_root(&conn, &root, &mut |_| {}, &mut |_, _| updates += 1).expect("unchanged rescan");
+        assert_eq!(updates, 0);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn search_tag_backfill_preserves_offline_roots() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("offline-root");
+        conn.execute("INSERT INTO tracks(path,root_path,title,artist,album,mtime_ns,size_bytes,indexed_at) VALUES (?1,?2,'Song','Artist','Album',0,0,0)",
+            params![root.join("song.flac").to_string_lossy(), root.to_string_lossy()]).expect("legacy offline row");
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let (tx, _rx) = unbounded();
+        backfill_search_tags(&conn, &mut snapshot, &tx).expect("skip offline root");
+        load_snapshot(&conn, &mut snapshot);
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert!(super::super::schema::needs_search_tag_backfill(&conn));
+    }
+    #[test]
+    fn backfill_reads_without_write_locks_and_preserves_concurrent_edits() {
+        let root = test_dir("backfill-locks");
+        fs::create_dir_all(&root).expect("directory");
+        let db = root.join("library.sqlite3");
+        let conn = Connection::open(&db).expect("db");
+        init_schema(&conn).expect("schema");
+        conn.execute("INSERT INTO tracks(path,root_path,title,artist,album,mtime_ns,size_bytes,indexed_at) VALUES ('/fixture/song','/fixture','Song','Artist','Album',0,0,0)", []).expect("legacy row");
+        let other = Connection::open(&db).expect("writer");
+        other.busy_timeout(Duration::ZERO).expect("no lock waits");
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let (tx, _rx) = unbounded();
+        let edited = super::super::SearchTags::from([("comment".into(), vec!["Edited".into()])]);
+        backfill_search_tags_using(&conn, &mut snapshot, &tx, |_| {
+            other
+                .execute(
+                    "UPDATE tracks SET search_tags=?1",
+                    params![serde_json::to_string(&edited).expect("json")],
+                )
+                .expect("tag edit can write during metadata read");
+            Some(super::super::SearchTags::from([(
+                "comment".into(),
+                vec!["Old".into()],
+            )]))
+        })
+        .expect("backfill");
+        load_snapshot(&conn, &mut snapshot);
+        assert_eq!(snapshot.tracks[0].search_tags, edited);
+        drop(other);
+        drop(conn);
+        fs::remove_dir_all(root).expect("cleanup");
     }
 }

@@ -781,14 +781,14 @@ bool decodeSearchResultsFrame(
         }
         return false;
     }
-    if (version != 2 && version != 3) {
+    if (version != 2 && version != 3 && version != 4) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("unsupported search frame version: %1").arg(version);
         }
         return false;
     }
 
-    if (version == 3) {
+    if (version >= 3) {
         for (auto &total : out->totals) {
             if (!reader.readU32(&total)) {
                 if (errorMessage) *errorMessage = QStringLiteral("search totals truncated");
@@ -848,6 +848,10 @@ bool decodeSearchResultsFrame(
         }
 
         DecodedSearchRow row;
+        if (version >= 4 && !reader.readUtf8U16(&row.matchDetail)) {
+            if (errorMessage) *errorMessage = QStringLiteral("search match detail truncated");
+            return false;
+        }
         row.rowType = static_cast<int>(rowType);
         row.score = score;
         row.year = year;

@@ -1842,7 +1842,7 @@ fn encode_stopped_event() -> Vec<u8> {
 fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + frame.rows.len() * 128);
     push_u8(&mut out, b'S');
-    push_u8(&mut out, 3);
+    push_u8(&mut out, 4);
     push_u16(&mut out, clamp_u16(frame.rows.len()));
     push_u32(&mut out, frame.seq);
     for total in frame.totals {
@@ -1871,6 +1871,7 @@ fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
         push_u16_string(&mut out, &row.section_key);
         push_u16_string(&mut out, &row.track_key);
         push_u16_string(&mut out, &row.track_path);
+        push_u16_string(&mut out, &row.match_detail);
     }
     out
 }
@@ -2583,6 +2584,7 @@ mod tests {
             library: Arc::new(LibrarySnapshot {
                 roots: vec![root("/music")],
                 tracks: vec![LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     path: PathBuf::from("/music/a.flac"),
                     root_path: PathBuf::from("/music"),
                     title: "Sample Track".to_string(),
@@ -3085,10 +3087,38 @@ mod tests {
             totals: [7, 12, 500],
             rows: Vec::new(),
         });
-        assert_eq!(&bytes[..8], &[b'S', 3, 0, 0, 9, 0, 0, 0]);
+        assert_eq!(&bytes[..8], &[b'S', 4, 0, 0, 9, 0, 0, 0]);
         assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
         assert_eq!(&bytes[12..16], &12u32.to_le_bytes());
         assert_eq!(&bytes[16..20], &500u32.to_le_bytes());
+        let row = crate::frontend_bridge::BridgeSearchResultRow {
+            match_detail: "Comment: remaster".into(),
+            row_type: BridgeSearchResultRowType::Track,
+            score: 6.0,
+            year: Some(1997),
+            track_number: Some(1),
+            count: 0,
+            length_seconds: None,
+            label: "Song".into(),
+            artist: String::new(),
+            album: String::new(),
+            root_label: String::new(),
+            genre: String::new(),
+            cover_path: String::new(),
+            artist_key: String::new(),
+            album_key: String::new(),
+            section_key: String::new(),
+            track_key: String::new(),
+            track_path: "/fixture/song".into(),
+        };
+        let bytes = encode_search_results_frame(&BridgeSearchResultsFrame {
+            seq: 9,
+            totals: [0, 0, 1],
+            rows: vec![row],
+        });
+        let mut suffix = Vec::new();
+        push_u16_string(&mut suffix, "Comment: remaster");
+        assert!(bytes.ends_with(&suffix));
     }
 
     #[test]
@@ -3175,6 +3205,7 @@ mod tests {
         Arc::make_mut(&mut snapshot.queue_details).insert(
             PathBuf::from("/outside/song.flac"),
             crate::library::IndexedTrack {
+                search_tags: crate::library::SearchTags::default(),
                 title: "Outside Song".to_string(),
                 artist: "Outside Artist".to_string(),
                 album: "Outside Album".to_string(),
@@ -3218,6 +3249,7 @@ mod tests {
         Arc::make_mut(&mut snapshot.queue_details).insert(
             path,
             crate::library::IndexedTrack {
+                search_tags: crate::library::SearchTags::default(),
                 title: "Outside Song".to_string(),
                 artist: "Outside Artist".to_string(),
                 album: "Outside Album".to_string(),

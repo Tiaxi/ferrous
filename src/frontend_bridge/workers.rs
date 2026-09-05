@@ -102,6 +102,7 @@ fn run_apply_album_art_worker(
                         .into_iter()
                         .map(|path| {
                             let indexed = IndexedTrack {
+                                search_tags: crate::library::SearchTags::default(),
                                 title: String::new(),
                                 artist: String::new(),
                                 album: String::new(),

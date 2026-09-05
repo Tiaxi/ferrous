@@ -1415,6 +1415,7 @@ mod tests {
         title: &str,
     ) -> LibraryTrack {
         LibraryTrack {
+            search_tags: crate::library::SearchTags::default(),
             path: PathBuf::from(path),
             root_path: PathBuf::from("/music"),
             title: title.to_string(),
@@ -1575,6 +1576,7 @@ mod tests {
             roots: vec![root("/music-a"), root("/music-b")],
             tracks: vec![
                 LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     path: PathBuf::from("/music-a/Artist/Album/01.flac"),
                     root_path: PathBuf::from("/music-a"),
                     title: "Track A".to_string(),
@@ -1587,6 +1589,7 @@ mod tests {
                     duration_secs: None,
                 },
                 LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     path: PathBuf::from("/music-b/Artist/Album/01.flac"),
                     root_path: PathBuf::from("/music-b"),
                     title: "Track B".to_string(),
@@ -1621,6 +1624,7 @@ mod tests {
             roots: vec![root("/music-a"), root("/music-b")],
             tracks: vec![
                 LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     path: PathBuf::from("/music-a/Same Artist/Album A/01.flac"),
                     root_path: PathBuf::from("/music-a"),
                     title: "Track A".to_string(),
@@ -1633,6 +1637,7 @@ mod tests {
                     duration_secs: None,
                 },
                 LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
                     path: PathBuf::from("/music-b/Same Artist/Album B/01.flac"),
                     root_path: PathBuf::from("/music-b"),
                     title: "Track B".to_string(),
@@ -2151,6 +2156,7 @@ mod tests {
         title: &str,
     ) -> LibraryTrack {
         LibraryTrack {
+            search_tags: crate::library::SearchTags::default(),
             path: PathBuf::from(path),
             root_path: PathBuf::from(root_path),
             title: title.to_string(),
