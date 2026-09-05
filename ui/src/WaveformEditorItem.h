@@ -2,6 +2,10 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
+#include <functional>
+
 #include <QByteArray>
 #include <QColor>
 #include <QImage>
@@ -48,6 +52,7 @@ class WaveformEditorItem : public QQuickPaintedItem {
 
 public:
     explicit WaveformEditorItem(QQuickItem *parent = nullptr);
+    ~WaveformEditorItem() override;
 
     QString sourcePath() const;
     void setSourcePath(const QString &value);
@@ -178,7 +183,7 @@ private:
     };
 
     static QByteArray decodeWindow(
-        const QString &path, double startSeconds, double endSeconds, int maxPoints);
+        const QString &path, double startSeconds, double endSeconds, int maxPoints, const std::shared_ptr<std::atomic_bool> &cancelled);
     static bool parseWindow(const QByteArray &bytes, DetailWindow *window);
     void scheduleDetailRequest();
     void requestDetailWindow();
@@ -315,6 +320,11 @@ private:
     int m_playbackTileHeight{0};
     quint32 m_playbackTileFramesPerPoint{0};
     int m_playbackTileDisplayedChannels{0};
+    void invalidateDetailRequestLocked();
+    std::shared_ptr<std::atomic_bool> m_decodeCancelled;
+    bool m_decodeActive{false};
+    std::function<QByteArray(const QString &, double, double, int,
+                            const std::shared_ptr<std::atomic_bool> &)> m_decodeWindow{decodeWindow};
     quint64 m_requestGeneration{0};
     bool m_requestInFlight{false};
     double m_requestedStartSeconds{0.0};

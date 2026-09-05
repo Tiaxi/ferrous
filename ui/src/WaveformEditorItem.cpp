@@ -165,6 +165,15 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     connect(this, &QQuickItem::windowChanged, this, &WaveformEditorItem::bindWindowFrameLoop);
 }
 
+WaveformEditorItem::~WaveformEditorItem() {
+    if (m_decodeCancelled) m_decodeCancelled->store(true);
+}
+
+void WaveformEditorItem::invalidateDetailRequestLocked() {
+    ++m_requestGeneration;
+    if (m_decodeCancelled) m_decodeCancelled->store(true);
+}
+
 QString WaveformEditorItem::sourcePath() const { QMutexLocker lock(&m_stateMutex); return m_sourcePath; }
 QByteArray WaveformEditorItem::overviewData() const { QMutexLocker lock(&m_stateMutex); return m_overviewData; }
 double WaveformEditorItem::positionSeconds() const { QMutexLocker lock(&m_stateMutex); return m_positionSeconds; }
@@ -188,7 +197,7 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
         QMutexLocker lock(&m_stateMutex);
         if (m_sourcePath == value) return;
         m_sourcePath = value;
-        ++m_requestGeneration;
+        invalidateDetailRequestLocked();
         clearPendingRequestLocked();
         clearDetailLocked();
         m_presentedZoomLevel = m_zoomLevel;
@@ -268,7 +277,7 @@ void WaveformEditorItem::setPlaying(bool value) {
 }
 
 void WaveformEditorItem::setDurationSeconds(double value) {
-    { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); m_presentedZoomLevel = m_zoomLevel; m_zoomOutHandoffPending = false; ++m_requestGeneration; clearPendingRequestLocked(); clearDetailLocked(); m_zoomFallbackToOverview = false; invalidateCacheLocked(); }
+    { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); m_presentedZoomLevel = m_zoomLevel; m_zoomOutHandoffPending = false; invalidateDetailRequestLocked(); clearPendingRequestLocked(); clearDetailLocked(); m_zoomFallbackToOverview = false; invalidateCacheLocked(); }
     emit durationSecondsChanged(); emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); update();
 }
 
@@ -282,7 +291,7 @@ void WaveformEditorItem::setZoomLevel(double value) {
         const bool previousSamplePoints = samplePointsVisibleLocked();
         const double previousPresentedZoom = m_presentedZoomLevel;
         m_zoomLevel = value;
-        ++m_requestGeneration;
+        invalidateDetailRequestLocked();
         clearPendingRequestLocked();
         clearStagedCacheLocked();
         const auto [visibleStart, visibleEnd] = visibleRangeForZoomLocked(value);
@@ -405,7 +414,7 @@ void WaveformEditorItem::geometryChange(const QRectF &newGeometry, const QRectF 
             QMutexLocker lock(&m_stateMutex);
             m_presentedZoomLevel = m_zoomLevel;
             m_zoomOutHandoffPending = false;
-            ++m_requestGeneration;
+            invalidateDetailRequestLocked();
             clearPendingRequestLocked();
             invalidateCacheLocked();
         }
@@ -414,13 +423,15 @@ void WaveformEditorItem::geometryChange(const QRectF &newGeometry, const QRectF 
 }
 
 QByteArray WaveformEditorItem::decodeWindow(const QString &path, double startSeconds,
-                                             double endSeconds, int maxPoints) {
+                                             double endSeconds, int maxPoints, const std::shared_ptr<std::atomic_bool> &cancelled) {
     const QByteArray encodedPath = path.toUtf8();
     std::size_t length = 0;
-    std::uint8_t *data = ferrous_ffi_waveform_window(
+    std::uint8_t *data = ferrous_ffi_waveform_window_cancellable(
         reinterpret_cast<const std::uint8_t *>(encodedPath.constData()),
         static_cast<std::size_t>(encodedPath.size()), startSeconds, endSeconds,
-        static_cast<std::uint32_t>(std::max(1, maxPoints)), &length);
+        static_cast<std::uint32_t>(std::max(1, maxPoints)), &length,
+        [](const void *context) { return static_cast<const std::atomic_bool *>(context)->load(); },
+        cancelled.get());
     if (data == nullptr || length == 0) return {};
     const QByteArray result(reinterpret_cast<const char *>(data), static_cast<qsizetype>(length));
     ferrous_ffi_waveform_window_free(data, length);
@@ -464,6 +475,7 @@ void WaveformEditorItem::requestDetailWindow() {
     double requestEnd = 0.0;
     int points = 0;
     quint64 generation = 0;
+    std::shared_ptr<std::atomic_bool> cancelled;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     bool profileEnabled = false;
     double profileZoom = 1.0;
@@ -476,6 +488,13 @@ void WaveformEditorItem::requestDetailWindow() {
     {
         QMutexLocker lock(&m_stateMutex);
         if (m_sourcePath.isEmpty() || m_durationSeconds <= 0.0 || width() < 2.0) return;
+        if (m_decodeActive) {
+            invalidateDetailRequestLocked();
+            return;
+        }
+        m_decodeActive = true;
+        cancelled = std::make_shared<std::atomic_bool>(false);
+        m_decodeCancelled = cancelled;
         const auto [visibleStart, visibleEnd] = detailRequestVisibleRangeLocked();
         std::tie(requestStart, requestEnd) = requestRangeLocked(visibleStart, visibleEnd);
         path = m_sourcePath;
@@ -522,8 +541,18 @@ void WaveformEditorItem::requestDetailWindow() {
         , profileRequestStarted
 #endif
     ]() {
-        const QByteArray bytes = watcher->result();
         watcher->deleteLater();
+        {
+            QMutexLocker lock(&m_stateMutex);
+            m_decodeActive = false;
+            m_decodeCancelled.reset();
+            if (generation != m_requestGeneration) {
+                clearPendingRequestLocked();
+                scheduleDetailRequest();
+                return;
+            }
+        }
+        const QByteArray bytes = watcher->result();
         DetailWindow next;
         const bool parsed = parseWindow(bytes, &next);
         bool channelsChanged = false;
@@ -656,7 +685,7 @@ void WaveformEditorItem::requestDetailWindow() {
         if (requestFollowup) scheduleDetailRequest();
         update();
     });
-    watcher->setFuture(QtConcurrent::run(&WaveformEditorItem::decodeWindow, path, requestStart, requestEnd, points));
+    watcher->setFuture(QtConcurrent::run(m_decodeWindow, path, requestStart, requestEnd, points, cancelled));
 }
 
 void WaveformEditorItem::clearDetailLocked() {
@@ -899,7 +928,7 @@ bool WaveformEditorItem::clampZoomToMaximumLocked() {
     m_zoomLevel = clampedTarget;
     m_presentedZoomLevel = clampedPresentation;
     if (m_zoomLevel >= m_presentedZoomLevel) m_zoomOutHandoffPending = false;
-    ++m_requestGeneration;
+    invalidateDetailRequestLocked();
     clearPendingRequestLocked();
     invalidateCacheLocked();
     return targetChanged;
