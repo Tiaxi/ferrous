@@ -2,13 +2,8 @@
 
 use std::path::Path;
 
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{SeekMode, SeekTo};
-
-use super::decoders::{open_audio_file, open_symphonia_file};
+use super::decoders::{open_audio_file, AudioRead};
 use super::f64_to_u64_saturating;
-use super::fft::ensure_sample_buffer;
 
 const MAX_WINDOW_POINTS: usize = 65_536;
 
@@ -141,51 +136,7 @@ pub(crate) fn decode_waveform_window_cancellable(
     anyhow::ensure!(max_points > 0);
 
     anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-    if let Some(mut file) = open_symphonia_file(path) {
-        let sample_rate_hz = u32::try_from(file.native_sample_rate)
-            .unwrap_or(u32::MAX)
-            .max(1);
-        let channels = file.native_channels.clamp(1, usize::from(u16::MAX));
-        let start_frame = f64_to_u64_saturating(start_seconds * f64::from(sample_rate_hz));
-        let end_frame = f64_to_u64_saturating(end_seconds * f64::from(sample_rate_hz))
-            .max(start_frame.saturating_add(1));
-        let mut accumulator = WindowAccumulator::new(start_frame, end_frame, max_points, channels);
-
-        let _ = file.format.seek(
-            SeekMode::Accurate,
-            SeekTo::TimeStamp {
-                ts: start_frame,
-                track_id: file.track_id,
-            },
-        );
-        file.decoder.reset();
-        let mut sample_buffer: Option<SampleBuffer<f32>> = None;
-        loop {
-            anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-            let Ok(packet) = file.format.next_packet() else {
-                break;
-            };
-            if packet.track_id() != file.track_id {
-                continue;
-            }
-            if packet.ts() >= end_frame {
-                break;
-            }
-            let decoded = match file.decoder.decode(&packet) {
-                Ok(decoded) => decoded,
-                Err(SymphoniaError::DecodeError(_)) => continue,
-                Err(_) => break,
-            };
-            let spec = *decoded.spec();
-            let decoded_channels = spec.channels.count().max(1);
-            let buffer = ensure_sample_buffer(&mut sample_buffer, decoded.capacity(), spec);
-            buffer.copy_interleaved_ref(decoded);
-            accumulator.push_interleaved(packet.ts(), buffer.samples(), decoded_channels);
-        }
-        return Ok(accumulator.finish(sample_rate_hz));
-    }
-
-    decode_fallback_window(path, start_seconds, end_seconds, max_points, cancelled)
+    decode_window(path, start_seconds, end_seconds, max_points, cancelled)
 }
 
 fn frame_seconds(frame: u64, sample_rate: u64) -> f64 {
@@ -196,7 +147,7 @@ fn frame_seconds(frame: u64, sample_rate: u64) -> f64 {
     std::time::Duration::new(seconds, u32::try_from(nanos).unwrap_or(999_999_999)).as_secs_f64()
 }
 
-fn decode_fallback_window(
+fn decode_window(
     path: &Path,
     start_seconds: f64,
     end_seconds: f64,
@@ -211,15 +162,19 @@ fn decode_fallback_window(
     let end_frame = f64_to_u64_saturating(end_seconds * f64::from(sample_rate_hz))
         .max(start_frame.saturating_add(1));
     let mut accumulator = WindowAccumulator::new(start_frame, end_frame, max_points, channels);
-    source.seek(start_seconds, sample_rate);
+    source.seek(start_seconds, sample_rate)?;
     let mut next_frame = start_frame;
     while next_frame < end_frame {
         anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-        let Some(frames) = source.next_frames() else {
-            break;
+        let frames = match source.next_frames()? {
+            AudioRead::Frames(frames) => frames,
+            AudioRead::Pending => continue,
+            AudioRead::Eof => break,
         };
-        accumulator.push_interleaved(next_frame, &frames.samples, frames.channels);
-        next_frame = next_frame.saturating_add(u64::try_from(frames.frames).unwrap_or(u64::MAX));
+        accumulator.push_interleaved(frames.first_frame, &frames.samples, frames.channels);
+        next_frame = frames
+            .first_frame
+            .saturating_add(u64::try_from(frames.frames).unwrap_or(u64::MAX));
     }
     Ok(accumulator.finish(sample_rate_hz))
 }
@@ -228,6 +183,49 @@ fn decode_fallback_window(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn compressed_seek_window_matches_the_absolute_sample_grid() {
+        // Synthesized 440 Hz mono tone, 48 kHz, encoded with ffmpeg/libmp3lame.
+        // Embedded so the test needs neither an encoder nor external media.
+        let path =
+            std::env::temp_dir().join(format!("ferrous-seek-tone-{}.mp3", std::process::id()));
+        std::fs::write(&path, include_bytes!("fixtures/seek-tone.mp3")).expect("write fixture");
+        let full = decode_waveform_window(&path, 0.0, 1.0, 48_000).expect("full decode");
+        let window = decode_waveform_window(&path, 0.731, 0.751, 960).expect("seek decode");
+        std::fs::remove_file(path).expect("remove fixture");
+        assert_eq!(window.frames_per_point, 1);
+        assert_eq!(window.sample_rate_hz, 48_000);
+        let offset = 35_088 * 2;
+        for (actual, expected) in window.extrema.iter().zip(&full.extrema[offset..]) {
+            assert!(
+                (actual - expected).abs() < 0.005,
+                "seek changed sample phase: {actual} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_window_seek_preserves_non_packet_aligned_pcm_samples() {
+        let samples: Vec<i16> = (0..10_003)
+            .map(|frame| (frame % 1000) as i16 * 20)
+            .collect();
+        let path = write_test_wave(&samples, 1000, 1);
+        for frame in [1, 239, 1234, 7001] {
+            let window = decode_waveform_window(
+                &path,
+                f64::from(frame) / 1000.0,
+                f64::from(frame + 10) / 1000.0,
+                16,
+            )
+            .expect("exact window");
+            assert_eq!(window.frames_per_point, 1);
+            assert!(
+                (window.extrema[0] - f32::from(samples[frame as usize]) / 32768.0).abs() < 0.0001
+            );
+        }
+        std::fs::remove_file(path).expect("remove fixture");
+    }
 
     fn write_test_wave(samples: &[i16], sample_rate: u32, channels: u16) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();

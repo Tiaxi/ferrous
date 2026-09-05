@@ -10,7 +10,7 @@ use std::time::Duration;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use super::decoders::{
-    deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource,
+    deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource, AudioRead,
 };
 use super::fft::{PeakHoldResampler, StftComputer};
 use super::{
@@ -449,9 +449,13 @@ fn centered_staging_decode(
         }
 
         let audio = match source.next_frames() {
-            Some(af) if af.frames == 0 => continue,
-            Some(af) => af,
-            None => break, // EOF
+            Ok(AudioRead::Pending) => continue,
+            Ok(AudioRead::Frames(audio)) => audio,
+            Ok(AudioRead::Eof) => break,
+            Err(error) => {
+                eprintln!("[analysis] staging decode failed: {error}");
+                return;
+            }
         };
 
         let effective_frames = audio.frames;
@@ -895,7 +899,10 @@ fn run_spectrogram_session(
     };
 
     if actual_seek_seconds > 0.0 {
-        source.seek(actual_seek_seconds, native_sample_rate);
+        if let Err(error) = source.seek(actual_seek_seconds, native_sample_rate) {
+            eprintln!("[analysis] spectrogram seek failed: {error}");
+            return None;
+        }
     }
 
     let start_column = f64_to_u64_saturating((start_seconds * cols_per_second).floor());
@@ -1251,9 +1258,13 @@ fn session_decode_loop(
 
         // 4. Decode next batch of audio frames.
         let audio = match source.next_frames() {
-            Some(af) if af.frames == 0 => continue, // GStreamer timeout, no data yet
-            Some(af) => af,
-            None => {
+            Ok(AudioRead::Pending) => continue,
+            Ok(AudioRead::Frames(audio)) => audio,
+            Err(error) => {
+                eprintln!("[analysis] spectrogram decode failed: {error}");
+                return None;
+            }
+            Ok(AudioRead::Eof) => {
                 // Real source EOF.  Mark so the outer wrapper emits a
                 // finalize chunk for this session (distinguishing EOF
                 // from the stale-generation None return below).
@@ -1548,7 +1559,10 @@ fn handle_session_seek(
     let actual_seek_seconds = (position_seconds - fft_warmup_seconds).max(0.0);
 
     let native_rate = u64::from(session.effective_rate);
-    source.seek(actual_seek_seconds, native_rate);
+    if let Err(error) = source.seek(actual_seek_seconds, native_rate) {
+        eprintln!("[analysis] spectrogram seek failed: {error}");
+        return None;
+    }
 
     // Reset STFT state.
     let output_interval = if session.zoom_level > 1.0 {
@@ -3110,6 +3124,7 @@ mod tests {
             },
             track_id: 0,
             sample_buf: None,
+            seek_frame: 0,
         }
     }
 
