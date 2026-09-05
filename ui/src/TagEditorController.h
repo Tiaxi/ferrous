@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QObject>
+#include <functional>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -68,8 +69,19 @@ signals:
     void statusChanged();
     void selectionChanged();
     void bulkSummaryChanged();
+    void saveFinished(bool success);
+    void renameFinished();
 
 private:
+    enum class Operation { Load, Save, Rename };
+    static QByteArray executeOperation(Operation operation, const QByteArray &payload);
+    void runOperation(Operation operation, const QByteArray &payload,
+                      std::function<void(const QByteArray &)> apply);
+    void applyLoadResult(const QByteArray &response);
+    void applySaveResult(const QByteArray &response);
+    void applyRenameResult(const QByteArray &response);
+    std::function<QByteArray(Operation, const QByteArray &)> m_executeOperation{executeOperation};
+    quint64 m_operationGeneration{0};
     QVector<int> targetRows() const;
     void setStatusText(const QString &text, const QString &details = QString());
     void resetSelection();

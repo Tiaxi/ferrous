@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <QDir>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -344,6 +346,37 @@ TagEditorController::TagEditorController(BridgeClient *bridge, QObject *parent)
     connect(&m_tableModel, &TagEditorTableModel::rowsChanged, this, &TagEditorController::bulkSummaryChanged);
 }
 
+QByteArray TagEditorController::executeOperation(Operation operation, const QByteArray &payload) {
+    const auto *data = reinterpret_cast<const std::uint8_t *>(payload.constData());
+    const auto size = static_cast<std::size_t>(payload.size());
+    std::size_t len = 0;
+    std::uint8_t *raw = nullptr;
+    switch (operation) {
+    case Operation::Load: raw = ferrous_ffi_tag_editor_load(data, size, &len); break;
+    case Operation::Save: raw = ferrous_ffi_tag_editor_save(data, size, &len); break;
+    case Operation::Rename: raw = ferrous_ffi_tag_editor_rename(data, size, &len); break;
+    }
+    QByteArray response;
+    if (raw != nullptr) {
+        response = QByteArray(reinterpret_cast<const char *>(raw), static_cast<qsizetype>(len));
+        ferrous_ffi_tag_editor_free_buffer(raw, len);
+    }
+    return response;
+}
+
+void TagEditorController::runOperation(Operation operation, const QByteArray &payload,
+                                       std::function<void(const QByteArray &)> apply) {
+    const quint64 generation = ++m_operationGeneration;
+    auto *watcher = new QFutureWatcher<QByteArray>(this);
+    connect(watcher, &QFutureWatcher<QByteArray>::finished, this,
+            [this, watcher, generation, apply = std::move(apply)]() {
+        watcher->deleteLater();
+        if (generation == m_operationGeneration) apply(watcher->result());
+    });
+    // The worker owns its input and function; it never accesses a controller or bridge.
+    watcher->setFuture(QtConcurrent::run(m_executeOperation, operation, payload));
+}
+
 QObject *TagEditorController::tableModel() const {
     return const_cast<TagEditorTableModel *>(&m_tableModel);
 }
@@ -401,18 +434,18 @@ bool TagEditorController::openSelection(const QVariantList &selections) {
     m_loading = true;
     emit loadingChanged();
 
-    const QByteArray payload = buildSelectionBlob(selections);
-    std::size_t len = 0;
-    std::uint8_t *raw = ferrous_ffi_tag_editor_load(
-        reinterpret_cast<const std::uint8_t *>(payload.constData()),
-        static_cast<std::size_t>(payload.size()),
-        &len);
-    QByteArray response;
-    if (raw != nullptr && len > 0) {
-        response = QByteArray(reinterpret_cast<const char *>(raw), static_cast<int>(len));
-        ferrous_ffi_tag_editor_free_buffer(raw, len);
-    }
+    m_open = true;
+    m_tableModel.clear();
+    m_loadedPaths.clear();
+    setStatusText(QStringLiteral("Loading tags..."));
+    emit openChanged();
+    runOperation(Operation::Load, buildSelectionBlob(selections), [this](const QByteArray &response) {
+        applyLoadResult(response);
+    });
+    return true;
+}
 
+void TagEditorController::applyLoadResult(const QByteArray &response) {
     QVector<TagEditorRowState> rows;
     QStringList resolvedPaths;
     QString errorText;
@@ -451,10 +484,12 @@ bool TagEditorController::openSelection(const QVariantList &selections) {
     m_loading = false;
     emit loadingChanged();
     emit bulkSummaryChanged();
-    return m_open;
 }
 
 void TagEditorController::close() {
+    if (m_saving) return;
+    ++m_operationGeneration;
+    if (m_loading) { m_loading = false; emit loadingChanged(); }
     const bool wasOpen = m_open;
     m_open = false;
     m_loadedPaths.clear();
@@ -481,18 +516,13 @@ bool TagEditorController::save() {
     m_saving = true;
     emit savingChanged();
 
-    const QByteArray payload = buildSaveBlob(m_tableModel.rows());
-    std::size_t len = 0;
-    std::uint8_t *raw = ferrous_ffi_tag_editor_save(
-        reinterpret_cast<const std::uint8_t *>(payload.constData()),
-        static_cast<std::size_t>(payload.size()),
-        &len);
-    QByteArray response;
-    if (raw != nullptr && len > 0) {
-        response = QByteArray(reinterpret_cast<const char *>(raw), static_cast<int>(len));
-        ferrous_ffi_tag_editor_free_buffer(raw, len);
-    }
+    runOperation(Operation::Save, buildSaveBlob(m_tableModel.rows()), [this](const QByteArray &response) {
+        applySaveResult(response);
+    });
+    return true;
+}
 
+void TagEditorController::applySaveResult(const QByteArray &response) {
     QHash<QString, QString> errorsByPath;
     QSet<QString> successPaths;
     QString status;
@@ -536,6 +566,8 @@ bool TagEditorController::save() {
         status = QStringLiteral("failed to parse tag editor save response");
     }
 
+    const bool success = document.isObject() && status.isEmpty()
+        && !successPaths.isEmpty() && errorsByPath.isEmpty();
     m_tableModel.applySaveResults(errorsByPath, successPaths);
     if (!successPaths.isEmpty() && m_bridge != nullptr) {
         QStringList paths = successPaths.values();
@@ -558,7 +590,7 @@ bool TagEditorController::save() {
     m_saving = false;
     emit savingChanged();
     emit bulkSummaryChanged();
-    return errorsByPath.isEmpty();
+    emit saveFinished(success);
 }
 
 bool TagEditorController::renameSelectedFiles() {
@@ -592,8 +624,15 @@ bool TagEditorController::renameSelectedFiles() {
 
     QJsonObject root;
     root.insert(QStringLiteral("rows"), rowArray);
-    const QByteArray response = m_bridge->renameEditedFiles(
-        QJsonDocument(root).toJson(QJsonDocument::Compact));
+    m_saving = true;
+    emit savingChanged();
+    runOperation(Operation::Rename, QJsonDocument(root).toJson(QJsonDocument::Compact), [this](const QByteArray &response) {
+        applyRenameResult(response);
+    });
+    return true;
+}
+
+void TagEditorController::applyRenameResult(const QByteArray &response) {
     const QJsonDocument document = QJsonDocument::fromJson(response);
 
     QHash<QString, QString> renamedPaths;
@@ -638,6 +677,11 @@ bool TagEditorController::renameSelectedFiles() {
         status = QStringLiteral("failed to parse file rename response");
     }
 
+    QStringList pairs;
+    for (auto it = renamedPaths.cbegin(); it != renamedPaths.cend(); ++it) {
+        pairs << it.key() << it.value();
+    }
+    if (m_bridge != nullptr && !pairs.isEmpty()) m_bridge->refreshRenamedPaths(pairs);
     QVector<TagEditorRowState> updatedRows = m_tableModel.rows();
     for (TagEditorRowState &row : updatedRows) {
         const auto renamedIt = renamedPaths.constFind(row.path);
@@ -667,7 +711,9 @@ bool TagEditorController::renameSelectedFiles() {
     failureLines.sort();
     setStatusText(status, buildActionDetails(renamedLines, failureLines));
     emit bulkSummaryChanged();
-    return errorsByPath.isEmpty();
+    m_saving = false;
+    emit savingChanged();
+    emit renameFinished();
 }
 
 void TagEditorController::setSelectedRows(const QVariantList &rows) {
@@ -710,6 +756,7 @@ QString TagEditorController::bulkValue(const QString &field) const {
 }
 
 void TagEditorController::applyBulkField(const QString &field, const QString &value) {
+    if (m_loading || m_saving) return;
     for (int row : targetRows()) {
         m_tableModel.setFieldValue(row, field, value);
     }
@@ -721,6 +768,7 @@ void TagEditorController::applyBulkFieldToRows(
     const QString &field,
     const QString &value)
 {
+    if (m_loading || m_saving) return;
     QSet<int> targetSet;
     for (const QVariant &entry : rows) {
         bool ok = false;
@@ -747,12 +795,14 @@ void TagEditorController::applyBulkFieldToRows(
 }
 
 void TagEditorController::setCell(int row, const QString &field, const QString &value) {
+    if (m_loading || m_saving) return;
     if (m_tableModel.setFieldValue(row, field, value)) {
         notifyRowMutation();
     }
 }
 
 void TagEditorController::applyEnglishTitleCase(const QString &field) {
+    if (m_loading || m_saving) return;
     for (int row : targetRows()) {
         m_tableModel.setFieldValue(
             row,
@@ -763,6 +813,7 @@ void TagEditorController::applyEnglishTitleCase(const QString &field) {
 }
 
 void TagEditorController::applyFinnishCapitalize(const QString &field) {
+    if (m_loading || m_saving) return;
     for (int row : targetRows()) {
         m_tableModel.setFieldValue(
             row,
@@ -773,6 +824,7 @@ void TagEditorController::applyFinnishCapitalize(const QString &field) {
 }
 
 void TagEditorController::applyGenreCapitalize() {
+    if (m_loading || m_saving) return;
     for (int row : targetRows()) {
         m_tableModel.setFieldValue(
             row,
@@ -790,6 +842,7 @@ void TagEditorController::autoNumber(
     bool resetOnFolder,
     bool resetOnDiscChange)
 {
+    if (m_loading || m_saving) return;
     const QVector<int> rows = targetRows();
     if (rows.isEmpty()) {
         return;
