@@ -716,6 +716,7 @@ private:
     bool m_pollTrackIdentityChanged{false};
     bool m_pollTrackMetadataChanged{false};
     bool m_pollSnapshotChanged{false};
+    qint64 m_pendingTrackRestartUntilMs{0};
     bool m_pendingSeek{false};
     double m_pendingSeekTargetSeconds{0.0};
     qint64 m_pendingSeekStartedAtMs{0};

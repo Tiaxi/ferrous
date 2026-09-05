@@ -1053,6 +1053,10 @@ impl AnalysisRuntimeState {
             self.start_spectrogram_session(0.0, emit_initial_reset, clear_history_on_reset, ctx);
         }
 
+        // The outgoing position is needed above for rolling gapless offsets.
+        // Subsequent settings/visibility restarts belong to the new track.
+        self.last_spectrogram_position = 0.0;
+
         if let Some(peaks) = self.load_cached_waveform(&path) {
             self.snapshot.waveform_peaks = peaks;
             self.snapshot.waveform_coverage_seconds = 0.0;
@@ -1870,11 +1874,12 @@ mod tests {
     /// end-to-end engine tests below to drive the real decode worker.
     fn write_engine_test_wave(seconds: u32, sample_rate: u32) -> std::path::PathBuf {
         let samples_len = usize::try_from(seconds * sample_rate).unwrap_or(0);
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
         let mut path = std::env::temp_dir();
         path.push(format!(
             "ferrous-analysis-engine-{}-{}.wav",
             std::process::id(),
-            samples_len
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         let data_bytes = u32::try_from(samples_len.saturating_mul(2)).unwrap();
         let mut file = std::fs::File::create(&path).unwrap();
@@ -3177,6 +3182,56 @@ mod tests {
     }
 
     #[test]
+    fn track_change_clears_position_before_settings_restart_in_both_modes() {
+        let path = write_engine_test_wave(1, 16_000);
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            let mut state = AnalysisRuntimeState::new();
+            state.display_mode = mode;
+            let (event_tx, _) = unbounded::<AnalysisEvent>();
+            let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+            let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+            let waveform_decode_active_token = AtomicU64::new(0);
+            let spectrogram_decode_generation = AtomicU64::new(0);
+            let spectrogram_track_duration_ms = AtomicU64::new(0);
+            let spectrogram_decode_columns_produced = AtomicU64::new(0);
+            let ctx = AnalysisContext {
+                event_tx: &event_tx,
+                waveform_job_tx: &waveform_job_tx,
+                waveform_decode_active_token: &waveform_decode_active_token,
+                spectrogram_cmd_tx: &spectrogram_cmd_tx,
+                spectrogram_decode_generation: &spectrogram_decode_generation,
+                spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+                spectrogram_track_duration_ms: &spectrogram_track_duration_ms,
+            };
+
+            state.active_track_path = Some(path.clone());
+            state.active_track_token = 1;
+            state.last_spectrogram_position = 120.0;
+            state.handle_track_change(path.clone(), true, false, 2, &ctx);
+            assert_eq!(state.last_spectrogram_position, 0.0);
+            let _ = spectrogram_cmd_rx.try_iter().collect::<Vec<_>>();
+            state.handle_command(AnalysisCommand::SetFftSize(512), &ctx);
+            let command = spectrogram_cmd_rx.try_recv().unwrap();
+            assert!(
+                matches!(
+                    command,
+                    SpectrogramWorkerCommand::NewTrack {
+                        track_token: 2,
+                        start_seconds: 0.0,
+                        target_position_seconds: 0.0,
+                        ..
+                    }
+                ),
+                "{command:?}"
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn rolling_gapless_dispatches_continue_with_file() {
         // In rolling mode, gapless transitions use ContinueWithFile
         // for seamless scrolling continuity.
@@ -3219,6 +3274,7 @@ mod tests {
 
         // Position offset should accumulate.
         assert!((state.spectrogram_position_offset - 200.0).abs() < 0.01);
+        assert_eq!(state.last_spectrogram_position, 0.0);
     }
 
     #[test]
@@ -3347,6 +3403,7 @@ mod tests {
         );
         // Position offset accumulates old track duration.
         assert!((state.spectrogram_position_offset - 200.0).abs() < 0.01);
+        assert_eq!(state.last_spectrogram_position, 0.0);
     }
 
     #[test]
@@ -3479,6 +3536,7 @@ mod tests {
         // staged_continuation_path consumed.
         assert!(state.staged_continuation_path.is_none());
         assert!((state.spectrogram_position_offset - 200.0).abs() < 0.01);
+        assert_eq!(state.last_spectrogram_position, 0.0);
     }
 
     #[test]
@@ -3563,6 +3621,7 @@ mod tests {
         assert_eq!(gen_after, gen_before);
         // Position offset preserved.
         assert!((state.spectrogram_position_offset - 200.0).abs() < 0.01);
+        assert_eq!(state.last_spectrogram_position, 0.0);
     }
 
     #[test]

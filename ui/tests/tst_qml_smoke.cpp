@@ -504,6 +504,7 @@ private slots:
     void playbackControllerPostSeekHeldTargetKeepsVisualClock();
     void playbackControllerPostSeekTargetEchoKeepsVisualClockActive();
     void playbackControllerPlayAtCurrentTrackClearsPostSeekVisualClock();
+    void playbackControllerTrackChangeSnapsClock();
     void playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst();
     void playbackControllerModerateSteadyStateLagUsesTrimNotBleed();
     void playbackControllerProfileLogsHeartbeatCorrectionAndBleed();
@@ -2838,6 +2839,77 @@ Item {
         qPrintable(QStringLiteral("displayed_before=%1 displayed_after=%2")
             .arg(displayedBeforeBackendHeartbeat, 0, 'f', 6)
             .arg(displayedAfterBackendHeartbeat, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::playbackControllerTrackChangeSnapsClock() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property string playbackState: "Playing"
+        property real positionSeconds: 12.0
+        property real durationSeconds: 480.0
+        property string currentTrackPath: "/music/test.flac"
+        property int playingQueueIndex: 0
+        property real volume: 1.0
+        property var playAtCalls: []
+        property var seekCalls: []
+        function seek(value) { seekCalls = seekCalls.concat([value]) }
+        function playAt(index) { playAtCalls = playAtCalls.concat([index]) }
+    }
+
+    Controllers.PlaybackController {
+        id: controller
+        objectName: "controller"
+        uiBridge: bridge
+        visualFeedsEnabled: true
+        seekPressed: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QVERIFY(controller != nullptr);
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(bridge != nullptr);
+
+    // Even a small difference must snap on identity change, rather than
+    // smoothing the new track against the previous track's visual clock.
+    bridge->setProperty("positionSeconds", 0.15);
+    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridgeAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
+    bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/new.wav"));
+    bridge->setProperty("positionSeconds", 0.05);
+    QVERIFY(QMetaObject::invokeMethod(controller, "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1010.0)),
+        Q_ARG(QVariant, QVariant()), Q_ARG(QVariant, QVariant())));
+    QVERIFY(std::abs(controller->property("displayedPositionSeconds").toDouble() - 0.05) < 0.0001);
+    QVERIFY(std::abs(controller->property("spectrogramPositionSeconds").toDouble() - 0.05) < 0.0001);
+    QVERIFY(QMetaObject::invokeMethod(controller, "stepInterpolationTo",
+        Q_ARG(QVariant, QVariant::fromValue(1110.0))));
+    QVERIFY(std::abs(controller->property("displayedPositionSeconds").toDouble() - 0.15) < 0.0001);
+
+    // A pending visual seek belongs to the old track as well.
+    QVERIFY(QMetaObject::invokeMethod(controller, "seekCommittedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(120.0)),
+        Q_ARG(QVariant, QVariant::fromValue(1200.0))));
+    bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/third.wav"));
+    bridge->setProperty("positionSeconds", 0.0);
+    QVERIFY(QMetaObject::invokeMethod(controller, "handlePlaybackChangedAtTime",
+        Q_ARG(QVariant, QVariant::fromValue(1210.0)),
+        Q_ARG(QVariant, QVariant()), Q_ARG(QVariant, QVariant())));
+    QVERIFY(!controller->property("visualSeekClockActive").toBool());
+    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 0.0);
+    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 0.0);
 }
 
 void QmlSmokeTest::playbackControllerPlayAtCurrentTrackClearsPostSeekVisualClock() {
