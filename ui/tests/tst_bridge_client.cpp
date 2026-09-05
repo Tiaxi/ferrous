@@ -112,6 +112,9 @@ private slots:
     void trackSwitchReanchorsBeforeSpectrogramData();
     void sameTrackRestartRejectsQueuedOldPosition();
     void noOpNextPreservesPosition();
+    void trackResetSurvivesQueuedPlaybackNotification_data();
+    void trackResetSurvivesQueuedPlaybackNotification();
+    void queuedSeekNotificationPreservesAdvancedVisualClock();
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
     void inProcessBridgeInstallsWakeNotifier();
@@ -437,6 +440,86 @@ void BridgeClientTest::sameTrackRestartRejectsQueuedOldPosition() {
     client.seek(30.0);
     QCOMPARE(client.m_pendingTrackRestartUntilMs, qint64{0});
     QCOMPARE(client.m_positionSeconds, 30.0);
+}
+
+void BridgeClientTest::trackResetSurvivesQueuedPlaybackNotification_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<bool>("registerAfterSnapshot");
+    QTest::newRow("centered-existing-item") << 1 << false;
+    QTest::newRow("centered-new-item") << 1 << true;
+    QTest::newRow("rolling-existing-item") << 0 << false;
+    QTest::newRow("rolling-new-item") << 0 << true;
+}
+
+void BridgeClientTest::trackResetSurvivesQueuedPlaybackNotification() {
+    QFETCH(int, mode);
+    QFETCH(bool, registerAfterSnapshot);
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/fixture/old.wav");
+    client.m_positionSeconds = 120.0;
+    SpectrogramItem item;
+    item.setDisplayMode(mode);
+    item.m_precomputedReady = true;
+    item.setPositionSeconds(120.0);
+    item.setPlaying(true);
+    if (!registerAfterSnapshot) {
+        client.registerSpectrogramItem(&item, 0);
+    }
+
+    // Global search activates a track through replaceWithPaths. Its reset
+    // snapshot is processed before the queued playbackChanged reaches QML.
+    client.replaceWithPaths({QStringLiteral("/fixture/new.wav")});
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/fixture/new.wav");
+    snapshot.playback.positionSeconds = 0.05;
+    snapshot.playback.durationSeconds = 180.0;
+    client.processBinarySnapshot(snapshot);
+    if (registerAfterSnapshot) {
+        client.registerSpectrogramItem(&item, 0);
+    }
+    // An animation tick still has the outgoing QML interpolation clock.
+    item.setPositionSeconds(120.1);
+    // Heartbeats can also coalesce before notification: use the latest one.
+    snapshot.playback.positionSeconds = 0.25;
+    client.processBinarySnapshot(snapshot);
+    connect(&client, &BridgeClient::playbackChanged, &item, [&]() {
+        // Models the QML binding updating when its playback clock resets.
+        item.setPositionSeconds(client.m_positionSeconds);
+    });
+    QSignalSpy playback(&client, &BridgeClient::playbackChanged);
+    client.schedulePlaybackChanged();
+    QCoreApplication::processEvents();
+    QCOMPARE(playback.count(), 1);
+    if (mode == 1) {
+        QVERIFY(!item.m_positionJumpHoldActive);
+        QVERIFY(std::abs(item.m_positionAnchorSeconds - 0.25) < 0.0001);
+    } else {
+        // Rolling history still waits for its worker reset/continuation.
+        QVERIFY(item.m_positionAnchorSeconds >= 120.0);
+    }
+}
+
+void BridgeClientTest::queuedSeekNotificationPreservesAdvancedVisualClock() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    SpectrogramItem item;
+    item.setDisplayMode(1);
+    item.m_precomputedReady = true;
+    item.setPositionSeconds(120.0);
+    item.setPlaying(true);
+    client.registerSpectrogramItem(&item, 0);
+    client.seek(30.0);
+    connect(&client, &BridgeClient::playbackChanged, &item, [&]() {
+        // Explicit seeking owns an optimistic QML clock which may have
+        // advanced before the queued notification is delivered.
+        item.setPositionSeconds(30.2);
+    });
+    QCoreApplication::processEvents();
+    QVERIFY(std::abs(item.m_positionAnchorSeconds - 30.2) < 0.0001);
 }
 
 void BridgeClientTest::noOpNextPreservesPosition() {

@@ -708,6 +708,7 @@ private:
     bool m_loggedStartupQueueMissing{false};
     bool m_loggedStartupQueuePresent{false};
     bool m_playbackChangedPending{false};
+    bool m_transportPositionDiscontinuityPending{false};
     bool m_trackIdentityChangedPending{false};
     bool m_trackMetadataChangedPending{false};
     bool m_snapshotChangedPending{false};
