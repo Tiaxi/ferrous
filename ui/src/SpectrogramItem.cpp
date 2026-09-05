@@ -408,6 +408,15 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     }
 #endif
     rebuildPalette();
+    connect(this, &QQuickItem::visibleChanged, this, [this]() {
+        if (!isVisible()) return;
+        {
+            QMutexLocker lock(&m_stateMutex);
+            m_animationTickInitialized = false;
+            m_precomputedCanvasDirty = true;
+        }
+        update();
+    });
     connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
     bindWindowFpsTracking(window());
     m_zoomDebounceTimer = new QTimer(this);
@@ -1587,7 +1596,9 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     m_precomputedLastRightCol = -1;
 
-    if (m_displayMode == 1
+    if (!isVisible() || (window() != nullptr && !window()->isVisible())) {
+        m_precomputedCanvasDirty = true;
+    } else if (m_displayMode == 1
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
         && !m_canvas.isNull()
         && m_precomputedBinsPerColumn > 0) {
@@ -4558,6 +4569,7 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
 }
 
 void SpectrogramItem::handleWindowAfterAnimating() {
+    if (!isVisible()) return;
     using Clock = std::chrono::steady_clock;
     const auto now = Clock::now();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS

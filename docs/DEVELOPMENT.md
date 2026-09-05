@@ -78,6 +78,8 @@ See [data locations](INSTALL.md#data-locations). Use `./scripts/run-ui.sh --help
 
 ## Profiling
 
+See [visualization architecture](VISUALIZATION_ARCHITECTURE.md) for decoder ownership, cache budgets, cancellation, and visibility scheduling.
+
 Profiling logs are disabled at compile time by default. To build and run with UI instrumentation:
 
 ```bash

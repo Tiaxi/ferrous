@@ -86,6 +86,7 @@ pub enum AnalysisCommand {
     SetFftSize(usize),
     SetSpectrogramZoomLevel(f32),
     SetSpectrogramWidgetWidth(u32),
+    SetSpectrogramActive(bool),
     SetSpectrogramViewMode(SpectrogramViewMode),
     SetSpectrogramDisplayMode(SpectrogramDisplayMode),
     RestartCurrentTrack {
@@ -261,6 +262,7 @@ struct AnalysisRuntimeState {
     /// lookahead costs ~12 MB extra vs a 1080p lookahead.
     spectrogram_max_widget_width: u32,
     spectrogram_view_mode: SpectrogramViewMode,
+    spectrogram_active: bool,
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
     active_track_stamp: Option<WaveformSourceStamp>,
@@ -446,6 +448,7 @@ impl AnalysisRuntimeState {
             spectrogram_widget_width: 1920,
             spectrogram_max_widget_width: 1920,
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
+            spectrogram_active: true,
             active_track_token: 0,
             active_track_path: None,
             active_track_stamp: None,
@@ -514,6 +517,9 @@ impl AnalysisRuntimeState {
                 let target = self.last_spectrogram_position;
                 let start = self.spectrogram_restart_start_seconds(target, ctx);
                 self.start_spectrogram_session_with_target(start, target, true, true, ctx);
+            }
+            AnalysisCommand::SetSpectrogramActive(active) => {
+                self.set_spectrogram_active(active, ctx);
             }
             AnalysisCommand::SetSpectrogramWidgetWidth(width) => {
                 let w = width.max(320);
@@ -653,11 +659,38 @@ impl AnalysisRuntimeState {
         }
     }
 
+    fn set_spectrogram_active(&mut self, active: bool, ctx: &AnalysisContext<'_>) {
+        if self.spectrogram_active == active {
+            return;
+        }
+        self.spectrogram_active = active;
+        self.suppress_next_spectrogram_position_update = false;
+        if active {
+            let target = self.last_spectrogram_position;
+            let start = if self.display_mode == SpectrogramDisplayMode::Rolling {
+                // Restore a viewport of history when a hidden rolling view returns.
+                (target - (self.centered_margin_seconds() - 2.0).max(0.0)).max(0.0)
+            } else {
+                self.spectrogram_restart_start_seconds(target, ctx)
+            };
+            self.start_spectrogram_session_with_target(start, target, true, true, ctx);
+        } else {
+            ctx.spectrogram_decode_generation
+                .fetch_add(1, Ordering::Relaxed);
+            self.clear_early_continuation(ctx);
+            self.cancel_centered_staging();
+            let _ = ctx.spectrogram_cmd_tx.send(SpectrogramWorkerCommand::Stop);
+        }
+    }
+
     /// Send an early `ContinueWithFile` to the live worker so it writes
     /// next-track columns directly into the ring — zero gap.  Rolling
     /// mode only; centered mode needs fresh `NewTrack` with 0-based
     /// indices at commit time.  Called from `about-to-finish`.
     fn handle_prepare_gapless_continuation(&mut self, path: PathBuf, ctx: &AnalysisContext<'_>) {
+        if !self.spectrogram_active {
+            return;
+        }
         // Cancel any prior pending work for both modes.
         self.clear_early_continuation(ctx);
         self.cancel_centered_staging();
@@ -954,7 +987,13 @@ impl AnalysisRuntimeState {
         }
         self.emit_snapshot(ctx.event_tx, true);
 
-        if gapless && !reset_spectrogram && self.display_mode == SpectrogramDisplayMode::Rolling {
+        if !self.spectrogram_active {
+            self.last_spectrogram_position = 0.0;
+            self.spectrogram_position_offset = 0.0;
+        } else if gapless
+            && !reset_spectrogram
+            && self.display_mode == SpectrogramDisplayMode::Rolling
+        {
             self.handle_rolling_gapless(&path, track_token, format_compatible, ctx);
         } else if gapless && !reset_spectrogram {
             // Centered mode gapless: check for pre-staged data.
@@ -1085,6 +1124,9 @@ impl AnalysisRuntimeState {
         clear_history_on_reset: bool,
         ctx: &AnalysisContext<'_>,
     ) {
+        if !self.spectrogram_active {
+            return;
+        }
         let Some(path) = self.active_track_path.clone() else {
             profile_eprintln!(
                 "[analysis] start_spectrogram_session: no active_track_path, skipping"
@@ -1300,6 +1342,9 @@ impl AnalysisRuntimeState {
 
     fn update_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
         self.last_spectrogram_position = position_seconds;
+        if !self.spectrogram_active {
+            return;
+        }
         if self.suppress_next_spectrogram_position_update {
             self.suppress_next_spectrogram_position_update = false;
             return;
@@ -1315,6 +1360,9 @@ impl AnalysisRuntimeState {
     fn seek_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
         self.spectrogram_position_offset = 0.0;
         self.last_spectrogram_position = position_seconds;
+        if !self.spectrogram_active {
+            return;
+        }
 
         if self.display_mode == SpectrogramDisplayMode::Centered {
             // Windowed centered: check if the seek target is within the
@@ -2002,6 +2050,8 @@ mod tests {
         }
         for command in [
             AnalysisCommand::SeekPosition(0.5),
+            AnalysisCommand::SetSpectrogramActive(false),
+            AnalysisCommand::SetSpectrogramActive(true),
             AnalysisCommand::RestartCurrentTrack {
                 position_seconds: 0.0,
                 clear_history: true,
@@ -2165,6 +2215,67 @@ mod tests {
             cmd,
             SpectrogramWorkerCommand::CancelPendingContinue
         ));
+    }
+
+    #[test]
+    fn hidden_spectrogram_resumes_latest_track_and_position_in_both_modes() {
+        let path = write_engine_test_wave(1, 16_000);
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            let mut state = AnalysisRuntimeState::new();
+            state.display_mode = mode;
+            let (event_tx, _) = unbounded::<AnalysisEvent>();
+            let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+            let (waveform_job_tx, _) = unbounded::<WaveformDecodeJob>();
+            let waveform_decode_active_token = AtomicU64::new(0);
+            let spectrogram_decode_generation = AtomicU64::new(0);
+            let spectrogram_track_duration_ms = AtomicU64::new(0);
+            let spectrogram_decode_columns_produced = AtomicU64::new(0);
+            let ctx = AnalysisContext {
+                event_tx: &event_tx,
+                waveform_job_tx: &waveform_job_tx,
+                waveform_decode_active_token: &waveform_decode_active_token,
+                spectrogram_cmd_tx: &spectrogram_cmd_tx,
+                spectrogram_decode_generation: &spectrogram_decode_generation,
+                spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+                spectrogram_track_duration_ms: &spectrogram_track_duration_ms,
+            };
+
+            state.handle_command(AnalysisCommand::SetSpectrogramActive(false), &ctx);
+            assert!(matches!(
+                spectrogram_cmd_rx.try_recv().unwrap(),
+                SpectrogramWorkerCommand::Stop
+            ));
+            assert_eq!(spectrogram_decode_generation.load(Ordering::Relaxed), 1);
+            state.handle_command(AnalysisCommand::SetSpectrogramActive(false), &ctx);
+            state.update_spectrogram_position(200.0, &ctx);
+            state.handle_track_change(path.clone(), false, true, 9, &ctx);
+            assert_eq!(state.last_spectrogram_position, 0.0);
+            state.handle_prepare_gapless_continuation(path.clone(), &ctx);
+            state.seek_spectrogram_position(0.5, &ctx);
+            state.handle_command(AnalysisCommand::SetFftSize(512), &ctx);
+            state.update_spectrogram_position(0.75, &ctx);
+            assert!(spectrogram_cmd_rx.try_recv().is_err());
+            assert_eq!(spectrogram_decode_generation.load(Ordering::Relaxed), 1);
+            assert!(state.staged_continuation_path.is_none());
+            assert!(state.staged_centered_rx.is_none());
+
+            state.handle_command(AnalysisCommand::SetSpectrogramActive(true), &ctx);
+            let command = spectrogram_cmd_rx.try_recv().unwrap();
+            assert!(
+                matches!(command, SpectrogramWorkerCommand::NewTrack {
+                path: ref resumed_path, track_token: 9, generation: 2, fft_size: 512,
+                start_seconds, target_position_seconds: 0.75,
+                emit_initial_reset: true, clear_history_on_reset: true, ..
+            } if resumed_path == &path && start_seconds < 0.75),
+                "{command:?}"
+            );
+            state.handle_command(AnalysisCommand::SetSpectrogramActive(true), &ctx);
+            assert!(spectrogram_cmd_rx.try_recv().is_err());
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

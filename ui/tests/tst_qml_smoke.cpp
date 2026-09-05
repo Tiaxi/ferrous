@@ -453,6 +453,7 @@ class QmlSmokeTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void hiddenSpectrogramDefersPaintingAndRetainsIncomingData();
     void initTestCase();
     void init();
     void cleanup();
@@ -9559,6 +9560,42 @@ void QmlSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom
                     initialCanvas.pixelColor(x + 1, y));
             }
         }
+    }
+}
+
+void QmlSmokeTest::hiddenSpectrogramDefersPaintingAndRetainsIncomingData() {
+    for (const int mode : {0, 1}) {
+        SpectrogramItem item;
+        item.setWidth(100);
+        item.setHeight(10);
+        item.setDisplayMode(mode);
+        constexpr int bins = 4;
+        item.feedPrecomputedChunk(QByteArray(100 * bins, '\x60'), bins, 0, 100,
+            0, 1000, 48000, 1024, false, true, 1);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.ensureMapping(10);
+            item.rebuildPrecomputedCanvasLocked(100, 10, 0, 99, false);
+        }
+        const QImage before = item.m_canvas.copy();
+        const qint64 sequence = item.m_ringWriteSeq;
+        item.setVisible(false);
+        item.m_animationTickInitialized = false;
+        item.handleWindowAfterAnimating();
+        QVERIFY(!item.m_animationTickInitialized);
+        item.feedPrecomputedChunk(QByteArray(bins, '\xF0'), bins, 0, 1,
+            100, 1000, 48000, 1024, false, false, 1);
+        QCOMPARE(item.m_ringWriteSeq, sequence + 1);
+        QCOMPARE(item.m_canvas, before);
+        QVERIFY(item.m_precomputedCanvasDirty);
+        item.setVisible(true);
+        QVERIFY(!item.m_animationTickInitialized);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.rebuildPrecomputedCanvasLocked(100, 10, 1, 100, false);
+        }
+        QVERIFY(item.m_canvas != before);
+        QVERIFY(!item.m_precomputedCanvasDirty);
     }
 }
 

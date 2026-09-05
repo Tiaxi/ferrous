@@ -89,6 +89,7 @@ enum CommandId : quint16 {
     CmdShowTrackInLibrary = 61,
     CmdRefreshRenamedPaths = 62,
     CmdRemoveMany = 63,
+    CmdSetSpectrogramActive = 64,
 };
 
 struct DecodedPlayback {

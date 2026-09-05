@@ -55,6 +55,7 @@ pub(super) fn resets_spectral_stream(command: &AnalysisCommand) -> bool {
         AnalysisCommand::RestartCurrentTrack { .. }
             | AnalysisCommand::SetTrack { gapless: false, .. }
             | AnalysisCommand::SetFftSize(_)
+            | AnalysisCommand::SetSpectrogramActive(false)
     )
 }
 

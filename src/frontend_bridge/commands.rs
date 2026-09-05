@@ -102,6 +102,12 @@ pub(super) fn handle_bridge_command(
                     .command(AnalysisCommand::SetSpectrogramZoomLevel(level));
                 true
             }
+            BridgeAnalysisCommand::SetSpectrogramActive(active) => {
+                context
+                    .analysis
+                    .command(AnalysisCommand::SetSpectrogramActive(active));
+                false
+            }
             BridgeAnalysisCommand::SetSpectrogramWidgetWidth(width) => {
                 context
                     .analysis
