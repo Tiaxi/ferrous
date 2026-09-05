@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,7 +9,7 @@ use std::time::Instant;
 use crossbeam_channel::{Receiver, Sender};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::library::{search_tracks_fts, LibraryRoot, LibrarySearchTrack, LibrarySnapshot};
+use crate::library::{LibraryRoot, LibrarySearchTrack, LibrarySnapshot};
 
 use super::{
     BridgeSearchResultRow, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeState,
@@ -55,7 +55,6 @@ struct HitAlbumAcc {
 }
 
 struct SearchResultLimits {
-    fallback: usize,
     artist: usize,
     album: usize,
     track: usize,
@@ -94,10 +93,12 @@ impl SearchRowAccumulator {
         }
     }
 
-    fn push_hit(&mut self, hit: &LibrarySearchTrack, query_terms: &[String]) {
-        let Some(context) = derive_hit_context(hit, &self.roots, &self.roots_by_path) else {
-            return;
-        };
+    fn push_hit(
+        &mut self,
+        hit: &LibrarySearchTrack,
+        query_terms: &[String],
+    ) -> Option<BridgeSearchResultRow> {
+        let context = derive_hit_context(hit, &self.roots, &self.roots_by_path)?;
         let hit_path_string = hit.path.to_string_lossy().to_string();
         let hit_artist = if hit.artist.trim().is_empty() {
             context.artist_name.clone()
@@ -114,30 +115,43 @@ impl SearchRowAccumulator {
         };
         let album_key = context.album_key.clone();
         if query_terms_match_text(query_terms, &context.artist_name) {
+            let score = entity_score(
+                query_terms,
+                &normalize_for_search(&context.artist_name),
+                &[],
+            );
             let artist_entry = self
                 .artist_groups
                 .entry(context.artist_key.clone())
                 .or_insert((
-                    hit.score,
+                    score,
                     context.artist_name.clone(),
                     context.root_label.clone(),
                 ));
-            if hit.score < artist_entry.0 {
-                artist_entry.0 = hit.score;
+            if score < artist_entry.0 {
+                artist_entry.0 = score;
                 artist_entry.1.clone_from(&context.artist_name);
                 artist_entry.2.clone_from(&context.root_label);
             }
         }
         if let Some(album_key_value) = album_key.clone() {
-            let album_query = format!("{} {}", context.artist_name, hit_album);
+            let album_query = format!("{} {} {}", context.artist_name, hit_artist, hit_album);
             if query_terms_match_text(query_terms, &album_query) {
+                let score = entity_score(
+                    query_terms,
+                    &normalize_for_search(&hit_album),
+                    &[
+                        &normalize_for_search(&hit_artist),
+                        &normalize_for_search(&context.artist_name),
+                    ],
+                );
                 let album_entry = self.album_groups.entry(album_key_value.clone()).or_insert((
-                    hit.score,
+                    score,
                     hit_album.clone(),
                     context.root_label.clone(),
                 ));
-                if hit.score < album_entry.0 {
-                    album_entry.0 = hit.score;
+                if score < album_entry.0 {
+                    album_entry.0 = score;
                     album_entry.1.clone_from(&hit_album);
                     album_entry.2.clone_from(&context.root_label);
                 }
@@ -164,7 +178,7 @@ impl SearchRowAccumulator {
         } else {
             hit.cover_path.clone()
         };
-        self.track_rows.push(build_track_search_result_row(
+        Some(build_track_search_result_row(
             hit,
             &context,
             &hit_artist,
@@ -172,7 +186,7 @@ impl SearchRowAccumulator {
             album_key,
             hit_path_string,
             row_cover_path,
-        ));
+        ))
     }
 
     fn finish(self) -> SearchRowBuckets {
@@ -190,8 +204,6 @@ impl SearchRowAccumulator {
 struct PreparedSearchTrack {
     path: PathBuf,
     root_path: PathBuf,
-    path_string: String,
-    path_lower: String,
     title: String,
     artist: String,
     album: String,
@@ -259,8 +271,8 @@ pub(super) enum SearchBuildOutcome {
     Cancelled(SearchWorkerQuery),
 }
 
-enum SearchFallbackOutcome {
-    Hits(Vec<LibrarySearchTrack>),
+enum PreparedSearchOutcome {
+    Hits(SearchRowBuckets),
     Cancelled(SearchWorkerQuery),
 }
 
@@ -285,31 +297,22 @@ pub(super) struct PreparedSearchRoot {
     pub(super) root_label: String,
 }
 
-#[derive(Clone)]
-struct FallbackRankedHit {
-    score: f32,
-    path_lower: String,
-    track_index: usize,
-}
+struct RankedSearchRow(BridgeSearchResultRow);
 
-impl PartialEq for FallbackRankedHit {
+impl PartialEq for RankedSearchRow {
     fn eq(&self, other: &Self) -> bool {
-        compare_fallback_rank(self.score, &self.path_lower, other.score, &other.path_lower)
-            == Ordering::Equal
+        self.cmp(other) == Ordering::Equal
     }
 }
-
-impl Eq for FallbackRankedHit {}
-
-impl PartialOrd for FallbackRankedHit {
+impl Eq for RankedSearchRow {}
+impl PartialOrd for RankedSearchRow {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-
-impl Ord for FallbackRankedHit {
+impl Ord for RankedSearchRow {
     fn cmp(&self, other: &Self) -> Ordering {
-        compare_fallback_rank(self.score, &self.path_lower, other.score, &other.path_lower)
+        search_row_cmp(&self.0, &other.0)
     }
 }
 
@@ -321,25 +324,11 @@ fn search_profile_enabled() -> bool {
     cfg!(feature = "profiling-logs") && std::env::var_os("FERROUS_SEARCH_PROFILE").is_some()
 }
 
-fn search_fallback_limit() -> usize {
-    std::env::var("FERROUS_SEARCH_FALLBACK_LIMIT")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(256, |v| v.clamp(64, 5_000))
-}
-
 fn search_short_query_char_threshold() -> usize {
     std::env::var("FERROUS_SEARCH_SHORT_QUERY_CHARS")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .map_or(1, |v| v.clamp(1, 8))
-}
-
-fn search_fallback_limit_short() -> usize {
-    std::env::var("FERROUS_SEARCH_FALLBACK_LIMIT_SHORT")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .map_or(128, |v| v.clamp(64, 5_000))
 }
 
 fn search_artist_row_limit() -> usize {
@@ -637,11 +626,6 @@ fn empty_search_results_frame(seq: u32) -> SearchBuildOutcome {
 fn search_result_limits(query_text: &str) -> SearchResultLimits {
     let is_short_query = query_text.chars().count() <= search_short_query_char_threshold();
     SearchResultLimits {
-        fallback: if is_short_query {
-            search_fallback_limit_short()
-        } else {
-            search_fallback_limit()
-        },
         artist: if is_short_query {
             search_artist_row_limit_short()
         } else {
@@ -658,22 +642,6 @@ fn search_result_limits(query_text: &str) -> SearchResultLimits {
             search_track_row_limit()
         },
     }
-}
-
-fn search_fts_enabled() -> bool {
-    std::env::var_os("FERROUS_SEARCH_DISABLE_FTS").is_none()
-}
-
-fn populate_search_rows(
-    roots: &[LibraryRoot],
-    hits: &[LibrarySearchTrack],
-    query_terms: &[String],
-) -> SearchRowBuckets {
-    let mut rows = SearchRowAccumulator::new(roots.to_vec());
-    for hit in hits {
-        rows.push_hit(hit, query_terms);
-    }
-    rows.finish()
 }
 
 fn choose_most_common_year(counts: &HashMap<i32, usize>) -> Option<i32> {
@@ -806,6 +774,8 @@ fn search_row_cmp(a: &BridgeSearchResultRow, b: &BridgeSearchResultRow) -> Order
         .unwrap_or(Ordering::Equal)
         .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
         .then_with(|| a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
+        .then_with(|| a.artist_key.cmp(&b.artist_key))
+        .then_with(|| a.album_key.cmp(&b.album_key))
         .then_with(|| {
             a.track_path
                 .to_lowercase()
@@ -844,78 +814,6 @@ fn derive_hit_context(
         .or_else(|| derive_tree_path_context(&hit.path, roots, &hit.artist))
 }
 
-fn accumulate_album_inventory_for_hits(
-    library: &LibrarySnapshot,
-    roots_by_path: &HashMap<PathBuf, PreparedSearchRoot>,
-    album_keys: &HashSet<String>,
-) -> HashMap<String, AlbumInventoryAcc> {
-    if album_keys.is_empty() {
-        return HashMap::new();
-    }
-
-    let mut album_inventory: HashMap<String, AlbumInventoryAcc> =
-        HashMap::with_capacity(album_keys.len());
-    for track in &library.tracks {
-        let artist = track.artist.trim().to_string();
-        let Some(context) = roots_by_path
-            .get(&track.root_path)
-            .and_then(|root| derive_tree_path_context_for_root(&track.path, root, &artist))
-        else {
-            continue;
-        };
-        let Some(album_key) = context.album_key else {
-            continue;
-        };
-        if !album_keys.contains(&album_key) {
-            continue;
-        }
-        let include_in_main_album =
-            context.is_main_level_album_track || context.is_disc_section_album_track;
-        if !include_in_main_album {
-            continue;
-        }
-
-        let inventory = album_inventory.entry(album_key).or_default();
-        inventory.main_track_count = inventory.main_track_count.saturating_add(1);
-        if let Some(duration) = track.duration_secs {
-            if duration.is_finite() && duration >= 0.0 {
-                inventory.main_total_length += duration;
-                inventory.has_main_duration = true;
-            }
-        }
-    }
-
-    album_inventory
-}
-
-fn build_search_rows_from_hits(
-    library: &LibrarySnapshot,
-    hits: &[LibrarySearchTrack],
-    query_terms: &[String],
-    limits: &SearchResultLimits,
-) -> Vec<BridgeSearchResultRow> {
-    let buckets = populate_search_rows(&library.roots, hits, query_terms);
-    let album_keys = buckets.album_groups.keys().cloned().collect::<HashSet<_>>();
-    let album_inventory = accumulate_album_inventory_for_hits(
-        library,
-        &roots_by_path_for_search(&library.roots),
-        &album_keys,
-    );
-    finalize_search_rows(
-        &album_inventory,
-        limits,
-        &buckets.album_cover_paths,
-        buckets.artist_groups,
-        buckets.album_groups,
-        &buckets.album_hit_stats,
-        buckets.track_rows,
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Prepare search library
-// ---------------------------------------------------------------------------
-
 fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
     let roots = library.roots.clone();
     if roots.is_empty() {
@@ -928,7 +826,6 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
 
     for track in &library.tracks {
         let path_string = track.path.to_string_lossy().to_string();
-        let path_lower = path_string.to_lowercase();
         let title = track.title.trim().to_string();
         let artist = track.artist.trim().to_string();
         let album = track.album.trim().to_string();
@@ -963,8 +860,6 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
         tracks.push(PreparedSearchTrack {
             path: track.path.clone(),
             root_path: track.root_path.clone(),
-            path_string,
-            path_lower,
             title,
             artist,
             album,
@@ -988,99 +883,66 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
 }
 
 // ---------------------------------------------------------------------------
-// Fallback search
+// Prepared library search
 // ---------------------------------------------------------------------------
 
-fn compare_fallback_rank(
-    a_score: f32,
-    a_path_lower: &str,
-    b_score: f32,
-    b_path_lower: &str,
-) -> Ordering {
-    a_score
-        .partial_cmp(&b_score)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| a_path_lower.cmp(b_path_lower))
+/// Rank an entity by its own name before supporting metadata. Scores are
+/// independent of library size, tag repetition, and filesystem path length.
+fn entity_score(terms: &[String], name: &str, secondary: &[&str]) -> f32 {
+    let phrase = terms.join(" ");
+    if name == phrase {
+        return 0.0;
+    }
+    if name.starts_with(&phrase) {
+        return 1.0;
+    }
+    if name.contains(&phrase) {
+        return 2.0;
+    }
+    if terms.iter().all(|term| name.contains(term)) {
+        return 3.0;
+    }
+    if terms
+        .iter()
+        .all(|term| name.contains(term) || secondary.iter().any(|field| field.contains(term)))
+    {
+        return 4.0;
+    }
+    5.0
 }
 
-fn search_tracks_fallback_prepared(
+fn search_tracks_prepared(
     query: &str,
     prepared: &PreparedSearchLibrary,
+    roots: &[LibraryRoot],
     limit: usize,
     query_rx: &Receiver<SearchWorkerQuery>,
-) -> SearchFallbackOutcome {
+) -> PreparedSearchOutcome {
     let terms = split_search_terms(query);
-    if terms.is_empty() {
-        return SearchFallbackOutcome::Hits(Vec::new());
-    }
-
-    let capped_limit = limit.clamp(1, 5_000);
-    let mut heap =
-        std::collections::BinaryHeap::<FallbackRankedHit>::with_capacity(capped_limit + 1);
+    let mut accumulator = SearchRowAccumulator::new(roots.to_vec());
+    let mut ranked = std::collections::BinaryHeap::<RankedSearchRow>::new();
     let cancel_poll_rows = search_cancel_poll_rows();
     for (index, track) in prepared.tracks.iter().enumerate() {
         if index % cancel_poll_rows == 0 {
             if let Some(next) = poll_latest_search_query(query_rx) {
-                return SearchFallbackOutcome::Cancelled(next);
+                return PreparedSearchOutcome::Cancelled(next);
             }
         }
-        if !terms.iter().all(|term| track.haystack_l.contains(term)) {
+        if terms.is_empty() || !terms.iter().all(|term| track.haystack_l.contains(term)) {
             continue;
         }
-
-        let mut score = 0.0f32;
-        for term in &terms {
-            score += if track.title_l.starts_with(term) {
-                0.0
-            } else if track.title_l.contains(term) {
-                0.8
-            } else if track.artist_l.starts_with(term) {
-                1.2
-            } else if track.artist_l.contains(term) {
-                1.8
-            } else if track.album_l.starts_with(term) {
-                2.0
-            } else if track.album_l.contains(term) {
-                2.6
-            } else if track.genre_l.contains(term) {
-                3.2
-            } else {
-                4.0
-            };
+        let mut score = entity_score(&terms, &track.title_l, &[&track.artist_l, &track.album_l]);
+        if score >= 5.0
+            && !terms.iter().all(|term| {
+                track.title_l.contains(term)
+                    || track.artist_l.contains(term)
+                    || track.album_l.contains(term)
+                    || track.genre_l.contains(term)
+            })
+        {
+            score = 6.0;
         }
-        score += f32::from(
-            u16::try_from(track.path_string.len().min(usize::from(u16::MAX))).unwrap_or(u16::MAX),
-        ) / 10_000.0;
-
-        if heap.len() >= capped_limit {
-            if let Some(worst) = heap.peek() {
-                let is_better =
-                    compare_fallback_rank(score, &track.path_lower, worst.score, &worst.path_lower)
-                        == Ordering::Less;
-                if !is_better {
-                    continue;
-                }
-            }
-            let _ = heap.pop();
-        }
-        heap.push(FallbackRankedHit {
-            score,
-            path_lower: track.path_lower.clone(),
-            track_index: index,
-        });
-    }
-
-    if let Some(next) = poll_latest_search_query(query_rx) {
-        return SearchFallbackOutcome::Cancelled(next);
-    }
-
-    let mut ranked = heap.into_vec();
-    ranked.sort_by(|a, b| compare_fallback_rank(a.score, &a.path_lower, b.score, &b.path_lower));
-
-    let mut out = Vec::with_capacity(ranked.len());
-    for rank in ranked {
-        let track = &prepared.tracks[rank.track_index];
-        out.push(LibrarySearchTrack {
+        let hit = LibrarySearchTrack {
             path: track.path.clone(),
             root_path: track.root_path.clone(),
             title: track.title.clone(),
@@ -1091,10 +953,25 @@ fn search_tracks_fallback_prepared(
             year: track.year,
             track_no: track.track_no,
             duration_secs: track.duration_secs,
-            score: rank.score,
-        });
+            score,
+        };
+        // Collect every matching group before bounding track rows: one large
+        // album must not consume the candidate budget for all other albums.
+        if let Some(row) = accumulator.push_hit(&hit, &terms) {
+            let candidate = RankedSearchRow(row);
+            if ranked.len() < limit {
+                ranked.push(candidate);
+            } else if ranked.peek().is_some_and(|worst| candidate < *worst) {
+                ranked.pop();
+                ranked.push(candidate);
+            }
+        }
     }
-    SearchFallbackOutcome::Hits(out)
+    if let Some(next) = poll_latest_search_query(query_rx) {
+        return PreparedSearchOutcome::Cancelled(next);
+    }
+    accumulator.track_rows = ranked.into_iter().map(|row| row.0).collect();
+    PreparedSearchOutcome::Hits(accumulator.finish())
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,29 +997,17 @@ fn build_search_results_frame(
     if library.roots.is_empty() {
         return empty_search_results_frame(seq);
     }
-    if search_fts_enabled() {
-        if let Ok(hits) = search_tracks_fts(query_text, limits.fallback) {
-            if !hits.is_empty() {
-                let rows = build_search_rows_from_hits(library, &hits, &query_terms, &limits);
-                return SearchBuildOutcome::Frame(BridgeSearchResultsFrame { seq, rows });
-            }
-        }
-    }
-
     let prepared = prepared_cache.prepared_for(&query.library);
-    let hits = match search_tracks_fallback_prepared(
+    let buckets = match search_tracks_prepared(
         query_text,
         prepared.as_ref(),
-        limits.fallback,
+        &library.roots,
+        limits.track,
         query_rx,
     ) {
-        SearchFallbackOutcome::Hits(rows) => rows,
-        SearchFallbackOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
+        PreparedSearchOutcome::Hits(rows) => rows,
+        PreparedSearchOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
     };
-    if hits.is_empty() {
-        return empty_search_results_frame(seq);
-    }
-    let buckets = populate_search_rows(&library.roots, &hits, &query_terms);
     let rows = finalize_search_rows(
         &prepared.album_inventory,
         &limits,
@@ -1290,15 +1155,6 @@ mod tests {
         }
     }
 
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-        TEST_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     #[test]
     fn disc_section_detection_accepts_common_main_disc_names() {
         assert!(is_main_album_disc_section("CD1"));
@@ -1369,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_search_cancels_when_newer_query_arrives() {
+    fn prepared_search_cancels_when_newer_query_arrives() {
         let root = p("/music");
         let snapshot = LibrarySnapshot {
             roots: vec![library_root(&root)],
@@ -1396,9 +1252,9 @@ mod tests {
         })
         .expect("queue newer search");
 
-        match search_tracks_fallback_prepared("song", &prepared, 10, &rx) {
-            SearchFallbackOutcome::Cancelled(next) => assert_eq!(next.seq, 99),
-            SearchFallbackOutcome::Hits(_) => panic!("expected cancellation"),
+        match search_tracks_prepared("song", &prepared, &[library_root(&p("/music"))], 10, &rx) {
+            PreparedSearchOutcome::Cancelled(next) => assert_eq!(next.seq, 99),
+            PreparedSearchOutcome::Hits(_) => panic!("expected cancellation"),
         }
     }
 
@@ -1462,8 +1318,6 @@ mod tests {
 
     #[test]
     fn album_search_rows_include_album_cover_path() {
-        let _guard = test_guard();
-        std::env::set_var("FERROUS_SEARCH_DISABLE_FTS", "1");
         let root = PathBuf::from(format!(
             "/tmp/ferrous-search-album-cover-{}-{}",
             std::process::id(),
@@ -1515,7 +1369,6 @@ mod tests {
             .find(|row| row.row_type == BridgeSearchResultRowType::Album)
             .expect("album row present");
         assert_eq!(album_row.cover_path, cover.to_string_lossy());
-        std::env::remove_var("FERROUS_SEARCH_DISABLE_FTS");
     }
 
     #[test]
@@ -1542,5 +1395,144 @@ mod tests {
 
         let terms3 = split_search_terms("sigur ros");
         assert!(query_terms_match_text(&terms3, "Sigur Rós"));
+    }
+    fn fixture_track(
+        title: &str,
+        artist: &str,
+        album: &str,
+        file: &str,
+    ) -> crate::library::LibraryTrack {
+        crate::library::LibraryTrack {
+            path: p(&format!("/music/{artist}/{album}/{file}.flac")),
+            root_path: p("/music"),
+            title: title.into(),
+            artist: artist.into(),
+            album: album.into(),
+            ..crate::library::LibraryTrack::default()
+        }
+    }
+
+    fn fixture_search(
+        query: &str,
+        tracks: Vec<crate::library::LibraryTrack>,
+        limit: usize,
+    ) -> Vec<BridgeSearchResultRow> {
+        let library = LibrarySnapshot {
+            roots: vec![library_root(&p("/music"))],
+            tracks,
+            ..LibrarySnapshot::default()
+        };
+        let prepared = prepare_search_library(&library);
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let PreparedSearchOutcome::Hits(buckets) =
+            search_tracks_prepared(query, &prepared, &library.roots, limit, &rx)
+        else {
+            panic!("unexpected cancellation")
+        };
+        finalize_search_rows(
+            &prepared.album_inventory,
+            &SearchResultLimits {
+                artist: limit,
+                album: limit,
+                track: limit,
+            },
+            &buckets.album_cover_paths,
+            buckets.artist_groups,
+            buckets.album_groups,
+            &buckets.album_hit_stats,
+            buckets.track_rows,
+        )
+    }
+
+    #[test]
+    fn exact_title_beats_repeated_metadata_and_prefix_matches() {
+        let rows = fixture_search(
+            "blue",
+            vec![
+                fixture_track("Intro", "Blue", "Blue", "01"),
+                fixture_track("Blue Skies", "Example", "Songs", "02"),
+                fixture_track(
+                    "Blue",
+                    "The Example Ensemble",
+                    "Collected Songs of the Northern Landscape",
+                    "03",
+                ),
+            ],
+            20,
+        );
+        let titles: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+            .map(|row| row.label.as_str())
+            .collect();
+        assert_eq!(titles, ["Blue", "Blue Skies", "Intro"]);
+    }
+
+    #[test]
+    fn substring_and_path_matches_survive_other_prefix_matches() {
+        let rows = fixture_search(
+            "light",
+            vec![
+                fixture_track("Moonlight", "Example", "Night", "01"),
+                fixture_track("Light Years", "Another", "Day", "02"),
+                fixture_track("Instrumental", "Third", "Songs", "light-recording"),
+            ],
+            20,
+        );
+        let titles: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+            .map(|row| row.label.as_str())
+            .collect();
+        assert_eq!(titles, ["Light Years", "Moonlight", "Instrumental"]);
+    }
+
+    #[test]
+    fn all_terms_can_match_across_accented_metadata() {
+        let mut track = fixture_track("Svefn", "Sigur Rós", "Ágætis byrjun", "01");
+        track.genre = "Post-rock".into();
+        let rows = fixture_search("SIGUR agætis rock", vec![track.clone()], 20);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+                .count(),
+            1
+        );
+        assert!(fixture_search("sigur missing", vec![track], 20).is_empty());
+    }
+
+    #[test]
+    fn groups_are_ranked_by_name_before_track_truncation() {
+        let mut tracks: Vec<_> = (0..300)
+            .map(|i| {
+                fixture_track(
+                    "Blue",
+                    "Blue Orchestra",
+                    "Blue Collection",
+                    &format!("{i:03}"),
+                )
+            })
+            .collect();
+        tracks.push(fixture_track("Intro", "Blue", "Blue", "01"));
+        let rows = fixture_search("blue", tracks, 1);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].row_type, BridgeSearchResultRowType::Artist);
+        assert_eq!(rows[0].label, "Blue");
+        assert_eq!(rows[1].row_type, BridgeSearchResultRowType::Album);
+        assert_eq!(rows[1].label, "Blue");
+        assert_eq!(rows[1].count, 1);
+    }
+
+    #[test]
+    fn equal_relevance_uses_title_before_path() {
+        let rows = fixture_search(
+            "artist",
+            vec![
+                fixture_track("Zulu", "Artist", "Album", "01"),
+                fixture_track("Alpha", "Artist", "Album", "99"),
+            ],
+            1,
+        );
+        assert_eq!(rows.last().expect("track result").label, "Alpha");
     }
 }
