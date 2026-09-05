@@ -11,6 +11,7 @@
 
 class GlobalSearchResultsModel : public QAbstractListModel {
     Q_OBJECT
+    Q_PROPERTY(QString resultFilter READ resultFilter WRITE setResultFilter NOTIFY searchRowsChanged)
 
 public:
     struct SearchDisplayRow {
@@ -120,6 +121,10 @@ public:
     QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
 
+    void presentSearchRows(QVector<SearchDisplayRow> rows);
+    QString resultFilter() const { return m_resultFilter; }
+    void setResultFilter(const QString &filter);
+    Q_INVOKABLE QString highlightText(const QString &text, const QString &query) const;
     void replaceRows(QVector<SearchDisplayRow> rows);
     void replaceRowsBatched(QVector<SearchDisplayRow> rows, int batchSize = 10);
     void cancelBatchedInsertion();
@@ -128,7 +133,13 @@ public:
     Q_INVOKABLE bool isSelectableIndex(int index) const;
     Q_INVOKABLE int nextSelectableIndex(int startIndex, int step, bool wrap) const;
 
+signals:
+    void searchRowsChanged();
+
 private:
+    void rebuildSearchRows();
+    QString m_resultFilter{QStringLiteral("all")};
+    QVector<SearchDisplayRow> m_sourceSearchRows;
     QVector<SearchDisplayRow> m_rows;
 
     QVector<SearchDisplayRow> m_pendingBatchRows;

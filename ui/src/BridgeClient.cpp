@@ -1739,6 +1739,7 @@ void BridgeClient::searchApplyWorkerLoop() {
         out.coalescedInputDrops = coalescedInputDrops;
 
         if (decodedOk) {
+            for (auto total : decoded.totals) out.totals.push_back(total);
             QElapsedTimer materializeTimer;
             materializeTimer.start();
             QHash<QString, QString> coverUrlCache;
@@ -3139,6 +3140,21 @@ void BridgeClient::setLibrarySortMode(int mode) {
         static_cast<qint32>(clamped)));
 }
 
+bool BridgeClient::globalSearchCanExpand() const {
+    return !m_globalSearchBusy && m_globalSearchLimit < 2000
+        && (m_globalSearchArtistCount < m_globalSearchTotals.value(0).toInt()
+            || m_globalSearchAlbumCount < m_globalSearchTotals.value(1).toInt()
+            || m_globalSearchTrackCount < m_globalSearchTotals.value(2).toInt());
+}
+
+void BridgeClient::expandGlobalSearch() {
+    if (!globalSearchCanExpand() || m_pendingGlobalSearchQuery.isEmpty()) return;
+    m_globalSearchLimit = std::min(2000u, std::max(40u, m_globalSearchLimit * 2));
+    m_globalSearchBusy = true;
+    emit globalSearchResultsChanged();
+    flushGlobalSearchQuery();
+}
+
 void BridgeClient::setGlobalSearchQuery(const QString &query) {
     const QString nextQuery = canonicalizeSearchQuery(query);
     const int trimmedChars = nextQuery.size();
@@ -3158,6 +3174,11 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
         return;
     }
     m_pendingGlobalSearchQuery = nextQuery;
+    m_globalSearchLimit = 0;
+    m_globalSearchBusy = !nextQuery.isEmpty();
+    m_searchModelApplyTimer.stop();
+    m_deferredSearchDisplayRows.clear();
+    emit globalSearchResultsChanged();
 
     if (nextQuery.trimmed().isEmpty()) {
         m_globalSearchModel.cancelBatchedInsertion();
@@ -3195,6 +3216,8 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
         if (changed) {
             emit globalSearchResultsChanged();
         }
+        m_globalSearchTotals = {0, 0, 0};
+        emit globalSearchResultsChanged();
         m_globalSearchSentAtMs.clear();
         if (m_profileUiEnabled) {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
@@ -3836,6 +3859,7 @@ QString BridgeClient::resolveDiagnosticsLogPath() {
 bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame) {
     SearchWorkerOutputFrame out;
     out.seq = frame.seq;
+    for (auto total : frame.totals) out.totals.push_back(total);
     QHash<QString, QString> coverUrlCache;
     coverUrlCache.reserve(frame.rows.size());
     const auto coverUrlForSearchRow = [&coverUrlCache](const QString &coverPath) {
@@ -4005,6 +4029,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
         emit bridgeError(QStringLiteral("invalid search frame: %1").arg(frame.decodeError));
         return false;
     }
+    if (m_globalSearchDebounceTimer.isActive()) return false;
     if (m_latestGlobalSearchSeqSent != 0
         && frame.seq != m_latestGlobalSearchSeqSent
         && !isNewerSeq(frame.seq, m_latestGlobalSearchSeqSent)) {
@@ -4047,6 +4072,8 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     const int albumCount = frame.albumCount;
     const int trackCount = frame.trackCount;
     m_globalSearchSeq = frame.seq;
+    m_globalSearchTotals = frame.totals.isEmpty()
+        ? QVariantList{artistCount, albumCount, trackCount} : frame.totals;
     m_globalSearchArtistCount = artistCount;
     m_globalSearchAlbumCount = albumCount;
     m_globalSearchTrackCount = trackCount;
@@ -4073,6 +4100,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     // QML delegate update runs.  If a new frame arrives before the timer
     // fires, the stored rows are overwritten and the timer is restarted,
     // giving latest-wins coalescing for free.
+    m_deferredSearchSeq = frame.seq;
     m_deferredSearchDisplayRows = std::move(frame.displayRows);
     m_searchModelApplyTimer.start();
     m_searchFramesApplied++;
@@ -4112,7 +4140,10 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
 }
 
 void BridgeClient::applyDeferredSearchDisplayRows() {
-    m_globalSearchModel.replaceRowsBatched(std::move(m_deferredSearchDisplayRows));
+    if (m_globalSearchDebounceTimer.isActive() || m_deferredSearchSeq != m_latestGlobalSearchSeqSent) return;
+    m_globalSearchModel.presentSearchRows(std::move(m_deferredSearchDisplayRows));
+    m_globalSearchBusy = false;
+    emit globalSearchResultsChanged();
 }
 
 void BridgeClient::flushGlobalSearchQuery() {
@@ -4124,7 +4155,8 @@ void BridgeClient::flushGlobalSearchQuery() {
         }
         return;
     }
-    if (m_pendingGlobalSearchQuery == m_lastGlobalSearchQuerySent) {
+    if (m_pendingGlobalSearchQuery == m_lastGlobalSearchQuerySent
+        && m_globalSearchLimit == m_lastGlobalSearchLimitSent) {
         if (m_profileUiEnabled) {
             FERROUS_PROFILE_LOG_DIAGNOSTIC(
                 QStringLiteral("search"),
@@ -4139,6 +4171,7 @@ void BridgeClient::flushGlobalSearchQuery() {
         m_globalSearchSentAtMs.clear();
     }
     m_lastGlobalSearchQuerySent = m_pendingGlobalSearchQuery;
+    m_lastGlobalSearchLimitSent = m_globalSearchLimit;
     const QString trimmedQuery = m_pendingGlobalSearchQuery.trimmed();
     QString preview = trimmedQuery;
     if (preview.size() > 64) {
@@ -4155,7 +4188,7 @@ void BridgeClient::flushGlobalSearchQuery() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandSearchQuery(
         BinaryBridgeCodec::CmdSetSearchQuery,
         seq,
-        m_pendingGlobalSearchQuery));
+        m_pendingGlobalSearchQuery, m_globalSearchLimit));
 }
 
 void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {

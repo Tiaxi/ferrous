@@ -3,13 +3,11 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
-import QtQml.Models
-import org.kde.kirigami 2.20 as Kirigami
 import "../components" as Components
 
 Dialog {
     id: root
-
+    objectName: "globalSearchDialog"
     required property var controller
     required property var uiPalette
     required property var windowRoot
@@ -17,756 +15,261 @@ Dialog {
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
     required property bool globalSearchShowsRootColumn
-    required property int globalSearchTrackNumberColumnWidth
-    required property int globalSearchCoverColumnWidth
-    required property int globalSearchArtistColumnWidth
-    required property int globalSearchAlbumColumnWidth
-    required property int globalSearchRootColumnWidth
-    required property int globalSearchYearColumnWidth
-    required property int globalSearchTrackGenreColumnWidth
-    required property int globalSearchAlbumCountColumnWidth
-    required property int globalSearchTrackLengthColumnWidth
-
     property var contextRowData: ({})
+    readonly property bool searching: !!root.controller.uiBridge.globalSearchBusy
+    readonly property string resultFilter: root.controller.globalSearchModelApi.resultFilter || "all"
 
     modal: true
-    title: "Global Search"
+    title: "Search library"
     standardButtons: Dialog.Close
-    width: Math.min(1240, root.windowRoot.width - 64)
+    width: Math.min(1000, root.windowRoot.width - 64)
     height: Math.min(720, root.windowRoot.height - 80)
     enter: Components.PopupTransition { duration: root.popupTransitionMs }
     exit: Components.PopupTransition { duration: root.popupTransitionMs }
-
-    Component.onCompleted: root.controller.registerRefs(root, globalSearchQueryField, globalSearchResultsView)
-
-    onOpened: root.controller.handleDialogOpened(globalSearchQueryField.text || "")
+    Component.onCompleted: root.controller.registerRefs(root, queryField, resultsView)
+    onOpened: root.controller.handleDialogOpened(queryField.text || "")
     onClosed: root.controller.endOpen(true)
+
+    function highlighted(value) {
+        const text = String(value || "")
+        return root.controller.globalSearchModelApi.highlightText
+            ? root.controller.globalSearchModelApi.highlightText(text, queryField.text)
+            : text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    }
+
+    function resultSummary() {
+        const bridge = root.controller.uiBridge
+        const shown = [bridge.globalSearchArtistCount || 0, bridge.globalSearchAlbumCount || 0, bridge.globalSearchTrackCount || 0]
+        const totals = bridge.globalSearchTotals || shown
+        const names = ["artists", "albums", "tracks"]
+        const types = ["artist", "album", "track"]
+        let parts = []
+        for (let i = 0; i < 3; ++i) {
+            if (root.resultFilter === "all" || root.resultFilter === types[i])
+                parts.push(shown[i] + " of " + (totals[i] || 0) + " " + names[i])
+        }
+        return parts.join(" · ")
+    }
+
+    function filterHasMore() {
+        const b = root.controller.uiBridge
+        const shown = [b.globalSearchArtistCount || 0, b.globalSearchAlbumCount || 0, b.globalSearchTrackCount || 0]
+        const totals = b.globalSearchTotals || shown
+        const types = ["artist", "album", "track"]
+        return types.some(function(type, i) { return (root.resultFilter === "all" || root.resultFilter === type) && shown[i] < totals[i] })
+    }
+
+    function handleResultKeys(event) {
+        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
+            root.controller.focusQueryField(true)
+        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (event.modifiers & Qt.ControlModifier) root.controller.navigateSelectionToLibrary()
+            else root.controller.activateSelection()
+        } else if (event.key === Qt.Key_Down || event.key === Qt.Key_Up) {
+            const direction = event.key === Qt.Key_Down ? 1 : -1
+            const next = root.controller.nextSelectableIndex(root.controller.selectedDisplayIndex, direction, true)
+            if (next >= 0) root.controller.selectDisplayIndex(next)
+        } else if (event.key === Qt.Key_PageDown || event.key === Qt.Key_PageUp) {
+            root.controller.moveSelectionByPage(event.key === Qt.Key_PageDown ? 1 : -1)
+        } else {
+            return false
+        }
+        event.accepted = true
+        return true
+    }
+
+    Connections {
+        target: root.controller.globalSearchModelApi
+        ignoreUnknownSignals: true
+        function onSearchRowsChanged() {
+            root.controller.selectFirstItem()
+            resultsView.positionViewAtBeginning()
+        }
+    }
 
     contentItem: ColumnLayout {
         spacing: 8
-
         TextField {
-            id: globalSearchQueryField
+            id: queryField
+            objectName: "globalSearchQueryField"
             Layout.fillWidth: true
-            placeholderText: "Type artist, album, or track"
+            placeholderText: "Search title, artist, album, genre, or filename"
             onTextChanged: {
+                root.controller.selectedDisplayIndex = -1
                 root.controller.uiBridge.setGlobalSearchQuery(text)
-                root.controller.selectFirstItem()
-                globalSearchResultsView.positionViewAtBeginning()
+                if (!root.searching) root.controller.selectFirstItem()
             }
-            Keys.onPressed: function(event) {
-                if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
-                    root.controller.focusQueryField(!root.controller.ignoreRefocusFind)
-                    event.accepted = true
-                    return
-                }
-                if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-                    root.controller.navigateSelectionToLibrary()
-                    event.accepted = true
-                    return
-                }
-                if (event.key === Qt.Key_Down) {
-                    const next = root.controller.nextSelectableIndex(
-                        root.controller.selectedDisplayIndex,
-                        1,
-                        true)
-                    if (next >= 0) {
-                        root.controller.selectDisplayIndex(next)
-                        globalSearchResultsView.forceActiveFocus()
-                    }
-                    event.accepted = true
-                    return
-                }
-                if (event.key === Qt.Key_Up) {
-                    const next = root.controller.nextSelectableIndex(
-                        root.controller.selectedDisplayIndex,
-                        -1,
-                        true)
-                    if (next >= 0) {
-                        root.controller.selectDisplayIndex(next)
-                        globalSearchResultsView.forceActiveFocus()
-                    }
-                    event.accepted = true
-                    return
-                }
-                if (event.key === Qt.Key_PageDown) {
-                    if (root.controller.moveSelectionByPage(1)) {
-                        globalSearchResultsView.forceActiveFocus()
-                    }
-                    event.accepted = true
-                    return
-                }
-                if (event.key === Qt.Key_PageUp) {
-                    if (root.controller.moveSelectionByPage(-1)) {
-                        globalSearchResultsView.forceActiveFocus()
-                    }
-                    event.accepted = true
-                    return
-                }
-                if (event.key === Qt.Key_Home) {
-                    const first = root.controller.searchFirstSelectableIndex()
-                    if (first >= 0) {
-                        root.controller.selectDisplayIndex(first)
-                        globalSearchResultsView.forceActiveFocus()
-                    }
-                    event.accepted = true
-                    return
-                }
-                if (event.key === Qt.Key_End) {
-                    const last = root.controller.searchLastSelectableIndex()
-                    if (last >= 0) {
-                        root.controller.selectDisplayIndex(last)
-                        globalSearchResultsView.forceActiveFocus()
-                    }
-                    event.accepted = true
-                    return
-                }
-                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                    root.controller.activateSelection()
-                    event.accepted = true
-                }
-            }
+            Keys.onPressed: function(event) { root.handleResultKeys(event) }
         }
-
+        RowLayout {
+            Layout.fillWidth: true
+            Repeater {
+                model: [{title: "All", type: "all"}, {title: "Artists", type: "artist"}, {title: "Albums", type: "album"}, {title: "Tracks", type: "track"}]
+                Button {
+                    text: modelData.title
+                    checkable: true
+                    checked: root.resultFilter === modelData.type
+                    onClicked: root.controller.globalSearchModelApi.resultFilter = modelData.type
+                }
+            }
+            Item { Layout.fillWidth: true }
+            BusyIndicator { running: root.searching; visible: running; Layout.preferredWidth: 24; Layout.preferredHeight: 24 }
+        }
         Label {
             Layout.fillWidth: true
+            text: root.searching ? "Searching…" : root.resultSummary()
             color: root.uiPalette.uiMutedTextColor
-            text: "Artists: " + (root.controller.uiBridge.globalSearchArtistCount || 0)
-                + " | Albums: " + (root.controller.uiBridge.globalSearchAlbumCount || 0)
-                + " | Tracks: " + (root.controller.uiBridge.globalSearchTrackCount || 0)
+            wrapMode: Text.Wrap
         }
-
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: "transparent"
             border.color: root.uiPalette.uiBorderColor
-
             ListView {
-                id: globalSearchResultsView
+                id: resultsView
+                objectName: "globalSearchResultsView"
                 anchors.fill: parent
                 anchors.margins: 1
                 clip: true
                 model: root.controller.uiBridge.globalSearchModel || []
                 reuseItems: true
-                spacing: 0
                 boundsBehavior: Flickable.StopAtBounds
-                boundsMovement: Flickable.StopAtBounds
                 flickDeceleration: root.snappyScrollFlickDeceleration
                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
-                pixelAligned: true
-                opacity: root.controller.uiBridge.globalSearchModelRetained ? 0 : 1
-                enabled: !root.controller.uiBridge.globalSearchModelRetained
-                readonly property int reservedRightPadding: globalSearchResultsScrollBar.visible
-                    ? globalSearchResultsScrollBar.width
-                    : 0
-
-                ScrollBar.vertical: ScrollBar {
-                    id: globalSearchResultsScrollBar
-                    policy: ScrollBar.AsNeeded
-                }
-
+                opacity: root.controller.uiBridge.globalSearchModelRetained ? 0 : (root.searching ? 0.5 : 1)
+                enabled: !root.searching && !root.controller.uiBridge.globalSearchModelRetained
+                ScrollBar.vertical: ScrollBar { id: resultScrollBar }
                 Keys.onPressed: function(event) {
-                    if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
-                        root.controller.focusQueryField(!root.controller.ignoreRefocusFind)
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-                        root.controller.navigateSelectionToLibrary()
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Down) {
-                        const next = root.controller.nextSelectableIndex(
-                            root.controller.selectedDisplayIndex,
-                            1,
-                            true)
-                        if (next >= 0) {
-                            root.controller.selectDisplayIndex(next)
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Up) {
-                        const next = root.controller.nextSelectableIndex(
-                            root.controller.selectedDisplayIndex,
-                            -1,
-                            true)
-                        if (next >= 0) {
-                            root.controller.selectDisplayIndex(next)
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_PageDown) {
-                        root.controller.moveSelectionByPage(1)
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_PageUp) {
-                        root.controller.moveSelectionByPage(-1)
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Home) {
-                        const first = root.controller.searchFirstSelectableIndex()
-                        if (first >= 0) {
-                            root.controller.selectDisplayIndex(first)
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_End) {
-                        const last = root.controller.searchLastSelectableIndex()
-                        if (last >= 0) {
-                            root.controller.selectDisplayIndex(last)
-                        }
-                        event.accepted = true
-                        return
-                    }
-                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                        root.controller.activateSelection()
+                    if (root.handleResultKeys(event)) return
+                    if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
+                        root.controller.selectDisplayIndex(event.key === Qt.Key_Home
+                            ? root.controller.searchFirstSelectableIndex() : root.controller.searchLastSelectableIndex())
                         event.accepted = true
                     }
                 }
-
-                delegate: DelegateChooser {
-                    role: "delegateType"
-
-                    DelegateChoice {
-                        roleValue: "section"
-                        delegate: Rectangle {
-                            width: Math.max(0, ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
-                            height: 30
-                            color: root.uiPalette.uiSectionColor
-
-                            Rectangle { visible: index > 0; height: 1; anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right; color: Qt.darker(root.uiPalette.uiSectionColor, 1.12) }
-                            Rectangle { height: 1; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right; color: Qt.darker(root.uiPalette.uiSectionColor, 1.12) }
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 8
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: model.sectionTitle || ""
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiTextColor
-                                }
+                delegate: Rectangle {
+                    id: resultRow
+                    readonly property bool section: model.kind === "section"
+                    readonly property bool selected: index === root.controller.selectedDisplayIndex
+                    readonly property color foreground: selected ? root.uiPalette.uiSelectionTextColor : root.uiPalette.uiTextColor
+                    readonly property string detail: {
+                        let parts = []
+                        if (model.rowType === "track") parts.push(model.artist || "", model.album || "")
+                        else if (model.rowType === "album") parts.push(model.artist || "")
+                        if (model.year !== undefined && model.year !== null) parts.push(String(model.year))
+                        if (model.genre) parts.push(model.genre)
+                        if (root.globalSearchShowsRootColumn && model.rootLabel) parts.push(model.rootLabel)
+                        if (model.score >= 6 && model.trackPath) parts.push("Matched path: " + model.trackPath)
+                        return parts.filter(function(value) { return value.length > 0 }).join(" · ")
+                    }
+                    width: resultsView.width - (resultScrollBar.visible ? resultScrollBar.width : 0)
+                    height: section ? 30 : 60
+                    color: section ? root.uiPalette.uiSectionColor : selected ? root.uiPalette.uiSelectionColor
+                        : (index % 2 ? root.uiPalette.uiSurfaceRaisedColor : root.uiPalette.uiSurfaceAltColor)
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 10
+                        Image {
+                            visible: !resultRow.section && model.rowType !== "artist"
+                            Layout.preferredWidth: 40
+                            Layout.preferredHeight: 40
+                            source: model.coverUrl || ""
+                            sourceSize.width: 80
+                            sourceSize.height: 80
+                            fillMode: Image.PreserveAspectFit
+                            asynchronous: true
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Label {
+                                Layout.fillWidth: true
+                                text: resultRow.section ? model.sectionTitle : root.highlighted(model.label)
+                                textFormat: Text.StyledText
+                                font.weight: resultRow.section ? Font.DemiBold : Font.Normal
+                                elide: Text.ElideRight
+                                color: resultRow.foreground
                             }
+                            Label {
+                                visible: !resultRow.section && resultRow.detail.length > 0
+                                Layout.fillWidth: true
+                                text: root.highlighted(resultRow.detail)
+                                textFormat: Text.StyledText
+                                elide: Text.ElideRight
+                                color: resultRow.selected ? resultRow.foreground : root.uiPalette.uiMutedTextColor
+                            }
+                        }
+                        Label {
+                            visible: !resultRow.section
+                            text: model.rowType === "track" ? "Track" : model.rowType === "album" ? "Album" : "Artist"
+                            color: resultRow.foreground
+                        }
+                        Label {
+                            visible: !resultRow.section && model.rowType !== "artist"
+                            text: (model.rowType === "album" ? (model.count || 0) + " tracks · " : "") + (model.lengthText || "")
+                            color: resultRow.foreground
                         }
                     }
-
-                    DelegateChoice {
-                        roleValue: "columns-artist"
-                        delegate: Rectangle {
-                            width: Math.max(0, ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
-                            height: 24
-                            color: root.uiPalette.uiColumnsColor
-
-                            Rectangle { height: 1; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right; color: Qt.darker(root.uiPalette.uiColumnsColor, 1.1) }
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 8
-
-                                Label {
-                                    text: "Name"
-                                    Layout.fillWidth: true
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: "Root"
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                            }
+                    MouseArea {
+                        id: rowMouse
+                        anchors.fill: parent
+                        enabled: !resultRow.section
+                        hoverEnabled: true
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onClicked: function(mouse) {
+                            root.controller.selectDisplayIndex(index)
+                            if (mouse.button === Qt.RightButton) {
+                                root.contextRowData = root.controller.globalSearchModelApi.rowDataAt(index)
+                                resultMenu.popup()
+                            } else resultsView.forceActiveFocus()
                         }
-                    }
-
-                    DelegateChoice {
-                        roleValue: "columns-album"
-                        delegate: Rectangle {
-                            width: Math.max(0, ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
-                            height: 24
-                            color: root.uiPalette.uiColumnsColor
-
-                            Rectangle { height: 1; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right; color: Qt.darker(root.uiPalette.uiColumnsColor, 1.1) }
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 8
-
-                                Label {
-                                    text: ""
-                                    Layout.preferredWidth: root.globalSearchCoverColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "Title"
-                                    Layout.fillWidth: true
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "Artist"
-                                    Layout.preferredWidth: root.globalSearchArtistColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: "Root"
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "Year"
-                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: "Genre"
-                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "#"
-                                    Layout.preferredWidth: root.globalSearchAlbumCountColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: "Length"
-                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                            }
+                        onDoubleClicked: function(mouse) {
+                            if (mouse.button === Qt.LeftButton) root.controller.activateSelection()
                         }
-                    }
-
-                    DelegateChoice {
-                        roleValue: "columns-track"
-                        delegate: Rectangle {
-                            width: Math.max(0, ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
-                            height: 24
-                            color: root.uiPalette.uiColumnsColor
-
-                            Rectangle { height: 1; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right; color: Qt.darker(root.uiPalette.uiColumnsColor, 1.1) }
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 8
-
-                                Label {
-                                    text: "#"
-                                    Layout.preferredWidth: root.globalSearchTrackNumberColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: "Title"
-                                    Layout.fillWidth: true
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "Artist"
-                                    Layout.preferredWidth: root.globalSearchArtistColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    text: ""
-                                    Layout.preferredWidth: root.globalSearchCoverColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "Album"
-                                    Layout.preferredWidth: root.globalSearchAlbumColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: "Root"
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "Year"
-                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: "Genre"
-                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                }
-                                Label {
-                                    text: "Length"
-                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
-                                    font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiMutedTextColor
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                            }
-                        }
-                    }
-
-                    DelegateChoice {
-                        roleValue: "artist"
-                        delegate: Rectangle {
-                            readonly property color rowTextColor: index === root.controller.selectedDisplayIndex
-                                ? root.uiPalette.uiSelectionTextColor
-                                : root.uiPalette.uiTextColor
-
-                            width: Math.max(0, ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
-                            height: 24
-                            color: index === root.controller.selectedDisplayIndex
-                                ? root.uiPalette.uiSelectionColor
-                                : (index % 2 === 0
-                                    ? root.uiPalette.uiSurfaceRaisedColor
-                                    : root.uiPalette.uiSurfaceAltColor)
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 8
-
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: model.label || ""
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: model.rootLabel || ""
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                onClicked: function(mouse) {
-                                    root.controller.selectDisplayIndex(index)
-                                    if (mouse.button === Qt.RightButton) {
-                                        root.contextRowData = root.controller.globalSearchModelApi
-                                            ? (root.controller.globalSearchModelApi.rowDataAt(index) || ({}))
-                                            : ({})
-                                        globalSearchContextMenu.popup()
-                                        return
-                                    }
-                                    if (mouse.button === Qt.LeftButton) {
-                                        globalSearchResultsView.forceActiveFocus()
-                                    }
-                                }
-                                onDoubleClicked: function(mouse) {
-                                    if (mouse.button === Qt.LeftButton) {
-                                        root.controller.selectDisplayIndex(index)
-                                        root.controller.activateSelection()
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    DelegateChoice {
-                        roleValue: "album"
-                        delegate: Rectangle {
-                            readonly property color rowTextColor: index === root.controller.selectedDisplayIndex
-                                ? root.uiPalette.uiSelectionTextColor
-                                : root.uiPalette.uiTextColor
-
-                            width: Math.max(0, ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
-                            height: 24
-                            color: index === root.controller.selectedDisplayIndex
-                                ? root.uiPalette.uiSelectionColor
-                                : (index % 2 === 0
-                                    ? root.uiPalette.uiSurfaceRaisedColor
-                                    : root.uiPalette.uiSurfaceAltColor)
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 8
-
-                                Item {
-                                    Layout.preferredWidth: root.globalSearchCoverColumnWidth
-                                    Layout.preferredHeight: 20
-
-                                    Image {
-                                        anchors.fill: parent
-                                        source: model.coverUrl || ""
-                                        fillMode: Image.PreserveAspectFit
-                                        asynchronous: true
-                                        cache: true
-                                        sourceSize.width: 32
-                                        sourceSize.height: 32
-                                    }
-                                }
-                                Label {
-                                    text: model.label || ""
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.artist || ""
-                                    Layout.preferredWidth: root.globalSearchArtistColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: model.rootLabel || ""
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.year !== undefined && model.year !== null ? model.year : ""
-                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.genre || ""
-                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.count !== undefined ? model.count : ""
-                                    Layout.preferredWidth: root.globalSearchAlbumCountColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.lengthText || "--:--"
-                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                onClicked: function(mouse) {
-                                    root.controller.selectDisplayIndex(index)
-                                    if (mouse.button === Qt.RightButton) {
-                                        root.contextRowData = root.controller.globalSearchModelApi
-                                            ? (root.controller.globalSearchModelApi.rowDataAt(index) || ({}))
-                                            : ({})
-                                        globalSearchContextMenu.popup()
-                                        return
-                                    }
-                                    if (mouse.button === Qt.LeftButton) {
-                                        globalSearchResultsView.forceActiveFocus()
-                                    }
-                                }
-                                onDoubleClicked: function(mouse) {
-                                    if (mouse.button === Qt.LeftButton) {
-                                        root.controller.selectDisplayIndex(index)
-                                        root.controller.activateSelection()
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    DelegateChoice {
-                        roleValue: "track"
-                        delegate: Rectangle {
-                            readonly property color rowTextColor: index === root.controller.selectedDisplayIndex
-                                ? root.uiPalette.uiSelectionTextColor
-                                : root.uiPalette.uiTextColor
-
-                            width: Math.max(0, ListView.view.width - (globalSearchResultsView.reservedRightPadding || 0))
-                            height: 24
-                            color: index === root.controller.selectedDisplayIndex
-                                ? root.uiPalette.uiSelectionColor
-                                : (index % 2 === 0
-                                    ? root.uiPalette.uiSurfaceRaisedColor
-                                    : root.uiPalette.uiSurfaceAltColor)
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 8
-
-                                Label {
-                                    text: model.trackNumber !== undefined && model.trackNumber !== null
-                                        ? String(model.trackNumber).padStart(2, "0")
-                                        : ""
-                                    Layout.preferredWidth: root.globalSearchTrackNumberColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.label || ""
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.artist || ""
-                                    Layout.preferredWidth: root.globalSearchArtistColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Item {
-                                    Layout.preferredWidth: root.globalSearchCoverColumnWidth
-                                    Layout.preferredHeight: 18
-
-                                    Image {
-                                        anchors.fill: parent
-                                        source: model.coverUrl || ""
-                                        fillMode: Image.PreserveAspectFit
-                                        asynchronous: true
-                                        cache: true
-                                        sourceSize.width: 24
-                                        sourceSize.height: 24
-                                    }
-                                }
-                                Label {
-                                    text: model.album || ""
-                                    Layout.preferredWidth: root.globalSearchAlbumColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    visible: root.globalSearchShowsRootColumn
-                                    text: model.rootLabel || ""
-                                    Layout.preferredWidth: root.globalSearchRootColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.year !== undefined && model.year !== null ? model.year : ""
-                                    Layout.preferredWidth: root.globalSearchYearColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.genre || ""
-                                    Layout.preferredWidth: root.globalSearchTrackGenreColumnWidth
-                                    elide: Text.ElideRight
-                                    color: rowTextColor
-                                }
-                                Label {
-                                    text: model.lengthText || "--:--"
-                                    Layout.preferredWidth: root.globalSearchTrackLengthColumnWidth
-                                    horizontalAlignment: Text.AlignRight
-                                    color: rowTextColor
-                                }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                onClicked: function(mouse) {
-                                    root.controller.selectDisplayIndex(index)
-                                    if (mouse.button === Qt.RightButton) {
-                                        root.contextRowData = root.controller.globalSearchModelApi
-                                            ? (root.controller.globalSearchModelApi.rowDataAt(index) || ({}))
-                                            : ({})
-                                        globalSearchContextMenu.popup()
-                                        return
-                                    }
-                                    if (mouse.button === Qt.LeftButton) {
-                                        globalSearchResultsView.forceActiveFocus()
-                                    }
-                                }
-                                onDoubleClicked: function(mouse) {
-                                    if (mouse.button === Qt.LeftButton) {
-                                        root.controller.selectDisplayIndex(index)
-                                        root.controller.activateSelection()
-                                    }
-                                }
-                            }
-                        }
+                        ToolTip.visible: containsMouse && !resultRow.section
+                        ToolTip.delay: 700
+                        ToolTip.text: (model.label || "") + "\n" + resultRow.detail
                     }
                 }
+
             }
-
-            Menu {
-                id: globalSearchContextMenu
-                property var rowData: root.contextRowData || ({})
-
-                enter: Components.PopupTransition { duration: root.popupTransitionMs }
-                exit: Components.PopupTransition { duration: root.popupTransitionMs }
-
-                MenuItem {
-                    text: "Play"
-                    enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                    onTriggered: root.controller.activateRow(globalSearchContextMenu.rowData)
+                Label {
+                    anchors.centerIn: parent
+                    visible: !root.searching && ((root.controller.uiBridge.globalSearchModelRetained || resultsView.count === 0))
+                    text: queryField.text.trim().length === 0 ? "Type to search your library" : "No matches. Try fewer words or another result type."
+                    color: root.uiPalette.uiMutedTextColor
                 }
-                MenuItem {
-                    text: "Queue"
-                    enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                    onTriggered: root.controller.queueRow(globalSearchContextMenu.rowData)
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: "Open in " + root.controller.uiBridge.fileBrowserName
-                    visible: (globalSearchContextMenu.rowData.rowType || "") !== "track"
-                    enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                    onTriggered: root.controller.openRowInFileBrowser(globalSearchContextMenu.rowData)
-                }
-                MenuItem {
-                    text: "Open containing folder"
-                    visible: (globalSearchContextMenu.rowData.rowType || "") === "track"
-                    enabled: (globalSearchContextMenu.rowData.kind || "") === "item"
-                    onTriggered: root.controller.openRowInFileBrowser(globalSearchContextMenu.rowData)
-                }
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            Label {
+                Layout.fillWidth: true
+                text: "Enter: play and replace queue · Ctrl+Enter: show in library · Esc: close"
+                color: root.uiPalette.uiMutedTextColor
+                wrapMode: Text.Wrap
+            }
+            Button {
+                text: "Show more"
+                visible: !!root.controller.uiBridge.globalSearchCanExpand && root.filterHasMore()
+                onClicked: root.controller.uiBridge.expandGlobalSearch()
             }
         }
-
         Label {
             Layout.fillWidth: true
-            visible: (root.controller.uiBridge.globalSearchArtistCount || 0) === 0
-                && (root.controller.uiBridge.globalSearchAlbumCount || 0) === 0
-                && (root.controller.uiBridge.globalSearchTrackCount || 0) === 0
-            text: (globalSearchQueryField.text || "").trim().length === 0
-                ? "Type to search"
-                : "No matches"
-            color: Kirigami.Theme.disabledTextColor
-            horizontalAlignment: Text.AlignHCenter
+            visible: !root.searching && root.filterHasMore() && !root.controller.uiBridge.globalSearchCanExpand
+            text: "More matches exist. Refine your search to narrow the results."
+            color: root.uiPalette.uiMutedTextColor
+            wrapMode: Text.Wrap
+        }
+        Menu {
+            id: resultMenu
+            MenuItem { text: "Play and replace queue"; onTriggered: root.controller.activateRow(root.contextRowData) }
+            MenuItem { text: "Queue"; onTriggered: root.controller.queueRow(root.contextRowData) }
+            MenuItem { text: "Show in library"; onTriggered: root.controller.navigateSelectionToLibrary() }
+            MenuSeparator {}
+            MenuItem { text: "Open containing folder"; onTriggered: root.controller.openRowInFileBrowser(root.contextRowData) }
         }
     }
 }

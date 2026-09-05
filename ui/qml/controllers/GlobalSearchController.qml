@@ -80,7 +80,7 @@ QtObject {
         const stepDir = direction < 0 ? -1 : 1
         const pageRows = Math.max(
             1,
-            Math.floor(((root.resultsView ? root.resultsView.height : 240) / 24)) - 1)
+            Math.floor(((root.resultsView ? root.resultsView.height : 240) / 60)) - 1)
         let index = root.selectedDisplayIndex
         if (!root.isSearchRowSelectable(index)) {
             index = stepDir > 0 ? root.searchFirstSelectableIndex() : root.searchLastSelectableIndex()
@@ -261,6 +261,7 @@ QtObject {
     }
 
     function navigateSelectionToLibrary() {
+        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
         let row = root.selectedRow()
         if (!row) {
             const first = root.searchFirstSelectableIndex()
@@ -280,6 +281,7 @@ QtObject {
     }
 
     function activateRow(row) {
+        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
         if (!row || row.kind !== "item") {
             return
         }
@@ -301,6 +303,7 @@ QtObject {
     }
 
     function queueRow(row) {
+        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
         if (!row || row.kind !== "item") {
             return
         }
@@ -326,6 +329,7 @@ QtObject {
     }
 
     function activateSelection() {
+        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
         const row = root.selectedRow()
         if (row) {
             root.activateRow(row)
