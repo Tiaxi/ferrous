@@ -245,6 +245,7 @@ struct DecodedSearchRow {
 
 struct DecodedSearchResults {
     quint32 seq{0};
+    quint32 totals[3]{0, 0, 0};
     QVector<DecodedSearchRow> rows;
 };
 
@@ -262,7 +263,7 @@ QByteArray encodeCommandLibraryViewState(
     const QString &selectionKey,
     const QString &anchorKey,
     float anchorOffset);
-QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query);
+QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query, quint32 limit = 0);
 QByteArray encodeCommandIndices(quint16 cmdId, const QList<quint32> &indices);
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
 QByteArray encodeCommandMoveQueue(quint32 from, quint32 to);

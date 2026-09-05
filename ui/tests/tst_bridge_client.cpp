@@ -155,6 +155,9 @@ private slots:
     void testSoloedChannelDecodingNone();
     void testChannelButtonsVisibilityDecoding();
     void libraryViewStateAvailabilityFollowsSnapshot();
+    void searchResultsRankFilterAndHighlight();
+    void searchProtocolTotalsAndExpansion();
+    void searchDeferredResultsRejectSupersededQuery();
     void searchModelDelegateTypeRoleIsExposed();
     void searchModelDelegateTypeValuesCorrect();
     void clearSearchQueryRetainsModelRows();
@@ -1822,6 +1825,73 @@ void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {
     QCOMPARE(client.libraryViewSelectionKey(), snapshot.library.viewSelectionKey);
     QCOMPARE(client.libraryViewAnchorKey(), snapshot.library.viewAnchorKey);
     QCOMPARE(client.libraryViewAnchorOffset(), 5.0);
+}
+
+
+void BridgeClientTest::searchResultsRankFilterAndHighlight() {
+    GlobalSearchResultsModel model;
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
+    for (const QString &type : {QStringLiteral("artist"), QStringLiteral("album"), QStringLiteral("track")}) {
+        GlobalSearchResultsModel::SearchDisplayRow row;
+        row.kind = "item"; row.rowType = type; row.label = "Blue"; row.score = 0;
+        rows.push_back(row);
+    }
+    model.presentSearchRows(rows);
+    QCOMPARE(model.rowDataAt(0).value("sectionTitle").toString(), QStringLiteral("Best matches"));
+    QCOMPARE(model.rowDataAt(1).value("rowType").toString(), QStringLiteral("track"));
+    QCOMPARE(model.rowCount(), 4); // Each result appears once.
+    model.setResultFilter("album");
+    QCOMPARE(model.rowCount(), 2);
+    QCOMPARE(model.rowDataAt(1).value("rowType").toString(), QStringLiteral("album"));
+    model.setResultFilter("invalid");
+    QCOMPARE(model.resultFilter(), QStringLiteral("album"));
+    model.setResultFilter("all");
+    QCOMPARE(model.rowCount(), 4);
+    QCOMPARE(model.highlightText(QString::fromUtf8("Björk & <Blue>"), "bjork blue"), QString::fromUtf8("<b>Björk</b> &amp; &lt;<b>Blue</b>&gt;"));
+    QCOMPARE(model.highlightText(QString::fromUtf8("Cafe\xcc\x81"), "cafe"), QString::fromUtf8("<b>Cafe\xcc\x81</b>"));
+}
+
+void BridgeClientTest::searchProtocolTotalsAndExpansion() {
+    QByteArray bytes;
+    const auto append = [&bytes](auto value) { auto le = qToLittleEndian(value); bytes.append(reinterpret_cast<const char *>(&le), sizeof(le)); };
+    append(quint8('S')); append(quint8(3)); append(quint16(0)); append(quint32(9));
+    append(quint32(7)); append(quint32(12)); append(quint32(500));
+    BinaryBridgeCodec::DecodedSearchResults decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSearchResultsFrame(bytes, &decoded, &error), qPrintable(error));
+    QCOMPARE(decoded.seq, 9u); QCOMPARE(decoded.totals[2], 500u);
+    bytes.chop(1);
+    QVERIFY(!BinaryBridgeCodec::decodeSearchResultsFrame(bytes, &decoded, &error));
+    const auto command = BinaryBridgeCodec::encodeCommandSearchQuery(BinaryBridgeCodec::CmdSetSearchQuery, 9, "blue", 80);
+    QCOMPARE(qFromLittleEndian<quint32>(command.constData() + command.size() - 4), 80u);
+    BridgeClient client; isolateBridgeClient(client);
+    client.m_globalSearchTotals = {7, 12, 500};
+    client.m_globalSearchTrackCount = 20;
+    client.m_pendingGlobalSearchQuery = "blue";
+    QVERIFY(client.globalSearchCanExpand());
+    client.expandGlobalSearch();
+    QCOMPARE(client.m_globalSearchLimit, 40u);
+    QVERIFY(client.m_globalSearchBusy);
+    QVERIFY(!client.globalSearchCanExpand());
+    client.setGlobalSearchQuery("new query");
+    QCOMPARE(client.m_globalSearchLimit, 0u);
+}
+
+void BridgeClientTest::searchDeferredResultsRejectSupersededQuery() {
+    BridgeClient client; isolateBridgeClient(client);
+    client.m_latestGlobalSearchSeqSent = 2;
+    BridgeClient::SearchWorkerOutputFrame oldFrame; oldFrame.seq = 1;
+    QVERIFY(!client.applyPreparedSearchResultsFrame(std::move(oldFrame)));
+    BridgeClient::SearchWorkerOutputFrame frame; frame.seq = 2;
+    frame.trackCount = 1; frame.totals = {0, 0, 30};
+    GlobalSearchResultsModel::SearchDisplayRow row; row.kind = "item"; row.rowType = "track"; row.label = "Old";
+    frame.displayRows.push_back(row);
+    QVERIFY(client.applyPreparedSearchResultsFrame(std::move(frame)));
+    client.setGlobalSearchQuery("new");
+    QVERIFY(client.m_deferredSearchDisplayRows.isEmpty());
+    client.applyDeferredSearchDisplayRows();
+    QCOMPARE(client.m_globalSearchModel.rowCount(), 0);
+    QVERIFY(client.m_globalSearchBusy);
 }
 
 void BridgeClientTest::searchModelDelegateTypeRoleIsExposed() {

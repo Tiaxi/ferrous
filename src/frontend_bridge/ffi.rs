@@ -1639,6 +1639,11 @@ fn parse_library_ui_command(
         36 => BridgeLibraryCommand::SetSearchQuery {
             seq: reader.read_u32()?,
             query: reader.read_u16_string()?,
+            limit: if reader.offset == reader.bytes.len() {
+                0
+            } else {
+                reader.read_u32()?
+            },
         },
         45 => BridgeLibraryCommand::RenameRoot {
             path: PathBuf::from(reader.read_u16_string()?),
@@ -1837,9 +1842,12 @@ fn encode_stopped_event() -> Vec<u8> {
 fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + frame.rows.len() * 128);
     push_u8(&mut out, b'S');
-    push_u8(&mut out, 2);
+    push_u8(&mut out, 3);
     push_u16(&mut out, clamp_u16(frame.rows.len()));
     push_u32(&mut out, frame.seq);
+    for total in frame.totals {
+        push_u32(&mut out, total);
+    }
     for row in &frame.rows {
         let row_type = match row.row_type {
             BridgeSearchResultRowType::Artist => 1u8,
@@ -3055,6 +3063,35 @@ mod tests {
     }
 
     #[test]
+    fn search_protocol_carries_expansion_and_totals() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 9);
+        push_u16_string(&mut payload, "blue");
+        push_u32(&mut payload, 80);
+        assert!(matches!(
+            parse_binary_command(&encode_command(36, &payload)).expect("parse"),
+            Some(BridgeCommand::Library(
+                BridgeLibraryCommand::SetSearchQuery {
+                    seq: 9,
+                    limit: 80,
+                    ..
+                }
+            ))
+        ));
+        payload.pop();
+        assert!(parse_binary_command(&encode_command(36, &payload)).is_err());
+        let bytes = encode_search_results_frame(&BridgeSearchResultsFrame {
+            seq: 9,
+            totals: [7, 12, 500],
+            rows: Vec::new(),
+        });
+        assert_eq!(&bytes[..8], &[b'S', 3, 0, 0, 9, 0, 0, 0]);
+        assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
+        assert_eq!(&bytes[12..16], &12u32.to_le_bytes());
+        assert_eq!(&bytes[16..20], &500u32.to_le_bytes());
+    }
+
+    #[test]
     fn parse_binary_command_supports_set_search_query() {
         let query = "pink floyd";
         let mut payload = Vec::new();
@@ -3066,7 +3103,12 @@ mod tests {
             .expect("parse")
             .expect("command");
         match cmd {
-            BridgeCommand::Library(BridgeLibraryCommand::SetSearchQuery { seq, query: q }) => {
+            BridgeCommand::Library(BridgeLibraryCommand::SetSearchQuery {
+                seq,
+                query: q,
+                limit,
+            }) => {
+                assert_eq!(limit, 0);
                 assert_eq!(seq, 42);
                 assert_eq!(q, query);
             }

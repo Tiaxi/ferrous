@@ -405,25 +405,6 @@ ApplicationWindow {
         return Math.max(28, Math.ceil(Math.max(valueWidth, headerWidth) + 10))
     }
     readonly property bool globalSearchShowsRootColumn: (uiBridge.libraryRootCount || 0) >= 2
-    readonly property int globalSearchTrackNumberColumnWidth: Math.max(
-        34,
-        Math.ceil(Math.max(
-            playlistOrderFontMetrics.boundingRect("#").width,
-            playlistOrderFontMetrics.boundingRect("00").width) + 10))
-    readonly property int globalSearchCoverColumnWidth: 26
-    readonly property int globalSearchArtistColumnWidth: 170
-    readonly property int globalSearchAlbumColumnWidth: 182
-    readonly property int globalSearchYearColumnWidth: 52
-    readonly property int globalSearchRootColumnWidth: 140
-    readonly property int globalSearchAlbumCountColumnWidth: 40
-    readonly property int globalSearchTrackLengthColumnWidth: Math.max(
-        40,
-        Math.ceil(playlistOrderFontMetrics.boundingRect("00:00").width + 12))
-    readonly property int globalSearchTrackGenreColumnWidth: Math.max(
-        124,
-        Math.ceil(Math.max(
-            playlistOrderFontMetrics.boundingRect("Genre").width,
-            playlistOrderFontMetrics.boundingRect("Alternative country").width) + 8))
     readonly property int playlistIndicatorColumnWidth: 18
 
     FontMetrics {
@@ -911,15 +892,6 @@ ApplicationWindow {
         snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
         snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
         globalSearchShowsRootColumn: root.globalSearchShowsRootColumn
-        globalSearchTrackNumberColumnWidth: root.globalSearchTrackNumberColumnWidth
-        globalSearchCoverColumnWidth: root.globalSearchCoverColumnWidth
-        globalSearchArtistColumnWidth: root.globalSearchArtistColumnWidth
-        globalSearchAlbumColumnWidth: root.globalSearchAlbumColumnWidth
-        globalSearchRootColumnWidth: root.globalSearchRootColumnWidth
-        globalSearchYearColumnWidth: root.globalSearchYearColumnWidth
-        globalSearchTrackGenreColumnWidth: root.globalSearchTrackGenreColumnWidth
-        globalSearchAlbumCountColumnWidth: root.globalSearchAlbumCountColumnWidth
-        globalSearchTrackLengthColumnWidth: root.globalSearchTrackLengthColumnWidth
     }
 
     Dialogs.DiagnosticsDialog {

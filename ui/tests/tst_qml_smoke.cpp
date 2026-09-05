@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QApplication>
+#include "../src/GlobalSearchResultsModel.h"
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFileInfo>
@@ -461,6 +462,7 @@ private slots:
     void init();
     void cleanup();
     void cleanupTestCase();
+    void globalSearchKeyboardAndResponsiveResults();
     void loadsMainQmlWithFallbackBridge();
     void loadsExtractedQmlSlicesWithFallbackProps();
     void spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints();
@@ -1048,15 +1050,6 @@ Item {
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
         globalSearchShowsRootColumn: false
-        globalSearchTrackNumberColumnWidth: 42
-        globalSearchCoverColumnWidth: 28
-        globalSearchArtistColumnWidth: 180
-        globalSearchAlbumColumnWidth: 220
-        globalSearchRootColumnWidth: 160
-        globalSearchYearColumnWidth: 54
-        globalSearchTrackGenreColumnWidth: 110
-        globalSearchAlbumCountColumnWidth: 44
-        globalSearchTrackLengthColumnWidth: 64
     }
 
     Dialogs.ItunesArtworkDialog {
@@ -10189,6 +10182,105 @@ void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() 
     QCOMPARE(item.m_zoomFillActive, false);
     QCOMPARE(item.m_precomputedCanvasDisplayRight,
              item.m_precomputedCanvasDisplayLeft - 1);
+}
+
+void QmlSmokeTest::globalSearchKeyboardAndResponsiveResults() {
+    GlobalSearchResultsModel model;
+    QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
+    for (int i = 0; i < 5; ++i) {
+        GlobalSearchResultsModel::SearchDisplayRow row;
+        row.kind = "item"; row.rowType = "track"; row.label = i == 0 ? "Blue" : "Blue Skies";
+        row.artist = "Example Ensemble"; row.album = "Collected Songs"; row.genre = "Jazz";
+        row.trackPath = QStringLiteral("/fixture/%1.flac").arg(i); row.score = i == 0 ? 0 : 1;
+        rows.push_back(row);
+    }
+    model.presentSearchRows(rows);
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("searchTestModel"), &model);
+    QString errorText;
+    QScopedPointer<QObject> object(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "controllers" as Controllers
+import "dialogs" as Dialogs
+ApplicationWindow {
+    id: harness
+    width: 800; height: 700; visible: true
+    property alias selectionIndex: searchController.selectedDisplayIndex
+    property alias searchBusy: bridge.globalSearchBusy
+    property alias playCount: bridge.playCount
+    property alias revealCount: bridge.revealCount
+    property alias searchVisible: dialog.visible
+    QtObject {
+        id: bridge
+        property var globalSearchModel: searchTestModel
+        property bool globalSearchBusy: false
+        property bool globalSearchModelRetained: false
+        property bool globalSearchCanExpand: false
+        property int globalSearchArtistCount: 0
+        property int globalSearchAlbumCount: 0
+        property int globalSearchTrackCount: 5
+        property var globalSearchTotals: [0, 0, 5]
+        property int playCount: 0
+        property int revealCount: 0
+        function setGlobalSearchQuery(query) {}
+        function replaceWithPaths(paths) { ++playCount }
+    }
+    Controllers.GlobalSearchController {
+        id: searchController
+        uiBridge: bridge
+        globalSearchModelApi: searchTestModel
+        requestLibraryRevealForSearchRow: function(row) { ++bridge.revealCount }
+        focusLibraryViewForNavigation: function() {}
+        requestOpenInFileBrowserForSearchRow: function(row) {}
+    }
+    Dialogs.GlobalSearchDialog {
+        id: dialog
+        controller: searchController
+        windowRoot: harness
+        uiPalette: ({uiTextColor: "#eee", uiMutedTextColor: "#aaa", uiSelectionTextColor: "white",
+            uiSelectionColor: "#345578", uiSectionColor: "#292929", uiSurfaceRaisedColor: "#202020",
+            uiSurfaceAltColor: "#252525", uiBorderColor: "#555"})
+        popupTransitionMs: 0
+        snappyScrollFlickDeceleration: 18000
+        snappyScrollMaxFlickVelocity: 1400
+        globalSearchShowsRootColumn: false
+    }
+    Component.onCompleted: Qt.callLater(searchController.openDialog)
+}
+)QML"), QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR) + "/qml/SearchTest.qml"), &errorText));
+    QVERIFY2(object, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(object.data());
+    QVERIFY(window);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    window->requestActivate();
+    QTRY_VERIFY(window->isActive());
+    QTRY_VERIFY(object->property("searchVisible").toBool());
+    auto *field = object->findChild<QQuickItem *>(QStringLiteral("globalSearchQueryField"));
+    QVERIFY(field);
+    field->setProperty("text", QStringLiteral("blue skies"));
+    QVERIFY(object->property("selectionIndex").toInt() >= 0);
+    QMetaObject::invokeMethod(field, "forceActiveFocus");
+    QTRY_VERIFY(field->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Home);
+    QCOMPARE(field->property("cursorPosition").toInt(), 0);
+    QTest::keyClick(window, Qt::Key_End);
+    QCOMPARE(field->property("cursorPosition").toInt(), 10);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QVERIFY(object->property("searchVisible").toBool());
+    QCOMPARE(object->property("revealCount").toInt(), 0);
+    QTRY_VERIFY(!field->hasActiveFocus());
+    QMetaObject::invokeMethod(field, "forceActiveFocus");
+    QTest::keyClick(window, Qt::Key_Down);
+    object->setProperty("searchBusy", true);
+    QTest::keyClick(window, Qt::Key_Return);
+    QCOMPARE(object->property("playCount").toInt(), 0);
+    object->setProperty("searchBusy", false);
+    const auto screenshot = qEnvironmentVariable("FERROUS_SEARCH_SCREENSHOT");
+    if (!screenshot.isEmpty()) QVERIFY(window->grabWindow().save(screenshot));
+    QTest::keyClick(window, Qt::Key_Return, Qt::ControlModifier);
+    QCOMPARE(object->property("revealCount").toInt(), 1);
+    QTRY_VERIFY(!object->property("searchVisible").toBool());
 }
 
 int main(int argc, char **argv) {
