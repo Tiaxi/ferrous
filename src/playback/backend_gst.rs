@@ -2785,6 +2785,19 @@ mod gst_integration_tests {
     /// play correctly (regression test for apedemux rank demotion).
     #[test]
     fn playbin3_mp3_with_typefinders_and_full_sink() {
+        gst::init().unwrap();
+        for plugin in ["id3demux", "apedemux", "mpegaudioparse"] {
+            assert!(
+                gst::ElementFactory::find(plugin).is_some(),
+                "install GStreamer good runtime plugins: missing {plugin}"
+            );
+        }
+        assert!(
+            ["mpg123audiodec", "avdec_mp3", "avdec_mp3float"]
+                .iter()
+                .any(|name| gst::ElementFactory::find(name).is_some()),
+            "install a GStreamer MP3 decoder (e.g. the libav runtime plugin)"
+        );
         let fixture =
             std::env::temp_dir().join(format!("ferrous-output-tags-{}.mp3", std::process::id()));
         let test_path = fixture.as_path();
