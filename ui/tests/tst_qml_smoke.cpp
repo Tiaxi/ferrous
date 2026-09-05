@@ -587,6 +587,7 @@ private slots:
     void spectrogramCenteredGaplessSnapsAnchorToZero();
     void spectrogramCenteredSeekRestartRebuildsEarlierWindow();
     void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
+    void spectrogramEndSeekReleasesCanvasOnFinalize();
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
     void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
@@ -6614,6 +6615,52 @@ void QmlSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
     const auto tokenMap = item.m_trackColumnToSeqByToken.value(token);
     QVERIFY(tokenMap.contains(static_cast<qint32>(item.m_precomputedCanvasDisplayLeft)));
     QVERIFY(tokenMap.contains(static_cast<qint32>(item.m_precomputedCanvasDisplayRight)));
+}
+
+void QmlSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1);
+    constexpr int bins = 4;
+    constexpr int estimatedEnd = 5000;
+    constexpr int actualEnd = 4000;
+    constexpr quint64 token = 7;
+    item.feedPrecomputedChunk(QByteArray(640 * bins, '\x30'), bins, 0, 640,
+        0, estimatedEnd, 44100, 1024, false, true, token, true, 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(180);
+        item.rebuildPrecomputedCanvasLocked(320, 180, 0, 319, false);
+    }
+    QVERIFY(!item.m_canvas.isNull());
+    item.applyExplicitSeekPosition(3990.0 * 1024.0 / 44100.0);
+    item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0,
+        false, true, token, true);
+    QVERIFY(item.m_zoomFillActive);
+    item.feedPrecomputedChunk({}, bins, 0, 0, 3600, estimatedEnd, 44100, 1024,
+        false, true, token, true, 2);
+    item.feedPrecomputedChunk(QByteArray(400 * bins, '\x60'), bins, 0, 400,
+        3600, estimatedEnd, 44100, 1024, false, false, token, false, 2);
+    QVERIFY(item.m_zoomFillActive);
+
+    // Neither an obsolete generation nor another track can end this handoff.
+    item.feedPrecomputedChunk({}, bins, 0, 0, actualEnd, actualEnd, 44100, 1024,
+        true, false, token, false, 1);
+    item.feedPrecomputedChunk({}, bins, 0, 0, actualEnd, actualEnd, 44100, 1024,
+        true, false, token - 1, false, 2);
+    QVERIFY(item.m_zoomFillActive);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, estimatedEnd);
+    item.feedPrecomputedChunk({}, bins, 0, 0, actualEnd, actualEnd, 44100, 1024,
+        true, false, token, false, 2);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, actualEnd);
+    QVERIFY(!item.m_zoomFillActive);
+    QVERIFY(item.m_precomputedCanvasDirty);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(item.m_precomputedCanvasDisplayLeft >= 3600);
+    QVERIFY(item.m_precomputedCanvasDisplayRight < actualEnd);
+    delete node;
 }
 
 void QmlSmokeTest::spectrogramCenteredFinalizeChunkShrinksTotalEstimate() {

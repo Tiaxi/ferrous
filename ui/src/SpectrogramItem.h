@@ -156,6 +156,7 @@ private:
     void ensureCanvas(int width, int height);
     bool reanchorRollingEpochForCurrentDataLocked(
         std::chrono::steady_clock::time_point now);
+    void updateCanvasFillReadinessLocked();
     void applyPrecomputedResetLocked(
         int startIndex,
         int bins,
