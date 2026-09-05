@@ -13,6 +13,7 @@ use super::decoders::{
     deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource, AudioRead,
 };
 use super::fft::{PeakHoldResampler, StftComputer};
+use super::output::{AnalysisEventOutput, AnalysisOutputs};
 use super::{
     f64_to_u64_saturating, usize_to_u64, AnalysisEvent, PrecomputedSpectrogramChunk,
     SpectrogramDisplayMode, SpectrogramViewMode, REFERENCE_HOP,
@@ -35,7 +36,7 @@ macro_rules! profile_eprintln {
 // ---------------------------------------------------------------------------
 
 // Keep default 2048-FFT stereo centered chunks at <=64 columns, about 128 KiB.
-const CENTERED_CHUNK_BYTE_BUDGET: usize = 64 * 1_025 * 2;
+const SPECTROGRAM_CHUNK_BYTE_BUDGET: usize = 64 * 1_025 * 2;
 
 fn clamp_to_u8(v: usize) -> u8 {
     u8::try_from(v).unwrap_or(u8::MAX)
@@ -554,7 +555,7 @@ pub(super) fn spawn_centered_staging_worker(
 
 pub(super) fn spawn_spectrogram_decode_worker(
     cmd_rx: Receiver<SpectrogramWorkerCommand>,
-    event_tx: Sender<AnalysisEvent>,
+    event_tx: AnalysisOutputs,
     generation: Arc<AtomicU64>,
     columns_produced: Arc<AtomicU64>,
     track_duration_ms: Arc<AtomicU64>,
@@ -587,7 +588,7 @@ struct LastSessionParams {
 
 fn spectrogram_worker_loop(
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
@@ -820,7 +821,7 @@ enum SessionAction {
 fn run_spectrogram_session(
     initial_cmd: &SpectrogramWorkerCommand,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
@@ -1129,7 +1130,7 @@ fn session_decode_loop(
     session: &mut SpectrogramSessionState,
     source: &mut AudioFrameSource,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
@@ -1497,7 +1498,7 @@ fn handle_session_seek(
     session: &mut SpectrogramSessionState,
     position_seconds: f64,
     source: &mut AudioFrameSource,
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
 ) -> bool {
     profile_eprintln!("[spect-worker] SEEK to {position_seconds:.2}s");
 
@@ -1585,12 +1586,8 @@ fn next_target_chunk_columns_for_payload(
     channel_count: usize,
 ) -> u16 {
     let column_cap = next_target_chunk_columns(current, display_mode);
-    if display_mode != SpectrogramDisplayMode::Centered {
-        return column_cap;
-    }
-
     let bytes_per_column = bins_per_column.saturating_mul(channel_count).max(1);
-    let payload_cap = CENTERED_CHUNK_BYTE_BUDGET / bytes_per_column;
+    let payload_cap = SPECTROGRAM_CHUNK_BYTE_BUDGET / bytes_per_column;
     column_cap.min(clamp_to_u16(payload_cap.max(1)))
 }
 
@@ -1641,8 +1638,7 @@ fn post_reset_window_active(session: &SpectrogramSessionState) -> bool {
 
 fn session_drain_stft_rows(
     session: &mut SpectrogramSessionState,
-
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
 ) {
     loop {
@@ -1789,7 +1785,7 @@ fn maybe_update_columns_estimate(session: &mut SpectrogramSessionState, source: 
 
 fn session_flush_chunk(
     session: &mut SpectrogramSessionState,
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
 ) {
     // Drain any partial resampler window at track end.
@@ -1828,7 +1824,7 @@ fn session_flush_chunk(
 /// preserve that interval so column indices remain derived from audio frames.
 fn session_emit_pending_chunk(
     session: &mut SpectrogramSessionState,
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
 ) {
     if session.chunk_columns > 0 {
@@ -1869,7 +1865,7 @@ fn session_emit_pending_chunk(
 /// rate-limited data chunk (~0.4–0.7 s later).
 fn session_flush_token(
     session: &mut SpectrogramSessionState,
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
 ) {
     // Publish complete buffered columns so they carry the updated token.
@@ -1899,7 +1895,7 @@ fn session_flush_token(
 
 fn flush_chunk_before_lookahead_park(
     session: &mut SpectrogramSessionState,
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
 ) {
     if session.display_mode == SpectrogramDisplayMode::Rolling {
@@ -1915,7 +1911,7 @@ fn flush_chunk_before_lookahead_park(
 /// estimate (which may overshoot by seconds at high zoom).
 fn session_emit_finalize_chunk(
     session: &SpectrogramSessionState,
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
 ) {
     let final_cols = u64_to_u32_saturating(session.columns_produced);
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(

@@ -110,6 +110,7 @@ private slots:
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
+    void delayedSpectrogramBatchesPreserveColumnsAndRejectOldGeneration();
     void spectrogramDetailedTraceLoggingRequiresExplicitOptIn();
     void diagnosticsWritesBatchOffHotPath();
     void profileDiagnosticsBypassUiThreadDiskQueue();
@@ -449,6 +450,35 @@ void BridgeClientTest::precomputedSpectrogramChunksRouteDirectlyToRegisteredItem
     QCOMPARE(right.m_ringCapacity > 0, true);
     QCOMPARE(static_cast<quint8>(left.m_ringBuffer.at(0)), static_cast<quint8>(0x11));
     QCOMPARE(static_cast<quint8>(right.m_ringBuffer.at(0)), static_cast<quint8>(0x77));
+}
+
+void BridgeClientTest::delayedSpectrogramBatchesPreserveColumnsAndRejectOldGeneration() {
+    for (int mode : {0, 1}) {
+        BridgeClient client;
+        isolateBridgeClient(client);
+        SpectrogramItem item;
+        item.setWidth(320);
+        item.setDisplayMode(mode);
+        client.registerSpectrogramItem(&item, 0);
+        for (int column = 0; column < 200; ++column) {
+            auto frame = makePrecomputedFrame(4, 1, 1, column, 200, 42, 7);
+            frame[45] = column == 0 ? 1 : 0;
+            frame[46] = column == 0 ? 1 : 0;
+            QVERIFY(client.parsePrecomputedSpectrogramFrame(frame).valid);
+            if (column % 20 == 0) {
+                QCoreApplication::processEvents();
+                QVERIFY(client.parsePrecomputedSpectrogramFrame(
+                    makePrecomputedFrame(4, 1, 3, 0, 200, 41, 6)).valid);
+            }
+        }
+        QCOMPARE(item.m_ringWriteSeq, qint64(200));
+        QCOMPARE(item.m_precomputedCommittedGeneration, quint64(7));
+        for (int column = 0; column < 200; ++column) {
+            QCOMPARE(item.m_ringColumnId[column], column);
+            QCOMPARE(item.m_ringTrackToken[column], quint64(42));
+            QCOMPARE(static_cast<quint8>(item.m_ringBuffer[column * 4]), quint8(0x11));
+        }
+    }
 }
 
 void BridgeClientTest::spectrogramDetailedTraceLoggingRequiresExplicitOptIn() {
