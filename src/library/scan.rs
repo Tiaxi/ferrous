@@ -436,9 +436,13 @@ pub(crate) fn load_external_track_cache(
     load_external_track_cache_from_conn(&conn, path, fingerprint)
 }
 
+#[cfg(test)]
 pub(crate) fn load_external_track_caches(
     requests: &[(PathBuf, TrackFileFingerprint)],
 ) -> HashMap<PathBuf, IndexedTrack> {
+    if requests.is_empty() {
+        return HashMap::new();
+    }
     let Ok(conn) = open_library_db() else {
         return HashMap::new();
     };
@@ -446,6 +450,43 @@ pub(crate) fn load_external_track_caches(
         return HashMap::new();
     }
     load_external_track_caches_from_conn(&conn, requests)
+}
+
+/// A queue worker owns one connection; schema checks happen once, not on each heartbeat.
+pub(crate) struct ExternalTrackCache(Option<Connection>);
+
+impl ExternalTrackCache {
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Self {
+        let conn = Connection::open_in_memory().expect("fixture DB");
+        init_schema(&conn).expect("fixture schema");
+        Self(Some(conn))
+    }
+
+    pub(crate) fn new() -> Self {
+        let conn = open_library_db()
+            .ok()
+            .filter(|conn| init_schema(conn).is_ok());
+        Self(conn)
+    }
+    pub(crate) fn load_many(
+        &self,
+        requests: &[(PathBuf, TrackFileFingerprint)],
+    ) -> HashMap<PathBuf, IndexedTrack> {
+        self.0.as_ref().map_or_else(HashMap::new, |conn| {
+            load_external_track_caches_from_conn(conn, requests)
+        })
+    }
+    pub(crate) fn store(
+        &self,
+        path: &Path,
+        fingerprint: TrackFileFingerprint,
+        indexed: &IndexedTrack,
+    ) {
+        if let Some(conn) = &self.0 {
+            let _ = store_external_track_cache_in_conn(conn, path, fingerprint, indexed);
+        }
+    }
 }
 
 fn load_external_track_cache_from_conn(

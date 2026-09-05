@@ -43,6 +43,7 @@ pub enum PlaybackCommand {
     LoadQueue(Vec<PathBuf>),
     AddToQueue(Vec<PathBuf>),
     RemoveAt(usize),
+    RemoveMany(Vec<usize>),
     MoveQueue { from: usize, to: usize },
     ClearQueue,
     PlayAt(usize),
@@ -83,6 +84,38 @@ pub enum PlaybackEvent {
     },
 }
 
+/// Remove a batch in one retain pass and remap the current/selected index.
+pub(crate) fn remove_queue_indices<T>(
+    queue: &mut Vec<T>,
+    current: Option<usize>,
+    indices: &[usize],
+) -> Option<usize> {
+    let mut removed: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|index| *index < queue.len())
+        .collect();
+    removed.sort_unstable();
+    removed.dedup();
+    if removed.is_empty() {
+        return current;
+    }
+    let next = current
+        .map(|index| index.saturating_sub(removed.partition_point(|removed| *removed < index)));
+    let mut index = 0;
+    let mut cursor = 0;
+    queue.retain(|_| {
+        let keep = removed.get(cursor) != Some(&index);
+        if !keep {
+            cursor += 1;
+        }
+        index += 1;
+        keep
+    });
+    next.filter(|_| !queue.is_empty())
+        .map(|index| index.min(queue.len() - 1))
+}
+
 pub struct PlaybackEngine {
     tx: Sender<PlaybackCommand>,
 }
@@ -113,7 +146,22 @@ mod shared_tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{stop_snapshot_at_terminal_eos, PlaybackSnapshot, PlaybackState};
+    use super::{
+        remove_queue_indices, stop_snapshot_at_terminal_eos, PlaybackSnapshot, PlaybackState,
+    };
+
+    #[test]
+    fn batched_removal_remaps_surviving_removed_and_last_current_tracks() {
+        for current in 0..6 {
+            let mut queue: Vec<_> = (0..6).collect();
+            let actual = remove_queue_indices(&mut queue, Some(current), &[1, 4, 5, 5, 999]);
+            assert_eq!(queue, vec![0, 2, 3]);
+            assert_eq!(actual, Some([0, 1, 1, 2, 2, 2][current]));
+        }
+        let mut queue = vec![0, 1];
+        assert_eq!(remove_queue_indices(&mut queue, Some(1), &[0, 1]), None);
+        assert!(queue.is_empty());
+    }
 
     #[test]
     fn muted_channels_mask_defaults_to_zero() {
@@ -190,6 +238,30 @@ mod tests {
         let (analysis_tx, _) = unbounded();
         let (pcm_tx, _) = unbounded();
         PlaybackEngine::new(analysis_tx, pcm_tx)
+    }
+
+    #[test]
+    fn batched_removal_preserves_surviving_current_position() {
+        let (engine, rx) = make_test_engine();
+        let paths: Vec<_> = (0..5)
+            .map(|index| PathBuf::from(format!("/fixture/{index}.flac")))
+            .collect();
+        engine.command(PlaybackCommand::LoadQueue(paths.clone()));
+        engine.command(PlaybackCommand::PlayAt(3));
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Pause);
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(42)));
+        engine.command(PlaybackCommand::RemoveMany(vec![0, 2, 4]));
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("surviving track");
+        assert_eq!(snapshot.current, Some(paths[3].clone()));
+        assert_eq!(snapshot.current_queue_index, Some(1));
+        assert_eq!(snapshot.position, Duration::from_secs(42));
+        assert_eq!(snapshot.state, PlaybackState::Paused);
+        engine.command(PlaybackCommand::RemoveMany(vec![1]));
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("replacement track");
+        assert_eq!(snapshot.current, Some(paths[1].clone()));
+        assert_eq!(snapshot.current_queue_index, Some(0));
+        assert_eq!(snapshot.position, Duration::ZERO);
     }
 
     #[test]

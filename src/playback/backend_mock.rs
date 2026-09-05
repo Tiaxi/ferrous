@@ -71,6 +71,30 @@ pub fn spawn_engine(
                     PlaybackCommand::AddToQueue(paths) => {
                         queue.extend(paths);
                     }
+                    PlaybackCommand::RemoveMany(indices) => {
+                        let old_current = snapshot.current.clone();
+                        let next =
+                            super::remove_queue_indices(&mut queue, Some(queue_idx), &indices);
+                        queue_idx = next.unwrap_or(0);
+                        snapshot.current_queue_index = next;
+                        snapshot.current = next.and_then(|index| queue.get(index).cloned());
+                        if snapshot.current != old_current {
+                            reset_mute!();
+                            snapshot.position = Duration::ZERO;
+                            if let Some(path) = snapshot.current.clone() {
+                                snapshot.duration = Duration::from_secs(180);
+                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
+                                    path,
+                                    queue_index: queue_idx,
+                                    kind: TrackChangeKind::Manual,
+                                    track_token: 0,
+                                });
+                            } else {
+                                snapshot.state = PlaybackState::Stopped;
+                                snapshot.duration = Duration::ZERO;
+                            }
+                        }
+                    }
                     PlaybackCommand::RemoveAt(idx) => {
                         if idx < queue.len() {
                             queue.remove(idx);

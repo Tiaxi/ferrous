@@ -30,6 +30,7 @@ pub mod ffi;
 mod imports;
 pub mod library_tree;
 mod queue;
+mod queue_validation;
 mod search;
 mod tree_worker;
 mod workers;
@@ -122,6 +123,7 @@ pub enum BridgeQueueCommand {
     Append(Vec<PathBuf>),
     PlayAt(usize),
     Remove(usize),
+    RemoveMany(Vec<usize>),
     Move {
         from: usize,
         to: usize,
@@ -445,6 +447,8 @@ impl Default for BridgeSettings {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct BridgeState {
+    queue_detail_generation: u64,
+    queue_detail_validation_requested: bool,
     playback: PlaybackSnapshot,
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
@@ -653,6 +657,7 @@ impl FrontendBridgeHandle {
 struct BridgeLoopRuntime {
     imports: imports::ImportWorker,
     tree_worker: tree_worker::TreeWorker,
+    queue_validator: queue_validation::QueueValidationWorker,
     analysis: AnalysisEngine,
     analysis_rx: Receiver<AnalysisEvent>,
     playback: PlaybackEngine,
@@ -732,6 +737,7 @@ impl SnapshotUrgency {
 enum BridgeLoopWake {
     Import(imports::ImportResult),
     Tree(tree_worker::TreeResult),
+    QueueValidated(queue_validation::ValidationResult),
     Command(BridgeCommand),
     Playback(PlaybackEvent),
     Analysis(AnalysisEvent),
@@ -793,6 +799,7 @@ impl BridgeLoopRuntime {
         Self {
             imports: imports::ImportWorker::new(),
             tree_worker: tree_worker::TreeWorker::new(),
+            queue_validator: queue_validation::QueueValidationWorker::new(),
             analysis,
             analysis_rx,
             playback,
@@ -876,6 +883,7 @@ impl BridgeLoopRuntime {
         select! {
             recv(&self.imports.results) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Import),
             recv(&self.tree_worker.results) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Tree),
+            recv(&self.queue_validator.results) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::QueueValidated),
             recv(cmd_rx) -> msg => {
                 match msg {
                     Ok(cmd) => BridgeLoopWake::Command(cmd),
@@ -993,6 +1001,15 @@ impl BridgeLoopRuntime {
         let mut urgency = match wake {
             BridgeLoopWake::Import(result) => self.apply_import_result(result, event_tx),
             BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
+            BridgeLoopWake::QueueValidated(result) => {
+                if self.queue_validator.apply(result, &mut self.state) {
+                    self.snapshot_plan.include_queue_in_next_snapshot = true;
+                    self.flags.session_dirty = true;
+                    SnapshotUrgency::Immediate
+                } else {
+                    SnapshotUrgency::None
+                }
+            }
             BridgeLoopWake::Command(cmd) => self.handle_command(cmd, event_tx),
             BridgeLoopWake::Playback(event) => self.handle_playback_event(event),
             BridgeLoopWake::Analysis(event) => self.handle_analysis_event(event, event_tx),
@@ -1297,6 +1314,10 @@ impl BridgeLoopRuntime {
         drain_search_results(&self.search_results_rx, &mut self.state);
         tick_lastfm_playback(&self.state, &self.lastfm, &mut self.lastfm_tracker);
         self.revalidate_queue_details();
+        if self.state.queue_detail_validation_requested {
+            self.state.queue_detail_validation_requested = false;
+            self.queue_validator.request(&self.state);
+        }
         if apply_album_art_urgency.is_pending() {
             self.deferred_tree_rebuild_at = Some(Instant::now() + Duration::from_millis(150));
         }
@@ -1330,11 +1351,7 @@ impl BridgeLoopRuntime {
         if self.last_queue_detail_revalidate.elapsed() < self.queue_detail_revalidate_interval {
             return;
         }
-        if sync_queue_details(&mut self.state, &self.external_queue_details_tx) {
-            self.snapshot_plan.include_queue_in_next_snapshot = true;
-            self.note_snapshot_urgency(SnapshotUrgency::Immediate);
-            self.flags.session_dirty = true;
-        }
+        self.state.queue_detail_validation_requested = true;
         self.last_queue_detail_revalidate = Instant::now();
     }
 

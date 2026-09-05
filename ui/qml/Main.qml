@@ -303,6 +303,7 @@ ApplicationWindow {
         function playAt(index) {}
         function selectQueueIndex(index) {}
         function removeAt(index) {}
+        function removeIndices(indices) {}
         function moveQueue(from, to) {}
         function clearQueue() {}
         function replaceAlbumAt(index) {}

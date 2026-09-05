@@ -282,14 +282,6 @@ impl FfiRuntime {
         }
     }
 
-    #[cfg(test)]
-    fn push_precomputed_spectrogram(&mut self, chunk: &PrecomputedSpectrogramChunk) {
-        self.push_precomputed_frame(
-            chunk.generation,
-            encode_precomputed_spectrogram_chunk(chunk),
-        );
-    }
-
     fn push_precomputed_frame(&mut self, generation: u64, frame: Vec<u8>) {
         if generation != 0 {
             if generation < self.latest_precomputed_generation {
@@ -1425,6 +1417,14 @@ fn parse_queue_command(
                 index => Some(usize_from_i32(index)?),
             };
             BridgeQueueCommand::Select(selected)
+        }
+        63 => {
+            let count = reader.read_u16()?;
+            let mut indices = Vec::with_capacity(usize::from(count));
+            for _ in 0..count {
+                indices.push(usize_from_u32(reader.read_u32()?));
+            }
+            BridgeQueueCommand::RemoveMany(indices)
         }
         10 => BridgeQueueCommand::Remove(usize_from_u32(reader.read_u32()?)),
         11 => {
@@ -2586,6 +2586,21 @@ mod tests {
         let end = start + len;
         *offset = end;
         String::from_utf8_lossy(&bytes[start..end]).to_string()
+    }
+
+    #[test]
+    fn batch_removal_command_decodes_all_indices_and_rejects_truncation() {
+        let mut payload = Vec::new();
+        push_u16(&mut payload, 3);
+        for index in [9, 5, 1] {
+            push_u32(&mut payload, index);
+        }
+        assert!(
+            matches!(parse_binary_command(&encode_command(63, &payload)).expect("batch"),
+            Some(BridgeCommand::Queue(BridgeQueueCommand::RemoveMany(indices))) if indices == vec![9, 5, 1])
+        );
+        payload.pop();
+        assert!(parse_binary_command(&encode_command(63, &payload)).is_err());
     }
 
     #[test]

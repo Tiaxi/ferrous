@@ -594,6 +594,13 @@ QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &q
     return finalizeCommand(cmdId, payload);
 }
 
+QByteArray encodeCommandIndices(quint16 cmdId, const QList<quint32> &indices) {
+    QByteArray payload;
+    appendLe<quint16>(payload, static_cast<quint16>(indices.size()));
+    for (quint32 index : indices) appendLe<quint32>(payload, index);
+    return finalizeCommand(cmdId, payload);
+}
+
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values) {
     QByteArray payload;
     const int count = std::min<int>(values.size(), std::numeric_limits<quint16>::max());

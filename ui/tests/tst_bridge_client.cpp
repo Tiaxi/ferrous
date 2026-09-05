@@ -25,6 +25,8 @@
 #undef private
 
 #include "../src/FerrousBridgeFfi.h"
+#include "../src/BinaryBridgeCodec.h"
+#include <QtEndian>
 #include "../src/SpectrogramTraceLogging.h"
 
 namespace {
@@ -99,6 +101,7 @@ class BridgeClientTest : public QObject {
 private slots:
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
+    void batchRemovalCodecPreservesIndices();
     void playAtDoesNotEmitImmediateSnapshotChanged();
     void playAtClearsPendingSeekAndPublishesRestartPosition();
     void queueSnapshotKeepsRawCoverPathsInRows();
@@ -225,6 +228,16 @@ void BridgeClientTest::tagEditorAsyncFileRoundTrip() {
     editor.reload();
     QTRY_VERIFY(!editor.loading());
     QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Renamed"));
+}
+
+void BridgeClientTest::batchRemovalCodecPreservesIndices() {
+    const QByteArray bytes = BinaryBridgeCodec::encodeCommandIndices(BinaryBridgeCodec::CmdRemoveMany, {9, 5, 1});
+    QCOMPARE(qFromLittleEndian<quint16>(bytes.constData()), quint16(63));
+    QCOMPARE(qFromLittleEndian<quint16>(bytes.constData() + 2), quint16(14));
+    QCOMPARE(qFromLittleEndian<quint16>(bytes.constData() + 4), quint16(3));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 6), quint32(9));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 10), quint32(5));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 14), quint32(1));
 }
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
