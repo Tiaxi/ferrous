@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 import FerrousUi 1.0
+import "../logic/ChannelLabels.js" as ChannelLabels
 
 Item {
     id: root
@@ -39,27 +40,12 @@ Item {
     }
 
 
-    // Standard channel labels for common layouts.
-    readonly property var standardChannelLabels: [
-        ["M"],
-        ["L", "R"],
-        ["L", "R", "C"],
-        ["L", "R", "Ls", "Rs"],
-        ["L", "R", "C", "Ls", "Rs"],
-        ["L", "R", "C", "LFE", "Ls", "Rs"],
-        ["L", "R", "C", "LFE", "Ls", "Rs", "Lrs"],
-        ["L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs"]
-    ]
-
     function descriptorsForChannelCount(count) {
         const isPerChannel = root.uiBridge.spectrogramViewMode === 1
         const showLabels = isPerChannel && count > 0
-        const labels = count > 0 && count <= standardChannelLabels.length
-            ? standardChannelLabels[count - 1]
-            : null
         let result = []
         for (let i = 0; i < Math.max(count, 1); ++i) {
-            const lbl = labels ? labels[i] || "" : (count === 0 ? "M" : "")
+            const lbl = ChannelLabels.label(count, i)
             const muted = root.uiBridge.isChannelMuted(i)
             result.push({
                 label: lbl,

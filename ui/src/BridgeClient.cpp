@@ -628,18 +628,6 @@ QString channelLayoutText(int channels) {
         return QStringLiteral("mono");
     case 2:
         return QStringLiteral("stereo");
-    case 3:
-        return QStringLiteral("3.0");
-    case 4:
-        return QStringLiteral("4.0");
-    case 5:
-        return QStringLiteral("5.0");
-    case 6:
-        return QStringLiteral("5.1");
-    case 7:
-        return QStringLiteral("6.1");
-    case 8:
-        return QStringLiteral("7.1");
     default:
         return channels > 0 ? QStringLiteral("%1 ch").arg(channels) : QString{};
     }
@@ -651,16 +639,6 @@ QString channelLayoutIconKey(int channels) {
         return QStringLiteral("mono");
     case 2:
         return QStringLiteral("stereo");
-    case 4:
-        return QStringLiteral("4.0");
-    case 5:
-        return QStringLiteral("5.0");
-    case 6:
-        return QStringLiteral("5.1");
-    case 7:
-        return QStringLiteral("6.1");
-    case 8:
-        return QStringLiteral("7.1");
     default:
         return QString{};
     }

@@ -1395,6 +1395,20 @@ Item {
 
     QObject *surface = root->findChild<QObject *>(QStringLiteral("spectrogramSurface"));
     QVERIFY(surface != nullptr);
+    for (const int count : {1, 2, 3, 4, 5, 6, 7, 8, 10}) {
+        QVariant descriptors;
+        QVERIFY(QMetaObject::invokeMethod(surface, "descriptorsForChannelCount",
+            Q_RETURN_ARG(QVariant, descriptors), Q_ARG(QVariant, count)));
+        const QVariantList channels = descriptors.value<QJSValue>().toVariant().toList();
+        QCOMPARE(channels.size(), count);
+        for (int i = 0; i < count; ++i) {
+            const QString expected = count == 1 ? QStringLiteral("M")
+                : count == 2 ? (i == 0 ? QStringLiteral("L") : QStringLiteral("R"))
+                : QString::number(i + 1);
+            QCOMPARE(channels[i].toMap().value(QStringLiteral("label")).toString(), expected);
+            QVERIFY(channels[i].toMap().value(QStringLiteral("showLabel")).toBool());
+        }
+    }
     const QVariantMap descriptor{
         {QStringLiteral("label"), QStringLiteral("L")},
         {QStringLiteral("showLabel"), true},
@@ -1646,6 +1660,19 @@ Item {
 
     QObject *bridge = root->findChild<QObject *>(QStringLiteral("waveformBridge"));
     QVERIFY(bridge != nullptr);
+    for (const int count : {1, 2, 3, 4, 5, 6, 7, 8, 10}) {
+        bridge->setProperty("currentTrackChannels", count);
+        QTRY_COMPARE(waveform->channelCount(), count);
+        for (int i = 0; i < count; ++i) {
+            QVariant label;
+            QVERIFY(QMetaObject::invokeMethod(surface, "channelLabel",
+                Q_RETURN_ARG(QVariant, label), Q_ARG(QVariant, i)));
+            const QString expected = count == 1 ? QStringLiteral("M")
+                : count == 2 ? (i == 0 ? QStringLiteral("L") : QStringLiteral("R"))
+                : QString::number(i + 1);
+            QCOMPARE(label.toString(), expected);
+        }
+    }
     bridge->setProperty("waveformCoverageSeconds", 5.0);
     QTRY_COMPARE(waveform->overviewCoverageSeconds(), 5.0);
     bridge->setProperty("waveformComplete", true);
