@@ -19,4 +19,4 @@ labels: bug
 - Distro/version:
 - Qt version:
 - GStreamer version:
-- Installed from: source / RPM
+- Installed from: source / RPM / deb

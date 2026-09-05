@@ -3,4 +3,4 @@
 
 ## Test plan
 
-- [ ] `./scripts/run-tests.sh` passes
+- Checks run and results (see `docs/DEVELOPMENT.md` for validation guidance):

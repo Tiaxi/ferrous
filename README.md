@@ -18,7 +18,7 @@ Ferrous is a personal project built for my own daily listening. It pairs a Rust 
 
 **Album art** — Embedded cover art display with the option to fetch high-resolution artwork from the iTunes catalog.
 
-**Visualization** — Live spectrogram and waveform displays rendered in real time alongside embedded cover art. The spectrogram is inspired by Adobe Audition's spectral view — something I've spent countless hours using to analyze songs. It renders with precise playback sync, supports mono downmix or per-channel display, fullscreen viewing, logarithmic or linear frequency scale, adjustable dB range, configurable FFT window size, and centered or rolling display modes. Rolling mode scrolls continuously like a traditional spectrogram; centered mode shows the full track with the playback position fixed in the middle, giving context of what's ahead.
+**Visualization** — Live spectrogram and waveform displays rendered alongside embedded cover art. The spectrogram is inspired by Adobe Audition's spectral view — something I've spent countless hours using to analyze songs. It supports mono downmix or per-channel display, fullscreen viewing, logarithmic or linear frequency scale, adjustable dB range, configurable FFT window size, and centered or rolling display modes. Rolling mode scrolls continuously; centered mode shows a zoomable window around playback, with the view clamped at track boundaries. The waveform viewer supports zooming and per-channel inspection.
 
 **Desktop integration** — MPRIS media controls, media key support, single-instance file opening, and `.desktop`/MIME registration.
 
@@ -26,7 +26,7 @@ Ferrous is a personal project built for my own daily listening. It pairs a Rust 
 
 ## Design priorities
 
-Ferrous treats UI responsiveness as a correctness requirement. No work blocks the main thread — playback, analysis, metadata extraction, library indexing, and search all run on dedicated background threads. The spectrogram and waveform render at display refresh rate with no hitching. If something feels sluggish, it's a bug.
+Ferrous treats UI responsiveness as a correctness requirement. Playback, analysis, metadata extraction, library indexing, and search use background workers. Smooth visualization and immediately responsive interaction are development goals; if something feels sluggish, it's a bug.
 
 ## Supported Formats
 
@@ -36,7 +36,7 @@ MP3, FLAC, M4A/AAC, Ogg Vorbis, Opus, WAV, AC-3, DTS, and M3U/M3U8 playlists. Ac
 
 Prebuilt RPM (Fedora) and deb (Ubuntu/Debian) packages are available from [GitHub Releases](https://github.com/Tiaxi/ferrous/releases).
 
-To build from source, install the prerequisites for your distro (Rust, zsh, CMake, Ninja, a C++20 compiler, Qt 6.6+, KDE Kirigami 6, GStreamer + plugins), then:
+To build from source, install the prerequisites in the [installation guide](docs/INSTALL.md), then:
 
 ```bash
 git clone https://github.com/Tiaxi/ferrous.git
@@ -50,7 +50,7 @@ See the [installation guide](docs/INSTALL.md) for full dependency lists, manual 
 
 Ferrous is a personal project tailored for my specific needs and workflow. It is usable for daily listening but still under active development. Contributions and feedback are welcome, though the project direction follows my own priorities.
 
-Current priorities include backend-owned playback clock cleanup, ReplayGain, output-device selection, and deeper spectrogram and waveform customization. See the [roadmap](docs/ROADMAP.md) for details.
+See the [backlog](docs/ROADMAP.md) for open ideas.
 
 ## Tech Stack
 
@@ -65,7 +65,8 @@ Current priorities include backend-owned playback clock cleanup, ReplayGain, out
 
 - [Installation guide](docs/INSTALL.md) — dependencies, build options, data locations
 - [Development guide](docs/DEVELOPMENT.md) — building, testing, debugging, profiling
-- [Roadmap](docs/ROADMAP.md) — priorities and backlog
+- [Backlog](docs/ROADMAP.md) — open feature and maintenance ideas
+- [Contributing](CONTRIBUTING.md) — proposing and submitting changes
 
 ## License
 

@@ -1,10 +1,10 @@
 # Installing Ferrous
 
-Ferrous is currently a Linux-first project. The supported runtime path today is the Qt6/Kirigami desktop app in `ui/`, backed by the in-process Rust library.
+Ferrous is a Linux desktop app built with Qt6/Kirigami and an in-process Rust library.
 
-## Option 1: Prebuilt Packages
+## Prebuilt packages
 
-Prebuilt RPM (Fedora) and deb (Ubuntu/Debian) packages are attached to each [GitHub Release](https://github.com/Tiaxi/ferrous/releases). Download the package for your distro and install it with your package manager:
+Check [GitHub Releases](https://github.com/Tiaxi/ferrous/releases) for RPM and deb assets. Choose a package built for your distribution version and architecture:
 
 ```bash
 # Fedora
@@ -14,46 +14,32 @@ sudo dnf install ./ferrous-*.rpm
 sudo apt install ./ferrous_*.deb
 ```
 
-## Building From Source
+## Build dependencies
 
-### Requirements
-
-Install the equivalent of these tools and development packages for your distro:
+Install these tools and development libraries:
 
 - Rust toolchain (`cargo`, `rustc`)
-- `zsh`
-- CMake
-- Ninja
-- `pkg-config`
-- A C++20-capable compiler
-- Qt 6.6 or newer development packages
-- Qt Quick Controls 2 development packages
-- KDE Frameworks 6 Kirigami development packages
-- GStreamer runtime packages
-- GStreamer development packages
-- GStreamer codec plugins for the formats you want to play
+- Bash and `/bin/zsh` (CMake invokes Cargo through zsh)
+- CMake 3.24 or newer, Ninja, pkg-config, and a C++20 compiler
+- Qt 6.8 or newer development libraries: Core, DBus, Gui, Qml, Quick, QuickControls2, Network, Widgets, Concurrent, and Test
+- KDE Frameworks 6 Kirigami development libraries and QML runtime modules
+- GLib/GIO and GStreamer development libraries, including app, audio, and pbutils
+- GStreamer runtime codec plugins for the formats you want to play
 
-GStreamer is required for the current UI build and default test path. There is no separate `cargo install` application flow at the moment.
+Although CMake declares a Qt 6.6 minimum, it unconditionally enables [QTP0004, introduced in Qt 6.8](https://doc.qt.io/qt-6/qt-cmake-policy-qtp0004.html), so source builds need Qt 6.8 or newer. See [UI CI](../.github/workflows/ci.yml) for the reference distribution and Rust toolchain.
 
-For Fedora-like systems, the package names typically map closely to:
+For Fedora, the build package set used by CI is:
 
-- `rust`
-- `cargo`
-- `cmake`
-- `ninja-build`
-- `gcc-c++`
-- `qt6-qtbase-devel`
-- `qt6-qtdeclarative-devel`
-- `qt6-qtquickcontrols2-devel`
-- `kf6-kirigami-devel`
-- `gstreamer1-devel`
-- `gstreamer1-plugins-base-devel`
+```bash
+sudo dnf install git rust cargo zsh cmake ninja-build gcc-c++ \
+  pkgconf-pkg-config glib2-devel gstreamer1-devel \
+  gstreamer1-plugins-base-devel qt6-qtbase-devel \
+  qt6-qtdeclarative-devel qt6-qtquickcontrols2-devel kf6-kirigami-devel
+```
 
-Depending on the codecs you need, you may also want the distro-specific GStreamer plugin packages that provide MP3, AAC, Opus, and similar formats.
+For Debian/Ubuntu package names, see [build dependencies](../packaging/debian/control) and the [release workflow](../.github/workflows/release.yml). Rust must also be installed. Older distributions may not provide the required Qt/Kirigami versions.
 
-## Option 2: Run From Source
-
-This is the simplest path today.
+## Run from source
 
 ```bash
 git clone https://github.com/Tiaxi/ferrous.git
@@ -61,96 +47,59 @@ cd ferrous
 ./scripts/run-ui.sh
 ```
 
-`./scripts/run-ui.sh` will:
+The launcher loads optional `build.env` settings, configures CMake, builds Rust and Qt, and launches Ferrous. Use `./scripts/run-ui.sh --no-run` to build without launching. See [development](DEVELOPMENT.md) for Last.fm build credentials, tests, debugging, and profiling.
 
-- load optional local build settings from `build.env`
-- configure the Qt UI build
-- build the Rust static library used by the UI
-- build the UI executable
-- launch Ferrous
+## Manual build and install
 
-The current UI build invokes Cargo through `/bin/zsh`, so `zsh` needs to be present even if your login shell is different.
-
-Useful variants:
+CMake builds the Rust static library with the `gst` feature automatically; no separate Cargo build is needed:
 
 ```bash
-./scripts/run-ui.sh --no-run
-./scripts/run-ui.sh --nuke-all
-./scripts/run-ui.sh --clear-diagnostics-log
-```
-
-## Option 3: Build Manually
-
-If you want the explicit build steps:
-
-```bash
-cargo build --release --features gst --lib
 cmake -S ui -B ui/build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build ui/build
 ./ui/build/ferrous
 ```
 
-To install into a local prefix instead of running from the build tree:
+To install the executable, desktop entry, and icon under a local prefix:
 
 ```bash
 cmake --install ui/build --prefix "$HOME/.local"
 ```
 
-That install path also places the desktop file and icon under the prefix.
+Manual CMake and Cargo commands do not load `build.env`; export any build credentials in your shell first. There is no `cargo install` flow for the desktop app.
 
-## Option 4: Build A Local RPM
+## Local package builds
 
-On Fedora-like systems:
+On Fedora, install the build dependencies above plus `rpm-build` and `desktop-file-utils`, then run:
 
 ```bash
 ./scripts/build-rpm.sh
-```
-
-To build and install immediately:
-
-```bash
+# Or build and install:
 ./scripts/build-rpm.sh --install
 ```
 
-The generated RPM is written under `dist/rpm/RPMS/`.
+The helper packages the current working tree, runs package checks, and writes RPMs under `dist/rpm/RPMS/`.
 
-## Option 5: Build A Local deb
-
-On Debian/Ubuntu-like systems:
+On Debian/Ubuntu, install `dpkg-dev`, `debhelper`, Rust, and the dependencies listed in [packaging/debian/control](../packaging/debian/control), then:
 
 ```bash
 cp -r packaging/debian .
 dpkg-buildpackage -us -uc -b
 ```
 
-The generated `.deb` is written to the parent directory.
+The deb is written to the parent directory. This manual packaging path also requires build credentials to be exported if Last.fm support is wanted.
 
-## Supported Formats
+## Formats
 
-Ferrous currently handles common local audio and playlist formats, including:
+See [supported formats](../README.md#supported-formats). Playback codec support depends on installed GStreamer plugins; file import and visualization support also depend on Ferrous's decoders.
 
-- MP3
-- FLAC
-- M4A / AAC / MP4 audio
-- Ogg Vorbis and Opus
-- WAV
-- AC-3 and DTS
-- M3U / M3U8 playlists
+## Data locations
 
-Format handling is a combination of:
+| State | Location |
+| --- | --- |
+| Library database and waveform cache | `$XDG_DATA_HOME/ferrous/library.sqlite3` |
+| Diagnostics log | `$XDG_DATA_HOME/ferrous/diagnostics.log` |
+| Settings | `$XDG_CONFIG_HOME/ferrous/settings.txt` |
+| Session restore | `$XDG_CONFIG_HOME/ferrous/session.json` |
+| Embedded cover art | `$XDG_CACHE_HOME/ferrous/embedded_covers` |
 
-- file import support in the app
-- MIME declarations in the desktop file
-- the GStreamer plugins available on your machine
-
-## Data Locations
-
-Ferrous stores its local state under standard XDG locations:
-
-- library database: `$XDG_DATA_HOME/ferrous/library.sqlite3`
-- diagnostics log: `$XDG_DATA_HOME/ferrous/diagnostics.log`
-- settings: `$XDG_CONFIG_HOME/ferrous/settings.txt`
-- session restore: `$XDG_CONFIG_HOME/ferrous/session.json`
-- cached cover art: `$XDG_CACHE_HOME/ferrous/embedded_covers`
-
-If the XDG variables are unset, the usual `~/.local/share`, `~/.config`, and `~/.cache` fallbacks are used.
+Unset XDG variables fall back to `~/.local/share`, `~/.config`, and `~/.cache`. Last.fm session keys are stored in the system keyring.
