@@ -1096,6 +1096,52 @@ pub unsafe extern "C" fn ferrous_ffi_waveform_window(
 }
 
 #[no_mangle]
+/// Decode a viewport with cooperative cancellation between decoder packets.
+///
+/// # Safety
+/// Input and output pointers follow `ferrous_ffi_waveform_window`'s contract.
+/// The callback and context must remain valid until this call returns.
+pub unsafe extern "C" fn ferrous_ffi_waveform_window_cancellable(
+    path_ptr: *const c_uchar,
+    path_len: usize,
+    start_seconds: f64,
+    end_seconds: f64,
+    max_points: u32,
+    len_out: *mut usize,
+    cancelled: unsafe extern "C" fn(*const std::ffi::c_void) -> bool,
+    context: *const std::ffi::c_void,
+) -> *mut c_uchar {
+    if !len_out.is_null() {
+        // SAFETY: The caller guarantees a writable output length.
+        unsafe {
+            *len_out = 0;
+        }
+    }
+    if path_ptr.is_null() || path_len == 0 || max_points == 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: The caller supplies a readable path for the duration of the call.
+    let bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len) };
+    let Ok(path) = std::str::from_utf8(bytes) else {
+        return std::ptr::null_mut();
+    };
+    let is_cancelled = || {
+        // SAFETY: The callback and context remain valid until this function returns.
+        unsafe { cancelled(context) }
+    };
+    let Ok(window) = crate::analysis::decode_waveform_window_cancellable(
+        &PathBuf::from(path),
+        start_seconds,
+        end_seconds,
+        usize::try_from(max_points).unwrap_or(usize::MAX),
+        &is_cancelled,
+    ) else {
+        return std::ptr::null_mut();
+    };
+    into_raw_buffer(encode_waveform_window(&window), len_out)
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `ptr` and `len` must describe a buffer returned by

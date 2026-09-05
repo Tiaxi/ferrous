@@ -126,10 +126,21 @@ pub(crate) fn decode_waveform_window(
     end_seconds: f64,
     max_points: usize,
 ) -> anyhow::Result<WaveformWindow> {
+    decode_waveform_window_cancellable(path, start_seconds, end_seconds, max_points, &|| false)
+}
+
+pub(crate) fn decode_waveform_window_cancellable(
+    path: &Path,
+    start_seconds: f64,
+    end_seconds: f64,
+    max_points: usize,
+    cancelled: &impl Fn() -> bool,
+) -> anyhow::Result<WaveformWindow> {
     anyhow::ensure!(start_seconds.is_finite() && end_seconds.is_finite());
     anyhow::ensure!(start_seconds >= 0.0 && end_seconds > start_seconds);
     anyhow::ensure!(max_points > 0);
 
+    anyhow::ensure!(!cancelled(), "waveform decode cancelled");
     if let Some(mut file) = open_symphonia_file(path) {
         let sample_rate_hz = u32::try_from(file.native_sample_rate)
             .unwrap_or(u32::MAX)
@@ -149,7 +160,11 @@ pub(crate) fn decode_waveform_window(
         );
         file.decoder.reset();
         let mut sample_buffer: Option<SampleBuffer<f32>> = None;
-        while let Ok(packet) = file.format.next_packet() {
+        loop {
+            anyhow::ensure!(!cancelled(), "waveform decode cancelled");
+            let Ok(packet) = file.format.next_packet() else {
+                break;
+            };
             if packet.track_id() != file.track_id {
                 continue;
             }
@@ -170,7 +185,7 @@ pub(crate) fn decode_waveform_window(
         return Ok(accumulator.finish(sample_rate_hz));
     }
 
-    decode_fallback_window(path, start_seconds, end_seconds, max_points)
+    decode_fallback_window(path, start_seconds, end_seconds, max_points, cancelled)
 }
 
 fn frame_seconds(frame: u64, sample_rate: u64) -> f64 {
@@ -186,6 +201,7 @@ fn decode_fallback_window(
     start_seconds: f64,
     end_seconds: f64,
     max_points: usize,
+    cancelled: &impl Fn() -> bool,
 ) -> anyhow::Result<WaveformWindow> {
     let (mut source, sample_rate, channels, _) =
         open_audio_file(path).ok_or_else(|| anyhow::anyhow!("unsupported audio file"))?;
@@ -198,6 +214,7 @@ fn decode_fallback_window(
     source.seek(start_seconds, sample_rate);
     let mut next_frame = start_frame;
     while next_frame < end_frame {
+        anyhow::ensure!(!cancelled(), "waveform decode cancelled");
         let Some(frames) = source.next_frames() else {
             break;
         };
@@ -238,6 +255,35 @@ mod tests {
             file.write_all(&sample.to_le_bytes()).unwrap();
         }
         path
+    }
+
+    #[test]
+    fn cancelled_window_does_not_open_the_source() {
+        let error = decode_waveform_window_cancellable(
+            Path::new("/missing/cancelled.wav"),
+            0.0,
+            1.0,
+            100,
+            &|| true,
+        )
+        .expect_err("cancel before opening");
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn window_decode_observes_cancellation_between_packets() {
+        let path = write_test_wave(&vec![100; 48_003], 48_000, 1);
+        let checks = std::cell::Cell::new(0);
+        let result = decode_waveform_window_cancellable(&path, 0.0, 1.0, 100, &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 2
+        });
+        std::fs::remove_file(path).expect("remove fixture");
+        assert!(result
+            .expect_err("cancel during decode")
+            .to_string()
+            .contains("cancelled"));
+        assert_eq!(checks.get(), 3);
     }
 
     #[test]

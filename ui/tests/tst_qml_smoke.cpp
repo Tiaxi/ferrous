@@ -19,6 +19,11 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QScopedPointer>
+#include <QSemaphore>
+#include <QFutureWatcher>
+#include <atomic>
+#include <functional>
+#include <memory>
 #include <QtEndian>
 #include <QtTest/QtTest>
 #include <qqml.h>
@@ -511,6 +516,7 @@ private slots:
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
     void waveformEditorParsesSignedSampleWindow();
+    void waveformEditorCancelsAndBoundsObsoleteDecodes();
     void waveformEditorSampleMarkersRequireSampleResolution();
     void waveformEditorFormatsViewportDuration();
     void waveformEditorConnectsSamplesBeforeMarkers();
@@ -4363,6 +4369,42 @@ void QmlSmokeTest::waveformPeakUpdatesInvalidateChangedSuffix() {
     QVERIFY(item.m_cacheDirty);
     QVERIFY(item.m_dirtyRect.x() >= 160);
     QCOMPARE(item.m_dirtyRect.height(), 24);
+}
+
+void QmlSmokeTest::waveformEditorCancelsAndBoundsObsoleteDecodes() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setDurationSeconds(10.0);
+    auto gate = std::make_shared<QSemaphore>();
+    auto started = std::make_shared<std::atomic_int>(0);
+    item.m_decodeWindow = [gate, started](const QString &, double, double, int,
+                                        const std::shared_ptr<std::atomic_bool> &) {
+        ++*started;
+        gate->tryAcquire(1, 5000);
+        return QByteArray("stale invalid payload");
+    };
+    item.setSourcePath(QStringLiteral("/fixture/first.wav"));
+    item.m_requestTimer.stop();
+    item.requestDetailWindow();
+    QTRY_COMPARE(started->load(), 1);
+    const auto cancelled = item.m_decodeCancelled;
+    for (int i = 0; i < 20; ++i) {
+        item.setZoomLevel(2.0 + i);
+        item.m_requestTimer.stop();
+        item.requestDetailWindow();
+    }
+    QVERIFY(cancelled->load());
+    QCOMPARE(started->load(), 1);
+    QCOMPARE(item.findChildren<QFutureWatcherBase *>().size(), 1);
+    item.setSourcePath(QStringLiteral("/fixture/latest.wav"));
+    item.m_requestTimer.stop();
+    gate->release();
+    QTRY_COMPARE(started->load(), 2);
+    item.setSourcePath(QString());
+    gate->release();
+    QTRY_VERIFY(!item.m_decodeActive);
+    QVERIFY(item.m_detail.extrema.empty());
+    QCOMPARE(started->load(), 2);
 }
 
 void QmlSmokeTest::waveformEditorParsesSignedSampleWindow() {
