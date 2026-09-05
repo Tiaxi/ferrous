@@ -88,6 +88,7 @@ enum CommandId : quint16 {
     CmdSetLibraryViewState = 60,
     CmdShowTrackInLibrary = 61,
     CmdRefreshRenamedPaths = 62,
+    CmdRemoveMany = 63,
 };
 
 struct DecodedPlayback {
@@ -261,6 +262,7 @@ QByteArray encodeCommandLibraryViewState(
     const QString &anchorKey,
     float anchorOffset);
 QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query);
+QByteArray encodeCommandIndices(quint16 cmdId, const QList<quint32> &indices);
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
 QByteArray encodeCommandMoveQueue(quint32 from, quint32 to);
 

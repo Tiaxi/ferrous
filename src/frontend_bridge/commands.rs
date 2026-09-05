@@ -11,10 +11,11 @@ use walkdir::WalkDir;
 
 use crate::analysis::{AnalysisCommand, AnalysisEngine};
 use crate::lastfm::{self, Command as LastFmCommand, Handle as LastFmHandle};
+#[cfg(test)]
+use crate::library::load_external_track_caches;
 use crate::library::{
-    is_supported_audio, load_external_track_caches, refresh_indexed_metadata_for_paths,
-    track_file_fingerprint, IndexedTrack, LibraryCommand, LibraryService, LibraryTrack,
-    TrackFileFingerprint,
+    is_supported_audio, refresh_indexed_metadata_for_paths, track_file_fingerprint, IndexedTrack,
+    LibraryCommand, LibraryService, LibraryTrack, TrackFileFingerprint,
 };
 use crate::metadata::MetadataService;
 use crate::playback::{PlaybackCommand, PlaybackEngine};
@@ -990,7 +991,26 @@ pub(super) fn format_import_warning(action: &str, outcome: &ImportExpandOutcome)
 
 pub(super) fn sync_queue_details(
     state: &mut BridgeState,
+    _external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
+) -> bool {
+    state.queue_detail_generation = state.queue_detail_generation.saturating_add(1);
+    state.queue_detail_validation_requested = true;
+    false
+}
+
+#[cfg(test)]
+fn sync_queue_details_blocking(
+    state: &mut BridgeState,
+    tx: &Sender<ExternalQueueDetailsRequest>,
+) -> bool {
+    validate_queue_details(state, tx, &|| false, load_external_track_caches)
+}
+
+pub(super) fn validate_queue_details(
+    state: &mut BridgeState,
     external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
+    cancelled: &impl Fn() -> bool,
+    mut load_cached: impl FnMut(&[(PathBuf, TrackFileFingerprint)]) -> HashMap<PathBuf, IndexedTrack>,
 ) -> bool {
     let queue_paths: HashSet<&Path> = state.queue.iter().map(PathBuf::as_path).collect();
     let library_paths: HashSet<&Path> = state
@@ -1013,6 +1033,9 @@ pub(super) fn sync_queue_details(
     let mut pending_requests = Vec::<(PathBuf, TrackFileFingerprint)>::new();
 
     for path in &state.queue {
+        if cancelled() {
+            return changed;
+        }
         if library_paths.contains(path.as_path()) {
             changed |= Arc::make_mut(&mut state.queue_details)
                 .remove(path)
@@ -1056,7 +1079,7 @@ pub(super) fn sync_queue_details(
         pending_requests.push((path.clone(), fingerprint));
     }
 
-    let cached_rows = load_external_track_caches(&pending_requests);
+    let cached_rows = load_cached(&pending_requests);
     for (path, fingerprint) in pending_requests {
         if let Some(indexed) = cached_rows.get(&path) {
             let needs_update = state.queue_details.get(&path) != Some(indexed);
@@ -1509,6 +1532,17 @@ mod tests {
     }
 
     #[test]
+    fn queue_sync_schedules_validation_without_file_or_database_work() {
+        let mut state = BridgeState::default();
+        state.queue = vec![p("/unavailable/queue-track.flac")];
+        let (tx, rx) = crossbeam_channel::unbounded();
+        assert!(!sync_queue_details(&mut state, &tx));
+        assert!(state.queue_detail_validation_requested);
+        assert_eq!(state.queue_detail_generation, 1);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn show_track_in_library_expands_ancestors_and_selects_track() {
         let root_path = p("/music");
         let track_path = p("/music/Artist/Album/Disc 1/01.flac");
@@ -1698,7 +1732,7 @@ mod tests {
 
         let mut state = BridgeState::default();
         state.queue = vec![track.clone()];
-        assert!(!sync_queue_details(&mut state, &request_tx));
+        assert!(!sync_queue_details_blocking(&mut state, &request_tx));
         let request = request_rx.try_recv().expect("external detail request");
         assert_eq!(request.path, track);
 
@@ -1735,7 +1769,7 @@ mod tests {
         );
 
         state.queue.clear();
-        assert!(sync_queue_details(&mut state, &request_tx));
+        assert!(sync_queue_details_blocking(&mut state, &request_tx));
         assert!(state.queue_details.is_empty());
 
         let _ = fs::remove_dir_all(root);
@@ -1755,7 +1789,7 @@ mod tests {
         });
         state.queue = vec![track.clone()];
 
-        assert!(!sync_queue_details(&mut state, &request_tx));
+        assert!(!sync_queue_details_blocking(&mut state, &request_tx));
 
         assert!(!state.queue_details.contains_key(&track));
         assert!(request_rx.try_recv().is_err());
@@ -1810,8 +1844,8 @@ mod tests {
             .expect("send library snapshot");
 
         assert!(pump_library_events(&library_rx, &request_tx, &mut state));
-        let request = request_rx.try_recv().expect("external detail request");
-        assert_eq!(request.path, track);
+        assert!(request_rx.try_recv().is_err());
+        assert!(state.queue_detail_validation_requested);
         assert!(state.queue_details.is_empty());
 
         let _ = fs::remove_dir_all(root);
@@ -1846,7 +1880,7 @@ mod tests {
             .queue_detail_fingerprints
             .insert(track.clone(), old_fingerprint);
 
-        assert!(sync_queue_details(&mut state, &request_tx));
+        assert!(sync_queue_details_blocking(&mut state, &request_tx));
         assert!(!state.queue_details.contains_key(&track));
         let request = request_rx.try_recv().expect("replacement request");
         assert_ne!(request.fingerprint, old_fingerprint);

@@ -7,16 +7,17 @@ use std::path::PathBuf;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
-pub(crate) use scan::read_library_snapshot_from_db;
+#[cfg(test)]
+pub(crate) use scan::load_external_track_caches;
 use scan::{
     handle_add_root, handle_rescan_all, handle_rescan_root, remove_root_and_purge, rename_root,
 };
 pub(crate) use scan::{
-    is_supported_audio, load_external_track_cache, load_external_track_caches, read_track_info,
-    refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
-    refresh_indexed_metadata_for_paths, rename_indexed_metadata_paths, store_external_track_cache,
-    track_file_fingerprint,
+    is_supported_audio, load_external_track_cache, read_track_info, refresh_cover_paths_for_tracks,
+    refresh_cover_paths_for_tracks_with_override, refresh_indexed_metadata_for_paths,
+    rename_indexed_metadata_paths, store_external_track_cache, track_file_fingerprint,
 };
+pub(crate) use scan::{read_library_snapshot_from_db, ExternalTrackCache};
 pub use schema::search_tracks_fts;
 use schema::{init_schema, load_snapshot, open_library_db};
 

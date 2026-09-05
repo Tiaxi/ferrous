@@ -602,6 +602,7 @@ private slots:
     void playbackControllerInterpolationDeactivatesOnStop();
     void trackIdentityChangedSignalTriggersQmlHandler();
     void queueAutoCenterIsDeferredOffHandlerStack();
+    void queueRemovalSendsOneBatch();
     void queueContainIndexSkipsScrollWhenVisible();
     void queueContainIndexScrollsUpWhenAboveViewport();
     void queueContainIndexClampsAtListEnd();
@@ -888,6 +889,7 @@ Item {
         function queuePathAt(index) { return "" }
         function playAt(index) {}
         function removeAt(index) {}
+        function removeIndices(indices) {}
         function moveQueue(from, to) {}
     }
 
@@ -7493,6 +7495,42 @@ Item {
 
     QVERIFY(QMetaObject::invokeMethod(root.data(), "emitTrackIdentityChanged"));
     QCOMPARE(root->property("trackIdentityChangedCount").toInt(), 1);
+}
+
+void QmlSmokeTest::queueRemovalSendsOneBatch() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+Item {
+    id: harness
+    property int batches: 0
+    property string removed: ""
+    QtObject {
+        id: bridge
+        property int queueLength: 10000
+        property int selectedQueueIndex: 1
+        function removeIndices(indices) { harness.batches++; harness.removed = indices.join(",") }
+    }
+    Controllers.QueueController {
+        id: controller
+        uiBridge: bridge
+        tagEditorApi: null
+        openTagEditorDialog: function() {}
+    }
+    function removeSelection() {
+        controller.setSelectedIndices([1, 200, 9999])
+        controller.removeSelectedTrack()
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QVERIFY(QMetaObject::invokeMethod(root.data(), "removeSelection"));
+    QCOMPARE(root->property("batches").toInt(), 1);
+    QCOMPARE(root->property("removed").toString(), QStringLiteral("9999,200,1"));
 }
 
 void QmlSmokeTest::queueAutoCenterIsDeferredOffHandlerStack() {

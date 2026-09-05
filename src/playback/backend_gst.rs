@@ -102,24 +102,15 @@ impl GaplessQueue {
         }
     }
 
-    fn remove_at(&mut self, idx: usize) -> Option<PathBuf> {
-        if idx >= self.queue.len() {
-            return self.current();
-        }
-        self.queue.remove(idx);
-        if self.queue.is_empty() {
-            self.current_idx = 0;
+    fn remove_many(&mut self, indices: &[usize]) -> Option<PathBuf> {
+        let old_len = self.queue.len();
+        self.current_idx =
+            super::remove_queue_indices(&mut self.queue, Some(self.current_idx), indices)
+                .unwrap_or(0);
+        if self.queue.len() != old_len {
             self.clear_shuffle_navigation();
-            self.shuffle_pool.clear();
-            return None;
+            self.rebuild_shuffle_pool();
         }
-        if idx < self.current_idx {
-            self.current_idx = self.current_idx.saturating_sub(1);
-        } else if idx == self.current_idx && self.current_idx >= self.queue.len() {
-            self.current_idx = self.queue.len().saturating_sub(1);
-        }
-        self.clear_shuffle_navigation();
-        self.rebuild_shuffle_pool();
         self.current()
     }
 
@@ -958,11 +949,15 @@ impl GstPlaybackRuntime {
     }
 
     fn remove_at(&mut self, idx: usize) {
+        self.remove_many(&[idx]);
+    }
+
+    fn remove_many(&mut self, indices: &[usize]) {
         let old_current = self.snapshot.current.clone();
         let Some((next_current, repeat_mode, shuffle_enabled, current_index)) =
             (match self.queue_state.lock() {
                 Ok(mut state) => {
-                    let next_current = state.remove_at(idx);
+                    let next_current = state.remove_many(indices);
                     Some((
                         next_current,
                         state.repeat_mode,
@@ -1511,6 +1506,7 @@ impl GstPlaybackRuntime {
             PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
             PlaybackCommand::AddToQueue(paths) => self.add_to_queue(paths),
             PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
+            PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
             PlaybackCommand::MoveQueue { from, to } => self.move_queue_item(from, to),
             PlaybackCommand::ClearQueue => self.clear_queue(),
             PlaybackCommand::PlayAt(idx) => self.play_at(idx),
@@ -2688,6 +2684,30 @@ mod tests {
         let _ = queue.next_manual();
         drop(queue);
         queue_state
+    }
+
+    #[test]
+    fn batched_removal_keeps_current_and_rebuilds_shuffle_for_survivors() {
+        let paths: Vec<_> = (0..6)
+            .map(|index| PathBuf::from(format!("/fixture/{index}.flac")))
+            .collect();
+        let mut queue = GaplessQueue::new();
+        queue.set_queue(paths.clone());
+        queue.set_current(3);
+        queue.set_shuffle_enabled(true);
+        queue.repeat_mode = RepeatMode::All;
+        assert_eq!(queue.remove_many(&[0, 2, 5]), Some(paths[3].clone()));
+        assert_eq!(queue.current_index(), Some(1));
+        assert_eq!(
+            queue.queue,
+            vec![paths[1].clone(), paths[3].clone(), paths[4].clone()]
+        );
+        for _ in 0..10 {
+            let next = queue.next_manual().expect("surviving shuffle track");
+            assert!(queue.queue.contains(&next));
+        }
+        assert_eq!(queue.remove_many(&[0, 1, 2]), None);
+        assert_eq!(queue.current_index(), None);
     }
 
     #[test]

@@ -426,10 +426,8 @@ QtObject {
                 root.selectionAnchorIndex = -1
                 return
             }
-            root.requestViewportRestoreWindow(Math.max(700, indices.length * 120))
-            for (let i = 0; i < indices.length; ++i) {
-                root.uiBridge.removeAt(indices[i])
-            }
+            root.requestViewportRestoreWindow(700)
+            root.uiBridge.removeIndices(indices)
             root.setSelectedIndices([])
             root.selectionAnchorIndex = -1
             return

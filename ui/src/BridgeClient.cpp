@@ -2792,6 +2792,22 @@ void BridgeClient::selectQueueIndex(int index) {
         static_cast<qint32>(index)));
 }
 
+void BridgeClient::removeIndices(const QVariantList &indices) {
+    QSet<quint32> unique;
+    for (const QVariant &value : indices) {
+        bool ok = false;
+        const int index = value.toInt(&ok);
+        if (ok && index >= 0 && index < m_queueLength) unique.insert(static_cast<quint32>(index));
+    }
+    QList<quint32> sorted = unique.values();
+    std::sort(sorted.begin(), sorted.end(), std::greater<quint32>());
+    // Descending batches preserve the original indexes in all subsequent batches.
+    for (qsizetype start = 0; start < sorted.size(); start += 4096) {
+        sendBinaryCommand(BinaryBridgeCodec::encodeCommandIndices(
+            BinaryBridgeCodec::CmdRemoveMany, sorted.mid(start, 4096)));
+    }
+}
+
 void BridgeClient::removeAt(int index) {
     if (index < 0) {
         return;

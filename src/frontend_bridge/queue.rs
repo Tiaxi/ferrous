@@ -18,13 +18,19 @@ pub(super) fn handle_queue_command(
     external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
+    let validate_details = !matches!(
+        cmd,
+        BridgeQueueCommand::Select(_)
+            | BridgeQueueCommand::PlayAt(_)
+            | BridgeQueueCommand::Move { .. }
+    );
     let outcome = apply_queue_command_state(
         cmd,
         &mut state.queue,
         &mut state.selected_queue_index,
         state.playback.state,
     );
-    if outcome.changed {
+    if outcome.changed && validate_details {
         let _ = sync_queue_details(state, external_queue_details_tx);
     }
     for op in &outcome.playback_ops {
@@ -34,6 +40,9 @@ pub(super) fn handle_queue_command(
             }
             QueuePlaybackOp::AddToQueue(tracks) => {
                 playback.command(PlaybackCommand::AddToQueue(tracks.clone()));
+            }
+            QueuePlaybackOp::RemoveMany(indices) => {
+                playback.command(PlaybackCommand::RemoveMany(indices.clone()));
             }
             QueuePlaybackOp::RemoveAt(idx) => playback.command(PlaybackCommand::RemoveAt(*idx)),
             QueuePlaybackOp::Move { from, to } => playback.command(PlaybackCommand::MoveQueue {
@@ -56,6 +65,7 @@ pub(super) enum QueuePlaybackOp {
     LoadQueue(Vec<PathBuf>),
     AddToQueue(Vec<PathBuf>),
     RemoveAt(usize),
+    RemoveMany(Vec<usize>),
     Move { from: usize, to: usize },
     ClearQueue,
     PlayAt(usize),
@@ -222,6 +232,23 @@ pub(super) fn apply_queue_command_state(
         BridgeQueueCommand::PlayAt(idx) => {
             play_at_queue_command_outcome(idx, queue.len(), selected_queue_index, playback_state)
         }
+        BridgeQueueCommand::RemoveMany(indices) => {
+            let old_len = queue.len();
+            *selected_queue_index =
+                crate::playback::remove_queue_indices(queue, *selected_queue_index, &indices);
+            if old_len == queue.len() {
+                return QueueCommandOutcome::default();
+            }
+            QueueCommandOutcome {
+                changed: true,
+                playback_ops: vec![if queue.is_empty() {
+                    QueuePlaybackOp::ClearQueue
+                } else {
+                    QueuePlaybackOp::RemoveMany(indices)
+                }],
+                error: None,
+            }
+        }
         BridgeQueueCommand::Remove(idx) => {
             remove_queue_command_outcome(idx, queue, selected_queue_index)
         }
@@ -261,6 +288,62 @@ mod tests {
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
+    }
+
+    #[test]
+    fn batch_removal_keeps_order_and_emits_one_playback_operation() {
+        let mut queue = (0..8)
+            .map(|index| p(&format!("/{index}.flac")))
+            .collect::<Vec<_>>();
+        let mut selected = Some(4);
+        let outcome = apply_queue_command_state(
+            BridgeQueueCommand::RemoveMany(vec![1, 3, 3, 5, 99]),
+            &mut queue,
+            &mut selected,
+            PlaybackState::Playing,
+        );
+        assert_eq!(
+            queue,
+            vec![
+                p("/0.flac"),
+                p("/2.flac"),
+                p("/4.flac"),
+                p("/6.flac"),
+                p("/7.flac")
+            ]
+        );
+        assert_eq!(selected, Some(2));
+        assert_eq!(outcome.playback_ops.len(), 1);
+        assert!(matches!(
+            &outcome.playback_ops[0],
+            QueuePlaybackOp::RemoveMany(_)
+        ));
+    }
+
+    #[test]
+    fn selection_playback_and_reorder_do_not_request_metadata_validation() {
+        let (analysis_tx, _) = crossbeam_channel::unbounded();
+        let (pcm_tx, _) = crossbeam_channel::unbounded();
+        let (playback, _) = PlaybackEngine::new(analysis_tx, pcm_tx);
+        let (details_tx, details_rx) = crossbeam_channel::unbounded();
+        let (event_tx, _) = crossbeam_channel::unbounded();
+        let mut state = BridgeState::default();
+        state.queue = vec![p("/missing/a.flac"), p("/missing/b.flac")];
+        for command in [
+            BridgeQueueCommand::Select(Some(1)),
+            BridgeQueueCommand::PlayAt(0),
+            BridgeQueueCommand::Move { from: 0, to: 1 },
+        ] {
+            assert!(handle_queue_command(
+                command,
+                &mut state,
+                &playback,
+                &details_tx,
+                &event_tx
+            ));
+            assert!(!state.queue_detail_validation_requested);
+        }
+        assert!(details_rx.try_recv().is_err());
     }
 
     #[test]

@@ -307,6 +307,7 @@ public:
     Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void selectQueueIndex(int index);
     Q_INVOKABLE void removeAt(int index);
+    Q_INVOKABLE void removeIndices(const QVariantList &indices);
     Q_INVOKABLE void moveQueue(int from, int to);
     Q_INVOKABLE void clearQueue();
     Q_INVOKABLE void replaceAlbumAt(int index);
