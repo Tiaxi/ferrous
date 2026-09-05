@@ -58,6 +58,13 @@ Item {
         }
     }
 
+    Connections {
+        target: root.uiBridge
+        function onTransportPositionDiscontinuity(seconds) {
+            waveform.applyExplicitSeekPosition(seconds)
+        }
+    }
+
     HoverHandler {
         id: waveformHover
         objectName: "waveformSurfaceHoverHandler"

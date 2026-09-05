@@ -602,6 +602,7 @@ void BridgeClientTest::seekPublishesOptimisticPositionAndExtendsPendingWindow() 
 void BridgeClientTest::seekImmediatelyReanchorsRegisteredCenteredSpectrograms() {
     BridgeClient client;
     isolateBridgeClient(client);
+    QSignalSpy discontinuity(&client, &BridgeClient::transportPositionDiscontinuity);
 
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
@@ -619,6 +620,8 @@ void BridgeClientTest::seekImmediatelyReanchorsRegisteredCenteredSpectrograms() 
     // The explicit seek command disambiguates the update and must move both
     // the centered viewport and playhead without waiting for reset data.
     client.seek(0.0);
+    QCOMPARE(discontinuity.count(), 1);
+    QCOMPARE(discontinuity.takeFirst().at(0).toDouble(), 0.0);
 
     QVERIFY(!item.m_positionJumpHoldActive);
     QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.0001);
@@ -628,6 +631,7 @@ void BridgeClientTest::seekImmediatelyReanchorsRegisteredCenteredSpectrograms() 
 void BridgeClientTest::playAtImmediatelyReanchorsRegisteredCenteredSpectrograms() {
     BridgeClient client;
     isolateBridgeClient(client);
+    QSignalSpy discontinuity(&client, &BridgeClient::transportPositionDiscontinuity);
 
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
@@ -640,6 +644,8 @@ void BridgeClientTest::playAtImmediatelyReanchorsRegisteredCenteredSpectrograms(
     QVERIFY(item.m_positionJumpHoldActive);
 
     client.playAt(2);
+    QCOMPARE(discontinuity.count(), 1);
+    QCOMPARE(discontinuity.takeFirst().at(0).toDouble(), 0.0);
 
     QVERIFY(!item.m_positionJumpHoldActive);
     QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.0001);

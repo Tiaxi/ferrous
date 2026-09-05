@@ -556,6 +556,7 @@ private slots:
     void waveformEditorCachedPaintClearsUncoveredPixels();
     void waveformEditorPausedDetailReplacesOverviewCache();
     void waveformEditorPlaybackHeartbeatDoesNotMoveBackward();
+    void waveformEditorExplicitSeekBypassesHeartbeatSmoothing();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
     void waveformEditorCrosshairLabelsMatchSpectrogramMargins();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
@@ -1563,6 +1564,7 @@ Item {
     QtObject {
         id: bridge
         objectName: "waveformBridge"
+        signal transportPositionDiscontinuity(double seconds)
         property string playbackState: "Stopped"
         property string currentTrackPath: ""
         property var waveformPeaksPacked: ""
@@ -1631,6 +1633,9 @@ Item {
     QVERIFY(bridge != nullptr);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     QTRY_VERIFY(waveform->playing());
+    waveform->applyExplicitSeekPosition(5.0);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "transportPositionDiscontinuity", Q_ARG(double, 4.5)));
+    QCOMPARE(waveform->positionSeconds(), 4.5);
 
     surface->setProperty("interactiveOverlaysVisible", false);
     QTRY_VERIFY(!waveform->crosshairEnabled());
@@ -5642,6 +5647,23 @@ void QmlSmokeTest::waveformEditorPlaybackHeartbeatDoesNotMoveBackward() {
         qPrintable(QStringLiteral("before=%1 after=%2")
             .arg(before, 0, 'f', 6)
             .arg(after, 0, 'f', 6)));
+}
+
+void QmlSmokeTest::waveformEditorExplicitSeekBypassesHeartbeatSmoothing() {
+    WaveformEditorItem item;
+    item.setDurationSeconds(30.0);
+    item.setPositionSeconds(10.0);
+    item.setPlaying(true);
+    for (double target : {9.5, 9.4, 9.45, 0.0}) {
+        item.applyExplicitSeekPosition(target);
+        QCOMPARE(item.positionSeconds(), target);
+        QVERIFY(item.displayedPositionSecondsLocked() < target + 0.02);
+        QVERIFY(item.playing());
+    }
+    item.setPlaying(false);
+    item.applyExplicitSeekPosition(0.25);
+    QCOMPARE(item.positionSeconds(), 0.25);
+    QVERIFY(!item.playing());
 }
 
 void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {

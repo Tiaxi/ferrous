@@ -87,6 +87,7 @@ public:
     bool samplePointsVisible() const;
 
     Q_INVOKABLE void resetZoom();
+    Q_INVOKABLE void applyExplicitSeekPosition(double seconds);
     Q_INVOKABLE double maximumZoomLevel() const;
     Q_INVOKABLE QString formatViewportDuration(double seconds) const;
     Q_INVOKABLE void setHoverPosition(double x, double y, bool active);
@@ -122,6 +123,7 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
 
 private:
+    void updatePositionSeconds(double seconds, bool explicitSeek);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     struct ProfileState {
         bool enabled{false};

@@ -256,6 +256,7 @@ ApplicationWindow {
         property string diagnosticsLogPath: ""
         property bool connected: false
         signal playbackChanged()
+        signal transportPositionDiscontinuity(double seconds)
         signal trackIdentityChanged()
         signal trackMetadataChanged()
         signal snapshotChanged()
