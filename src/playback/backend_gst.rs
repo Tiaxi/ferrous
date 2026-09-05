@@ -670,12 +670,12 @@ impl GstPlaybackRuntime {
         seek_result_ok: bool,
     ) {
         let clock_trace = self.clock_trace();
-        profile_eprintln!(
+        eprintln!(
             "[gst-seek] requested_ms={} target_ms={} result={} cancelled_gapless={} current_state={:?} pending_state={:?} running_time_ms={} clock_time_ms={} base_time_ms={} current={}",
             duration_ms_i128(requested),
             duration_ms_i128(target),
             if seek_result_ok { "ok" } else { "err" },
-            if cancelled_gapless_advance { 1 } else { 0 },
+            i32::from(cancelled_gapless_advance),
             clock_trace.current_state,
             clock_trace.pending_state,
             clock_trace.running,
@@ -697,7 +697,7 @@ impl GstPlaybackRuntime {
             Some(Duration::ZERO),
         );
         let clock_trace = self.clock_trace();
-        profile_eprintln!(
+        eprintln!(
             "[gst-seek-hold] phase=clear target_ms={} since_seek_ms={} since_seek_release_ms={} current_state={:?} pending_state={:?} running_time_ms={} clock_time_ms={} base_time_ms={} current={}",
             seek_trace.target,
             seek_trace.since_issue,
@@ -727,12 +727,12 @@ impl GstPlaybackRuntime {
         }
         let seek_trace = self.recent_seek_trace();
         let clock_trace = self.clock_trace();
-        profile_eprintln!(
+        eprintln!(
             "[gst-pos] prev_ms={} next_ms={} delta_ms={} jumped_backward={} mode={:?} accepted_ms={} seek_locked=0 seek_target_ms={} since_seek_ms={} since_seek_release_ms={} current_state={:?} pending_state={:?} running_time_ms={} clock_time_ms={} base_time_ms={} pending_gapless_duration={} current={}",
             trace.previous,
             trace.current,
             trace.delta,
-            if trace.jumped_backward { 1 } else { 0 },
+            i32::from(trace.jumped_backward),
             mode,
             duration_ms_i128(accepted),
             seek_trace.target,
@@ -743,7 +743,7 @@ impl GstPlaybackRuntime {
             clock_trace.running,
             clock_trace.clock,
             clock_trace.base,
-            if self.pending_gapless_duration.is_some() { 1 } else { 0 },
+            i32::from(self.pending_gapless_duration.is_some()),
             self
                 .snapshot
                 .current

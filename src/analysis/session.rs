@@ -855,7 +855,7 @@ fn run_spectrogram_session(
         hop_size,
         zoom_level,
         widget_width,
-        channel_count: _channel_count,
+        channel_count: _,
         start_seconds,
         target_position_seconds,
         emit_initial_reset,
@@ -867,11 +867,11 @@ fn run_spectrogram_session(
         return None;
     };
 
-    let _start = std::time::Instant::now();
+    #[cfg(feature = "profiling-logs")]
+    let session_started_at = std::time::Instant::now();
     profile_eprintln!(
-        "[spect-worker] SESSION START path={} gen={gen} token={track_token} fft={fft_size} hop={hop_size} ch={channel_count} view={view_mode:?} display={display_mode:?} start_s={start_seconds:.2} target_s={target_position_seconds:.2}",
+        "[spect-worker] SESSION START path={} gen={gen} token={track_token} fft={fft_size} hop={hop_size} view={view_mode:?} display={display_mode:?} start_s={start_seconds:.2} target_s={target_position_seconds:.2}",
         path.file_name().unwrap_or_default().to_string_lossy(),
-        channel_count = _channel_count,
     );
 
     let bins_per_column = (fft_size / 2) + 1;
@@ -879,7 +879,7 @@ fn run_spectrogram_session(
 
     profile_eprintln!(
         "[spect-worker] file opened in {:.2}ms sr={native_sample_rate} ch={native_channels} est_cols={total_columns}",
-        _start.elapsed().as_secs_f64() * 1000.0,
+        session_started_at.elapsed().as_secs_f64() * 1000.0,
     );
 
     let effective_rate = u32::try_from(native_sample_rate).unwrap_or(48_000);
@@ -1099,7 +1099,7 @@ fn run_spectrogram_session(
                 // Interrupted by NewTrack or Stop.
                 profile_eprintln!(
                     "[spect-worker] SESSION END (interrupted) elapsed={:.1}ms cols_produced={}",
-                    _start.elapsed().as_secs_f64() * 1000.0,
+                    session_started_at.elapsed().as_secs_f64() * 1000.0,
                     session.columns_produced.saturating_sub(start_column),
                 );
                 return Some(cmd);
@@ -1114,7 +1114,7 @@ fn run_spectrogram_session(
                     } else {
                         "superseded"
                     },
-                    _start.elapsed().as_secs_f64() * 1000.0,
+                    session_started_at.elapsed().as_secs_f64() * 1000.0,
                     session.columns_produced.saturating_sub(start_column),
                 );
                 return None;
