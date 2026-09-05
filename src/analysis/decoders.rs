@@ -778,7 +778,7 @@ mod tests {
                 deinterleave_samples(&stereo, mono.len(), 2, 1, SpectrogramViewMode::Downmix);
             assert!(mixed[0].iter().all(|value| value.abs() < f32::EPSILON));
             let mut stft = super::super::fft::StftComputer::new(8192, 1024);
-            stft.enqueue_samples(&split[0], rate);
+            stft.enqueue_samples(&split[0]);
             let rows = stft.take_rows(1);
             let peak = rows[0]
                 .iter()
