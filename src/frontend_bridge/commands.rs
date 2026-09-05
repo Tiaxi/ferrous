@@ -748,12 +748,13 @@ fn collect_album_paths_for_queue(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ImportExpandOutcome {
-    tracks: Vec<PathBuf>,
+pub(super) struct ImportExpandOutcome {
+    pub(super) tracks: Vec<PathBuf>,
     missing_count: usize,
     unsupported_count: usize,
     unreadable_count: usize,
     non_local_url_count: usize,
+    invalid_playlist_count: usize,
 }
 
 impl ImportExpandOutcome {
@@ -762,6 +763,7 @@ impl ImportExpandOutcome {
             + self.unsupported_count
             + self.unreadable_count
             + self.non_local_url_count
+            + self.invalid_playlist_count
     }
 
     fn push_missing(&mut self) {
@@ -844,13 +846,20 @@ fn playlist_entry_path(
     Some(resolved)
 }
 
-fn append_folder_tracks(root: &Path, outcome: &mut ImportExpandOutcome) {
+fn append_folder_tracks(
+    root: &Path,
+    outcome: &mut ImportExpandOutcome,
+    cancelled: &impl Fn() -> bool,
+) {
     let mut folder_tracks = Vec::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_map(std::result::Result::ok)
     {
+        if cancelled() {
+            return;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
@@ -864,30 +873,44 @@ fn append_folder_tracks(root: &Path, outcome: &mut ImportExpandOutcome) {
     outcome.tracks.extend(folder_tracks);
 }
 
-fn append_import_path(path: &Path, outcome: &mut ImportExpandOutcome) {
+fn append_import_path(
+    path: &Path,
+    outcome: &mut ImportExpandOutcome,
+    active_playlists: &mut HashSet<PathBuf>,
+    cancelled: &impl Fn() -> bool,
+) {
+    if cancelled() {
+        return;
+    }
     if path.is_dir() {
-        append_folder_tracks(path, outcome);
+        append_folder_tracks(path, outcome, cancelled);
         return;
     }
 
     if is_playlist_file(path) {
+        if active_playlists.len() >= 64 || !active_playlists.insert(path.to_path_buf()) {
+            outcome.invalid_playlist_count += 1;
+            return;
+        }
         let Ok(bytes) = fs::read(path) else {
             outcome.push_unreadable();
+            active_playlists.remove(path);
             return;
         };
         let mut reader = Cursor::new(decode_playlist_bytes(&bytes));
         let base_dir = path.parent().unwrap_or_else(|| Path::new(""));
         let mut line = String::new();
         while let Ok(read) = reader.read_line(&mut line) {
-            if read == 0 {
+            if read == 0 || cancelled() {
                 break;
             }
             let cleaned = line.trim_start_matches('\u{feff}');
             if let Some(entry_path) = playlist_entry_path(cleaned, base_dir, outcome) {
-                append_import_path(&entry_path, outcome);
+                append_import_path(&entry_path, outcome, active_playlists, cancelled);
             }
             line.clear();
         }
+        active_playlists.remove(path);
         return;
     }
 
@@ -900,18 +923,29 @@ fn append_import_path(path: &Path, outcome: &mut ImportExpandOutcome) {
 }
 
 fn expand_import_paths(paths: Vec<PathBuf>) -> ImportExpandOutcome {
+    expand_import_paths_cancellable(paths, &|| false)
+}
+
+pub(super) fn expand_import_paths_cancellable(
+    paths: Vec<PathBuf>,
+    cancelled: &impl Fn() -> bool,
+) -> ImportExpandOutcome {
+    let mut active_playlists = HashSet::new();
     let mut outcome = ImportExpandOutcome::default();
     for raw_path in paths {
+        if cancelled() {
+            break;
+        }
         let Some(path) = canonicalize_existing_path(&raw_path) else {
             outcome.push_missing();
             continue;
         };
-        append_import_path(&path, &mut outcome);
+        append_import_path(&path, &mut outcome, &mut active_playlists, cancelled);
     }
     outcome
 }
 
-fn format_import_warning(action: &str, outcome: &ImportExpandOutcome) -> Option<String> {
+pub(super) fn format_import_warning(action: &str, outcome: &ImportExpandOutcome) -> Option<String> {
     let skipped = outcome.skipped_count();
     if skipped == 0 {
         return None;
@@ -931,6 +965,12 @@ fn format_import_warning(action: &str, outcome: &ImportExpandOutcome) -> Option<
         parts.push(format!("{} non-local URLs", outcome.non_local_url_count));
     }
 
+    if outcome.invalid_playlist_count > 0 {
+        parts.push(format!(
+            "{} cyclic or excessively nested playlists",
+            outcome.invalid_playlist_count
+        ));
+    }
     let joined = parts.join(", ");
     if outcome.tracks.is_empty() {
         Some(format!("Import {action} skipped all entries ({joined})"))
@@ -1434,6 +1474,44 @@ mod tests {
         fs::File::create(path)
             .and_then(|mut file| file.write_all(bytes))
             .expect("write stub file");
+    }
+
+    #[test]
+    fn playlist_cycles_are_skipped_but_repeated_playlists_preserve_duplicates() {
+        let root = test_dir("playlist-cycles");
+        fs::create_dir_all(&root).expect("fixture directory");
+        write_stub(&root.join("song.flac"), b"fixture");
+        write_stub(&root.join("a.m3u"), b"b.m3u\nsong.flac\n");
+        write_stub(&root.join("b.m3u"), b"a.m3u\n");
+        let outcome = expand_import_paths(vec![root.join("a.m3u"), root.join("a.m3u")]);
+        assert_eq!(outcome.tracks, vec![root.join("song.flac"); 2]);
+        assert_eq!(outcome.invalid_playlist_count, 2);
+        assert!(format_import_warning("open", &outcome)
+            .expect("cycle warning")
+            .contains("cyclic"));
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn cancelled_import_does_not_inspect_paths() {
+        let outcome = expand_import_paths_cancellable(vec![p("/missing/fixture.m3u")], &|| true);
+        assert_eq!(outcome, ImportExpandOutcome::default());
+    }
+
+    #[test]
+    fn playlist_nesting_is_bounded() {
+        let root = test_dir("playlist-depth");
+        fs::create_dir_all(&root).expect("fixture directory");
+        for index in 0..66 {
+            write_stub(
+                &root.join(format!("{index}.m3u")),
+                format!("{}.m3u\n", index + 1).as_bytes(),
+            );
+        }
+        let outcome = expand_import_paths(vec![root.join("0.m3u")]);
+        assert_eq!(outcome.invalid_playlist_count, 1);
+        assert!(outcome.tracks.is_empty());
+        fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
