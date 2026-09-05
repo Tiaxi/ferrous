@@ -144,6 +144,7 @@ qt_add_qml_module(ferrous
         qml/assets/channel-5_0.svg
         qml/assets/channel-5_1.svg
         qml/assets/channel-7_1.svg
+        qml/logic/ChannelLabels.js
         qml/logic/ColorUtils.js
         qml/logic/FormatUtils.js
         qml/logic/PathUtils.js

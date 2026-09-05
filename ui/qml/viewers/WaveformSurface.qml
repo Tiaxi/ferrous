@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import FerrousUi 1.0
+import "../logic/ChannelLabels.js" as ChannelLabels
 
 Item {
     id: root
@@ -13,19 +14,8 @@ Item {
     property var pointerActivity: null
     readonly property alias waveformItem: waveform
 
-    readonly property var standardChannelLabels: [
-        ["M"], ["L", "R"], ["L", "R", "C"], ["L", "R", "Ls", "Rs"],
-        ["L", "R", "C", "Ls", "Rs"], ["L", "R", "C", "LFE", "Ls", "Rs"],
-        ["L", "R", "C", "LFE", "Ls", "Rs", "Lrs"],
-        ["L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs"]
-    ]
-
     function channelLabel(index) {
-        const count = waveform.channelCount
-        if (count > 0 && count <= standardChannelLabels.length) {
-            return standardChannelLabels[count - 1][index] || (index + 1).toString()
-        }
-        return (index + 1).toString()
+        return ChannelLabels.label(waveform.channelCount, index)
     }
 
     Rectangle {

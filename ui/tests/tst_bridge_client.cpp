@@ -1399,7 +1399,8 @@ void BridgeClientTest::currentTrackChannelsExposesDecodedMetadata()
     client.m_currentTrackChannels = 6;
 
     QCOMPARE(client.currentTrackChannels(), 6);
-    QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("5.1"));
+    QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("6 ch"));
+    QVERIFY(client.currentTrackChannelLayoutIconKey().isEmpty());
 }
 
 void BridgeClientTest::testSoloChannelCommandEncoding()
