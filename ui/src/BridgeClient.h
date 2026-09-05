@@ -32,6 +32,7 @@ struct FerrousFfiBridge;
 class QNetworkReply;
 class QSocketNotifier;
 class QTemporaryDir;
+class QQuickWindow;
 
 struct QueueRowData {
     QString title;
@@ -490,8 +491,14 @@ private:
     struct SpectrogramRoute {
         QPointer<QObject> item;
         int channelIndex{0};
+        QMetaObject::Connection visibilityConnection{};
+        QMetaObject::Connection windowConnection{};
+        QMetaObject::Connection destructionConnection{};
     };
 
+    void scheduleSpectrogramActivityUpdate();
+    void updateSpectrogramActivity();
+    void observeSpectrogramWindow(QQuickWindow *window);
     bool startInProcessBridge();
     void startSearchApplyWorker();
     void stopSearchApplyWorker();
@@ -723,6 +730,9 @@ private:
     QTimer m_searchModelApplyTimer;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> m_deferredSearchDisplayRows;
     QVector<SpectrogramRoute> m_spectrogramRoutes;
+    QSet<QQuickWindow *> m_spectrogramWindows;
+    bool m_spectrogramActivityPending{false};
+    bool m_spectrogramActive{true};
     std::thread m_searchApplyThread;
     mutable std::mutex m_searchApplyMutex;
     std::condition_variable m_searchApplyCv;

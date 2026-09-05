@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QQuickWindow>
 #include <QSignalSpy>
 #include <QSemaphore>
 #include <QFutureWatcher>
@@ -32,6 +33,8 @@
 namespace {
 
 void isolateBridgeClient(BridgeClient &client) {
+    // Settle the constructor's queued activity update before disconnecting.
+    client.updateSpectrogramActivity();
     client.m_bridgePollTimer.stop();
     if (client.m_bridgeWakeNotifier != nullptr) {
         client.m_bridgeWakeNotifier->setEnabled(false);
@@ -99,6 +102,7 @@ class BridgeClientTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void spectrogramActivityFollowsVisibleItemsAndWindows();
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
     void batchRemovalCodecPreservesIndices();
@@ -158,6 +162,54 @@ private slots:
     void coverImageProviderCancelDoesNotCrash();
     void coverImageProviderUrlForPathFormat();
 };
+
+void BridgeClientTest::spectrogramActivityFollowsVisibleItemsAndWindows() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QQuickWindow first;
+    QQuickWindow second;
+    QQuickItem parent(first.contentItem());
+    SpectrogramItem embedded(&parent);
+    SpectrogramItem viewer(second.contentItem());
+    client.registerSpectrogramItem(&embedded, 0);
+    client.registerSpectrogramItem(&viewer, 0);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    first.show();
+    QTRY_VERIFY(client.m_spectrogramActive);
+    parent.setVisible(false);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    second.show();
+    QTRY_VERIFY(client.m_spectrogramActive);
+    second.setVisibility(QWindow::Minimized);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    second.showNormal();
+    QTRY_VERIFY(client.m_spectrogramActive);
+    viewer.setVisible(false);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    parent.setVisible(true);
+    QTRY_VERIFY(client.m_spectrogramActive);
+    second.hide();
+    embedded.setParentItem(second.contentItem());
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    second.show();
+    QTRY_VERIFY(client.m_spectrogramActive);
+    client.unregisterSpectrogramItem(&embedded);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    client.registerSpectrogramItem(&embedded, 0);
+    client.registerSpectrogramItem(&embedded, 1);
+    QCOMPARE(client.m_spectrogramRoutes.size(), 2);
+    QTRY_VERIFY(client.m_spectrogramActive);
+    client.unregisterSpectrogramItem(&embedded);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    auto *temporary = new SpectrogramItem(second.contentItem());
+    client.registerSpectrogramItem(temporary, 0);
+    QTRY_VERIFY(client.m_spectrogramActive);
+    delete temporary;
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    const QByteArray activeCommand = BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetSpectrogramActive, 1);
+    QCOMPARE(activeCommand, QByteArray::fromHex("4000010001"));
+}
 
 void BridgeClientTest::tagJobsKeepUiResponsiveAndDiscardClosedLoads() {
     TagEditorController editor(nullptr);

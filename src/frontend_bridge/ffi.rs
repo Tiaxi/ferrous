@@ -1707,6 +1707,7 @@ fn parse_analysis_command(
             BridgeAnalysisCommand::SetSpectrogramZoomLevel(level)
         }
         58 => BridgeAnalysisCommand::SetSpectrogramWidgetWidth(reader.read_u32()?),
+        64 => BridgeAnalysisCommand::SetSpectrogramActive(reader.read_u8()? != 0),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -2905,6 +2906,18 @@ mod tests {
             cmd,
             BridgeCommand::Settings(BridgeSettingsCommand::DisconnectLastFm)
         ));
+    }
+
+    #[test]
+    fn parse_spectrogram_activity_command() {
+        for active in [false, true] {
+            let command = parse_binary_command(&encode_command(64, &[u8::from(active)]))
+                .unwrap()
+                .unwrap();
+            assert!(matches!(command, BridgeCommand::Analysis(
+                BridgeAnalysisCommand::SetSpectrogramActive(value)) if value == active));
+        }
+        assert!(parse_binary_command(&encode_command(64, &[])).is_err());
     }
 
     #[test]

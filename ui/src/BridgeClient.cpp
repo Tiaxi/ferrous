@@ -40,6 +40,7 @@
 #include <QPointer>
 #include <QNetworkRequest>
 #include <QProcess>
+#include <QQuickWindow>
 #include <QSet>
 #include <QSocketNotifier>
 #include <QStandardPaths>
@@ -886,6 +887,7 @@ BridgeClient::BridgeClient(QObject *parent)
     startCoverLookupWorker();
     startFileBrowserNameDetection();
     startInProcessBridge();
+    scheduleSpectrogramActivityUpdate();
 }
 
 BridgeClient::~BridgeClient() {
@@ -2677,6 +2679,17 @@ void BridgeClient::registerSpectrogramItem(QObject *item, int channelIndex) {
         .item = item,
         .channelIndex = channelIndex,
     });
+    if (auto *view = qobject_cast<QQuickItem *>(item)) {
+        auto &route = m_spectrogramRoutes.back();
+        route.visibilityConnection = connect(view, &QQuickItem::visibleChanged, this, &BridgeClient::scheduleSpectrogramActivityUpdate);
+        route.windowConnection = connect(view, &QQuickItem::windowChanged, this, [this](QQuickWindow *window) {
+            observeSpectrogramWindow(window);
+            scheduleSpectrogramActivityUpdate();
+        });
+        route.destructionConnection = connect(view, &QObject::destroyed, this, &BridgeClient::scheduleSpectrogramActivityUpdate);
+        observeSpectrogramWindow(view->window());
+    }
+    scheduleSpectrogramActivityUpdate();
 }
 
 void BridgeClient::unregisterSpectrogramItem(QObject *item) {
@@ -2684,8 +2697,44 @@ void BridgeClient::unregisterSpectrogramItem(QObject *item) {
         return;
     }
     m_spectrogramRoutes.removeIf([item](const SpectrogramRoute &route) {
-        return route.item.isNull() || route.item == item;
+        if (!route.item.isNull() && route.item != item) return false;
+        disconnect(route.visibilityConnection);
+        disconnect(route.windowConnection);
+        disconnect(route.destructionConnection);
+        return true;
     });
+    scheduleSpectrogramActivityUpdate();
+}
+
+void BridgeClient::observeSpectrogramWindow(QQuickWindow *window) {
+    if (window == nullptr || m_spectrogramWindows.contains(window)) return;
+    m_spectrogramWindows.insert(window);
+    connect(window, &QWindow::visibilityChanged, this, &BridgeClient::scheduleSpectrogramActivityUpdate);
+    connect(window, &QObject::destroyed, this, [this, window]() {
+        m_spectrogramWindows.remove(window);
+        scheduleSpectrogramActivityUpdate();
+    });
+}
+
+void BridgeClient::scheduleSpectrogramActivityUpdate() {
+    if (m_spectrogramActivityPending) return;
+    m_spectrogramActivityPending = true;
+    QTimer::singleShot(0, this, &BridgeClient::updateSpectrogramActivity);
+}
+
+void BridgeClient::updateSpectrogramActivity() {
+    m_spectrogramActivityPending = false;
+    m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) { return route.item.isNull(); });
+    const bool active = std::any_of(m_spectrogramRoutes.cbegin(), m_spectrogramRoutes.cend(), [](const SpectrogramRoute &route) {
+        const auto *view = qobject_cast<QQuickItem *>(route.item.data());
+        const auto *window = view != nullptr ? view->window() : nullptr;
+        return view != nullptr && view->isVisible() && window != nullptr
+            && window->isVisible() && window->visibility() != QWindow::Minimized;
+    });
+    if (active == m_spectrogramActive) return;
+    m_spectrogramActive = active;
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetSpectrogramActive, active ? 1 : 0));
 }
 
 void BridgeClient::reanchorCenteredSpectrogramsForExplicitPosition(double seconds) {

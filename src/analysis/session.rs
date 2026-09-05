@@ -965,7 +965,12 @@ fn run_spectrogram_session(
         target_chunk_columns: 1, // Start with 1 for fastest first-pixel
         total_covered_samples: 0,
         session_start_time: std::time::Instant::now(),
-        post_reset_unthrottled_columns: post_reset_unthrottled_columns(display_mode),
+        post_reset_unthrottled_columns: initial_unthrottled_columns(
+            display_mode,
+            start_column,
+            target_position_seconds,
+            cols_per_second,
+        ),
         decode_rate_limit,
         lookahead_columns,
         lookahead_seconds,
@@ -1639,6 +1644,22 @@ fn refresh_lookahead(session: &mut SpectrogramSessionState) {
     .lookahead;
 }
 
+fn initial_unthrottled_columns(
+    mode: SpectrogramDisplayMode,
+    start: u64,
+    target: f64,
+    columns_per_second: f64,
+) -> u32 {
+    let history = if mode == SpectrogramDisplayMode::Rolling {
+        u64_to_u32_saturating(
+            f64_to_u64_saturating(target * columns_per_second).saturating_sub(start),
+        )
+    } else {
+        0
+    };
+    post_reset_unthrottled_columns(mode).saturating_add(history)
+}
+
 fn post_reset_unthrottled_columns(display_mode: SpectrogramDisplayMode) -> u32 {
     match display_mode {
         // Keep rolling mode unthrottled until it has emitted the first full
@@ -1974,6 +1995,22 @@ fn session_emit_finalize_chunk(
 mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
+
+    #[test]
+    fn resumed_rolling_session_fills_history_before_throttling() {
+        assert_eq!(
+            initial_unthrottled_columns(SpectrogramDisplayMode::Rolling, 100, 5.0, 100.0),
+            527
+        );
+        assert_eq!(
+            initial_unthrottled_columns(SpectrogramDisplayMode::Rolling, 0, 0.0, 100.0),
+            127
+        );
+        assert_eq!(
+            initial_unthrottled_columns(SpectrogramDisplayMode::Centered, 100, 5.0, 100.0),
+            0
+        );
+    }
 
     #[test]
     fn worker_publishes_eof_before_parking_and_after_a_backward_seek() {
