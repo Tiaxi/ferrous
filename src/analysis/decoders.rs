@@ -182,6 +182,19 @@ impl AudioFrameSource {
         );
         let rate = u32::try_from(native_sample_rate)?;
         let target = f64_to_u64_saturating(position_seconds * f64::from(rate));
+        self.seek_with_target(position_seconds, target)
+    }
+
+    pub(super) fn seek_to_frame(&mut self, frame: u64, sample_rate: u32) -> anyhow::Result<()> {
+        anyhow::ensure!(sample_rate > 0, "invalid sample rate");
+        // The decoder may land before this time; integer timestamp trimming
+        // below guarantees the exact frame even when f64 rounds the time.
+        #[allow(clippy::cast_precision_loss)]
+        let seconds = frame as f64 / f64::from(sample_rate);
+        self.seek_with_target(seconds, frame)
+    }
+
+    fn seek_with_target(&mut self, position_seconds: f64, target: u64) -> anyhow::Result<()> {
         match self {
             Self::Symphonia {
                 format,

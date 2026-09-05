@@ -45,6 +45,12 @@ impl StftComputer {
         }
     }
 
+    pub(super) fn reset(&mut self) {
+        self.pending.clear();
+        self.pending_start = 0;
+        self.pending_skip = 0;
+    }
+
     pub(super) fn enqueue_samples(&mut self, samples: &[f32]) {
         self.compact_pending_if_needed();
         let skip = self.pending_skip.min(samples.len());
@@ -136,10 +142,20 @@ impl PeakHoldResampler {
         }
     }
 
+    pub(super) fn reset_at_column(&mut self, column: u64, input_hop: usize, output_hop: usize) {
+        let offset =
+            column.saturating_mul(usize_to_u64(output_hop)) % usize_to_u64(input_hop.max(1));
+        // Hop sizes are bounded to the supported FFT/zoom range.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            self.accumulator = -(offset as f64) / input_hop.max(1) as f64;
+        }
+        self.peak.fill(f32::NEG_INFINITY);
+    }
+
     pub(super) fn push(&mut self, row: &[f32]) -> Option<&[f32]> {
         if self.peak.len() != row.len() {
             self.peak = vec![f32::NEG_INFINITY; row.len()];
-            self.accumulator = 0.0;
         }
 
         // Peak-hold: element-wise max.

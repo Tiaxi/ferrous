@@ -14,8 +14,8 @@ use super::decoders::{
 };
 use super::fft::{PeakHoldResampler, StftComputer};
 use super::{
-    f64_to_u64_saturating, AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode,
-    SpectrogramViewMode, REFERENCE_HOP,
+    f64_to_u64_saturating, usize_to_u64, AnalysisEvent, PrecomputedSpectrogramChunk,
+    SpectrogramDisplayMode, SpectrogramViewMode, REFERENCE_HOP,
 };
 
 #[cfg(feature = "profiling-logs")]
@@ -77,17 +77,32 @@ fn output_interval_for_hop(hop: usize, zoom_level: f32) -> f64 {
         return 1.0;
     }
     // Continuous fractional interval: target_effective_hop / hop.
-    // Unlike the old integer factor, this is NOT truncated, so every
-    // zoom level produces a distinct output rate.  At zoom=0.8 with
-    // hop=1024, this gives 1.25 (not 1).
+    // Round to the sample hop advertised over the bridge, then retain the
+    // fractional row interval. This prevents long-track timing drift.
+    // At zoom=0.8 with hop=1024, the interval remains 1.25 (not 1).
     let zoom = f64::from(zoom_level.clamp(0.001, 1.0));
     // REFERENCE_HOP and hop are small compile-time/session constants;
     // precision loss from usize→f64 is negligible.
     #[allow(clippy::cast_precision_loss)]
-    let target_effective_hop = REFERENCE_HOP as f64 / zoom;
+    let target_effective_hop = (REFERENCE_HOP as f64 / zoom).round();
     #[allow(clippy::cast_precision_loss)]
     let interval = target_effective_hop / hop as f64;
     interval.max(1.0)
+}
+
+/// Locate the first input FFT window contributing to an absolute output column.
+fn stft_seek_grid(
+    position_seconds: f64,
+    rate: u32,
+    hop: usize,
+    effective_hop: usize,
+) -> (u64, u64) {
+    let column = f64_to_u64_saturating(
+        position_seconds * f64::from(rate) / usize_to_f64_approx(effective_hop),
+    );
+    let output_frame = column.saturating_mul(usize_to_u64(effective_hop));
+    let input_hop = usize_to_u64(hop.max(1));
+    (column, output_frame / input_hop * input_hop)
 }
 
 /// Compute the effective hop size from a fractional output interval.
@@ -540,7 +555,6 @@ pub(super) fn spawn_centered_staging_worker(
 pub(super) fn spawn_spectrogram_decode_worker(
     cmd_rx: Receiver<SpectrogramWorkerCommand>,
     event_tx: Sender<AnalysisEvent>,
-    active_token: Arc<AtomicU64>,
     generation: Arc<AtomicU64>,
     columns_produced: Arc<AtomicU64>,
     track_duration_ms: Arc<AtomicU64>,
@@ -551,7 +565,6 @@ pub(super) fn spawn_spectrogram_decode_worker(
             spectrogram_worker_loop(
                 &cmd_rx,
                 &event_tx,
-                &active_token,
                 &generation,
                 &columns_produced,
                 &track_duration_ms,
@@ -575,7 +588,6 @@ struct LastSessionParams {
 fn spectrogram_worker_loop(
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &Sender<AnalysisEvent>,
-    active_token: &AtomicU64,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
@@ -618,7 +630,6 @@ fn spectrogram_worker_loop(
                     &cmd,
                     cmd_rx,
                     event_tx,
-                    active_token,
                     generation,
                     columns_produced_out,
                     track_duration_ms_out,
@@ -660,7 +671,6 @@ fn spectrogram_worker_loop(
                         &fallback,
                         cmd_rx,
                         event_tx,
-                        active_token,
                         generation,
                         columns_produced_out,
                         track_duration_ms_out,
@@ -811,7 +821,6 @@ fn run_spectrogram_session(
     initial_cmd: &SpectrogramWorkerCommand,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &Sender<AnalysisEvent>,
-    active_token: &AtomicU64,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
@@ -897,24 +906,14 @@ fn run_spectrogram_session(
         f64::INFINITY
     };
 
-    // Pre-seek warmup: seek fft_size samples earlier so the STFT produces
-    // its first output at exactly the requested position.
-    let fft_warmup_seconds = usize_to_f64_approx(fft_size) / f64::from(effective_rate);
-    let actual_seek_seconds = (start_seconds - fft_warmup_seconds).max(0.0);
-    let warmup_columns = if start_seconds > fft_warmup_seconds {
-        f64_to_u64_saturating((start_seconds - actual_seek_seconds) * cols_per_second)
-    } else {
-        0
-    };
-
-    if actual_seek_seconds > 0.0 {
-        if let Err(error) = source.seek(actual_seek_seconds, native_sample_rate) {
+    let (start_column, seek_frame) =
+        stft_seek_grid(start_seconds, effective_rate, hop_size, effective_hop);
+    if seek_frame > 0 {
+        if let Err(error) = source.seek_to_frame(seek_frame, effective_rate) {
             eprintln!("[analysis] spectrogram seek failed: {error}");
             return None;
         }
     }
-
-    let start_column = f64_to_u64_saturating((start_seconds * cols_per_second).floor());
 
     let mut session = SpectrogramSessionState {
         track_token,
@@ -978,19 +977,26 @@ fn run_spectrogram_session(
         },
     ));
 
-    let mut warmup_remaining = warmup_columns;
+    for resampler in &mut session.resamplers {
+        resampler.reset_at_column(start_column, hop_size, effective_hop);
+    }
 
     loop {
         let result = session_decode_loop(
             &mut session,
             &mut source,
-            &mut warmup_remaining,
             cmd_rx,
             event_tx,
-            active_token,
             generation,
             columns_produced_out,
         );
+
+        if let Some(SpectrogramWorkerCommand::Seek { position_seconds }) = result {
+            if !handle_session_seek(&mut session, position_seconds, &mut source, event_tx) {
+                return None;
+            }
+            continue;
+        }
 
         // Flush any partially accumulated chunk so the final columns are
         // not lost.
@@ -1029,7 +1035,7 @@ fn run_spectrogram_session(
                         session.effective_rate,
                         track_duration_ms_out,
                     );
-                    warmup_remaining = 0;
+
                     session.target_chunk_columns = 1;
                     session.session_start_time = std::time::Instant::now();
                     session.session_start_column = session.columns_produced;
@@ -1118,14 +1124,12 @@ fn publish_track_duration_ms(
 // ---------------------------------------------------------------------------
 
 /// Inner decode loop. Returns `Some(cmd)` if interrupted, `None` on EOF.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 fn session_decode_loop(
     session: &mut SpectrogramSessionState,
     source: &mut AudioFrameSource,
-    warmup_remaining: &mut u64,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &Sender<AnalysisEvent>,
-    active_token: &AtomicU64,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
@@ -1149,17 +1153,7 @@ fn session_decode_loop(
                 SessionAction::Stop => return Some(SpectrogramWorkerCommand::Stop),
                 SessionAction::NewSession(cmd) => return Some(cmd),
                 SessionAction::SeekRequired { position_seconds } => {
-                    return handle_session_seek(
-                        session,
-                        position_seconds,
-                        source,
-                        warmup_remaining,
-                        cmd_rx,
-                        event_tx,
-                        active_token,
-                        generation,
-                        columns_produced_out,
-                    );
+                    return Some(SpectrogramWorkerCommand::Seek { position_seconds });
                 }
             }
         }
@@ -1188,17 +1182,7 @@ fn session_decode_loop(
                     }
                     SessionAction::NewSession(cmd) => return Some(cmd),
                     SessionAction::SeekRequired { position_seconds } => {
-                        return handle_session_seek(
-                            session,
-                            position_seconds,
-                            source,
-                            warmup_remaining,
-                            cmd_rx,
-                            event_tx,
-                            active_token,
-                            generation,
-                            columns_produced_out,
-                        );
+                        return Some(SpectrogramWorkerCommand::Seek { position_seconds });
                     }
                 },
                 Err(_) => return None,
@@ -1231,17 +1215,7 @@ fn session_decode_loop(
                                 return Some(cmd);
                             }
                             SessionAction::SeekRequired { position_seconds } => {
-                                return handle_session_seek(
-                                    session,
-                                    position_seconds,
-                                    source,
-                                    warmup_remaining,
-                                    cmd_rx,
-                                    event_tx,
-                                    active_token,
-                                    generation,
-                                    columns_produced_out,
-                                );
+                                return Some(SpectrogramWorkerCommand::Seek { position_seconds });
                             }
                         },
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -1292,7 +1266,7 @@ fn session_decode_loop(
         }
 
         // 5. Drain STFT rows and emit chunks.
-        session_drain_stft_rows(session, warmup_remaining, event_tx, columns_produced_out);
+        session_drain_stft_rows(session, event_tx, columns_produced_out);
 
         // 6. Update total_columns_estimate when the decoder produces more
         //    columns than initially estimated.  This happens for raw DTS/AC3
@@ -1337,17 +1311,7 @@ fn session_decode_loop(
                 SessionAction::Stop => return Some(SpectrogramWorkerCommand::Stop),
                 SessionAction::NewSession(cmd) => return Some(cmd),
                 SessionAction::SeekRequired { position_seconds } => {
-                    return handle_session_seek(
-                        session,
-                        position_seconds,
-                        source,
-                        warmup_remaining,
-                        cmd_rx,
-                        event_tx,
-                        active_token,
-                        generation,
-                        columns_produced_out,
-                    );
+                    return Some(SpectrogramWorkerCommand::Seek { position_seconds });
                 }
             },
             Err(_) => return None,
@@ -1529,18 +1493,12 @@ fn handle_single_command(
 
 /// Handles a seek within the current session by resetting STFT state and
 /// repositioning the file reader.
-#[allow(clippy::too_many_arguments)]
 fn handle_session_seek(
     session: &mut SpectrogramSessionState,
     position_seconds: f64,
     source: &mut AudioFrameSource,
-    warmup_remaining: &mut u64,
-    cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &Sender<AnalysisEvent>,
-    active_token: &AtomicU64,
-    generation: &AtomicU64,
-    columns_produced_out: &AtomicU64,
-) -> Option<SpectrogramWorkerCommand> {
+) -> bool {
     profile_eprintln!("[spect-worker] SEEK to {position_seconds:.2}s");
 
     // Drop any partially accumulated pre-seek chunk. Emitting it after a seek
@@ -1548,33 +1506,24 @@ fn handle_session_seek(
     session.chunk_buf.clear();
     session.chunk_columns = 0;
 
-    // Pre-seek warmup.
-    let fft_warmup_seconds =
-        usize_to_f64_approx(session.fft_size) / f64::from(session.effective_rate);
-    let actual_seek_seconds = (position_seconds - fft_warmup_seconds).max(0.0);
-
-    let native_rate = u64::from(session.effective_rate);
-    if let Err(error) = source.seek(actual_seek_seconds, native_rate) {
+    let (new_column, frame) = stft_seek_grid(
+        position_seconds,
+        session.effective_rate,
+        session.hop_size,
+        session.effective_hop,
+    );
+    if let Err(error) = source.seek_to_frame(frame, session.effective_rate) {
         eprintln!("[analysis] spectrogram seek failed: {error}");
-        return None;
+        return false;
+    }
+    session.source_reached_eof = false;
+    for stft in &mut session.stfts {
+        stft.reset();
+    }
+    for resampler in &mut session.resamplers {
+        resampler.reset_at_column(new_column, session.hop_size, session.effective_hop);
     }
 
-    session.source_reached_eof = false;
-
-    // Reset STFT state.
-    let output_interval = if session.zoom_level > 1.0 {
-        1.0
-    } else {
-        output_interval_for_hop(session.hop_size, session.zoom_level)
-    };
-    session.stfts = (0..session.channel_count)
-        .map(|_| StftComputer::new(session.fft_size, session.hop_size))
-        .collect();
-    session.resamplers = (0..session.channel_count)
-        .map(|_| PeakHoldResampler::new(output_interval))
-        .collect();
-
-    let new_column = f64_to_u64_saturating((position_seconds * session.cols_per_second).floor());
     session.columns_produced = new_column;
     session.session_start_column = new_column;
     session.chunk_buf.clear();
@@ -1606,23 +1555,7 @@ fn handle_session_seek(
         },
     ));
 
-    *warmup_remaining = if position_seconds > fft_warmup_seconds {
-        f64_to_u64_saturating((position_seconds - actual_seek_seconds) * session.cols_per_second)
-    } else {
-        0
-    };
-
-    // Continue decode loop from new position.
-    session_decode_loop(
-        session,
-        source,
-        warmup_remaining,
-        cmd_rx,
-        event_tx,
-        active_token,
-        generation,
-        columns_produced_out,
-    )
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1708,12 +1641,11 @@ fn post_reset_window_active(session: &SpectrogramSessionState) -> bool {
 
 fn session_drain_stft_rows(
     session: &mut SpectrogramSessionState,
-    warmup_remaining: &mut u64,
+
     event_tx: &Sender<AnalysisEvent>,
     columns_produced_out: &AtomicU64,
 ) {
     loop {
-        let start = session.chunk_buf.len();
         let Some(emitted) = append_stft_column(
             &mut session.stfts,
             &mut session.resamplers,
@@ -1724,11 +1656,6 @@ fn session_drain_stft_rows(
             break;
         };
         if !emitted {
-            continue;
-        }
-        if *warmup_remaining > 0 {
-            *warmup_remaining -= 1;
-            session.chunk_buf.truncate(start);
             continue;
         }
         session.chunk_columns += 1;
@@ -2054,7 +1981,6 @@ mod tests {
                     &command_rx,
                     &events,
                     &AtomicU64::new(1),
-                    &AtomicU64::new(1),
                     &AtomicU64::new(0),
                     &AtomicU64::new(0),
                 )
@@ -2110,6 +2036,158 @@ mod tests {
     use symphonia::core::meta::MetadataOptions;
     #[cfg(not(feature = "gst"))]
     use symphonia::core::probe::Hint;
+
+    fn collect_session_columns(
+        rx: &Receiver<AnalysisEvent>,
+    ) -> std::collections::BTreeMap<u32, Vec<u8>> {
+        let mut columns = std::collections::BTreeMap::new();
+        loop {
+            let event = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("worker output before timeout");
+            if let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = event {
+                if chunk.complete {
+                    return columns;
+                }
+                let width = usize::from(chunk.bins_per_column) * usize::from(chunk.channel_count);
+                for (offset, column) in chunk.columns_u8.chunks_exact(width).enumerate() {
+                    columns.insert(
+                        chunk.start_column_index + u32::try_from(offset).unwrap(),
+                        column.to_vec(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn write_seek_grid_fixture() -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("ferrous-seek-grid-{}.wav", std::process::id()));
+        let data_size = 48_000u32 * 4;
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x02\0");
+        bytes.extend_from_slice(&48_000u32.to_le_bytes());
+        bytes.extend_from_slice(&192_000u32.to_le_bytes());
+        bytes.extend_from_slice(b"\x04\0\x10\0data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        let mut random = 0x1234_5678u32;
+        for _ in 0..96_000 {
+            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            bytes.extend_from_slice(&u16::try_from(random >> 16).unwrap().to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn fractional_zoom_column_rate_matches_the_published_integer_hop() {
+        for zoom in [0.05, 0.17, 0.77, 1.0] {
+            let hop = 1_024;
+            let interval = output_interval_for_hop(hop, zoom);
+            let output_hop = effective_hop_from_interval(hop, interval);
+            let mut resampler = PeakHoldResampler::new(interval);
+            let count = (0..100_000)
+                .filter(|_| resampler.push(&[1.0]).is_some())
+                .count();
+            assert_eq!(count, 100_000 * hop / output_hop, "zoom {zoom}");
+        }
+    }
+
+    #[test]
+    fn explicit_and_initial_seeks_match_continuous_absolute_columns() {
+        let path = write_seek_grid_fixture();
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            for (fft, zoom) in [(512, 1.1), (2_048, 0.77), (8_192, 0.73)] {
+                let hop = super::super::zoom_hop_size(fft, zoom);
+                let (commands, command_rx) = unbounded();
+                let (events, event_rx) = unbounded();
+                let command = SpectrogramWorkerCommand::NewTrack {
+                    track_token: 1,
+                    generation: 1,
+                    path: path.clone(),
+                    fft_size: fft,
+                    hop_size: hop,
+                    zoom_level: zoom,
+                    widget_width: 320,
+                    channel_count: 2,
+                    start_seconds: 0.0,
+                    target_position_seconds: 0.0,
+                    emit_initial_reset: true,
+                    clear_history_on_reset: true,
+                    view_mode: SpectrogramViewMode::PerChannel,
+                    display_mode: mode,
+                };
+                let initial = command.clone();
+                let worker = std::thread::spawn(move || {
+                    run_spectrogram_session(
+                        &command,
+                        &command_rx,
+                        &events,
+                        &AtomicU64::new(1),
+                        &AtomicU64::new(0),
+                        &AtomicU64::new(0),
+                    )
+                });
+                let reference = collect_session_columns(&event_rx);
+                for seek in [0.001, 0.231_234, 0.731_234, 0.031_234]
+                    .into_iter()
+                    .cycle()
+                    .take(16)
+                {
+                    commands
+                        .send(SpectrogramWorkerCommand::Seek {
+                            position_seconds: seek,
+                        })
+                        .unwrap();
+                    let actual = collect_session_columns(&event_rx);
+                    assert!(!actual.is_empty());
+                    for (index, bytes) in actual {
+                        assert_eq!(
+                            Some(&bytes),
+                            reference.get(&index),
+                            "{mode:?} fft {fft} zoom {zoom} seek {seek} column {index}"
+                        );
+                    }
+                }
+                commands.send(SpectrogramWorkerCommand::Stop).unwrap();
+                worker.join().unwrap();
+                let mut initial = initial;
+                if let SpectrogramWorkerCommand::NewTrack {
+                    start_seconds,
+                    target_position_seconds,
+                    ..
+                } = &mut initial
+                {
+                    *start_seconds = 0.231_234;
+                    *target_position_seconds = 0.231_234;
+                }
+                let (commands, command_rx) = unbounded();
+                let (events, event_rx) = unbounded();
+                let worker = std::thread::spawn(move || {
+                    run_spectrogram_session(
+                        &initial,
+                        &command_rx,
+                        &events,
+                        &AtomicU64::new(1),
+                        &AtomicU64::new(0),
+                        &AtomicU64::new(0),
+                    )
+                });
+                let actual = collect_session_columns(&event_rx);
+                commands.send(SpectrogramWorkerCommand::Stop).unwrap();
+                worker.join().unwrap();
+                assert!(!actual.is_empty());
+                for (index, bytes) in actual {
+                    assert_eq!(Some(&bytes), reference.get(&index));
+                }
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn synchronized_stft_does_not_consume_a_channel_before_all_are_ready() {
