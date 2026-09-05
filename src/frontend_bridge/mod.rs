@@ -1491,10 +1491,9 @@ impl BridgeLoopRuntime {
         {
             return;
         }
-        let _rss_kb = current_rss_kb();
         profile_eprintln!(
             "[bridge] rss_kb={} playback_q={} analysis_q={} metadata_q={} library_q={} wave_len={} sent_snap/s={} drop_snap/s={}",
-            _rss_kb,
+            current_rss_kb(),
             self.playback_rx.len(),
             self.analysis_rx.len(),
             self.metadata_rx.len(),
@@ -1724,6 +1723,7 @@ pub(super) fn command_requires_queue_snapshot(cmd: &BridgeCommand) -> bool {
     }
 }
 
+#[cfg(feature = "profiling-logs")]
 fn current_rss_kb() -> usize {
     let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
         return 0;

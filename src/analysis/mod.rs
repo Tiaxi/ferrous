@@ -944,7 +944,7 @@ impl AnalysisRuntimeState {
         ctx: &AnalysisContext<'_>,
     ) {
         #[cfg(feature = "profiling-logs")]
-        let _track_change_start = std::time::Instant::now();
+        let track_change_started_at = std::time::Instant::now();
 
         // Snapshot the outgoing track's identity before any updates so
         // the centered-gapless path can emit a finalize chunk for it
@@ -1066,7 +1066,7 @@ impl AnalysisRuntimeState {
 
         profile_eprintln!(
             "[analysis] handle_track_change: completed in {:.2}ms",
-            _track_change_start.elapsed().as_secs_f64() * 1000.0,
+            track_change_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
 
