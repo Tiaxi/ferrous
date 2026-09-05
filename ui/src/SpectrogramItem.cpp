@@ -943,6 +943,100 @@ void SpectrogramItem::setZoomEnabled(bool value) {
     emit zoomEnabledChanged();
 }
 
+void SpectrogramItem::updateCanvasFillReadinessLocked() {
+    // Canvas freeze readiness: clear m_zoomFillActive when the ring
+    // has enough data to cover the visible display.
+    if (m_zoomFillActive) {
+        const int screenWidth = std::max(static_cast<int>(width()), 1);
+        // Two conditions must be met:
+        // 1. The ring has at least screenWidth columns (enough data
+        //    to fill the canvas).
+        // 2. The newest column in the ring covers the display's
+        //    right edge (playheadCol + screenWidth/2), so the
+        //    display won't have a black region on the right.
+        // Both are capped at totalEstimate for max zoom-out.
+        const qint64 ringFill = m_ringWriteSeq - m_ringOldestSeq;
+        const int fillWidth = m_precomputedTotalColumnsEstimate > 0
+            ? std::min(screenWidth, m_precomputedTotalColumnsEstimate)
+            : screenWidth;
+        const bool ringHasEnoughColumns =
+            ringFill >= static_cast<qint64>(fillWidth) - 16;
+
+        const double cps = m_precomputedHopSize > 0
+            ? static_cast<double>(m_precomputedSampleRateHz)
+                / static_cast<double>(m_precomputedHopSize)
+            : 1.0;
+        const qint64 displayRightCol = static_cast<qint64>(
+            std::max(0.0, m_positionSeconds) * cps) + screenWidth / 2;
+        const qint64 displayRightCapped =
+            m_precomputedTotalColumnsEstimate > 0
+                ? std::min(displayRightCol,
+                    static_cast<qint64>(m_precomputedTotalColumnsEstimate))
+                : displayRightCol;
+        const bool ringCoversDisplayRight =
+            m_precomputedMaxColumnIndex + 1 >= displayRightCapped - 16;
+
+        // A large absolute max column does not prove that the ring contains
+        // the LEFT edge of this viewport.  In particular, a stale backend
+        // target can refill thousands of columns near EOF while the stopped
+        // Qt viewport is at column 0.  Releasing the freeze in that state
+        // rebuilds every requested pixel from missing slots and turns the
+        // widget fully black.  Require the active token to retain the
+        // viewport's first source column before handing off to the new zoom.
+        const int visibleWindowCols = static_cast<int>(std::ceil(
+            static_cast<double>(screenWidth)
+            / std::max(0.001, effectiveZoomLocked())));
+        const qint64 estimateCount = std::max<qint64>(
+            static_cast<qint64>(m_precomputedTotalColumnsEstimate), 1);
+        const qint64 nowCol = static_cast<qint64>(
+            std::max(0.0, m_positionSeconds) * cps);
+        qint64 displayLeftCol;
+        if (static_cast<qint64>(visibleWindowCols) * 100 / estimateCount >= 90) {
+            displayLeftCol = 0;
+        } else {
+            const qint64 halfWindowCols = visibleWindowCols / 2;
+            displayLeftCol = std::max<qint64>(0, nowCol - halfWindowCols);
+            const qint64 displayRightColForEstimate = std::min(
+                estimateCount - 1,
+                displayLeftCol + static_cast<qint64>(visibleWindowCols) - 1);
+            displayLeftCol = std::max<qint64>(
+                0,
+                displayRightColForEstimate
+                    - static_cast<qint64>(visibleWindowCols) + 1);
+        }
+        const bool ringCoversDisplayLeft =
+            ringSlotForDisplayIndexLocked(displayLeftCol, false) >= 0;
+
+        // Decode tail-end: the STFT window truncates the last few
+        // columns so maxCol+1 stops short of the estimate by ~20–30
+        // columns.  At max zoom-out in wide fullscreen views,
+        // fillWidth ≈ totalEstimate and ringHasEnoughColumns would
+        // require ringFill to exceed that short-by-tail value —
+        // which it never does.  Without this bypass, the freeze
+        // persists forever and the old canvas leaves a slice of
+        // stale content at the right edge.  Once maxCol is within
+        // a reasonable slack of the estimate, no more data is
+        // coming; clear the freeze so the rebuild can run.
+        const bool decodeReachedEnd =
+            m_precomputedTotalColumnsEstimate > 0
+            && m_precomputedMaxColumnIndex >= 0
+            && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 64
+                >= static_cast<qint64>(m_precomputedTotalColumnsEstimate);
+
+        if (ringCoversDisplayLeft
+            && ((ringHasEnoughColumns && ringCoversDisplayRight)
+                || decodeReachedEnd)) {
+            m_zoomFillActive = false;
+            // Don't invalidateCanvas() here — the canvas must stay
+            // non-null so the NEXT zoom transition can activate its
+            // freeze.  Just mark dirty; the rebuild replaces all
+            // canvas content.
+            m_precomputedCanvasDirty = true;
+        }
+    }
+
+}
+
 void SpectrogramItem::feedPrecomputedChunk(
     const QByteArray &data, int bins, int channelIndex,
     int columns, int startIndex, int totalEstimate,
@@ -993,6 +1087,10 @@ void SpectrogramItem::feedPrecomputedChunk(
             && static_cast<int>(totalEstimate) < m_precomputedTotalColumnsEstimate) {
             m_precomputedTotalColumnsEstimate = totalEstimate;
             m_precomputedCanvasDirty = true;
+            // EOF can make the viewport attainable when the duration estimate
+            // extends past decoded audio. No further data may arrive to end
+            // the preserved-canvas handoff, so re-evaluate it here too.
+            updateCanvasFillReadinessLocked();
             update();
         }
         return;
@@ -1649,96 +1747,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedCanvasDirty = true;
     }
 
-    // Canvas freeze readiness: clear m_zoomFillActive when the ring
-    // has enough data to cover the visible display.
-    if (m_zoomFillActive) {
-        const int screenWidth = std::max(static_cast<int>(width()), 1);
-        // Two conditions must be met:
-        // 1. The ring has at least screenWidth columns (enough data
-        //    to fill the canvas).
-        // 2. The newest column in the ring covers the display's
-        //    right edge (playheadCol + screenWidth/2), so the
-        //    display won't have a black region on the right.
-        // Both are capped at totalEstimate for max zoom-out.
-        const qint64 ringFill = m_ringWriteSeq - m_ringOldestSeq;
-        const int fillWidth = m_precomputedTotalColumnsEstimate > 0
-            ? std::min(screenWidth, m_precomputedTotalColumnsEstimate)
-            : screenWidth;
-        const bool ringHasEnoughColumns =
-            ringFill >= static_cast<qint64>(fillWidth) - 16;
-
-        const double cps = m_precomputedHopSize > 0
-            ? static_cast<double>(m_precomputedSampleRateHz)
-                / static_cast<double>(m_precomputedHopSize)
-            : 1.0;
-        const qint64 displayRightCol = static_cast<qint64>(
-            std::max(0.0, m_positionSeconds) * cps) + screenWidth / 2;
-        const qint64 displayRightCapped =
-            m_precomputedTotalColumnsEstimate > 0
-                ? std::min(displayRightCol,
-                    static_cast<qint64>(m_precomputedTotalColumnsEstimate))
-                : displayRightCol;
-        const bool ringCoversDisplayRight =
-            m_precomputedMaxColumnIndex + 1 >= displayRightCapped - 16;
-
-        // A large absolute max column does not prove that the ring contains
-        // the LEFT edge of this viewport.  In particular, a stale backend
-        // target can refill thousands of columns near EOF while the stopped
-        // Qt viewport is at column 0.  Releasing the freeze in that state
-        // rebuilds every requested pixel from missing slots and turns the
-        // widget fully black.  Require the active token to retain the
-        // viewport's first source column before handing off to the new zoom.
-        const int visibleWindowCols = static_cast<int>(std::ceil(
-            static_cast<double>(screenWidth)
-            / std::max(0.001, effectiveZoomLocked())));
-        const qint64 estimateCount = std::max<qint64>(
-            static_cast<qint64>(m_precomputedTotalColumnsEstimate), 1);
-        const qint64 nowCol = static_cast<qint64>(
-            std::max(0.0, m_positionSeconds) * cps);
-        qint64 displayLeftCol;
-        if (static_cast<qint64>(visibleWindowCols) * 100 / estimateCount >= 90) {
-            displayLeftCol = 0;
-        } else {
-            const qint64 halfWindowCols = visibleWindowCols / 2;
-            displayLeftCol = std::max<qint64>(0, nowCol - halfWindowCols);
-            const qint64 displayRightColForEstimate = std::min(
-                estimateCount - 1,
-                displayLeftCol + static_cast<qint64>(visibleWindowCols) - 1);
-            displayLeftCol = std::max<qint64>(
-                0,
-                displayRightColForEstimate
-                    - static_cast<qint64>(visibleWindowCols) + 1);
-        }
-        const bool ringCoversDisplayLeft =
-            ringSlotForDisplayIndexLocked(displayLeftCol, false) >= 0;
-
-        // Decode tail-end: the STFT window truncates the last few
-        // columns so maxCol+1 stops short of the estimate by ~20–30
-        // columns.  At max zoom-out in wide fullscreen views,
-        // fillWidth ≈ totalEstimate and ringHasEnoughColumns would
-        // require ringFill to exceed that short-by-tail value —
-        // which it never does.  Without this bypass, the freeze
-        // persists forever and the old canvas leaves a slice of
-        // stale content at the right edge.  Once maxCol is within
-        // a reasonable slack of the estimate, no more data is
-        // coming; clear the freeze so the rebuild can run.
-        const bool decodeReachedEnd =
-            m_precomputedTotalColumnsEstimate > 0
-            && m_precomputedMaxColumnIndex >= 0
-            && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 64
-                >= static_cast<qint64>(m_precomputedTotalColumnsEstimate);
-
-        if (ringCoversDisplayLeft
-            && ((ringHasEnoughColumns && ringCoversDisplayRight)
-                || decodeReachedEnd)) {
-            m_zoomFillActive = false;
-            // Don't invalidateCanvas() here — the canvas must stay
-            // non-null so the NEXT zoom transition can activate its
-            // freeze.  Just mark dirty; the rebuild replaces all
-            // canvas content.
-            m_precomputedCanvasDirty = true;
-        }
-    }
+    updateCanvasFillReadinessLocked();
 
     // Reset zoom to 1.0 on any track change (gapless or user-initiated).
     // Check m_renderZoomLevel (not m_zoomLevel) because in multi-channel
