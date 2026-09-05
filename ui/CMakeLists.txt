@@ -76,6 +76,8 @@ qt_add_executable(ferrous
     src/SpectrogramItem.cpp
     src/WindowActivation.cpp
     src/WaveformItem.cpp
+    src/WaveformSceneGraph.cpp
+    src/WaveformSceneGraph.h
     src/WaveformEditorItem.cpp
 )
 
@@ -206,6 +208,8 @@ if(BUILD_TESTING)
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
         src/WaveformItem.cpp
+        src/WaveformSceneGraph.cpp
+        src/WaveformSceneGraph.h
         src/WaveformEditorItem.cpp
     )
     target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
@@ -291,6 +295,8 @@ if(BUILD_TESTING)
         src/SpectrogramItem.cpp
         src/WindowActivation.cpp
         src/WaveformItem.cpp
+        src/WaveformSceneGraph.cpp
+        src/WaveformSceneGraph.h
         src/WaveformEditorItem.cpp
     )
     target_include_directories(ferrous_bridge_client_tests PRIVATE src)

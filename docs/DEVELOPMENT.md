@@ -114,6 +114,18 @@ FERROUS_BENCHMARK_SPECTROGRAM=1 QT_QPA_PLATFORM=offscreen \
 
 This optional benchmark reports full-canvas rebuild times and image checksums for two FFT sizes, two pane heights, and linear/logarithmic frequency scales at 3440 pixels wide. It excludes decoding, transport, and GPU uploads. Use the same optimized build and machine for comparisons; normal test runs skip it.
 
+To compare waveform CPU painting with scene graph preparation using synthetic resident data:
+
+```bash
+FERROUS_BENCHMARK_WAVEFORM=1 QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=rhi \
+  QSG_RHI_BACKEND=opengl QSG_RENDER_LOOP=basic \
+  ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphBenchmark
+```
+
+This optional benchmark uses 1200×180 and 3440×1440 viewports at overview, intermediate, and sample zoom levels. It reports CPU milliseconds per frame and texture creation requests/payload bytes after warmup. It excludes decoding, GPU submission, presentation, and display refresh limits; it does not measure displayed FPS. Use the same optimized build, machine, and renderer for comparisons. The native command requires an X display (Xvfb works for automated checks); use `QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software` to measure the software fallback.
+
+The waveform editor retains image tiles in the scene graph and moves their source coordinates during playback. Native sample curves use antialiased geometry; labels use a bounded raster cache. The software renderer keeps a single raster pass at sample zoom. Texture resources belong to the render node and are recreated with the window's scene graph. CI compares the native output with the shared raster reference at 1× and 2× scaling, including rulers, crosshairs, split channels, and texture tile boundaries.
+
 Other useful runtime controls:
 
 | Variable | Purpose / default |

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "WaveformEditorItem.h"
+#include "WaveformSceneGraph.h"
 
 #include "FerrousBridgeFfi.h"
 
@@ -12,6 +13,7 @@
 #include <QPen>
 #include <QPointer>
 #include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtEndian>
 
@@ -138,16 +140,8 @@ bool shouldLogProfileSpike(
 }
 
 WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
-    : QQuickPaintedItem(parent) {
-    setAntialiasing(false);
-    setOpaquePainting(true);
-    setFillColor(kBackground);
-    // Keep QPainter off the scene graph's OpenGL framebuffer.  The waveform
-    // surface is shown/hidden and moved between widget and fullscreen windows;
-    // queued FBO draw commands can otherwise outlive the owning render target.
-    // The image target gives each paint an isolated raster which Qt uploads
-    // after painting has finished.
-    setRenderTarget(QQuickPaintedItem::Image);
+    : QQuickItem(parent) {
+    setFlag(ItemHasContents, true);
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     m_requestTimer.setSingleShot(true);
@@ -453,7 +447,7 @@ void WaveformEditorItem::setHoverPosition(double x, double y, bool active) {
 }
 
 void WaveformEditorItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
-    QQuickPaintedItem::geometryChange(newGeometry, oldGeometry);
+    QQuickItem::geometryChange(newGeometry, oldGeometry);
     if (newGeometry.size() != oldGeometry.size()) {
         {
             QMutexLocker lock(&m_stateMutex);
@@ -1381,6 +1375,19 @@ bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
     if (m_viewMode == 0) return false;
     if (m_soloedChannel >= 0) return channel != m_soloedChannel;
     return channel < 64 && (m_mutedChannelsMask & (qulonglong{1} << channel)) != 0;
+}
+
+QSGNode *WaveformEditorItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) {
+    bool rasterize = false;
+    if (window() && window()->rendererInterface()->graphicsApi() == QSGRendererInterface::Software) {
+        QMutexLocker lock(&m_stateMutex);
+        const auto [start, end] = visibleRangeLocked();
+        rasterize = renderDetailDirectlyLocked(start, end);
+    }
+    return WaveformSceneGraph::render(oldNode, window(),
+        QSize(std::max(1, static_cast<int>(std::floor(width()))),
+              std::max(1, static_cast<int>(std::floor(height())))),
+        [this](QPainter *painter) { paint(painter); }, rasterize);
 }
 
 void WaveformEditorItem::paint(QPainter *painter) {

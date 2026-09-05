@@ -75,7 +75,9 @@ jobs:
             qt6-qtbase-devel \
             qt6-qtdeclarative-devel \
             qt6-qtquickcontrols2-devel \
-            kf6-kirigami-devel
+            kf6-kirigami-devel \
+            xorg-x11-server-Xvfb \
+            mesa-dri-drivers
 
       - name: Checkout
         uses: actions/checkout@v5
@@ -88,3 +90,17 @@ jobs:
 
       - name: Run UI smoke tests
         run: ctest --test-dir ui/build --output-on-failure -V
+
+      - name: Compare native waveform rendering and texture reuse
+        run: |
+          Xvfb :99 -screen 0 3440x1440x24 -nolisten tcp &
+          trap 'kill $!' EXIT
+          for attempt in 1 2 3 4 5; do
+            [ -S /tmp/.X11-unix/X99 ] && break
+            sleep 1
+          done
+          export DISPLAY=:99 QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=rhi
+          export QSG_RHI_BACKEND=opengl QSG_RENDER_LOOP=basic LIBGL_ALWAYS_SOFTWARE=1
+          ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphMatchesRaster waveformSceneGraphReusesTextures
+          QT_SCALE_FACTOR=2 ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphMatchesRaster
+          QSG_RENDER_LOOP=threaded ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphMatchesRaster
