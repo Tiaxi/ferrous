@@ -103,6 +103,15 @@ With a profiling build, these runtime variables select additional output:
 
 The desktop app copies console output to the diagnostics log available through **Help > Diagnostics**. Waveform editor entries use the `[ui-waveform-editor]` prefix.
 
+To measure spectrogram CPU projection with synthetic resident data after a UI test build:
+
+```bash
+FERROUS_BENCHMARK_SPECTROGRAM=1 QT_QPA_PLATFORM=offscreen \
+  ./ui/build/ferrous_qml_smoke_tests spectrogramRebuildBenchmark
+```
+
+This optional benchmark reports full-canvas rebuild times and image checksums for two FFT sizes, two pane heights, and linear/logarithmic frequency scales at 3440 pixels wide. It excludes decoding, transport, and GPU uploads. Use the same optimized build and machine for comparisons; normal test runs skip it.
+
 Other useful runtime controls:
 
 | Variable | Purpose / default |
