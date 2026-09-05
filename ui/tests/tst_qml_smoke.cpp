@@ -609,6 +609,7 @@ private slots:
     void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
     void spectrogramPixelToFrequency();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
+    void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
     void spectrogramCrosshairOverlayGeneratesOnHover();
     void spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry();
     void spectrogramGridOverlayGeneratesWhenEnabled();
@@ -7838,6 +7839,30 @@ void QmlSmokeTest::spectrogramSampleRateSyncsFromPrecomputedChunks() {
              qPrintable(QStringLiteral("Expected Nyquist ~22050 but got %1").arg(topFreq)));
     QVERIFY2(topFreq > 21000.0,
              qPrintable(QStringLiteral("Expected Nyquist ~22050 but got %1").arg(topFreq)));
+}
+
+void QmlSmokeTest::spectrogramPreservesNativeRateAcrossModesAndTrackTransitions() {
+    for (int mode : {0, 1}) {
+        SpectrogramItem item;
+        item.setWidth(200);
+        item.setHeight(100);
+        item.setDisplayMode(mode);
+        item.setSampleRateHz(48000);
+        const int bins = 4097;
+        const QByteArray data(bins, '\x80');
+        quint64 generation = 1;
+        for (int rate : {96000, 192000, 44100}) {
+            item.feedPrecomputedChunk(data, bins, 0, 1, 0, 1000, rate, 1024,
+                false, true, generation, true, generation);
+            const double nyquist = item.pixelToFrequencyHz(0, 100);
+            QVERIFY(std::abs(nyquist - rate / 2.0) < rate * 0.02);
+            QCOMPARE(item.m_precomputedSampleRateHz, rate);
+            ++generation;
+        }
+        item.feedPrecomputedChunk(data, bins, 0, 1, 0, 1000, 96000, 1024,
+            false, true, 1, true, 1);
+        QCOMPARE(item.m_precomputedSampleRateHz, 44100);
+    }
 }
 
 void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {

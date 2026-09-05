@@ -304,7 +304,6 @@ struct AnalysisRuntimeState {
     /// preflight can compare candidate files against the live session.
     active_session_effective_rate: u32,
     active_session_channel_count: usize,
-    active_session_divisor: usize,
     /// Path of the next track for which an early `ContinueWithFile` was
     /// sent to the worker.  Consumed at commit time (`handle_track_change`).
     staged_continuation_path: Option<PathBuf>,
@@ -454,7 +453,6 @@ impl AnalysisRuntimeState {
             suppress_next_spectrogram_position_update: false,
             active_session_effective_rate: 0,
             active_session_channel_count: 0,
-            active_session_divisor: 1,
             staged_continuation_path: None,
             staged_centered_rx: None,
             staged_centered_stop: None,
@@ -691,10 +689,7 @@ impl AnalysisRuntimeState {
                 return;
             };
 
-            let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
-            let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
-            let cand_effective_rate =
-                u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
+            let cand_effective_rate = u32::try_from(native_sr).unwrap_or(48_000);
             let cand_channel_count = match self.spectrogram_view_mode {
                 SpectrogramViewMode::Downmix => 1,
                 SpectrogramViewMode::PerChannel => native_ch,
@@ -1065,15 +1060,11 @@ impl AnalysisRuntimeState {
         else {
             return;
         };
-        let divisor = usize::try_from(waveform_sample_rate_divisor(native_sr)).unwrap_or(1);
-        let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
-        self.active_session_effective_rate =
-            u32::try_from(native_sr / divisor_u64.max(1)).unwrap_or(48_000);
+        self.active_session_effective_rate = u32::try_from(native_sr).unwrap_or(48_000);
         self.active_session_channel_count = match self.spectrogram_view_mode {
             SpectrogramViewMode::Downmix => 1,
             SpectrogramViewMode::PerChannel => native_ch,
         };
-        self.active_session_divisor = divisor;
     }
 
     fn start_spectrogram_session(
@@ -1235,9 +1226,7 @@ impl AnalysisRuntimeState {
         let rate = if self.active_session_effective_rate > 0 {
             self.active_session_effective_rate
         } else if self.snapshot.sample_rate_hz > 0 {
-            let sample_rate = self.snapshot.sample_rate_hz;
-            let divisor = waveform_sample_rate_divisor(u64::from(sample_rate)).max(1);
-            u32::try_from(u64::from(sample_rate) / divisor).ok()?
+            self.snapshot.sample_rate_hz
         } else {
             0
         };
