@@ -348,7 +348,7 @@ fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32
         .build();
     capsfilter.set_property("caps", &caps);
 
-    let appsink = gst_app::AppSink::builder().sync(false).build();
+    let appsink = analysis_decode_sink();
 
     pipeline
         .add_many([&src, &decodebin, &conv, &capsfilter, appsink.upcast_ref()])
@@ -414,6 +414,19 @@ fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32
     Some((source, rate, channels, total_columns))
 }
 
+#[cfg(feature = "gst")]
+fn analysis_decode_sink() -> gst_app::AppSink {
+    // This pipeline is independent of playback. Backpressure must stop its
+    // decoder while analysis parks at the lookahead boundary, without dropping
+    // PCM or waiting for queued data when a seek/track change tears it down.
+    gst_app::AppSink::builder()
+        .sync(false)
+        .max_buffers(8)
+        .drop(false)
+        .wait_on_eos(false)
+        .build()
+}
+
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
@@ -468,6 +481,84 @@ pub(super) fn deinterleave_samples(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn parked_gstreamer_decoder_backpressures_without_losing_samples() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        gst::init().expect("gstreamer initialization");
+        let pipeline = gst::Pipeline::new();
+        let source = gst_app::AppSrc::builder().build();
+        let sink = analysis_decode_sink();
+        pipeline
+            .add_many([source.upcast_ref::<gst::Element>(), sink.upcast_ref()])
+            .expect("add source and sink");
+        source.link(&sink).expect("link source and sink");
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&delivered);
+        sink.static_pad("sink").expect("sink pad").add_probe(
+            gst::PadProbeType::BUFFER,
+            move |_, _| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            },
+        );
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("start pipeline");
+        for value in 0_u8..32 {
+            source
+                .push_buffer(gst::Buffer::from_mut_slice(vec![value]))
+                .expect("queue fixture buffer");
+        }
+        source.end_of_stream().expect("queue EOF");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while delivered.load(Ordering::Relaxed) < 9 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        // Eight queued samples plus one blocked streaming-thread buffer.
+        let parked_count = delivered.load(Ordering::Relaxed);
+        let mut values = Vec::new();
+        for _ in 0..32 {
+            if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_seconds(2)) {
+                let buffer = sample.buffer().expect("fixture buffer");
+                values.push(buffer.map_readable().expect("read fixture")[0]);
+            }
+        }
+        pipeline.set_state(gst::State::Null).expect("stop pipeline");
+        assert_eq!(parked_count, 9);
+        assert_eq!(values, (0_u8..32).collect::<Vec<_>>());
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn parked_gstreamer_decoder_can_be_cancelled() {
+        gst::init().expect("gstreamer initialization");
+        let pipeline = gst::Pipeline::new();
+        let source = gst_app::AppSrc::builder().build();
+        let sink = analysis_decode_sink();
+        pipeline
+            .add_many([source.upcast_ref::<gst::Element>(), sink.upcast_ref()])
+            .expect("add elements");
+        source.link(&sink).expect("link elements");
+        pipeline.set_state(gst::State::Playing).expect("start");
+        for _ in 0..32 {
+            source
+                .push_buffer(gst::Buffer::from_mut_slice(vec![0_u8; 4]))
+                .expect("push");
+        }
+        source.end_of_stream().expect("EOF");
+        // State teardown must release both a full queue and pending EOF even
+        // when the analysis consumer has been cancelled and never pulls again.
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("cancel parked decoder");
+        assert_eq!(pipeline.current_state(), gst::State::Null);
+    }
 
     #[test]
     fn symphonia_next_frames_returns_none_on_invalid_data() {
