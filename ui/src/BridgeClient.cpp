@@ -2689,6 +2689,7 @@ void BridgeClient::unregisterSpectrogramItem(QObject *item) {
 }
 
 void BridgeClient::reanchorCenteredSpectrogramsForExplicitPosition(double seconds) {
+    emit transportPositionDiscontinuity(seconds);
     m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) {
         return route.item.isNull();
     });

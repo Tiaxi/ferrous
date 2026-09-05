@@ -219,15 +219,23 @@ void WaveformEditorItem::setOverviewData(const QByteArray &value) {
 }
 
 void WaveformEditorItem::setPositionSeconds(double value) {
+    updatePositionSeconds(value, false);
+}
+
+void WaveformEditorItem::applyExplicitSeekPosition(double value) {
+    updatePositionSeconds(value, true);
+}
+
+void WaveformEditorItem::updatePositionSeconds(double value, bool explicitSeek) {
     bool request = false;
     bool cacheNeedsUpdate = false;
     {
         QMutexLocker lock(&m_stateMutex);
         value = std::clamp(value, 0.0, std::max(0.0, m_durationSeconds));
-        if (std::abs(m_positionSeconds - value) < 0.0001) return;
+        if (!explicitSeek && std::abs(m_positionSeconds - value) < 0.0001) return;
         const auto now = std::chrono::steady_clock::now();
         const auto previousRange = visibleRangeLocked();
-        if (m_playing) {
+        if (m_playing && !explicitSeek) {
             const double displayedPosition = displayedPositionSecondsLocked();
             const double error = value - displayedPosition;
             const bool heartbeatRegression =
@@ -244,6 +252,10 @@ void WaveformEditorItem::setPositionSeconds(double value) {
         const auto [start, end] = visibleRangeLocked();
         const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
+        if (explicitSeek && request) {
+            invalidateDetailRequestLocked();
+            clearPendingRequestLocked();
+        }
         const bool rangeMoved = std::abs(previousRange.first - start) > 0.0001
             || std::abs(previousRange.second - end) > 0.0001;
         const bool tiledPlayback = playbackTilesEligibleLocked(start, end);

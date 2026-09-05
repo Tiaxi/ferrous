@@ -362,6 +362,7 @@ public:
     QByteArray renameEditedFiles(const QByteArray &payload);
 
 signals:
+    void transportPositionDiscontinuity(double seconds);
     void playbackChanged();
     void trackIdentityChanged();
     void trackMetadataChanged();
