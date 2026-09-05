@@ -20,6 +20,7 @@
 #include <QMutexLocker>
 #include <QScopedPointer>
 #include <QSemaphore>
+#include <QTemporaryFile>
 #include <QFutureWatcher>
 #include <atomic>
 #include <functional>
@@ -516,6 +517,7 @@ private slots:
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
     void waveformEditorParsesSignedSampleWindow();
+    void waveformEditorCachedDecoderPreservesOverlappingSamples();
     void waveformEditorDownmixUsesMixedExtremaAtEveryZoom();
     void waveformEditorCancelsAndBoundsObsoleteDecodes();
     void waveformEditorSampleMarkersRequireSampleResolution();
@@ -4424,6 +4426,49 @@ void QmlSmokeTest::waveformEditorCancelsAndBoundsObsoleteDecodes() {
     QTRY_VERIFY(!item.m_decodeActive);
     QVERIFY(item.m_detail.extrema.empty());
     QCOMPARE(started->load(), 2);
+}
+
+void QmlSmokeTest::waveformEditorCachedDecoderPreservesOverlappingSamples() {
+    QByteArray wav("RIFF", 4);
+    constexpr quint32 frames = 30'000;
+    appendLe<quint32>(wav, 36 + frames * 4);
+    wav.append("WAVEfmt ", 8);
+    appendLe<quint32>(wav, 16);
+    appendLe<quint16>(wav, 1);
+    appendLe<quint16>(wav, 2);
+    appendLe<quint32>(wav, 48'000);
+    appendLe<quint32>(wav, 48'000 * 4);
+    appendLe<quint16>(wav, 4);
+    appendLe<quint16>(wav, 16);
+    wav.append("data", 4);
+    appendLe<quint32>(wav, frames * 4);
+    for (quint32 frame = 0; frame < frames; ++frame) {
+        const qint16 sample = static_cast<qint16>((frame % 16) * 1024);
+        appendLe<qint16>(wav, sample);
+        appendLe<qint16>(wav, -sample);
+    }
+    QTemporaryFile file;
+    QVERIFY(file.open());
+    QCOMPARE(file.write(wav), wav.size());
+    QVERIFY(file.flush());
+    const auto cancelled = std::make_shared<std::atomic_bool>(false);
+    WaveformEditorItem::DetailWindow full;
+    QVERIFY(WaveformEditorItem::parseWindow(WaveformEditorItem::decodeWindow(
+        file.fileName(), 0.0, 0.6, 30'000, cancelled), &full));
+    for (int request = 0; request < 2; ++request) {
+        WaveformEditorItem item;
+        QVERIFY(WaveformEditorItem::parseWindow(WaveformEditorItem::decodeWindow(
+            file.fileName(), 0.25, 0.5, 12'000, cancelled), &item.m_detail));
+        QCOMPARE(item.m_detail.framesPerPoint, quint32(1));
+        QCOMPARE(item.m_detail.channelCount, 2);
+        for (size_t index = 0; index < item.m_detail.extrema.size(); ++index) {
+            QCOMPARE(item.m_detail.extrema[index], full.extrema[12'000 * 4 + index]);
+        }
+        for (float mixed : item.m_detail.downmixExtrema) QCOMPARE(mixed, 0.0F);
+    }
+    cancelled->store(true);
+    QVERIFY(WaveformEditorItem::decodeWindow(
+        file.fileName(), 0.25, 0.5, 12'000, cancelled).isEmpty());
 }
 
 void QmlSmokeTest::waveformEditorParsesSignedSampleWindow() {

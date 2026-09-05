@@ -170,21 +170,6 @@ impl AudioFrameSource {
         }
     }
 
-    /// Seek before the requested sample and trim decoded preroll by timestamp.
-    pub(super) fn seek(
-        &mut self,
-        position_seconds: f64,
-        native_sample_rate: u64,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            position_seconds.is_finite() && position_seconds >= 0.0,
-            "invalid seek position"
-        );
-        let rate = u32::try_from(native_sample_rate)?;
-        let target = f64_to_u64_saturating(position_seconds * f64::from(rate));
-        self.seek_with_target(position_seconds, target)
-    }
-
     pub(super) fn seek_to_frame(&mut self, frame: u64, sample_rate: u32) -> anyhow::Result<()> {
         anyhow::ensure!(sample_rate > 0, "invalid sample rate");
         // The decoder may land before this time; integer timestamp trimming

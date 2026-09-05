@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use super::decoders::{open_audio_file, AudioRead};
 use super::f64_to_u64_saturating;
+use super::waveform_service::{with_session, WaveformSession, TILE_FRAMES};
 
 const MAX_WINDOW_POINTS: usize = 65_536;
 
@@ -165,7 +165,9 @@ pub(crate) fn decode_waveform_window_cancellable(
     anyhow::ensure!(max_points > 0);
 
     anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-    decode_window(path, start_seconds, end_seconds, max_points, cancelled)
+    with_session(path, cancelled, |session| {
+        decode_window(session, start_seconds, end_seconds, max_points, cancelled)
+    })
 }
 
 fn frame_seconds(frame: u64, sample_rate: u64) -> f64 {
@@ -177,41 +179,88 @@ fn frame_seconds(frame: u64, sample_rate: u64) -> f64 {
 }
 
 fn decode_window(
-    path: &Path,
+    session: &mut WaveformSession,
     start_seconds: f64,
     end_seconds: f64,
     max_points: usize,
     cancelled: &impl Fn() -> bool,
 ) -> anyhow::Result<WaveformWindow> {
-    let (mut source, sample_rate, channels, _) =
-        open_audio_file(path).ok_or_else(|| anyhow::anyhow!("unsupported audio file"))?;
-    let sample_rate_hz = u32::try_from(sample_rate).unwrap_or(u32::MAX).max(1);
-    let channels = channels.clamp(1, usize::from(u16::MAX));
+    let sample_rate_hz = session.sample_rate;
     let start_frame = f64_to_u64_saturating(start_seconds * f64::from(sample_rate_hz));
     let end_frame = f64_to_u64_saturating(end_seconds * f64::from(sample_rate_hz))
         .max(start_frame.saturating_add(1));
-    let mut accumulator = WindowAccumulator::new(start_frame, end_frame, max_points, channels);
-    source.seek(start_seconds, sample_rate)?;
-    let mut next_frame = start_frame;
-    while next_frame < end_frame {
-        anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-        let frames = match source.next_frames()? {
-            AudioRead::Frames(frames) => frames,
-            AudioRead::Pending => continue,
-            AudioRead::Eof => break,
-        };
-        accumulator.push_interleaved(frames.first_frame, &frames.samples, frames.channels);
-        next_frame = frames
-            .first_frame
-            .saturating_add(u64::try_from(frames.frames).unwrap_or(u64::MAX));
+    let mut accumulator =
+        WindowAccumulator::new(start_frame, end_frame, max_points, session.channels);
+    for index in accumulator.start_frame / TILE_FRAMES..end_frame.div_ceil(TILE_FRAMES) {
+        if session.reached_eof(index.saturating_mul(TILE_FRAMES)) {
+            break;
+        }
+        let tile = session.tile(index, cancelled)?;
+        for frames in &tile.segments {
+            accumulator.push_interleaved(frames.first_frame, &frames.samples, frames.channels);
+        }
     }
+    anyhow::ensure!(!cancelled(), "waveform decode cancelled");
     Ok(accumulator.finish(sample_rate_hz))
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn overlapping_cached_views_match_direct_aggregation_at_every_resolution() {
+        let samples: Vec<i16> = (0..100_006)
+            .map(|sample| i16::try_from((sample * 73) % 60_000 - 30_000).unwrap())
+            .collect();
+        let path = write_test_wave(&samples, 48_000, 2);
+        let mut session = WaveformSession::open(&path).expect("open fixture");
+        let floats: Vec<_> = samples
+            .iter()
+            .map(|&sample| f32::from(sample) / 32768.0)
+            .collect();
+        for (start, end) in [(1_001, 40_013), (2_003, 39_001), (1_001, 40_013)] {
+            for points in [1, 31, 1_000, 65_536] {
+                let actual = decode_window(
+                    &mut session,
+                    f64::from(start) / 48_000.0,
+                    f64::from(end) / 48_000.0,
+                    points,
+                    &|| false,
+                )
+                .expect("cached view");
+                let mut expected = WindowAccumulator::new(start as u64, end as u64, points, 2);
+                expected.push_interleaved(0, &floats, 2);
+                let expected = expected.finish(48_000);
+                assert_eq!(actual.extrema, expected.extrema);
+                assert_eq!(actual.downmix_extrema, expected.downmix_extrema);
+            }
+        }
+        assert_eq!(
+            session.decoded_tiles, 3,
+            "all overlapping resolutions reuse PCM"
+        );
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn shared_service_invalidates_replaced_file_and_track_identity() {
+        let first = write_test_wave(&vec![8_192; 1_003], 1_000, 1);
+        let second = write_test_wave(&vec![-16_384; 2_003], 1_000, 1);
+        let read = |path: &Path| {
+            decode_waveform_window(path, 0.0, 0.5, 100)
+                .expect("decode")
+                .extrema
+        };
+        assert!(read(&first).iter().all(|&value| value == 0.25));
+        assert!(read(&second).iter().all(|&value| value == -0.5));
+        assert!(read(&first).iter().all(|&value| value == 0.25));
+        std::fs::copy(&second, &first).expect("replace active source");
+        assert!(read(&first).iter().all(|&value| value == -0.5));
+        std::fs::remove_file(first).expect("remove fixture");
+        std::fs::remove_file(second).expect("remove fixture");
+    }
 
     #[test]
     fn waveform_downmix_cancels_opposite_channels_before_peak_aggregation() {
@@ -278,7 +327,11 @@ mod tests {
         std::fs::remove_file(path).expect("remove fixture");
     }
 
-    fn write_test_wave(samples: &[i16], sample_rate: u32, channels: u16) -> std::path::PathBuf {
+    pub(crate) fn write_test_wave(
+        samples: &[i16],
+        sample_rate: u32,
+        channels: u16,
+    ) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
             "ferrous-waveform-window-{}-{}.wav",
