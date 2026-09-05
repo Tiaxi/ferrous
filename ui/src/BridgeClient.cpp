@@ -2414,6 +2414,7 @@ void BridgeClient::previous() {
 }
 
 void BridgeClient::seek(double seconds) {
+    m_pendingTrackRestartUntilMs = 0;
     const double target = std::max(0.0, seconds);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -2767,6 +2768,7 @@ void BridgeClient::playAt(int index) {
     if (index < 0) {
         return;
     }
+    m_pendingTrackRestartUntilMs = QDateTime::currentMSecsSinceEpoch() + 3000;
     reanchorCenteredSpectrogramsForExplicitPosition(0.0);
     m_pendingSeek = false;
     m_pendingSeekTargetSeconds = 0.0;
@@ -4818,29 +4820,31 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     bool trackMetadataSignalChanged = false;
     bool snapshotSignalChanged = false;
     const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
+    const bool currentPathChanged = m_currentTrackPath != currentPath;
+    const bool playbackTrackChanged = snapshot.playback.present && currentPathChanged
+        && !currentPath.isEmpty();
     const QString previousPlaybackState = m_playbackState;
     const QString previousTrackPath = m_currentTrackPath;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const int previousPlayingIndex = m_playingQueueIndex;
 #endif
 
-    // Stop resets the transport: the backend always reports position 0
-    // once stopped.  Re-anchor centered spectrograms immediately — before
-    // the queued playbackChanged cascade runs — so the playhead and
-    // viewport return to column 0 instead of lingering at the parked
-    // position.  Without this, restarting the same track activates the
-    // position jump hold against the stale anchor and the playhead crawls
-    // forward from where it parked until the hold times out before
-    // snapping to the real position.  Clear any pending seek window so it
-    // cannot suppress the stopped position below.  Rolling mode is
-    // untouched: its ring is write-order history and the decode worker
-    // restart on the next play re-anchors it.
-    if (snapshot.playback.present && isStopped && previousPlaybackState != nextState) {
+    // A stopped transport or new track invalidates the old visual clock and
+    // pending seek. Re-anchor before playbackChanged reaches QML, even when
+    // spectral decoding is delayed. Rolling history waits for the worker's
+    // reset/continuation; centered views can move immediately.
+    const bool stoppedTransition = snapshot.playback.present && isStopped
+        && previousPlaybackState != nextState;
+    if (stoppedTransition || playbackTrackChanged) {
         m_pendingSeek = false;
         m_pendingSeekTargetSeconds = 0.0;
         m_pendingSeekStartedAtMs = 0;
         m_pendingSeekUntilMs = 0;
-        reanchorCenteredSpectrogramsForExplicitPosition(0.0);
+        m_pendingTrackRestartUntilMs = 0;
+        // Playback identity is authoritative even when decoding is delayed.
+        // Do not make a new track's playhead wait for spectral reset data.
+        reanchorCenteredSpectrogramsForExplicitPosition(stoppedTransition ? 0.0 : pos);
+        playbackSignalChanged = true;
     }
 
     if (snapshot.queue.present && !m_loggedStartupQueuePresent) {
@@ -4871,6 +4875,19 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     bool applyIncomingPosition = true;
+    if (m_pendingTrackRestartUntilMs != 0) {
+        if (nowMs >= m_pendingTrackRestartUntilMs) {
+            m_pendingTrackRestartUntilMs = 0;
+        } else if (snapshot.playback.present && pos <= 0.8) {
+            // Replaying the same path does not change track identity. Wait
+            // for its reset position instead of accepting queued old samples.
+            m_pendingTrackRestartUntilMs = 0;
+            reanchorCenteredSpectrogramsForExplicitPosition(pos);
+            playbackSignalChanged = true;
+        } else {
+            applyIncomingPosition = false;
+        }
+    }
     if (m_pendingSeek) {
         if (nowMs >= m_pendingSeekUntilMs) {
             m_pendingSeek = false;
@@ -4888,7 +4905,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             changed = true;
             playbackSignalChanged = true;
         }
-        if (std::abs(m_positionSeconds - nextPos) >= 0.03) {
+        if (playbackTrackChanged || std::abs(m_positionSeconds - nextPos) >= 0.03) {
             m_positionSeconds = nextPos;
             changed = true;
             playbackSignalChanged = true;
@@ -5032,7 +5049,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     finishSnapshotSection(snapshotQueueMs);
 
-    const bool currentPathChanged = m_currentTrackPath != currentPath;
     if (currentPathChanged) {
         m_currentTrackPath = currentPath;
         changed = true;

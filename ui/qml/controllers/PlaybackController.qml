@@ -313,7 +313,9 @@ QtObject {
         } else if (!root.positionSmoothingPrimed || trackChanged) {
             // First update or track change: snap to position, start interpolating.
             root.clearVisualSeekClock()
-            root.applyPlaybackHeartbeat(incomingPosition, nowMs)
+            root.applyInterpolatedPosition(root.clampPositionToDuration(incomingPosition))
+            root.resetInterpolationState(incomingPosition, nowMs)
+            root.interpolationActive = true
             root.positionSmoothingPrimed = true
             root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         } else {
