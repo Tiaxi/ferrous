@@ -4,6 +4,7 @@ mod cache;
 mod decoders;
 mod fft;
 mod output;
+pub(crate) mod retention;
 use output::{resets_spectral_stream, AnalysisEventOutput, AnalysisOutputs};
 #[cfg(feature = "gst")]
 mod gst_waveform;
@@ -1230,14 +1231,23 @@ impl AnalysisRuntimeState {
     }
 
     fn centered_ring_capacity_columns(&self) -> Option<u64> {
-        let cols_per_second = self.current_centered_cols_per_second()?;
-        let current_width = self
-            .spectrogram_widget_width
-            .max(self.spectrogram_max_widget_width);
-        let screen_width = current_width.max(1920);
-        let extra_seconds = 10.0;
-        let capacity = f64::from(screen_width) * 3.0 + extra_seconds * cols_per_second;
-        Some(f64_to_u64_saturating(capacity.ceil()))
+        self.current_centered_cols_per_second()?;
+        let config = retention::SpectrogramBufferConfig {
+            width: self
+                .spectrogram_widget_width
+                .max(self.spectrogram_max_widget_width),
+            sample_rate: if self.active_session_effective_rate > 0 {
+                self.active_session_effective_rate
+            } else {
+                self.snapshot.sample_rate_hz
+            },
+            hop: u32::try_from(self.effective_hop_for_current_zoom()?).ok()?,
+            bins: u32::try_from(self.fft_size / 2 + 1).ok()?,
+            channels: u32::try_from(self.active_session_channel_count.max(1)).ok()?,
+            zoom: f64::from(self.zoom_level),
+            centered: true,
+        };
+        Some(config.limits(retention::lookahead_seconds()).capacity)
     }
 
     /// Compute the pre-decode margin for centered mode: how many seconds

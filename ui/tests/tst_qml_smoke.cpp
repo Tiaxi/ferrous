@@ -645,6 +645,7 @@ private slots:
     void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
+    void spectrogramHighRateRetentionPreservesViewportWithinBudget();
     void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
     void spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill();
     void spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally();
@@ -6460,6 +6461,7 @@ void QmlSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
     item.setHeight(200);
     item.setDisplayMode(1); // Centered
     item.setSampleRateHz(44100);
+    item.setZoomLevel(16.0);
 
     constexpr int bins = 4;
     constexpr int hop = 64; // max zoom
@@ -9185,6 +9187,32 @@ void QmlSmokeTest::spectrogramMinZoomAdaptsToWidthChange() {
     // Re-applying the old narrow zoom should clamp to the new minimum.
     item.setZoomLevel(narrowMinZoom);
     QVERIFY(std::abs(item.zoomLevel() - wideMinZoom) < 0.01);
+}
+
+void QmlSmokeTest::spectrogramHighRateRetentionPreservesViewportWithinBudget() {
+    for (int mode : {0, 1}) {
+        SpectrogramItem item;
+        item.setWidth(1920);
+        item.setHeight(100);
+        item.setDisplayMode(mode);
+        constexpr int bins = 4097;
+        QByteArray column(bins * 8, '\x40');
+        item.feedPrecomputedChunk(column, bins, 0, 1, 0, 1'000'000,
+            384'000, 1024, false, true, 100, true, 1);
+        item.setZoomLevel(16.0);
+        item.m_zoomDebounceTimer->stop();
+        item.feedPrecomputedChunk(column, bins, 0, 1, 0, 1'000'000,
+            384'000, 64, false, true, 100, true, 2);
+        const int width = std::max(1920, SpectrogramItem::s_maxWidgetWidthSeen);
+        const int visibleColumns = static_cast<int>(std::ceil(width / item.effectiveZoomLocked()));
+        QVERIFY(item.m_ringCapacity >= visibleColumns * 2);
+        const qint64 bytesAcrossChannels = item.m_ringBuffer.size() * 8;
+        const qint64 visibleReserve = static_cast<qint64>(visibleColumns) * bins * 8;
+        QVERIFY(bytesAcrossChannels <= visibleReserve * 3 + 64 * 1024 * 1024);
+        QVERIFY(bytesAcrossChannels < 512 * 1024 * 1024);
+        QCOMPARE(item.m_ringColumnId[0], 0);
+        QCOMPARE(item.m_ringTrackToken[0], quint64(100));
+    }
 }
 
 void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
