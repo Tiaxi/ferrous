@@ -3888,20 +3888,13 @@ void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
 
 std::array<quint8, 256> SpectrogramItem::buildPrecomputedDbRemapLocked() const {
     std::array<quint8, 256> dbRemap{};
-    static constexpr double kBakedDbRange = 132.0;
-    const int fftSize = std::max(2, (m_precomputedBinsPerColumn - 1) * 2);
-    const double peakDb = 20.0
-        * std::log10(std::max(
-            1.0,
-            static_cast<double>(fftSize) * 0.35875 / 2.0));
+    // Rust reserves zero for silence/below-floor; 1..255 spans -150..0 dBFS.
+    static constexpr double kBakedDbRange = 150.0;
     const double userDbRange = std::clamp(m_dbRange, 50.0, 150.0);
-    for (int i = 0; i < 256; ++i) {
-        const double db = (static_cast<double>(i) / 255.0)
-            * kBakedDbRange - kBakedDbRange + peakDb;
-        const double xdb = std::clamp(
-            db + userDbRange - peakDb,
-            0.0,
-            userDbRange);
+    for (int i = 1; i < 256; ++i) {
+        const double db = (static_cast<double>(i - 1) / 254.0)
+            * kBakedDbRange - kBakedDbRange;
+        const double xdb = std::clamp(db + userDbRange, 0.0, userDbRange);
         const double normalized = xdb / userDbRange;
         static constexpr double kB = 1.3;
         const double gamma = (normalized > 0.0)

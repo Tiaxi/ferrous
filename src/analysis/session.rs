@@ -132,7 +132,9 @@ fn seconds_from_frames(frames: u64, sample_rate_hz: u64) -> f32 {
     Duration::new(secs, nanos).as_secs_f32()
 }
 
-const PRECOMPUTED_DB_RANGE: f32 = 132.0;
+// Shared with SpectrogramItem::buildPrecomputedDbRemapLocked: zero means
+// silence/below-floor; 1..=255 encodes -150..=0 dB relative to full scale.
+const PRECOMPUTED_DB_RANGE: f32 = 150.0;
 
 /// Compute the expected peak power dB for a full-scale sine in a
 /// Blackman-Harris-windowed FFT of the given size.  This is used to
@@ -148,16 +150,18 @@ fn stft_peak_power_db(fft_size: usize) -> f64 {
 
 fn precomputed_to_u8_spectrum(v: f32, fft_size: usize) -> u8 {
     let range = f64::from(PRECOMPUTED_DB_RANGE);
-    let db = if v > 0.0 {
-        (10.0 / std::f64::consts::LN_10) * f64::from(v).ln()
-    } else {
-        -200.0
-    };
+    if v.is_nan() || v <= 0.0 {
+        return 0;
+    }
+    let db = (10.0 / std::f64::consts::LN_10) * f64::from(v).ln();
     // Normalise for FFT size: anchor at the BH4 peak power so that a
     // full-scale signal maps to u8≈255 for any FFT size.
     let peak_db = stft_peak_power_db(fft_size);
+    if db < peak_db - range {
+        return 0;
+    }
     let xdb = (db + range - peak_db).clamp(0.0, range);
-    let scaled = (xdb / range) * 255.0;
+    let scaled = 1.0 + (xdb / range) * 254.0;
     // Value is clamped to 0.0..=255.0, so truncation and sign loss are impossible.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let result = scaled.round().clamp(0.0, 255.0) as u8;
@@ -2128,6 +2132,31 @@ mod tests {
     use symphonia::core::meta::MetadataOptions;
     #[cfg(not(feature = "gst"))]
     use symphonia::core::probe::Hint;
+
+    #[test]
+    fn precomputed_encoding_preserves_full_dynamic_range_and_silence() {
+        for fft_size in [512, 1_024, 2_048, 4_096, 8_192] {
+            for silent in [0.0, -1.0, f32::NAN] {
+                assert_eq!(precomputed_to_u8_spectrum(silent, fft_size), 0);
+            }
+            let mut previous = 0;
+            for db in [-160.0, -150.0, -140.0, -132.0, -90.0, -50.0, 0.0] {
+                // FFT powers in this test remain well within f32's range.
+                #[allow(clippy::cast_possible_truncation)]
+                let power = 10.0_f64.powf((stft_peak_power_db(fft_size) + db) / 10.0) as f32;
+                let encoded = precomputed_to_u8_spectrum(power, fft_size);
+                assert!(encoded >= previous);
+                if db < -150.0 {
+                    assert_eq!(encoded, 0);
+                } else if db > -150.0 {
+                    let decoded = (f64::from(encoded) - 1.0) / 254.0 * 150.0 - 150.0;
+                    assert!((decoded - db).abs() < 0.3, "{fft_size}: {db} -> {decoded}");
+                }
+                previous = encoded;
+            }
+            assert_eq!(previous, 255);
+        }
+    }
 
     #[test]
     fn explicit_seek_command_forces_seek_even_inside_lookahead() {

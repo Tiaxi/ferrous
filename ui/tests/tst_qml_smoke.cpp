@@ -611,6 +611,7 @@ private slots:
     void queueContainIndexClampsAtListEnd();
     void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
     void spectrogramPixelToFrequency();
+    void spectrogramDynamicRangePreservesSilence();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
     void spectrogramCrosshairOverlayGeneratesOnHover();
@@ -7941,6 +7942,26 @@ void QmlSmokeTest::spectrogramPixelToFrequency() {
     // Mid-height should be roughly half Nyquist in linear mode.
     const double midFreq = item.pixelToFrequencyHz(50, 100);
     QVERIFY(midFreq > 10000.0 && midFreq < 14000.0);
+}
+
+void QmlSmokeTest::spectrogramDynamicRangePreservesSilence() {
+    SpectrogramItem item;
+    for (int mode : {0, 1}) {
+        item.setDisplayMode(mode);
+        for (int fft : {512, 2'048, 8'192}) {
+            item.m_precomputedBinsPerColumn = fft / 2 + 1;
+            for (int range = 50; range <= 150; ++range) {
+                item.setDbRange(range);
+                const auto remap = item.buildPrecomputedDbRemapLocked();
+                QCOMPARE(remap[0], quint8(0));
+                QCOMPARE(remap[255], quint8(255));
+                for (int i = 1; i < 256; ++i) QVERIFY(remap[i] >= remap[i - 1]);
+                // -130 dBFS is visible at the full range, clipped at 90 dB.
+                if (range == 150) QVERIFY(remap[35] > 0);
+                if (range == 90) QCOMPARE(remap[35], quint8(0));
+            }
+        }
+    }
 }
 
 void QmlSmokeTest::spectrogramSampleRateSyncsFromPrecomputedChunks() {
