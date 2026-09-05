@@ -1,55 +1,50 @@
 # Development
 
-This page keeps day-to-day development, validation, and debugging details out of the main repository README.
+Run commands from the repository root. See [installation](INSTALL.md) for build dependencies.
 
-## Run The App
-
-Preferred development path:
+## Build and run
 
 ```bash
 ./scripts/run-ui.sh
-```
-
-The current UI build expects `/bin/zsh` because the CMake bridge target invokes Cargo through it.
-
-Useful variants:
-
-```bash
 ./scripts/run-ui.sh --no-run
-./scripts/run-ui.sh --nuke-db
-./scripts/run-ui.sh --nuke-session
-./scripts/run-ui.sh --nuke-thumbnails
-./scripts/run-ui.sh --nuke-all
-./scripts/run-ui.sh --clear-diagnostics-log
-./scripts/run-ui.sh --coredump
-./scripts/run-ui.sh --profile-logs
 ```
+
+The launcher configures CMake, builds the Rust static library and Qt executable, and launches the app unless `--no-run` is given. CMake invokes Cargo through `/bin/zsh`.
+
+Repository scripts load optional `build.env` settings. Start with `cp build.env.example build.env` and replace the placeholder values. Last.fm builds need `FERROUS_LASTFM_API_KEY` and `FERROUS_LASTFM_SHARED_SECRET` at compile time; they are optional for other features. `FERROUS_DNF_CMD` overrides the local RPM installation command. Keep credentials out of version control.
+
+Set `FERROUS_UI_BUILD_DIR` to use another UI build directory. The Rust archive still builds under `target/release`. The launcher also accepts `CMAKE_BUILD_TYPE` and `CMAKE_GENERATOR`.
 
 ## Validation
 
-Default validation entrypoint:
+Install rustfmt, Clippy, and cargo-audit before running the checks:
 
 ```bash
-./scripts/run-tests.sh
+rustup component add rustfmt clippy
+cargo install cargo-audit
 ```
 
-Scope-specific variants:
+Use the repository script for validation:
+
+| Change | Command |
+| --- | --- |
+| Rust/backend only | `./scripts/run-tests.sh --rust-only` |
+| UI/QML only | `./scripts/run-tests.sh --ui-only` |
+| Both stacks, build configuration, or uncertain scope | `./scripts/run-tests.sh` |
+
+The Rust path runs formatting, `cargo check`, strict Clippy (`-D clippy::pedantic`), tests, and cargo-audit, in that order. The default feature set is `gst`. The UI path configures and builds with CMake, then runs all registered Qt tests through CTest with offscreen rendering where configured. UI builds also rebuild the Rust static library. The script configures profiling logs off.
+
+Keep Clippy and audit enabled. Fix failures and new warnings; report checks that could not run. For documentation-only changes, verify commands and claims against the source, check relative links, and run `git diff --check`.
+
+CI also tests the mock playback backend. To exercise that path locally through the script:
 
 ```bash
-./scripts/run-tests.sh --rust-only
-./scripts/run-tests.sh --ui-only
+FERROUS_TEST_FEATURES=' ' ./scripts/run-tests.sh --rust-only
 ```
 
-By default the script runs:
+The single space deliberately supplies no Cargo features; an empty value falls back to `gst` in the script. Add this run when changing shared playback behavior or mock-only tests.
 
-- `cargo fmt --check`
-- `cargo check --features gst`
-- `cargo clippy --features gst -- -D clippy::pedantic`
-- `cargo test --features gst`
-- `cargo audit`
-- UI configure/build/test via CMake and CTest
-
-Optional coverage gate:
+Optional coverage gate (default minimum line coverage: 35%, overridden by `FERROUS_COVERAGE_MIN`):
 
 ```bash
 rustup component add llvm-tools-preview
@@ -57,111 +52,68 @@ cargo install cargo-llvm-cov
 ./scripts/run-tests.sh --rust-only --coverage
 ```
 
-Coverage threshold is controlled by `FERROUS_COVERAGE_MIN`.
+## Debugging
 
-## Backend Debug CLI
-
-The shipped app uses the in-process Rust FFI bridge. For backend-oriented debugging without the Qt UI, use the separate CLI entrypoint:
+The backend CLI uses the in-process bridge without Qt:
 
 ```bash
 cargo run --bin frontend_cli --features gst
 ```
 
-This is a debugging tool only; the UI does not launch it as a subprocess. The CLI exposes playback and settings commands such as:
+It prints its commands at startup. These cover playback, seeking, volume, display settings, and snapshots; the UI does not launch this CLI as a subprocess.
 
-- `play`, `pause`, `stop`, `next`, `prev`
-- `vol <0..1>`
-- `seek <seconds>`
-- `repeat <0|1|2>`
-- `shuffle <0|1>`
-- `dbrange <50..120>`
-- `log <0|1>`
-- `snap`
-- `quit`
+For crash investigation, `./scripts/run-ui.sh --coredump` enables core dumps and prints `coredumpctl` commands.
 
-If you need profiling logs in this path:
+The launcher also provides cleanup options that delete local app state:
 
-```bash
-cargo run --bin frontend_cli --features "gst profiling-logs"
-```
+| Option | Deletes |
+| --- | --- |
+| `--nuke-db` | Library database, including waveform cache, and SQLite WAL/SHM files |
+| `--nuke-session` | Saved queue/session |
+| `--nuke-thumbnails` | Library thumbnail cache, including its temporary fallback |
+| `--nuke-all` | All three of the above; settings and embedded cover cache remain |
+| `--clear-diagnostics-log` | Current diagnostics log |
 
-## Local Build Configuration
+See [data locations](INSTALL.md#data-locations). Use `./scripts/run-ui.sh --help` for the complete launcher interface.
 
-Repository scripts load `build.env` if it exists. Start from:
+## Profiling
 
-```bash
-cp build.env.example build.env
-```
-
-Current optional values include:
-
-- `FERROUS_LASTFM_API_KEY`
-- `FERROUS_LASTFM_SHARED_SECRET`
-- `FERROUS_DNF_CMD`
-
-Last.fm credentials are optional and only needed if you want scrobbling enabled in your build.
-
-## Local Packaging
-
-Build a local RPM:
-
-```bash
-./scripts/build-rpm.sh
-```
-
-Install the newest local RPM:
-
-```bash
-./scripts/install-rpm.sh
-```
-
-Or build and install in one step:
-
-```bash
-./scripts/build-rpm.sh --install
-```
-
-## Runtime Knobs
-
-Useful environment variables during local development:
-
-- `FERROUS_BRIDGE_SNAPSHOT_MS`: bridge snapshot cadence, default `16`
-- `FERROUS_UI_PAINT_FBO=1`: force framebuffer-backed painted items
-- `FERROUS_UI_SHOW_FPS=1`: show the spectrogram FPS overlay on startup
-- `FERROUS_UI_SEARCH_DEBOUNCE_MS=<ms>`: override search debounce timing
-
-## Profiling Logs
-
-Profiling prints are compile-time gated and are disabled by default.
-
-Enable them in the UI build:
-
-```bash
-cmake -S ui -B ui/build -G Ninja -DFERROUS_ENABLE_PROFILE_LOGS=ON
-cmake --build ui/build
-```
-
-Enable them for direct Rust CLI runs:
-
-```bash
-cargo run --bin frontend_cli --features "gst profiling-logs"
-```
-
-With a profile-enabled build, these runtime toggles become active:
-
-- `FERROUS_PROFILE_UI=1`
-- `FERROUS_PROFILE=1`
-- `FERROUS_PROFILE_WAVEFORM=1` (waveform editor only)
-- `FERROUS_SEARCH_PROFILE=1`
-
-For the desktop UI, the convenience launcher configures, builds, and enables
-the instrumentation in one command:
+Profiling logs are disabled at compile time by default. To build and run with UI instrumentation:
 
 ```bash
 ./scripts/run-ui.sh --profile-logs
 ```
 
-Waveform editor entries use the `[ui-waveform-editor]` prefix and include
-frame gaps, paint/cache timings, detail request latency, resolution, zoom,
-and visible-window coverage. Console output is also copied to the diagnostics
-log shown by **Help > Diagnostics**.
+This enables `FERROUS_ENABLE_PROFILE_LOGS` and launches with `FERROUS_PROFILE_UI=1` unless already set. For Rust backend profiling:
+
+```bash
+FERROUS_PROFILE=1 cargo run --bin frontend_cli --features 'gst profiling-logs'
+```
+
+With a profiling build, these runtime variables select additional output:
+
+| Variable | Purpose |
+| --- | --- |
+| `FERROUS_PROFILE_UI=1` | UI timing and seek diagnostics |
+| `FERROUS_PROFILE=1` | Backend timing logs and UI profiling |
+| `FERROUS_PROFILE_WAVEFORM=1` | Waveform editor timing logs |
+| `FERROUS_SEARCH_PROFILE=1` | Rust search timing |
+| `FERROUS_PROFILE_SPECTROGRAM_TRACE=1` | Detailed UI spectrogram traces |
+| `FERROUS_PROFILE_HEARTBEAT_TRACE=1` | Detailed Rust heartbeat traces |
+
+The desktop app copies console output to the diagnostics log available through **Help > Diagnostics**. Waveform editor entries use the `[ui-waveform-editor]` prefix.
+
+Other useful runtime controls:
+
+| Variable | Purpose / default |
+| --- | --- |
+| `FERROUS_UI_SHOW_FPS=1` | Show spectrogram FPS on startup |
+| `FERROUS_UI_PAINT_FBO=1` | Request framebuffer rendering for the waveform overview |
+| `FERROUS_UI_SEARCH_DEBOUNCE_MS` | UI search debounce, 40 ms |
+| `FERROUS_BRIDGE_PLAYING_HEARTBEAT_MS` | Playback heartbeat, 40 ms |
+| `FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS` | Paused heartbeat, 333 ms |
+| `FERROUS_BRIDGE_ANALYSIS_SNAPSHOT_MS` | Analysis snapshot interval, 16 ms |
+
+## Packaging
+
+See [local package builds](INSTALL.md#local-package-builds) for RPM and deb instructions. `./scripts/install-rpm.sh` installs the newest local RPM without rebuilding it.
