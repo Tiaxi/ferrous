@@ -25,7 +25,9 @@ use crate::raw_audio::{is_dts_file, register_raw_surround_typefinders};
 use gstreamer_app as gst_app;
 
 use super::fft::ensure_sample_buffer;
-use super::{f64_to_u64_saturating, usize_to_f32_approx, SpectrogramViewMode, REFERENCE_HOP};
+use super::{
+    f64_to_u64_saturating, usize_to_f32_approx, usize_to_u64, SpectrogramViewMode, REFERENCE_HOP,
+};
 
 #[cfg(feature = "profiling-logs")]
 macro_rules! profile_eprintln {
@@ -59,8 +61,34 @@ pub(super) struct SymphoniaFile {
 /// A batch of interleaved F32 audio frames from either backend.
 pub(super) struct AudioFrames {
     pub(super) samples: Vec<f32>,
+    pub(super) first_frame: u64,
     pub(super) frames: usize,
     pub(super) channels: usize,
+}
+
+/// An empty queue is not EOF, and a decoder failure is returned as an error.
+pub(super) enum AudioRead {
+    Frames(AudioFrames),
+    Pending,
+    Eof,
+}
+
+impl AudioFrames {
+    fn trim_before(&mut self, target_frame: u64) {
+        let skip = usize::try_from(target_frame.saturating_sub(self.first_frame))
+            .unwrap_or(usize::MAX)
+            .min(self.frames);
+        self.samples.drain(..skip * self.channels);
+        self.frames -= skip;
+        self.first_frame = self.first_frame.saturating_add(usize_to_u64(skip));
+    }
+}
+
+fn timestamp_frame(ts: u64, numerator: u32, denominator: u32, rate: u32) -> u64 {
+    let denominator = u128::from(denominator.max(1));
+    let frame =
+        (u128::from(ts) * u128::from(numerator) * u128::from(rate) + denominator / 2) / denominator;
+    u64::try_from(frame).unwrap_or(u64::MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -75,93 +103,58 @@ pub(super) enum AudioFrameSource {
         decoder: Box<dyn symphonia::core::codecs::Decoder>,
         track_id: u32,
         sample_buf: Option<SampleBuffer<f32>>,
+        seek_frame: u64,
     },
     #[cfg(feature = "gst")]
     Gst {
         pipeline: gst::Pipeline,
         appsink: gst_app::AppSink,
         native_channels: usize,
+        sample_rate: u32,
+        seek_frame: u64,
         /// Stored for seek-flag selection (DTS needs `KEY_UNIT`).
         path: std::path::PathBuf,
     },
 }
 
 impl AudioFrameSource {
-    /// Pull the next batch of decoded audio frames.
-    /// Returns `None` on EOF or unrecoverable error.
-    pub(super) fn next_frames(&mut self) -> Option<AudioFrames> {
-        match self {
+    /// Read native samples with their absolute source position. Seek preroll is
+    /// decoded but excluded, so callers never have to guess where a seek landed.
+    pub(super) fn next_frames(&mut self) -> anyhow::Result<AudioRead> {
+        let (read, target) = match self {
             Self::Symphonia {
                 format,
                 decoder,
                 track_id,
                 sample_buf,
-            } => loop {
-                let packet = match format.next_packet() {
-                    Ok(p) => p,
-                    Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
-                        return None;
-                    }
-                    Err(_) => return None,
-                };
-                if packet.track_id() != *track_id {
-                    continue;
-                }
-                let decoded_audio = match decoder.decode(&packet) {
-                    Ok(d) => d,
-                    Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
-                        return None;
-                    }
-                    Err(SymphoniaError::DecodeError(_)) => continue,
-                    Err(_) => return None,
-                };
-                let spec = *decoded_audio.spec();
-                let decoded_channels = spec.channels.count().max(1);
-                let decoded_capacity = decoded_audio.capacity();
-                let buf = ensure_sample_buffer(sample_buf, decoded_capacity, spec);
-                buf.copy_interleaved_ref(decoded_audio);
-                let samples = buf.samples().to_vec();
-                let frames = samples.len() / decoded_channels;
-                return Some(AudioFrames {
-                    samples,
-                    frames,
-                    channels: decoded_channels,
-                });
-            },
+                seek_frame,
+            } => (
+                read_symphonia_frames(format, decoder, *track_id, sample_buf)?,
+                *seek_frame,
+            ),
             #[cfg(feature = "gst")]
             Self::Gst {
+                pipeline,
                 appsink,
                 native_channels,
+                sample_rate,
+                seek_frame,
                 ..
-            } => {
-                let timeout = gst::ClockTime::from_mseconds(50);
-                if let Some(sample) = appsink.try_pull_sample(timeout) {
-                    let buffer = sample.buffer()?;
-                    let map = buffer.map_readable().ok()?;
-                    let bytes = map.as_slice();
-                    let mut samples = Vec::with_capacity(bytes.len() / 4);
-                    for chunk in bytes.chunks_exact(4) {
-                        samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                    }
-                    let ch = *native_channels;
-                    let frames = if ch > 0 { samples.len() / ch } else { 0 };
-                    Some(AudioFrames {
-                        samples,
-                        frames,
-                        channels: ch,
-                    })
-                } else if appsink.is_eos() {
-                    None
+            } => (
+                read_gstreamer_frames(pipeline, appsink, *native_channels, *sample_rate)?,
+                *seek_frame,
+            ),
+        };
+        match read {
+            AudioRead::Frames(mut audio) => {
+                audio.trim_before(target);
+                Ok(if audio.frames == 0 {
+                    AudioRead::Pending
                 } else {
-                    // Timeout but not EOS — return empty batch so the decode
-                    // loop can check for commands and retry.
-                    Some(AudioFrames {
-                        samples: Vec::new(),
-                        frames: 0,
-                        channels: *native_channels,
-                    })
-                }
+                    AudioRead::Frames(audio)
+                })
             }
+            other => Ok(other),
         }
     }
 
@@ -177,26 +170,133 @@ impl AudioFrameSource {
         }
     }
 
-    /// Seek to the given position.
-    pub(super) fn seek(&mut self, position_seconds: f64, native_sample_rate: u64) {
+    /// Seek before the requested sample and trim decoded preroll by timestamp.
+    pub(super) fn seek(
+        &mut self,
+        position_seconds: f64,
+        native_sample_rate: u64,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            position_seconds.is_finite() && position_seconds >= 0.0,
+            "invalid seek position"
+        );
+        let rate = u32::try_from(native_sample_rate)?;
+        let target = f64_to_u64_saturating(position_seconds * f64::from(rate));
         match self {
             Self::Symphonia {
                 format,
                 decoder,
                 track_id,
+                seek_frame,
                 ..
             } => {
-                seek_symphonia(format, *track_id, native_sample_rate, position_seconds);
+                seek_symphonia(format, *track_id, position_seconds)?;
                 decoder.reset();
+                *seek_frame = target;
             }
             #[cfg(feature = "gst")]
-            Self::Gst { pipeline, path, .. } => {
-                let flags = spectrogram_seek_flags_for_path(path);
+            Self::Gst {
+                pipeline,
+                path,
+                seek_frame,
+                ..
+            } => {
                 let ns = f64_to_u64_saturating(position_seconds * 1_000_000_000.0);
-                let _ = pipeline.seek_simple(flags, gst::ClockTime::from_nseconds(ns));
+                pipeline.seek_simple(
+                    spectrogram_seek_flags_for_path(path),
+                    gst::ClockTime::from_nseconds(ns),
+                )?;
+                *seek_frame = target;
             }
         }
+        Ok(())
     }
+}
+
+fn read_symphonia_frames(
+    format: &mut Box<dyn symphonia::core::formats::FormatReader>,
+    decoder: &mut Box<dyn symphonia::core::codecs::Decoder>,
+    track_id: u32,
+    sample_buf: &mut Option<SampleBuffer<f32>>,
+) -> anyhow::Result<AudioRead> {
+    let packet = match format.next_packet() {
+        Ok(packet) => packet,
+        Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
+            return Ok(AudioRead::Eof);
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if packet.track_id() != track_id {
+        return Ok(AudioRead::Pending);
+    }
+    let time_base = format
+        .tracks()
+        .iter()
+        .find(|track| track.id == track_id)
+        .and_then(|track| track.codec_params.time_base);
+    let audio = match decoder.decode(&packet) {
+        Ok(audio) => audio,
+        Err(SymphoniaError::DecodeError(_)) => return Ok(AudioRead::Pending),
+        Err(err) => return Err(err.into()),
+    };
+    let spec = *audio.spec();
+    let channels = spec.channels.count().max(1);
+    let first_frame = time_base.map_or(packet.ts(), |base| {
+        timestamp_frame(packet.ts(), base.numer, base.denom, spec.rate)
+    });
+    let buffer = ensure_sample_buffer(sample_buf, audio.capacity(), spec);
+    buffer.copy_interleaved_ref(audio);
+    let samples = buffer.samples().to_vec();
+    Ok(AudioRead::Frames(AudioFrames {
+        frames: samples.len() / channels,
+        samples,
+        channels,
+        first_frame,
+    }))
+}
+
+#[cfg(feature = "gst")]
+fn read_gstreamer_frames(
+    pipeline: &gst::Pipeline,
+    appsink: &gst_app::AppSink,
+    native_channels: usize,
+    sample_rate: u32,
+) -> anyhow::Result<AudioRead> {
+    if let Some(message) = pipeline
+        .bus()
+        .and_then(|bus| bus.pop_filtered(&[gst::MessageType::Error]))
+    {
+        if let gst::MessageView::Error(error) = message.view() {
+            anyhow::bail!("analysis decoder failed: {}", error.error());
+        }
+    }
+    let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(50)) else {
+        return Ok(if appsink.is_eos() {
+            AudioRead::Eof
+        } else {
+            AudioRead::Pending
+        });
+    };
+    let buffer = sample
+        .buffer()
+        .ok_or_else(|| anyhow::anyhow!("missing audio buffer"))?;
+    let pts = buffer
+        .pts()
+        .ok_or_else(|| anyhow::anyhow!("missing audio timestamp"))?;
+    let first_frame = timestamp_frame(pts.nseconds(), 1, 1_000_000_000, sample_rate);
+    let map = buffer.map_readable()?;
+    let samples: Vec<f32> = map
+        .as_slice()
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .collect();
+    let channels = native_channels;
+    Ok(AudioRead::Frames(AudioFrames {
+        frames: samples.len() / channels,
+        samples,
+        channels,
+        first_frame,
+    }))
 }
 
 impl Drop for AudioFrameSource {
@@ -232,6 +332,7 @@ pub(super) fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usi
                 decoder: sf.decoder,
                 track_id: sf.track_id,
                 sample_buf: None,
+                seek_frame: 0,
             },
             sf.native_sample_rate,
             sf.native_channels,
@@ -298,17 +399,27 @@ pub(super) fn open_symphonia_file(path: &Path) -> Option<SymphoniaFile> {
     })
 }
 
-pub(super) fn seek_symphonia(
+fn seek_symphonia(
     format: &mut Box<dyn symphonia::core::formats::FormatReader>,
     track_id: u32,
-    native_sample_rate: u64,
     seek_seconds: f64,
-) {
-    use symphonia::core::formats::SeekMode;
-    use symphonia::core::formats::SeekTo;
-    let native_rate_u32 = u32::try_from(native_sample_rate).unwrap_or(u32::MAX);
-    let ts = f64_to_u64_saturating(seek_seconds * f64::from(native_rate_u32));
-    let _ = format.seek(SeekMode::Coarse, SeekTo::TimeStamp { ts, track_id });
+) -> anyhow::Result<()> {
+    use symphonia::core::formats::{SeekMode, SeekTo};
+    // Compressed decoders need reservoir/overlap history even after an accurate
+    // demuxer seek. Decode preroll, then trim by actual packet timestamps.
+    let seek_seconds = (seek_seconds - 0.1).max(0.0);
+    let time = symphonia::core::units::Time::new(
+        f64_to_u64_saturating(seek_seconds),
+        seek_seconds.fract(),
+    );
+    format.seek(
+        SeekMode::Accurate,
+        SeekTo::Time {
+            time,
+            track_id: Some(track_id),
+        },
+    )?;
+    Ok(())
 }
 
 /// `GStreamer` seek flags for the spectrogram worker.  DTS files need
@@ -316,9 +427,9 @@ pub(super) fn seek_symphonia(
 #[cfg(feature = "gst")]
 fn spectrogram_seek_flags_for_path(path: &Path) -> gst::SeekFlags {
     if is_dts_file(path) {
-        gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+        gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_BEFORE
     } else {
-        gst::SeekFlags::FLUSH
+        gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
     }
 }
 
@@ -406,6 +517,8 @@ fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32
         pipeline,
         appsink,
         native_channels: channels,
+        sample_rate: u32::try_from(rate).ok()?,
+        seek_frame: 0,
         path: path.to_path_buf(),
     };
 
@@ -556,6 +669,91 @@ mod tests {
             .set_state(gst::State::Null)
             .expect("cancel parked decoder");
         assert_eq!(pipeline.current_state(), gst::State::Null);
+    }
+
+    #[test]
+    fn timestamp_conversion_handles_container_timebases_and_nanosecond_rounding() {
+        assert_eq!(timestamp_frame(1234, 1, 1000, 48000), 59_232);
+        assert_eq!(timestamp_frame(20_833, 1, 1_000_000_000, 48000), 1);
+        assert_eq!(
+            timestamp_frame(1_000_020_833, 1, 1_000_000_000, 48000),
+            48_001
+        );
+    }
+
+    #[test]
+    fn timestamped_preroll_trimming_preserves_channel_alignment() {
+        let mut audio = AudioFrames {
+            first_frame: 100,
+            frames: 3,
+            channels: 2,
+            samples: vec![1.0, -1.0, 2.0, -2.0, 3.0, -3.0],
+        };
+        audio.trim_before(102);
+        assert_eq!(audio.first_frame, 102);
+        assert_eq!(audio.frames, 1);
+        assert_eq!(audio.samples, [3.0, -3.0]);
+        audio.trim_before(200);
+        assert_eq!(audio.frames, 0);
+        assert!(audio.samples.is_empty());
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn gstreamer_reads_preserve_pts_and_distinguish_pending_from_eof() {
+        gst::init().expect("gstreamer initialization");
+        let pipeline = gst::Pipeline::new();
+        let producer = gst_app::AppSrc::builder().build();
+        let sink = gst_app::AppSink::builder()
+            .sync(false)
+            .max_buffers(8)
+            .build();
+        pipeline
+            .add_many([producer.upcast_ref::<gst::Element>(), sink.upcast_ref()])
+            .expect("add elements");
+        producer.link(&sink).expect("link");
+        let mut source = AudioFrameSource::Gst {
+            pipeline,
+            appsink: sink,
+            native_channels: 1,
+            sample_rate: 48000,
+            seek_frame: 48_001,
+            path: Path::new("fixture.wav").to_owned(),
+        };
+        let AudioFrameSource::Gst { pipeline, .. } = &source else {
+            unreachable!()
+        };
+        pipeline.set_state(gst::State::Playing).expect("start");
+        assert!(matches!(
+            source.next_frames().expect("idle read"),
+            AudioRead::Pending
+        ));
+        let bytes: Vec<u8> = [0.25_f32, 0.5, 0.75]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let mut buffer = gst::Buffer::from_mut_slice(bytes);
+        buffer
+            .get_mut()
+            .expect("unique buffer")
+            .set_pts(gst::ClockTime::from_seconds(1));
+        producer.push_buffer(buffer).expect("push");
+        producer.end_of_stream().expect("EOF");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let audio = loop {
+            assert!(std::time::Instant::now() < deadline, "decoder timed out");
+            match source.next_frames().expect("read") {
+                AudioRead::Frames(audio) => break audio,
+                AudioRead::Pending => {}
+                AudioRead::Eof => panic!("premature EOF"),
+            }
+        };
+        assert_eq!(audio.first_frame, 48_001);
+        assert_eq!(audio.samples, [0.5, 0.75]);
+        assert!(matches!(
+            source.next_frames().expect("final read"),
+            AudioRead::Eof
+        ));
     }
 
     #[test]
