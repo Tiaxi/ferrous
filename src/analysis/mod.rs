@@ -7,6 +7,8 @@ mod output;
 pub(crate) mod retention;
 use output::{resets_spectral_stream, AnalysisEventOutput, AnalysisOutputs};
 #[cfg(feature = "gst")]
+mod gst_lifecycle;
+#[cfg(feature = "gst")]
 mod gst_waveform;
 mod session;
 mod waveform_pyramid;
