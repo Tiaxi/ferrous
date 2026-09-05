@@ -11,6 +11,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use super::decoders::{
     deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource, AudioRead,
+    AudioTimeline,
 };
 use super::fft::{PeakHoldResampler, StftComputer};
 use super::output::{AnalysisEventOutput, AnalysisOutputs};
@@ -485,6 +486,7 @@ fn centered_staging_decode(
         path.file_name().unwrap_or_default().to_string_lossy(),
     );
 
+    let mut timeline = AudioTimeline::new(0);
     loop {
         if stop.load(Ordering::Relaxed) {
             // Flush any partial chunk so the drain captures as much data as possible.
@@ -495,7 +497,7 @@ fn centered_staging_decode(
             return;
         }
 
-        let audio = match source.next_frames() {
+        let audio = match timeline.read(|| source.next_frames()) {
             Ok(AudioRead::Pending) => continue,
             Ok(AudioRead::Frames(audio)) => audio,
             Ok(AudioRead::Eof) => break,
@@ -800,6 +802,7 @@ struct SpectrogramSessionState {
     lookahead_seconds: f64,
     /// True while parked after real source EOF; reset on seeks/continuations.
     source_reached_eof: bool,
+    timeline: AudioTimeline,
 
     /// Whether a `GStreamer` duration re-query has already been attempted.
     /// Raw DTS/AC3 files often lack duration at pipeline start; a re-query
@@ -967,6 +970,7 @@ fn run_spectrogram_session(
         lookahead_columns,
         lookahead_seconds,
         source_reached_eof: false,
+        timeline: AudioTimeline::new(seek_frame),
         #[cfg(feature = "gst")]
         gst_duration_requeried: false,
         pending_continue: None,
@@ -1038,6 +1042,7 @@ fn run_spectrogram_session(
                     let (new_source, _, _, new_est) = opened.unwrap();
                     source = new_source;
                     session.source_reached_eof = false;
+                    session.timeline = AudioTimeline::new(0);
                     session.track_token = track_token;
                     session.total_columns_estimate = new_est;
                     // handle_track_change invalidates the outgoing duration
@@ -1248,7 +1253,7 @@ fn session_decode_loop(
         }
 
         // 4. Decode next batch of audio frames.
-        let audio = match source.next_frames() {
+        let audio = match session.timeline.read(|| source.next_frames()) {
             Ok(AudioRead::Pending) => continue,
             Ok(AudioRead::Frames(audio)) => audio,
             Err(error) => {
@@ -1531,6 +1536,7 @@ fn handle_session_seek(
         return false;
     }
     session.source_reached_eof = false;
+    session.timeline = AudioTimeline::new(frame);
     for stft in &mut session.stfts {
         stft.reset();
     }
@@ -2292,6 +2298,7 @@ mod tests {
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
             source_reached_eof: false,
+            timeline: AudioTimeline::new(0),
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2401,6 +2408,7 @@ mod tests {
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
             source_reached_eof: false,
+            timeline: AudioTimeline::new(0),
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2449,6 +2457,7 @@ mod tests {
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
             source_reached_eof: false,
+            timeline: AudioTimeline::new(0),
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2507,6 +2516,7 @@ mod tests {
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
             source_reached_eof: false,
+            timeline: AudioTimeline::new(0),
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2557,6 +2567,7 @@ mod tests {
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
             source_reached_eof: false,
+            timeline: AudioTimeline::new(0),
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -2638,6 +2649,7 @@ mod tests {
             lookahead_columns: 512,
             lookahead_seconds: 10.0,
             source_reached_eof: false,
+            timeline: AudioTimeline::new(0),
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
@@ -3147,6 +3159,58 @@ mod tests {
         assert!(session.decode_rate_limit.is_finite());
         assert!(session.lookahead_columns < u64::MAX);
         assert_eq!(session.display_mode, SpectrogramDisplayMode::Rolling);
+    }
+
+    #[test]
+    fn timestamped_gaps_and_overlaps_preserve_absolute_spectral_columns() {
+        use super::super::decoders::AudioFrames;
+        let mut packets = vec![
+            AudioFrames {
+                samples: vec![0.5; 1024],
+                first_frame: 0,
+                frames: 1024,
+                channels: 1,
+            },
+            AudioFrames {
+                samples: vec![-0.5; 1024],
+                first_frame: 4096,
+                frames: 1024,
+                channels: 1,
+            },
+            AudioFrames {
+                samples: vec![0.25; 1024],
+                first_frame: 4608,
+                frames: 1024,
+                channels: 1,
+            },
+        ]
+        .into_iter();
+        let mut timeline = AudioTimeline::new(0);
+        let mut actual = StftComputer::new(512, 128);
+        loop {
+            match timeline
+                .read(|| Ok(packets.next().map_or(AudioRead::Eof, AudioRead::Frames)))
+                .unwrap()
+            {
+                AudioRead::Frames(frames) => actual.enqueue_samples(&frames.samples),
+                AudioRead::Pending => {}
+                AudioRead::Eof => break,
+            }
+        }
+        let mut expected = StftComputer::new(512, 128);
+        let samples: Vec<_> = std::iter::repeat_n(0.5, 1024)
+            .chain(std::iter::repeat_n(0.0, 3072))
+            .chain(std::iter::repeat_n(-0.5, 1024))
+            .chain(std::iter::repeat_n(0.25, 512))
+            .collect();
+        expected.enqueue_samples(&samples);
+        let mut columns = 0;
+        while let Some(row) = expected.take_row() {
+            assert_eq!(actual.take_row(), Some(row));
+            columns += 1;
+        }
+        assert_eq!(columns, 41);
+        assert!(!actual.has_row());
     }
 
     #[test]

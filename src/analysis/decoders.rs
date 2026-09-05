@@ -84,6 +84,58 @@ impl AudioFrames {
     }
 }
 
+/// Normalize timestamped packets for a continuous STFT timeline. Missing audio
+/// advances time as bounded silent batches; overlaps never repeat old frames.
+/// Waveform extrema deliberately use the original packets to retain empty gaps.
+pub(super) struct AudioTimeline {
+    next_frame: u64,
+    pending: Option<AudioFrames>,
+}
+
+impl AudioTimeline {
+    pub(super) fn new(next_frame: u64) -> Self {
+        Self {
+            next_frame,
+            pending: None,
+        }
+    }
+
+    pub(super) fn read(
+        &mut self,
+        next: impl FnOnce() -> anyhow::Result<AudioRead>,
+    ) -> anyhow::Result<AudioRead> {
+        let mut frames = match self
+            .pending
+            .take()
+            .map_or_else(next, |frames| Ok(AudioRead::Frames(frames)))?
+        {
+            AudioRead::Frames(frames) => frames,
+            other => return Ok(other),
+        };
+        frames.trim_before(self.next_frame);
+        if frames.frames == 0 {
+            return Ok(AudioRead::Pending);
+        }
+        if frames.first_frame > self.next_frame {
+            let gap =
+                usize::try_from((frames.first_frame - self.next_frame).min(4096)).unwrap_or(4096);
+            let silence = AudioFrames {
+                samples: vec![0.0; gap * frames.channels],
+                first_frame: self.next_frame,
+                frames: gap,
+                channels: frames.channels,
+            };
+            self.next_frame += usize_to_u64(gap);
+            self.pending = Some(frames);
+            return Ok(AudioRead::Frames(silence));
+        }
+        self.next_frame = frames
+            .first_frame
+            .saturating_add(usize_to_u64(frames.frames));
+        Ok(AudioRead::Frames(frames))
+    }
+}
+
 fn timestamp_frame(ts: u64, numerator: u32, denominator: u32, rate: u32) -> u64 {
     let denominator = u128::from(denominator.max(1));
     let frame =
@@ -599,6 +651,97 @@ pub(super) fn deinterleave_samples(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn timeline_fills_gaps_in_bounded_batches_without_reading_ahead() {
+        let mut timeline = AudioTimeline::new(0);
+        let mut reads = 0;
+        let mut samples = Vec::new();
+        for expected_frames in [4096, 4096, 1808, 2] {
+            let read = timeline
+                .read(|| {
+                    reads += 1;
+                    assert_eq!(reads, 1, "pending packet must be retained through the gap");
+                    Ok(AudioRead::Frames(AudioFrames {
+                        samples: vec![0.5, -0.5, 0.25, -0.25],
+                        first_frame: 10_000,
+                        frames: 2,
+                        channels: 2,
+                    }))
+                })
+                .expect("normalize gap");
+            let AudioRead::Frames(frames) = read else {
+                panic!("expected audio");
+            };
+            assert_eq!(frames.frames, expected_frames);
+            assert_eq!(frames.first_frame * 2, usize_to_u64(samples.len()));
+            samples.extend(frames.samples);
+        }
+        assert_eq!(samples.len(), 20_004);
+        assert!(samples[..20_000].iter().all(|&sample| sample == 0.0));
+        assert_eq!(&samples[20_000..], &[0.5, -0.5, 0.25, -0.25]);
+        assert!(matches!(
+            timeline.read(|| Ok(AudioRead::Eof)).unwrap(),
+            AudioRead::Eof
+        ));
+    }
+
+    #[test]
+    fn timeline_trims_overlap_and_resets_pending_audio_for_a_seek_or_new_file() {
+        let mut timeline = AudioTimeline::new(42);
+        let read = timeline
+            .read(|| {
+                Ok(AudioRead::Frames(AudioFrames {
+                    samples: vec![0.0, 0.25, 0.5, 0.75],
+                    first_frame: 40,
+                    frames: 4,
+                    channels: 1,
+                }))
+            })
+            .unwrap();
+        let AudioRead::Frames(frames) = read else {
+            panic!("expected audio");
+        };
+        assert_eq!(frames.first_frame, 42);
+        assert_eq!(frames.samples, [0.5, 0.75]);
+        assert!(matches!(
+            timeline
+                .read(|| Ok(AudioRead::Frames(AudioFrames {
+                    samples: vec![1.0],
+                    first_frame: 0,
+                    frames: 1,
+                    channels: 1,
+                })))
+                .unwrap(),
+            AudioRead::Pending
+        ));
+        timeline
+            .read(|| {
+                Ok(AudioRead::Frames(AudioFrames {
+                    samples: vec![1.0],
+                    first_frame: 100_000,
+                    frames: 1,
+                    channels: 1,
+                }))
+            })
+            .unwrap();
+        timeline = AudioTimeline::new(0);
+        let read = timeline
+            .read(|| {
+                Ok(AudioRead::Frames(AudioFrames {
+                    samples: vec![-0.5],
+                    first_frame: 0,
+                    frames: 1,
+                    channels: 1,
+                }))
+            })
+            .unwrap();
+        let AudioRead::Frames(frames) = read else {
+            panic!("expected new source");
+        };
+        assert_eq!(frames.first_frame, 0);
+        assert_eq!(frames.samples, [-0.5]);
+    }
 
     #[cfg(feature = "gst")]
     #[test]
