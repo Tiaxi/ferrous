@@ -166,10 +166,12 @@ pub(crate) fn is_raw_surround_file(path: &Path) -> bool {
     matches!(raw_surround_extension(path).as_deref(), Some("ac3" | "dts"))
 }
 
+#[cfg(any(feature = "gst", test))]
 pub(crate) fn is_dts_file(path: &Path) -> bool {
     matches!(raw_surround_extension(path).as_deref(), Some("dts"))
 }
 
+#[cfg(any(feature = "gst", test))]
 pub(crate) fn same_surround_extension(a: &Path, b: &Path) -> bool {
     is_raw_surround_file(a)
         && is_raw_surround_file(b)
@@ -181,6 +183,7 @@ fn raw_surround_extension(path: &Path) -> Option<String> {
     Some(ext.to_ascii_lowercase())
 }
 
+#[cfg(feature = "gst")]
 fn round_f64_to_u32(value: f64) -> Option<u32> {
     if !value.is_finite() || value < 0.0 {
         return None;
@@ -204,6 +207,7 @@ pub(crate) fn raw_surround_format_label(path: &Path) -> String {
 /// Byte range of clean audio within a raw surround file: first sync word
 /// through end of audio (before `APEv2` tag).  Returns `None` for non-raw
 /// surround files or when there is nothing to strip.
+#[cfg(any(feature = "gst", test))]
 pub(crate) fn audio_byte_range(path: &Path) -> Option<(u64, u64)> {
     if !is_raw_surround_file(path) {
         return None;
@@ -340,6 +344,7 @@ pub(crate) fn probe_raw_surround_technical_details(
 /// subtracting the `APEv2` tag if present.  Works for AC3 (A/52) and DTS files.
 // Duration estimate from byte count — f64 precision loss is negligible.
 #[allow(clippy::cast_precision_loss)]
+#[cfg(any(feature = "gst", test))]
 fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
     let mut file = File::open(path).ok()?;
     let file_len = file.seek(SeekFrom::End(0)).ok()?;
@@ -389,16 +394,19 @@ fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
 }
 
 /// AC3 bitrate lookup indexed by `frmsizecod / 2` (kbps) — A/52 Table 5.18.
+#[cfg(any(feature = "gst", test))]
 const AC3_BITRATES_KBPS: [u32; 19] = [
     32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640,
 ];
 
 /// DTS sample rate table indexed by SFREQ code.
+#[cfg(any(feature = "gst", test))]
 const DTS_SAMPLE_RATES: [u32; 16] = [
     0, 8000, 16000, 32000, 0, 0, 11025, 22050, 44100, 0, 0, 12000, 24000, 48000, 0, 0,
 ];
 
 /// Find the byte offset of the first AC3 sync word (`0x0B77`) in `data`.
+#[cfg(any(feature = "gst", test))]
 fn find_ac3_sync(data: &[u8]) -> Option<usize> {
     data.windows(2).position(|w| w == [0x0B, 0x77])
 }
@@ -409,6 +417,7 @@ fn find_ac3_sync(data: &[u8]) -> Option<usize> {
 ///   `[0..2]` sync word `0x0B77`
 ///   `[2..4]` CRC1
 ///   `[4]`    fscod (2 bits) | frmsizecod (6 bits)
+#[cfg(any(feature = "gst", test))]
 fn parse_ac3_bitrate(header: &[u8]) -> Option<u32> {
     if header.len() < 5 || header[0] != 0x0B || header[1] != 0x77 {
         return None;
@@ -419,6 +428,7 @@ fn parse_ac3_bitrate(header: &[u8]) -> Option<u32> {
 }
 
 /// Find the byte offset of the first DTS sync word (`0x7FFE8001`) in `data`.
+#[cfg(any(feature = "gst", test))]
 fn find_dts_sync(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|w| w == [0x7F, 0xFE, 0x80, 0x01])
 }
@@ -429,6 +439,7 @@ fn find_dts_sync(data: &[u8]) -> Option<usize> {
 /// Frame size and sample rate are extracted from the header to compute
 /// the bitrate as `frame_bytes * 8 * sample_rate / 512` (512 PCM samples
 /// per DTS frame).
+#[cfg(any(feature = "gst", test))]
 fn parse_dts_bitrate(header: &[u8]) -> Option<u32> {
     if header.len() < 12 {
         return None;
@@ -811,7 +822,7 @@ pub(crate) fn write_test_apev2_file(path: &Path, items: &[(&str, &str)], header:
 }
 
 #[cfg(test)]
-fn build_test_apev2_tag(items: &[(&str, &str)], header: bool) -> Vec<u8> {
+pub(crate) fn build_test_apev2_tag(items: &[(&str, &str)], header: bool) -> Vec<u8> {
     let mut item_bytes = Vec::new();
     for (key, value) in items {
         item_bytes.extend_from_slice(

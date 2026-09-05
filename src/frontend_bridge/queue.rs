@@ -323,8 +323,8 @@ mod tests {
     #[test]
     fn selection_playback_and_reorder_do_not_request_metadata_validation() {
         let (analysis_tx, _) = crossbeam_channel::unbounded();
-        let (pcm_tx, _) = crossbeam_channel::unbounded();
-        let (playback, _) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (playback, _) = PlaybackEngine::new(analysis_tx);
         let (details_tx, details_rx) = crossbeam_channel::unbounded();
         let (event_tx, _) = crossbeam_channel::unbounded();
         let mut state = BridgeState::default();

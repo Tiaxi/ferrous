@@ -1,328 +1,335 @@
-use std::f32::consts::PI;
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
+use crate::analysis::AnalysisCommand;
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
-
-use crate::analysis::{AnalysisCommand, AnalysisPcmChunk, SpectrogramChannelLabel};
-
-use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
-
 pub fn spawn_engine(
     analysis_tx: Sender<AnalysisCommand>,
-    pcm_tx: Sender<AnalysisPcmChunk>,
 ) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
-    let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
-    let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
-
+    let (cmd_tx, cmd_rx) = unbounded();
+    let (event_tx, event_rx) = unbounded();
     let _ = std::thread::Builder::new()
         .name("ferrous-playback-sim".to_string())
         .spawn(move || {
-            let mut snapshot = PlaybackSnapshot {
-                volume: 1.0,
-                ..PlaybackSnapshot::default()
+            let mut runtime = MockPlaybackRuntime {
+                snapshot: PlaybackSnapshot {
+                    volume: 1.0,
+                    ..PlaybackSnapshot::default()
+                },
+                queue: Vec::new(),
+                queue_idx: 0,
+                solo_pre_mask: None,
+                soloed_channel: None,
+                event_tx,
+                analysis_tx,
             };
-            let mut queue: Vec<PathBuf> = Vec::new();
-            let mut queue_idx = 0usize;
             let mut last_tick = Instant::now();
-            let mut phase = 0.0f32;
-            let mut solo_pre_mask: Option<u64> = None;
-            let mut soloed_channel: Option<u8> = None;
-
-            macro_rules! reset_mute {
-                () => {
-                    snapshot.muted_channels_mask = 0;
-                    snapshot.soloed_channel = None;
-                    solo_pre_mask = None;
-                    soloed_channel = None;
-                };
-            }
-
             while let Ok(cmd) = cmd_rx.recv() {
-                if snapshot.state == PlaybackState::Playing {
-                    let delta = last_tick.elapsed();
-                    snapshot.position = snapshot.position.saturating_add(delta);
+                if runtime.snapshot.state == PlaybackState::Playing {
+                    runtime.snapshot.position = runtime
+                        .snapshot
+                        .position
+                        .saturating_add(last_tick.elapsed());
                 }
                 last_tick = Instant::now();
-
-                match cmd {
-                    PlaybackCommand::LoadQueue(paths) => {
-                        queue = paths;
-                        queue_idx = 0;
-                        reset_mute!();
-                        snapshot.position = Duration::ZERO;
-                        snapshot.duration = Duration::from_secs(180);
-                        snapshot.current = queue.first().cloned();
-                        snapshot.current_queue_index = if snapshot.current.is_some() {
-                            Some(queue_idx)
-                        } else {
-                            None
-                        };
-                        if let Some(path) = snapshot.current.clone() {
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                path,
-                                queue_index: queue_idx,
-                                kind: TrackChangeKind::Manual,
-                                track_token: 0,
-                            });
-                            let _ = analysis_tx.send(AnalysisCommand::SetSampleRate(48_000));
-                        }
-                    }
-                    PlaybackCommand::AddToQueue(paths) => {
-                        queue.extend(paths);
-                    }
-                    PlaybackCommand::RemoveMany(indices) => {
-                        let old_current = snapshot.current.clone();
-                        let next =
-                            super::remove_queue_indices(&mut queue, Some(queue_idx), &indices);
-                        queue_idx = next.unwrap_or(0);
-                        snapshot.current_queue_index = next;
-                        snapshot.current = next.and_then(|index| queue.get(index).cloned());
-                        if snapshot.current != old_current {
-                            reset_mute!();
-                            snapshot.position = Duration::ZERO;
-                            if let Some(path) = snapshot.current.clone() {
-                                snapshot.duration = Duration::from_secs(180);
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                    path,
-                                    queue_index: queue_idx,
-                                    kind: TrackChangeKind::Manual,
-                                    track_token: 0,
-                                });
-                            } else {
-                                snapshot.state = PlaybackState::Stopped;
-                                snapshot.duration = Duration::ZERO;
-                            }
-                        }
-                    }
-                    PlaybackCommand::RemoveAt(idx) => {
-                        if idx < queue.len() {
-                            queue.remove(idx);
-                            reset_mute!();
-                            if queue.is_empty() {
-                                queue_idx = 0;
-                                snapshot.current = None;
-                                snapshot.current_queue_index = None;
-                                snapshot.state = PlaybackState::Stopped;
-                                snapshot.position = Duration::ZERO;
-                                snapshot.duration = Duration::ZERO;
-                            } else {
-                                if idx < queue_idx {
-                                    queue_idx = queue_idx.saturating_sub(1);
-                                } else if idx == queue_idx && queue_idx >= queue.len() {
-                                    queue_idx = queue.len().saturating_sub(1);
-                                }
-                                snapshot.current = queue.get(queue_idx).cloned();
-                                snapshot.current_queue_index = Some(queue_idx);
-                                snapshot.position = Duration::ZERO;
-                                snapshot.duration = Duration::from_secs(180);
-                                if let Some(path) = snapshot.current.clone() {
-                                    let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                        path,
-                                        queue_index: queue_idx,
-                                        kind: TrackChangeKind::Manual,
-                                        track_token: 0,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    PlaybackCommand::MoveQueue { from, to } => {
-                        if from < queue.len() && to < queue.len() && from != to {
-                            let item = queue.remove(from);
-                            queue.insert(to, item);
-                            if queue_idx == from {
-                                queue_idx = to;
-                            } else if from < queue_idx && to >= queue_idx {
-                                queue_idx = queue_idx.saturating_sub(1);
-                            } else if from > queue_idx && to <= queue_idx {
-                                queue_idx += 1;
-                            }
-                            snapshot.current = queue.get(queue_idx).cloned();
-                            snapshot.current_queue_index = if snapshot.current.is_some() {
-                                Some(queue_idx)
-                            } else {
-                                None
-                            };
-                        }
-                    }
-                    PlaybackCommand::ClearQueue => {
-                        queue.clear();
-                        queue_idx = 0;
-                        reset_mute!();
-                        snapshot.current = None;
-                        snapshot.current_queue_index = None;
-                        snapshot.state = PlaybackState::Stopped;
-                        snapshot.position = Duration::ZERO;
-                        snapshot.duration = Duration::ZERO;
-                    }
-                    PlaybackCommand::PlayAt(idx) => {
-                        if let Some(path) = queue.get(idx).cloned() {
-                            queue_idx = idx;
-                            reset_mute!();
-                            snapshot.current = Some(path.clone());
-                            snapshot.current_queue_index = Some(queue_idx);
-                            snapshot.position = Duration::ZERO;
-                            snapshot.duration = Duration::from_secs(180);
-                            let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                path,
-                                queue_index: queue_idx,
-                                kind: TrackChangeKind::Manual,
-                                track_token: 0,
-                            });
-                        }
-                    }
-                    PlaybackCommand::Next => {
-                        if queue_idx + 1 < queue.len() {
-                            queue_idx += 1;
-                            reset_mute!();
-                            if let Some(next) = queue.get(queue_idx).cloned() {
-                                snapshot.current = Some(next.clone());
-                                snapshot.current_queue_index = Some(queue_idx);
-                                snapshot.position = Duration::ZERO;
-                                snapshot.duration = Duration::from_secs(180);
-                                if snapshot.state == PlaybackState::Paused {
-                                    snapshot.state = PlaybackState::Playing;
-                                }
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                    path: next,
-                                    queue_index: queue_idx,
-                                    kind: TrackChangeKind::Manual,
-                                    track_token: 0,
-                                });
-                            }
-                        }
-                    }
-                    PlaybackCommand::Previous => {
-                        if queue_idx > 0 {
-                            queue_idx -= 1;
-                            reset_mute!();
-                            if let Some(prev) = queue.get(queue_idx).cloned() {
-                                snapshot.current = Some(prev.clone());
-                                snapshot.current_queue_index = Some(queue_idx);
-                                snapshot.position = Duration::ZERO;
-                                snapshot.duration = Duration::from_secs(180);
-                                if snapshot.state == PlaybackState::Paused {
-                                    snapshot.state = PlaybackState::Playing;
-                                }
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                    path: prev,
-                                    queue_index: queue_idx,
-                                    kind: TrackChangeKind::Manual,
-                                    track_token: 0,
-                                });
-                            }
-                        }
-                    }
-                    PlaybackCommand::Play => {
-                        snapshot.state = PlaybackState::Playing;
-                        snapshot.current_queue_index = if snapshot.current.is_some() {
-                            Some(queue_idx)
-                        } else {
-                            None
-                        };
-                    }
-                    PlaybackCommand::Pause => {
-                        if snapshot.state == PlaybackState::Playing {
-                            snapshot.state = PlaybackState::Paused;
-                        }
-                    }
-                    PlaybackCommand::Stop => {
-                        reset_mute!();
-                        snapshot.state = PlaybackState::Stopped;
-                        snapshot.position = Duration::ZERO;
-                        snapshot.current_queue_index = None;
-                    }
-                    PlaybackCommand::Seek(pos) => {
-                        snapshot.position = pos.min(snapshot.duration);
-                        let _ = event_tx.send(PlaybackEvent::Seeked {
-                            position: snapshot.position,
-                        });
-                    }
-                    PlaybackCommand::SetVolume(vol) => {
-                        snapshot.volume = vol.clamp(0.0, 1.0);
-                    }
-                    PlaybackCommand::SetRepeatMode(mode) => {
-                        snapshot.repeat_mode = mode;
-                    }
-                    PlaybackCommand::SetShuffle(enabled) => {
-                        snapshot.shuffle_enabled = enabled;
-                    }
-                    PlaybackCommand::ToggleChannelMute(ch) => {
-                        let ch = ch.min(63);
-                        if soloed_channel == Some(ch) {
-                            if let Some(pre) = solo_pre_mask.take() {
-                                snapshot.muted_channels_mask = pre;
-                            }
-                            soloed_channel = None;
-                        } else {
-                            snapshot.muted_channels_mask ^= 1u64 << ch;
-                            solo_pre_mask = None;
-                            soloed_channel = None;
-                        }
-                        snapshot.soloed_channel = soloed_channel;
-                    }
-                    PlaybackCommand::SoloChannel(ch) => {
-                        let ch = ch.min(63);
-                        if soloed_channel == Some(ch) {
-                            // solo_pre_mask is always Some when soloed_channel is Some.
-                            if let Some(pre) = solo_pre_mask.take() {
-                                snapshot.muted_channels_mask = pre;
-                            }
-                            soloed_channel = None;
-                        } else {
-                            if soloed_channel.is_none() {
-                                solo_pre_mask = Some(snapshot.muted_channels_mask);
-                            }
-                            snapshot.muted_channels_mask = u64::MAX ^ (1u64 << ch);
-                            soloed_channel = Some(ch);
-                        }
-                        snapshot.soloed_channel = soloed_channel;
-                    }
-                    PlaybackCommand::Poll => {
-                        if snapshot.state == PlaybackState::Playing {
-                            // Generate synthetic PCM when GStreamer is disabled, so visuals remain testable.
-                            let mut chunk = Vec::with_capacity(1024);
-                            for _ in 0..1024 {
-                                chunk.push(0.25 * phase.sin());
-                                phase += (2.0 * PI * 440.0) / 48_000.0;
-                                if phase > 2.0 * PI {
-                                    phase -= 2.0 * PI;
-                                }
-                            }
-                            let _ = pcm_tx.try_send(AnalysisPcmChunk {
-                                samples: chunk,
-                                channel_labels: vec![SpectrogramChannelLabel::Mono],
-                                track_token: 0,
-                            });
-                        }
-
-                        if snapshot.state == PlaybackState::Playing
-                            && snapshot.position >= snapshot.duration
-                        {
-                            let next_queue_idx = queue_idx + 1;
-                            if let Some(next) = queue.get(next_queue_idx).cloned() {
-                                queue_idx = next_queue_idx;
-                                snapshot.current = Some(next.clone());
-                                snapshot.current_queue_index = Some(queue_idx);
-                                snapshot.position = Duration::ZERO;
-                                snapshot.duration = Duration::from_secs(180);
-                                let _ = event_tx.send(PlaybackEvent::TrackChanged {
-                                    path: next,
-                                    queue_index: queue_idx,
-                                    kind: TrackChangeKind::Gapless,
-                                    track_token: 0,
-                                });
-                            } else {
-                                super::stop_snapshot_at_terminal_eos(&mut snapshot);
-                            }
-                        }
-                    }
-                }
-
-                let _ = event_tx.send(PlaybackEvent::Snapshot(snapshot.clone()));
+                runtime.handle_command(cmd);
+                let _ = runtime
+                    .event_tx
+                    .send(PlaybackEvent::Snapshot(runtime.snapshot.clone()));
             }
         });
-
     (cmd_tx, event_rx)
+}
+
+struct MockPlaybackRuntime {
+    snapshot: PlaybackSnapshot,
+    queue: Vec<PathBuf>,
+    queue_idx: usize,
+    solo_pre_mask: Option<u64>,
+    soloed_channel: Option<u8>,
+    event_tx: Sender<PlaybackEvent>,
+    analysis_tx: Sender<AnalysisCommand>,
+}
+
+impl MockPlaybackRuntime {
+    fn reset_mute(&mut self) {
+        self.snapshot.muted_channels_mask = 0;
+        self.snapshot.soloed_channel = None;
+        self.solo_pre_mask = None;
+        self.soloed_channel = None;
+    }
+    fn handle_command(&mut self, cmd: PlaybackCommand) {
+        match cmd {
+            PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
+            PlaybackCommand::AddToQueue(paths) => {
+                self.queue.extend(paths);
+            }
+            PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
+            PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
+            PlaybackCommand::MoveQueue { from, to } => self.move_queue(from, to),
+            PlaybackCommand::ClearQueue => self.clear_queue(),
+            PlaybackCommand::PlayAt(idx) => self.play_at(idx),
+            PlaybackCommand::Next => self.next(),
+            PlaybackCommand::Previous => self.previous(),
+            PlaybackCommand::Play => {
+                self.snapshot.state = PlaybackState::Playing;
+                self.snapshot.current_queue_index = if self.snapshot.current.is_some() {
+                    Some(self.queue_idx)
+                } else {
+                    None
+                };
+            }
+            PlaybackCommand::Pause => {
+                if self.snapshot.state == PlaybackState::Playing {
+                    self.snapshot.state = PlaybackState::Paused;
+                }
+            }
+            PlaybackCommand::Stop => {
+                self.reset_mute();
+                self.snapshot.state = PlaybackState::Stopped;
+                self.snapshot.position = Duration::ZERO;
+                self.snapshot.current_queue_index = None;
+            }
+            PlaybackCommand::Seek(pos) => {
+                self.snapshot.position = pos.min(self.snapshot.duration);
+                let _ = self.event_tx.send(PlaybackEvent::Seeked {
+                    position: self.snapshot.position,
+                });
+            }
+            PlaybackCommand::SetVolume(vol) => {
+                self.snapshot.volume = vol.clamp(0.0, 1.0);
+            }
+            PlaybackCommand::SetRepeatMode(mode) => {
+                self.snapshot.repeat_mode = mode;
+            }
+            PlaybackCommand::SetShuffle(enabled) => {
+                self.snapshot.shuffle_enabled = enabled;
+            }
+            PlaybackCommand::ToggleChannelMute(ch) => self.toggle_channel_mute(ch),
+            PlaybackCommand::SoloChannel(ch) => self.solo_channel(ch),
+            PlaybackCommand::Poll => self.poll(),
+        }
+    }
+    fn load_queue(&mut self, paths: Vec<PathBuf>) {
+        self.queue = paths;
+        self.queue_idx = 0;
+        self.reset_mute();
+        self.snapshot.position = Duration::ZERO;
+        self.snapshot.duration = Duration::from_secs(180);
+        self.snapshot.current = self.queue.first().cloned();
+        self.snapshot.current_queue_index = if self.snapshot.current.is_some() {
+            Some(self.queue_idx)
+        } else {
+            None
+        };
+        if let Some(path) = self.snapshot.current.clone() {
+            let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+                path,
+                queue_index: self.queue_idx,
+                kind: TrackChangeKind::Manual,
+                track_token: 0,
+            });
+            let _ = self
+                .analysis_tx
+                .send(AnalysisCommand::SetSampleRate(48_000));
+        }
+    }
+    fn remove_many(&mut self, indices: &[usize]) {
+        let old_current = self.snapshot.current.clone();
+        let next = super::remove_queue_indices(&mut self.queue, Some(self.queue_idx), indices);
+        self.queue_idx = next.unwrap_or(0);
+        self.snapshot.current_queue_index = next;
+        self.snapshot.current = next.and_then(|index| self.queue.get(index).cloned());
+        if self.snapshot.current != old_current {
+            self.reset_mute();
+            self.snapshot.position = Duration::ZERO;
+            if let Some(path) = self.snapshot.current.clone() {
+                self.snapshot.duration = Duration::from_secs(180);
+                let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+                    path,
+                    queue_index: self.queue_idx,
+                    kind: TrackChangeKind::Manual,
+                    track_token: 0,
+                });
+            } else {
+                self.snapshot.state = PlaybackState::Stopped;
+                self.snapshot.duration = Duration::ZERO;
+            }
+        }
+    }
+    fn remove_at(&mut self, idx: usize) {
+        if idx < self.queue.len() {
+            self.queue.remove(idx);
+            self.reset_mute();
+            if self.queue.is_empty() {
+                self.queue_idx = 0;
+                self.snapshot.current = None;
+                self.snapshot.current_queue_index = None;
+                self.snapshot.state = PlaybackState::Stopped;
+                self.snapshot.position = Duration::ZERO;
+                self.snapshot.duration = Duration::ZERO;
+            } else {
+                if idx < self.queue_idx {
+                    self.queue_idx = self.queue_idx.saturating_sub(1);
+                } else if idx == self.queue_idx && self.queue_idx >= self.queue.len() {
+                    self.queue_idx = self.queue.len().saturating_sub(1);
+                }
+                self.snapshot.current = self.queue.get(self.queue_idx).cloned();
+                self.snapshot.current_queue_index = Some(self.queue_idx);
+                self.snapshot.position = Duration::ZERO;
+                self.snapshot.duration = Duration::from_secs(180);
+                if let Some(path) = self.snapshot.current.clone() {
+                    let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+                        path,
+                        queue_index: self.queue_idx,
+                        kind: TrackChangeKind::Manual,
+                        track_token: 0,
+                    });
+                }
+            }
+        }
+    }
+    fn move_queue(&mut self, from: usize, to: usize) {
+        if from < self.queue.len() && to < self.queue.len() && from != to {
+            let item = self.queue.remove(from);
+            self.queue.insert(to, item);
+            if self.queue_idx == from {
+                self.queue_idx = to;
+            } else if from < self.queue_idx && to >= self.queue_idx {
+                self.queue_idx = self.queue_idx.saturating_sub(1);
+            } else if from > self.queue_idx && to <= self.queue_idx {
+                self.queue_idx += 1;
+            }
+            self.snapshot.current = self.queue.get(self.queue_idx).cloned();
+            self.snapshot.current_queue_index = if self.snapshot.current.is_some() {
+                Some(self.queue_idx)
+            } else {
+                None
+            };
+        }
+    }
+    fn clear_queue(&mut self) {
+        self.queue.clear();
+        self.queue_idx = 0;
+        self.reset_mute();
+        self.snapshot.current = None;
+        self.snapshot.current_queue_index = None;
+        self.snapshot.state = PlaybackState::Stopped;
+        self.snapshot.position = Duration::ZERO;
+        self.snapshot.duration = Duration::ZERO;
+    }
+    fn play_at(&mut self, idx: usize) {
+        if let Some(path) = self.queue.get(idx).cloned() {
+            self.queue_idx = idx;
+            self.reset_mute();
+            self.snapshot.current = Some(path.clone());
+            self.snapshot.current_queue_index = Some(self.queue_idx);
+            self.snapshot.position = Duration::ZERO;
+            self.snapshot.duration = Duration::from_secs(180);
+            let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+                path,
+                queue_index: self.queue_idx,
+                kind: TrackChangeKind::Manual,
+                track_token: 0,
+            });
+        }
+    }
+    fn next(&mut self) {
+        if self.queue_idx + 1 < self.queue.len() {
+            self.queue_idx += 1;
+            self.reset_mute();
+            if let Some(next) = self.queue.get(self.queue_idx).cloned() {
+                self.snapshot.current = Some(next.clone());
+                self.snapshot.current_queue_index = Some(self.queue_idx);
+                self.snapshot.position = Duration::ZERO;
+                self.snapshot.duration = Duration::from_secs(180);
+                if self.snapshot.state == PlaybackState::Paused {
+                    self.snapshot.state = PlaybackState::Playing;
+                }
+                let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+                    path: next,
+                    queue_index: self.queue_idx,
+                    kind: TrackChangeKind::Manual,
+                    track_token: 0,
+                });
+            }
+        }
+    }
+    fn previous(&mut self) {
+        if self.queue_idx > 0 {
+            self.queue_idx -= 1;
+            self.reset_mute();
+            if let Some(prev) = self.queue.get(self.queue_idx).cloned() {
+                self.snapshot.current = Some(prev.clone());
+                self.snapshot.current_queue_index = Some(self.queue_idx);
+                self.snapshot.position = Duration::ZERO;
+                self.snapshot.duration = Duration::from_secs(180);
+                if self.snapshot.state == PlaybackState::Paused {
+                    self.snapshot.state = PlaybackState::Playing;
+                }
+                let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+                    path: prev,
+                    queue_index: self.queue_idx,
+                    kind: TrackChangeKind::Manual,
+                    track_token: 0,
+                });
+            }
+        }
+    }
+    fn toggle_channel_mute(&mut self, ch: u8) {
+        let ch = ch.min(63);
+        if self.soloed_channel == Some(ch) {
+            if let Some(pre) = self.solo_pre_mask.take() {
+                self.snapshot.muted_channels_mask = pre;
+            }
+            self.soloed_channel = None;
+        } else {
+            self.snapshot.muted_channels_mask ^= 1u64 << ch;
+            self.solo_pre_mask = None;
+            self.soloed_channel = None;
+        }
+        self.snapshot.soloed_channel = self.soloed_channel;
+    }
+    fn solo_channel(&mut self, ch: u8) {
+        let ch = ch.min(63);
+        if self.soloed_channel == Some(ch) {
+            // self.solo_pre_mask is always Some when self.soloed_channel is Some.
+            if let Some(pre) = self.solo_pre_mask.take() {
+                self.snapshot.muted_channels_mask = pre;
+            }
+            self.soloed_channel = None;
+        } else {
+            if self.soloed_channel.is_none() {
+                self.solo_pre_mask = Some(self.snapshot.muted_channels_mask);
+            }
+            self.snapshot.muted_channels_mask = u64::MAX ^ (1u64 << ch);
+            self.soloed_channel = Some(ch);
+        }
+        self.snapshot.soloed_channel = self.soloed_channel;
+    }
+    fn poll(&mut self) {
+        if self.snapshot.state == PlaybackState::Playing
+            && self.snapshot.position >= self.snapshot.duration
+        {
+            let next_queue_idx = self.queue_idx + 1;
+            if let Some(next) = self.queue.get(next_queue_idx).cloned() {
+                self.queue_idx = next_queue_idx;
+                self.snapshot.current = Some(next.clone());
+                self.snapshot.current_queue_index = Some(self.queue_idx);
+                self.snapshot.position = Duration::ZERO;
+                self.snapshot.duration = Duration::from_secs(180);
+                let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+                    path: next,
+                    queue_index: self.queue_idx,
+                    kind: TrackChangeKind::Gapless,
+                    track_token: 0,
+                });
+            } else {
+                super::stop_snapshot_at_terminal_eos(&mut self.snapshot);
+            }
+        }
+    }
 }

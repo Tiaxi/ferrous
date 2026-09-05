@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::analysis::{AnalysisCommand, AnalysisPcmChunk};
+use crate::analysis::AnalysisCommand;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PlaybackState {
@@ -128,11 +128,8 @@ fn stop_snapshot_at_terminal_eos(snapshot: &mut PlaybackSnapshot) {
 
 impl PlaybackEngine {
     #[must_use]
-    pub fn new(
-        analysis_tx: Sender<AnalysisCommand>,
-        pcm_tx: Sender<AnalysisPcmChunk>,
-    ) -> (Self, Receiver<PlaybackEvent>) {
-        let (tx, rx) = backend::spawn_engine(analysis_tx, pcm_tx);
+    pub fn new(analysis_tx: Sender<AnalysisCommand>) -> (Self, Receiver<PlaybackEvent>) {
+        let (tx, rx) = backend::spawn_engine(analysis_tx);
         (Self { tx }, rx)
     }
 
@@ -236,8 +233,8 @@ mod tests {
 
     fn make_test_engine() -> (PlaybackEngine, crossbeam_channel::Receiver<PlaybackEvent>) {
         let (analysis_tx, _) = unbounded();
-        let (pcm_tx, _) = unbounded();
-        PlaybackEngine::new(analysis_tx, pcm_tx)
+
+        PlaybackEngine::new(analysis_tx)
     }
 
     #[test]
@@ -267,8 +264,8 @@ mod tests {
     #[test]
     fn rapid_track_switch_keeps_current_consistent() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -290,8 +287,8 @@ mod tests {
     #[test]
     fn clear_queue_stops_and_resets_snapshot() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.mp3");
         engine.command(PlaybackCommand::LoadQueue(vec![a]));
@@ -308,8 +305,8 @@ mod tests {
     #[test]
     fn seek_only_advances_to_next_track_at_duration_boundary() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -331,8 +328,8 @@ mod tests {
     #[test]
     fn boundary_handoff_emits_natural_track_changed_event() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -368,8 +365,8 @@ mod tests {
     #[test]
     fn set_volume_clamps_to_unit_interval() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         engine.command(PlaybackCommand::SetVolume(1.7));
         engine.command(PlaybackCommand::Poll);
@@ -385,8 +382,8 @@ mod tests {
     #[test]
     fn seek_clamps_and_emits_seeked_event() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         engine.command(PlaybackCommand::LoadQueue(vec![PathBuf::from(
             "/tmp/a.flac",
@@ -406,8 +403,8 @@ mod tests {
     #[test]
     fn add_to_queue_allows_navigation_into_appended_track() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -424,8 +421,8 @@ mod tests {
     #[test]
     fn remove_at_preserves_current_track_when_other_row_removed() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -447,8 +444,8 @@ mod tests {
     #[test]
     fn move_queue_keeps_current_track_identity() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -470,8 +467,8 @@ mod tests {
     #[test]
     fn play_at_out_of_bounds_keeps_current_track() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -487,8 +484,8 @@ mod tests {
     #[test]
     fn play_at_without_play_stays_stopped() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -508,8 +505,8 @@ mod tests {
     #[test]
     fn previous_at_start_keeps_first_track() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -524,8 +521,8 @@ mod tests {
     #[test]
     fn paused_navigation_resumes_playback() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         let b = PathBuf::from("/tmp/b.flac");
@@ -557,8 +554,8 @@ mod tests {
     #[test]
     fn pause_from_stopped_keeps_stopped_state() {
         let (analysis_tx, _analysis_rx) = unbounded();
-        let (pcm_tx, _pcm_rx) = unbounded();
-        let (engine, rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (engine, rx) = PlaybackEngine::new(analysis_tx);
 
         let a = PathBuf::from("/tmp/a.flac");
         engine.command(PlaybackCommand::LoadQueue(vec![a.clone()]));

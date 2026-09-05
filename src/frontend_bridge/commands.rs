@@ -1801,8 +1801,8 @@ mod tests {
         use crate::playback::PlaybackEngine;
 
         let (analysis_tx, _) = crossbeam_channel::unbounded();
-        let (pcm_tx, _) = crossbeam_channel::unbounded();
-        let (playback, _playback_rx) = PlaybackEngine::new(analysis_tx, pcm_tx);
+
+        let (playback, _playback_rx) = PlaybackEngine::new(analysis_tx);
         let root = test_dir("session-restore-queue-details");
         fs::create_dir_all(&root).expect("mkdir root");
         let track = root.join("song.flac");
