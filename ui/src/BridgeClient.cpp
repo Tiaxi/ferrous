@@ -4540,6 +4540,13 @@ void BridgeClient::schedulePlaybackChanged() {
             QElapsedTimer t; t.start();
 #endif
             emit playbackChanged();
+            // QML's old interpolation clock can tick between the immediate
+            // reset and this queued notification, rearming the renderer's
+            // jump hold. Complete the handoff after bindings have consumed
+            // the new clock, including items registered in the meantime.
+            if (std::exchange(m_transportPositionDiscontinuityPending, false)) {
+                reanchorCenteredSpectrogramsForExplicitPosition(m_positionSeconds);
+            }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             {
                 const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
@@ -4844,6 +4851,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         // Playback identity is authoritative even when decoding is delayed.
         // Do not make a new track's playhead wait for spectral reset data.
         reanchorCenteredSpectrogramsForExplicitPosition(stoppedTransition ? 0.0 : pos);
+        m_transportPositionDiscontinuityPending = true;
         playbackSignalChanged = true;
     }
 
@@ -4883,6 +4891,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             // for its reset position instead of accepting queued old samples.
             m_pendingTrackRestartUntilMs = 0;
             reanchorCenteredSpectrogramsForExplicitPosition(pos);
+            m_transportPositionDiscontinuityPending = true;
             playbackSignalChanged = true;
         } else {
             applyIncomingPosition = false;
