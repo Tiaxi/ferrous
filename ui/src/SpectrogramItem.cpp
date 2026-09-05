@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "SpectrogramItem.h"
+#include "FerrousBridgeFfi.h"
 
 #include "SpectrogramSeekTrace.h"
 #include "SpectrogramTraceLogging.h"
@@ -1411,9 +1412,6 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     // Dynamically size the ring buffer based on widget width and display mode.
     if (columns > 0 && bins > 0) {
-        const double colsPerSecond =
-            static_cast<double>(m_precomputedSampleRateHz)
-            / static_cast<double>(m_precomputedHopSize);
         // Track the max widget width so the ring can hold enough cols
         // to cover the Rust decoder's lookahead even after a session
         // reset that shrinks the current widget.  Static so the floor
@@ -1424,24 +1422,13 @@ void SpectrogramItem::feedPrecomputedChunk(
         s_maxWidgetWidthSeen = std::max(s_maxWidgetWidthSeen, currentWidth);
         const int screenWidth = std::max(
             {currentWidth, 1920, s_maxWidgetWidthSeen});
-        const int extraSeconds = 10;
-        int neededCapacity;
-        if (m_displayMode == 1) {
-            // Centered: windowed — ~3 screen widths around playhead.
-            neededCapacity = screenWidth * 3
-                + static_cast<int>(extraSeconds * colsPerSecond);
-        } else {
-            // Rolling: need one visible viewport of history, the decoder
-            // lookahead, and one extra viewport of slack so eviction never
-            // intrudes into the live window when the decoder runs ahead.
-            const double ez = effectiveZoomLocked();
-            const int zoomAdjustedWidth = static_cast<int>(
-                static_cast<double>(screenWidth) / std::max(0.05, ez));
-            neededCapacity = zoomAdjustedWidth * 2
-                + static_cast<int>(extraSeconds * colsPerSecond);
-        }
-        // Add some margin.
-        neededCapacity = std::max(neededCapacity, 1024);
+        const int neededCapacity = static_cast<int>(ferrous_ffi_spectrogram_ring_capacity(
+            static_cast<std::uint32_t>(screenWidth),
+            static_cast<std::uint32_t>(m_precomputedSampleRateHz),
+            static_cast<std::uint32_t>(m_precomputedHopSize),
+            static_cast<std::uint32_t>(bins),
+            static_cast<std::uint32_t>(channelCount),
+            static_cast<double>(static_cast<float>(m_zoomLevel)), m_displayMode == 1));
 
         // Check if we need to (re)allocate: either more columns, or
         // bins_per_column changed (e.g. FFT size switch).

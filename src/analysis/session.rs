@@ -14,6 +14,7 @@ use super::decoders::{
 };
 use super::fft::{PeakHoldResampler, StftComputer};
 use super::output::{AnalysisEventOutput, AnalysisOutputs};
+use super::retention::{lookahead_seconds, SpectrogramBufferConfig};
 use super::{
     f64_to_u64_saturating, usize_to_u64, AnalysisEvent, PrecomputedSpectrogramChunk,
     SpectrogramDisplayMode, SpectrogramViewMode, REFERENCE_HOP,
@@ -897,22 +898,18 @@ fn run_spectrogram_session(
 
     // Lookahead configuration: how far ahead of the play head the decode
     // worker runs before parking.
-    let lookahead_seconds = std::env::var("FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(10.0);
-    let lookahead_columns = if display_mode == SpectrogramDisplayMode::Centered {
-        // Windowed centered: decode enough to fill the visible window
-        // plus one screen width of buffer for small seeks and playback.
-        // visible_cols covers the display from left to right.
-        // The extra screen width means small forward seeks stay within
-        // the decoded window without a restart.
-        let visible_cols = u64::from(widget_width);
-        visible_cols * 2 + f64_to_u64_saturating(lookahead_seconds * cols_per_second)
-    } else {
-        // Rolling mode: existing logic
-        f64_to_u64_saturating(lookahead_seconds * cols_per_second)
-    };
+    let lookahead_seconds = lookahead_seconds();
+    let lookahead_columns = SpectrogramBufferConfig {
+        width: widget_width,
+        sample_rate: effective_rate,
+        hop: u32::try_from(effective_hop).unwrap_or(u32::MAX),
+        bins: u32::try_from(bins_per_column).unwrap_or(u32::MAX),
+        channels: u32::try_from(actual_channel_count).unwrap_or(u32::MAX),
+        zoom: f64::from(zoom_level),
+        centered: display_mode == SpectrogramDisplayMode::Centered,
+    }
+    .limits(lookahead_seconds)
+    .lookahead;
 
     // Rate throttle: 2× realtime for rolling, unlimited for centered.
     let decode_rate_limit = if display_mode == SpectrogramDisplayMode::Rolling {
@@ -1243,6 +1240,13 @@ fn session_decode_loop(
             }
         }
 
+        // A packet may contain more FFT rows than the lookahead budget.
+        // Drain retained rows before reading another packet after resuming.
+        if !session.stfts.is_empty() && session.stfts.iter().all(StftComputer::has_row) {
+            session_drain_stft_rows(session, event_tx, columns_produced_out);
+            continue;
+        }
+
         // 4. Decode next batch of audio frames.
         let audio = match source.next_frames() {
             Ok(AudioRead::Pending) => continue,
@@ -1380,14 +1384,9 @@ fn process_session_commands(
                 session.pending_continue = None;
             }
             SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width } => {
-                if session.display_mode == SpectrogramDisplayMode::Centered
-                    && widget_width > session.widget_width
-                {
+                if widget_width > session.widget_width {
                     session.widget_width = widget_width;
-                    session.lookahead_columns = u64::from(widget_width) * 2
-                        + f64_to_u64_saturating(
-                            session.lookahead_seconds * session.cols_per_second,
-                        );
+                    refresh_lookahead(session);
                 }
             }
             SpectrogramWorkerCommand::Stop => {
@@ -1492,12 +1491,9 @@ fn handle_single_command(
             SessionAction::Continue
         }
         SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width } => {
-            if session.display_mode == SpectrogramDisplayMode::Centered
-                && widget_width > session.widget_width
-            {
+            if widget_width > session.widget_width {
                 session.widget_width = widget_width;
-                session.lookahead_columns = u64::from(widget_width) * 2
-                    + f64_to_u64_saturating(session.lookahead_seconds * session.cols_per_second);
+                refresh_lookahead(session);
             }
             SessionAction::Continue
         }
@@ -1612,24 +1608,29 @@ fn next_target_chunk_columns_for_payload(
 /// and lookahead for the new mode.
 fn apply_display_mode(session: &mut SpectrogramSessionState, mode: SpectrogramDisplayMode) {
     session.display_mode = mode;
-    let lookahead_seconds = std::env::var("FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(10.0);
     if mode == SpectrogramDisplayMode::Rolling {
         session.decode_rate_limit = std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
             .ok()
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(2.0);
-        session.lookahead_columns =
-            f64_to_u64_saturating(lookahead_seconds * session.cols_per_second);
     } else {
         session.decode_rate_limit = f64::INFINITY;
-        // Windowed centered: visible window + one screen buffer + playback lookahead
-        let visible_cols = u64::from(session.widget_width);
-        session.lookahead_columns =
-            visible_cols * 2 + f64_to_u64_saturating(lookahead_seconds * session.cols_per_second);
     }
+    refresh_lookahead(session);
+}
+
+fn refresh_lookahead(session: &mut SpectrogramSessionState) {
+    session.lookahead_columns = SpectrogramBufferConfig {
+        width: session.widget_width,
+        sample_rate: session.effective_rate,
+        hop: u32::try_from(session.effective_hop).unwrap_or(u32::MAX),
+        bins: u32::try_from(session.bins_per_column).unwrap_or(u32::MAX),
+        channels: u32::try_from(session.channel_count).unwrap_or(u32::MAX),
+        zoom: f64::from(session.zoom_level),
+        centered: session.display_mode == SpectrogramDisplayMode::Centered,
+    }
+    .limits(session.lookahead_seconds)
+    .lookahead;
 }
 
 fn post_reset_unthrottled_columns(display_mode: SpectrogramDisplayMode) -> u32 {
@@ -1659,6 +1660,14 @@ fn session_drain_stft_rows(
     columns_produced_out: &AtomicU64,
 ) {
     loop {
+        let target =
+            f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
+        if session.columns_produced.saturating_sub(target) >= session.lookahead_columns
+            && !post_reset_window_active(session)
+        {
+            break;
+        }
+
         let Some(emitted) = append_stft_column(
             &mut session.stfts,
             &mut session.resamplers,
@@ -2924,9 +2933,9 @@ mod tests {
     }
 
     #[test]
-    fn update_widget_width_ignored_in_rolling_mode() {
-        // Rolling mode uses a different lookahead formula that doesn't
-        // depend on widget width; UpdateWidgetWidth must be a no-op.
+    fn update_widget_width_remembers_rolling_width_for_mode_switch() {
+        // Record rolling resizes so a later centered mode switch uses the
+        // same viewport width as the UI.
         let mut session = make_test_session();
         session.display_mode = SpectrogramDisplayMode::Rolling;
         session.widget_width = 1000;
@@ -2938,8 +2947,8 @@ mod tests {
         );
 
         assert!(matches!(action, SessionAction::Continue));
-        assert_eq!(session.widget_width, 1000);
-        assert_eq!(session.lookahead_columns, 430);
+        assert_eq!(session.widget_width, 3840);
+        assert_eq!(session.lookahead_columns, 468);
     }
 
     #[test]
@@ -3138,6 +3147,56 @@ mod tests {
         assert!(session.decode_rate_limit.is_finite());
         assert!(session.lookahead_columns < u64::MAX);
         assert_eq!(session.display_mode, SpectrogramDisplayMode::Rolling);
+    }
+
+    #[test]
+    fn packet_drain_stops_at_lookahead_and_resumes_without_losing_rows() {
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            let samples: Vec<_> = (0..10_000_u32).map(|i| (i as f32 * 0.07).sin()).collect();
+            let mut reference = StftComputer::new(512, 128);
+            reference.enqueue_samples(&samples);
+            let mut expected = Vec::new();
+            while let Some(row) = reference.take_row() {
+                append_quantized_spectrum(&mut expected, row, 257, 512);
+            }
+            let mut session = make_test_session();
+            session.display_mode = mode;
+            session.fft_size = 512;
+            session.hop_size = 128;
+            session.effective_hop = 128;
+            session.bins_per_column = 257;
+            session.target_position_seconds = 0.0;
+            session.columns_produced = 0;
+            session.chunk_start_index = 0;
+            session.lookahead_columns = 3;
+            session.stfts = vec![StftComputer::new(512, 128)];
+            session.stfts[0].enqueue_samples(&samples);
+            session.resamplers = vec![PeakHoldResampler::new(1.0)];
+            let (tx, rx) = unbounded();
+            let produced = AtomicU64::new(0);
+            session_drain_stft_rows(&mut session, &tx, &produced);
+            assert_eq!(session.columns_produced, 3);
+            assert!(session.stfts[0].has_row());
+            while session.stfts[0].has_row() {
+                session.target_position_seconds =
+                    usize_to_f64_approx(usize::try_from(session.columns_produced).unwrap())
+                        / session.cols_per_second;
+                session_drain_stft_rows(&mut session, &tx, &produced);
+            }
+            session_flush_chunk(&mut session, &tx, &produced);
+            let actual: Vec<_> = rx
+                .try_iter()
+                .filter_map(|event| match event {
+                    AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => Some(chunk.columns_u8),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

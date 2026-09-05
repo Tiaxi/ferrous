@@ -692,6 +692,30 @@ pub struct FerrousFfiBridge {
     spectral_relay_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Shared retention policy used by the decoder and each Qt channel view.
+#[no_mangle]
+pub extern "C" fn ferrous_ffi_spectrogram_ring_capacity(
+    width: u32,
+    sample_rate: u32,
+    hop: u32,
+    bins: u32,
+    channels: u32,
+    zoom: f64,
+    centered: bool,
+) -> u64 {
+    crate::analysis::retention::SpectrogramBufferConfig {
+        width,
+        sample_rate,
+        hop,
+        bins,
+        channels,
+        zoom,
+        centered,
+    }
+    .limits(crate::analysis::retention::lookahead_seconds())
+    .capacity
+}
+
 #[no_mangle]
 pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
     let bridge = FrontendBridgeHandle::spawn();

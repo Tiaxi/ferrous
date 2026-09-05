@@ -8,6 +8,10 @@
 extern "C" {
 struct FerrousFfiBridge;
 
+std::uint64_t ferrous_ffi_spectrogram_ring_capacity(
+    std::uint32_t width, std::uint32_t sampleRate, std::uint32_t hop,
+    std::uint32_t bins, std::uint32_t channels, double zoom, bool centered);
+
 FerrousFfiBridge *ferrous_ffi_bridge_create();
 void ferrous_ffi_bridge_destroy(FerrousFfiBridge *handle);
 bool ferrous_ffi_bridge_send_binary(
