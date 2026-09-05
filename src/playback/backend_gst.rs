@@ -1,15 +1,3 @@
-#[cfg(feature = "profiling-logs")]
-macro_rules! profile_eprintln {
-    ($($arg:tt)*) => {
-        eprintln!($($arg)*);
-    };
-}
-
-#[cfg(not(feature = "profiling-logs"))]
-macro_rules! profile_eprintln {
-    ($($arg:tt)*) => {};
-}
-
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -21,10 +9,8 @@ use anyhow::{anyhow, Context};
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use gst::prelude::*;
 use gstreamer as gst;
-use gstreamer_app as gst_app;
-use gstreamer_audio as gst_audio;
 
-use crate::analysis::{AnalysisCommand, AnalysisPcmChunk, SpectrogramChannelLabel};
+use crate::analysis::AnalysisCommand;
 #[cfg(feature = "profiling-logs")]
 use crate::profile_logging::heartbeat_trace_enabled;
 use crate::raw_audio::{
@@ -521,10 +507,6 @@ struct GstPlaybackRuntime {
     playbin: gst::Element,
     queue_state: Arc<Mutex<GaplessQueue>>,
     analysis_tx: Sender<AnalysisCommand>,
-    /// Shared with the PCM tap thread.  The tap reads this to tag each
-    /// chunk; the analysis runtime uses the value to filter stale data.
-    /// Only updated for non-gapless transitions (manual, cross-format).
-    analysis_pcm_token: Arc<AtomicU64>,
     /// Local counter for generating unique track tokens (waveform jobs,
     /// track-changed events).  Always incremented, even for gapless.
     track_token_counter: u64,
@@ -565,22 +547,14 @@ struct GstPlaybackRuntime {
 
 pub fn spawn_engine(
     analysis_tx: Sender<AnalysisCommand>,
-    pcm_tx: Sender<AnalysisPcmChunk>,
 ) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
     let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
-    let analysis_track_token = Arc::new(AtomicU64::new(0));
 
     let _ = std::thread::Builder::new()
         .name("ferrous-playback-gst".to_string())
         .spawn(move || {
-            if let Err(err) = run_gst_engine(
-                &cmd_rx,
-                event_tx.clone(),
-                analysis_tx,
-                pcm_tx,
-                analysis_track_token,
-            ) {
+            if let Err(err) = run_gst_engine(&cmd_rx, event_tx.clone(), analysis_tx) {
                 eprintln!("[ferrous] gstreamer playback engine failed: {err:#}");
             }
         });
@@ -603,15 +577,11 @@ impl GstPlaybackRuntime {
         }
     }
 
-    // All arguments are distinct shared-state handles passed from the
-    // pipeline builder — grouping them would add indirection without
-    // reducing real complexity.
-    #[allow(clippy::too_many_arguments)]
     fn new(
         playbin: gst::Element,
         queue_state: Arc<Mutex<GaplessQueue>>,
         analysis_tx: Sender<AnalysisCommand>,
-        analysis_pcm_token: Arc<AtomicU64>,
+
         event_tx: Sender<PlaybackEvent>,
         pending_eos_track_switch: Arc<AtomicBool>,
         staged_continuation_active: Arc<AtomicBool>,
@@ -621,7 +591,7 @@ impl GstPlaybackRuntime {
             playbin,
             queue_state,
             analysis_tx,
-            analysis_pcm_token,
+
             track_token_counter: 0,
             event_tx,
             snapshot: PlaybackSnapshot {
@@ -821,21 +791,13 @@ impl GstPlaybackRuntime {
         (position_locked, snapshot_changed, released_seek_sample)
     }
 
-    /// Advance the track token for a non-gapless transition (manual or
-    /// cross-format).  Updates the shared PCM tap atomic so the analysis
-    /// runtime accepts only chunks from the new track.
+    /// Advance identity for a manual or cross-format transition.
     fn advance_track_token(&mut self) -> u64 {
         self.track_token_counter += 1;
-        let token = self.track_token_counter;
-        self.analysis_pcm_token.store(token, Ordering::Relaxed);
-        let _ = self.analysis_tx.send(AnalysisCommand::SetTrackToken(token));
-        token
+        self.track_token_counter
     }
 
-    /// Advance the track token for a gapless transition.  Returns a
-    /// unique token for waveform tracking but does NOT touch the shared
-    /// PCM tap atomic — the audio stream is continuous and PCM chunks
-    /// must keep flowing without interruption.
+    /// Advance identity while preserving continuous gapless playback.
     fn advance_track_token_gapless(&mut self) -> u64 {
         self.track_token_counter += 1;
         self.track_token_counter
@@ -1712,8 +1674,6 @@ fn run_gst_engine(
     cmd_rx: &Receiver<PlaybackCommand>,
     event_tx: Sender<PlaybackEvent>,
     analysis_tx: Sender<AnalysisCommand>,
-    pcm_tx: Sender<AnalysisPcmChunk>,
-    analysis_track_token: Arc<AtomicU64>,
 ) -> anyhow::Result<()> {
     gst::init().context("gst::init failed")?;
     register_raw_surround_typefinders();
@@ -1725,12 +1685,7 @@ fn run_gst_engine(
 
     let channel_mute_mask = Arc::new(AtomicU64::new(0));
 
-    let analysis_sink = build_analysis_audio_sink(
-        analysis_tx.clone(),
-        pcm_tx,
-        Arc::clone(&analysis_track_token),
-        &channel_mute_mask,
-    )?;
+    let analysis_sink = build_analysis_audio_sink(analysis_tx.clone(), &channel_mute_mask)?;
     playbin.set_property("audio-sink", &analysis_sink);
 
     // Strip leading partial-frame data and trailing APEv2 tags from raw
@@ -1791,7 +1746,6 @@ fn run_gst_engine(
         playbin,
         queue_state,
         analysis_tx,
-        analysis_track_token,
         event_tx,
         pending_eos_track_switch,
         staged_continuation_active,
@@ -1978,339 +1932,6 @@ fn resolve_eos_handoff(
     Some((path, index))
 }
 
-fn decode_interleaved_f32(bytes: &[u8]) -> Vec<f32> {
-    let mut pcm = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        pcm.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    pcm
-}
-
-fn positive_i32_to_usize(value: i32) -> Option<usize> {
-    usize::try_from(value)
-        .ok()
-        .filter(|converted| *converted > 0)
-}
-
-fn positive_i32_to_u32(value: i32) -> Option<u32> {
-    u32::try_from(value).ok().filter(|converted| *converted > 0)
-}
-
-fn fallback_channel_labels(channels: usize) -> Vec<SpectrogramChannelLabel> {
-    match channels {
-        0 | 1 => vec![SpectrogramChannelLabel::Mono],
-        2 => vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-        ],
-        3 => vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::FrontCenter,
-        ],
-        4 => vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::RearLeft,
-            SpectrogramChannelLabel::RearRight,
-        ],
-        5 => vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::FrontCenter,
-            SpectrogramChannelLabel::SideLeft,
-            SpectrogramChannelLabel::SideRight,
-        ],
-        6 => vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::FrontCenter,
-            SpectrogramChannelLabel::Lfe,
-            SpectrogramChannelLabel::SideLeft,
-            SpectrogramChannelLabel::SideRight,
-        ],
-        7 => vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::FrontCenter,
-            SpectrogramChannelLabel::Lfe,
-            SpectrogramChannelLabel::RearCenter,
-            SpectrogramChannelLabel::SideLeft,
-            SpectrogramChannelLabel::SideRight,
-        ],
-        8 => vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::FrontCenter,
-            SpectrogramChannelLabel::Lfe,
-            SpectrogramChannelLabel::RearLeft,
-            SpectrogramChannelLabel::RearRight,
-            SpectrogramChannelLabel::SideLeft,
-            SpectrogramChannelLabel::SideRight,
-        ],
-        count => vec![SpectrogramChannelLabel::Unknown; count],
-    }
-}
-
-fn map_channel_position(position: gst_audio::AudioChannelPosition) -> SpectrogramChannelLabel {
-    use gst_audio::AudioChannelPosition as Position;
-
-    match position {
-        Position::Mono => SpectrogramChannelLabel::Mono,
-        Position::FrontLeft => SpectrogramChannelLabel::FrontLeft,
-        Position::FrontRight => SpectrogramChannelLabel::FrontRight,
-        Position::FrontCenter => SpectrogramChannelLabel::FrontCenter,
-        Position::Lfe1 | Position::Lfe2 => SpectrogramChannelLabel::Lfe,
-        Position::SideLeft | Position::SurroundLeft => SpectrogramChannelLabel::SideLeft,
-        Position::SideRight | Position::SurroundRight => SpectrogramChannelLabel::SideRight,
-        Position::RearLeft => SpectrogramChannelLabel::RearLeft,
-        Position::RearRight => SpectrogramChannelLabel::RearRight,
-        Position::RearCenter => SpectrogramChannelLabel::RearCenter,
-        _ => SpectrogramChannelLabel::Unknown,
-    }
-}
-
-struct AnalysisTapState {
-    analysis_tx: Sender<AnalysisCommand>,
-    pcm_tx: Sender<AnalysisPcmChunk>,
-    track_token: Arc<AtomicU64>,
-    last_rate_hz: u32,
-    tap_chunk_samples: usize,
-    profile_enabled: bool,
-    prof_last: Instant,
-    prof_sent: usize,
-    prof_dropped: usize,
-    prof_samples: usize,
-    /// Exponential moving average of per-buffer RMS, used by the PCM
-    /// spike detector to identify anomalous decoder output.
-    rolling_rms: f32,
-    /// Suppress spike detection for the first N buffers after a track
-    /// change, while the rolling RMS is still settling from zero.
-    spike_warmup_remaining: u32,
-    /// Last observed track token, for detecting track changes.
-    last_track_token: u64,
-}
-
-impl AnalysisTapState {
-    fn new(
-        analysis_tx: Sender<AnalysisCommand>,
-        pcm_tx: Sender<AnalysisPcmChunk>,
-        track_token: Arc<AtomicU64>,
-        tap_chunk_samples: usize,
-    ) -> Self {
-        Self {
-            analysis_tx,
-            pcm_tx,
-            track_token,
-            last_rate_hz: 0,
-            tap_chunk_samples,
-            profile_enabled: cfg!(feature = "profiling-logs")
-                && std::env::var_os("FERROUS_PROFILE").is_some(),
-            prof_last: Instant::now(),
-            prof_sent: 0,
-            prof_dropped: 0,
-            prof_samples: 0,
-            rolling_rms: 0.0,
-            spike_warmup_remaining: 20,
-            last_track_token: 0,
-        }
-    }
-
-    fn handle_sample(&mut self, sink: &gst_app::AppSink) -> gst::FlowSuccess {
-        if let Ok(sample) = sink.pull_sample() {
-            self.process_sample(&sample);
-        }
-        self.maybe_log_profile();
-        gst::FlowSuccess::Ok
-    }
-
-    fn process_sample(&mut self, sample: &gst::Sample) {
-        let Some(buffer) = sample.buffer() else {
-            return;
-        };
-        let Ok(map) = buffer.map_readable() else {
-            return;
-        };
-        let bytes = map.as_slice();
-        if bytes.is_empty() {
-            return;
-        }
-
-        let current_token = self.track_token.load(Ordering::Relaxed);
-        if current_token != self.last_track_token {
-            self.last_track_token = current_token;
-            self.reset_spike_detector();
-        }
-
-        let channel_labels = self.channel_labels_for_sample(sample);
-        let pcm = decode_interleaved_f32(bytes);
-        if pcm.is_empty() {
-            return;
-        }
-
-        self.check_pcm_spike(&pcm, sample);
-
-        let channels = channel_labels.len().max(1);
-        let chunk_width = self.tap_chunk_samples.saturating_mul(channels);
-        for part in pcm.chunks(chunk_width.max(channels)) {
-            if self
-                .pcm_tx
-                .try_send(AnalysisPcmChunk {
-                    samples: part.to_vec(),
-                    channel_labels: channel_labels.clone(),
-                    track_token: self.track_token.load(Ordering::Relaxed),
-                })
-                .is_ok()
-            {
-                self.prof_sent += 1;
-                self.prof_samples += part.len();
-            } else {
-                self.prof_dropped += 1;
-            }
-        }
-    }
-
-    fn channel_labels_for_sample(&mut self, sample: &gst::Sample) -> Vec<SpectrogramChannelLabel> {
-        let Some(caps) = sample.caps() else {
-            return vec![SpectrogramChannelLabel::Mono];
-        };
-
-        let channel_labels = channel_labels_from_caps(caps);
-        if let Some(structure) = caps.structure(0) {
-            if let Ok(rate) = structure.get::<i32>("rate") {
-                if let Some(rate_hz) = positive_i32_to_u32(rate) {
-                    if self.last_rate_hz != rate_hz {
-                        self.last_rate_hz = rate_hz;
-                        let _ = self
-                            .analysis_tx
-                            .send(AnalysisCommand::SetSampleRate(rate_hz));
-                    }
-                }
-            }
-        }
-        channel_labels
-    }
-
-    fn maybe_log_profile(&mut self) {
-        if !self.profile_enabled || self.prof_last.elapsed() < Duration::from_secs(1) {
-            return;
-        }
-        profile_eprintln!(
-            "[gst] pcm_chunks sent/s={} dropped/s={} samples/s={} rate={}Hz",
-            self.prof_sent,
-            self.prof_dropped,
-            self.prof_samples,
-            self.last_rate_hz
-        );
-        self.prof_last = Instant::now();
-        self.prof_sent = 0;
-        self.prof_dropped = 0;
-        self.prof_samples = 0;
-    }
-
-    /// Detect anomalous amplitude spikes in decoded PCM that may indicate
-    /// decoder corruption.  Logs full diagnostic context when triggered.
-    fn check_pcm_spike(&mut self, pcm: &[f32], sample: &gst::Sample) {
-        // Compute buffer peak and RMS.
-        let mut sum_sq: f64 = 0.0;
-        let mut peak: f32 = 0.0;
-        for &s in pcm {
-            let abs = s.abs();
-            if abs > peak {
-                peak = abs;
-            }
-            sum_sq += f64::from(s) * f64::from(s);
-        }
-        // Precision loss is acceptable: len never exceeds audio buffer size, f32 RMS is sufficient.
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-        let rms = (sum_sq / pcm.len().max(1) as f64).sqrt() as f32;
-
-        // Let the rolling average settle before checking for spikes.
-        if self.spike_warmup_remaining > 0 {
-            self.spike_warmup_remaining -= 1;
-            self.rolling_rms = rms;
-            return;
-        }
-
-        // Slow-moving exponential average (α ≈ 0.03).  At ~46 buffers/s
-        // (1024 samples at 44.1 kHz) the time constant is roughly 0.7 s.
-        let alpha: f32 = 0.03;
-        self.rolling_rms = self.rolling_rms * (1.0 - alpha) + rms * alpha;
-
-        // Spike criterion: peak near full-scale AND energy far above
-        // recent average.  Thresholds are deliberately conservative to
-        // avoid false positives on legitimately loud music.
-        let spike = peak > 0.95 && self.rolling_rms > 0.001 && rms > self.rolling_rms * 20.0; // ~26 dB above average
-
-        if spike {
-            let caps_info = sample
-                .caps()
-                .and_then(|c| gst_audio::AudioInfo::from_caps(c).ok());
-            let (channels, rate) = caps_info
-                .as_ref()
-                .map_or((0, 0), |info| (info.channels(), info.rate()));
-
-            let pts = sample
-                .buffer()
-                .and_then(gst::BufferRef::pts)
-                .map_or(0, gst::ClockTime::nseconds);
-
-            eprintln!(
-                "[ferrous] PCM SPIKE DETECTED: peak={peak:.4} rms={rms:.4} \
-                 rolling_rms={:.4} ratio={:.1}x | \
-                 channels={channels} rate={rate} pts={pts}ns samples={}",
-                self.rolling_rms,
-                rms / self.rolling_rms.max(f32::EPSILON),
-                pcm.len(),
-            );
-
-            // Dump a few samples around the peak so we can inspect the
-            // waveform shape (descending tone vs white noise vs click).
-            #[allow(clippy::float_cmp)] // exact: finding the sample that set `peak`
-            if let Some(peak_idx) = pcm.iter().position(|s| s.abs() == peak) {
-                let start = peak_idx.saturating_sub(8);
-                let end = (peak_idx + 9).min(pcm.len());
-                let window: Vec<String> =
-                    pcm[start..end].iter().map(|s| format!("{s:.4}")).collect();
-                eprintln!(
-                    "[ferrous]   peak at sample {peak_idx}: [{}]",
-                    window.join(", ")
-                );
-            }
-        }
-    }
-
-    /// Reset spike detector state for a new track.
-    fn reset_spike_detector(&mut self) {
-        self.rolling_rms = 0.0;
-        self.spike_warmup_remaining = 20;
-    }
-}
-
-fn channel_labels_from_caps(caps: &gst::CapsRef) -> Vec<SpectrogramChannelLabel> {
-    if let Ok(info) = gst_audio::AudioInfo::from_caps(caps) {
-        if let Some(positions) = info.positions() {
-            let labels = positions
-                .iter()
-                .copied()
-                .map(map_channel_position)
-                .collect::<Vec<_>>();
-            if !labels.is_empty() {
-                return labels;
-            }
-        }
-        return fallback_channel_labels(usize::try_from(info.channels()).unwrap_or(usize::MAX));
-    }
-    if let Some(structure) = caps.structure(0) {
-        if let Ok(channels) = structure.get::<i32>("channels") {
-            if let Some(channel_count) = positive_i32_to_usize(channels) {
-                return fallback_channel_labels(channel_count);
-            }
-        }
-    }
-    vec![SpectrogramChannelLabel::Mono]
-}
-
 /// Installs a buffer probe on `capsfilter`'s src pad that silences
 /// muted channels.  Placed after `audioconvert` + `audioresample` so
 /// the format is fully negotiated.
@@ -2480,15 +2101,6 @@ fn build_raw_audio_caps() -> gst::Caps {
     gst::Caps::builder("audio/x-raw").build()
 }
 
-fn build_analysis_audio_caps() -> gst::Caps {
-    gst::Caps::builder("audio/x-raw")
-        .field("format", "F32LE")
-        .field("layout", "interleaved")
-        // Keep analysis workload constant across source formats/codecs.
-        .field("rate", 44_100i32)
-        .build()
-}
-
 fn build_capsfilter(caps: &gst::Caps) -> anyhow::Result<gst::Element> {
     let capsfilter = gst::ElementFactory::make("capsfilter")
         .build()
@@ -2497,47 +2109,28 @@ fn build_capsfilter(caps: &gst::Caps) -> anyhow::Result<gst::Element> {
     Ok(capsfilter)
 }
 
-fn build_analysis_queue() -> anyhow::Result<gst::Element> {
-    let queue = gst::ElementFactory::make("queue")
-        .build()
-        .map_err(|_| anyhow!("missing queue element"))?;
-    queue.set_property_from_str("leaky", "downstream");
-    queue.set_property("max-size-buffers", 128u32);
-    queue.set_property("max-size-bytes", 0u32);
-    queue.set_property("max-size-time", 0u64);
-    Ok(queue)
-}
-
-fn link_tee_branch(
-    tee: &gst::Element,
-    branch_sink: &gst::Element,
-    label: &str,
-) -> anyhow::Result<()> {
-    let tee_pad = tee
-        .request_pad_simple("src_%u")
-        .ok_or_else(|| anyhow!("failed requesting tee src pad for {label}"))?;
-    let branch_sink_pad = branch_sink
-        .static_pad("sink")
-        .ok_or_else(|| anyhow!("missing {label} sink pad"))?;
-    tee_pad
-        .link(&branch_sink_pad)
-        .map_err(|err| anyhow!("failed linking tee->{label}: {err:?}"))?;
-    Ok(())
-}
-
-/// Log every caps change that reaches the tee — these indicate decoder
-/// format renegotiations (channel count, sample rate, etc.) that could
-/// be the trigger for noise bursts.
-fn install_caps_change_probe(tee: &gst::Element) {
-    let Some(tee_sink) = tee.static_pad("sink") else {
+/// Observe format renegotiation without copying or converting audio for analysis.
+fn install_caps_change_probe(element: &gst::Element, analysis_tx: Sender<AnalysisCommand>) {
+    let Some(sink) = element.static_pad("sink") else {
         return;
     };
-    tee_sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, |_pad, info| {
+    let last_rate = AtomicU64::new(0);
+    sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
         if let Some(gst::PadProbeData::Event(ref event)) = info.data {
             if let gst::EventView::Caps(caps_ev) = event.view() {
+                let caps = caps_ev.caps();
                 if cfg!(feature = "profiling-logs") {
-                    let caps = caps_ev.caps();
                     eprintln!("[ferrous] audio sink caps change: {caps}");
+                }
+                if let Some(rate) = caps
+                    .structure(0)
+                    .and_then(|s| s.get::<i32>("rate").ok())
+                    .and_then(|rate| u32::try_from(rate).ok())
+                    .filter(|rate| *rate > 0)
+                {
+                    if last_rate.swap(u64::from(rate), Ordering::Relaxed) != u64::from(rate) {
+                        let _ = analysis_tx.send(AnalysisCommand::SetSampleRate(rate));
+                    }
                 }
             }
         }
@@ -2545,129 +2138,44 @@ fn install_caps_change_probe(tee: &gst::Element) {
     });
 }
 
-#[cfg_attr(
-    not(feature = "profiling-logs"),
-    allow(unused_variables, unused_assignments)
-)]
 fn build_analysis_audio_sink(
     analysis_tx: Sender<AnalysisCommand>,
-    pcm_tx: Sender<AnalysisPcmChunk>,
-    track_token: Arc<AtomicU64>,
     channel_mute_mask: &Arc<AtomicU64>,
+) -> anyhow::Result<gst::Bin> {
+    build_audio_output_bin(analysis_tx, channel_mute_mask, &build_output_sink()?)
+}
+
+fn build_audio_output_bin(
+    analysis_tx: Sender<AnalysisCommand>,
+    channel_mute_mask: &Arc<AtomicU64>,
+    sink: &gst::Element,
 ) -> anyhow::Result<gst::Bin> {
     let bin = gst::Bin::new();
     let raw_audio_caps = build_raw_audio_caps();
-    let analysis_caps = build_analysis_audio_caps();
-
     let input_capsfilter = build_capsfilter(&raw_audio_caps)?;
-
-    let tee = gst::ElementFactory::make("tee")
-        .build()
-        .map_err(|_| anyhow!("missing tee element"))?;
-
-    let queue_out = gst::ElementFactory::make("queue")
-        .build()
-        .map_err(|_| anyhow!("missing queue element"))?;
-    let conv_out = gst::ElementFactory::make("audioconvert")
-        .build()
-        .map_err(|_| anyhow!("missing audioconvert element"))?;
-    let resample_out = gst::ElementFactory::make("audioresample")
-        .build()
-        .map_err(|_| anyhow!("missing audioresample element"))?;
+    let queue = gst::ElementFactory::make("queue").build()?;
+    let convert = gst::ElementFactory::make("audioconvert").build()?;
+    let resample = gst::ElementFactory::make("audioresample").build()?;
     let output_capsfilter = build_capsfilter(&raw_audio_caps)?;
-    let sink_out = build_output_sink()?;
-
-    let queue_tap = build_analysis_queue()?;
-    let conv = gst::ElementFactory::make("audioconvert")
-        .build()
-        .map_err(|_| anyhow!("missing audioconvert element"))?;
-    let resample = gst::ElementFactory::make("audioresample")
-        .build()
-        .map_err(|_| anyhow!("missing audioresample element"))?;
-    let capsfilter = build_capsfilter(&analysis_caps)?;
-
-    // Keep tap synced by default to avoid analysis racing ahead of
-    // audible playback; explicit env override is still available for
-    // controlled experiments.
-    let analysis_sync = std::env::var("FERROUS_GST_ANALYSIS_SYNC")
-        .ok()
-        .and_then(|raw| raw.parse::<i32>().ok())
-        != Some(0);
-
-    let appsink = gst_app::AppSink::builder()
-        .caps(&analysis_caps)
-        .drop(true)
-        .max_buffers(8)
-        .sync(analysis_sync)
-        .build();
-
-    let tap_chunk_samples = std::env::var("FERROUS_GST_TAP_CHUNK_SAMPLES")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .map_or(2048, |v| v.clamp(256, 16384));
-    let mut tap_state = AnalysisTapState::new(analysis_tx, pcm_tx, track_token, tap_chunk_samples);
-
-    appsink.set_callbacks(
-        gst_app::AppSinkCallbacks::builder()
-            .new_sample(move |sink| Ok(tap_state.handle_sample(sink)))
-            .build(),
-    );
-
-    bin.add_many([
+    let elements = [
         &input_capsfilter,
-        &tee,
-        &queue_out,
-        &conv_out,
-        &resample_out,
-        &output_capsfilter,
-        &sink_out,
-        &queue_tap,
-        &conv,
+        &queue,
+        &convert,
         &resample,
-        &capsfilter,
-        appsink.upcast_ref(),
-    ])
-    .context("failed to add elements to analysis audio bin")?;
-
-    gst::Element::link_many([&input_capsfilter, &tee])
-        .context("failed to link audio sink ingress")?;
-    install_caps_change_probe(&tee);
-    gst::Element::link_many([
-        &queue_out,
-        &conv_out,
-        &resample_out,
         &output_capsfilter,
-        &sink_out,
-    ])
-    .context("failed to link output branch")?;
-
-    // Channel-mute probe: zeroes samples for muted channels in the output
-    // branch.  The analysis branch is unaffected — spectrograms show all
-    // channels regardless of mute state.
+        sink,
+    ];
+    bin.add_many(elements)
+        .context("failed to add audio output elements")?;
+    gst::Element::link_many(elements).context("failed to link audio output")?;
+    install_caps_change_probe(&input_capsfilter, analysis_tx);
     install_channel_mute_probe(&output_capsfilter, channel_mute_mask);
-    gst::Element::link_many([
-        &queue_tap,
-        &conv,
-        &resample,
-        &capsfilter,
-        appsink.upcast_ref(),
-    ])
-    .context("failed to link analysis branch")?;
-
-    link_tee_branch(&tee, &queue_out, "output queue")?;
-    link_tee_branch(&tee, &queue_tap, "analysis queue")?;
-
-    let ingress_sink_pad = input_capsfilter
+    let ingress = input_capsfilter
         .static_pad("sink")
-        .ok_or_else(|| anyhow!("missing input capsfilter sink pad"))?;
-    let ghost = gst::GhostPad::with_target(&ingress_sink_pad)
-        .map_err(|_| anyhow!("failed creating ghost pad"))?;
-    ghost
-        .set_active(true)
-        .map_err(|_| anyhow!("failed activating ghost pad"))?;
-    bin.add_pad(&ghost)
-        .map_err(|_| anyhow!("failed adding ghost pad to bin"))?;
-
+        .context("missing ingress pad")?;
+    let ghost = gst::GhostPad::with_target(&ingress)?;
+    ghost.set_active(true)?;
+    bin.add_pad(&ghost)?;
     Ok(bin)
 }
 
@@ -3010,25 +2518,6 @@ mod tests {
     }
 
     #[test]
-    fn analysis_interleaved_pcm_decodes_f32_frames() {
-        let bytes = [
-            1.0f32.to_le_bytes(),
-            0.0f32.to_le_bytes(),
-            (-1.0f32).to_le_bytes(),
-            0.5f32.to_le_bytes(),
-            0.5f32.to_le_bytes(),
-            0.5f32.to_le_bytes(),
-        ]
-        .concat();
-
-        let pcm = decode_interleaved_f32(&bytes);
-        assert_eq!(pcm.len(), 6);
-        assert!((pcm[0] - 1.0).abs() < f32::EPSILON);
-        assert!((pcm[2] + 1.0).abs() < f32::EPSILON);
-        assert!((pcm[5] - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn flac_seek_uses_accurate_mode_to_avoid_parser_stall() {
         let flags = seek_flags_for_path(Some(Path::new("/tmp/test.flac")));
         assert!(flags.contains(gst::SeekFlags::FLUSH));
@@ -3221,83 +2710,91 @@ mod gst_integration_tests {
         Err("timeout waiting for Playing state".into())
     }
 
-    fn make_full_analysis_sink() -> gst::Bin {
-        let bin = gst::Bin::new();
-        let caps = gst::Caps::builder("audio/x-raw").build();
-        let analysis_caps = gst::Caps::builder("audio/x-raw")
-            .field("format", "F32LE")
-            .field("layout", "interleaved")
-            .field("rate", 44_100i32)
-            .build();
-
-        let input_cf = gst::ElementFactory::make("capsfilter")
-            .property("caps", &caps)
-            .build()
-            .unwrap();
-        let tee = gst::ElementFactory::make("tee").build().unwrap();
-
-        // output branch
-        let q_out = gst::ElementFactory::make("queue").build().unwrap();
-        let conv_out = gst::ElementFactory::make("audioconvert").build().unwrap();
-        let res_out = gst::ElementFactory::make("audioresample").build().unwrap();
-        let cf_out = gst::ElementFactory::make("capsfilter")
-            .property("caps", &caps)
-            .build()
-            .unwrap();
-        let sink_out = gst::ElementFactory::make("fakesink")
-            .property("sync", false)
-            .build()
-            .unwrap();
-
-        // analysis branch
-        let q_tap = gst::ElementFactory::make("queue")
-            .property_from_str("leaky", "downstream")
-            .property("max-size-buffers", 128u32)
-            .property("max-size-bytes", 0u32)
-            .property("max-size-time", 0u64)
-            .build()
-            .unwrap();
-        let conv_tap = gst::ElementFactory::make("audioconvert").build().unwrap();
-        let res_tap = gst::ElementFactory::make("audioresample").build().unwrap();
-        let cf_tap = gst::ElementFactory::make("capsfilter")
-            .property("caps", &analysis_caps)
-            .build()
-            .unwrap();
-        let sink_tap = gst::ElementFactory::make("fakesink")
-            .property("sync", false)
-            .build()
-            .unwrap();
-
-        bin.add_many([
-            &input_cf, &tee, &q_out, &conv_out, &res_out, &cf_out, &sink_out, &q_tap, &conv_tap,
-            &res_tap, &cf_tap, &sink_tap,
-        ])
-        .unwrap();
-        gst::Element::link_many([&input_cf, &tee]).unwrap();
-        gst::Element::link_many([&q_out, &conv_out, &res_out, &cf_out, &sink_out]).unwrap();
-        gst::Element::link_many([&q_tap, &conv_tap, &res_tap, &cf_tap, &sink_tap]).unwrap();
-        link_tee_branch(&tee, &q_out, "out").unwrap();
-        link_tee_branch(&tee, &q_tap, "tap").unwrap();
-
-        let ghost = gst::GhostPad::with_target(&input_cf.static_pad("sink").unwrap()).unwrap();
-        ghost.set_active(true).unwrap();
-        bin.add_pad(&ghost).unwrap();
-        bin
+    #[test]
+    fn output_bin_reports_native_format_without_a_pcm_analysis_branch() {
+        gst::init().unwrap();
+        for (rate, channels) in [(192_000i32, 6i32), (44_100, 2)] {
+            let (analysis_tx, analysis_rx) = unbounded();
+            let sink = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .build()
+                .unwrap();
+            let bin =
+                build_audio_output_bin(analysis_tx, &Arc::new(AtomicU64::new(0)), &sink).unwrap();
+            let factories: Vec<_> = bin
+                .children()
+                .iter()
+                .filter_map(|element| element.factory().map(|factory| factory.name().to_string()))
+                .collect();
+            assert!(!factories
+                .iter()
+                .any(|name| name == "appsink" || name == "tee"));
+            assert_eq!(
+                factories
+                    .iter()
+                    .filter(|name| *name == "audioresample")
+                    .count(),
+                1
+            );
+            let source = gst::ElementFactory::make("audiotestsrc")
+                .property("num-buffers", 3i32)
+                .build()
+                .unwrap();
+            let caps = gst::Caps::builder("audio/x-raw")
+                .field("rate", rate)
+                .field("channels", channels)
+                .build();
+            let filter = build_capsfilter(&caps).unwrap();
+            let pipeline = gst::Pipeline::new();
+            pipeline
+                .add_many([&source, &filter, bin.upcast_ref()])
+                .unwrap();
+            gst::Element::link_many([&source, &filter, bin.upcast_ref()]).unwrap();
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let bus = pipeline.bus().unwrap();
+            let result = bus.timed_pop_filtered(
+                gst::ClockTime::from_seconds(2),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
+            pipeline.set_state(gst::State::Null).unwrap();
+            assert!(
+                matches!(
+                    result.as_ref().map(|message| message.view()),
+                    Some(gst::MessageView::Eos(_))
+                ),
+                "{result:?}"
+            );
+            assert!(
+                matches!(analysis_rx.try_recv(), Ok(AnalysisCommand::SetSampleRate(value)) if value == u32::try_from(rate).unwrap())
+            );
+            assert!(analysis_rx.try_recv().is_err());
+        }
     }
 
-    const TEST_MP3: &str =
-        "/mnt/nassikka/Musiikki/Albumit/Coldplay/X&Y/Instrumental/02 - What If.mp3";
+    fn make_full_analysis_sink() -> gst::Bin {
+        let (analysis_tx, _) = unbounded();
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .unwrap();
+        build_audio_output_bin(analysis_tx, &Arc::new(AtomicU64::new(0)), &sink).unwrap()
+    }
 
     /// Full app pipeline pattern: custom typefinders + source probe
     /// + full analysis sink.  Verifies that MP3 files with APE tags
     /// play correctly (regression test for apedemux rank demotion).
     #[test]
     fn playbin3_mp3_with_typefinders_and_full_sink() {
-        let test_path = std::path::Path::new(TEST_MP3);
-        if !test_path.exists() {
-            eprintln!("skipping: test file not available");
-            return;
-        }
+        let fixture =
+            std::env::temp_dir().join(format!("ferrous-output-tags-{}.mp3", std::process::id()));
+        let test_path = fixture.as_path();
+        let mut bytes = b"ID3\x04\0\0\0\0\0\0".to_vec();
+        bytes.extend_from_slice(include_bytes!("../analysis/fixtures/seek-tone.mp3"));
+        bytes.extend_from_slice(&crate::raw_audio::build_test_apev2_tag(
+            &[("Title", "Synthetic fixture")],
+            true,
+        ));
+        std::fs::write(test_path, bytes).unwrap();
 
         gst::init().unwrap();
         register_raw_surround_typefinders();
@@ -3324,5 +2821,6 @@ mod gst_integration_tests {
             }
         }
         let _ = playbin.set_state(gst::State::Null);
+        std::fs::remove_file(test_path).unwrap();
     }
 }

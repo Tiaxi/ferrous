@@ -1829,6 +1829,7 @@ fn session_drain_stft_rows(
 /// always larger than the correctly-scaled in-session estimate and
 /// the estimate gets inflated by `effective_hop / REFERENCE_HOP`,
 /// breaking the zoom-out minZoom computation on the Qt side.
+#[cfg(any(feature = "gst", test))]
 fn duration_requery_estimate_for_session(effective_frames: u64, effective_hop: usize) -> u32 {
     let new_est_ref =
         u32::try_from(((effective_frames / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))

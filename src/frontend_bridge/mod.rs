@@ -763,7 +763,7 @@ fn env_duration_ms(var: &str, default: u64, min: u64, max: u64) -> Duration {
 impl BridgeLoopRuntime {
     fn new(options: BridgeRuntimeOptions) -> Self {
         let (analysis, analysis_rx) = AnalysisEngine::new();
-        let (playback, playback_rx) = PlaybackEngine::new(analysis.sender(), analysis.pcm_sender());
+        let (playback, playback_rx) = PlaybackEngine::new(analysis.sender());
         let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
         let (library, library_rx) = LibraryService::new();
         let (search_query_tx, search_query_rx) = unbounded::<SearchWorkerQuery>();

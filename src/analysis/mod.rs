@@ -22,7 +22,7 @@ use std::sync::{
 };
 use std::time::{Duration, UNIX_EPOCH};
 
-use crossbeam_channel::{select, unbounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use rusqlite::Connection;
 use symphonia::core::audio::SampleBuffer;
 
@@ -71,11 +71,9 @@ pub enum AnalysisCommand {
         path: PathBuf,
         reset_spectrogram: bool,
         track_token: u64,
-        /// When true (same-format gapless), skip PCM label re-init so the
-        /// spectrogram/channel state stays continuous.
+        /// Preserve continuous spectrogram history on compatible gapless transitions.
         gapless: bool,
     },
-    SetTrackToken(u64),
     ResetSpectrogram,
     SetSampleRate(u32),
     SetFftSize(usize),
@@ -145,13 +143,6 @@ pub enum SpectrogramChannelLabel {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct AnalysisPcmChunk {
-    pub samples: Vec<f32>,
-    pub channel_labels: Vec<SpectrogramChannelLabel>,
-    pub track_token: u64,
-}
-
-#[derive(Debug, Clone, Default)]
 pub struct AnalysisSpectrogramChannel {
     pub label: SpectrogramChannelLabel,
     pub rows: Vec<Vec<f32>>,
@@ -197,7 +188,6 @@ pub enum AnalysisEvent {
 
 pub struct AnalysisEngine {
     tx: Sender<AnalysisCommand>,
-    pcm_tx: Sender<AnalysisPcmChunk>,
 }
 
 const REFERENCE_HOP: usize = 1024;
@@ -266,13 +256,6 @@ struct AnalysisRuntimeState {
     waveform_cache_lru: VecDeque<PathBuf>,
     waveform_db: Option<Connection>,
     waveform_db_writes_since_prune: usize,
-    pcm_fifo: VecDeque<f32>,
-    pcm_labels: Vec<SpectrogramChannelLabel>,
-    /// Set on track changes; disables transient channel-reduction
-    /// suppression for the first label change so that legitimate
-    /// cross-track format changes (e.g. 5.1 → stereo) are accepted.
-    pcm_labels_pending_init: bool,
-    active_pcm_track_token: u64,
     /// Cumulative offset added to playback positions before forwarding
     /// to the spectrogram worker.  Translates the new track's position
     /// (which resets to 0) into the worker's continuous coordinate
@@ -315,13 +298,6 @@ struct AnalysisRuntimeState {
     staged_centered_handle: Option<std::thread::JoinHandle<()>>,
     /// Path of the file being pre-decoded for centered gapless.
     staged_centered_path: Option<PathBuf>,
-    profile_enabled: bool,
-    prof_last: std::time::Instant,
-    prof_pcm: usize,
-    prof_rows: usize,
-    prof_ticks: usize,
-    prof_in_samples: usize,
-    prof_out_samples: usize,
 }
 
 impl AnalysisEngine {
@@ -332,8 +308,6 @@ impl AnalysisEngine {
     )]
     pub fn new() -> (Self, Receiver<AnalysisEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<AnalysisCommand>();
-        // Bounded PCM queue to prevent unbounded backlog under decode bursts.
-        let (pcm_tx, pcm_rx) = crossbeam_channel::bounded::<AnalysisPcmChunk>(12);
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
 
         let waveform_tx = cmd_tx.clone();
@@ -360,7 +334,6 @@ impl AnalysisEngine {
 
         spawn_analysis_worker(
             cmd_rx,
-            pcm_rx,
             event_tx,
             waveform_job_tx,
             waveform_decode_active_token,
@@ -372,7 +345,7 @@ impl AnalysisEngine {
             },
         );
 
-        (Self { tx: cmd_tx, pcm_tx }, event_rx)
+        (Self { tx: cmd_tx }, event_rx)
     }
 
     pub fn command(&self, cmd: AnalysisCommand) {
@@ -382,11 +355,6 @@ impl AnalysisEngine {
     #[must_use]
     pub fn sender(&self) -> Sender<AnalysisCommand> {
         self.tx.clone()
-    }
-
-    #[must_use]
-    pub fn pcm_sender(&self) -> Sender<AnalysisPcmChunk> {
-        self.pcm_tx.clone()
     }
 }
 
@@ -432,18 +400,6 @@ impl AnalysisRuntimeState {
             waveform_cache_lru: VecDeque::new(),
             waveform_db: open_waveform_cache_db().ok(),
             waveform_db_writes_since_prune: 0,
-            pcm_fifo: VecDeque::with_capacity(48_000),
-            pcm_labels: vec![SpectrogramChannelLabel::Mono],
-            pcm_labels_pending_init: true,
-            active_pcm_track_token: 0,
-            profile_enabled: cfg!(feature = "profiling-logs")
-                && std::env::var_os("FERROUS_PROFILE").is_some(),
-            prof_last: std::time::Instant::now(),
-            prof_pcm: 0,
-            prof_rows: 0,
-            prof_ticks: 0,
-            prof_in_samples: 0,
-            prof_out_samples: 0,
             spectrogram_position_offset: 0.0,
             last_spectrogram_position: 0.0,
             spectrogram_session_start: 0.0,
@@ -479,12 +435,6 @@ impl AnalysisRuntimeState {
                     track_token,
                     ctx,
                 );
-            }
-            AnalysisCommand::SetTrackToken(track_token) => {
-                self.active_pcm_track_token = track_token;
-                // Don't set pcm_labels_pending_init here — the subsequent
-                // SetTrack command will set it when appropriate (skipped
-                // for gapless transitions to keep channel state continuous).
             }
             AnalysisCommand::ResetSpectrogram => {
                 self.clear_early_continuation(ctx);
@@ -930,14 +880,6 @@ impl AnalysisRuntimeState {
             && self.active_session_channel_count == prev_channel_count;
 
         self.active_track_token = track_token;
-        // For gapless transitions the PCM stream is continuous — the
-        // playback module did NOT update the shared PCM tap atomic, so
-        // chunks still arrive with the old token.  Keep active_pcm_track_token
-        // unchanged so they are accepted without a gap.
-        if !gapless {
-            self.active_pcm_track_token = track_token;
-            self.pcm_labels_pending_init = true;
-        }
         ctx.waveform_decode_active_token
             .store(track_token, Ordering::Relaxed);
         self.active_track_stamp = source_stamp(&path);
@@ -1503,121 +1445,7 @@ impl AnalysisRuntimeState {
 
     fn reset_spectrogram_state(&mut self) {
         self.pending_channels.clear();
-        self.pcm_fifo.clear();
         self.suppress_next_spectrogram_position_update = false;
-        // Clear labels so the first chunk from the new track
-        // unconditionally sets them.  Keeping stale labels from the
-        // previous track would cause the transient-suppression logic in
-        // push_pcm_chunk to misidentify a legitimate channel-count
-        // reduction (e.g. 5.1 → stereo) as a decoder startup transient,
-        // permanently blocking all incoming audio.
-        self.pcm_labels.clear();
-    }
-
-    fn handle_pcm_ready(
-        &mut self,
-        first_chunk: AnalysisPcmChunk,
-        pcm_rx: &Receiver<AnalysisPcmChunk>,
-        event_tx: &Sender<AnalysisEvent>,
-    ) {
-        self.prof_ticks += 1;
-        self.push_pcm_chunk(first_chunk);
-        self.pull_pcm_chunks(pcm_rx);
-
-        let channel_count = self.pcm_labels.len().max(1);
-        self.trim_pcm_fifo(channel_count);
-        self.emit_snapshot(event_tx, false);
-        self.maybe_log_profile(channel_count);
-    }
-
-    fn pull_pcm_chunks(&mut self, pcm_rx: &Receiver<AnalysisPcmChunk>) {
-        for _ in 0..64 {
-            let Ok(chunk) = pcm_rx.try_recv() else {
-                break;
-            };
-            self.push_pcm_chunk(chunk);
-        }
-    }
-
-    fn push_pcm_chunk(&mut self, chunk: AnalysisPcmChunk) {
-        if chunk.samples.is_empty() {
-            return;
-        }
-        if chunk.track_token != self.active_pcm_track_token {
-            return;
-        }
-        self.prof_pcm += 1;
-        self.prof_in_samples += chunk.samples.len();
-        let chunk_labels = if chunk.channel_labels.is_empty() {
-            vec![SpectrogramChannelLabel::Mono]
-        } else {
-            chunk.channel_labels.clone()
-        };
-        if chunk_labels == self.pcm_labels {
-            // Labels match.  Do NOT clear pcm_labels_pending_init here —
-            // during cross-format gapless transitions, residual buffers
-            // from the old decoder (still in GStreamer's queues) can arrive
-            // tagged with the new track token but carrying the old format.
-            // Clearing the flag on these would re-enable suppression before
-            // the real new-format buffers arrive.  The flag is only cleared
-            // in the != branch when a genuine label change is accepted.
-        } else {
-            // GStreamer decoders (especially AC3/DTS) may initially report
-            // fewer channels during startup before settling on the real
-            // layout.  Suppress transient channel-count reductions to avoid
-            // a brief spectrogram layout flicker.  Once the FIFO has enough
-            // data the startup window has passed and we accept any change.
-            //
-            // Skip suppression when pcm_labels_pending_init is set — the
-            // first label change after a track change is always legitimate
-            // (a real format difference, not a decoder transient).
-            let is_startup_reduction = !self.pcm_labels_pending_init
-                && chunk_labels.len() < self.pcm_labels.len()
-                && self.pcm_fifo.len() < self.pcm_labels.len() * 4096;
-            if is_startup_reduction {
-                return;
-            }
-            self.pcm_labels_pending_init = false;
-            self.pcm_labels.clone_from(&chunk_labels);
-            self.pcm_fifo.clear();
-            self.pending_channels.clear();
-        }
-        self.pcm_fifo.extend(chunk.samples);
-    }
-
-    fn trim_pcm_fifo(&mut self, channel_count: usize) {
-        let fifo_max_frames = (u32_to_usize(self.snapshot.sample_rate_hz) / 2).max(4096);
-        while (self.pcm_fifo.len() / channel_count) > fifo_max_frames {
-            for _ in 0..channel_count {
-                let _ = self.pcm_fifo.pop_front();
-            }
-        }
-    }
-
-    fn maybe_log_profile(&mut self, _channel_count: usize) {
-        if !self.profile_enabled || self.prof_last.elapsed() < Duration::from_secs(1) {
-            return;
-        }
-
-        profile_eprintln!(
-            "[analysis] wakes/s={} pcm_chunks/s={} in_samples/s={} out_samples/s={} rows/s={} pending_samples={} fifo_frames={} fft={} hop={} channels={}",
-            self.prof_ticks,
-            self.prof_pcm,
-            self.prof_in_samples,
-            self.prof_out_samples,
-            self.prof_rows,
-            0,
-            self.pcm_fifo.len() / _channel_count,
-            self.fft_size,
-            self.hop_size,
-            self.pcm_labels.len()
-        );
-        self.prof_last = std::time::Instant::now();
-        self.prof_pcm = 0;
-        self.prof_in_samples = 0;
-        self.prof_out_samples = 0;
-        self.prof_rows = 0;
-        self.prof_ticks = 0;
     }
 
     fn emit_snapshot(&mut self, event_tx: &Sender<AnalysisEvent>, force: bool) {
@@ -1693,7 +1521,6 @@ fn usize_to_f32_approx(v: usize) -> f32 {
 
 fn spawn_analysis_worker(
     cmd_rx: Receiver<AnalysisCommand>,
-    pcm_rx: Receiver<AnalysisPcmChunk>,
     event_tx: Sender<AnalysisEvent>,
     waveform_job_tx: Sender<WaveformDecodeJob>,
     waveform_decode_active_token: Arc<AtomicU64>,
@@ -1703,29 +1530,17 @@ fn spawn_analysis_worker(
         .name("ferrous-analysis".to_string())
         .spawn(move || {
             let mut state = AnalysisRuntimeState::new();
-            loop {
-                select! {
-                    recv(cmd_rx) -> msg => {
-                        let Ok(cmd) = msg else { break; };
-                        let ctx = AnalysisContext {
-                            event_tx: &event_tx,
-                            waveform_job_tx: &waveform_job_tx,
-                            waveform_decode_active_token: waveform_decode_active_token.as_ref(),
-                            spectrogram_cmd_tx: &spectrogram.cmd_tx,
-                            spectrogram_decode_generation: spectrogram.decode_generation.as_ref(),
-                            spectrogram_decode_columns_produced:
-                                spectrogram.columns_produced.as_ref(),
-                            spectrogram_track_duration_ms: spectrogram
-                                .track_duration_ms
-                                .as_ref(),
-                        };
-                        state.handle_command(cmd, &ctx);
-                    }
-                    recv(pcm_rx) -> msg => {
-                        let Ok(chunk) = msg else { break; };
-                        state.handle_pcm_ready(chunk, &pcm_rx, &event_tx);
-                    }
-                }
+            while let Ok(cmd) = cmd_rx.recv() {
+                let ctx = AnalysisContext {
+                    event_tx: &event_tx,
+                    waveform_job_tx: &waveform_job_tx,
+                    waveform_decode_active_token: waveform_decode_active_token.as_ref(),
+                    spectrogram_cmd_tx: &spectrogram.cmd_tx,
+                    spectrogram_decode_generation: spectrogram.decode_generation.as_ref(),
+                    spectrogram_decode_columns_produced: spectrogram.columns_produced.as_ref(),
+                    spectrogram_track_duration_ms: spectrogram.track_duration_ms.as_ref(),
+                };
+                state.handle_command(cmd, &ctx);
             }
         });
 }
@@ -2105,57 +1920,19 @@ mod tests {
     }
 
     #[test]
-    fn push_pcm_chunk_accepts_stereo_after_surround_track_change() {
+    fn waveform_completion_publishes_without_playback_pcm_and_rejects_stale_jobs() {
         let mut state = AnalysisRuntimeState::new();
-        let token = 1;
-        state.active_pcm_track_token = token;
-
-        let surround_labels = vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::FrontCenter,
-            SpectrogramChannelLabel::Lfe,
-            SpectrogramChannelLabel::RearLeft,
-            SpectrogramChannelLabel::RearRight,
-        ];
-
-        // Simulate playing a 5.1 track: push enough data to exit the
-        // startup window.
-        state.pcm_labels = surround_labels.clone();
-        let surround_samples: Vec<f32> = vec![0.1; 6 * 5000];
-        state.push_pcm_chunk(AnalysisPcmChunk {
-            samples: surround_samples,
-            channel_labels: surround_labels,
-            track_token: token,
-        });
-        assert!(
-            !state.pcm_fifo.is_empty(),
-            "surround data should be in FIFO"
-        );
-
-        // Switch to a new stereo track.
-        let token2 = 2;
-        state.active_pcm_track_token = token2;
-        state.reset_spectrogram_state();
-
-        // Push stereo chunk for the new track.
-        let stereo_labels = vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-        ];
-        let stereo_samples: Vec<f32> = vec![0.2; 2 * 1024];
-        state.push_pcm_chunk(AnalysisPcmChunk {
-            samples: stereo_samples,
-            channel_labels: stereo_labels.clone(),
-            track_token: token2,
-        });
-
-        // The stereo data must be accepted, not suppressed.
-        assert_eq!(state.pcm_labels, stereo_labels);
-        assert!(
-            !state.pcm_fifo.is_empty(),
-            "stereo data must be accepted after track change, not suppressed"
-        );
+        state.active_track_token = 2;
+        let (tx, rx) = unbounded();
+        state.handle_waveform_progress(1, vec![0.8; 12], 1.0, true, true, &tx);
+        assert!(rx.try_recv().is_err());
+        state.handle_waveform_progress(2, vec![0.5; 12], 1.0, true, true, &tx);
+        let AnalysisEvent::Snapshot(snapshot) = rx.try_recv().expect("completion without PCM wake")
+        else {
+            panic!("expected snapshot");
+        };
+        assert!(snapshot.waveform_complete);
+        assert_eq!(snapshot.waveform_peaks, vec![0.5; 12]);
     }
 
     #[test]
@@ -2169,156 +1946,6 @@ mod tests {
             !state.suppress_next_spectrogram_position_update,
             "stale centered-seek suppression must not survive a reset"
         );
-    }
-
-    #[test]
-    fn push_pcm_chunk_suppresses_transient_channel_reduction_during_startup() {
-        let mut state = AnalysisRuntimeState::new();
-        let token = 1;
-        state.active_pcm_track_token = token;
-
-        // First chunk arrives with the real surround layout.
-        let surround_labels = vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::FrontCenter,
-            SpectrogramChannelLabel::Lfe,
-            SpectrogramChannelLabel::RearLeft,
-            SpectrogramChannelLabel::RearRight,
-        ];
-        state.push_pcm_chunk(AnalysisPcmChunk {
-            samples: vec![0.1; 6 * 100],
-            channel_labels: surround_labels.clone(),
-            track_token: token,
-        });
-        assert_eq!(state.pcm_labels, surround_labels);
-        let fifo_after_surround = state.pcm_fifo.len();
-
-        // Decoder transiently reports fewer channels during startup.
-        // This should be suppressed (data dropped, labels unchanged).
-        let stereo_labels = vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-        ];
-        state.push_pcm_chunk(AnalysisPcmChunk {
-            samples: vec![0.2; 2 * 100],
-            channel_labels: stereo_labels,
-            track_token: token,
-        });
-
-        // Labels should NOT have changed — the transient was suppressed.
-        assert_eq!(state.pcm_labels, surround_labels);
-        assert_eq!(
-            state.pcm_fifo.len(),
-            fifo_after_surround,
-            "transient stereo data should be dropped during startup"
-        );
-    }
-
-    #[test]
-    fn push_pcm_chunk_accepts_stereo_after_gapless_surround_transition() {
-        // Gapless (Natural) transitions do NOT call reset_spectrogram_state.
-        // The pcm_labels_pending_init flag must still allow the format change.
-        let mut state = AnalysisRuntimeState::new();
-        let token = 1;
-        state.active_pcm_track_token = token;
-        state.pcm_labels_pending_init = false;
-
-        let surround_labels = vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::FrontCenter,
-            SpectrogramChannelLabel::Lfe,
-            SpectrogramChannelLabel::RearLeft,
-            SpectrogramChannelLabel::RearRight,
-        ];
-        state.pcm_labels = surround_labels;
-
-        // Fill FIFO with surround data, then drain most of it to simulate
-        // spectrogram processing having consumed the buffer.
-        state.pcm_fifo.extend(vec![0.1f32; 6 * 500]);
-
-        // Gapless transition: only token changes + pcm_labels_pending_init
-        // is set (mirrors SetTrackToken handler). NO reset_spectrogram_state.
-        let token2 = 2;
-        state.active_pcm_track_token = token2;
-        state.pcm_labels_pending_init = true;
-
-        // Push stereo chunk — must NOT be suppressed.
-        let stereo_labels = vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-        ];
-        state.push_pcm_chunk(AnalysisPcmChunk {
-            samples: vec![0.2; 2 * 1024],
-            channel_labels: stereo_labels.clone(),
-            track_token: token2,
-        });
-
-        assert_eq!(state.pcm_labels, stereo_labels);
-        assert!(
-            !state.pcm_fifo.is_empty(),
-            "stereo data must be accepted during gapless transition"
-        );
-        assert!(
-            !state.pcm_labels_pending_init,
-            "init flag should be cleared after first label set"
-        );
-    }
-
-    #[test]
-    fn push_pcm_chunk_survives_residual_old_format_buffers_during_gapless() {
-        // During cross-format gapless, residual buffers from the old
-        // decoder (still in GStreamer's queues) arrive tagged with the
-        // new token but carrying the old format.  These must NOT clear
-        // pcm_labels_pending_init, or the subsequent real format change
-        // will be suppressed.
-        let mut state = AnalysisRuntimeState::new();
-        let token = 1;
-        state.active_pcm_track_token = token;
-        state.pcm_labels_pending_init = false;
-
-        let surround_labels = vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-            SpectrogramChannelLabel::FrontCenter,
-            SpectrogramChannelLabel::Lfe,
-            SpectrogramChannelLabel::RearLeft,
-            SpectrogramChannelLabel::RearRight,
-        ];
-        state.pcm_labels = surround_labels.clone();
-        state.pcm_fifo.extend(vec![0.1f32; 6 * 500]);
-
-        // Gapless transition: token changes, flag set.
-        let token2 = 2;
-        state.active_pcm_track_token = token2;
-        state.pcm_labels_pending_init = true;
-
-        // Residual 5.1 buffer arrives with the NEW token but OLD format.
-        state.push_pcm_chunk(AnalysisPcmChunk {
-            samples: vec![0.1; 6 * 256],
-            channel_labels: surround_labels,
-            track_token: token2,
-        });
-        // Flag must still be set — the residual buffer must not clear it.
-        assert!(
-            state.pcm_labels_pending_init,
-            "residual old-format buffer must not clear pending_init flag"
-        );
-
-        // Now the real stereo buffers arrive — must be accepted.
-        let stereo_labels = vec![
-            SpectrogramChannelLabel::FrontLeft,
-            SpectrogramChannelLabel::FrontRight,
-        ];
-        state.push_pcm_chunk(AnalysisPcmChunk {
-            samples: vec![0.2; 2 * 1024],
-            channel_labels: stereo_labels.clone(),
-            track_token: token2,
-        });
-
-        assert_eq!(state.pcm_labels, stereo_labels);
-        assert!(!state.pcm_labels_pending_init);
     }
 
     #[test]
