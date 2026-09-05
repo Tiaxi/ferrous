@@ -756,11 +756,7 @@ struct SpectrogramSessionState {
     /// `UpdateWidgetWidth` can recompute `lookahead_columns` without
     /// re-reading the env var.
     lookahead_seconds: f64,
-    /// True once `source.next_frames()` has returned `None` — the
-    /// decoder has consumed the entire audio file.  Used by
-    /// `run_spectrogram_session` to emit a finalize chunk only in the
-    /// real-EOF case, not on a stale-generation termination (where the
-    /// decoder is superseded by a new session before reaching EOF).
+    /// True while parked after real source EOF; reset on seeks/continuations.
     source_reached_eof: bool,
 
     /// Whether a `GStreamer` duration re-query has already been attempted.
@@ -1007,6 +1003,7 @@ fn run_spectrogram_session(
                 if compatible {
                     let (new_source, _, _, new_est) = opened.unwrap();
                     source = new_source;
+                    session.source_reached_eof = false;
                     session.track_token = track_token;
                     session.total_columns_estimate = new_est;
                     // handle_track_change invalidates the outgoing duration
@@ -1064,23 +1061,8 @@ fn run_spectrogram_session(
                 return Some(cmd);
             }
             None => {
-                // session_decode_loop returns None for two reasons:
-                //   1. Real source EOF (decoder consumed the whole
-                //      file) — post-EOF park then exited via stale-gen
-                //      or cmd_rx close.  cols_produced is the true
-                //      decoded extent and should be sent as a finalize
-                //      chunk so Qt can shrink the estimate.
-                //   2. Stale-generation detection in the main decode
-                //      loop BEFORE reaching source EOF — a new session
-                //      is about to start and cols_produced is just the
-                //      current in-flight count, NOT the track length.
-                //      Emitting a finalize here would clobber the next
-                //      session's estimate with a bogus small value.
-                // Gate the finalize on `source_reached_eof` to tell
-                // them apart.
-                if session.source_reached_eof {
-                    session_emit_finalize_chunk(&session, event_tx);
-                }
+                // EOF is published before parking; session exit must not
+                // publish it again or turn a cancelled decode into completion.
                 profile_eprintln!(
                     "[spect-worker] SESSION END ({}) elapsed={:.1}ms cols_produced={}",
                     if session.source_reached_eof {
@@ -1312,10 +1294,10 @@ fn session_decode_loop(
         }
     }
 
-    // EOF reached — flush remaining columns so the UI has all decoded
-    // data.  If a ContinueWithFile is pending, return it immediately
-    // so run_spectrogram_session can switch to the next file.
+    // Publish the decoded extent while this track is still current. Waiting
+    // until the parked worker exits leaves the UI using a padded estimate.
     session_flush_chunk(session, event_tx, columns_produced_out);
+    session_emit_finalize_chunk(session, event_tx);
     if let Some((path, track_token)) = session.pending_continue.take() {
         return Some(SpectrogramWorkerCommand::ContinueWithFile { path, track_token });
     }
@@ -1563,6 +1545,8 @@ fn handle_session_seek(
         eprintln!("[analysis] spectrogram seek failed: {error}");
         return None;
     }
+
+    session.source_reached_eof = false;
 
     // Reset STFT state.
     let output_interval = if session.zoom_level > 1.0 {
@@ -2053,6 +2037,83 @@ fn session_emit_finalize_chunk(
 mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
+
+    #[test]
+    fn worker_publishes_eof_before_parking_and_after_a_backward_seek() {
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            let path = std::env::temp_dir()
+                .join(format!("ferrous-eof-{}-{mode:?}.mp3", std::process::id()));
+            std::fs::write(&path, include_bytes!("fixtures/seek-tone.mp3")).expect("fixture");
+            let (commands, command_rx) = unbounded();
+            let (events, event_rx) = unbounded();
+            let file = path.clone();
+            let worker = std::thread::spawn(move || {
+                let command = SpectrogramWorkerCommand::NewTrack {
+                    track_token: 1,
+                    generation: 1,
+                    path: file,
+                    fft_size: 512,
+                    hop_size: 64,
+                    zoom_level: 1.0,
+                    widget_width: 320,
+                    channel_count: 1,
+                    start_seconds: 0.0,
+                    target_position_seconds: 0.0,
+                    emit_initial_reset: true,
+                    clear_history_on_reset: true,
+                    view_mode: SpectrogramViewMode::Downmix,
+                    display_mode: mode,
+                };
+                run_spectrogram_session(
+                    &command,
+                    &command_rx,
+                    &events,
+                    &AtomicU64::new(1),
+                    &AtomicU64::new(1),
+                    &AtomicU64::new(0),
+                    &AtomicU64::new(0),
+                )
+            });
+            let wait_for_eof = || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while std::time::Instant::now() < deadline {
+                    if let Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) =
+                        event_rx.recv_timeout(Duration::from_millis(20))
+                    {
+                        if chunk.complete {
+                            return Some(chunk);
+                        }
+                    }
+                }
+                None
+            };
+            let first = wait_for_eof();
+            commands
+                .send(SpectrogramWorkerCommand::Seek {
+                    position_seconds: 0.25,
+                })
+                .expect("backward seek");
+            let second = wait_for_eof();
+            commands
+                .send(SpectrogramWorkerCommand::Stop)
+                .expect("stop worker");
+            worker.join().expect("join worker");
+            std::fs::remove_file(path).expect("remove fixture");
+            for result in [first, second] {
+                let chunk =
+                    result.expect("EOF must arrive without replacing or stopping the track");
+                assert_eq!(chunk.track_token, 1);
+                assert_eq!(chunk.generation, 1);
+                assert_eq!(chunk.column_count, 0);
+                assert!(chunk.total_columns_estimate > 0 && chunk.total_columns_estimate < 60);
+            }
+            assert!(!event_rx.try_iter().any(|event| matches!(event,
+                AnalysisEvent::PrecomputedSpectrogramChunk(chunk) if chunk.complete)));
+        }
+    }
     use std::sync::atomic::AtomicU64;
 
     #[cfg(not(feature = "gst"))]
