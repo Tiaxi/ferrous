@@ -2308,7 +2308,7 @@ mod tests {
                 }],
                 ..LibrarySnapshot::default()
             }),
-            queue_details: HashMap::new(),
+            queue_details: Arc::default(),
             library_artist_count: 1,
             library_album_count: 1,
             library_expanded_keys: vec!["artist|/music|Sample Artist".to_string()],
@@ -2758,7 +2758,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.library = Arc::new(LibrarySnapshot::default());
         snapshot.queue = vec![PathBuf::from("/outside/song.flac")];
-        snapshot.queue_details.insert(
+        Arc::make_mut(&mut snapshot.queue_details).insert(
             PathBuf::from("/outside/song.flac"),
             crate::library::IndexedTrack {
                 title: "Outside Song".to_string(),
@@ -2801,7 +2801,7 @@ mod tests {
 
         assert!(queue_section_cache_matches(&cache, &snapshot));
 
-        snapshot.queue_details.insert(
+        Arc::make_mut(&mut snapshot.queue_details).insert(
             path,
             crate::library::IndexedTrack {
                 title: "Outside Song".to_string(),

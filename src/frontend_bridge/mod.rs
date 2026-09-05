@@ -361,7 +361,7 @@ pub struct BridgeSnapshot {
     pub analysis: AnalysisSnapshot,
     pub metadata: TrackMetadata,
     pub library: Arc<LibrarySnapshot>,
-    pub(crate) queue_details: HashMap<PathBuf, IndexedTrack>,
+    pub(crate) queue_details: Arc<HashMap<PathBuf, IndexedTrack>>,
     pub library_artist_count: usize,
     pub library_album_count: usize,
     pub library_expanded_keys: Vec<String>,
@@ -447,7 +447,7 @@ pub(super) struct BridgeState {
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
     library: Arc<LibrarySnapshot>,
-    queue_details: HashMap<PathBuf, IndexedTrack>,
+    queue_details: Arc<HashMap<PathBuf, IndexedTrack>>,
     queue_detail_fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
     pending_queue_detail_fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
     library_artist_count: usize,
@@ -1718,6 +1718,38 @@ mod tests {
         }
         runtime.flags.pending_snapshot = SnapshotUrgency::None;
         while event_rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn heartbeat_snapshots_share_queue_metadata_and_preserve_old_values() {
+        let mut state = BridgeState::default();
+        let path = PathBuf::from("/fixture/song.flac");
+        Arc::make_mut(&mut state.queue_details).insert(
+            path.clone(),
+            IndexedTrack {
+                title: "Before".into(),
+                artist: String::new(),
+                album: String::new(),
+                cover_path: String::new(),
+                genre: String::new(),
+                year: None,
+                track_no: None,
+                duration_secs: Some(10.0),
+            },
+        );
+        let first = state.snapshot(false, false);
+        let second = state.snapshot(false, false);
+        assert!(Arc::ptr_eq(&first.queue_details, &second.queue_details));
+        assert!(Arc::ptr_eq(&first.queue_details, &state.queue_details));
+        Arc::make_mut(&mut state.queue_details)
+            .get_mut(&path)
+            .expect("fixture track")
+            .title = "After".into();
+        assert_eq!(first.queue_details[&path].title, "Before");
+        assert_eq!(
+            state.snapshot(false, true).queue_details[&path].title,
+            "After"
+        );
     }
 
     #[test]

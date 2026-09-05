@@ -124,7 +124,7 @@ pub(super) fn update_queue_cover_paths(
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
 ) {
     for (path, indexed) in indexed_by_path {
-        let Some(existing) = state.queue_details.get_mut(path) else {
+        let Some(existing) = Arc::make_mut(&mut state.queue_details).get_mut(path) else {
             continue;
         };
         if existing.cover_path != indexed.cover_path {
@@ -786,7 +786,9 @@ pub(super) fn process_external_queue_detail_event(
         || !is_supported_audio(&event.path)
         || track_file_fingerprint(&event.path) != Some(event.fingerprint)
     {
-        let removed = state.queue_details.remove(&event.path).is_some();
+        let removed = Arc::make_mut(&mut state.queue_details)
+            .remove(&event.path)
+            .is_some();
         state.queue_detail_fingerprints.remove(&event.path);
         return if removed {
             SnapshotUrgency::Immediate
@@ -809,7 +811,7 @@ pub(super) fn process_external_queue_detail_event(
             || existing.duration_secs != event.indexed.duration_secs
     });
     if needs_update {
-        state.queue_details.insert(event.path, event.indexed);
+        Arc::make_mut(&mut state.queue_details).insert(event.path, event.indexed);
         SnapshotUrgency::Immediate
     } else {
         SnapshotUrgency::None
