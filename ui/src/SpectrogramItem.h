@@ -14,11 +14,13 @@
 #include <array>
 #include <chrono>
 #include <deque>
+#include <memory>
 #include <vector>
 
 class QQuickWindow;
 class QSGNode;
 class QWheelEvent;
+struct SpectrogramProjection;
 
 class SpectrogramItem : public QQuickItem {
     Q_OBJECT
@@ -179,20 +181,20 @@ private:
         int x,
         qint64 displayIndex,
         bool rollingMode,
-        const std::array<quint8, 256> &dbRemap);
+        const SpectrogramProjection &projection);
     void drawPeakHoldColumnRangeLocked(
         int x,
         qint64 colFirst,
         qint64 colLast,
         bool rollingMode,
-        const std::array<quint8, 256> &dbRemap);
+        const SpectrogramProjection &projection);
     void drawInterpolatedColumnAtLocked(
         int x,
         qint64 displayIndexL,
         qint64 displayIndexR,
         double t,
         bool rollingMode,
-        const std::array<quint8, 256> &dbRemap);
+        const SpectrogramProjection &projection);
     void drawPrecomputedPixelAtLocked(
         int canvasX,
         int pixelX,
@@ -200,11 +202,13 @@ private:
         qint64 displayRight,
         bool rollingMode,
         double effectiveZoom,
-        const std::array<quint8, 256> &dbRemap);
+        const SpectrogramProjection &projection);
     int ringSlotForDisplayIndexLocked(
         qint64 displayIndex,
         bool rollingMode) const;
     std::array<quint8, 256> buildPrecomputedDbRemapLocked() const;
+    std::shared_ptr<const SpectrogramProjection> precomputedProjectionLocked() const;
+    mutable std::shared_ptr<const SpectrogramProjection> m_precomputedProjection;
     void rebuildCanvasFromColumns();
     void drawColumnAt(int x, const std::vector<quint8> &col);
     void resizeDirtyTilesLocked();

@@ -25,6 +25,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <map>
+#include <tuple>
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 #define FERROUS_SPECTROGRAM_LOGF(...)               \
@@ -38,6 +40,16 @@
     do {                              \
     } while (false)
 #endif
+
+// Immutable frequency and color projection shared by equivalent channel panes.
+// A draw pass holds its own reference, so later setting changes cannot mutate
+// the inputs used by that pass. The global cache retains only weak references.
+struct SpectrogramProjection {
+    using Key = std::tuple<int, int, int, int, int, bool, double, bool>;
+    Key key;
+    std::vector<std::pair<int, int>> binRanges;
+    std::array<QRgb, 256> colors;
+};
 
 namespace {
 constexpr double kMinFreqHz = 25.0;
@@ -1593,7 +1605,8 @@ void SpectrogramItem::feedPrecomputedChunk(
             static_cast<qint32>(startIndex) <= dispR
             && chunkEnd >= dispL;
         if (overlapsVisible) {
-            const auto dbRemap = buildPrecomputedDbRemapLocked();
+            const auto projectionOwner = precomputedProjectionLocked();
+            const auto &projection = *projectionOwner;
             const double ez = effectiveZoomLocked();
             const int canvasWidth = m_canvas.width();
             const int drawCols = std::min(m_canvasFilledCols, canvasWidth);
@@ -1611,7 +1624,7 @@ void SpectrogramItem::feedPrecomputedChunk(
                 if (logicalX >= 0 && logicalX < canvasWidth) {
                     const int canvasX = (canvasStart + logicalX) % canvasWidth;
                     drawPrecomputedColumnAtLocked(
-                        canvasX, static_cast<qint64>(col), false, dbRemap);
+                        canvasX, static_cast<qint64>(col), false, projection);
                 }
             }
         }
@@ -3896,21 +3909,78 @@ std::array<quint8, 256> SpectrogramItem::buildPrecomputedDbRemapLocked() const {
     return dbRemap;
 }
 
+std::shared_ptr<const SpectrogramProjection> SpectrogramItem::precomputedProjectionLocked() const {
+    const SpectrogramProjection::Key key{
+        m_canvas.height(), m_mappingHeight, m_binsPerColumn,
+        m_precomputedBinsPerColumn, m_sampleRateHz, m_logScale,
+        m_dbRange, m_channelMuted};
+    if (m_precomputedProjection && m_precomputedProjection->key == key) {
+        return m_precomputedProjection;
+    }
+    static QMutex cacheMutex;
+    static std::map<SpectrogramProjection::Key, std::weak_ptr<const SpectrogramProjection>> cache;
+    QMutexLocker lock(&cacheMutex);
+    if (const auto found = cache.find(key); found != cache.end()) {
+        if (auto shared = found->second.lock()) {
+            m_precomputedProjection = std::move(shared);
+            return m_precomputedProjection;
+        }
+    }
+    std::erase_if(cache, [](const auto &entry) { return entry.second.expired(); });
+    auto projection = std::make_shared<SpectrogramProjection>();
+    projection->key = key;
+    projection->binRanges.reserve(static_cast<size_t>(m_canvas.height()));
+    const int mapSize = static_cast<int>(m_iToBin.size());
+    const int bins = std::max(1, m_precomputedBinsPerColumn);
+    for (int y = 0; y < m_canvas.height(); ++y) {
+        const int mi = m_canvas.height() - 1 - y;
+        int lo = 0;
+        int hi = 0;
+        if (mi >= 0 && mi < mapSize) {
+            const int center = m_iToBin[static_cast<size_t>(mi)];
+            const int previous = mi > 0 ? m_iToBin[static_cast<size_t>(mi - 1)] : center;
+            const int next = mi + 1 < mapSize ? m_iToBin[static_cast<size_t>(mi + 1)] : center;
+            lo = previous + (center - previous) / 2;
+            hi = center + (next - center) / 2;
+            if (lo == previous && previous != center) lo = center;
+            if (hi == next && next != center) hi = center;
+            if (lo > hi) std::swap(lo, hi);
+            lo = std::clamp(lo, 0, bins - 1);
+            hi = std::clamp(hi, 0, bins - 1);
+        }
+        projection->binRanges.emplace_back(lo, hi);
+    }
+    const auto remap = buildPrecomputedDbRemapLocked();
+    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
+    const double scale = static_cast<double>(kGradientTableSize) / 255.0;
+    for (size_t raw = 0; raw < projection->colors.size(); ++raw) {
+        const int paletteIndex = std::clamp(kGradientTableSize
+            - static_cast<int>(std::lround(scale * remap[raw])), 0, kGradientTableSize - 1);
+        projection->colors[raw] = palette[static_cast<size_t>(paletteIndex)];
+    }
+    m_precomputedProjection = projection;
+    cache[key] = projection;
+    return m_precomputedProjection;
+}
+
 void SpectrogramItem::drawPrecomputedColumnAtLocked(
     int x,
     qint64 displayIndex,
     bool rollingMode,
-    const std::array<quint8, 256> &dbRemap) {
+    const SpectrogramProjection &projection) {
     if (m_canvas.isNull() || x < 0 || x >= m_canvas.width() || m_precomputedBinsPerColumn <= 0) {
         return;
     }
 
     markTileDirtyLocked(x);
 
+    const int height = m_canvas.height();
+    // Detach once per column, not once for every pixel written.
+    auto *destination = reinterpret_cast<QRgb *>(m_canvas.bits()) + x;
+    const qsizetype rowStride = m_canvas.bytesPerLine() / static_cast<qsizetype>(sizeof(QRgb));
     const int bins = m_precomputedBinsPerColumn;
     const auto *ringData = reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
     const QRgb bgColor = kBackgroundColor.rgba();
-    const double gradScale = static_cast<double>(kGradientTableSize) / 255.0;
 
     int slot = -1;
     bool valid = false;
@@ -3946,52 +4016,22 @@ void SpectrogramItem::drawPrecomputedColumnAtLocked(
     }
 
     if (!valid) {
-        for (int y = 0; y < m_canvas.height(); ++y) {
-            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] = bgColor;
+        for (int y = 0; y < height; ++y) {
+            destination[static_cast<qsizetype>(y) * rowStride] = bgColor;
         }
         return;
     }
 
     const int baseOff = slot * bins;
-    const int mapSize = static_cast<int>(m_iToBin.size());
-    for (int y = 0; y < m_canvas.height(); ++y) {
-        const int mi = m_canvas.height() - 1 - y;
-        int binLo = 0;
-        int binHi = 0;
-        if (mi >= 0 && mi < mapSize) {
-            const int bc = m_iToBin[static_cast<size_t>(mi)];
-            const int bp = (mi > 0)
-                ? m_iToBin[static_cast<size_t>(mi - 1)]
-                : bc;
-            const int bn = (mi + 1 < mapSize)
-                ? m_iToBin[static_cast<size_t>(mi + 1)]
-                : bc;
-            binLo = bp + (bc - bp) / 2;
-            binHi = bc + (bn - bc) / 2;
-            if (binLo == bp && bp != bc) {
-                binLo = bc;
-            }
-            if (binHi == bn && bn != bc) {
-                binHi = bc;
-            }
-            if (binLo > binHi) {
-                std::swap(binLo, binHi);
-            }
-            binLo = std::clamp(binLo, 0, bins - 1);
-            binHi = std::clamp(binHi, 0, bins - 1);
-        }
+    for (int y = 0; y < height; ++y) {
+        const auto [binLo, binHi] = projection.binRanges[static_cast<size_t>(y)];
 
         quint8 rawMax = 0;
         for (int b = binLo; b <= binHi; ++b) {
             rawMax = std::max(rawMax, ringData[baseOff + b]);
         }
-        const quint8 intensity = dbRemap[static_cast<size_t>(rawMax)];
-        int paletteIndex = kGradientTableSize
-            - static_cast<int>(std::lround(gradScale * static_cast<double>(intensity)));
-        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
-        const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
-        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] =
-            palette[static_cast<size_t>(paletteIndex)];
+        destination[static_cast<qsizetype>(y) * rowStride] =
+            projection.colors[static_cast<size_t>(rawMax)];
     }
 }
 
@@ -4000,7 +4040,7 @@ void SpectrogramItem::drawPeakHoldColumnRangeLocked(
     qint64 colFirst,
     qint64 colLast,
     bool rollingMode,
-    const std::array<quint8, 256> &dbRemap) {
+    const SpectrogramProjection &projection) {
     if (m_canvas.isNull() || x < 0 || x >= m_canvas.width()
         || m_precomputedBinsPerColumn <= 0 || colFirst > colLast) {
         return;
@@ -4008,19 +4048,20 @@ void SpectrogramItem::drawPeakHoldColumnRangeLocked(
 
     // Single column: delegate to the fast path.
     if (colFirst == colLast) {
-        drawPrecomputedColumnAtLocked(x, colFirst, rollingMode, dbRemap);
+        drawPrecomputedColumnAtLocked(x, colFirst, rollingMode, projection);
         return;
     }
 
     markTileDirtyLocked(x);
 
+    const int height = m_canvas.height();
+    // Detach once per column, not once for every pixel written.
+    auto *destination = reinterpret_cast<QRgb *>(m_canvas.bits()) + x;
+    const qsizetype rowStride = m_canvas.bytesPerLine() / static_cast<qsizetype>(sizeof(QRgb));
     const int bins = m_precomputedBinsPerColumn;
     const auto *ringData =
         reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
     const QRgb bgColor = kBackgroundColor.rgba();
-    const double gradScale =
-        static_cast<double>(kGradientTableSize) / 255.0;
-    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
 
     // Resolve ring slots for each column in the range.
     // Cap to a reasonable max to avoid pathological cases.
@@ -4040,39 +4081,14 @@ void SpectrogramItem::drawPeakHoldColumnRangeLocked(
     }
 
     if (validCount == 0) {
-        for (int y = 0; y < m_canvas.height(); ++y) {
-            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] = bgColor;
+        for (int y = 0; y < height; ++y) {
+            destination[static_cast<qsizetype>(y) * rowStride] = bgColor;
         }
         return;
     }
 
-    const int mapSize = static_cast<int>(m_iToBin.size());
-    for (int y = 0; y < m_canvas.height(); ++y) {
-        const int mi = m_canvas.height() - 1 - y;
-        int binLo = 0;
-        int binHi = 0;
-        if (mi >= 0 && mi < mapSize) {
-            const int bc = m_iToBin[static_cast<size_t>(mi)];
-            const int bp = (mi > 0)
-                ? m_iToBin[static_cast<size_t>(mi - 1)]
-                : bc;
-            const int bn = (mi + 1 < mapSize)
-                ? m_iToBin[static_cast<size_t>(mi + 1)]
-                : bc;
-            binLo = bp + (bc - bp) / 2;
-            binHi = bc + (bn - bc) / 2;
-            if (binLo == bp && bp != bc) {
-                binLo = bc;
-            }
-            if (binHi == bn && bn != bc) {
-                binHi = bc;
-            }
-            if (binLo > binHi) {
-                std::swap(binLo, binHi);
-            }
-            binLo = std::clamp(binLo, 0, bins - 1);
-            binHi = std::clamp(binHi, 0, bins - 1);
-        }
+    for (int y = 0; y < height; ++y) {
+        const auto [binLo, binHi] = projection.binRanges[static_cast<size_t>(y)];
 
         // Peak-hold across all valid columns in the range.
         quint8 rawMax = 0;
@@ -4083,13 +4099,8 @@ void SpectrogramItem::drawPeakHoldColumnRangeLocked(
             }
         }
 
-        const quint8 intensity = dbRemap[static_cast<size_t>(rawMax)];
-        int paletteIndex = kGradientTableSize
-            - static_cast<int>(
-                  std::lround(gradScale * static_cast<double>(intensity)));
-        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
-        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] =
-            palette[static_cast<size_t>(paletteIndex)];
+        destination[static_cast<qsizetype>(y) * rowStride] =
+            projection.colors[static_cast<size_t>(rawMax)];
     }
 }
 
@@ -4135,7 +4146,7 @@ void SpectrogramItem::drawInterpolatedColumnAtLocked(
     qint64 displayIndexR,
     double t,
     bool rollingMode,
-    const std::array<quint8, 256> &dbRemap) {
+    const SpectrogramProjection &projection) {
     if (m_canvas.isNull() || x < 0 || x >= m_canvas.width()
         || m_precomputedBinsPerColumn <= 0) {
         return;
@@ -4143,65 +4154,41 @@ void SpectrogramItem::drawInterpolatedColumnAtLocked(
 
     markTileDirtyLocked(x);
 
+    const int height = m_canvas.height();
+    // Detach once per column, not once for every pixel written.
+    auto *destination = reinterpret_cast<QRgb *>(m_canvas.bits()) + x;
+    const qsizetype rowStride = m_canvas.bytesPerLine() / static_cast<qsizetype>(sizeof(QRgb));
     const int bins = m_precomputedBinsPerColumn;
     const auto *ringData =
         reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
     const QRgb bgColor = kBackgroundColor.rgba();
-    const double gradScale =
-        static_cast<double>(kGradientTableSize) / 255.0;
 
     const int slotL = ringSlotForDisplayIndexLocked(displayIndexL, rollingMode);
     const int slotR = ringSlotForDisplayIndexLocked(displayIndexR, rollingMode);
 
     if (slotL < 0 && slotR < 0) {
-        for (int y = 0; y < m_canvas.height(); ++y) {
-            reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] = bgColor;
+        for (int y = 0; y < height; ++y) {
+            destination[static_cast<qsizetype>(y) * rowStride] = bgColor;
         }
         return;
     }
     if (slotL < 0) {
         drawPrecomputedColumnAtLocked(
-            x, displayIndexR, rollingMode, dbRemap);
+            x, displayIndexR, rollingMode, projection);
         return;
     }
     if (slotR < 0) {
         drawPrecomputedColumnAtLocked(
-            x, displayIndexL, rollingMode, dbRemap);
+            x, displayIndexL, rollingMode, projection);
         return;
     }
 
     const int baseL = slotL * bins;
     const int baseR = slotR * bins;
     const double oneMinusT = 1.0 - t;
-    const int mapSize = static_cast<int>(m_iToBin.size());
-    const auto &palette = m_channelMuted ? m_palette32Gray : m_palette32;
 
-    for (int y = 0; y < m_canvas.height(); ++y) {
-        const int mi = m_canvas.height() - 1 - y;
-        int binLo = 0;
-        int binHi = 0;
-        if (mi >= 0 && mi < mapSize) {
-            const int bc = m_iToBin[static_cast<size_t>(mi)];
-            const int bp = (mi > 0)
-                ? m_iToBin[static_cast<size_t>(mi - 1)]
-                : bc;
-            const int bn = (mi + 1 < mapSize)
-                ? m_iToBin[static_cast<size_t>(mi + 1)]
-                : bc;
-            binLo = bp + (bc - bp) / 2;
-            binHi = bc + (bn - bc) / 2;
-            if (binLo == bp && bp != bc) {
-                binLo = bc;
-            }
-            if (binHi == bn && bn != bc) {
-                binHi = bc;
-            }
-            if (binLo > binHi) {
-                std::swap(binLo, binHi);
-            }
-            binLo = std::clamp(binLo, 0, bins - 1);
-            binHi = std::clamp(binHi, 0, bins - 1);
-        }
+    for (int y = 0; y < height; ++y) {
+        const auto [binLo, binHi] = projection.binRanges[static_cast<size_t>(y)];
 
         quint8 rawMaxL = 0;
         quint8 rawMaxR = 0;
@@ -4213,13 +4200,8 @@ void SpectrogramItem::drawInterpolatedColumnAtLocked(
         const auto rawBlended = static_cast<quint8>(std::lround(
             static_cast<double>(rawMaxL) * oneMinusT
             + static_cast<double>(rawMaxR) * t));
-        const quint8 intensity = dbRemap[static_cast<size_t>(rawBlended)];
-        int paletteIndex = kGradientTableSize
-            - static_cast<int>(
-                  std::lround(gradScale * static_cast<double>(intensity)));
-        paletteIndex = std::clamp(paletteIndex, 0, kGradientTableSize - 1);
-        reinterpret_cast<QRgb *>(m_canvas.scanLine(y))[x] =
-            palette[static_cast<size_t>(paletteIndex)];
+        destination[static_cast<qsizetype>(y) * rowStride] =
+            projection.colors[static_cast<size_t>(rawBlended)];
     }
 }
 
@@ -4230,7 +4212,7 @@ void SpectrogramItem::drawPrecomputedPixelAtLocked(
     qint64 displayRight,
     bool rollingMode,
     double effectiveZoom,
-    const std::array<quint8, 256> &dbRemap) {
+    const SpectrogramProjection &projection) {
     if (m_canvas.isNull() || effectiveZoom <= 0.0 || displayRight < displayLeft) {
         return;
     }
@@ -4247,20 +4229,20 @@ void SpectrogramItem::drawPrecomputedPixelAtLocked(
     const bool interpolate = effectiveZoom > 1.001;
     if (colFirst < colLast && !interpolate) {
         drawPeakHoldColumnRangeLocked(
-            canvasX, colFirst, colLast, rollingMode, dbRemap);
+            canvasX, colFirst, colLast, rollingMode, projection);
     } else if (interpolate) {
         const double t = rangeStart - std::floor(rangeStart);
         if (t > 0.001) {
             const qint64 colR = std::min(colFirst + 1, displayRight);
             if (colR != colFirst) {
                 drawInterpolatedColumnAtLocked(
-                    canvasX, colFirst, colR, t, rollingMode, dbRemap);
+                    canvasX, colFirst, colR, t, rollingMode, projection);
                 return;
             }
         }
-        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, dbRemap);
+        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, projection);
     } else {
-        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, dbRemap);
+        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, projection);
     }
 }
 
@@ -4299,12 +4281,13 @@ void SpectrogramItem::rebuildPrecomputedCanvasLocked(
         && sourceColumns + 5 >= static_cast<qint64>(width)) {
         drawPixels = width;
     }
-    const auto dbRemap = buildPrecomputedDbRemapLocked();
+    const auto projectionOwner = precomputedProjectionLocked();
+    const auto &projection = *projectionOwner;
 
     for (int px = 0; px < drawPixels; ++px) {
         drawPrecomputedPixelAtLocked(
             px, px, displayLeft, displayRight,
-            rollingMode, rebuildEffectiveZoom, dbRemap);
+            rollingMode, rebuildEffectiveZoom, projection);
     }
 
     const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
@@ -4368,13 +4351,14 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
         }
 
         if (appendCount > 0) {
-            const auto dbRemap = buildPrecomputedDbRemapLocked();
+            const auto projectionOwner = precomputedProjectionLocked();
+            const auto &projection = *projectionOwner;
             for (qint64 displayIndex = appendStart; displayIndex <= displayRight; ++displayIndex) {
                 drawPrecomputedColumnAtLocked(
                     m_canvasWriteX,
                     displayIndex,
                     rollingMode,
-                    dbRemap);
+                    projection);
                 m_canvasWriteX = (m_canvasWriteX + 1) % width;
                 m_canvasFilledCols = std::min(width, m_canvasFilledCols + 1);
             }
@@ -4426,7 +4410,8 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     }
 
     if (appendPixels > 0) {
-        const auto dbRemap = buildPrecomputedDbRemapLocked();
+        const auto projectionOwner = precomputedProjectionLocked();
+        const auto &projection = *projectionOwner;
         const int firstPixel = newFilledPixels - appendPixels;
         for (int pixelX = firstPixel; pixelX < newFilledPixels; ++pixelX) {
             drawPrecomputedPixelAtLocked(
@@ -4436,7 +4421,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
                 displayRight,
                 rollingMode,
                 effectiveZoom,
-                dbRemap);
+                projection);
             m_canvasWriteX = (m_canvasWriteX + 1) % width;
         }
     }

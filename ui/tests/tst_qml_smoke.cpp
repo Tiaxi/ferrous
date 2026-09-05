@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QHoverEvent>
 #include <QImage>
@@ -614,6 +615,9 @@ private slots:
     void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
     void spectrogramPixelToFrequency();
     void spectrogramDynamicRangePreservesSilence();
+    void spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans();
+    void spectrogramProjectionWritesPreserveSharedCanvasImages();
+    void spectrogramRebuildBenchmark();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
     void spectrogramCrosshairOverlayGeneratesOnHover();
@@ -8008,6 +8012,123 @@ void QmlSmokeTest::spectrogramPixelToFrequency() {
     // Mid-height should be roughly half Nyquist in linear mode.
     const double midFreq = item.pixelToFrequencyHz(50, 100);
     QVERIFY(midFreq > 10000.0 && midFreq < 14000.0);
+}
+
+void QmlSmokeTest::spectrogramRebuildBenchmark() {
+    if (qEnvironmentVariableIntValue("FERROUS_BENCHMARK_SPECTROGRAM") != 1) {
+        QSKIP("Set FERROUS_BENCHMARK_SPECTROGRAM=1 to measure CPU projection");
+    }
+    // Resident synthetic history isolates projection from decoding, transport,
+    // and GPU uploads. Checksums make before/after output comparisons possible.
+    constexpr int width = 3440;
+    for (int bins : {1025, 4097}) {
+        for (int height : {90, 719}) {
+            for (bool logarithmic : {false, true}) {
+                SpectrogramItem item;
+                item.setWidth(width);
+                item.setHeight(height);
+                item.setLogScale(logarithmic);
+                item.m_binsPerColumn = bins;
+                item.m_precomputedBinsPerColumn = bins;
+                item.m_precomputedSampleRateHz = 48'000;
+                item.m_sampleRateHz = 48'000;
+                item.m_precomputedHopSize = 1024;
+                item.m_precomputedTrackToken = 1;
+                item.m_renderZoomLevel = 1.0;
+                item.m_ringCapacity = width;
+                item.m_ringWriteSeq = width;
+                item.m_ringOldestSeq = 0;
+                item.m_ringBuffer.resize(width * bins);
+                item.m_ringColumnId.resize(width);
+                item.m_ringSequenceId.resize(width);
+                item.m_ringTrackToken.resize(width, 1);
+                for (int x = 0; x < width; ++x) {
+                    item.m_ringColumnId[static_cast<size_t>(x)] = x;
+                    item.m_ringSequenceId[static_cast<size_t>(x)] = x;
+                    item.m_trackColumnToSeqByToken[1].insert(x, x);
+                    for (int bin = 0; bin < bins; ++bin) {
+                        item.m_ringBuffer[x * bins + bin] = static_cast<char>((x * 37 + bin * 13) % 256);
+                    }
+                }
+                item.ensureMapping(height);
+                item.rebuildPrecomputedCanvasLocked(width, height, 0, width - 1, false);
+                QElapsedTimer elapsed;
+                elapsed.start();
+                for (int iteration = 0; iteration < 12; ++iteration) {
+                    item.rebuildPrecomputedCanvasLocked(width, height, 0, width - 1, false);
+                }
+                const double milliseconds = static_cast<double>(elapsed.nsecsElapsed()) / 12'000'000.0;
+                quint64 checksum = 0;
+                for (int y = 0; y < height; ++y) {
+                    for (int x = 0; x < width; ++x) checksum += item.m_canvas.pixel(x, y);
+                }
+                qInfo("bins=%d height=%d log=%d rebuild_ms=%.3f checksum=%llu", bins, height,
+                    logarithmic ? 1 : 0, milliseconds, static_cast<unsigned long long>(checksum));
+            }
+        }
+    }
+}
+
+void QmlSmokeTest::spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans() {
+    SpectrogramItem first;
+    SpectrogramItem second;
+    const auto prepare = [](SpectrogramItem &item, int height) {
+        item.m_binsPerColumn = 1025;
+        item.m_precomputedBinsPerColumn = 1025;
+        item.ensureCanvas(100, height);
+    };
+    prepare(first, 90);
+    prepare(second, 90);
+    const auto initial = first.precomputedProjectionLocked();
+    QCOMPARE(second.precomputedProjectionLocked().get(), initial.get());
+    first.setDbRange(150);
+    prepare(first, 90);
+    QVERIFY(first.precomputedProjectionLocked().get() != initial.get());
+    QCOMPARE(second.precomputedProjectionLocked().get(), initial.get());
+    second.setDbRange(150);
+    prepare(second, 90);
+    QCOMPARE(second.precomputedProjectionLocked().get(), first.precomputedProjectionLocked().get());
+    second.setChannelMuted(true);
+    prepare(second, 90);
+    QVERIFY(second.precomputedProjectionLocked().get() != first.precomputedProjectionLocked().get());
+    const auto muted = second.precomputedProjectionLocked();
+    second.setLogScale(!second.logScale());
+    prepare(second, 90);
+    QVERIFY(second.precomputedProjectionLocked().get() != muted.get());
+    const auto logarithmic = second.precomputedProjectionLocked();
+    second.setSampleRateHz(96'000);
+    prepare(second, 90);
+    QVERIFY(second.precomputedProjectionLocked().get() != logarithmic.get());
+    std::weak_ptr<const SpectrogramProjection> released;
+    {
+        SpectrogramItem temporary;
+        prepare(temporary, 17);
+        released = temporary.precomputedProjectionLocked();
+        QVERIFY(!released.expired());
+    }
+    QVERIFY(released.expired());
+}
+
+void QmlSmokeTest::spectrogramProjectionWritesPreserveSharedCanvasImages() {
+    for (bool rolling : {false, true}) {
+        SpectrogramItem item;
+        item.setWidth(2);
+        item.setHeight(32);
+        item.setDisplayMode(rolling ? 0 : 1);
+        constexpr int bins = 64;
+        item.feedPrecomputedChunk(QByteArray(bins * 2, '\x30'), bins, 0, 2,
+            0, 100, 48'000, 1024, false, true, 1);
+        item.m_binsPerColumn = bins;
+        item.ensureMapping(32);
+        item.rebuildPrecomputedCanvasLocked(2, 32, 0, 1, rolling);
+        const QImage shared = item.m_canvas;
+        const QImage reference = shared.copy();
+        std::fill_n(item.m_ringBuffer.data(), bins, static_cast<char>(255));
+        const auto projection = item.precomputedProjectionLocked();
+        item.drawPrecomputedColumnAtLocked(0, 0, rolling, *projection);
+        QCOMPARE(shared, reference);
+        QVERIFY(item.m_canvas != reference);
+    }
 }
 
 void QmlSmokeTest::spectrogramDynamicRangePreservesSilence() {
