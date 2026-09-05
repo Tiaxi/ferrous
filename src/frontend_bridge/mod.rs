@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::analysis::SpectrogramOutputRoute;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicU64, Arc};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{after, bounded, select, unbounded, Receiver, Sender, TrySendError};
@@ -590,6 +591,8 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
 pub struct FrontendBridgeHandle {
     tx: Sender<BridgeCommand>,
     rx: Receiver<BridgeEvent>,
+    spectral_rx: Receiver<AnalysisEvent>,
+    spectral_generation: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -625,13 +628,21 @@ impl FrontendBridgeHandle {
         let (cmd_tx, cmd_rx) = unbounded::<BridgeCommand>();
         // Keep snapshot/event queue bounded so a slow UI consumer cannot grow memory unbounded.
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        let (spectral_tx, spectral_rx) = bounded::<AnalysisEvent>(4);
+        let spectral_generation = Arc::new(AtomicU64::new(0));
+        let spectral_route = SpectrogramOutputRoute {
+            sender: spectral_tx,
+            generation: Arc::clone(&spectral_generation),
+        };
 
         let _ = std::thread::Builder::new()
             .name("ferrous-bridge".to_string())
-            .spawn(move || run_bridge_loop(&cmd_rx, &event_tx, options));
+            .spawn(move || run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route));
         Self {
             tx: cmd_tx,
             rx: event_rx,
+            spectral_rx,
+            spectral_generation,
         }
     }
 
@@ -641,16 +652,41 @@ impl FrontendBridgeHandle {
 
     #[must_use]
     pub fn recv_timeout(&self, timeout: Duration) -> Option<BridgeEvent> {
-        self.rx.recv_timeout(timeout).ok()
+        select! {
+            recv(self.rx) -> event => event.ok(),
+            recv(self.spectral_rx) -> event => event.ok().and_then(Self::spectral_event),
+            default(timeout) => None,
+        }
     }
 
     #[must_use]
     pub fn try_recv(&self) -> Option<BridgeEvent> {
-        self.rx.try_recv().ok()
+        self.rx.try_recv().ok().or_else(|| {
+            self.spectral_rx
+                .try_recv()
+                .ok()
+                .and_then(Self::spectral_event)
+        })
     }
 
-    pub(crate) fn into_parts(self) -> (Sender<BridgeCommand>, Receiver<BridgeEvent>) {
-        (self.tx, self.rx)
+    fn spectral_event(event: AnalysisEvent) -> Option<BridgeEvent> {
+        match event {
+            AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
+                Some(BridgeEvent::PrecomputedSpectrogramChunk(chunk))
+            }
+            AnalysisEvent::Snapshot(_) => None,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Sender<BridgeCommand>,
+        Receiver<BridgeEvent>,
+        Receiver<AnalysisEvent>,
+        Arc<AtomicU64>,
+    ) {
+        (self.tx, self.rx, self.spectral_rx, self.spectral_generation)
     }
 }
 
@@ -761,8 +797,8 @@ fn env_duration_ms(var: &str, default: u64, min: u64, max: u64) -> Duration {
 }
 
 impl BridgeLoopRuntime {
-    fn new(options: BridgeRuntimeOptions) -> Self {
-        let (analysis, analysis_rx) = AnalysisEngine::new();
+    fn new(options: BridgeRuntimeOptions, spectral_tx: Option<SpectrogramOutputRoute>) -> Self {
+        let (analysis, analysis_rx) = AnalysisEngine::new_with_spectrogram_output(spectral_tx);
         let (playback, playback_rx) = PlaybackEngine::new(analysis.sender());
         let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
         let (library, library_rx) = LibraryService::new();
@@ -1570,8 +1606,9 @@ fn run_bridge_loop(
     cmd_rx: &Receiver<BridgeCommand>,
     event_tx: &Sender<BridgeEvent>,
     options: BridgeRuntimeOptions,
+    spectral_tx: SpectrogramOutputRoute,
 ) {
-    let mut runtime = BridgeLoopRuntime::new(options);
+    let mut runtime = BridgeLoopRuntime::new(options, Some(spectral_tx));
     runtime.run(cmd_rx, event_tx);
 }
 
@@ -1864,7 +1901,7 @@ mod tests {
             ..SessionSnapshot::default()
         });
 
-        let runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+        let runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
 
         assert!(
             !runtime.persisted_state_enabled,
@@ -1938,7 +1975,7 @@ mod tests {
     #[test]
     fn metadata_event_emits_snapshot_immediately_while_stopped() {
         let _guard = test_guard();
-        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
         drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let track = p("/tmp/ferrous_reactive_stopped_metadata.flac");
@@ -1966,7 +2003,7 @@ mod tests {
     #[test]
     fn analysis_wake_forwards_following_precomputed_chunks_from_drain_path() {
         let _guard = test_guard();
-        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
         drain_initial_events(&mut runtime, &event_tx, &event_rx);
 
@@ -2039,7 +2076,7 @@ mod tests {
     #[test]
     fn library_event_publishes_tree_after_worker_completion() {
         let _guard = test_guard();
-        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
         drain_initial_events(&mut runtime, &event_tx, &event_rx);
         // Isolate the fixture from late startup snapshots from the real library worker.
@@ -2093,7 +2130,7 @@ mod tests {
     #[test]
     fn playing_position_updates_wait_for_coarse_heartbeat() {
         let _guard = test_guard();
-        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
         drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let track = p("/tmp/ferrous_playing_heartbeat.flac");

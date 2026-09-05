@@ -3,6 +3,8 @@
 mod cache;
 mod decoders;
 mod fft;
+mod output;
+use output::{resets_spectral_stream, AnalysisEventOutput, AnalysisOutputs};
 #[cfg(feature = "gst")]
 mod gst_waveform;
 mod session;
@@ -17,7 +19,7 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::{Duration, UNIX_EPOCH};
@@ -186,8 +188,15 @@ pub enum AnalysisEvent {
     PrecomputedSpectrogramChunk(PrecomputedSpectrogramChunk),
 }
 
+pub(crate) struct SpectrogramOutputRoute {
+    pub sender: Sender<AnalysisEvent>,
+    pub generation: Arc<AtomicU64>,
+}
+
 pub struct AnalysisEngine {
     tx: Sender<AnalysisCommand>,
+    spectral_tx: Sender<AnalysisEvent>,
+    pending_resets: Arc<AtomicUsize>,
 }
 
 const REFERENCE_HOP: usize = 1024;
@@ -307,6 +316,12 @@ impl AnalysisEngine {
         allow(unused_variables, unused_assignments)
     )]
     pub fn new() -> (Self, Receiver<AnalysisEvent>) {
+        Self::new_with_spectrogram_output(None)
+    }
+
+    pub(crate) fn new_with_spectrogram_output(
+        spectral_route: Option<SpectrogramOutputRoute>,
+    ) -> (Self, Receiver<AnalysisEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<AnalysisCommand>();
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
 
@@ -320,7 +335,19 @@ impl AnalysisEngine {
         );
 
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
-        let spectrogram_decode_generation = Arc::new(AtomicU64::new(0));
+        let route = spectral_route.unwrap_or_else(|| SpectrogramOutputRoute {
+            sender: event_tx.clone(),
+            generation: Arc::new(AtomicU64::new(0)),
+        });
+        let spectrogram_decode_generation = route.generation;
+        let pending_resets = Arc::new(AtomicUsize::new(0));
+        let spectral_tx = route.sender.clone();
+        let event_tx = AnalysisOutputs {
+            spectra: route.sender,
+            snapshots: event_tx,
+            generation: Arc::clone(&spectrogram_decode_generation),
+            pending_resets: Arc::clone(&pending_resets),
+        };
         let worker_columns_produced = Arc::new(AtomicU64::new(0));
         let worker_track_duration_ms = Arc::new(AtomicU64::new(0));
         spawn_spectrogram_decode_worker(
@@ -344,11 +371,34 @@ impl AnalysisEngine {
             },
         );
 
-        (Self { tx: cmd_tx }, event_rx)
+        (
+            Self {
+                tx: cmd_tx,
+                spectral_tx,
+                pending_resets,
+            },
+            event_rx,
+        )
     }
 
-    pub fn command(&self, cmd: AnalysisCommand) {
-        let _ = self.tx.send(cmd);
+    pub fn command(&self, mut cmd: AnalysisCommand) {
+        // A seek into cached history normally reuses the session. Under
+        // backpressure, restart so queued old columns can be discarded safely.
+        if let AnalysisCommand::SeekPosition(position_seconds) = cmd {
+            if self.spectral_tx.is_full() {
+                cmd = AnalysisCommand::RestartCurrentTrack {
+                    position_seconds,
+                    clear_history: true,
+                };
+            }
+        }
+        let resets = resets_spectral_stream(&cmd);
+        if resets {
+            self.pending_resets.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.tx.send(cmd).is_err() && resets {
+            self.pending_resets.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     #[must_use]
@@ -358,7 +408,7 @@ impl AnalysisEngine {
 }
 
 struct AnalysisContext<'a> {
-    event_tx: &'a Sender<AnalysisEvent>,
+    event_tx: &'a dyn AnalysisEventOutput,
     waveform_job_tx: &'a Sender<WaveformDecodeJob>,
     waveform_decode_active_token: &'a AtomicU64,
     spectrogram_cmd_tx: &'a Sender<SpectrogramWorkerCommand>,
@@ -1397,7 +1447,7 @@ impl AnalysisRuntimeState {
         coverage_seconds: f32,
         complete: bool,
         done: bool,
-        event_tx: &Sender<AnalysisEvent>,
+        event_tx: &dyn AnalysisEventOutput,
     ) {
         if track_token != self.active_track_token || peaks.is_empty() {
             return;
@@ -1447,7 +1497,7 @@ impl AnalysisRuntimeState {
         self.suppress_next_spectrogram_position_update = false;
     }
 
-    fn emit_snapshot(&mut self, event_tx: &Sender<AnalysisEvent>, force: bool) {
+    fn emit_snapshot(&mut self, event_tx: &dyn AnalysisEventOutput, force: bool) {
         emit_snapshot(
             event_tx,
             &self.snapshot,
@@ -1520,7 +1570,7 @@ fn usize_to_f32_approx(v: usize) -> f32 {
 
 fn spawn_analysis_worker(
     cmd_rx: Receiver<AnalysisCommand>,
-    event_tx: Sender<AnalysisEvent>,
+    event_tx: AnalysisOutputs,
     waveform_job_tx: Sender<WaveformDecodeJob>,
     waveform_decode_active_token: Arc<AtomicU64>,
     spectrogram: SpectrogramWorkerHandles,
@@ -1530,6 +1580,7 @@ fn spawn_analysis_worker(
         .spawn(move || {
             let mut state = AnalysisRuntimeState::new();
             while let Ok(cmd) = cmd_rx.recv() {
+                event_tx.begin_command(&cmd);
                 let ctx = AnalysisContext {
                     event_tx: &event_tx,
                     waveform_job_tx: &waveform_job_tx,
@@ -1555,10 +1606,6 @@ fn source_stamp(path: &Path) -> Option<WaveformSourceStamp> {
     })
 }
 
-fn u32_to_usize(value: u32) -> usize {
-    usize::try_from(value).unwrap_or(usize::MAX)
-}
-
 fn small_usize_to_f32(value: usize) -> f32 {
     f32::from(u16::try_from(value).expect("value fits into u16"))
 }
@@ -1576,7 +1623,7 @@ fn seconds_from_frames(frames: u64, sample_rate_hz: u64) -> f32 {
 }
 
 fn emit_snapshot(
-    event_tx: &Sender<AnalysisEvent>,
+    event_tx: &dyn AnalysisEventOutput,
     snapshot: &AnalysisSnapshot,
     pending_channels: &mut Vec<AnalysisSpectrogramChannel>,
     waveform_dirty: &mut bool,
@@ -1916,6 +1963,49 @@ mod tests {
             AnalysisEvent::Snapshot(s) => assert_eq!(s.waveform_peaks, vec![0.1, 0.2]),
             _ => panic!("unexpected event variant"),
         }
+    }
+
+    #[test]
+    fn seek_and_stop_restart_a_backpressured_spectral_stream() {
+        let path = write_engine_test_wave(2, 48_000);
+        let generation = Arc::new(AtomicU64::new(0));
+        let (spectral_tx, spectral_rx) = crossbeam_channel::bounded(1);
+        let (engine, _) =
+            AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
+                sender: spectral_tx,
+                generation: Arc::clone(&generation),
+            }));
+        engine.command(AnalysisCommand::SetTrack {
+            path: path.clone(),
+            reset_spectrogram: true,
+            track_token: 1,
+            gapless: false,
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while spectral_rx.is_empty() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for command in [
+            AnalysisCommand::SeekPosition(0.5),
+            AnalysisCommand::RestartCurrentTrack {
+                position_seconds: 0.0,
+                clear_history: true,
+            },
+        ] {
+            let previous = generation.load(Ordering::Relaxed);
+            engine.command(command);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while generation.load(Ordering::Relaxed) <= previous {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "reset must interrupt backpressure"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        drop(spectral_rx);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

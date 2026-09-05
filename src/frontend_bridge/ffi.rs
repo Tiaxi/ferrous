@@ -4,8 +4,8 @@ use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::ffi::c_uchar;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -17,7 +17,9 @@ use super::{
     BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand,
     BridgeSnapshot, FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
 };
-use crate::analysis::{PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode};
+use crate::analysis::{
+    AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
+};
 use crate::library::{IndexedTrack, LibraryTrack};
 use crate::playback::{PlaybackState, RepeatMode};
 use crate::tag_editor;
@@ -31,6 +33,7 @@ const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
 const MAX_PENDING_PRECOMPUTED_SPECTROGRAM: usize = 64;
 const MAX_PENDING_LIBRARY_TREES: usize = 1;
 const MAX_PENDING_SEARCH_RESULTS: usize = 2;
+const MAX_PENDING_SPECTROGRAM_BYTES: usize = 16 * 1024 * 1024;
 const RELAY_RECV_TIMEOUT: Duration = Duration::from_millis(250);
 
 const SNAPSHOT_MAGIC: u32 = 0xFE55_0001;
@@ -128,6 +131,7 @@ struct FfiRuntime {
     pending_analysis_frames: VecDeque<Vec<u8>>,
     pending_precomputed_spectrogram: VecDeque<PendingPrecomputedSpectrogramFrame>,
     latest_precomputed_generation: u64,
+    pending_spectrogram_bytes: usize,
     pending_library_trees: VecDeque<LibraryTreeFrame>,
     pending_search_results: VecDeque<SearchResultsFrame>,
     next_tree_version: u32,
@@ -153,6 +157,7 @@ impl FfiRuntime {
                 MAX_PENDING_PRECOMPUTED_SPECTROGRAM,
             ),
             latest_precomputed_generation: 0,
+            pending_spectrogram_bytes: 0,
             pending_library_trees: VecDeque::with_capacity(MAX_PENDING_LIBRARY_TREES),
             pending_search_results: VecDeque::with_capacity(MAX_PENDING_SEARCH_RESULTS),
             next_tree_version: 1,
@@ -282,17 +287,24 @@ impl FfiRuntime {
         }
     }
 
-    fn push_precomputed_frame(&mut self, generation: u64, frame: Vec<u8>) {
-        if generation != 0 {
-            if generation < self.latest_precomputed_generation {
-                return;
-            }
-            if generation > self.latest_precomputed_generation {
-                self.latest_precomputed_generation = generation;
-                self.pending_precomputed_spectrogram
-                    .retain(|pending| pending.generation == 0 || pending.generation >= generation);
-            }
+    fn advance_spectral_generation(&mut self, generation: u64) {
+        if generation > self.latest_precomputed_generation {
+            self.latest_precomputed_generation = generation;
+            self.pending_precomputed_spectrogram
+                .retain(|frame| frame.generation == 0 || frame.generation >= generation);
+            self.pending_spectrogram_bytes = self
+                .pending_precomputed_spectrogram
+                .iter()
+                .map(|frame| frame.bytes.len())
+                .sum();
         }
+    }
+
+    fn push_precomputed_frame(&mut self, generation: u64, frame: Vec<u8>) {
+        if generation != 0 && generation < self.latest_precomputed_generation {
+            return;
+        }
+        self.advance_spectral_generation(generation);
 
         if frame.is_empty() {
             return;
@@ -308,8 +320,11 @@ impl FfiRuntime {
             if generation != 0 && front.generation != 0 && front.generation >= generation {
                 break;
             }
-            self.pending_precomputed_spectrogram.pop_front();
+            if let Some(frame) = self.pending_precomputed_spectrogram.pop_front() {
+                self.pending_spectrogram_bytes -= frame.bytes.len();
+            }
         }
+        self.pending_spectrogram_bytes += frame.len();
         self.pending_precomputed_spectrogram
             .push_back(PendingPrecomputedSpectrogramFrame {
                 generation,
@@ -321,9 +336,9 @@ impl FfiRuntime {
     }
 
     fn pop_precomputed_spectrogram(&mut self) -> Option<Vec<u8>> {
-        self.pending_precomputed_spectrogram
-            .pop_front()
-            .map(|frame| frame.bytes)
+        let frame = self.pending_precomputed_spectrogram.pop_front()?;
+        self.pending_spectrogram_bytes -= frame.bytes.len();
+        Some(frame.bytes)
     }
 
     fn push_library_tree_frame(&mut self, bytes: Vec<u8>) {
@@ -582,9 +597,46 @@ fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Recei
             break;
         }
         if encoder.stopped {
-            shared.stop_requested.store(true, Ordering::Relaxed);
+            shared.request_stop();
             break;
         }
+    }
+}
+
+// Dedicated spectral relay may wait for UI consumption; control publication never waits here.
+fn run_spectral_relay(shared: &FfiShared, event_rx: &crossbeam_channel::Receiver<AnalysisEvent>) {
+    while !shared.stop_requested.load(Ordering::Relaxed) {
+        let event = crossbeam_channel::select! {
+            recv(shared.spectral_stop_rx) -> _ => return,
+            recv(event_rx) -> event => match event { Ok(event) => event, Err(_) => return },
+        };
+        let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = event else {
+            continue;
+        };
+        let bytes = encode_precomputed_spectrogram_chunk(&chunk);
+        let Ok(mut runtime) = shared.runtime.lock() else {
+            break;
+        };
+        loop {
+            runtime.advance_spectral_generation(shared.spectral_generation.load(Ordering::Relaxed));
+            if shared.stop_requested.load(Ordering::Relaxed) {
+                return;
+            }
+            if chunk.generation != 0 && chunk.generation < runtime.latest_precomputed_generation {
+                break;
+            }
+            if runtime.pending_spectrogram_bytes + bytes.len() <= MAX_PENDING_SPECTROGRAM_BYTES {
+                break;
+            }
+            let Ok((guard, _)) = shared
+                .spectral_space
+                .wait_timeout(runtime, Duration::from_millis(50))
+            else {
+                return;
+            };
+            runtime = guard;
+        }
+        runtime.push_precomputed_frame(chunk.generation, bytes);
     }
 }
 
@@ -607,23 +659,48 @@ fn prepare_and_publish(
 struct FfiShared {
     runtime: Mutex<FfiRuntime>,
     stop_requested: AtomicBool,
+    spectral_space: Condvar,
+    spectral_generation: Arc<AtomicU64>,
+    spectral_stop_tx: crossbeam_channel::Sender<()>,
+    spectral_stop_rx: crossbeam_channel::Receiver<()>,
+}
+
+impl FfiShared {
+    fn new(runtime: FfiRuntime, spectral_generation: Arc<AtomicU64>) -> Self {
+        let (spectral_stop_tx, spectral_stop_rx) = crossbeam_channel::bounded(1);
+        Self {
+            runtime: Mutex::new(runtime),
+            stop_requested: AtomicBool::new(false),
+            spectral_space: Condvar::new(),
+            spectral_generation,
+            spectral_stop_tx,
+            spectral_stop_rx,
+        }
+    }
+
+    fn request_stop(&self) {
+        self.stop_requested.store(true, Ordering::Relaxed);
+        let _ = self.spectral_stop_tx.try_send(());
+        self.spectral_space.notify_all();
+    }
 }
 
 #[repr(C)]
 pub struct FerrousFfiBridge {
     shared: Arc<FfiShared>,
     relay_thread: Mutex<Option<JoinHandle<()>>>,
+    spectral_relay_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[no_mangle]
 pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
     let bridge = FrontendBridgeHandle::spawn();
-    let (command_tx, event_rx) = bridge.into_parts();
+    let (command_tx, event_rx, spectral_rx, spectral_generation) = bridge.into_parts();
     let (wake_read_fd, wake_write_fd) = create_nonblocking_pipe().unwrap_or((-1, -1));
-    let shared = Arc::new(FfiShared {
-        runtime: Mutex::new(FfiRuntime::new(command_tx, wake_read_fd, wake_write_fd)),
-        stop_requested: AtomicBool::new(false),
-    });
+    let shared = Arc::new(FfiShared::new(
+        FfiRuntime::new(command_tx, wake_read_fd, wake_write_fd),
+        spectral_generation,
+    ));
     if let Ok(runtime) = shared.runtime.lock() {
         let _ = runtime.command_tx.send(BridgeCommand::RequestSnapshot);
     }
@@ -634,9 +711,16 @@ pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
         .spawn(move || run_ffi_relay_loop(relay_shared, event_rx))
         .ok();
 
+    let spectral_shared = Arc::clone(&shared);
+    let spectral_relay_thread = thread::Builder::new()
+        .name("ferrous-spectral-relay".to_string())
+        .spawn(move || run_spectral_relay(&spectral_shared, &spectral_rx))
+        .ok();
+
     Box::into_raw(Box::new(FerrousFfiBridge {
         shared,
         relay_thread: Mutex::new(relay_thread),
+        spectral_relay_thread: Mutex::new(spectral_relay_thread),
     }))
 }
 
@@ -651,13 +735,18 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridg
     }
     let bridge = Box::from_raw(handle);
     let shared = Arc::clone(&bridge.shared);
-    shared.stop_requested.store(true, Ordering::Relaxed);
+    shared.request_stop();
     if let Ok(runtime) = shared.runtime.lock() {
         let _ = runtime.command_tx.send(BridgeCommand::Shutdown);
     }
     if let Ok(mut relay_thread) = bridge.relay_thread.lock() {
         if let Some(join_handle) = relay_thread.take() {
             let _ = join_handle.join();
+        }
+    }
+    if let Ok(mut relay) = bridge.spectral_relay_thread.lock() {
+        if let Some(handle) = relay.take() {
+            let _ = handle.join();
         }
     }
     {
@@ -854,6 +943,7 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_precomputed_spectrogram(
     let Some(frame) = runtime.pop_precomputed_spectrogram() else {
         return std::ptr::null_mut();
     };
+    bridge.shared.spectral_space.notify_one();
     let mut boxed = frame.into_boxed_slice();
     let ptr = boxed.as_mut_ptr();
     let len = boxed.len();
@@ -2632,10 +2722,10 @@ mod tests {
     #[test]
     fn relay_preparation_does_not_lock_ui_command_or_output_queues() {
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
-        let shared = FfiShared {
-            runtime: Mutex::new(FfiRuntime::new(command_tx, -1, -1)),
-            stop_requested: AtomicBool::new(false),
-        };
+        let shared = FfiShared::new(
+            FfiRuntime::new(command_tx, -1, -1),
+            Arc::new(AtomicU64::new(0)),
+        );
         let mut encoder = FfiEncoder::default();
         let events = std::iter::once_with(|| {
             let mut runtime = shared
@@ -3303,6 +3393,140 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn spectral_shared() -> Arc<FfiShared> {
+        let (commands, _) = crossbeam_channel::unbounded();
+        Arc::new(FfiShared::new(
+            FfiRuntime::new(commands, -1, -1),
+            Arc::new(AtomicU64::new(1)),
+        ))
+    }
+
+    fn spectral_fixture(generation: u64, start: u32) -> AnalysisEvent {
+        AnalysisEvent::PrecomputedSpectrogramChunk(PrecomputedSpectrogramChunk {
+            track_token: 1,
+            generation,
+            columns_u8: vec![127; 64 * 1_025 * 2],
+            bins_per_column: 1_025,
+            column_count: 64,
+            channel_count: 2,
+            start_column_index: start,
+            total_columns_estimate: 20_000,
+            sample_rate_hz: 48_000,
+            hop_size: 1_024,
+            coverage_seconds: 1.0,
+            complete: false,
+            buffer_reset: start == 0,
+            clear_history: start == 0,
+        })
+    }
+
+    #[test]
+    fn spectral_relay_preserves_all_active_columns_under_byte_backpressure() {
+        let shared = spectral_shared();
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let relay_shared = Arc::clone(&shared);
+        let relay = thread::spawn(move || run_spectral_relay(&relay_shared, &rx));
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let producer = thread::spawn(move || {
+            for index in 0..200 {
+                tx.send(spectral_fixture(1, index * 64)).unwrap();
+            }
+            done_tx.send(()).unwrap();
+        });
+        let frame_size = 47 + 64 * 1_025 * 2;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let bytes = shared.runtime.lock().unwrap().pending_spectrogram_bytes;
+            assert!(bytes <= MAX_PENDING_SPECTROGRAM_BYTES);
+            if bytes + frame_size > MAX_PENDING_SPECTROGRAM_BYTES {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            done_rx.try_recv().is_err(),
+            "producer must wait for the consumer"
+        );
+        for index in 0..200 {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let frame = loop {
+                let mut runtime = shared.runtime.lock().unwrap();
+                assert!(runtime.pending_spectrogram_bytes <= MAX_PENDING_SPECTROGRAM_BYTES);
+                if let Some(frame) = runtime.pop_precomputed_spectrogram() {
+                    break frame;
+                }
+                drop(runtime);
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            };
+            shared.spectral_space.notify_one();
+            assert_eq!(
+                decode_precomputed_generation_and_start(&frame),
+                (1, index * 64)
+            );
+        }
+        producer.join().unwrap();
+        relay.join().unwrap();
+        assert_eq!(shared.runtime.lock().unwrap().pending_spectrogram_bytes, 0);
+    }
+
+    #[test]
+    fn stalled_spectral_relay_allows_control_and_new_generation_without_a_consumer() {
+        let shared = spectral_shared();
+        shared
+            .runtime
+            .lock()
+            .unwrap()
+            .push_precomputed_frame(1, vec![0; MAX_PENDING_SPECTROGRAM_BYTES]);
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        tx.send(spectral_fixture(1, 0)).unwrap();
+        let relay_shared = Arc::clone(&shared);
+        let relay = thread::spawn(move || run_spectral_relay(&relay_shared, &rx));
+        let mut encoder = FfiEncoder::default();
+        assert!(prepare_and_publish(
+            &shared,
+            &mut encoder,
+            [BridgeEvent::Error("control remains responsive".into())]
+        ));
+        assert!(shared.runtime.lock().unwrap().pop_binary_event().is_some());
+        shared.spectral_generation.store(2, Ordering::Relaxed);
+        shared.spectral_space.notify_all();
+        tx.send(spectral_fixture(2, 64)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut runtime = shared.runtime.lock().unwrap();
+            if runtime.latest_precomputed_generation == 2
+                && !runtime.pending_precomputed_spectrogram.is_empty()
+            {
+                let frame = runtime.pop_precomputed_spectrogram().unwrap();
+                assert_eq!(decode_precomputed_generation_and_start(&frame), (2, 64));
+                assert_eq!(runtime.pending_spectrogram_bytes, 0);
+                break;
+            }
+            drop(runtime);
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        shared.request_stop();
+        relay.join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_releases_a_full_spectral_relay() {
+        let shared = spectral_shared();
+        shared
+            .runtime
+            .lock()
+            .unwrap()
+            .push_precomputed_frame(1, vec![0; MAX_PENDING_SPECTROGRAM_BYTES]);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.send(spectral_fixture(1, 0)).unwrap();
+        let relay_shared = Arc::clone(&shared);
+        let relay = thread::spawn(move || run_spectral_relay(&relay_shared, &rx));
+        shared.request_stop();
+        relay.join().unwrap();
+    }
+
     #[test]
     fn precomputed_queue_preserves_active_generation_prefix_when_full() {
         let mut runtime = test_runtime_with_wake_pipe();
