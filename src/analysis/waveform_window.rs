@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use super::f64_to_u64_saturating;
+use super::waveform_pyramid::SUMMARY_FRAMES;
 use super::waveform_service::{with_session, WaveformSession, TILE_FRAMES};
 
 const MAX_WINDOW_POINTS: usize = 65_536;
@@ -37,7 +38,11 @@ impl WindowAccumulator {
     fn new(start_frame: u64, end_frame: u64, max_points: usize, channels: usize) -> Self {
         let requested_frames = end_frame.saturating_sub(start_frame).max(1);
         let point_limit = u64::try_from(max_points.clamp(1, MAX_WINDOW_POINTS)).unwrap_or(1);
-        let frames_per_point = requested_frames.div_ceil(point_limit).max(1);
+        let frames_per_point = requested_frames
+            .div_ceil(point_limit)
+            .max(1)
+            .checked_next_power_of_two()
+            .unwrap_or(u64::MAX);
         // Anchor every aggregation bin to the track's absolute sample grid.
         // Sliding windows with the same resolution must describe their shared
         // samples identically or cache handoffs make the waveform pulse.
@@ -105,6 +110,26 @@ impl WindowAccumulator {
                 *maximum = maximum.max(mixed);
             }
         }
+    }
+
+    fn push_summary(&mut self, first_frame: u64, extrema: &[[f32; 2]]) {
+        if first_frame < self.start_frame || first_frame >= self.end_frame {
+            return;
+        }
+        let point = usize::try_from((first_frame - self.start_frame) / self.frames_per_point)
+            .unwrap_or(self.downmix_minima.len());
+        for (channel, &[minimum, maximum]) in extrema.iter().take(self.channels).enumerate() {
+            if minimum > maximum {
+                continue;
+            }
+            let index = point * self.channels + channel;
+            self.minima[index] = self.minima[index].min(minimum);
+            self.maxima[index] = self.maxima[index].max(maximum);
+            self.seen[index] = true;
+        }
+        let mixed = extrema[self.channels];
+        self.downmix_minima[point] = self.downmix_minima[point].min(mixed[0]);
+        self.downmix_maxima[point] = self.downmix_maxima[point].max(mixed[1]);
     }
 
     fn finish(self, sample_rate_hz: u32) -> WaveformWindow {
@@ -195,6 +220,20 @@ fn decode_window(
         if session.reached_eof(index.saturating_mul(TILE_FRAMES)) {
             break;
         }
+        if accumulator.frames_per_point >= SUMMARY_FRAMES
+            && accumulator.frames_per_point.is_power_of_two()
+            && index.saturating_add(1).saturating_mul(TILE_FRAMES) <= end_frame
+        {
+            let tile = session.summary(index, cancelled)?;
+            let (rows, span) = tile.rows(accumulator.frames_per_point);
+            for (row, extrema) in rows.chunks_exact(tile.row_width()).enumerate() {
+                accumulator.push_summary(
+                    index * TILE_FRAMES + super::usize_to_u64(row) * span,
+                    extrema,
+                );
+            }
+            continue;
+        }
         let tile = session.tile(index, cancelled)?;
         for frames in &tile.segments {
             accumulator.push_interleaved(frames.first_frame, &frames.samples, frames.channels);
@@ -208,6 +247,55 @@ fn decode_window(
 pub(super) mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn summary_levels_reuse_evicted_pcm_and_preserve_partial_endpoints() {
+        let samples: Vec<i16> = (0..131_072)
+            .map(|sample| i16::try_from((sample * 73) % 60_000 - 30_000).unwrap())
+            .collect();
+        let path = write_test_wave(&samples, 48_000, 2);
+        let mut session = WaveformSession::open(&path).expect("open fixture");
+        let floats: Vec<_> = samples
+            .iter()
+            .map(|&sample| f32::from(sample) / 32768.0)
+            .collect();
+        decode_window(&mut session, 0.0, 65_536.0 / 48_000.0, 64, &|| false)
+            .expect("warm summaries");
+        assert_eq!(session.decoded_tiles, 4);
+        session.discard_pcm();
+        for points in [64, 128, 256] {
+            let window = decode_window(
+                &mut session,
+                2_048.0 / 48_000.0,
+                65_536.0 / 48_000.0,
+                points,
+                &|| false,
+            )
+            .expect("cached resolution");
+            let mut expected = WindowAccumulator::new(2_048, 65_536, points, 2);
+            expected.push_interleaved(0, &floats, 2);
+            let expected = expected.finish(48_000);
+            assert_eq!(window.extrema, expected.extrema);
+            assert_eq!(window.downmix_extrema, expected.downmix_extrema);
+            assert_eq!(session.decoded_tiles, 4, "summary zoom must not reopen PCM");
+        }
+        let window = decode_window(
+            &mut session,
+            2_048.0 / 48_000.0,
+            65_519.0 / 48_000.0,
+            64,
+            &|| false,
+        )
+        .expect("partial final bin");
+        let mut expected = WindowAccumulator::new(2_048, 65_519, 64, 2);
+        expected.push_interleaved(0, &floats, 2);
+        assert_eq!(window.extrema, expected.finish(48_000).extrema);
+        assert_eq!(
+            session.decoded_tiles, 5,
+            "only the clipped endpoint needs PCM"
+        );
+        std::fs::remove_file(path).expect("remove fixture");
+    }
 
     #[test]
     fn overlapping_cached_views_match_direct_aggregation_at_every_resolution() {
