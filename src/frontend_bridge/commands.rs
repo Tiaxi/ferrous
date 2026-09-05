@@ -432,8 +432,9 @@ fn handle_library_view_command(
             }
             Some(changed)
         }
-        BridgeLibraryCommand::SetSearchQuery { seq, query } => {
+        BridgeLibraryCommand::SetSearchQuery { seq, query, limit } => {
             let _ = runtime.search_query_tx.send(SearchWorkerQuery {
+                limit,
                 seq,
                 query: query.trim().to_string(),
                 library: Arc::clone(&state.library),

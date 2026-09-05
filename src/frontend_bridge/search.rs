@@ -63,6 +63,7 @@ struct SearchResultLimits {
 type SearchGroupMap = HashMap<String, (f32, String, String)>;
 
 struct SearchRowBuckets {
+    track_count: u32,
     track_rows: Vec<BridgeSearchResultRow>,
     album_cover_paths: HashMap<String, String>,
     artist_groups: SearchGroupMap,
@@ -71,6 +72,7 @@ struct SearchRowBuckets {
 }
 
 struct SearchRowAccumulator {
+    track_count: u32,
     roots: Vec<LibraryRoot>,
     roots_by_path: HashMap<PathBuf, PreparedSearchRoot>,
     album_cover_paths: HashMap<String, String>,
@@ -83,6 +85,7 @@ struct SearchRowAccumulator {
 impl SearchRowAccumulator {
     fn new(roots: Vec<LibraryRoot>) -> Self {
         Self {
+            track_count: 0,
             roots_by_path: roots_by_path_for_search(&roots),
             roots,
             album_cover_paths: HashMap::new(),
@@ -99,6 +102,7 @@ impl SearchRowAccumulator {
         query_terms: &[String],
     ) -> Option<BridgeSearchResultRow> {
         let context = derive_hit_context(hit, &self.roots, &self.roots_by_path)?;
+        self.track_count = self.track_count.saturating_add(1);
         let hit_path_string = hit.path.to_string_lossy().to_string();
         let hit_artist = if hit.artist.trim().is_empty() {
             context.artist_name.clone()
@@ -191,6 +195,7 @@ impl SearchRowAccumulator {
 
     fn finish(self) -> SearchRowBuckets {
         SearchRowBuckets {
+            track_count: self.track_count,
             track_rows: self.track_rows,
             album_cover_paths: self.album_cover_paths,
             artist_groups: self.artist_groups,
@@ -285,6 +290,7 @@ struct AlbumInventoryAcc {
 
 #[derive(Debug)]
 pub(super) struct SearchWorkerQuery {
+    pub(super) limit: u32,
     pub(super) seq: u32,
     pub(super) query: String,
     pub(super) library: Arc<LibrarySnapshot>,
@@ -620,6 +626,7 @@ fn empty_search_results_frame(seq: u32) -> SearchBuildOutcome {
     SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
         seq,
         rows: Vec::new(),
+        totals: [0; 3],
     })
 }
 
@@ -992,7 +999,17 @@ fn build_search_results_frame(
     if query_terms.is_empty() {
         return empty_search_results_frame(seq);
     }
-    let limits = search_result_limits(query_text);
+    let mut limits = search_result_limits(query_text);
+    if query.limit > 0 {
+        let limit = usize::try_from(query.limit)
+            .unwrap_or(2_000)
+            .clamp(20, 2_000);
+        limits = SearchResultLimits {
+            artist: limit,
+            album: limit,
+            track: limit,
+        };
+    }
     let library = query.library.as_ref();
     if library.roots.is_empty() {
         return empty_search_results_frame(seq);
@@ -1008,6 +1025,11 @@ fn build_search_results_frame(
         PreparedSearchOutcome::Hits(rows) => rows,
         PreparedSearchOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
     };
+    let totals = [
+        u32::try_from(buckets.artist_groups.len()).unwrap_or(u32::MAX),
+        u32::try_from(buckets.album_groups.len()).unwrap_or(u32::MAX),
+        buckets.track_count,
+    ];
     let rows = finalize_search_rows(
         &prepared.album_inventory,
         &limits,
@@ -1017,7 +1039,7 @@ fn build_search_results_frame(
         &buckets.album_hit_stats,
         buckets.track_rows,
     );
-    SearchBuildOutcome::Frame(BridgeSearchResultsFrame { seq, rows })
+    SearchBuildOutcome::Frame(BridgeSearchResultsFrame { seq, totals, rows })
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,6 +1268,7 @@ mod tests {
         let prepared = prepare_search_library(&snapshot);
         let (tx, rx) = crossbeam_channel::unbounded::<SearchWorkerQuery>();
         tx.send(SearchWorkerQuery {
+            limit: 0,
             seq: 99,
             query: "new".to_string(),
             library: Arc::new(snapshot),
@@ -1351,6 +1374,7 @@ mod tests {
         let mut prepared_cache = SearchWorkerPreparedCache::default();
         let outcome = build_search_results_frame(
             &SearchWorkerQuery {
+                limit: 0,
                 seq: 1,
                 query: "album".to_string(),
                 library: Arc::new(library),
@@ -1534,5 +1558,40 @@ mod tests {
             1,
         );
         assert_eq!(rows.last().expect("track result").label, "Alpha");
+    }
+    #[test]
+    fn totals_count_all_matches_and_expansion_retrieves_more_rows() {
+        let library = Arc::new(LibrarySnapshot {
+            roots: vec![library_root(&p("/music"))],
+            tracks: (0..65)
+                .map(|i| {
+                    fixture_track(
+                        &format!("Song {i:03}"),
+                        "Artist",
+                        "Album",
+                        &format!("{i:03}"),
+                    )
+                })
+                .collect(),
+            ..LibrarySnapshot::default()
+        });
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let mut cache = SearchWorkerPreparedCache::default();
+        for (limit, expected) in [(0, 20), (40, 40), (80, 65)] {
+            let SearchBuildOutcome::Frame(frame) = build_search_results_frame(
+                &SearchWorkerQuery {
+                    seq: 1,
+                    query: "song".into(),
+                    library: Arc::clone(&library),
+                    limit,
+                },
+                &mut cache,
+                &rx,
+            ) else {
+                panic!("unexpected cancellation")
+            };
+            assert_eq!(frame.totals, [0, 0, 65]);
+            assert_eq!(frame.rows.len(), expected);
+        }
     }
 }

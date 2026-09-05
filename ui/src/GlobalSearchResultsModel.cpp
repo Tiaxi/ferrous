@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "GlobalSearchResultsModel.h"
+#include <QRegularExpression>
 
 #include <algorithm>
 #include <limits>
@@ -427,4 +428,95 @@ int GlobalSearchResultsModel::nextSelectableIndex(int startIndex, int step, bool
         }
     }
     return -1;
+}
+
+void GlobalSearchResultsModel::presentSearchRows(QVector<SearchDisplayRow> rows) {
+    m_sourceSearchRows.clear();
+    for (auto &row : rows) {
+        if (row.kind == QStringLiteral("item")) m_sourceSearchRows.push_back(std::move(row));
+    }
+    rebuildSearchRows();
+}
+
+void GlobalSearchResultsModel::setResultFilter(const QString &filter) {
+    if (filter == m_resultFilter || !QStringList{"all", "artist", "album", "track"}.contains(filter)) return;
+    m_resultFilter = filter;
+    rebuildSearchRows();
+}
+
+void GlobalSearchResultsModel::rebuildSearchRows() {
+    QVector<SearchDisplayRow> candidates;
+    for (const auto &row : m_sourceSearchRows) {
+        if (m_resultFilter == QStringLiteral("all") || row.rowType == m_resultFilter) candidates.push_back(row);
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
+        if (a.score != b.score) return a.score < b.score;
+        // Prefer an exact track when it shares a name with its parent entities.
+        if (a.rowType != b.rowType) return a.rowType == "track" || (a.rowType == "album" && b.rowType == "artist");
+        return QString::compare(a.label, b.label, Qt::CaseInsensitive) < 0;
+    });
+    QVector<SearchDisplayRow> display;
+    const auto section = [&display](const QString &title) {
+        SearchDisplayRow header;
+        header.kind = QStringLiteral("section");
+        header.sectionTitle = title;
+        display.push_back(std::move(header));
+    };
+    int bestCount = 0;
+    if (m_resultFilter == QStringLiteral("all") && !candidates.isEmpty()) {
+        section(QStringLiteral("Best matches"));
+        bestCount = std::min(3, static_cast<int>(candidates.size()));
+        for (int i = 0; i < bestCount; ++i) display.push_back(candidates[i]);
+    }
+    for (const auto &type : {QStringLiteral("artist"), QStringLiteral("album"), QStringLiteral("track")}) {
+        bool started = false;
+        for (qsizetype i = bestCount; i < candidates.size(); ++i) {
+            if (candidates[i].rowType != type) continue;
+            if (!started) {
+                section(type == "artist" ? QStringLiteral("Artists") : type == "album" ? QStringLiteral("Albums") : QStringLiteral("Tracks"));
+                started = true;
+            }
+            display.push_back(candidates[i]);
+        }
+    }
+    replaceRowsBatched(std::move(display));
+    emit searchRowsChanged();
+}
+
+QString GlobalSearchResultsModel::highlightText(const QString &text, const QString &query) const {
+    const auto fold = [](const QString &value) {
+        QString result;
+        for (auto ch : value.normalized(QString::NormalizationForm_KD).toCaseFolded()) {
+            if (ch.category() != QChar::Mark_NonSpacing && ch.category() != QChar::Mark_SpacingCombining
+                && ch.category() != QChar::Mark_Enclosing) result += ch;
+        }
+        return result;
+    };
+    QString normalized;
+    QVector<qsizetype> positions;
+    for (qsizetype i = 0; i < text.size(); ++i) {
+        const auto fragment = fold(text.mid(i, 1));
+        normalized += fragment;
+        for (qsizetype j = 0; j < fragment.size(); ++j) positions.push_back(i);
+    }
+    QVector<bool> matched(text.size(), false);
+    for (const auto &rawTerm : query.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts)) {
+        const auto term = fold(rawTerm);
+        if (term.isEmpty()) continue;
+        qsizetype offset = 0;
+        while ((offset = normalized.indexOf(term, offset)) >= 0) {
+            const auto end = offset + term.size();
+            const auto originalEnd = end < positions.size() ? positions[end] : text.size();
+            for (auto i = positions[offset]; i < originalEnd; ++i) matched[i] = true;
+            offset = end;
+        }
+    }
+    QString result;
+    bool bold = false;
+    for (qsizetype i = 0; i < text.size(); ++i) {
+        if (matched[i] != bold) { bold = matched[i]; result += bold ? "<b>" : "</b>"; }
+        result += text.mid(i, 1).toHtmlEscaped();
+    }
+    if (bold) result += "</b>";
+    return result;
 }

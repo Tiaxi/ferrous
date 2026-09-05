@@ -10,7 +10,7 @@ Ferrous is a personal project built for my own daily listening. It pairs a Rust 
 
 **Playback** — GStreamer-backed engine with seeking, gapless queue transitions, repeat, shuffle, and volume control.
 
-**Library** — Folder-first browsing that mirrors your filesystem. Add one or more root directories, and Ferrous indexes them into a navigable tree with artist, album, and track grouping. Global search spans the entire library.
+**Library** — Folder-first browsing that mirrors your filesystem. Add one or more root directories, and Ferrous indexes them into a navigable tree with artist, album, and track grouping. [Global search](docs/SEARCH.md) spans the entire library, with ranked results and artist/album/track filters.
 
 **Queue** — Open files, add folders, import M3U playlists, drag-to-reorder, and automatic session restore on launch.
 

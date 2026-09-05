@@ -165,6 +165,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int globalSearchTrackCount READ globalSearchTrackCount NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(quint32 globalSearchSeq READ globalSearchSeq NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(bool globalSearchModelRetained READ globalSearchModelRetained NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(bool globalSearchBusy MEMBER m_globalSearchBusy NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(QVariantList globalSearchTotals MEMBER m_globalSearchTotals NOTIFY globalSearchResultsChanged)
+    Q_PROPERTY(bool globalSearchCanExpand READ globalSearchCanExpand NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QObject* globalSearchModel READ globalSearchModel CONSTANT)
     Q_PROPERTY(QVariantList itunesArtworkResults READ itunesArtworkResults NOTIFY itunesArtworkChanged)
     Q_PROPERTY(bool itunesArtworkLoading READ itunesArtworkLoading NOTIFY itunesArtworkChanged)
@@ -342,6 +345,8 @@ public:
     Q_INVOKABLE void showTrackInLibrary(const QString &path);
     Q_INVOKABLE void setLibrarySortMode(int mode);
     Q_INVOKABLE void setGlobalSearchQuery(const QString &query);
+    Q_INVOKABLE void expandGlobalSearch();
+    bool globalSearchCanExpand() const;
     Q_INVOKABLE void searchCurrentTrackArtworkSuggestions();
     Q_INVOKABLE void clearItunesArtworkSuggestions();
     Q_INVOKABLE QVariantMap itunesArtworkResultAt(int index) const;
@@ -394,6 +399,7 @@ private:
 
     struct SearchWorkerOutputFrame {
         quint32 seq{0};
+        QVariantList totals;
         QVariantList artistRows;
         QVariantList albumRows;
         QVariantList trackRows;
@@ -675,6 +681,11 @@ private:
     int m_globalSearchTrackCount{0};
     quint32 m_globalSearchSeq{0};
     bool m_globalSearchModelRetained{false};
+    bool m_globalSearchBusy{false};
+    QVariantList m_globalSearchTotals{0, 0, 0};
+    quint32 m_globalSearchLimit{0};
+    quint32 m_lastGlobalSearchLimitSent{0};
+    quint32 m_deferredSearchSeq{0};
     GlobalSearchResultsModel m_globalSearchModel;
     quint32 m_nextGlobalSearchSeq{1};
     quint32 m_latestGlobalSearchSeqSent{0};

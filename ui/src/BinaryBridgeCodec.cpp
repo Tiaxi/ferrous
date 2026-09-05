@@ -586,11 +586,12 @@ QByteArray encodeCommandLibraryViewState(
     return finalizeCommand(cmdId, payload);
 }
 
-QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query) {
+QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query, quint32 limit) {
     QByteArray payload;
     payload.reserve(8 + query.size());
     appendLe<quint32>(payload, seq);
     appendUtf8U16(payload, query);
+    appendLe<quint32>(payload, limit);
     return finalizeCommand(cmdId, payload);
 }
 
@@ -780,13 +781,21 @@ bool decodeSearchResultsFrame(
         }
         return false;
     }
-    if (version != 2) {
+    if (version != 2 && version != 3) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("unsupported search frame version: %1").arg(version);
         }
         return false;
     }
 
+    if (version == 3) {
+        for (auto &total : out->totals) {
+            if (!reader.readU32(&total)) {
+                if (errorMessage) *errorMessage = QStringLiteral("search totals truncated");
+                return false;
+            }
+        }
+    }
     QVector<DecodedSearchRow> rows;
     rows.reserve(static_cast<int>(rowCount));
     for (quint16 i = 0; i < rowCount; ++i) {
@@ -858,6 +867,7 @@ bool decodeSearchResultsFrame(
         row.sectionKey = sectionKey;
         row.trackKey = trackKey;
         row.trackPath = trackPath;
+        if (version == 2 && rowType >= 1 && rowType <= 3) ++out->totals[rowType - 1];
         rows.push_back(std::move(row));
     }
 

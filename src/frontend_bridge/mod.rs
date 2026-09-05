@@ -188,6 +188,7 @@ pub enum BridgeLibraryCommand {
         anchor_offset: f32,
     },
     SetSearchQuery {
+        limit: u32,
         seq: u32,
         query: String,
     },
@@ -330,6 +331,7 @@ pub enum BridgeEvent {
 #[derive(Debug, Clone)]
 pub struct BridgeSearchResultsFrame {
     pub seq: u32,
+    pub totals: [u32; 3],
     pub rows: Vec<BridgeSearchResultRow>,
 }
 
@@ -1242,6 +1244,7 @@ impl BridgeLoopRuntime {
             self.handle_library_refresh(urgency);
             if !self.state.library.scan_in_progress {
                 let _ = self.search_query_tx.send(SearchWorkerQuery {
+                    limit: 0,
                     seq: 0,
                     query: String::new(),
                     library: Arc::clone(&self.state.library),
