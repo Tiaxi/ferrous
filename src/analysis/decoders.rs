@@ -24,7 +24,7 @@ use crate::raw_audio::{is_dts_file, register_raw_surround_typefinders};
 #[cfg(feature = "gst")]
 use gstreamer_app as gst_app;
 
-use super::fft::{ensure_sample_buffer, waveform_sample_rate_divisor};
+use super::fft::ensure_sample_buffer;
 use super::{f64_to_u64_saturating, usize_to_f32_approx, SpectrogramViewMode, REFERENCE_HOP};
 
 #[cfg(feature = "profiling-logs")]
@@ -281,8 +281,7 @@ pub(super) fn open_symphonia_file(path: &Path) -> Option<SymphoniaFile> {
         .codec_params
         .n_frames
         .unwrap_or(native_sample_rate * 300);
-    let divisor = waveform_sample_rate_divisor(native_sample_rate);
-    let effective_frames = n_frames / divisor;
+    let effective_frames = n_frames;
     let total_columns =
         u32::try_from(((effective_frames / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
             .unwrap_or(u32::MAX);
@@ -395,8 +394,7 @@ fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32
         .query_duration::<gst::ClockTime>()
         .map(gst::ClockTime::nseconds);
     let total_frames = duration_ns.map_or(rate * 300, |ns| ns * rate / 1_000_000_000);
-    let divisor = waveform_sample_rate_divisor(rate);
-    let effective_frames = total_frames / divisor;
+    let effective_frames = total_frames;
     let total_columns =
         u32::try_from(((effective_frames / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
             .unwrap_or(u32::MAX);
@@ -440,17 +438,17 @@ pub(super) fn deinterleave_samples(
     frames: usize,
     decoded_channels: usize,
     channel_count: usize,
-    divisor: usize,
-    effective_frames: usize,
     view_mode: SpectrogramViewMode,
 ) -> Vec<Vec<f32>> {
-    let mut per_channel: Vec<Vec<f32>> = vec![Vec::with_capacity(effective_frames); channel_count];
+    // Preserve the native sample grid. Skipping samples here aliases ultrasonic
+    // energy into the audible spectrum and loses phase at packet boundaries.
+    let mut per_channel: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); channel_count];
 
     match view_mode {
         SpectrogramViewMode::Downmix => {
-            let mut downmixed = Vec::with_capacity(effective_frames);
+            let mut downmixed = Vec::with_capacity(frames);
             let inv_channels = 1.0 / usize_to_f32_approx(decoded_channels);
-            for frame_idx in (0..frames).step_by(divisor) {
+            for frame_idx in 0..frames {
                 let base = frame_idx * decoded_channels;
                 let mut sum = 0.0f32;
                 for ch in 0..decoded_channels {
@@ -461,7 +459,7 @@ pub(super) fn deinterleave_samples(
             per_channel[0] = downmixed;
         }
         SpectrogramViewMode::PerChannel => {
-            for frame_idx in (0..frames).step_by(divisor) {
+            for frame_idx in 0..frames {
                 let base = frame_idx * decoded_channels;
                 for ch in 0..channel_count.min(decoded_channels) {
                     per_channel[ch].push(samples[base + ch]);
@@ -558,6 +556,40 @@ mod tests {
             .set_state(gst::State::Null)
             .expect("cancel parked decoder");
         assert_eq!(pipeline.current_state(), gst::State::Null);
+    }
+
+    #[test]
+    fn native_rate_spectra_preserve_ultrasonic_tones_and_channel_samples() {
+        for rate in [88_200, 96_000, 192_000, 384_000] {
+            let frequency = f64::from(rate) * 0.3125;
+            let mono: Vec<f32> = (0_u16..8192)
+                .map(|frame| {
+                    (std::f64::consts::TAU * frequency * f64::from(frame) / f64::from(rate)).sin()
+                        as f32
+                })
+                .collect();
+            let stereo: Vec<f32> = mono.iter().flat_map(|&value| [value, -value]).collect();
+            let split =
+                deinterleave_samples(&stereo, mono.len(), 2, 2, SpectrogramViewMode::PerChannel);
+            assert_eq!(split[0], mono);
+            assert_eq!(
+                split[1],
+                mono.iter().map(|value| -value).collect::<Vec<_>>()
+            );
+            let mixed =
+                deinterleave_samples(&stereo, mono.len(), 2, 1, SpectrogramViewMode::Downmix);
+            assert!(mixed[0].iter().all(|value| value.abs() < f32::EPSILON));
+            let mut stft = super::super::fft::StftComputer::new(8192, 1024);
+            stft.enqueue_samples(&split[0], rate);
+            let rows = stft.take_rows(1);
+            let peak = rows[0]
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .expect("spectrum")
+                .0;
+            assert_eq!(peak, 2560, "native spectrum at {rate} Hz");
+        }
     }
 
     #[test]

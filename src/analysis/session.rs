@@ -12,7 +12,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use super::decoders::{
     deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource,
 };
-use super::fft::{waveform_sample_rate_divisor, PeakHoldResampler, StftComputer};
+use super::fft::{PeakHoldResampler, StftComputer};
 use super::{
     f64_to_u64_saturating, AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode,
     SpectrogramViewMode, REFERENCE_HOP,
@@ -396,9 +396,7 @@ fn centered_staging_decode(
         return;
     };
 
-    let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
-    let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
-    let effective_rate = u32::try_from(native_sample_rate / divisor_u64.max(1)).unwrap_or(48_000);
+    let effective_rate = u32::try_from(native_sample_rate).unwrap_or(48_000);
     let channel_count = match view_mode {
         SpectrogramViewMode::Downmix => 1,
         SpectrogramViewMode::PerChannel => native_channels,
@@ -456,14 +454,12 @@ fn centered_staging_decode(
             None => break, // EOF
         };
 
-        let effective_frames = audio.frames / divisor;
+        let effective_frames = audio.frames;
         let per_channel = deinterleave_samples(
             &audio.samples,
             audio.frames,
             audio.channels,
             channel_count,
-            divisor,
-            effective_frames,
             view_mode,
         );
 
@@ -721,7 +717,6 @@ struct SpectrogramSessionState {
     total_columns_estimate: u32,
     effective_rate: u32,
     cols_per_second: f64,
-    divisor: usize,
 
     // Position tracking
     target_position_seconds: f64,
@@ -843,9 +838,7 @@ fn run_spectrogram_session(
         _start.elapsed().as_secs_f64() * 1000.0,
     );
 
-    let divisor = usize::try_from(waveform_sample_rate_divisor(native_sample_rate)).unwrap_or(1);
-    let divisor_u64 = u64::try_from(divisor).unwrap_or(1);
-    let effective_rate = u32::try_from(native_sample_rate / divisor_u64.max(1)).unwrap_or(48_000);
+    let effective_rate = u32::try_from(native_sample_rate).unwrap_or(48_000);
 
     publish_track_duration_ms(total_columns, effective_rate, track_duration_ms_out);
 
@@ -922,7 +915,6 @@ fn run_spectrogram_session(
         total_columns_estimate,
         effective_rate,
         cols_per_second,
-        divisor,
         target_position_seconds,
         suppress_backward_seek: false,
         columns_produced: start_column,
@@ -1003,9 +995,7 @@ fn run_spectrogram_session(
                         SpectrogramViewMode::Downmix => 1,
                         SpectrogramViewMode::PerChannel => *ch,
                     };
-                    let divisor_u64 = u64::try_from(session.divisor).unwrap_or(1);
-                    *sr == u64::from(session.effective_rate) * divisor_u64
-                        && eff_ch == session.channel_count
+                    *sr == u64::from(session.effective_rate) && eff_ch == session.channel_count
                 });
                 if compatible {
                     let (new_source, _, _, new_est) = opened.unwrap();
@@ -1274,15 +1264,13 @@ fn session_decode_loop(
         session.packet_counter += 1;
 
         let frames = audio.frames;
-        let effective_frames = frames / session.divisor;
+        let effective_frames = frames;
 
         let per_channel = deinterleave_samples(
             &audio.samples,
             frames,
             audio.channels,
             session.channel_count,
-            session.divisor,
-            effective_frames,
             session.view_mode,
         );
 
@@ -1559,9 +1547,7 @@ fn handle_session_seek(
         usize_to_f64_approx(session.fft_size) / f64::from(session.effective_rate);
     let actual_seek_seconds = (position_seconds - fft_warmup_seconds).max(0.0);
 
-    // Compute native rate from effective rate × divisor.
-    let native_rate =
-        u64::from(session.effective_rate) * u64::try_from(session.divisor).unwrap_or(1);
+    let native_rate = u64::from(session.effective_rate);
     source.seek(actual_seek_seconds, native_rate);
 
     // Reset STFT state.
@@ -1845,11 +1831,9 @@ fn maybe_update_columns_estimate(session: &mut SpectrogramSessionState, source: 
     if !session.gst_duration_requeried && session.packet_counter >= 20 {
         session.gst_duration_requeried = true;
         if let Some(ns) = source.query_duration_ns() {
-            let rate =
-                u64::from(session.effective_rate) * u64::try_from(session.divisor).unwrap_or(1);
+            let rate = u64::from(session.effective_rate);
             let total_frames = ns * rate / 1_000_000_000;
-            let divisor = waveform_sample_rate_divisor(rate);
-            let effective = total_frames / divisor;
+            let effective = total_frames;
             let new_est = duration_requery_estimate_for_session(effective, session.effective_hop);
             if new_est > session.total_columns_estimate {
                 profile_eprintln!(
@@ -2087,7 +2071,6 @@ mod tests {
             total_columns_estimate: 8_739,
             effective_rate: 48_000,
             cols_per_second: 46.875,
-            divisor: 1,
             target_position_seconds: 2.0,
             suppress_backward_seek: false,
             columns_produced: 256,
@@ -2195,7 +2178,6 @@ mod tests {
             total_columns_estimate: 8_739,
             effective_rate: 48_000,
             cols_per_second: 46.875,
-            divisor: 1,
             target_position_seconds: 2.0,
             suppress_backward_seek: false,
             columns_produced: 400,
@@ -2246,7 +2228,6 @@ mod tests {
             total_columns_estimate: 8_739,
             effective_rate: 48_000,
             cols_per_second: 46.875,
-            divisor: 1,
             target_position_seconds: 2.0,
             suppress_backward_seek: false,
             columns_produced: 320,
@@ -2305,7 +2286,6 @@ mod tests {
             total_columns_estimate: 8_739,
             effective_rate: 48_000,
             cols_per_second: 46.875,
-            divisor: 1,
             target_position_seconds: 2.0,
             suppress_backward_seek: false,
             columns_produced: 320,
@@ -2356,7 +2336,6 @@ mod tests {
             total_columns_estimate: 8_739,
             effective_rate: 48_000,
             cols_per_second: 46.875,
-            divisor: 1,
             target_position_seconds: 2.0,
             suppress_backward_seek: false,
             columns_produced: 320,
@@ -2438,7 +2417,6 @@ mod tests {
             total_columns_estimate: 8_739,
             effective_rate: 48_000,
             cols_per_second: 46.875,
-            divisor: 1,
             target_position_seconds: 2.0,
             suppress_backward_seek: false,
             columns_produced: 256,
