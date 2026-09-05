@@ -27,6 +27,7 @@ mod commands;
 mod config;
 mod events;
 pub mod ffi;
+mod imports;
 pub mod library_tree;
 mod queue;
 mod search;
@@ -662,6 +663,7 @@ impl FrontendBridgeHandle {
 }
 
 struct BridgeLoopRuntime {
+    imports: imports::ImportWorker,
     analysis: AnalysisEngine,
     analysis_rx: Receiver<AnalysisEvent>,
     playback: PlaybackEngine,
@@ -739,6 +741,7 @@ impl SnapshotUrgency {
 }
 
 enum BridgeLoopWake {
+    Import(imports::ImportResult),
     Command(BridgeCommand),
     Playback(PlaybackEvent),
     Analysis(AnalysisEvent),
@@ -798,6 +801,7 @@ impl BridgeLoopRuntime {
         let paused_snapshot_interval =
             env_duration_ms("FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS", 333, 125, 1000);
         Self {
+            imports: imports::ImportWorker::new(),
             analysis,
             analysis_rx,
             playback,
@@ -879,6 +883,7 @@ impl BridgeLoopRuntime {
     fn wait_for_wake(&mut self, cmd_rx: &Receiver<BridgeCommand>) -> BridgeLoopWake {
         let wake_delay = self.next_wake_delay();
         select! {
+            recv(&self.imports.results) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Import),
             recv(cmd_rx) -> msg => {
                 match msg {
                     Ok(cmd) => BridgeLoopWake::Command(cmd),
@@ -994,6 +999,7 @@ impl BridgeLoopRuntime {
 
     fn handle_wake(&mut self, wake: BridgeLoopWake, event_tx: &Sender<BridgeEvent>) {
         let mut urgency = match wake {
+            BridgeLoopWake::Import(result) => self.apply_import_result(result, event_tx),
             BridgeLoopWake::Command(cmd) => self.handle_command(cmd, event_tx),
             BridgeLoopWake::Playback(event) => self.handle_playback_event(event),
             BridgeLoopWake::Analysis(event) => self.handle_analysis_event(event, event_tx),
@@ -1018,11 +1024,58 @@ impl BridgeLoopRuntime {
         self.maybe_emit_pending_snapshot(event_tx);
     }
 
+    fn apply_import_result(
+        &mut self,
+        result: imports::ImportResult,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
+        if !self.imports.is_current(&result) {
+            return SnapshotUrgency::None;
+        }
+        if let Some(warning) = commands::format_import_warning(
+            if result.replace { "open" } else { "append" },
+            &result.outcome,
+        ) {
+            let _ = try_send_event(event_tx, BridgeEvent::Error(warning));
+        }
+        if result.outcome.tracks.is_empty() {
+            return SnapshotUrgency::None;
+        }
+        let command = if result.replace {
+            BridgeQueueCommand::Replace {
+                tracks: result.outcome.tracks,
+                autoplay: true,
+            }
+        } else {
+            BridgeQueueCommand::Append(result.outcome.tracks)
+        };
+        if queue::handle_queue_command(
+            command,
+            &mut self.state,
+            &self.playback,
+            &self.external_queue_details_tx,
+            event_tx,
+        ) {
+            self.flags.session_dirty = true;
+            self.snapshot_plan.include_queue_in_next_snapshot = true;
+            SnapshotUrgency::Immediate
+        } else {
+            SnapshotUrgency::None
+        }
+    }
+
     fn handle_command(
         &mut self,
         cmd: BridgeCommand,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
+        if let Some(result) = self.imports.request(&cmd) {
+            if let Err(error) = result {
+                let _ = try_send_event(event_tx, BridgeEvent::Error(error));
+            }
+            return SnapshotUrgency::None;
+        }
+
         let session_only = matches!(
             &cmd,
             BridgeCommand::Library(BridgeLibraryCommand::SetViewState { .. })
