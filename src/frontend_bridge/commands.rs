@@ -962,9 +962,7 @@ pub(super) fn sync_queue_details(
     let mut changed = false;
 
     let previous_len = state.queue_details.len();
-    state
-        .queue_details
-        .retain(|path, _| queue_paths.contains(path.as_path()));
+    Arc::make_mut(&mut state.queue_details).retain(|path, _| queue_paths.contains(path.as_path()));
     changed |= state.queue_details.len() != previous_len;
     state
         .queue_detail_fingerprints
@@ -976,19 +974,25 @@ pub(super) fn sync_queue_details(
 
     for path in &state.queue {
         if library_paths.contains(path.as_path()) {
-            changed |= state.queue_details.remove(path).is_some();
+            changed |= Arc::make_mut(&mut state.queue_details)
+                .remove(path)
+                .is_some();
             state.queue_detail_fingerprints.remove(path);
             state.pending_queue_detail_fingerprints.remove(path);
             continue;
         }
         if !path.is_file() || !is_supported_audio(path) {
-            changed |= state.queue_details.remove(path).is_some();
+            changed |= Arc::make_mut(&mut state.queue_details)
+                .remove(path)
+                .is_some();
             state.queue_detail_fingerprints.remove(path);
             state.pending_queue_detail_fingerprints.remove(path);
             continue;
         }
         let Some(fingerprint) = track_file_fingerprint(path) else {
-            changed |= state.queue_details.remove(path).is_some();
+            changed |= Arc::make_mut(&mut state.queue_details)
+                .remove(path)
+                .is_some();
             state.queue_detail_fingerprints.remove(path);
             state.pending_queue_detail_fingerprints.remove(path);
             continue;
@@ -1000,7 +1004,9 @@ pub(super) fn sync_queue_details(
         }
 
         if cached_fingerprint.is_some() && cached_fingerprint != Some(fingerprint) {
-            changed |= state.queue_details.remove(path).is_some();
+            changed |= Arc::make_mut(&mut state.queue_details)
+                .remove(path)
+                .is_some();
             state.queue_detail_fingerprints.remove(path);
         }
 
@@ -1019,7 +1025,7 @@ pub(super) fn sync_queue_details(
                 .insert(path.clone(), fingerprint);
             state.pending_queue_detail_fingerprints.remove(&path);
             if needs_update {
-                state.queue_details.insert(path, indexed.clone());
+                Arc::make_mut(&mut state.queue_details).insert(path, indexed.clone());
                 changed = true;
             }
             continue;
@@ -1177,7 +1183,9 @@ fn update_queue_track_details(
 
     for (path, indexed) in indexed_by_path {
         if library_paths.contains(path.as_path()) {
-            changed |= state.queue_details.remove(path).is_some();
+            changed |= Arc::make_mut(&mut state.queue_details)
+                .remove(path)
+                .is_some();
             state.queue_detail_fingerprints.remove(path);
             state.pending_queue_detail_fingerprints.remove(path);
             continue;
@@ -1187,7 +1195,7 @@ fn update_queue_track_details(
             .get(path)
             .is_none_or(|existing| existing != indexed);
         if needs_update {
-            state.queue_details.insert(path.clone(), indexed.clone());
+            Arc::make_mut(&mut state.queue_details).insert(path.clone(), indexed.clone());
             changed = true;
         }
         if let Some(fingerprint) = track_file_fingerprint(path) {
@@ -1357,7 +1365,7 @@ fn apply_renamed_queue_paths(
         }
     }
     for (old_path, new_path) in renames {
-        if let Some(details) = state.queue_details.remove(old_path) {
+        if let Some(details) = Arc::make_mut(&mut state.queue_details).remove(old_path) {
             if state
                 .library
                 .tracks
@@ -1366,7 +1374,7 @@ fn apply_renamed_queue_paths(
             {
                 changed = true;
             } else {
-                state.queue_details.insert(
+                Arc::make_mut(&mut state.queue_details).insert(
                     new_path.clone(),
                     indexed_by_path.get(new_path).cloned().unwrap_or(details),
                 );
@@ -1749,7 +1757,7 @@ mod tests {
 
         let mut state = BridgeState::default();
         state.queue = vec![track.clone()];
-        state.queue_details.insert(
+        Arc::make_mut(&mut state.queue_details).insert(
             track.clone(),
             IndexedTrack {
                 title: "Old".to_string(),
