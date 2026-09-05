@@ -39,6 +39,8 @@ Item {
         anchors.fill: parent
         sourcePath: root.visible ? root.uiBridge.currentTrackPath : ""
         overviewData: root.uiBridge.waveformPeaksPacked
+        overviewCoverageSeconds: root.uiBridge.waveformCoverageSeconds
+        overviewComplete: root.uiBridge.waveformComplete
         positionSeconds: root.positionSeconds
         durationSeconds: root.uiBridge.durationSeconds
         playing: (root.uiBridge.playbackState || "") === "Playing"
