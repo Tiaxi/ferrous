@@ -38,6 +38,14 @@ macro_rules! profile_eprintln {
 // Keep default 2048-FFT stereo centered chunks at <=64 columns, about 128 KiB.
 const SPECTROGRAM_CHUNK_BYTE_BUDGET: usize = 64 * 1_025 * 2;
 
+// Gapless staging is a prefix, not a whole-track cache. Its receiver is not
+// consumed until handoff, so channel backpressure would prevent cancellation.
+const CENTERED_STAGING_BYTE_BUDGET: usize = 8 * 1024 * 1024;
+
+fn staging_column_limit(bins: usize, channels: usize) -> u64 {
+    usize_to_u64(CENTERED_STAGING_BYTE_BUDGET / bins.saturating_mul(channels).max(1))
+}
+
 fn clamp_to_u8(v: usize) -> u8 {
     u8::try_from(v).unwrap_or(u8::MAX)
 }
@@ -269,6 +277,7 @@ struct StagingChunkState {
     effective_rate: u32,
     effective_hop: usize,
     total_columns_estimate: u32,
+    max_columns: u64,
     // Mutable accumulation state.
     columns_produced: u64,
     total_covered_samples: u64,
@@ -354,13 +363,16 @@ fn append_quantized_spectrum(chunk: &mut Vec<u8>, row: &[f32], bins: usize, fft_
 /// Drain STFT rows from the staging pipeline, quantize, and emit
 /// chunks via the channel.  Extracted from `centered_staging_decode`
 /// to stay within clippy's line limit.
-/// Returns `true` to continue decoding, `false` if the receiver dropped.
+/// Returns `false` once the prefix budget is exhausted or the receiver drops.
 fn staging_drain_stft_rows(
     stfts: &mut [StftComputer],
     resamplers: &mut [PeakHoldResampler],
     state: &mut StagingChunkState,
     tx: &Sender<PrecomputedSpectrogramChunk>,
 ) -> bool {
+    if state.columns_produced >= state.max_columns {
+        return false;
+    }
     while let Some(emitted) = append_stft_column(
         stfts,
         resamplers,
@@ -374,7 +386,8 @@ fn staging_drain_stft_rows(
         state.chunk_columns += 1;
         state.columns_produced += 1;
 
-        if state.chunk_columns >= state.target_chunk_columns {
+        let prefix_complete = state.columns_produced >= state.max_columns;
+        if state.chunk_columns >= state.target_chunk_columns || prefix_complete {
             let coverage =
                 seconds_from_frames(state.total_covered_samples, u64::from(state.effective_rate));
             let chunk = PrecomputedSpectrogramChunk {
@@ -404,6 +417,9 @@ fn staging_drain_stft_rows(
                 state.bins_per_column,
                 state.channel_count,
             );
+        }
+        if prefix_complete {
+            return false;
         }
     }
     true // ok, continue decoding
@@ -454,6 +470,7 @@ fn centered_staging_decode(
         effective_rate,
         effective_hop,
         total_columns_estimate,
+        max_columns: staging_column_limit(bins_per_column, channel_count),
         columns_produced: 0,
         total_covered_samples: 0,
         chunk_buf: Vec::new(),
@@ -508,7 +525,7 @@ fn centered_staging_decode(
         }
 
         if !staging_drain_stft_rows(&mut stfts, &mut resamplers, &mut state, tx) {
-            return; // receiver dropped
+            return; // prefix budget exhausted or receiver dropped
         }
     }
 
@@ -3142,84 +3159,82 @@ mod tests {
     }
 
     #[test]
-    fn centered_staging_chunk_indices_are_zero_based_and_monotonic() {
-        // Exercises the same STFT -> resampler -> chunk indexing logic used
-        // by centered_staging_decode, verifying 0-based start indices and
-        // placeholder token 0.
+    fn centered_staging_stops_at_byte_budget_with_partial_batch() {
         let fft_size = 512;
-        let hop_size = 128;
-        let bins_per_column = (fft_size / 2) + 1;
-        let output_interval = output_interval_for_hop(hop_size, 1.0);
-
-        let mut stft = StftComputer::new(fft_size, hop_size);
-        let mut resampler = PeakHoldResampler::new(output_interval);
-
-        // Feed a 440 Hz sine wave, enough for several output columns.
-        let sample_rate = 48_000u32;
-        let samples: Vec<f32> = (0u32..32_768)
-            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * (i as f32 / sample_rate as f32)).sin())
-            .collect();
-        stft.enqueue_samples(&samples);
-
-        // output_interval >= 1.0 and hop_size is small, so the product fits.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let effective_hop = (hop_size as f64 * output_interval).round() as usize;
-
-        let mut columns_produced: u64 = 0;
-        let mut chunk_start_index: u64 = 0;
-        let mut chunk_columns: u16 = 0;
-        let mut target_chunk_columns: u16 = 1;
-        let mut chunks: Vec<PrecomputedSpectrogramChunk> = Vec::new();
-
-        loop {
-            let row = stft.take_rows(1);
-            if row.is_empty() {
-                break;
-            }
-            let row = row.into_iter().next().unwrap();
-            let maybe_dec = resampler.push(&row);
-            if maybe_dec.is_none() {
-                continue;
-            }
-
-            chunk_columns += 1;
-            columns_produced += 1;
-
-            if chunk_columns >= target_chunk_columns {
-                chunks.push(PrecomputedSpectrogramChunk {
-                    track_token: 0,
-                    generation: 0,
-                    columns_u8: vec![0u8; usize::from(chunk_columns) * bins_per_column],
-                    bins_per_column: clamp_to_u16(bins_per_column),
-                    column_count: chunk_columns,
-                    channel_count: 1,
-                    start_column_index: u64_to_u32_saturating(chunk_start_index),
-                    total_columns_estimate: 1000,
-                    sample_rate_hz: sample_rate,
-                    hop_size: clamp_to_u16(effective_hop),
-                    coverage_seconds: 0.0,
-                    complete: false,
-                    buffer_reset: false,
-                    clear_history: false,
-                });
-                chunk_start_index = columns_produced;
-                chunk_columns = 0;
-                target_chunk_columns = next_target_chunk_columns(
-                    target_chunk_columns,
-                    SpectrogramDisplayMode::Centered,
+        let bins = fft_size / 2 + 1;
+        // A limit of three ends inside the normal 1, 2, 4... batching sequence
+        // when starting with a four-column batch. Keep the receiver unread to
+        // reproduce predecode waiting for a gapless handoff.
+        for (limit, target) in [(3, 4), (9, 1)] {
+            let mut stfts: Vec<_> = (0..2)
+                .map(|_| {
+                    let mut stft = StftComputer::new(fft_size, 128);
+                    stft.enqueue_samples(&vec![0.25; 32_768]);
+                    stft
+                })
+                .collect();
+            let mut resamplers: Vec<_> = (0..2).map(|_| PeakHoldResampler::new(1.0)).collect();
+            let mut state = StagingChunkState {
+                fft_size,
+                bins_per_column: bins,
+                channel_count: 2,
+                effective_rate: 48_000,
+                effective_hop: 128,
+                total_columns_estimate: 1_000,
+                max_columns: limit,
+                columns_produced: 0,
+                total_covered_samples: 32_768,
+                chunk_buf: Vec::new(),
+                chunk_columns: 0,
+                chunk_start_index: 0,
+                target_chunk_columns: target,
+            };
+            let (tx, rx) = unbounded();
+            assert!(!staging_drain_stft_rows(
+                &mut stfts,
+                &mut resamplers,
+                &mut state,
+                &tx,
+            ));
+            assert!(stfts.iter().all(StftComputer::has_row));
+            assert!(state.take_partial_chunk().is_none());
+            assert!(!staging_drain_stft_rows(
+                &mut stfts,
+                &mut resamplers,
+                &mut state,
+                &tx,
+            ));
+            let mut next = 0;
+            let mut bytes = 0;
+            for chunk in rx.try_iter() {
+                assert_eq!(u64::from(chunk.start_column_index), next);
+                assert_eq!(chunk.track_token, 0);
+                assert!(!chunk.complete, "a staged prefix is not EOF");
+                assert_eq!(
+                    chunk.columns_u8.len(),
+                    usize::from(chunk.column_count) * bins * 2
                 );
+                next += u64::from(chunk.column_count);
+                bytes += chunk.columns_u8.len();
+            }
+            assert_eq!(next, limit);
+            assert_eq!(usize_to_u64(bytes), limit * usize_to_u64(bins * 2));
+        }
+    }
+
+    #[test]
+    fn centered_staging_budget_accounts_for_fft_and_all_channels() {
+        for bins in [257, 1_025, 4_097] {
+            for channels in [1, 2, 8, 255] {
+                let limit = staging_column_limit(bins, channels);
+                let bytes_per_column = usize_to_u64(bins * channels);
+                let budget = usize_to_u64(CENTERED_STAGING_BYTE_BUDGET);
+                assert!(limit > 0);
+                assert!(limit * bytes_per_column <= budget);
+                assert!((limit + 1) * bytes_per_column > budget);
             }
         }
-
-        assert!(chunks.len() >= 2, "should produce multiple chunks");
-        // First chunk starts at index 0.
-        assert_eq!(chunks[0].start_column_index, 0);
-        assert_eq!(chunks[0].track_token, 0);
-        // Indices are monotonically increasing.
-        for i in 1..chunks.len() {
-            assert!(chunks[i].start_column_index > chunks[i - 1].start_column_index);
-            assert_eq!(chunks[i].track_token, 0);
-        }
+        assert_eq!(staging_column_limit(usize::MAX, 2), 0);
     }
 
     /// Simulates a Symphonia source for tests that need `maybe_update_columns_estimate`.
