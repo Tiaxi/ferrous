@@ -443,7 +443,15 @@ fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32
     gst::init().ok()?;
     register_raw_surround_typefinders();
 
-    let pipeline = gst::Pipeline::new();
+    open_gstreamer_pipeline(path, gst::Pipeline::new())
+}
+
+#[cfg(feature = "gst")]
+fn open_gstreamer_pipeline(
+    path: &Path,
+    pipeline: gst::Pipeline,
+) -> Option<(AudioFrameSource, u64, usize, u32)> {
+    let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     let src = gst::ElementFactory::make("filesrc").build().ok()?;
     src.set_property("location", path.to_string_lossy().to_string());
 
@@ -520,6 +528,7 @@ fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32
         path: path.to_path_buf(),
     };
 
+    shutdown.disarm(); // AudioFrameSource::drop now owns pipeline shutdown.
     Some((source, rate, channels, total_columns))
 }
 
@@ -590,6 +599,28 @@ pub(super) fn deinterleave_samples(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn failed_gstreamer_open_stops_pipeline_and_success_transfers_shutdown() {
+        gst::init().expect("gstreamer initialization");
+        let pipeline = gst::Pipeline::new();
+        assert!(open_gstreamer_pipeline(
+            Path::new("/missing/analysis-startup.wav"),
+            pipeline.clone()
+        )
+        .is_none());
+        assert_eq!(pipeline.current_state(), gst::State::Null);
+
+        let path =
+            super::super::waveform_window::tests::write_test_wave(&vec![100; 12_017], 48_000, 1);
+        let pipeline = gst::Pipeline::new();
+        let (source, _, _, _) = open_gstreamer_pipeline(&path, pipeline.clone()).expect("open wav");
+        assert_ne!(pipeline.current_state(), gst::State::Null);
+        drop(source);
+        assert_eq!(pipeline.current_state(), gst::State::Null);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
 
     #[cfg(feature = "gst")]
     #[test]

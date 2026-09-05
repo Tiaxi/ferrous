@@ -6,6 +6,8 @@ mod fft;
 mod output;
 use output::{resets_spectral_stream, AnalysisEventOutput, AnalysisOutputs};
 #[cfg(feature = "gst")]
+mod gst_lifecycle;
+#[cfg(feature = "gst")]
 mod gst_waveform;
 mod session;
 mod waveform_pyramid;

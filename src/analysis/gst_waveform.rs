@@ -191,11 +191,11 @@ where
 
     gst::init()?;
     let (pipeline, bus, level) = build_waveform_gst_pipeline(path)?;
+    let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     let duration_ns = configure_waveform_gst_pipeline(&pipeline, &level, max_points)?;
     let mut waveform = GstWaveformAccumulator::new(max_points, duration_ns);
     loop {
         if is_cancelled() {
-            let _ = pipeline.set_state(gst::State::Null);
             return Ok(());
         }
 
@@ -220,14 +220,12 @@ where
                                 false,
                             )
                         {
-                            let _ = pipeline.set_state(gst::State::Null);
                             return Ok(());
                         }
                     }
                 }
                 gst::MessageView::Eos(..) => break,
                 gst::MessageView::Error(err) => {
-                    let _ = pipeline.set_state(gst::State::Null);
                     return Err(anyhow::anyhow!(
                         "gstreamer waveform decode failed: {} ({:?})",
                         err.error(),
@@ -242,7 +240,7 @@ where
     let coverage_seconds = waveform.coverage_seconds();
     let peaks = waveform.finish();
 
-    let _ = pipeline.set_state(gst::State::Null);
+    drop(shutdown);
 
     if !is_cancelled() {
         let _ = on_update(peaks, coverage_seconds, true);
@@ -378,6 +376,19 @@ fn materialize_waveform_peaks(events: &[(u64, f32)], span_ns: u64, max_points: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_waveform_configuration_releases_the_started_pipeline() {
+        gst::init().expect("gstreamer initialization");
+        let (pipeline, _, level) =
+            build_waveform_gst_pipeline(Path::new("/missing/waveform-startup.wav"))
+                .expect("build pipeline");
+        {
+            let _shutdown = super::super::gst_lifecycle::PipelineShutdown::new(&pipeline);
+            assert!(configure_waveform_gst_pipeline(&pipeline, &level, 100).is_err());
+        }
+        assert_eq!(pipeline.current_state(), gst::State::Null);
+    }
 
     #[test]
     fn collapse_level_message_peaks_uses_loudest_channel() {
