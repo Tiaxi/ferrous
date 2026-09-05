@@ -1279,9 +1279,6 @@ fn refresh_edited_paths(
         }
     }
 
-    if changed {
-        state.rebuild_pre_built_tree();
-    }
     changed |= sync_queue_details(state, external_queue_details_tx);
     changed
 }
@@ -1314,9 +1311,6 @@ fn refresh_renamed_paths(
     changed |= apply_renamed_library_paths(state, &rename_map, &indexed_by_path);
     changed |= apply_renamed_queue_paths(state, renames, &rename_map, &indexed_by_path, metadata);
     changed |= update_queue_track_details(state, &indexed_by_path);
-    if changed {
-        state.rebuild_pre_built_tree();
-    }
     changed |= sync_queue_details(state, external_queue_details_tx);
     changed
 }

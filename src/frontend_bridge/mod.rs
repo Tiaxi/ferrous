@@ -31,6 +31,7 @@ mod imports;
 pub mod library_tree;
 mod queue;
 mod search;
+mod tree_worker;
 mod workers;
 
 use commands::{handle_bridge_command, sync_queue_details, BridgeCommandContext};
@@ -558,19 +559,6 @@ impl BridgeState {
             lastfm: self.lastfm.clone(),
         }
     }
-
-    fn rebuild_pre_built_tree(&mut self) {
-        if !self.library.scan_in_progress {
-            library_tree::retain_valid_expanded_keys(&self.library, &mut self.expanded_keys);
-        }
-        (self.library_artist_count, self.library_album_count) =
-            library_tree::compute_artist_album_counts(&self.library);
-        self.pre_built_tree_bytes = Arc::new(library_tree::build_library_tree_flat_binary(
-            &self.library,
-            self.settings.library_sort_mode,
-            Some(&self.expanded_keys),
-        ));
-    }
 }
 
 fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
@@ -664,6 +652,7 @@ impl FrontendBridgeHandle {
 
 struct BridgeLoopRuntime {
     imports: imports::ImportWorker,
+    tree_worker: tree_worker::TreeWorker,
     analysis: AnalysisEngine,
     analysis_rx: Receiver<AnalysisEvent>,
     playback: PlaybackEngine,
@@ -742,6 +731,7 @@ impl SnapshotUrgency {
 
 enum BridgeLoopWake {
     Import(imports::ImportResult),
+    Tree(tree_worker::TreeResult),
     Command(BridgeCommand),
     Playback(PlaybackEvent),
     Analysis(AnalysisEvent),
@@ -802,6 +792,7 @@ impl BridgeLoopRuntime {
             env_duration_ms("FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS", 333, 125, 1000);
         Self {
             imports: imports::ImportWorker::new(),
+            tree_worker: tree_worker::TreeWorker::new(),
             analysis,
             analysis_rx,
             playback,
@@ -884,6 +875,7 @@ impl BridgeLoopRuntime {
         let wake_delay = self.next_wake_delay();
         select! {
             recv(&self.imports.results) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Import),
+            recv(&self.tree_worker.results) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Tree),
             recv(cmd_rx) -> msg => {
                 match msg {
                     Ok(cmd) => BridgeLoopWake::Command(cmd),
@@ -1000,6 +992,7 @@ impl BridgeLoopRuntime {
     fn handle_wake(&mut self, wake: BridgeLoopWake, event_tx: &Sender<BridgeEvent>) {
         let mut urgency = match wake {
             BridgeLoopWake::Import(result) => self.apply_import_result(result, event_tx),
+            BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
             BridgeLoopWake::Command(cmd) => self.handle_command(cmd, event_tx),
             BridgeLoopWake::Playback(event) => self.handle_playback_event(event),
             BridgeLoopWake::Analysis(event) => self.handle_analysis_event(event, event_tx),
@@ -1064,6 +1057,29 @@ impl BridgeLoopRuntime {
         }
     }
 
+    fn request_tree(&self) {
+        self.tree_worker.request(
+            Arc::clone(&self.state.library),
+            self.state.settings.library_sort_mode,
+            self.state.expanded_keys.clone(),
+        );
+    }
+
+    fn apply_tree_result(&mut self, result: tree_worker::TreeResult) -> SnapshotUrgency {
+        if !self.tree_worker.is_current(&result) {
+            return SnapshotUrgency::None;
+        }
+        self.state.pre_built_tree_bytes = result.bytes;
+        self.flags.session_dirty |= self.state.expanded_keys != result.expanded;
+        self.state.expanded_keys = result.expanded;
+        (
+            self.state.library_artist_count,
+            self.state.library_album_count,
+        ) = result.counts;
+        self.snapshot_plan.include_tree_in_next_snapshot = true;
+        SnapshotUrgency::Immediate
+    }
+
     fn handle_command(
         &mut self,
         cmd: BridgeCommand,
@@ -1101,8 +1117,7 @@ impl BridgeLoopRuntime {
         let changed = handle_bridge_command(cmd, &mut self.state, &mut command_context);
         let mut urgency = SnapshotUrgency::None;
         if rebuild_tree {
-            self.state.rebuild_pre_built_tree();
-            self.snapshot_plan.include_tree_in_next_snapshot = true;
+            self.request_tree();
             urgency = SnapshotUrgency::Immediate;
         } else if changed {
             if let Some(delay) = deferred_tree_rebuild {
@@ -1343,8 +1358,7 @@ impl BridgeLoopRuntime {
             || self.last_tree_emit_at.is_none()
             || (scan_emit_due && track_delta >= self.tree_emit_min_track_delta);
         if should_emit_tree {
-            self.state.rebuild_pre_built_tree();
-            self.snapshot_plan.include_tree_in_next_snapshot = true;
+            self.request_tree();
             self.note_snapshot_urgency(SnapshotUrgency::Immediate);
         }
     }
@@ -1357,8 +1371,7 @@ impl BridgeLoopRuntime {
             return;
         }
         self.deferred_tree_rebuild_at = None;
-        self.state.rebuild_pre_built_tree();
-        self.snapshot_plan.include_tree_in_next_snapshot = true;
+        self.request_tree();
         self.note_snapshot_urgency(SnapshotUrgency::Immediate);
     }
 
@@ -1526,7 +1539,6 @@ fn restore_initial_bridge_state(
     if should_sync_queue_details_on_initial_restore(state) {
         let _ = sync_queue_details(state, external_queue_details_tx);
     }
-    state.rebuild_pre_built_tree();
 }
 
 fn should_sync_queue_details_on_initial_restore(state: &BridgeState) -> bool {
@@ -2008,11 +2020,14 @@ mod tests {
     }
 
     #[test]
-    fn library_event_rebuilds_tree_on_first_wake() {
+    fn library_event_publishes_tree_after_worker_completion() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default());
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
         drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        // Isolate the fixture from late startup snapshots from the real library worker.
+        let (_library_tx, library_rx) = unbounded();
+        runtime.library_rx = library_rx;
 
         let root = p("/music");
         let snapshot = LibrarySnapshot {
@@ -2032,6 +2047,19 @@ mod tests {
             BridgeLoopWake::Library(LibraryEvent::Snapshot(snapshot)),
             &event_tx,
         );
+
+        let result = loop {
+            let result = runtime
+                .tree_worker
+                .results
+                .recv_timeout(Duration::from_secs(2))
+                .expect("tree worker result");
+            if runtime.tree_worker.is_current(&result) {
+                break result;
+            }
+        };
+        while event_rx.try_recv().is_ok() {}
+        runtime.handle_wake(BridgeLoopWake::Tree(result), &event_tx);
 
         let snapshot = match event_rx.recv_timeout(Duration::from_millis(20)) {
             Ok(BridgeEvent::Snapshot(snapshot)) => *snapshot,

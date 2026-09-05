@@ -362,44 +362,105 @@ pub fn retain_valid_expanded_keys<S: BuildHasher + Default>(
     expanded_keys.retain(|key| valid.contains(key));
 }
 
+/// Reusable hierarchy and album presentation data for one immutable library revision.
+/// Build and use on the tree worker because album cover fallbacks access the filesystem.
+pub struct LibraryTreeCache {
+    builders: BTreeMap<String, RootNodeBuilder>,
+    resolved_albums: HashMap<String, Vec<ResolvedAlbum>>,
+    valid_keys: HashSet<String>,
+    pub(crate) counts: (usize, usize),
+}
+
+impl LibraryTreeCache {
+    #[must_use]
+    pub fn new(library: &LibrarySnapshot) -> Self {
+        let builders = build_root_builders(&library.roots, &library.tracks);
+        let mut valid_keys = HashSet::new();
+        for root in builders.values() {
+            let root_path = root.root_path.to_string_lossy();
+            valid_keys.insert(root_row_key(&root_path));
+            for artist in root.artists.values() {
+                valid_keys.insert(artist_row_key(&root_path, &artist.artist_name));
+                for album in artist.albums.values() {
+                    valid_keys.insert(album_row_key(
+                        &root_path,
+                        &artist.artist_name,
+                        &album.folder_name,
+                    ));
+                    for section in album.sections.keys() {
+                        valid_keys.insert(section_row_key(
+                            &root_path,
+                            &artist.artist_name,
+                            &album.folder_name,
+                            section,
+                        ));
+                    }
+                }
+            }
+        }
+        Self {
+            builders,
+            resolved_albums: HashMap::new(),
+            valid_keys,
+            counts: compute_artist_album_counts(library),
+        }
+    }
+
+    pub(crate) fn retain_expanded_keys(&self, keys: &mut HashSet<String>) {
+        // Initial library loading must not erase the restored view state.
+        if !self.builders.is_empty() {
+            keys.retain(|key| self.valid_keys.contains(key));
+        }
+    }
+
+    #[must_use]
+    pub fn build<S: BuildHasher>(
+        &mut self,
+        sort_mode: LibrarySortMode,
+        expanded_keys: Option<&HashSet<String, S>>,
+    ) -> Vec<u8> {
+        encode_flat_rows(&self.rows(sort_mode, expanded_keys))
+    }
+
+    fn rows<S: BuildHasher>(
+        &mut self,
+        sort_mode: LibrarySortMode,
+        expanded_keys: Option<&HashSet<String, S>>,
+    ) -> Vec<FlatTreeRow> {
+        let multi_root = self.builders.len() >= 2;
+        let mut rows = Vec::new();
+        for root_builder in self.builders.values() {
+            let root_depth = if multi_root { 0 } else { u16::MAX };
+            let artist_depth = u16::from(multi_root);
+            let root_path = root_builder.root_path.to_string_lossy().to_string();
+            let artist_rows = build_artist_rows_flat(
+                root_builder,
+                &root_path,
+                sort_mode,
+                artist_depth,
+                expanded_keys,
+                &mut self.resolved_albums,
+            );
+            if multi_root {
+                rows.push(FlatTreeRow::root(
+                    root_depth,
+                    &root_path,
+                    &root_builder.root_name,
+                    root_builder.artists.len(),
+                ));
+            }
+            rows.extend(artist_rows);
+        }
+        rows
+    }
+}
+
 fn build_library_tree_flat_rows<S: BuildHasher>(
     library: &LibrarySnapshot,
     sort_mode: LibrarySortMode,
     expanded_keys: Option<&HashSet<String, S>>,
 ) -> Vec<FlatTreeRow> {
-    let roots = library.roots.clone();
-    if roots.is_empty() {
-        return Vec::new();
-    }
-
-    let builders = build_root_builders(&roots, &library.tracks);
-
-    let multi_root = roots.len() >= 2;
-    let mut rows = Vec::new();
-
-    for (_, root_builder) in builders {
-        let root_depth = if multi_root { 0 } else { u16::MAX };
-        let artist_depth = u16::from(multi_root);
-        let root_path = root_builder.root_path.to_string_lossy().to_string();
-        let artist_rows = build_artist_rows_flat(
-            &root_builder,
-            &root_path,
-            sort_mode,
-            artist_depth,
-            expanded_keys,
-        );
-        if multi_root {
-            rows.push(FlatTreeRow::root(
-                root_depth,
-                &root_path,
-                &root_builder.root_name,
-                root_builder.artists.len(),
-            ));
-        }
-        rows.extend(artist_rows);
-    }
-
-    rows
+    LibraryTreeCache::new(library).rows(sort_mode, expanded_keys)
 }
 
 fn build_root_builders(
@@ -524,9 +585,10 @@ fn build_artist_rows_flat<S: BuildHasher>(
     sort_mode: LibrarySortMode,
     artist_depth: u16,
     expanded_keys: Option<&HashSet<String, S>>,
+    resolved_cache: &mut HashMap<String, Vec<ResolvedAlbum>>,
 ) -> Vec<FlatTreeRow> {
     let lazy_hydration = expanded_keys.is_some();
-    let mut artists = root.artists.values().cloned().collect::<Vec<_>>();
+    let mut artists = root.artists.values().collect::<Vec<_>>();
     artists.sort_by(|a, b| natural_cmp(&a.artist_name, &b.artist_name));
 
     let mut out = Vec::new();
@@ -542,9 +604,11 @@ fn build_artist_rows_flat<S: BuildHasher>(
 
         let mut resolved_albums = Vec::new();
         if artist_expanded {
-            for album in artist.albums.values() {
-                resolved_albums.push(resolve_album(album));
-            }
+            resolved_albums.clone_from(
+                resolved_cache
+                    .entry(artist_key.clone())
+                    .or_insert_with(|| artist.albums.values().map(resolve_album).collect()),
+            );
             sort_resolved_albums(&mut resolved_albums, sort_mode);
         }
 
@@ -1369,6 +1433,54 @@ mod tests {
             path: PathBuf::from(path),
             name: String::new(),
         }
+    }
+
+    #[test]
+    fn cached_expansion_matches_fresh_tree_and_reuses_cover_resolution() {
+        let dir = std::env::temp_dir().join(format!("ferrous-tree-cache-{}", std::process::id()));
+        let album_dir = dir.join("Artist/Album");
+        std::fs::create_dir_all(&album_dir).expect("fixture directory");
+        let cover = album_dir.join("cover.png");
+        std::fs::write(&cover, b"fixture").expect("cover fixture");
+        let mut song = track(
+            &album_dir.join("01.flac").to_string_lossy(),
+            "Album",
+            Some(2020),
+            Some(1),
+            "Song",
+        );
+        song.root_path.clone_from(&dir);
+        let library = LibrarySnapshot {
+            roots: vec![root(&dir.to_string_lossy())],
+            tracks: vec![song],
+            ..Default::default()
+        };
+        let mut cache = LibraryTreeCache::new(&library);
+        let artist = artist_row_key(&dir.to_string_lossy(), "Artist");
+        let album = album_row_key(&dir.to_string_lossy(), "Artist", "Album");
+        let mut expanded = HashSet::from([artist]);
+        let initial = cache.build(LibrarySortMode::Year, Some(&expanded));
+        assert_eq!(
+            initial,
+            build_library_tree_flat_binary(&library, LibrarySortMode::Year, Some(&expanded))
+        );
+        std::fs::remove_file(&cover).expect("remove cover to detect new directory lookups");
+        expanded.insert(album);
+        let expanded_bytes = cache.build(LibrarySortMode::Title, Some(&expanded));
+        let rows = decode_rows(&expanded_bytes);
+        assert!(rows.iter().any(|row| row.row_type == ROW_TYPE_TRACK));
+        assert!(rows
+            .iter()
+            .any(|row| row.cover_path == cover.to_string_lossy()));
+        expanded.clear();
+        let _ = cache.build(LibrarySortMode::Year, Some(&expanded));
+        let mut fresh = LibraryTreeCache::new(&library);
+        let expanded = HashSet::from([artist_row_key(&dir.to_string_lossy(), "Artist")]);
+        let fresh_bytes = fresh.build(LibrarySortMode::Year, Some(&expanded));
+        assert!(decode_rows(&fresh_bytes)
+            .iter()
+            .all(|row| row.cover_path.is_empty()));
+        std::fs::remove_dir_all(dir).expect("remove fixture");
     }
 
     #[test]
