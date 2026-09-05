@@ -178,6 +178,10 @@ impl SearchRowAccumulator {
         query: &SearchQuery,
         fields: &BTreeMap<String, String>,
     ) {
+        // Match the main-album queue: bonus folders remain searchable as tracks.
+        if !context.is_main_level_album_track && !context.is_disc_section_album_track {
+            return;
+        }
         if let Some(album_key_value) = context.album_key.clone() {
             let context_artist = normalize_for_search(&context.artist_name);
             let album_name = normalize_for_search(hit_album);
@@ -1857,6 +1861,28 @@ mod tests {
         assert!(rows
             .iter()
             .all(|row| row.match_detail.contains("Comment: remaster")));
+    }
+
+    #[test]
+    fn album_metadata_matches_only_tracks_in_the_main_album_queue() {
+        for (section, expect_album) in [("Bonus", false), ("CD1", true)] {
+            let main = fixture_track("Intro", "Artist", "Album", "01");
+            let mut extra = fixture_track("Extra", "Artist", "Album", "02");
+            extra.path = p(&format!("/music/Artist/Album/{section}/02.flac"));
+            extra
+                .search_tags
+                .insert("comment".into(), vec!["Anniversary remaster".into()]);
+            let rows = fixture_search("comment:remaster", vec![main, extra], 20);
+            assert!(rows.iter().any(|row| {
+                row.row_type == BridgeSearchResultRowType::Track && row.label == "Extra"
+            }));
+            assert_eq!(
+                rows.iter()
+                    .any(|row| row.row_type == BridgeSearchResultRowType::Album),
+                expect_album,
+                "unexpected album match from {section}"
+            );
+        }
     }
 
     #[test]

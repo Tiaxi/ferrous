@@ -38,7 +38,7 @@ Put double quotes around words that must occur together. All terms and filters a
 
 Available fields: `title`, `artist`, `album`, `albumartist`, `genre`, `year`, `date`, `composer`, `conductor`, `performer`, `label`, `comment`, `lyrics`, `path`, `root`, `track`, and `disc`. `album_artist`/`album-artist`, `publisher`, and `filename` are aliases for `albumartist`, `label`, and `path`. Year, track, and disc filters match complete numbers. Unknown prefixes are treated as ordinary text, so filenames containing colons remain searchable. Unclosed quotes are accepted while typing. Boolean operators, numeric ranges, and typo correction are not supported.
 
-Album results can also match genre, dates, credits, and other album-track metadata. Playing an album still plays the main album, not only its matching tracks. Artist results represent library folders; searching a guest artist or performer may therefore return tracks/albums without an artist-folder result.
+Album results can also match genre, dates, credits, and other metadata from main-album tracks and recognized disc folders. Bonus-folder matches appear as tracks. Playing an album still plays the main album, not only its matching tracks. Artist results represent library folders; searching a guest artist or performer may therefore return tracks/albums without an artist-folder result.
 
 ## Existing libraries
 
