@@ -125,10 +125,9 @@ impl SearchRowAccumulator {
         let artist_fields =
             BTreeMap::from([("artist".into(), normalize_for_search(&context.artist_name))]);
         if query.matches(&artist_fields) {
-            let score = entity_score(
+            let score = name_score(
                 &query.name_terms("artist"),
                 &normalize_for_search(&context.artist_name),
-                &[],
             );
             let artist_entry = self
                 .artist_groups
@@ -191,14 +190,12 @@ impl SearchRowAccumulator {
                 &[("artist", &context_artist), ("album", &album_name)],
             ) {
                 let score = entity_score(
+                    query,
                     &query.name_terms("album"),
-                    &normalize_for_search(hit_album),
-                    &[
-                        &normalize_for_search(hit_artist),
-                        &normalize_for_search(&context.artist_name),
-                    ],
+                    &album_name,
+                    fields,
+                    false,
                 );
-                let score = metadata_score(query, fields, score, false);
                 let album_entry = self.album_groups.entry(album_key_value.clone()).or_insert((
                     score,
                     hit_album.to_string(),
@@ -261,8 +258,6 @@ struct PreparedSearchTrack {
     track_no: Option<u32>,
     duration_secs: Option<f32>,
     title_l: String,
-    artist_l: String,
-    album_l: String,
     fields: BTreeMap<String, String>,
 }
 
@@ -946,8 +941,6 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
             track_no: track.track_no,
             duration_secs: track.duration_secs,
             title_l,
-            artist_l,
-            album_l,
             fields,
         });
     }
@@ -964,7 +957,7 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
 
 /// Rank an entity by its own name before supporting metadata. Scores are
 /// independent of library size, tag repetition, and filesystem path length.
-fn entity_score(terms: &[String], name: &str, secondary: &[&str]) -> f32 {
+fn name_score(terms: &[String], name: &str) -> f32 {
     if terms.is_empty() {
         return 5.0;
     }
@@ -989,24 +982,47 @@ fn entity_score(terms: &[String], name: &str, secondary: &[&str]) -> f32 {
     if terms.iter().all(|term| name.contains(term)) {
         return 3.5;
     }
-    if terms
-        .iter()
-        .all(|term| name.contains(term) || secondary.iter().any(|field| field.contains(term)))
-    {
-        return 4.0;
-    }
     5.0
+}
+
+fn entity_score(
+    query: &SearchQuery,
+    terms: &[String],
+    name: &str,
+    fields: &BTreeMap<String, String>,
+    include_title: bool,
+) -> f32 {
+    let direct = name_score(terms, name);
+    if direct < 5.0 {
+        return direct;
+    }
+    let supporting = metadata_score(query, fields, include_title);
+    // Matching already requires every query term. Rank the name-bearing part
+    // independently when the remaining terms match metadata, e.g. "1997 signify".
+    let name_terms: Vec<_> = terms
+        .iter()
+        .filter(|term| name.contains(*term))
+        .cloned()
+        .collect();
+    if name_terms.is_empty() {
+        return supporting + 0.5;
+    }
+    let partial = name_score(&name_terms, name);
+    if supporting >= 6.0 {
+        // Comments, lyrics, and paths retain their lower tiers, with name quality
+        // providing ordering within a tier rather than promoting it above names.
+        supporting + partial / 10.0
+    } else {
+        // Prefer the complete name to the same name plus supporting metadata.
+        partial + 0.25
+    }
 }
 
 fn metadata_score(
     query: &SearchQuery,
     fields: &BTreeMap<String, String>,
-    score: f32,
     include_title: bool,
 ) -> f32 {
-    if score < 5.0 {
-        return score;
-    }
     if query.matches_with(
         fields,
         |key| {
@@ -1117,12 +1133,7 @@ fn search_tracks_prepared(
         if !query.matches(&track.fields) {
             continue;
         }
-        let score = metadata_score(
-            &query,
-            &track.fields,
-            entity_score(&terms, &track.title_l, &[&track.artist_l, &track.album_l]),
-            true,
-        );
+        let score = entity_score(&query, &terms, &track.title_l, &track.fields, true);
         let hit = LibrarySearchTrack {
             path: track.path.clone(),
             root_path: track.root_path.clone(),
@@ -1692,6 +1703,97 @@ mod tests {
             .map(|row| row.label.as_str())
             .collect();
         assert_eq!(titles, ["Blue", "Blue Skies", "Intro"]);
+    }
+
+    #[test]
+    fn exact_title_with_year_beats_partial_titles_with_year_in_album_names() {
+        let mut tracks = vec![
+            fixture_track(
+                "Intro/Signify",
+                "Porcupine Tree",
+                "Coma:Coda (Rome 1997)",
+                "01",
+            ),
+            fixture_track("Signify II", "Porcupine Tree", "Stars Die: 1991-1997", "02"),
+            fixture_track("Signify", "Porcupine Tree", "Coma Divine", "03"),
+            fixture_track("Signify", "Porcupine Tree", "Insignificance", "04"),
+            fixture_track("Waiting", "Porcupine Tree", "Signify", "05"),
+        ];
+        for (track, year) in tracks.iter_mut().zip([2020, 2002, 1997, 1997, 1996]) {
+            track.year = Some(year);
+        }
+        for query in ["1997 signify", "signify 1997"] {
+            let rows = fixture_search(query, tracks.clone(), 20);
+            let matches: Vec<_> = rows
+                .iter()
+                .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+                .map(|row| (row.label.as_str(), row.album.as_str()))
+                .collect();
+            assert_eq!(
+                matches,
+                [
+                    ("Signify", "Coma Divine"),
+                    ("Signify", "Insignificance"),
+                    ("Signify II", "Stars Die: 1991-1997"),
+                    ("Intro/Signify", "Coma:Coda (Rome 1997)"),
+                ],
+                "unexpected ranking for {query}"
+            );
+            assert!(!rows
+                .iter()
+                .any(|row| row.row_type == BridgeSearchResultRowType::Album));
+        }
+        let rows = fixture_search("1996 signify", tracks, 20);
+        let album = rows
+            .iter()
+            .find(|row| row.row_type == BridgeSearchResultRowType::Album)
+            .expect("Signify album");
+        let track = rows
+            .iter()
+            .find(|row| row.row_type == BridgeSearchResultRowType::Track)
+            .expect("Waiting track");
+        assert_eq!(album.label, "Signify");
+        assert!(album.score < track.score);
+    }
+
+    #[test]
+    fn mixed_metadata_preserves_name_quality_without_promoting_comment_or_path_matches() {
+        let mut exact = fixture_track("Blue", "Example", "Songs", "01");
+        exact.genre = "Jazz".into();
+        let mut prefix = fixture_track("Blue Skies", "Example", "Songs", "02");
+        prefix.genre = "Jazz".into();
+        let mut comment = fixture_track("Blue", "Example", "Other", "03");
+        comment
+            .search_tags
+            .insert("comment".into(), vec!["jazz".into()]);
+        let mut comment_prefix = fixture_track("Blue Skies", "Example", "Other", "04");
+        comment_prefix
+            .search_tags
+            .insert("comment".into(), vec!["jazz".into()]);
+        let mut comment_only = fixture_track("Another Song", "Example", "Other", "05");
+        comment_only
+            .search_tags
+            .insert("comment".into(), vec!["blue jazz".into()]);
+        let path = fixture_track("Blue", "Example", "Other", "jazz");
+        let rows = fixture_search(
+            "jazz blue",
+            vec![path, comment_only, comment_prefix, comment, prefix, exact],
+            20,
+        );
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+            .collect();
+        assert_eq!(matches[0].label, "Blue");
+        assert_eq!(matches[0].genre, "Jazz");
+        assert_eq!(matches[1].label, "Blue Skies");
+        assert!(matches[2].match_detail.contains("Comment: jazz"));
+        assert_eq!(matches[3].label, "Blue Skies");
+        assert_eq!(matches[4].label, "Another Song");
+        assert!(matches[5].track_path.contains("jazz.flac"));
+        for pair in matches.windows(2) {
+            assert!(pair[0].score < pair[1].score);
+        }
     }
 
     #[test]
