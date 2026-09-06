@@ -104,6 +104,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString currentTrackChannelLayoutText READ currentTrackChannelLayoutText NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackChannelLayoutIconKey READ currentTrackChannelLayoutIconKey NOTIFY trackMetadataChanged)
     Q_PROPERTY(int currentTrackChannels READ currentTrackChannels NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QStringList currentTrackChannelLabels READ currentTrackChannelLabels NOTIFY trackMetadataChanged)
     Q_PROPERTY(int currentTrackSampleRateHz READ currentTrackSampleRateHz NOTIFY trackMetadataChanged)
     Q_PROPERTY(int currentTrackBitDepth READ currentTrackBitDepth NOTIFY trackMetadataChanged)
     Q_PROPERTY(int currentTrackCurrentBitrateKbps READ currentTrackCurrentBitrateKbps NOTIFY trackMetadataChanged)
@@ -124,6 +125,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int soloedChannel READ soloedChannel NOTIFY playbackChanged)
     Q_PROPERTY(int channelButtonsVisibility READ channelButtonsVisibility NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
+    Q_PROPERTY(bool showLevelMeter READ showLevelMeter NOTIFY snapshotChanged)
     Q_PROPERTY(bool showSpectrogramCrosshair READ showSpectrogramCrosshair NOTIFY snapshotChanged)
     Q_PROPERTY(bool showSpectrogramScale READ showSpectrogramScale NOTIFY snapshotChanged)
     Q_PROPERTY(bool spectrogramZoomEnabled READ spectrogramZoomEnabled NOTIFY snapshotChanged)
@@ -205,6 +207,7 @@ public:
     QString currentTrackChannelLayoutText() const;
     QString currentTrackChannelLayoutIconKey() const;
     int currentTrackChannels() const;
+    QStringList currentTrackChannelLabels() const;
     int currentTrackSampleRateHz() const;
     int currentTrackBitDepth() const;
     int currentTrackCurrentBitrateKbps() const;
@@ -225,6 +228,7 @@ public:
     int soloedChannel() const;
     int channelButtonsVisibility() const;
     bool showFps() const;
+    bool showLevelMeter() const;
     bool showSpectrogramCrosshair() const;
     bool showSpectrogramScale() const;
     bool spectrogramZoomEnabled() const;
@@ -296,6 +300,7 @@ public:
     Q_INVOKABLE void setChannelButtonsVisibility(int value);
     Q_INVOKABLE bool isChannelMuted(int channelIndex) const;
     Q_INVOKABLE void setShowFps(bool value);
+    Q_INVOKABLE void setShowLevelMeter(bool value);
     Q_INVOKABLE void setShowSpectrogramCrosshair(bool value);
     Q_INVOKABLE void setShowSpectrogramScale(bool value);
     Q_INVOKABLE void setSpectrogramZoomEnabled(bool value);
@@ -608,6 +613,7 @@ private:
     int m_currentTrackNumber{0};
     QString m_currentTrackFormatLabel;
     int m_currentTrackChannels{0};
+    QStringList m_currentTrackChannelLabels;
     int m_currentTrackSampleRateHz{0};
     int m_currentTrackBitDepth{0};
     int m_currentTrackCurrentBitrateKbps{0};
@@ -628,6 +634,7 @@ private:
     int m_soloedChannel{-1};
     int m_channelButtonsVisibility{1};
     bool m_showFps{false};
+    bool m_showLevelMeter{true};
     bool m_showSpectrogramCrosshair{false};
     bool m_showSpectrogramScale{false};
     bool m_spectrogramZoomEnabled{true};

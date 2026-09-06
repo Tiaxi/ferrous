@@ -45,6 +45,8 @@ pub struct TrackMetadata {
     pub sample_rate_hz: Option<u32>,
     pub bitrate_kbps: Option<u32>,
     pub channels: Option<u8>,
+    /// Speaker labels in the analysis decoder's native PCM channel order.
+    pub channel_labels: Vec<String>,
     pub bit_depth: Option<u8>,
     pub format_label: String,
     pub current_bitrate_kbps: Option<u32>,
@@ -115,6 +117,11 @@ fn run_metadata_worker(
         }
         let mut metadata = load_metadata_for_path(&path);
         let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+        metadata.channel_labels = crate::analysis::probe_source_channel_labels(&path);
+        if !metadata.channel_labels.is_empty() {
+            metadata.channels = u8::try_from(metadata.channel_labels.len()).ok();
+            let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+        }
         apply_technical_details(&path, &mut metadata, event_tx);
 
         if metadata.current_bitrate_kbps.is_none() {

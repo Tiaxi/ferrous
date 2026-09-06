@@ -51,6 +51,7 @@
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformItem.h"
 #include "../src/WaveformEditorItem.h"
+#include "../src/LevelMeterItem.h"
 #undef private
 #undef protected
 
@@ -476,6 +477,7 @@ private slots:
     void spectrogramHoverChannelButtonsRemainClickable();
     void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
     void mainWindowContentStartsBelowMenuBar();
+    void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
     void tagEditorLibrarySupportGateMatchesSupportedRows();
@@ -681,6 +683,7 @@ private slots:
 void QmlSmokeTest::initTestCase() {
     previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
+    qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
 }
 
 void QmlSmokeTest::init() {
@@ -836,6 +839,7 @@ Item {
         property int channelButtonsVisibility: 1
         property int viewerFullscreenMode: 0
         property bool preventDisplaySleepInFullscreen: true
+        property bool showLevelMeter: true
         property int libraryArtistCount: 0
         property int libraryAlbumCount: 0
         property int libraryTrackCount: 0
@@ -897,6 +901,7 @@ Item {
         function unregisterSpectrogramItem(item) {}
         function setViewerFullscreenMode(mode) {}
         function setPreventDisplaySleepInFullscreen(value) {}
+        function setShowLevelMeter(value) { showLevelMeter = value }
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}
         function completeLastFmAuth() {}
@@ -1609,6 +1614,7 @@ Item {
         property bool showSpectrogramCrosshair: true
         property bool showFps: true
         property int currentTrackChannels: 2
+        property var currentTrackChannelLabels: []
         property var mutedChannelsMask: 0
         property int soloedChannel: -1
         property int channelButtonsVisibility: 2
@@ -1680,6 +1686,20 @@ Item {
             QCOMPARE(label.toString(), expected);
         }
     }
+    bridge->setProperty("currentTrackChannels", 6);
+    const QStringList positions{"L", "R", "C", "LFE", "SL", "SR"};
+    bridge->setProperty("currentTrackChannelLabels", positions);
+    for (int mode : {0, 1}) {
+        bridge->setProperty("spectrogramViewMode", mode);
+        const int visibleChannels = mode == 0 ? 1 : positions.size();
+        QTRY_COMPARE(waveform->channelCount(), visibleChannels);
+        for (int i = 0; i < visibleChannels; ++i) {
+            QVariant label;
+            QVERIFY(QMetaObject::invokeMethod(surface, "channelLabel",
+                Q_RETURN_ARG(QVariant, label), Q_ARG(QVariant, i)));
+            QCOMPARE(label.toString(), mode == 0 ? QStringLiteral("M") : positions[i]);
+        }
+    }
     bridge->setProperty("waveformCoverageSeconds", 5.0);
     QTRY_COMPARE(waveform->overviewCoverageSeconds(), 5.0);
     bridge->setProperty("waveformComplete", true);
@@ -1718,6 +1738,120 @@ void QmlSmokeTest::mainWindowContentStartsBelowMenuBar() {
     QVERIFY2(
         contentItem->property("y").toReal() >= menuBar->property("height").toReal(),
         "Application content must start below the menu bar");
+}
+
+void QmlSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
+    engine.load(QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
+    QVERIFY(!engine.rootObjects().isEmpty());
+    QObject *root = engine.rootObjects().constFirst();
+    root->setProperty("width", 1600);
+    root->setProperty("height", 1000);
+    auto *meter = root->findChild<LevelMeterItem *>(QStringLiteral("levelMeter"));
+    auto *surface = root->findChild<QQuickItem *>(QStringLiteral("visualizationSurface"));
+    auto *spectrogram = root->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveform = root->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *queue = root->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+    auto *controller = root->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *bridge = qvariant_cast<QObject *>(root->property("uiBridge"));
+    QVERIFY(meter && surface && spectrogram && waveform && queue && controller && bridge);
+    QTRY_COMPARE(meter->height(), 20.0);
+    QTRY_VERIFY(surface->height() > 20);
+    QTRY_COMPARE(queue->height(), 560.0);
+    QTRY_COMPARE(spectrogram->height(), surface->height() - 20);
+    QTRY_COMPARE(waveform->height(), spectrogram->height());
+    QTRY_COMPARE(meter->y(), spectrogram->height());
+    const double originalHeight = spectrogram->height();
+    auto *originalParent = surface->parentItem();
+    for (int mode : {0, 1}) {
+        controller->setProperty("visualizationMode", mode);
+        bridge->setProperty("spectrogramDisplayMode", mode);
+        bridge->setProperty("spectrogramViewMode", mode);
+        for (int channels : {1, 2, 6, 8}) {
+            bridge->setProperty("currentTrackChannels", channels);
+            QTRY_COMPARE(meter->channelCountHint(), channels);
+            QCOMPARE(meter->height(), 20.0);
+            QCOMPARE(spectrogram->height(), originalHeight);
+            QCOMPARE(meter->width(), surface->width());
+        }
+    }
+    bridge->setProperty("currentTrackChannels", 6);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady",
+        Q_ARG(int, 6), Q_ARG(bool, true)));
+    QTRY_VERIFY(findQuickItemByObjectName(spectrogram, QStringLiteral("spectrogramChannelLabel")));
+    auto *label = findQuickItemByObjectName(spectrogram, QStringLiteral("spectrogramChannelLabel"));
+    QPointer<QQuickItem> originalPane = findQuickItemByObjectName(
+        spectrogram, QStringLiteral("spectrogramPaneItem"));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1"));
+    const QStringList positions{"C", "L", "R", "SL", "SR", "LFE"};
+    for (int mode : {0, 1}) {
+        bridge->setProperty("spectrogramViewMode", mode);
+        bridge->setProperty("currentTrackChannelLabels", positions);
+        QTRY_COMPARE(label->property("text").toString(), QStringLiteral("C"));
+        QVERIFY(originalPane);
+        QCOMPARE(findQuickItemByObjectName(spectrogram, QStringLiteral("spectrogramPaneItem")), originalPane.data());
+        bridge->setProperty("currentTrackChannelLabels", QStringList{});
+        QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1"));
+    }
+    QVariant iconUrl;
+    QVERIFY(QMetaObject::invokeMethod(root, "channelStatusIconSource",
+        Q_RETURN_ARG(QVariant, iconUrl), Q_ARG(QVariant, QStringLiteral("5.1"))));
+    QVERIFY(iconUrl.toUrl().toString().endsWith(QStringLiteral("channel-5_1.svg")));
+    meter->m_channels[0].observe(-3, 0);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "transportPositionDiscontinuity", Q_ARG(double, 0.0)));
+    QCOMPARE(meter->m_channels[0].peak, -60.0);
+    auto *checkBox = root->findChild<QObject *>(QStringLiteral("showLevelMeterCheckBox"));
+    QVERIFY(checkBox);
+    QVERIFY(checkBox->property("checked").toBool());
+    bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/first.wav"));
+    QTRY_COMPARE(meter->sourcePath(), QStringLiteral("/fixture/first.wav"));
+    const auto cancelled = std::make_shared<std::atomic_bool>(false);
+    meter->m_cancelled = cancelled;
+    meter->m_channels[0].observe(-3, 0);
+    checkBox->setProperty("checked", false);
+    QVERIFY(QMetaObject::invokeMethod(checkBox, "toggled"));
+    QTRY_VERIFY(!bridge->property("showLevelMeter").toBool());
+    QTRY_VERIFY(!meter->isVisible());
+    QTRY_COMPARE(meter->height(), 0.0);
+    QTRY_COMPARE(queue->height(), 580.0);
+    QTRY_COMPARE(spectrogram->height(), originalHeight);
+    QTRY_COMPARE(waveform->height(), originalHeight);
+    QVERIFY(cancelled->load());
+    QVERIFY(meter->sourcePath().isEmpty());
+    QCOMPARE(meter->m_channels[0].peak, -60.0);
+    bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/next.wav"));
+    QVERIFY(meter->sourcePath().isEmpty());
+    checkBox->setProperty("checked", true);
+    QVERIFY(QMetaObject::invokeMethod(checkBox, "toggled"));
+    QTRY_VERIFY(meter->isVisible());
+    QTRY_COMPARE(meter->sourcePath(), QStringLiteral("/fixture/next.wav"));
+    QTRY_COMPARE(queue->height(), 560.0);
+    for (int mode : {0, 1}) {
+        controller->setProperty("visualizationMode", mode);
+        bridge->setProperty("spectrogramDisplayMode", mode);
+        for (int fullscreen : {0, 1}) {
+            bridge->setProperty("viewerFullscreenMode", fullscreen);
+            controller->setProperty("spectrogramViewerOpen", true);
+            QTRY_VERIFY(surface->parentItem() != originalParent);
+            for (bool enabled : {false, true}) {
+                bridge->setProperty("showLevelMeter", enabled);
+                QTRY_VERIFY(!meter->isVisible());
+                QTRY_COMPARE(meter->height(), 0.0);
+                QTRY_COMPARE(spectrogram->height(), surface->height());
+                QTRY_COMPARE(waveform->height(), surface->height());
+                QVERIFY(meter->sourcePath().isEmpty());
+            }
+            controller->setProperty("spectrogramViewerOpen", false);
+            QTRY_COMPARE(surface->parentItem(), originalParent);
+            QTRY_COMPARE(spectrogram->height(), originalHeight);
+            QTRY_VERIFY(meter->isVisible());
+            QTRY_COMPARE(meter->height(), 20.0);
+        }
+    }
 }
 
 void QmlSmokeTest::albumArtTileKeepsHeightInsideColumnLayout() {

@@ -330,8 +330,12 @@ Item {
 
                         Text {
                             id: labelText
+                            objectName: "spectrogramChannelLabel"
                             anchors.centerIn: parent
-                            text: modelData.label
+                            // Late metadata updates labels without replacing the
+                            // channel delegates and losing their spectral history.
+                            text: ChannelLabels.label(root.channelDescriptors.length, index,
+                                                      root.uiBridge.currentTrackChannelLabels || [])
                             color: spectrogramPaneItem.channelMuted
                                 ? Qt.rgba(0.65, 0.35, 0.35, 0.9)
                                 : Qt.rgba(0.90, 0.93, 0.98, 0.74)

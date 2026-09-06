@@ -282,6 +282,11 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.display.log_scale = x != 0;
                 }
             }
+            "show_level_meter" => {
+                if let Ok(x) = value.parse::<i32>() {
+                    settings.display.show_level_meter = x != 0;
+                }
+            }
             "show_fps" => {
                 if let Ok(x) = value.parse::<i32>() {
                     settings.display.show_fps = x != 0;
@@ -359,7 +364,7 @@ pub(super) fn save_settings(settings: &BridgeSettings) {
 
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     format!(
-        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
         settings.fft_size,
         settings.spectrogram_view_mode.settings_value(),
@@ -368,6 +373,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.db_range,
         i32::from(settings.display.log_scale),
         i32::from(settings.display.show_fps),
+        i32::from(settings.display.show_level_meter),
         i32::from(settings.display.prevent_display_sleep_in_fullscreen),
         i32::from(settings.display.show_spectrogram_crosshair),
         i32::from(settings.display.show_spectrogram_scale),
@@ -391,6 +397,19 @@ mod tests {
     }
 
     #[test]
+    fn level_meter_setting_defaults_on_and_roundtrips_both_values() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume=0.5\n");
+        assert!(settings.display.show_level_meter);
+        for enabled in [false, true] {
+            settings.display.show_level_meter = enabled;
+            let mut parsed = BridgeSettings::default();
+            parse_settings_text(&mut parsed, &format_settings_text(&settings));
+            assert_eq!(parsed.display.show_level_meter, enabled);
+        }
+    }
+
+    #[test]
     fn settings_roundtrip_text_format() {
         let settings = BridgeSettings {
             volume: 0.42,
@@ -402,6 +421,7 @@ mod tests {
             display: BridgeDisplaySettings {
                 log_scale: true,
                 show_fps: true,
+                show_level_meter: true,
                 prevent_display_sleep_in_fullscreen: false,
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,
@@ -489,6 +509,7 @@ mod tests {
             display: BridgeDisplaySettings {
                 log_scale: false,
                 show_fps: false,
+                show_level_meter: true,
                 prevent_display_sleep_in_fullscreen: true,
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,

@@ -207,6 +207,13 @@ fn set_display_sleep_prevention(
     *context.settings_dirty = true;
 }
 
+fn set_fft_size(state: &mut BridgeState, context: &mut BridgeCommandContext<'_>, size: usize) {
+    let fft = size.clamp(512, 8192).next_power_of_two();
+    state.settings.fft_size = fft;
+    context.analysis.command(AnalysisCommand::SetFftSize(fft));
+    *context.settings_dirty = true;
+}
+
 fn handle_settings_bridge_command(
     cmd: &BridgeSettingsCommand,
     state: &mut BridgeState,
@@ -226,12 +233,7 @@ fn handle_settings_bridge_command(
             context.playback.command(PlaybackCommand::SetVolume(volume));
             *context.settings_dirty = true;
         }
-        BridgeSettingsCommand::SetFftSize(size) => {
-            let fft = (*size).clamp(512, 8192).next_power_of_two();
-            state.settings.fft_size = fft;
-            context.analysis.command(AnalysisCommand::SetFftSize(fft));
-            *context.settings_dirty = true;
-        }
+        BridgeSettingsCommand::SetFftSize(size) => set_fft_size(state, context, *size),
         BridgeSettingsCommand::SetSpectrogramViewMode(view_mode) => {
             state.settings.spectrogram_view_mode = *view_mode;
             context
@@ -259,6 +261,10 @@ fn handle_settings_bridge_command(
         }
         BridgeSettingsCommand::SetLogScale(enabled) => {
             state.settings.display.log_scale = *enabled;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetShowLevelMeter(enabled) => {
+            state.settings.display.show_level_meter = *enabled;
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetShowFps(enabled) => {

@@ -28,6 +28,18 @@ Detail requests run on Qt worker threads. A shared Rust service serializes acces
 
 Native channels and the arithmetic downmix have separate extrema: averaging channel extrema would destroy phase cancellation. The versioned WVF2 payload carries both. The compact whole-track overview remains a separate background job with a persistent cache, partial-coverage metadata, and peak-preserving reduction.
 
+## Channel positions
+
+Channel positions are probed on the metadata worker using the same decoder selection as visualization analysis. The metadata protocol carries labels in native PCM channel order. Recognized speaker sets restore the status layout name and icon; unknown layouts retain the channel count. Waveform and spectrogram labels use the reported positions, falling back to numbers for unknown surround positions. Late layout metadata updates spectrogram text without replacing panes or clearing their history. The level meter remains unlabelled.
+
+## Level meter
+
+The horizontal meter occupies a fixed 20 logical pixels below the embedded visualization. Settings → Display → “Show level meter below the main visualization” controls its visibility and is persisted as `show_level_meter` (enabled by default). Both fullscreen viewer modes always hide the meter and give its space to the visualization. Hiding the meter clears its source and cancels pending queries. In the main view, its space comes from the playlist's initial preferred height; disabling it returns that space to the playlist. Stereo uses two 9-pixel bars with a 2-pixel gap; additional channels divide the same fixed height without labels.
+
+The meter reads source levels before listening volume and channel mute/solo. It reuses the waveform service through the existing WVF2 interface, requesting at most 2,048 extrema points over two seconds on a Qt worker thread. One request may be in flight, with one current window and one staged replacement. Cancellation and generation checks discard results after seeks, track changes, pause, or hiding the view; failed reads retry after a delay. Only bins whose end has reached the transport playhead contribute to the display.
+
+The scale runs from −60 to 0 dBFS with a subdued green/yellow/orange gradient. Each channel has immediate attack, 60 dB/s release (full scale to the floor in one second), and an independent one-physical-pixel-wide peak marker held for 1.5 seconds before falling at 12 dB/s. Elapsed-time ballistics include each bin's age so changing display refresh rate does not change hold or decay. The scene graph retains one shared gradient texture and updates bar and marker geometry on window presentation, with no fixed FPS timer. Pause lets the bars and held peaks decay; stop and transport discontinuities clear them.
+
 ## Qt rendering and visibility
 
 Each spectrogram item owns its raw ring and rendered canvas under its state mutex. Matching panes share immutable frequency-bin projection ranges and color lookup tables through weak references. Render passes retain their projection; image updates preserve previously retained `QImage` copies. This shares reusable rendering calculations without introducing a second global owner for mutable timeline state.

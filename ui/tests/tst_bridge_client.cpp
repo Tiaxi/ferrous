@@ -138,6 +138,8 @@ private slots:
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void testMutedChannelsMaskDecoding();
     void currentTrackChannelsExposesDecodedMetadata();
+    void metadataChannelLabelsDecodeOptionalTail();
+    void channelLayoutFollowsMatchingMetadataAcrossTracks();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void trackOnlySnapshotSetsTrackFlagOnly();
     void gaplessHandoffSetsIdentityFlagBeforeMetadata();
@@ -1528,6 +1530,7 @@ void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {
     QCOMPARE(client.showSpectrogramCrosshair(), false);
     QCOMPARE(client.showSpectrogramScale(), false);
     QCOMPARE(client.preventDisplaySleepInFullscreen(), true);
+    QCOMPARE(client.showLevelMeter(), true);
 
     // Apply a snapshot with both enabled.
     BinaryBridgeCodec::DecodedSnapshot snapshot;
@@ -1535,21 +1538,25 @@ void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {
     snapshot.settings.showSpectrogramCrosshair = true;
     snapshot.settings.showSpectrogramScale = true;
     snapshot.settings.preventDisplaySleepInFullscreen = false;
+    snapshot.settings.showLevelMeter = false;
     QVERIFY(client.processBinarySnapshot(snapshot));
 
     QCOMPARE(client.showSpectrogramCrosshair(), true);
     QCOMPARE(client.showSpectrogramScale(), true);
     QCOMPARE(client.preventDisplaySleepInFullscreen(), false);
+    QCOMPARE(client.showLevelMeter(), false);
 
     // Apply a snapshot with both disabled.
     snapshot.settings.showSpectrogramCrosshair = false;
     snapshot.settings.showSpectrogramScale = false;
     snapshot.settings.preventDisplaySleepInFullscreen = true;
+    snapshot.settings.showLevelMeter = true;
     QVERIFY(client.processBinarySnapshot(snapshot));
 
     QCOMPARE(client.showSpectrogramCrosshair(), false);
     QCOMPARE(client.showSpectrogramScale(), false);
     QCOMPARE(client.preventDisplaySleepInFullscreen(), true);
+    QCOMPARE(client.showLevelMeter(), true);
 }
 
 void BridgeClientTest::spectrogramOverlaySettingsDecodeFromBinaryPayload() {
@@ -1577,6 +1584,7 @@ void BridgeClientTest::spectrogramOverlaySettingsDecodeFromBinaryPayload() {
     ds << quint8(1);       // channelButtonsVisibility
     ds << quint8(1);       // spectrogramZoomEnabled
     ds << quint8(0);       // preventDisplaySleepInFullscreen
+    ds << quint8(0);       // showLevelMeter
 
     // Wrap in a full snapshot packet:
     // header: magic(u32) + totalLength(u32) + sectionMask(u16) + reserved(u16)
@@ -1606,6 +1614,9 @@ void BridgeClientTest::spectrogramOverlaySettingsDecodeFromBinaryPayload() {
     QCOMPARE(decoded.settings.showSpectrogramCrosshair, true);
     QCOMPARE(decoded.settings.showSpectrogramScale, true);
     QCOMPARE(decoded.settings.preventDisplaySleepInFullscreen, false);
+    QCOMPARE(decoded.settings.showLevelMeter, false);
+    const QByteArray command = BinaryBridgeCodec::encodeCommandU8(BinaryBridgeCodec::CmdSetShowLevelMeter, 0);
+    QCOMPARE(command, QByteArray::fromHex("4100010000"));
     // Verify other fields survived too.
     QCOMPARE(decoded.settings.systemMediaControlsEnabled, true);
     QCOMPARE(decoded.settings.fftSize, 8192);
@@ -1664,6 +1675,85 @@ void BridgeClientTest::currentTrackChannelsExposesDecodedMetadata()
     QCOMPARE(client.currentTrackChannels(), 6);
     QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("6 ch"));
     QVERIFY(client.currentTrackChannelLayoutIconKey().isEmpty());
+}
+
+
+void BridgeClientTest::metadataChannelLabelsDecodeOptionalTail()
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    auto appendText = [&stream](const QByteArray &value) {
+        stream << quint16(value.size());
+        stream.writeRawData(value.constData(), value.size());
+    };
+    appendText("/fixture/surround.wav");
+    for (int i = 0; i < 4; ++i) appendText("");
+    stream << qint32(0) << quint32(48000) << quint32(0) << quint16(6) << quint16(16);
+    appendText("WAV");
+    stream << quint32(0);
+    appendText("");
+    stream << quint32(0);
+    auto decode = [](const QByteArray &body, BinaryBridgeCodec::DecodedSnapshot *decoded) {
+        QByteArray packet;
+        QDataStream header(&packet, QIODevice::WriteOnly);
+        header.setByteOrder(QDataStream::LittleEndian);
+        header << quint32(0xFE550001u) << quint32(16 + body.size())
+               << quint16(BinaryBridgeCodec::SectionMetadata) << quint16(0)
+               << quint32(body.size());
+        packet.append(body);
+        QString error;
+        return BinaryBridgeCodec::decodeSnapshotPacket(packet, decoded, &error);
+    };
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QVERIFY(decode(payload, &decoded)); // Old payloads remain valid.
+    QVERIFY(decoded.metadata.channelLabels.isEmpty());
+    const QByteArray legacy = payload;
+    stream << quint16(6);
+    const QStringList positions{"C", "L", "R", "SL", "SR", "LFE"};
+    for (const auto &position : positions) appendText(position.toUtf8());
+    QVERIFY(decode(payload, &decoded));
+    QCOMPARE(decoded.metadata.channelLabels, positions); // Preserve native order.
+    QVERIFY(!decode(payload.first(payload.size() - 1), &decoded));
+    QByteArray mismatched = payload;
+    mismatched[legacy.size()] = 5;
+    QVERIFY(!decode(mismatched, &decoded));
+    QVERIFY(!decode(payload + QByteArray(1, '\0'), &decoded));
+    QVERIFY(decode(legacy + QByteArray(2, '\0'), &decoded));
+    QVERIFY(decoded.metadata.channelLabels.isEmpty());
+}
+
+void BridgeClientTest::channelLayoutFollowsMatchingMetadataAcrossTracks()
+{
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/fixture/surround.wav");
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.channels = 6;
+    snapshot.metadata.channelLabels = {"L", "R", "C", "LFE", "SL", "SR"};
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackChannelLabels(), snapshot.metadata.channelLabels);
+    QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("5.1"));
+    QCOMPARE(client.currentTrackChannelLayoutIconKey(), QStringLiteral("5.1"));
+    snapshot.playback.currentPath = QStringLiteral("/fixture/next.wav");
+    QVERIFY(client.processBinarySnapshot(snapshot)); // Stale metadata for prior track.
+    QCOMPARE(client.currentTrackChannels(), 0);
+    QVERIFY(client.currentTrackChannelLabels().isEmpty());
+    QVERIFY(client.currentTrackChannelLayoutIconKey().isEmpty());
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.channelLabels = {"L", "R", "C", "LFE", "FLC", "FRC"};
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("6 ch"));
+    QVERIFY(client.currentTrackChannelLayoutIconKey().isEmpty());
+    snapshot.metadata.channelLabels = {"C", "L", "R", "RL", "RR", "LFE"};
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("5.1"));
+    QCOMPARE(client.currentTrackChannelLayoutIconKey(), QStringLiteral("5.1"));
+    QCOMPARE(client.currentTrackChannelLabels(), snapshot.metadata.channelLabels);
 }
 
 void BridgeClientTest::testSoloChannelCommandEncoding()
@@ -1805,6 +1895,7 @@ void BridgeClientTest::testChannelButtonsVisibilityDecoding()
              qPrintable(error));
     QCOMPARE(decoded.settings.channelButtonsVisibility, 2);
     QCOMPARE(decoded.settings.preventDisplaySleepInFullscreen, true);
+    QCOMPARE(decoded.settings.showLevelMeter, true); // Older settings payloads default on.
 }
 
 void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {

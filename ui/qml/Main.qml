@@ -74,6 +74,8 @@ ApplicationWindow {
         ? libraryModel
         : null
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
+    readonly property int levelMeterHeight: 20
+    readonly property int embeddedLevelMeterHeight: uiBridge.showLevelMeter ? levelMeterHeight : 0
     readonly property var uiPalette: uiPaletteObject
     readonly property var overlayHost: Overlay.overlay
     readonly property bool themeIsDark: uiPalette.themeIsDark
@@ -131,6 +133,7 @@ ApplicationWindow {
 
     Controllers.ViewerController {
         id: viewerController
+        objectName: "viewerController"
         uiBridge: root.uiBridge
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
     }
@@ -188,6 +191,7 @@ ApplicationWindow {
         property string currentTrackChannelLayoutText: ""
         property string currentTrackChannelLayoutIconKey: ""
         property int currentTrackChannels: 0
+        property var currentTrackChannelLabels: []
         property int currentTrackSampleRateHz: 0
         property int currentTrackBitDepth: 0
         property int currentTrackCurrentBitrateKbps: 0
@@ -204,6 +208,7 @@ ApplicationWindow {
         property int repeatMode: 0
         property bool shuffleEnabled: false
         property bool showFps: false
+        property bool showLevelMeter: true
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
         property bool spectrogramZoomEnabled: true
@@ -289,6 +294,7 @@ ApplicationWindow {
         function setRepeatMode(mode) {}
         function setShuffleEnabled(value) {}
         function setShowFps(value) {}
+        function setShowLevelMeter(value) { showLevelMeter = value }
         function setShowSpectrogramCrosshair(value) {}
         function setShowSpectrogramScale(value) {}
         function setSpectrogramZoomEnabled(value) {}
@@ -998,10 +1004,11 @@ ApplicationWindow {
                 SplitView.fillWidth: true
 
                 Panes.QueuePane {
+                    objectName: "mainQueuePane"
                     controller: queueController
                     uiBridge: root.uiBridge
                     uiPalette: root.uiPalette
-                    preferredHeight: root.height * 0.58
+                    preferredHeight: Math.max(220, root.height * 0.58 - root.embeddedLevelMeterHeight)
                     playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
                     playlistOrderColumnWidth: root.playlistOrderColumnWidth
                     playlistOrderText: FormatUtils.playlistOrderText
@@ -1019,7 +1026,7 @@ ApplicationWindow {
                     id: spectrogramPane
                     SplitView.fillWidth: true
                     SplitView.fillHeight: true
-                    SplitView.minimumHeight: 220
+                    SplitView.minimumHeight: 220 + root.embeddedLevelMeterHeight
                     openViewer: viewerController.openSpectrogramViewer
                     visualizationMode: viewerController.visualizationMode
                     setVisualizationMode: viewerController.setVisualizationMode
@@ -1030,6 +1037,7 @@ ApplicationWindow {
 
     Item {
         id: visualizationSurface
+        objectName: "visualizationSurface"
         parent: viewerController.spectrogramViewerOpen
             ? (root.useWholeScreenViewerMode
                 ? spectrogramViewerShell.windowHost
@@ -1040,7 +1048,9 @@ ApplicationWindow {
 
         Viewers.SpectrogramSurface {
             id: spectrogramSurface
+            objectName: "mainSpectrogramSurface"
             anchors.fill: parent
+            anchors.bottomMargin: levelMeter.height
             visible: viewerController.visualizationMode === 0
             viewerMode: viewerController.spectrogramViewerOpen
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
@@ -1052,13 +1062,37 @@ ApplicationWindow {
 
         Viewers.WaveformSurface {
             id: waveformSurface
+            objectName: "mainWaveformSurface"
             anchors.fill: parent
+            anchors.bottomMargin: levelMeter.height
             visible: viewerController.visualizationMode === 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             uiBridge: root.uiBridge
             positionSeconds: playbackController.spectrogramPositionSeconds
             seekCommitted: playbackController.seekCommitted
+        }
+
+        LevelMeterItem {
+            id: levelMeter
+            objectName: "levelMeter"
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            visible: root.uiBridge.showLevelMeter && !viewerController.spectrogramViewerOpen
+            height: visible ? root.levelMeterHeight : 0
+            sourcePath: visible && root.uiBridge.playbackState !== "Stopped" ? root.uiBridge.currentTrackPath : ""
+            positionSeconds: playbackController.displayedPositionSeconds
+            durationSeconds: root.uiBridge.durationSeconds
+            playing: root.uiBridge.connected && root.uiBridge.playbackState === "Playing"
+            channelCountHint: root.uiBridge.currentTrackChannels > 0 ? root.uiBridge.currentTrackChannels : 2
+        }
+
+        Connections {
+            target: root.uiBridge
+            function onTransportPositionDiscontinuity(seconds) {
+                levelMeter.resetForSeek(seconds)
+            }
         }
     }
 

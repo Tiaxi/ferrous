@@ -79,6 +79,7 @@ qt_add_executable(ferrous
     src/WaveformSceneGraph.cpp
     src/WaveformSceneGraph.h
     src/WaveformEditorItem.cpp
+    src/LevelMeterItem.cpp
 )
 
 target_include_directories(ferrous PRIVATE src)
@@ -197,6 +198,23 @@ install(FILES assets/ferrous.svg DESTINATION share/icons/hicolor/scalable/apps R
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
 
+    qt_add_executable(ferrous_level_meter_tests
+        tests/tst_level_meter.cpp
+        src/LevelMeterItem.cpp
+    )
+    target_include_directories(ferrous_level_meter_tests PRIVATE src)
+    set_target_properties(ferrous_level_meter_tests PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+    add_dependencies(ferrous_level_meter_tests ferrous_rust_bridge)
+    target_link_libraries(ferrous_level_meter_tests PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Concurrent Qt6::Test
+        "${FERROUS_RUST_STATIC_LIB}" PkgConfig::FERROUS_GSTREAMER dl m pthread
+    )
+    ferrous_enable_strict_warnings(ferrous_level_meter_tests)
+    add_test(NAME ferrous_level_meter_tests COMMAND ferrous_level_meter_tests)
+    set_tests_properties(ferrous_level_meter_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software"
+    )
+
     qt_add_executable(ferrous_qml_smoke_tests
         tests/tst_qml_smoke.cpp
         src/BinaryBridgeCodec.cpp
@@ -212,6 +230,7 @@ if(BUILD_TESTING)
         src/WaveformSceneGraph.cpp
         src/WaveformSceneGraph.h
         src/WaveformEditorItem.cpp
+        src/LevelMeterItem.cpp
     )
     target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
     add_dependencies(ferrous_qml_smoke_tests ferrous_rust_bridge)

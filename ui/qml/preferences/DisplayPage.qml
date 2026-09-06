@@ -66,6 +66,14 @@ ScrollView {
                 }
 
                 CheckBox {
+                    objectName: "showLevelMeterCheckBox"
+                    text: "Show level meter below the main visualization"
+                    focusPolicy: Qt.NoFocus
+                    checked: root.uiBridge.showLevelMeter
+                    onToggled: root.uiBridge.setShowLevelMeter(checked)
+                }
+
+                CheckBox {
                     objectName: "preventDisplaySleepInFullscreenCheckBox"
                     text: "Prevent display sleep and dimming in fullscreen viewer"
                     focusPolicy: Qt.NoFocus
