@@ -1,3 +1,13 @@
+ferrous (0.2.0-1) unstable; urgency=low
+
+  * Expand global search with extended metadata, field filters, and ranked results.
+  * Add an optional per-channel level meter.
+  * Improve waveform and spectrogram rendering, memory use, and playback sync.
+  * Keep library, playlist, queue, and tag-editing operations responsive.
+  * Drop Fedora 43 packaging support.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Sun, 06 Sep 2026 22:19:17 +0300
+
 ferrous (0.1.16-1) unstable; urgency=low
 
   * Keep the centered spectrogram filled when zooming out near track end.
