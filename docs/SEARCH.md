@@ -2,7 +2,7 @@
 
 Open global search with Ctrl+F. Search matches titles, artists (including repeated values), albums, album artists, genres, years/dates, composers, conductors, performers, labels/publishers, comments, lyrics, and filenames/folder paths across the indexed library. Matching ignores case and accents; all query words must match, and words may match different fields. Substring matches remain available even when other results match a word prefix.
 
-Exact entity names rank first, followed by prefixes, phrases, and supporting metadata. Comments and lyrics rank below name matches; path-only matches rank last. Artist and album results are ranked by their own names, independently of track ranking. Artists and albums follow the library's folder grouping, including separate copies in different library roots.
+Exact entity names rank first, followed by prefixes, phrases, and supporting metadata. Comments and lyrics rank below name matches; path-only matches rank last. When query words span a name and metadata, the name portion keeps its exact/prefix advantage: `1997 signify` ranks a track titled Signify with year 1997 ahead of Intro/Signify with 1997 in its album name. Artist and album results are ranked by their own names, independently of track ranking. Artists and albums follow the library's folder grouping, including separate copies in different library roots.
 
 The All view starts with up to three best matches across result types. Each result appears once. Use Artists, Albums, or Tracks to focus the list; highlighted text shows the matching words. Matches in fields that are not normally displayed include a short explanation, such as `Album artist: orchestra` or `Comment: remaster`. Hover a result to read its full title and supporting details.
 
