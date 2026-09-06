@@ -273,6 +273,7 @@ struct PreparedSearchTrack {
 struct PreparedSearchLibrary {
     tracks: Vec<PreparedSearchTrack>,
     album_inventory: HashMap<String, AlbumInventoryAcc>,
+    artist_album_counts: HashMap<String, u32>,
 }
 
 #[derive(Default)]
@@ -732,7 +733,7 @@ fn choose_most_common_genre(counts: &HashMap<String, usize>) -> String {
 }
 
 fn finalize_search_rows(
-    album_inventory: &HashMap<String, AlbumInventoryAcc>,
+    prepared: &PreparedSearchLibrary,
     limits: &SearchResultLimits,
     album_cover_paths: &HashMap<String, String>,
     artist_groups: SearchGroupMap,
@@ -749,7 +750,11 @@ fn finalize_search_rows(
                 score,
                 year: None,
                 track_number: None,
-                count: 0,
+                count: prepared
+                    .artist_album_counts
+                    .get(&artist_key)
+                    .copied()
+                    .unwrap_or(0),
                 length_seconds: None,
                 label: artist_name.clone(),
                 artist: artist_name,
@@ -770,7 +775,7 @@ fn finalize_search_rows(
         .into_iter()
         .filter_map(|(album_key, (score, fallback_title, root_label))| {
             let stats = album_hit_stats.get(&album_key)?;
-            let inventory = album_inventory.get(&album_key);
+            let inventory = prepared.album_inventory.get(&album_key);
             Some(BridgeSearchResultRow {
                 match_detail: stats.match_detail.clone(),
                 row_type: BridgeSearchResultRowType::Album,
@@ -879,6 +884,7 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
 
     let mut tracks = Vec::with_capacity(library.tracks.len());
     let mut album_inventory: HashMap<String, AlbumInventoryAcc> = HashMap::new();
+    let mut artist_album_counts: HashMap<String, u32> = HashMap::new();
 
     for track in &library.tracks {
         let path_string = track.path.to_string_lossy().to_string();
@@ -924,7 +930,12 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
             if let Some(album_key) = context.album_key.clone() {
                 let include_in_main_album =
                     context.is_main_level_album_track || context.is_disc_section_album_track;
-                let inventory = album_inventory.entry(album_key).or_default();
+                let inventory = album_inventory.entry(album_key).or_insert_with(|| {
+                    // Count each library album group once, including multi-disc albums.
+                    let count = artist_album_counts.entry(context.artist_key).or_default();
+                    *count = count.saturating_add(1);
+                    AlbumInventoryAcc::default()
+                });
                 if include_in_main_album {
                     inventory.main_track_count = inventory.main_track_count.saturating_add(1);
                     if let Some(duration) = track.duration_secs {
@@ -955,6 +966,7 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
     PreparedSearchLibrary {
         tracks,
         album_inventory,
+        artist_album_counts,
     }
 }
 
@@ -1287,7 +1299,7 @@ fn build_search_results_frame(
         buckets.track_count,
     ];
     let rows = finalize_search_rows(
-        &prepared.album_inventory,
+        &prepared,
         &limits,
         &buckets.album_cover_paths,
         buckets.artist_groups,
@@ -1724,7 +1736,7 @@ mod tests {
             panic!("unexpected cancellation")
         };
         finalize_search_rows(
-            &prepared.album_inventory,
+            &prepared,
             &SearchResultLimits {
                 artist: limit,
                 album: limit,
@@ -1736,6 +1748,47 @@ mod tests {
             &buckets.album_hit_stats,
             buckets.track_rows,
         )
+    }
+
+    #[test]
+    fn artist_album_counts_use_full_inventory_and_distinct_root_groups() {
+        let mut tracks = vec![
+            fixture_track("Intro", "Example", "First", "01"),
+            fixture_track("Song", "Example", "First", "CD1/02"),
+            fixture_track("Extra", "Example", "First", "Bonus/03"),
+            fixture_track("Song", "Example", "Second", "01"),
+            fixture_track("Song", "Other", "Third", "01"),
+        ];
+        let mut copy = fixture_track("Song", "Example", "First", "01");
+        copy.root_path = p("/surround");
+        copy.path = p("/surround/Example/First/01.flac");
+        tracks.push(copy);
+        let library = LibrarySnapshot {
+            roots: vec![library_root(&p("/music")), library_root(&p("/surround"))],
+            tracks,
+            ..LibrarySnapshot::default()
+        };
+        let prepared = prepare_search_library(&library);
+        assert_eq!(prepared.artist_album_counts["artist|/music|Example"], 2);
+        assert_eq!(prepared.artist_album_counts["artist|/surround|Example"], 1);
+        assert_eq!(prepared.artist_album_counts["artist|/music|Other"], 1);
+
+        // Artist-only searches and limited result lists still report all albums.
+        for query in ["example", "example type:artist"] {
+            let tracks = library
+                .tracks
+                .iter()
+                .filter(|track| track.root_path == p("/music"))
+                .cloned()
+                .collect();
+            let rows = fixture_search(query, tracks, 1);
+            let artist = rows
+                .iter()
+                .find(|row| row.row_type == BridgeSearchResultRowType::Artist)
+                .expect("matching artist");
+            assert_eq!(artist.count, 2);
+            assert_eq!(artist.length_seconds, None);
+        }
     }
 
     #[test]

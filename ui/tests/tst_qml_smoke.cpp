@@ -10491,6 +10491,37 @@ ApplicationWindow {
     QCOMPARE(object->property("albumPlayCount").toInt(), 1);
     QCOMPARE(object->property("playCount").toInt(), 0);
     QTRY_VERIFY(!object->property("searchVisible").toBool());
+
+    // Artist rows describe albums instead of displaying an unknown duration.
+    for (const auto &type : {QStringLiteral("artist"), QStringLiteral("album")}) {
+        for (const int count : {0, 1, 12}) {
+            GlobalSearchResultsModel::SearchDisplayRow row;
+            row.kind = "item";
+            row.rowType = type;
+            row.label = "Example";
+            row.count = count;
+            row.lengthText = "--:--";
+            model.setResultFilter(type);
+            model.presentSearchRows({row});
+            QMetaObject::invokeMethod(object.data(), "reopenSearch");
+            QTRY_VERIFY(object->property("searchVisible").toBool());
+            const QString expected = QString::number(count) + " "
+                + (type == "artist" ? "album" : "track") + (count == 1 ? "" : "s");
+            auto summaryVisible = [&]() {
+                bool found = false;
+                const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+                    if (item->objectName() == QStringLiteral("globalSearchResultSummary")
+                        && item->property("text").toString() == expected) found = true;
+                    for (auto *child : item->childItems()) visit(child);
+                };
+                visit(view);
+                return found;
+            };
+            QTRY_VERIFY(summaryVisible());
+            QTest::keyClick(window, Qt::Key_Escape);
+            QTRY_VERIFY(!object->property("searchVisible").toBool());
+        }
+    }
 }
 
 int main(int argc, char **argv) {

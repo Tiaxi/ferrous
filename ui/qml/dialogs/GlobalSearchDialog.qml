@@ -265,10 +265,16 @@ Dialog {
                             color: resultRow.selected ? resultRow.foreground : root.uiPalette.uiMutedTextColor
                         }
                         Label {
-                            Layout.minimumWidth: Math.max(74, rowFont.advanceWidth("999 tracks"))
+                            objectName: "globalSearchResultSummary"
+                            Layout.minimumWidth: Math.max(74, rowFont.advanceWidth("999 tracks"), rowFont.advanceWidth("999 albums"))
                             Layout.maximumWidth: Layout.minimumWidth
                             horizontalAlignment: Text.AlignRight
-                            text: model.rowType === "album" ? (model.count || 0) + " tracks" : (model.lengthText || "")
+                            text: {
+                                if (model.rowType === "track") return model.lengthText || ""
+                                const count = model.count || 0
+                                const unit = model.rowType === "artist" ? "album" : "track"
+                                return count + " " + unit + (count === 1 ? "" : "s")
+                            }
                             color: resultRow.foreground
                         }
                     }
