@@ -88,7 +88,7 @@ Dialog {
     }
 
     contentItem: ColumnLayout {
-        spacing: 8
+        spacing: 6
         TextField {
             id: queryField
             objectName: "globalSearchQueryField"
@@ -140,6 +140,10 @@ Dialog {
                 clip: true
                 model: root.controller.uiBridge.globalSearchModel || []
                 reuseItems: true
+                readonly property real resultRowHeight: Math.max(44, queryField.font.pixelSize * 2 + 14)
+                currentIndex: root.controller.selectedDisplayIndex
+                highlightFollowsCurrentItem: false
+                keyNavigationEnabled: false
                 boundsBehavior: Flickable.StopAtBounds
                 flickDeceleration: root.snappyScrollFlickDeceleration
                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
@@ -170,26 +174,31 @@ Dialog {
                         return parts.filter(function(value) { return value.length > 0 }).join(" · ")
                     }
                     width: resultsView.width - (resultScrollBar.visible ? resultScrollBar.width : 0)
-                    height: section ? 30 : 60
+                    height: section ? Math.max(24, queryField.font.pixelSize + 8)
+                        : model.rowType === "artist" ? Math.max(30, queryField.font.pixelSize + 12)
+                        : resultsView.resultRowHeight
                     color: section ? root.uiPalette.uiSectionColor : selected ? root.uiPalette.uiSelectionColor
                         : (index % 2 ? root.uiPalette.uiSurfaceRaisedColor : root.uiPalette.uiSurfaceAltColor)
                     RowLayout {
                         anchors.fill: parent
-                        anchors.margins: 8
-                        spacing: 10
+                        anchors.leftMargin: 8
+                        anchors.rightMargin: 8
+                        anchors.topMargin: 4
+                        anchors.bottomMargin: 4
+                        spacing: 8
                         Image {
                             visible: !resultRow.section && model.rowType !== "artist"
-                            Layout.preferredWidth: 40
-                            Layout.preferredHeight: 40
+                            Layout.preferredWidth: 32
+                            Layout.preferredHeight: 32
                             source: model.coverUrl || ""
-                            sourceSize.width: 80
-                            sourceSize.height: 80
+                            sourceSize.width: 64
+                            sourceSize.height: 64
                             fillMode: Image.PreserveAspectFit
                             asynchronous: true
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            spacing: 2
+                            spacing: 0
                             Label {
                                 Layout.fillWidth: true
                                 text: resultRow.section ? model.sectionTitle : root.highlighted(model.label)
@@ -199,13 +208,21 @@ Dialog {
                                 color: resultRow.foreground
                             }
                             Label {
-                                visible: !resultRow.section && resultRow.detail.length > 0
+                                visible: !resultRow.section && model.rowType !== "artist" && resultRow.detail.length > 0
                                 Layout.fillWidth: true
                                 text: root.highlighted(resultRow.detail)
                                 textFormat: Text.StyledText
                                 elide: Text.ElideRight
                                 color: resultRow.selected ? resultRow.foreground : root.uiPalette.uiMutedTextColor
                             }
+                        }
+                        Label {
+                            visible: !resultRow.section && model.rowType === "artist" && resultRow.detail.length > 0
+                            Layout.maximumWidth: resultRow.width * 0.35
+                            text: root.highlighted(resultRow.detail)
+                            textFormat: Text.StyledText
+                            elide: Text.ElideRight
+                            color: resultRow.selected ? resultRow.foreground : root.uiPalette.uiMutedTextColor
                         }
                         Label {
                             visible: !resultRow.section
