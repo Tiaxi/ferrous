@@ -16,13 +16,8 @@ Dialog {
     required property real snappyScrollMaxFlickVelocity
     required property bool globalSearchShowsRootColumn
     property var contextRowData: ({})
-    property int resultsRevision: 0
     readonly property bool searching: !!root.controller.uiBridge.globalSearchBusy
     readonly property string resultFilter: root.controller.globalSearchModelApi.resultFilter || "all"
-    readonly property var selectedResult: {
-        const revision = root.resultsRevision
-        return root.controller.selectedRow() || ({})
-    }
 
     modal: true
     title: "Search library"
@@ -78,16 +73,6 @@ Dialog {
         if (row.matchDetail) parts.push(row.matchDetail)
         return parts.filter(function(value) { return value.length > 0 }).join(" · ")
     }
-    function selectionAction() {
-        if (root.searching) return "Searching…"
-        if (root.controller.uiBridge.globalSearchModelRetained || root.selectedResult.kind !== "item")
-            return "Select a result to play"
-        const row = root.selectedResult
-        let text = "Enter: Play " + row.rowType
-        if (row.rowType === "album") text += " · " + (row.count || 0) + " tracks"
-        if (row.lengthText) text += " · " + row.lengthText
-        return text + " · replaces queue"
-    }
     function resultSummary() {
         const b = root.controller.uiBridge
         const shown = [b.globalSearchArtistCount || 0, b.globalSearchAlbumCount || 0, b.globalSearchTrackCount || 0]
@@ -128,7 +113,6 @@ Dialog {
         target: root.controller.globalSearchModelApi
         ignoreUnknownSignals: true
         function onSearchRowsChanged() {
-            ++root.resultsRevision
             root.controller.selectFirstItem()
             resultsView.cancelFlick()
             resultsView.positionViewAtBeginning()
@@ -170,6 +154,13 @@ Dialog {
                 text: root.searching ? "Searching…" : root.resultSummary()
                 color: root.uiPalette.uiMutedTextColor
                 elide: Text.ElideRight
+            }
+            Button {
+                objectName: "globalSearchShowMoreButton"
+                text: "Show more"
+                implicitHeight: 28
+                visible: !!root.controller.uiBridge.globalSearchCanExpand && root.filterHasMore()
+                onClicked: root.controller.uiBridge.expandGlobalSearch()
             }
             BusyIndicator { running: root.searching; visible: running; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
             ToolButton {
@@ -241,10 +232,11 @@ Dialog {
                                 foreground: resultRow.foreground
                             }
                             Label {
+                                objectName: "globalSearchResultType"
                                 Layout.fillWidth: true
-                                text: String(model.rowType || "").toUpperCase()
-                                font.weight: model.rowType === "album" ? Font.DemiBold : Font.Normal
-                                color: resultRow.foreground
+                                text: model.rowType === "album" ? "Album" : (model.rowType === "artist" ? "Artist" : "Track")
+                                font.weight: Font.Normal
+                                color: resultRow.selected ? resultRow.foreground : root.uiPalette.uiMutedTextColor
                             }
                         }
                         Image {
@@ -306,34 +298,6 @@ Dialog {
                 visible: !root.searching && (root.controller.uiBridge.globalSearchModelRetained || resultsView.count === 0)
                 text: queryField.text.trim().length === 0 ? "Type to search your library" : "No matches. Try fewer words or another result type."
                 color: root.uiPalette.uiMutedTextColor
-            }
-        }
-        RowLayout {
-            Layout.fillWidth: true
-            ColumnLayout {
-                Layout.fillWidth: true
-                Layout.minimumWidth: 0
-                spacing: 2
-                Label {
-                    objectName: "globalSearchSelectionAction"
-                    Layout.fillWidth: true
-                    text: root.selectionAction()
-                    elide: Text.ElideRight
-                    color: root.uiPalette.uiTextColor
-                }
-                Label {
-                    Layout.fillWidth: true
-                    text: root.searching || root.controller.uiBridge.globalSearchModelRetained ? ""
-                        : root.rowContext(root.selectedResult, true)
-                    elide: Text.ElideRight
-                    color: root.uiPalette.uiMutedTextColor
-                }
-            }
-            Label { text: "Ctrl+Enter: show in library · Esc: close"; color: root.uiPalette.uiMutedTextColor }
-            Button {
-                text: "Show more"
-                visible: !!root.controller.uiBridge.globalSearchCanExpand && root.filterHasMore()
-                onClicked: root.controller.uiBridge.expandGlobalSearch()
             }
         }
         Label {

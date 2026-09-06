@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QApplication>
+#include <QFont>
 #include "../src/GlobalSearchResultsModel.h"
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -10282,6 +10283,9 @@ ApplicationWindow {
     property alias searchBusy: bridge.globalSearchBusy
     property alias playCount: bridge.playCount
     property alias albumPlayCount: bridge.albumPlayCount
+    property alias canExpand: bridge.globalSearchCanExpand
+    property alias searchTotals: bridge.globalSearchTotals
+    property alias expandCount: bridge.expandCount
     function reopenSearch() { searchController.openDialog() }
     property alias revealCount: bridge.revealCount
     property alias searchVisible: dialog.visible
@@ -10304,6 +10308,8 @@ ApplicationWindow {
         property var globalSearchTotals: [1, 1, 80]
         property int playCount: 0
         property int albumPlayCount: 0
+        property int expandCount: 0
+        function expandGlobalSearch() { ++expandCount }
         property int revealCount: 0
         function setGlobalSearchQuery(query) {}
         function replaceWithPaths(paths) { ++playCount }
@@ -10343,10 +10349,17 @@ ApplicationWindow {
     QVERIFY(field);
     field->setProperty("text", QStringLiteral("blue skies"));
     QCOMPARE(object->property("selectionIndex").toInt(), 0);
-    auto *action = object->findChild<QObject *>(QStringLiteral("globalSearchSelectionAction"));
-    QVERIFY(action);
-    QTRY_VERIFY(action->property("text").toString().contains("Play album"));
-    QVERIFY(action->property("text").toString().contains("12 tracks"));
+    QVERIFY(!object->findChild<QObject *>(QStringLiteral("globalSearchSelectionAction")));
+    auto *showMore = object->findChild<QQuickItem *>(QStringLiteral("globalSearchShowMoreButton"));
+    QVERIFY(showMore);
+    QVERIFY(!showMore->isVisible());
+    object->setProperty("canExpand", true);
+    QVERIFY(!showMore->isVisible()); // No hidden matches yet.
+    object->setProperty("searchTotals", QVariantList{1, 1, 100});
+    QTRY_VERIFY(showMore->isVisible());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      showMore->mapToScene(QPointF(showMore->width() / 2, showMore->height() / 2)).toPoint());
+    QCOMPARE(object->property("expandCount").toInt(), 1);
     auto *helpButton = object->findChild<QQuickItem *>(QStringLiteral("globalSearchHelpButton"));
     auto *help = object->findChild<QObject *>(QStringLiteral("globalSearchHelp"));
     QVERIFY(helpButton); QVERIFY(help);
@@ -10389,6 +10402,34 @@ ApplicationWindow {
         });
     };
     QTRY_VERIFY(columnsAligned());
+    // Type labels stay quiet until selected, without losing type information.
+    auto typeLabelsReadable = [&]() {
+        bool albumFound = false;
+        bool trackFound = false;
+        bool valid = true;
+        const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+            if (item->objectName() == QStringLiteral("globalSearchResultType")) {
+                const QString text = item->property("text").toString();
+                albumFound |= text == "Album";
+                trackFound |= text == "Track";
+                valid &= text == "Album" || text == "Track" || text == "Artist";
+                valid &= item->property("font").value<QFont>().weight() == QFont::Normal;
+                valid &= item->property("color").value<QColor>()
+                    == QColor(text == "Album" ? "white" : "#aaa");
+            }
+            for (auto *child : item->childItems()) visit(child);
+        };
+        visit(view);
+        return valid && albumFound && trackFound;
+    };
+    QTRY_VERIFY(typeLabelsReadable());
+    QVERIFY(showMore->mapToScene(QPointF(0, showMore->height())).y()
+            <= view->mapToScene(QPointF()).y());
+    // Removing the normal footer gives its space back to the results.
+    auto *dialog = object->findChild<QObject *>(QStringLiteral("globalSearchDialog"));
+    QVERIFY(dialog);
+    const qreal dialogBottom = dialog->property("y").toReal() + dialog->property("height").toReal();
+    QVERIFY(dialogBottom - view->mapToScene(QPointF(0, view->height())).y() <= 12);
     const QPointF wheelPosition = view->mapToScene(QPointF(view->width() / 2, view->height() / 2));
     QTest::mouseMove(window, wheelPosition.toPoint());
     for (int i = 0; i < 8; ++i) {
@@ -10434,9 +10475,7 @@ ApplicationWindow {
     QTest::keyClick(window, Qt::Key_Down); // No deferred reset may undo this move.
     QTRY_VERIFY(selectionFullyVisible());
     QMetaObject::invokeMethod(field, "forceActiveFocus");
-    QTRY_VERIFY(action->property("text").toString().contains("Play track"));
     object->setProperty("searchBusy", true);
-    QTRY_COMPARE(action->property("text").toString(), QStringLiteral("Searching…"));
     QTest::keyClick(window, Qt::Key_Return);
     QCOMPARE(object->property("playCount").toInt(), 0);
     object->setProperty("searchBusy", false);
@@ -10448,7 +10487,6 @@ ApplicationWindow {
     model.setResultFilter("album");
     QMetaObject::invokeMethod(object.data(), "reopenSearch");
     QTRY_VERIFY(object->property("searchVisible").toBool());
-    QTRY_VERIFY(action->property("text").toString().contains("Play album"));
     QTest::keyClick(window, Qt::Key_Return);
     QCOMPARE(object->property("albumPlayCount").toInt(), 1);
     QCOMPARE(object->property("playCount").toInt(), 0);

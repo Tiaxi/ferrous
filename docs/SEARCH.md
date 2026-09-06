@@ -6,11 +6,11 @@ Exact entity names rank first, followed by whole-word and prefix matches, substr
 
 The All view is one relevance-sorted list. Albums precede tracks and artists when their relevance is equal. A weak album match cannot jump ahead of a stronger track. Artists and albums follow the library's folder grouping, including separate copies in different library roots.
 
-Each result appears once in a compact single-line row, with its type and icon on the left. Use Albums, Tracks, or Artists to focus the list; highlighted text shows the matching words. Rows show name, artist/album context, year, and track length or album track count. Genre and other tag details appear when they explain a match; library roots appear when they match the query or distinguish copies. The selected result's full context appears below the list and in hover details. Matches in fields that are not normally displayed include a short explanation, such as `Album artist: orchestra` or `Comment: remaster`.
+Each result appears once in a compact single-line row, with its type and icon on the left. Use Albums, Tracks, or Artists to focus the list; highlighted text shows the matching words. Rows show name, artist/album context, year, and track length or album track count. Genre and other tag details appear when they explain a match; library roots appear when they match the query or distinguish copies. Full result context is available in hover details. Matches in fields that are not normally displayed include a short explanation, such as `Album artist: orchestra` or `Comment: remaster`.
 
-The first result is selected automatically. The footer states whether Enter will play an album, track, or artist and replace the queue. The ? button opens search syntax and keyboard help.
+The first result is selected automatically. Enter plays the selected album, track, or artist and replaces the queue. The ? button opens search syntax and keyboard help.
 
-Counts show displayed results out of total matching artists, albums, and tracks. Show more increases the result budget. Results are bounded at 2,000 per type to keep interaction responsive; if more matches remain, refine the query. Initial budgets default to 5 artists, 10 albums, and 20 tracks.
+Counts show displayed results out of total matching artists, albums, and tracks. Show more, beside the counts, increases the result budget. Results are bounded at 2,000 per type to keep interaction responsive; if more matches remain, refine the query. Initial budgets default to 5 artists, 10 albums, and 20 tracks.
 
 | Action | Control |
 | --- | --- |
