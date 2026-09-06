@@ -3,11 +3,13 @@
 use std::collections::BTreeMap;
 
 use super::search::normalize_for_search;
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug)]
 pub(super) struct SearchTerm {
     pub(super) field: Option<&'static str>,
     pub(super) value: String,
+    pub(super) spelling: String,
 }
 
 #[derive(Debug)]
@@ -17,6 +19,7 @@ pub(super) struct SearchQuery {
 
 pub(super) fn field_key(name: &str) -> Option<&'static str> {
     match name.to_ascii_lowercase().as_str() {
+        "type" => Some("type"),
         "title" => Some("title"),
         "artist" => Some("artist"),
         "album" => Some("album"),
@@ -65,12 +68,14 @@ impl SearchQuery {
                         return SearchTerm {
                             field: Some(field),
                             value: normalize_for_search(value.trim()),
+                            spelling: value.trim().nfc().collect::<String>().to_lowercase(),
                         };
                     }
                 }
                 SearchTerm {
                     field: None,
                     value: normalize_for_search(token.trim()),
+                    spelling: token.trim().nfc().collect::<String>().to_lowercase(),
                 }
             })
             .collect();
@@ -88,23 +93,26 @@ impl SearchQuery {
         extra: &[(&str, &str)],
     ) -> bool {
         !self.terms.is_empty()
-            && self.terms.iter().all(|term| {
-                !term.value.is_empty()
-                    && (fields
-                        .iter()
-                        .any(|(field, value)| include(field) && term.matches(field, value))
-                        || extra
+            && self
+                .terms
+                .iter()
+                .filter(|term| term.field != Some("type"))
+                .all(|term| {
+                    !term.value.is_empty()
+                        && (fields
                             .iter()
-                            .any(|(field, value)| term.matches(field, value)))
-            })
+                            .any(|(field, value)| include(field) && term.matches(field, value))
+                            || extra
+                                .iter()
+                                .any(|(field, value)| term.matches(field, value)))
+                })
     }
 
-    pub(super) fn name_terms(&self, field: &str) -> Vec<String> {
+    pub(super) fn allows_type(&self, row_type: &str) -> bool {
         self.terms
             .iter()
-            .filter(|term| term.field.is_none_or(|key| key == field))
-            .map(|term| term.value.clone())
-            .collect()
+            .filter(|term| term.field == Some("type"))
+            .all(|term| term.value == row_type)
     }
 }
 

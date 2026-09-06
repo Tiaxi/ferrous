@@ -24,6 +24,7 @@ public:
         QString artist;
         QString album;
         QString rootLabel;
+        bool showRoot{false};
         QString genre;
         QString coverPath;
         QString coverUrl;
@@ -47,6 +48,7 @@ public:
                 && artist == other.artist
                 && album == other.album
                 && rootLabel == other.rootLabel
+                && showRoot == other.showRoot
                 && genre == other.genre
                 && coverPath == other.coverPath
                 && coverUrl == other.coverUrl
@@ -74,6 +76,7 @@ public:
                 && artist == other.artist
                 && album == other.album
                 && rootLabel == other.rootLabel
+                && showRoot == other.showRoot
                 && genre == other.genre
                 && coverPath == other.coverPath
                 && coverUrl == other.coverUrl
@@ -114,6 +117,7 @@ public:
         LengthSecondsRole,
         LengthTextRole,
         DelegateTypeRole,
+        ShowRootRole,
     };
     Q_ENUM(Role)
 

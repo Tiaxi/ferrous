@@ -466,6 +466,7 @@ private slots:
     void cleanup();
     void cleanupTestCase();
     void globalSearchKeyboardAndResponsiveResults();
+    void searchResultIconsFollowForeground();
     void loadsMainQmlWithFallbackBridge();
     void loadsExtractedQmlSlicesWithFallbackProps();
     void spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints();
@@ -10187,6 +10188,59 @@ void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() 
              item.m_precomputedCanvasDisplayLeft - 1);
 }
 
+void QmlSmokeTest::searchResultIconsFollowForeground() {
+    QQmlEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> object(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+Window {
+    id: harness
+    width: 72; height: 24; visible: true; color: "#111111"
+    property color ink: "#eeeeee"
+    Row {
+        Repeater {
+            model: ["album", "track", "artist"]
+            Components.SearchResultIcon {
+                required property string modelData
+                width: 24; height: 24
+                resultType: modelData
+                foreground: harness.ink
+            }
+        }
+    }
+}
+)QML"), QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR) + "/qml/SearchIconsTest.qml"), &errorText));
+    QVERIFY2(object, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(object.data());
+    QVERIFY(window);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    const auto allIconsUseColor = [&](const QColor &color) {
+        const auto rendered = window->grabWindow();
+        if (rendered.isNull()) return false;
+        const int size = rendered.width() / 3;
+        for (int icon = 0; icon < 3; ++icon) {
+            int matching = 0;
+            for (int y = 0; y < rendered.height(); ++y) {
+                for (int x = icon * size; x < (icon + 1) * size; ++x) {
+                    if (rendered.pixelColor(x, y) == color) ++matching;
+                }
+            }
+            if (matching < 6) return false;
+        }
+        return true;
+    };
+    QTRY_VERIFY(allIconsUseColor(QColor("#eeeeee")));
+    const auto dark = window->grabWindow();
+    const int iconWidth = dark.width() / 3;
+    QVERIFY(dark.copy(0, 0, iconWidth, dark.height()) != dark.copy(iconWidth, 0, iconWidth, dark.height()));
+    QVERIFY(dark.copy(iconWidth, 0, iconWidth, dark.height()) != dark.copy(iconWidth * 2, 0, iconWidth, dark.height()));
+    object->setProperty("ink", QColor("#222222"));
+    window->setColor(QColor("#fafafa"));
+    QTRY_VERIFY(allIconsUseColor(QColor("#222222")));
+}
+
 void QmlSmokeTest::globalSearchKeyboardAndResponsiveResults() {
     GlobalSearchResultsModel model;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
@@ -10201,7 +10255,9 @@ void QmlSmokeTest::globalSearchKeyboardAndResponsiveResults() {
     for (const auto &type : {QStringLiteral("artist"), QStringLiteral("album")}) {
         GlobalSearchResultsModel::SearchDisplayRow row;
         row.kind = "item"; row.rowType = type; row.label = "Blue Collection";
-        row.artist = "Example Ensemble"; row.rootLabel = "Music"; row.score = 5;
+        row.artist = "Example Ensemble"; row.rootLabel = "Music";
+        row.score = type == "album" ? 0 : 5;
+        if (type == "album") { row.count = 12; row.lengthText = "1:02:01"; }
         rows.push_back(row);
     }
     model.presentSearchRows(rows);
@@ -10216,9 +10272,17 @@ import "dialogs" as Dialogs
 ApplicationWindow {
     id: harness
     width: 800; height: 700; visible: true
+    palette.window: "#141617"
+    palette.base: "#141617"
+    palette.text: "#eeeeee"
+    palette.windowText: "#eeeeee"
+    palette.button: "#2a2d2e"
+    palette.buttonText: "#eeeeee"
     property alias selectionIndex: searchController.selectedDisplayIndex
     property alias searchBusy: bridge.globalSearchBusy
     property alias playCount: bridge.playCount
+    property alias albumPlayCount: bridge.albumPlayCount
+    function reopenSearch() { searchController.openDialog() }
     property alias revealCount: bridge.revealCount
     property alias searchVisible: dialog.visible
     function selectionFullyVisible() {
@@ -10239,9 +10303,11 @@ ApplicationWindow {
         property int globalSearchTrackCount: 80
         property var globalSearchTotals: [1, 1, 80]
         property int playCount: 0
+        property int albumPlayCount: 0
         property int revealCount: 0
         function setGlobalSearchQuery(query) {}
         function replaceWithPaths(paths) { ++playCount }
+        function replaceAlbumByKey(artist, album) { ++albumPlayCount }
     }
     Controllers.GlobalSearchController {
         id: searchController
@@ -10276,7 +10342,20 @@ ApplicationWindow {
     auto *field = object->findChild<QQuickItem *>(QStringLiteral("globalSearchQueryField"));
     QVERIFY(field);
     field->setProperty("text", QStringLiteral("blue skies"));
-    QVERIFY(object->property("selectionIndex").toInt() >= 0);
+    QCOMPARE(object->property("selectionIndex").toInt(), 0);
+    auto *action = object->findChild<QObject *>(QStringLiteral("globalSearchSelectionAction"));
+    QVERIFY(action);
+    QTRY_VERIFY(action->property("text").toString().contains("Play album"));
+    QVERIFY(action->property("text").toString().contains("12 tracks"));
+    auto *helpButton = object->findChild<QQuickItem *>(QStringLiteral("globalSearchHelpButton"));
+    auto *help = object->findChild<QObject *>(QStringLiteral("globalSearchHelp"));
+    QVERIFY(helpButton); QVERIFY(help);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      helpButton->mapToScene(QPointF(helpButton->width() / 2, helpButton->height() / 2)).toPoint());
+    QTRY_VERIFY(help->property("visible").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!help->property("visible").toBool());
+    QVERIFY(object->property("searchVisible").toBool());
     QMetaObject::invokeMethod(field, "forceActiveFocus");
     QTRY_VERIFY(field->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Home);
@@ -10295,6 +10374,21 @@ ApplicationWindow {
         QMetaObject::invokeMethod(object.data(), "selectionFullyVisible", Q_RETURN_ARG(QVariant, visible));
         return visible.toBool();
     };
+    // Short album context and long track context must share the same name column.
+    auto columnsAligned = [&]() {
+        QList<QQuickItem *> names;
+        const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+            if (item->objectName() == QStringLiteral("globalSearchResultName")) names.push_back(item);
+            for (auto *child : item->childItems()) visit(child);
+        };
+        visit(view);
+        if (names.size() < 2) return false;
+        const qreal nameX = names.first()->mapToScene(QPointF()).x();
+        return std::all_of(names.cbegin(), names.cend(), [nameX](QQuickItem *item) {
+            return qAbs(item->mapToScene(QPointF()).x() - nameX) < 1;
+        });
+    };
+    QTRY_VERIFY(columnsAligned());
     const QPointF wheelPosition = view->mapToScene(QPointF(view->width() / 2, view->height() / 2));
     QTest::mouseMove(window, wheelPosition.toPoint());
     for (int i = 0; i < 8; ++i) {
@@ -10308,11 +10402,11 @@ ApplicationWindow {
     }
     QTest::qWait(250);
     QVERIFY(view->property("contentY").toReal() > view->height());
-    QVERIFY(view->property("resultRowHeight").toReal() < 60);
+    QVERIFY(view->property("resultRowHeight").toReal() <= 34);
+    QVERIFY(view->height() / view->property("resultRowHeight").toReal() >= 11);
     QTest::keyClick(window, Qt::Key_Down);
     QTRY_VERIFY(selectionFullyVisible());
-    // Returning to the first result must use the view's actual origin, even
-    // after differently sized section/item delegates have been recycled.
+    // Returning to the first result must keep it visible after recycling.
     QTest::keyClick(window, Qt::Key_Up);
     QTRY_VERIFY(selectionFullyVisible());
     for (int i = 0; i < 30; ++i) {
@@ -10340,7 +10434,9 @@ ApplicationWindow {
     QTest::keyClick(window, Qt::Key_Down); // No deferred reset may undo this move.
     QTRY_VERIFY(selectionFullyVisible());
     QMetaObject::invokeMethod(field, "forceActiveFocus");
+    QTRY_VERIFY(action->property("text").toString().contains("Play track"));
     object->setProperty("searchBusy", true);
+    QTRY_COMPARE(action->property("text").toString(), QStringLiteral("Searching…"));
     QTest::keyClick(window, Qt::Key_Return);
     QCOMPARE(object->property("playCount").toInt(), 0);
     object->setProperty("searchBusy", false);
@@ -10348,6 +10444,14 @@ ApplicationWindow {
     if (!screenshot.isEmpty()) QVERIFY(window->grabWindow().save(screenshot));
     QTest::keyClick(window, Qt::Key_Return, Qt::ControlModifier);
     QCOMPARE(object->property("revealCount").toInt(), 1);
+    QTRY_VERIFY(!object->property("searchVisible").toBool());
+    model.setResultFilter("album");
+    QMetaObject::invokeMethod(object.data(), "reopenSearch");
+    QTRY_VERIFY(object->property("searchVisible").toBool());
+    QTRY_VERIFY(action->property("text").toString().contains("Play album"));
+    QTest::keyClick(window, Qt::Key_Return);
+    QCOMPARE(object->property("albumPlayCount").toInt(), 1);
+    QCOMPARE(object->property("playCount").toInt(), 0);
     QTRY_VERIFY(!object->property("searchVisible").toBool());
 }
 

@@ -1845,7 +1845,7 @@ void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {
     client.m_latestGlobalSearchSeqSent = 9;
     QVERIFY(client.processSearchResultsFrame(decoded));
     client.applyDeferredSearchDisplayRows();
-    QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(1), GlobalSearchResultsModel::MatchDetailRole).toString(), QStringLiteral("Comment: remaster"));
+    QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(0), GlobalSearchResultsModel::MatchDetailRole).toString(), QStringLiteral("Comment: remaster"));
     QCOMPARE(client.m_globalSearchModel.highlightText("Comment: anniversary remaster", "comment:\"anniversary remaster\""), QStringLiteral("Comment: <b>anniversary remaster</b>"));
     QCOMPARE(client.m_globalSearchModel.highlightText("live:oslo", "live:oslo"), QStringLiteral("<b>live:oslo</b>"));
     bytes.chop(1);
@@ -1860,17 +1860,33 @@ void BridgeClientTest::searchResultsRankFilterAndHighlight() {
         row.kind = "item"; row.rowType = type; row.label = "Blue"; row.score = 0;
         rows.push_back(row);
     }
+    // Weak album matches must stay below every stronger track, even beyond
+    // the first three positions. Matching copies expose their library roots.
+    for (int i = 0; i < 5; ++i) {
+        auto row = rows.last(); row.label = QStringLiteral("Track %1").arg(i); row.score = 1;
+        rows.push_back(row);
+    }
+    auto weak = rows[1]; weak.label = "Weak album"; weak.score = 6;
+    rows.push_back(weak);
+    auto copy = rows[1]; copy.rootLabel = "Surround";
+    rows[1].rootLabel = "Stereo";
+    rows.push_back(copy);
     model.presentSearchRows(rows);
-    QCOMPARE(model.rowDataAt(0).value("sectionTitle").toString(), QStringLiteral("Best matches"));
-    QCOMPARE(model.rowDataAt(1).value("rowType").toString(), QStringLiteral("track"));
-    QCOMPARE(model.rowCount(), 4); // Each result appears once.
-    model.setResultFilter("album");
-    QCOMPARE(model.rowCount(), 2);
+    QCOMPARE(model.rowDataAt(0).value("rowType").toString(), QStringLiteral("album"));
     QCOMPARE(model.rowDataAt(1).value("rowType").toString(), QStringLiteral("album"));
+    QVERIFY(model.rowDataAt(0).value("showRoot").toBool());
+    QVERIFY(model.rowDataAt(1).value("showRoot").toBool());
+    QCOMPARE(model.rowCount(), 10); // No section rows or repeated results.
+    QCOMPARE(model.rowDataAt(9).value("label").toString(), QStringLiteral("Weak album"));
+    QVERIFY(!model.rowDataAt(9).value("showRoot").toBool());
+    model.setResultFilter("album");
+    QCOMPARE(model.rowCount(), 3);
+    QCOMPARE(model.rowDataAt(0).value("rowType").toString(), QStringLiteral("album"));
     model.setResultFilter("invalid");
     QCOMPARE(model.resultFilter(), QStringLiteral("album"));
     model.setResultFilter("all");
-    QCOMPARE(model.rowCount(), 4);
+    QCOMPARE(model.rowCount(), 10);
+    QCOMPARE(model.highlightText("Album: Signify", "type:album signify"), QStringLiteral("Album: <b>Signify</b>"));
     QCOMPARE(model.highlightText(QString::fromUtf8("Björk & <Blue>"), "bjork blue"), QString::fromUtf8("<b>Björk</b> &amp; &lt;<b>Blue</b>&gt;"));
     QCOMPARE(model.highlightText(QString::fromUtf8("Cafe\xcc\x81"), "cafe"), QString::fromUtf8("<b>Cafe\xcc\x81</b>"));
 }

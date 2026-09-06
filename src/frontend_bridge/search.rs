@@ -106,7 +106,7 @@ impl SearchRowAccumulator {
         fields: &BTreeMap<String, String>,
     ) -> Option<BridgeSearchResultRow> {
         let context = derive_hit_context(hit, &self.roots, &self.roots_by_path)?;
-        self.track_count = self.track_count.saturating_add(1);
+
         let hit_path_string = hit.path.to_string_lossy().to_string();
         let hit_artist = if hit.artist.trim().is_empty() {
             context.artist_name.clone()
@@ -122,13 +122,12 @@ impl SearchRowAccumulator {
             hit.album.trim().to_string()
         };
         let album_key = context.album_key.clone();
-        let artist_fields =
-            BTreeMap::from([("artist".into(), normalize_for_search(&context.artist_name))]);
-        if query.matches(&artist_fields) {
-            let score = name_score(
-                &query.name_terms("artist"),
-                &normalize_for_search(&context.artist_name),
-            );
+        let artist_fields = BTreeMap::from([
+            ("artist".into(), normalize_for_search(&context.artist_name)),
+            ("root".into(), normalize_for_search(&context.root_label)),
+        ]);
+        if query.allows_type("artist") && query.matches(&artist_fields) {
+            let score = entity_score(query, "artist", &context.artist_name, &artist_fields);
             let artist_entry = self
                 .artist_groups
                 .entry(context.artist_key.clone())
@@ -157,6 +156,10 @@ impl SearchRowAccumulator {
         } else {
             hit.cover_path.clone()
         };
+        if !query.allows_type("track") {
+            return None;
+        }
+        self.track_count = self.track_count.saturating_add(1);
         Some(build_track_search_result_row(
             hit,
             &context,
@@ -178,24 +181,29 @@ impl SearchRowAccumulator {
         fields: &BTreeMap<String, String>,
     ) {
         // Match the main-album queue: bonus folders remain searchable as tracks.
-        if !context.is_main_level_album_track && !context.is_disc_section_album_track {
+        if !query.allows_type("album")
+            || (!context.is_main_level_album_track && !context.is_disc_section_album_track)
+        {
             return;
         }
         if let Some(album_key_value) = context.album_key.clone() {
             let context_artist = normalize_for_search(&context.artist_name);
             let album_name = normalize_for_search(hit_album);
+            // Lyrics can narrow an album-name query, but must not introduce
+            // unrelated parent albums into an ordinary lyric search.
+            let name_matches = query
+                .terms
+                .iter()
+                .any(|term| term.matches("album", &album_name));
             if query.matches_with(
                 fields,
-                |key| !matches!(key, "title" | "path" | "track" | "disc"),
+                |key| {
+                    !matches!(key, "title" | "path" | "track" | "disc")
+                        && (key != "lyrics" || name_matches)
+                },
                 &[("artist", &context_artist), ("album", &album_name)],
             ) {
-                let score = entity_score(
-                    query,
-                    &query.name_terms("album"),
-                    &album_name,
-                    fields,
-                    false,
-                );
+                let score = entity_score(query, "album", hit_album, fields);
                 let album_entry = self.album_groups.entry(album_key_value.clone()).or_insert((
                     score,
                     hit_album.to_string(),
@@ -219,6 +227,7 @@ impl SearchRowAccumulator {
                         query,
                         fields,
                         &[
+                            ("root", &context.root_label),
                             ("artist", hit_artist),
                             ("album", hit_album),
                             ("genre", &hit.genre),
@@ -257,7 +266,6 @@ struct PreparedSearchTrack {
     year: Option<i32>,
     track_no: Option<u32>,
     duration_secs: Option<f32>,
-    title_l: String,
     fields: BTreeMap<String, String>,
 }
 
@@ -940,7 +948,6 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
             year: track.year,
             track_no: track.track_no,
             duration_secs: track.duration_secs,
-            title_l,
             fields,
         });
     }
@@ -955,67 +962,114 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
 // Prepared library search
 // ---------------------------------------------------------------------------
 
-/// Rank an entity by its own name before supporting metadata. Scores are
-/// independent of library size, tag repetition, and filesystem path length.
+// Punctuation separates name words for ranking, while retrieval continues to
+// accept literal substrings and quoted phrases.
+fn name_words(text: &str) -> String {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn name_score(terms: &[String], name: &str) -> f32 {
     if terms.is_empty() {
         return 5.0;
     }
-    let phrase = terms.join(" ");
+    let name = name_words(name);
+    let phrase = name_words(&terms.join(" "));
+    if phrase.is_empty() {
+        return 5.0;
+    }
     if name == phrase {
         return 0.0;
     }
     if name.starts_with(&phrase) {
-        return 1.0;
+        return if name[phrase.len()..].starts_with(' ') {
+            1.0
+        } else {
+            1.5
+        };
     }
-    if name.match_indices(&phrase).any(|(offset, _)| {
-        name[..offset]
-            .chars()
-            .next_back()
-            .is_none_or(|ch| !ch.is_alphanumeric())
-    }) {
-        return 2.0;
+    for (offset, _) in name.match_indices(&phrase) {
+        if name[..offset].ends_with(' ') {
+            let tail = &name[offset + phrase.len()..];
+            return if tail.is_empty() || tail.starts_with(' ') {
+                2.0
+            } else {
+                2.5
+            };
+        }
     }
-    if name.contains(&phrase) {
+    if terms
+        .iter()
+        .all(|term| name.split_whitespace().any(|word| word == term))
+    {
         return 3.0;
     }
-    if terms.iter().all(|term| name.contains(term)) {
+    if name.contains(&phrase) {
         return 3.5;
+    }
+    if terms.iter().all(|term| name.contains(&name_words(term))) {
+        return 3.75;
     }
     5.0
 }
 
 fn entity_score(
     query: &SearchQuery,
-    terms: &[String],
+    primary: &str,
     name: &str,
     fields: &BTreeMap<String, String>,
-    include_title: bool,
 ) -> f32 {
-    let direct = name_score(terms, name);
-    if direct < 5.0 {
-        return direct;
-    }
-    let supporting = metadata_score(query, fields, include_title);
-    // Matching already requires every query term. Rank the name-bearing part
-    // independently when the remaining terms match metadata, e.g. "1997 signify".
-    let name_terms: Vec<_> = terms
+    let folded = normalize_for_search(name);
+    let terms: Vec<_> = query
+        .terms
         .iter()
-        .filter(|term| name.contains(*term))
-        .cloned()
+        .filter(|term| {
+            if term.field.is_some_and(|field| field != primary) {
+                return false;
+            }
+            // A matching year or library-root word is context, unless it also
+            // belongs to the entity's name. Ordinary album/lyric words stay in it.
+            let context = term.field.is_none()
+                && !folded.contains(&term.value)
+                && ((term.value.len() == 4
+                    && term.value.chars().all(|ch| ch.is_ascii_digit())
+                    && fields.get("year").is_some_and(|year| year == &term.value))
+                    || fields.get("root").is_some_and(|root| {
+                        root == &term.value
+                            || root.split_whitespace().any(|word| word == term.value)
+                    }));
+            !context
+        })
+        .collect();
+    let values: Vec<_> = terms.iter().map(|term| term.value.clone()).collect();
+    let spelling = name_words(&name.nfc().collect::<String>().to_lowercase());
+    let spelling_penalty = if terms
+        .iter()
+        .any(|term| folded.contains(&term.value) && !spelling.contains(&name_words(&term.spelling)))
+    {
+        0.05
+    } else {
+        0.0
+    };
+    let direct = name_score(&values, &folded);
+    if direct < 5.0 {
+        return direct + spelling_penalty;
+    }
+    let supporting = metadata_score(query, fields, primary == "title");
+    let name_terms: Vec<_> = values
+        .into_iter()
+        .filter(|term| folded.contains(term))
         .collect();
     if name_terms.is_empty() {
         return supporting + 0.5;
     }
-    let partial = name_score(&name_terms, name);
-    if supporting >= 6.0 {
-        // Comments, lyrics, and paths retain their lower tiers, with name quality
-        // providing ordering within a tier rather than promoting it above names.
-        supporting + partial / 10.0
-    } else {
-        // Prefer the complete name to the same name plus supporting metadata.
-        partial + 0.25
-    }
+    let partial = name_score(&name_terms, &folded);
+    // All query name words outrank a subset of them, even when that subset is
+    // an exact shorter title ("You Lose!" must beat "Lose" + album metadata).
+    let tier = if supporting >= 6.0 { supporting } else { 4.0 };
+    tier + partial / 10.0 + spelling_penalty
 }
 
 fn metadata_score(
@@ -1050,6 +1104,9 @@ fn hidden_match_detail(
 ) -> String {
     let mut reasons = Vec::new();
     for term in &query.terms {
+        if term.field == Some("type") {
+            continue;
+        }
         if visible
             .iter()
             .any(|(key, value)| term.matches(key, &normalize_for_search(value)))
@@ -1120,7 +1177,6 @@ fn search_tracks_prepared(
     query_rx: &Receiver<SearchWorkerQuery>,
 ) -> PreparedSearchOutcome {
     let query = SearchQuery::parse(query);
-    let terms = query.name_terms("title");
     let mut accumulator = SearchRowAccumulator::new(roots.to_vec());
     let mut ranked = std::collections::BinaryHeap::<RankedSearchRow>::new();
     let cancel_poll_rows = search_cancel_poll_rows();
@@ -1133,7 +1189,7 @@ fn search_tracks_prepared(
         if !query.matches(&track.fields) {
             continue;
         }
-        let score = entity_score(&query, &terms, &track.title_l, &track.fields, true);
+        let score = entity_score(&query, "title", &track.title, &track.fields);
         let hit = LibrarySearchTrack {
             path: track.path.clone(),
             root_path: track.root_path.clone(),
@@ -1154,6 +1210,7 @@ fn search_tracks_prepared(
                 &query,
                 &track.fields,
                 &[
+                    ("root", &row.root_label),
                     ("title", &hit.title),
                     ("artist", &hit.artist),
                     ("album", &hit.album),
@@ -1794,6 +1851,139 @@ mod tests {
         for pair in matches.windows(2) {
             assert!(pair[0].score < pair[1].score);
         }
+    }
+
+    #[test]
+    fn complete_name_words_beat_incidental_album_words() {
+        let rows = fixture_search(
+            "you lose",
+            vec![
+                fixture_track("Lose", "Dinosaur Jr.", "You're Living All Over Me", "01"),
+                fixture_track("You Lose!", "Magdalena Bay", "Mercurial World", "02"),
+                fixture_track("And You and I", "Yes", "Close to the Edge", "03"),
+            ],
+            20,
+        );
+        let tracks: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+            .collect();
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].label, "You Lose!");
+        assert!(tracks[0].score < tracks[1].score);
+    }
+
+    #[test]
+    fn word_boundaries_and_original_spelling_rank_before_folded_substrings() {
+        let tracks = vec![
+            fixture_track("Alabama", "Example", "Songs", "01"),
+            fixture_track("Ala puhu poika", "Example", "Songs", "02"),
+            fixture_track("Älä puhu poika", "Stam1na", "Songs", "03"),
+            fixture_track("Purified", "Lamb of God", "As the Palaces Burn", "04"),
+        ];
+        for query in ["älä", "älä pu", "a\u{308}la\u{308} pu"] {
+            let rows = fixture_search(query, tracks.clone(), 20);
+            let matches: Vec<_> = rows
+                .iter()
+                .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+                .collect();
+            assert_eq!(matches[0].label, "Älä puhu poika", "query {query}");
+            assert!(matches[0].score < matches[1].score);
+        }
+        let rows = fixture_search("ala", tracks, 20);
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+            .collect();
+        assert_eq!(matches[0].label, "Ala puhu poika");
+        assert_eq!(matches[1].label, "Älä puhu poika");
+        assert_eq!(matches[2].label, "Alabama");
+    }
+
+    #[test]
+    fn type_filters_and_root_context_preserve_album_relevance_and_totals() {
+        let library = Arc::new(LibrarySnapshot {
+            roots: vec![LibraryRoot {
+                path: p("/music"),
+                name: "Surround".into(),
+            }],
+            tracks: vec![
+                fixture_track("Anesthetize", "Porcupine Tree", "Anesthetize", "01"),
+                fixture_track(
+                    "Anesthetize",
+                    "Porcupine Tree",
+                    "Fear of a Blank Planet",
+                    "02",
+                ),
+                fixture_track("Halo", "Porcupine Tree", "Anesthetize", "03"),
+            ],
+            ..LibrarySnapshot::default()
+        });
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let mut cache = SearchWorkerPreparedCache::default();
+        for (query, totals) in [
+            ("anesthetiz surround", [0, 1, 3]),
+            ("anesthetiz surround type:album", [0, 1, 0]),
+            ("type:track anesthetiz surround", [0, 0, 3]),
+            ("type:artist porcupine surround", [1, 0, 0]),
+            ("type:album", [0, 2, 0]),
+            ("type:podcast", [0, 0, 0]),
+            ("type:album type:track", [0, 0, 0]),
+            ("type:", [0, 0, 0]),
+        ] {
+            let SearchBuildOutcome::Frame(frame) = build_search_results_frame(
+                &SearchWorkerQuery {
+                    seq: 1,
+                    query: query.into(),
+                    library: Arc::clone(&library),
+                    limit: 20,
+                },
+                &mut cache,
+                &rx,
+            ) else {
+                panic!("unexpected cancellation")
+            };
+            assert_eq!(frame.totals, totals, "query {query}");
+            if query == "anesthetiz surround" {
+                let album = frame
+                    .rows
+                    .iter()
+                    .find(|row| row.row_type == BridgeSearchResultRowType::Album)
+                    .expect("album");
+                let title = frame
+                    .rows
+                    .iter()
+                    .find(|row| {
+                        row.row_type == BridgeSearchResultRowType::Track
+                            && row.label == "Anesthetize"
+                    })
+                    .expect("track");
+                assert_eq!(album.score, title.score);
+                assert!(album.score < 2.0);
+            }
+            assert!(frame
+                .rows
+                .iter()
+                .all(|row| !row.match_detail.contains("Path: surround")));
+        }
+    }
+
+    #[test]
+    fn lyric_matches_return_tracks_without_promoting_the_parent_album() {
+        let mut track = fixture_track("Song", "Artist", "From the North", "01");
+        track
+            .search_tags
+            .insert("lyrics".into(), vec!["you lose".into()]);
+        for query in ["you lose", "lyrics:lose"] {
+            let rows = fixture_search(query, vec![track.clone()], 20);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].row_type, BridgeSearchResultRowType::Track);
+            assert!(rows[0].match_detail.contains("Lyrics:"));
+        }
+        assert!(fixture_search("type:album you lose", vec![track.clone()], 20).is_empty());
+        let rows = fixture_search("type:album album:north lyrics:lose", vec![track], 20);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].row_type, BridgeSearchResultRowType::Album);
     }
 
     #[test]
