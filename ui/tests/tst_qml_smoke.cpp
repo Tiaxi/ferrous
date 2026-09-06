@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QWheelEvent>
 #include <QHoverEvent>
 #include <QImage>
 #include <QMouseEvent>
@@ -10189,12 +10190,18 @@ void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() 
 void QmlSmokeTest::globalSearchKeyboardAndResponsiveResults() {
     GlobalSearchResultsModel model;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 80; ++i) {
         GlobalSearchResultsModel::SearchDisplayRow row;
         row.kind = "item"; row.rowType = "track"; row.label = i == 0 ? "Blue" : "Blue Skies";
         row.matchDetail = "Comment: remaster";
         row.artist = "Example Ensemble"; row.album = "Collected Songs"; row.genre = "Jazz";
         row.trackPath = QStringLiteral("/fixture/%1.flac").arg(i); row.score = i == 0 ? 0 : 1;
+        rows.push_back(row);
+    }
+    for (const auto &type : {QStringLiteral("artist"), QStringLiteral("album")}) {
+        GlobalSearchResultsModel::SearchDisplayRow row;
+        row.kind = "item"; row.rowType = type; row.label = "Blue Collection";
+        row.artist = "Example Ensemble"; row.rootLabel = "Music"; row.score = 5;
         rows.push_back(row);
     }
     model.presentSearchRows(rows);
@@ -10214,16 +10221,23 @@ ApplicationWindow {
     property alias playCount: bridge.playCount
     property alias revealCount: bridge.revealCount
     property alias searchVisible: dialog.visible
+    function selectionFullyVisible() {
+        const view = searchController.resultsView
+        const item = view.itemAtIndex(selectionIndex)
+        return item !== null && item.y >= view.contentY - 1
+            && item.y + item.height <= view.contentY + view.height + 1
+    }
+    function startResultFlick() { searchController.resultsView.flick(0, -1400) }
     QtObject {
         id: bridge
         property var globalSearchModel: searchTestModel
         property bool globalSearchBusy: false
         property bool globalSearchModelRetained: false
         property bool globalSearchCanExpand: false
-        property int globalSearchArtistCount: 0
-        property int globalSearchAlbumCount: 0
-        property int globalSearchTrackCount: 5
-        property var globalSearchTotals: [0, 0, 5]
+        property int globalSearchArtistCount: 1
+        property int globalSearchAlbumCount: 1
+        property int globalSearchTrackCount: 80
+        property var globalSearchTotals: [1, 1, 80]
         property int playCount: 0
         property int revealCount: 0
         function setGlobalSearchQuery(query) {}
@@ -10274,7 +10288,58 @@ ApplicationWindow {
     QCOMPARE(object->property("revealCount").toInt(), 0);
     QTRY_VERIFY(!field->hasActiveFocus());
     QMetaObject::invokeMethod(field, "forceActiveFocus");
+    auto *view = object->findChild<QQuickItem *>(QStringLiteral("globalSearchResultsView"));
+    QVERIFY(view);
+    auto selectionFullyVisible = [&]() {
+        QVariant visible;
+        QMetaObject::invokeMethod(object.data(), "selectionFullyVisible", Q_RETURN_ARG(QVariant, visible));
+        return visible.toBool();
+    };
+    const QPointF wheelPosition = view->mapToScene(QPointF(view->width() / 2, view->height() / 2));
+    QTest::mouseMove(window, wheelPosition.toPoint());
+    for (int i = 0; i < 8; ++i) {
+        QWheelEvent wheel(wheelPosition, window->mapToGlobal(wheelPosition.toPoint()),
+                         QPoint(), QPoint(0, -720), Qt::NoButton, Qt::NoModifier,
+                         Qt::NoScrollPhase, false);
+        wheel.setTimestamp(1000 + i * 100);
+        QSpontaneKeyEvent::setSpontaneous(&wheel);
+        QCoreApplication::sendEvent(view->window(), &wheel);
+        QTest::qWait(30);
+    }
+    QTest::qWait(250);
+    QVERIFY(view->property("contentY").toReal() > view->height());
+    QVERIFY(view->property("resultRowHeight").toReal() < 60);
     QTest::keyClick(window, Qt::Key_Down);
+    QTRY_VERIFY(selectionFullyVisible());
+    // Returning to the first result must use the view's actual origin, even
+    // after differently sized section/item delegates have been recycled.
+    QTest::keyClick(window, Qt::Key_Up);
+    QTRY_VERIFY(selectionFullyVisible());
+    for (int i = 0; i < 30; ++i) {
+        QTest::keyClick(window, Qt::Key_Down);
+        QTRY_VERIFY(selectionFullyVisible());
+    }
+    QMetaObject::invokeMethod(object.data(), "startResultFlick");
+    QTest::qWait(30);
+    QTest::keyClick(window, Qt::Key_Up);
+    QTRY_VERIFY(selectionFullyVisible());
+    QTest::qWait(200);
+    QVERIFY(selectionFullyVisible());
+    QTest::keyClick(window, Qt::Key_PageDown);
+    QTRY_VERIFY(selectionFullyVisible());
+    QTest::keyClick(window, Qt::Key_PageUp);
+    QTRY_VERIFY(selectionFullyVisible());
+    QMetaObject::invokeMethod(view, "forceActiveFocus");
+    QTest::keyClick(window, Qt::Key_End);
+    QTRY_VERIFY(selectionFullyVisible());
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_VERIFY(selectionFullyVisible());
+    QTest::keyClick(window, Qt::Key_Up); // Wrap from first to last.
+    QTRY_VERIFY(selectionFullyVisible());
+    QTest::keyClick(window, Qt::Key_Down); // Wrap back to first.
+    QTest::keyClick(window, Qt::Key_Down); // No deferred reset may undo this move.
+    QTRY_VERIFY(selectionFullyVisible());
+    QMetaObject::invokeMethod(field, "forceActiveFocus");
     object->setProperty("searchBusy", true);
     QTest::keyClick(window, Qt::Key_Return);
     QCOMPARE(object->property("playCount").toInt(), 0);

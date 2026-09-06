@@ -80,7 +80,8 @@ QtObject {
         const stepDir = direction < 0 ? -1 : 1
         const pageRows = Math.max(
             1,
-            Math.floor(((root.resultsView ? root.resultsView.height : 240) / 60)) - 1)
+            Math.floor((root.resultsView ? root.resultsView.height : 240)
+                / (root.resultsView ? root.resultsView.resultRowHeight : 44)) - 1)
         let index = root.selectedDisplayIndex
         if (!root.isSearchRowSelectable(index)) {
             index = stepDir > 0 ? root.searchFirstSelectableIndex() : root.searchLastSelectableIndex()
@@ -109,19 +110,27 @@ QtObject {
         }
         root.selectedDisplayIndex = index
         if (root.resultsView && index >= 0 && index < root.rowCount()) {
-            const firstSelectable = root.searchFirstSelectableIndex()
-            if (index === firstSelectable && root.globalSearchModelApi) {
-                root.resultsView.contentY = 0
-                Qt.callLater(function() {
-                    if (root.resultsView) {
-                        root.resultsView.contentY = 0
-                    }
-                })
-            } else {
-                root.resultsView.positionViewAtIndex(index, ListView.Contain)
-            }
+            root.resultsView.cancelFlick()
+            root.ensureSelectionVisible(index)
+            // Recycled delegates can finish changing height during layout.
+            // Only correct the same selection; a newer key press wins.
+            Qt.callLater(function() {
+                if (root.dialogVisible && root.selectedDisplayIndex === index
+                        && root.resultsView && !root.resultsView.moving)
+                    root.ensureSelectionVisible(index)
+            })
         }
         return true
+    }
+
+    function ensureSelectionVisible(index) {
+        root.resultsView.forceLayout()
+        if (index === root.searchFirstSelectableIndex()) {
+            // Variable-height, recycled delegates can move the list origin.
+            root.resultsView.positionViewAtBeginning()
+        } else {
+            root.resultsView.positionViewAtIndex(index, ListView.Contain)
+        }
     }
 
     function selectedRow() {
