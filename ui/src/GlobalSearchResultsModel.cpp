@@ -2,6 +2,7 @@
 
 #include "GlobalSearchResultsModel.h"
 #include <utility>
+#include <QSet>
 
 #include <algorithm>
 #include <limits>
@@ -53,6 +54,8 @@ QVariant GlobalSearchResultsModel::data(const QModelIndex &index, int role) cons
         return row.artist;
     case AlbumRole:
         return row.album;
+    case ShowRootRole:
+        return row.showRoot;
     case RootLabelRole:
         return row.rootLabel;
     case GenreRole:
@@ -115,6 +118,7 @@ QHash<int, QByteArray> GlobalSearchResultsModel::roleNames() const {
         {ArtistRole, "artist"},
         {AlbumRole, "album"},
         {RootLabelRole, "rootLabel"},
+        {ShowRootRole, "showRoot"},
         {GenreRole, "genre"},
         {CoverPathRole, "coverPath"},
         {CoverUrlRole, "coverUrl"},
@@ -385,6 +389,7 @@ QVariantMap GlobalSearchResultsModel::rowDataAt(int index) const {
     out.insert(QStringLiteral("artist"), row.artist);
     out.insert(QStringLiteral("album"), row.album);
     out.insert(QStringLiteral("rootLabel"), row.rootLabel);
+    out.insert(QStringLiteral("showRoot"), row.showRoot);
     out.insert(QStringLiteral("genre"), row.genre);
     out.insert(QStringLiteral("count"), row.count);
     out.insert(QStringLiteral("coverPath"), row.coverPath);
@@ -455,35 +460,19 @@ void GlobalSearchResultsModel::rebuildSearchRows() {
     }
     std::stable_sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
         if (a.score != b.score) return a.score < b.score;
-        // Prefer an exact track when it shares a name with its parent entities.
-        if (a.rowType != b.rowType) return a.rowType == "track" || (a.rowType == "album" && b.rowType == "artist");
+        // Prefer an album when name relevance is equal; weak album matches
+        // never jump ahead of stronger tracks merely because of their type.
+        if (a.rowType != b.rowType) return a.rowType == "album" || (a.rowType == "track" && b.rowType == "artist");
         return QString::compare(a.label, b.label, Qt::CaseInsensitive) < 0;
     });
-    QVector<SearchDisplayRow> display;
-    const auto section = [&display](const QString &title) {
-        SearchDisplayRow header;
-        header.kind = QStringLiteral("section");
-        header.sectionTitle = title;
-        display.push_back(std::move(header));
+    const auto identity = [](const SearchDisplayRow &row) {
+        return QStringList{row.rowType.toCaseFolded(), row.label.toCaseFolded(),
+                           row.artist.toCaseFolded(), row.album.toCaseFolded()};
     };
-    int bestCount = 0;
-    if (m_resultFilter == QStringLiteral("all") && !candidates.isEmpty()) {
-        section(QStringLiteral("Best matches"));
-        bestCount = std::min(3, static_cast<int>(candidates.size()));
-        for (int i = 0; i < bestCount; ++i) display.push_back(candidates[i]);
-    }
-    for (const auto &type : {QStringLiteral("artist"), QStringLiteral("album"), QStringLiteral("track")}) {
-        bool started = false;
-        for (qsizetype i = bestCount; i < candidates.size(); ++i) {
-            if (candidates[i].rowType != type) continue;
-            if (!started) {
-                section(type == "artist" ? QStringLiteral("Artists") : type == "album" ? QStringLiteral("Albums") : QStringLiteral("Tracks"));
-                started = true;
-            }
-            display.push_back(candidates[i]);
-        }
-    }
-    replaceRowsBatched(std::move(display));
+    QHash<QStringList, QSet<QString>> roots;
+    for (const auto &row : candidates) roots[identity(row)].insert(row.rootLabel);
+    for (auto &row : candidates) row.showRoot = roots.value(identity(row)).size() > 1;
+    replaceRowsBatched(std::move(candidates));
     emit searchRowsChanged();
 }
 
@@ -519,6 +508,7 @@ QString GlobalSearchResultsModel::highlightText(const QString &text, const QStri
         "path", "filename", "root", "track", "disc"};
     for (auto rawTerm : tokens) {
         const auto colon = rawTerm.indexOf(':');
+        if (colon > 0 && rawTerm.left(colon).compare("type", Qt::CaseInsensitive) == 0) continue;
         if (colon > 0 && fields.contains(rawTerm.left(colon).toLower())) rawTerm = rawTerm.mid(colon + 1);
         const auto term = fold(rawTerm.trimmed());
         if (term.isEmpty()) continue;

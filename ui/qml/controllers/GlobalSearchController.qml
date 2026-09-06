@@ -81,7 +81,7 @@ QtObject {
         const pageRows = Math.max(
             1,
             Math.floor((root.resultsView ? root.resultsView.height : 240)
-                / (root.resultsView ? root.resultsView.resultRowHeight : 44)) - 1)
+                / (root.resultsView ? root.resultsView.resultRowHeight : 34)) - 1)
         let index = root.selectedDisplayIndex
         if (!root.isSearchRowSelectable(index)) {
             index = stepDir > 0 ? root.searchFirstSelectableIndex() : root.searchLastSelectableIndex()
