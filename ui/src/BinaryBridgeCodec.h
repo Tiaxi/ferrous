@@ -90,6 +90,7 @@ enum CommandId : quint16 {
     CmdRefreshRenamedPaths = 62,
     CmdRemoveMany = 63,
     CmdSetSpectrogramActive = 64,
+    CmdSetShowLevelMeter = 65,
 };
 
 struct DecodedPlayback {
@@ -168,6 +169,7 @@ struct DecodedMetadata {
     int sampleRateHz{0};
     int bitrateKbps{0};
     int channels{0};
+    QStringList channelLabels;
     int bitDepth{0};
     QString formatLabel;
     int currentBitrateKbps{0};
@@ -185,6 +187,7 @@ struct DecodedSettings {
     float dbRange{132.0f};
     bool logScale{false};
     bool showFps{false};
+    bool showLevelMeter{true};
     int librarySortMode{0};
     bool systemMediaControlsEnabled{true};
     bool preventDisplaySleepInFullscreen{true};

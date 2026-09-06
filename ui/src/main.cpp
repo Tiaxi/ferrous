@@ -32,6 +32,7 @@
 #include "TagEditorController.h"
 #include "WaveformItem.h"
 #include "WaveformEditorItem.h"
+#include "LevelMeterItem.h"
 
 namespace {
 
@@ -277,6 +278,7 @@ int main(int argc, char *argv[]) {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
+    qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &tagEditor);

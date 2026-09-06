@@ -1666,6 +1666,7 @@ fn parse_settings_command(
         },
         28 => BridgeSettingsCommand::SetLogScale(reader.read_u8()? != 0),
         29 => BridgeSettingsCommand::SetShowFps(reader.read_u8()? != 0),
+        65 => BridgeSettingsCommand::SetShowLevelMeter(reader.read_u8()? != 0),
         30 => {
             BridgeSettingsCommand::SetLibrarySortMode(LibrarySortMode::from_i32(reader.read_i32()?))
         }
@@ -2204,6 +2205,16 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
             .unwrap_or_default(),
     );
     push_u32(&mut out, snapshot.metadata.track_number.unwrap_or(0));
+    // Optional metadata tail: native decoder order, not inferred from channel count.
+    push_u16(&mut out, clamp_u16(snapshot.metadata.channel_labels.len()));
+    for label in snapshot
+        .metadata
+        .channel_labels
+        .iter()
+        .take(usize::from(u16::MAX))
+    {
+        push_u16_string(&mut out, label);
+    }
     out
 }
 
@@ -2258,6 +2269,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
                 .display
                 .prevent_display_sleep_in_fullscreen,
         ),
+    );
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.display.show_level_meter),
     );
     out
 }
@@ -2574,6 +2589,7 @@ mod tests {
                 sample_rate_hz: Some(48_000),
                 bitrate_kbps: Some(320),
                 channels: Some(2),
+                channel_labels: vec!["L".to_owned(), "R".to_owned()],
                 bit_depth: Some(24),
                 format_label: "FLAC".to_string(),
                 current_bitrate_kbps: Some(905),
@@ -2620,6 +2636,7 @@ mod tests {
                 display: super::super::BridgeDisplaySettings {
                     log_scale: false,
                     show_fps: false,
+                    show_level_meter: true,
                     prevent_display_sleep_in_fullscreen: true,
                     show_spectrogram_crosshair: false,
                     show_spectrogram_scale: false,
@@ -3296,6 +3313,10 @@ mod tests {
         assert_eq!(read_u32(&encoded, &mut offset), 905);
         assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.cover.png");
         assert_eq!(read_u32(&encoded, &mut offset), 3);
+        assert_eq!(&encoded[offset..offset + 2], &2u16.to_le_bytes());
+        offset += 2;
+        assert_eq!(read_u16_string(&encoded, &mut offset), "L");
+        assert_eq!(read_u16_string(&encoded, &mut offset), "R");
         assert_eq!(offset, encoded.len());
     }
 
@@ -3315,6 +3336,26 @@ mod tests {
         assert_ne!(mask & SECTION_SETTINGS, 0);
         assert_eq!(mask & SECTION_ERROR, 0);
         assert_eq!(mask & SECTION_STOPPED, 0);
+    }
+
+    #[test]
+    fn level_meter_setting_command_and_snapshot_share_protocol() {
+        for enabled in [false, true] {
+            let cmd = parse_binary_command(&encode_command(65, &[u8::from(enabled)]))
+                .expect("parse level meter setting")
+                .expect("level meter setting command");
+            assert!(matches!(cmd,
+                BridgeCommand::Settings(BridgeSettingsCommand::SetShowLevelMeter(value))
+                if value == enabled));
+            let mut snapshot = sample_snapshot();
+            snapshot.settings.display.show_level_meter = enabled;
+            assert_eq!(
+                encode_settings_section(&snapshot).last(),
+                Some(&u8::from(enabled))
+            );
+        }
+        assert!(parse_binary_command(&encode_command(65, &[])).is_err());
+        assert!(parse_binary_command(&encode_command(65, &[1, 0])).is_err());
     }
 
     #[test]
@@ -3339,17 +3380,12 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        // Last 8 bytes: system_media_controls(0), viewer_fullscreen(1),
-        // display_mode(0), crosshair(0), scale(0), channel_buttons_visibility(1),
-        // spectrogram_zoom_enabled(1), prevent_display_sleep_in_fullscreen(0)
-        assert_eq!(settings.iter().rev().nth(7).copied(), Some(0)); // system_media_controls
-        assert_eq!(settings.iter().rev().nth(6).copied(), Some(1)); // viewer_fullscreen (WholeScreen)
-        assert_eq!(settings.iter().rev().nth(5).copied(), Some(0)); // display_mode
-        assert_eq!(settings.iter().rev().nth(4).copied(), Some(0)); // crosshair
-        assert_eq!(settings.iter().rev().nth(3).copied(), Some(0)); // scale
-        assert_eq!(settings.iter().rev().nth(2).copied(), Some(1)); // channel_buttons_visibility (default=1)
-        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // spectrogram_zoom_enabled (default=true)
-        assert_eq!(settings.last().copied(), Some(0)); // prevent_display_sleep_in_fullscreen
+        // Settings tail: system media controls, fullscreen mode, display mode,
+        // crosshair, scale, channel buttons, zoom, display sleep, level meter.
+        assert_eq!(
+            &settings[settings.len() - 9..],
+            &[0, 1, 0, 0, 0, 1, 1, 0, 1]
+        );
     }
 
     #[test]
@@ -3370,12 +3406,8 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        // Last 4 bytes: crosshair(1), scale(1), channel_buttons_visibility(1),
-        // spectrogram_zoom_enabled(1)
-        assert_eq!(settings.iter().rev().nth(3).copied(), Some(1)); // crosshair
-        assert_eq!(settings.iter().rev().nth(2).copied(), Some(1)); // scale
-        assert_eq!(settings.iter().rev().nth(1).copied(), Some(1)); // channel_buttons_visibility (default=1)
-        assert_eq!(settings.last().copied(), Some(1)); // spectrogram_zoom_enabled (default=true)
+        // Crosshair, scale, channel buttons, zoom, display sleep, level meter.
+        assert_eq!(&settings[settings.len() - 6..], &[1, 1, 1, 1, 1, 1]);
     }
 
     #[test]

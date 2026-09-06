@@ -218,6 +218,7 @@ pub enum BridgeSettingsCommand {
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
+    SetShowLevelMeter(bool),
     SetShowSpectrogramCrosshair(bool),
     SetShowSpectrogramScale(bool),
     SetSystemMediaControlsEnabled(bool),
@@ -393,6 +394,7 @@ pub struct BridgeSnapshot {
 pub struct BridgeDisplaySettings {
     pub log_scale: bool,
     pub show_fps: bool,
+    pub show_level_meter: bool,
     pub prevent_display_sleep_in_fullscreen: bool,
     pub show_spectrogram_crosshair: bool,
     pub show_spectrogram_scale: bool,
@@ -435,6 +437,7 @@ impl Default for BridgeSettings {
             display: BridgeDisplaySettings {
                 log_scale: false,
                 show_fps,
+                show_level_meter: true,
                 prevent_display_sleep_in_fullscreen: true,
                 show_spectrogram_crosshair: false,
                 show_spectrogram_scale: false,
@@ -583,6 +586,7 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         sample_rate_hz: metadata.sample_rate_hz,
         bitrate_kbps: metadata.bitrate_kbps,
         channels: metadata.channels,
+        channel_labels: metadata.channel_labels.clone(),
         bit_depth: metadata.bit_depth,
         format_label: metadata.format_label.clone(),
         current_bitrate_kbps: metadata.current_bitrate_kbps,
@@ -1950,6 +1954,22 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn level_meter_command_updates_setting_and_marks_it_for_persistence() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(32);
+        for enabled in [false, true] {
+            runtime.flags.settings_dirty = false;
+            runtime.handle_command(
+                BridgeCommand::Settings(BridgeSettingsCommand::SetShowLevelMeter(enabled)),
+                &event_tx,
+            );
+            assert_eq!(runtime.state.settings.display.show_level_meter, enabled);
+            assert!(runtime.flags.settings_dirty);
+        }
     }
 
     #[test]

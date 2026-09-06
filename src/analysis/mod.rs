@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 mod cache;
+mod channel_layout;
+pub(crate) use channel_layout::probe_source_channel_labels;
 mod decoders;
 mod fft;
 mod output;

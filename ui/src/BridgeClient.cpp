@@ -622,7 +622,35 @@ QString playbackStateText(int state, const QString &fallback) {
     }
 }
 
-QString channelLayoutText(int channels) {
+QString knownChannelLayout(const QStringList &labels) {
+    if (labels.size() == 1 && (labels[0] == QStringLiteral("M")
+        || labels[0] == QStringLiteral("L") || labels[0] == QStringLiteral("C"))) {
+        return QStringLiteral("mono");
+    }
+    const QStringList positions{QStringLiteral("L"), QStringLiteral("R"), QStringLiteral("C"),
+        QStringLiteral("LFE"), QStringLiteral("RL"), QStringLiteral("RR"),
+        QStringLiteral("SL"), QStringLiteral("SR")};
+    unsigned mask = 0;
+    for (const auto &label : labels) {
+        const auto index = positions.indexOf(label);
+        if (index < 0 || (mask & (1U << index))) return {};
+        mask |= 1U << index;
+    }
+    switch (mask) {
+    case 0x03: return QStringLiteral("stereo");
+    case 0x33: case 0xc3: return QStringLiteral("4.0");
+    case 0x37: case 0xc7: return QStringLiteral("5.0");
+    case 0x3f: case 0xcf: return QStringLiteral("5.1");
+    case 0xff: return QStringLiteral("7.1");
+    default: return {};
+    }
+}
+
+QString channelLayoutText(int channels, const QStringList &labels) {
+    if (!labels.isEmpty() && labels.size() == channels) {
+        const QString known = knownChannelLayout(labels);
+        return known.isEmpty() ? QStringLiteral("%1 ch").arg(channels) : known;
+    }
     switch (channels) {
     case 1:
         return QStringLiteral("mono");
@@ -633,15 +661,14 @@ QString channelLayoutText(int channels) {
     }
 }
 
-QString channelLayoutIconKey(int channels) {
-    switch (channels) {
-    case 1:
-        return QStringLiteral("mono");
-    case 2:
-        return QStringLiteral("stereo");
-    default:
-        return QString{};
+QString channelLayoutIconKey(int channels, const QStringList &labels) {
+    QString layout = channelLayoutText(channels, labels);
+    if (layout == QStringLiteral("mono") || layout == QStringLiteral("stereo")) return layout;
+    if (layout == QStringLiteral("4.0") || layout == QStringLiteral("5.0")
+        || layout == QStringLiteral("5.1") || layout == QStringLiteral("7.1")) {
+        return layout;
     }
+    return {};
 }
 
 QString formatLabelFromPath(const QString &path) {
@@ -2052,11 +2079,15 @@ QString BridgeClient::currentTrackFormatLabel() const {
 }
 
 QString BridgeClient::currentTrackChannelLayoutText() const {
-    return channelLayoutText(m_currentTrackChannels);
+    return channelLayoutText(m_currentTrackChannels, m_currentTrackChannelLabels);
 }
 
 QString BridgeClient::currentTrackChannelLayoutIconKey() const {
-    return channelLayoutIconKey(m_currentTrackChannels);
+    return channelLayoutIconKey(m_currentTrackChannels, m_currentTrackChannelLabels);
+}
+
+QStringList BridgeClient::currentTrackChannelLabels() const {
+    return m_currentTrackChannelLabels;
 }
 
 int BridgeClient::currentTrackChannels() const {
@@ -2137,6 +2168,10 @@ int BridgeClient::soloedChannel() const {
 
 int BridgeClient::channelButtonsVisibility() const {
     return m_channelButtonsVisibility;
+}
+
+bool BridgeClient::showLevelMeter() const {
+    return m_showLevelMeter;
 }
 
 bool BridgeClient::showFps() const {
@@ -2590,6 +2625,16 @@ bool BridgeClient::isChannelMuted(int channelIndex) const {
         return false;
     }
     return (m_mutedChannelsMask & (1ULL << channelIndex)) != 0;
+}
+
+void BridgeClient::setShowLevelMeter(bool value) {
+    if (m_showLevelMeter != value) {
+        m_showLevelMeter = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetShowLevelMeter,
+        static_cast<quint8>(value ? 1 : 0)));
 }
 
 void BridgeClient::setShowFps(bool value) {
@@ -5151,7 +5196,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         : (metadataMatchesCurrentPath
             ? formatLabelFromPath(currentPath)
             : m_currentTrackFormatLabel);
-    int nextTrackChannels = currentPath.isEmpty() ? 0 : m_currentTrackChannels;
+    int nextTrackChannels = currentPath.isEmpty() || currentPathChanged ? 0 : m_currentTrackChannels;
+    QStringList nextChannelLabels = currentPath.isEmpty() || currentPathChanged
+        ? QStringList{} : m_currentTrackChannelLabels;
     int nextTrackSampleRateHz = currentPath.isEmpty() ? 0 : m_currentTrackSampleRateHz;
     int nextTrackBitDepth = currentPath.isEmpty() ? 0 : m_currentTrackBitDepth;
     int nextTrackCurrentBitrateKbps = currentPath.isEmpty() ? 0 : m_currentTrackCurrentBitrateKbps;
@@ -5227,6 +5274,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             nextTrackFormatLabel = metadataFormatLabel;
         }
         nextTrackChannels = metadataChannels;
+        nextChannelLabels = snapshot.metadata.channelLabels;
         nextTrackSampleRateHz = metadataSampleRateHz;
         nextTrackBitDepth = metadataBitDepth;
         nextTrackCurrentBitrateKbps = metadataCurrentBitrateKbps;
@@ -5268,6 +5316,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_currentTrackChannels != nextTrackChannels) {
         m_currentTrackChannels = nextTrackChannels;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
+    if (m_currentTrackChannelLabels != nextChannelLabels) {
+        m_currentTrackChannelLabels = nextChannelLabels;
         changed = true;
         trackMetadataSignalChanged = true;
     }
@@ -5384,6 +5437,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         snapshotSignalChanged = true;
     }
 
+    const bool showLevelMeter = snapshot.settings.present ? snapshot.settings.showLevelMeter : m_showLevelMeter;
+    if (m_showLevelMeter != showLevelMeter) {
+        m_showLevelMeter = showLevelMeter;
+        changed = true;
+    }
     const bool showFps = snapshot.settings.present ? snapshot.settings.showFps : m_showFps;
     if (m_showFps != showFps) {
         m_showFps = showFps;

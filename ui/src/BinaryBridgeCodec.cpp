@@ -392,9 +392,19 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
         || !reader.readUtf8U16(&out->formatLabel)
         || !reader.readU32(&currentBitrateKbps)
         || !reader.readUtf8U16(&out->coverPath)
-        || !reader.readU32(&trackNumber)
-        || !reader.atEnd()) {
+        || !reader.readU32(&trackNumber)) {
         return false;
+    }
+    out->channelLabels.clear();
+    if (!reader.atEnd()) {
+        quint16 count = 0;
+        if (!reader.readU16(&count) || count > 64 || (count != 0 && count != channels)) return false;
+        for (quint16 i = 0; i < count; ++i) {
+            QString label;
+            if (!reader.readUtf8U16(&label)) return false;
+            out->channelLabels.append(label);
+        }
+        if (!reader.atEnd()) return false;
     }
     out->present = true;
     out->sampleRateHz = static_cast<int>(sampleRateHz);
@@ -457,6 +467,10 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&preventDisplaySleepInFullscreen)) {
         return false;
     }
+    quint8 showLevelMeter = 1;
+    if (!reader.atEnd() && !reader.readU8(&showLevelMeter)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -467,6 +481,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->viewerFullscreenMode = static_cast<int>(viewerFullscreenMode);
     out->logScale = logScale != 0;
     out->showFps = showFps != 0;
+    out->showLevelMeter = showLevelMeter != 0;
     out->librarySortMode = static_cast<int>(librarySortMode);
     out->systemMediaControlsEnabled = systemMediaControlsEnabled != 0;
     out->showSpectrogramCrosshair = showSpectrogramCrosshair != 0;

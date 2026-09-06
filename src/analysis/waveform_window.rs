@@ -249,6 +249,38 @@ pub(super) mod tests {
     use std::io::Write;
 
     #[test]
+    fn meter_windows_preserve_single_sample_peaks_in_every_channel() {
+        const CHANNELS: usize = 8;
+        let mut samples = vec![0_i16; 96_007 * CHANNELS];
+        for channel in 0..CHANNELS {
+            let frame = (channel + 1) * 1_237 + 63;
+            samples[frame * CHANNELS + channel] =
+                -i16::try_from((channel + 1) * 3_000).expect("fixture amplitude fits PCM16");
+        }
+        let path = write_test_wave(&samples, 48_000, 8);
+        // The meter requests two-second windows independently of rendering FPS.
+        // Overlapping windows must retain brief, negative-only native-channel peaks.
+        for start in [0.0, 0.01] {
+            let window = decode_waveform_window(&path, start, 2.0, 2048).expect("meter window");
+            assert_eq!(window.channel_count, 8);
+            assert!(window.frames_per_point <= 64);
+            let mut peaks = [0.0_f32; CHANNELS];
+            for point in window.extrema.chunks_exact(CHANNELS * 2) {
+                for (channel, pair) in point.chunks_exact(2).enumerate() {
+                    peaks[channel] = peaks[channel].max(pair[0].abs()).max(pair[1].abs());
+                }
+            }
+            for (channel, peak) in peaks.iter().enumerate() {
+                let expected = f32::from(
+                    i16::try_from((channel + 1) * 3_000).expect("fixture amplitude fits PCM16"),
+                ) / 32_768.0;
+                assert!((peak - expected).abs() < 0.000_001);
+            }
+        }
+        std::fs::remove_file(path).expect("remove meter fixture");
+    }
+
+    #[test]
     fn summary_levels_reuse_evicted_pcm_and_preserve_partial_endpoints() {
         let samples: Vec<i16> = (0..131_072)
             .map(|sample| i16::try_from((sample * 73) % 60_000 - 30_000).unwrap())

@@ -15,7 +15,8 @@ Item {
     readonly property alias waveformItem: waveform
 
     function channelLabel(index) {
-        return ChannelLabels.label(waveform.channelCount, index)
+        return ChannelLabels.label(waveform.channelCount, index,
+                                   root.uiBridge.currentTrackChannelLabels || [])
     }
 
     Rectangle {
