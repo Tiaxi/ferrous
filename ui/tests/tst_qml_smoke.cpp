@@ -550,9 +550,11 @@ private slots:
     void waveformEditorFullscreenSampleCurveRequestsRawFramesEarly();
     void waveformEditorSampleViewPrefetchesUsefulSpan();
     void waveformEditorPrefetchesBeforeDetailBoundary();
+    void waveformEditorFullscreenPrefetchDoesNotWaitPastCoverage();
     void waveformEditorKeepsOverlappingDetailDuringHandoff();
     void waveformEditorWideDetailCacheKeepsViewportDensity();
     void waveformEditorWholeTrackAcceptsDecodedEndpointTolerance();
+    void waveformEditorFullscreenWholeTrackRetainsCache();
     void waveformEditorZoomOutDefersOverviewUntilDetailReady();
     void waveformEditorDeferredZoomOutCommitsCompletedDetailCache();
     void waveformEditorZoomOutKeepsReadyDetail();
@@ -567,6 +569,7 @@ private slots:
     void waveformEditorReplacementCacheDoesNotReuseOldRaster();
     void waveformEditorBuildsPlaybackTilesWithinFrameBudget();
     void waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs();
+    void waveformEditorLateDetailPreservesPartialPlaybackTiles();
     void waveformEditorBuildsReplacementCacheIncrementally();
     void waveformEditorPaintDefersGuiContinuation();
     void waveformEditorZoomedPlaybackUsesScrollingCache();
@@ -5185,6 +5188,36 @@ void QmlSmokeTest::waveformEditorPrefetchesBeforeDetailBoundary() {
     QVERIFY(item.m_requestTimer.isActive());
 }
 
+void QmlSmokeTest::waveformEditorFullscreenPrefetchDoesNotWaitPastCoverage() {
+    WaveformEditorItem item;
+    item.setWidth(3440);
+    item.setHeight(1440);
+    item.setDurationSeconds(225.413333);
+    item.setPositionSeconds(70.0);
+    item.m_sampleRateHz = 44100;
+    item.setZoomLevel(std::pow(1.25, 23));
+    const auto [start, end] = item.visibleRangeLocked();
+    const auto [requestStart, requestEnd] = item.requestRangeLocked(start, end);
+    const double margin = requestEnd - end;
+    QVERIFY(margin > 0.07 && margin < 0.08);
+    item.m_detail.sampleRateHz = 44100;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = static_cast<int>((requestEnd - requestStart) * 44100);
+    item.m_detail.startSeconds = requestStart;
+    item.m_detail.endSeconds = requestEnd;
+    item.m_playing = true;
+    item.m_positionSeconds += margin * 0.4 + 0.001;
+    item.m_positionUpdatedAt = std::chrono::steady_clock::now();
+    item.handleWindowFrameSwapped();
+    const auto [nextStart, nextEnd] = item.visibleRangeLocked();
+    QVERIFY(item.detailCoversRangeLocked(nextStart, nextEnd));
+    QVERIFY(item.m_requestTimer.isActive());
+    // A pending 40 ms zoom debounce must be expedited for playback prefetch.
+    QCOMPARE(item.m_requestTimer.remainingTime(), 0);
+    item.scheduleDetailRequest();
+    QCOMPARE(item.m_requestTimer.remainingTime(), 0);
+}
+
 void QmlSmokeTest::waveformEditorKeepsOverlappingDetailDuringHandoff() {
     WaveformEditorItem item;
     item.setWidth(320);
@@ -5274,6 +5307,67 @@ void QmlSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
         }
     }
     QVERIFY(waveformPixels > 200);
+}
+
+void QmlSmokeTest::waveformEditorFullscreenWholeTrackRetainsCache() {
+    for (bool detailReady : {false, true}) {
+        WaveformEditorItem item;
+        item.setWidth(1183);
+        item.setHeight(180);
+        // Playback reports nanoseconds, not the six decimals printed by ffprobe.
+        constexpr double duration = 225.413333333;
+        item.setDurationSeconds(duration);
+        item.setPositionSeconds(70.0);
+        item.setOverviewComplete(true);
+        item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+        item.setCrosshairEnabled(true);
+        if (detailReady) {
+            item.m_sampleRateHz = 44'100;
+            item.m_detail.sampleRateHz = 44'100;
+            item.m_detail.channelCount = 1;
+            item.m_detail.startSeconds = 0.0;
+            item.m_detail.endSeconds = duration;
+            item.m_detail.framesPerPoint = 512;
+            item.m_detail.pointCount = static_cast<int>(std::ceil(duration * 44'100 / 512));
+            item.m_detail.extrema.assign(item.m_detail.pointCount * 2U, 0.25F);
+        }
+        item.setPlaying(true);
+        // Enter fullscreen without changing the whole-track zoom.
+        item.setWidth(3440);
+        item.setHeight(1440);
+        QImage canvas(3440, 1440, QImage::Format_RGB32);
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        const auto cacheKey = item.m_cache.cacheKey();
+        QCOMPARE(item.m_cache.width(), 3440);
+        for (int frame = 0; frame < 3; ++frame) {
+            item.handleWindowFrameSwapped();
+            QVERIFY(!item.m_cacheDirty);
+            item.setHoverPosition(300.0 + frame * 100, 400.0, true);
+            item.paint(&painter);
+            QCOMPARE(item.m_cache.cacheKey(), cacheKey);
+        }
+        // A genuine uncovered raster column must still trigger a refresh.
+        item.m_cacheEndSeconds -= item.m_cacheSecondsPerPixel;
+        item.handleWindowFrameSwapped();
+        QVERIFY(item.m_cacheDirty);
+
+        if (detailReady) {
+            // A staged zoom-out must also accept that same rounded endpoint.
+            item.m_presentedZoomLevel = 2.0;
+            item.m_zoomOutHandoffPending = true;
+            item.beginStagedCacheForRangeLocked(0.0, duration, true);
+            QVERIFY(!item.m_stagedCache.isNull());
+            // Bound the loop: rejection used to restart the same stage forever.
+            for (int frame = 0; frame < 30 && !item.m_stagedCache.isNull(); ++frame) {
+                item.advanceStagedCacheLocked();
+            }
+            QVERIFY(item.m_stagedCache.isNull());
+            QVERIFY(!item.m_zoomOutHandoffPending);
+            QCOMPARE(item.m_presentedZoomLevel, 1.0);
+            QVERIFY(!item.m_cacheDirty);
+        }
+    }
 }
 
 void QmlSmokeTest::waveformEditorZoomOutDefersOverviewUntilDetailReady() {
@@ -5811,6 +5905,65 @@ void QmlSmokeTest::waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs() {
     item.setPositionSeconds(5.01);
     QVERIFY(!item.m_cacheDirty);
     QVERIFY(!item.m_playbackTiles.empty());
+}
+
+void QmlSmokeTest::waveformEditorLateDetailPreservesPartialPlaybackTiles() {
+    for (int viewMode : {0, 1}) {
+        WaveformEditorItem item;
+        item.setWidth(3440);
+        item.setHeight(1440);
+        item.setDurationSeconds(225.413333);
+        item.setPositionSeconds(70.0);
+        item.setViewMode(viewMode);
+        item.m_sampleRateHz = 44100;
+        item.m_channelCount = 2;
+        item.setZoomLevel(std::pow(1.25, 23));
+        const auto [start, end] = item.visibleRangeLocked();
+        const auto [requestStart, requestEnd] = item.requestRangeLocked(start, end);
+        item.m_detail.sampleRateHz = 44100;
+        item.m_detail.channelCount = 2;
+        item.m_detail.framesPerPoint = 1;
+        item.m_detail.pointCount = static_cast<int>((requestEnd - requestStart) * 44100);
+        item.m_detail.startSeconds = requestStart;
+        item.m_detail.endSeconds = requestEnd;
+        item.m_detail.extrema.assign(item.m_detail.pointCount * 4U, 0.25F);
+        item.m_playing = true;
+        item.preparePlaybackTilesLocked(start, end, 1440);
+        while (!item.playbackTilesCoverLocked(start, end)) {
+            QVERIFY(item.renderMissingPlaybackTilesLocked(start, end, 1440, 8) > 0);
+        }
+        const auto originalTiles = item.m_playbackTiles;
+        item.m_cacheDirty = false;
+        item.m_cacheStartSeconds = requestStart;
+        item.m_cacheEndSeconds = requestEnd;
+        // A late result lets playback overtake both the detail and raster edge.
+        item.m_positionSeconds += 0.1;
+        item.m_positionUpdatedAt = std::chrono::steady_clock::now();
+        const auto [nextStart, nextEnd] = item.visibleRangeLocked();
+        QVERIFY(!item.detailCoversRangeLocked(nextStart, nextEnd));
+        QVERIFY(!item.playbackTilesCoverLocked(nextStart, nextEnd));
+        item.handleWindowFrameSwapped();
+        QVERIFY(!item.m_cacheDirty);
+        QCOMPARE(item.m_playbackTiles.size(), originalTiles.size());
+        for (const auto &[index, tile] : originalTiles) {
+            QCOMPARE(item.m_playbackTiles.at(index).image.cacheKey(), tile.image.cacheKey());
+        }
+        // The replacement shares the same sample grid and keeps resident tiles.
+        item.m_detail.startSeconds += 0.1;
+        item.m_detail.endSeconds += 0.1;
+        item.preparePlaybackTilesLocked(nextStart, nextEnd, 1440);
+        const int rendered = item.renderMissingPlaybackTilesLocked(nextStart, nextEnd, 1440, 8);
+        QVERIFY(rendered > 0 && rendered <= 8);
+        QVERIFY(item.playbackTilesCoverLocked(nextStart, nextEnd));
+        // A distant seek has no reusable overlap and must refresh its fallback.
+        item.applyExplicitSeekPosition(150.0);
+        QVERIFY(item.m_cacheDirty);
+        QVERIFY(item.m_playbackTiles.empty());
+        // Track changes still discard all presentation resources and data.
+        item.setSourcePath(QStringLiteral("/fixture/next.wav"));
+        QVERIFY(item.m_playbackTiles.empty());
+        QVERIFY(item.m_detail.extrema.empty());
+    }
 }
 
 void QmlSmokeTest::waveformEditorBuildsReplacementCacheIncrementally() {
