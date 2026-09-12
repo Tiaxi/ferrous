@@ -58,6 +58,18 @@ constexpr QColor kPlayhead(190, 190, 200, 150);
 constexpr QColor kPlayheadContrast(8, 18, 14, 235);
 constexpr QColor kOverlay(190, 190, 200, 180);
 
+bool rasterCoversRange(double rasterStart, double rasterEnd,
+                       double visibleStart, double visibleEnd) {
+    // Converting time to a pixel grid and back can round a covered endpoint
+    // just outside the raster. Allow a few floating-point rounding steps so
+    // stationary views do not rebuild every frame; real pixel gaps still fail.
+    const double magnitude = std::max({1.0, std::abs(rasterStart),
+        std::abs(rasterEnd), std::abs(visibleStart), std::abs(visibleEnd)});
+    const double tolerance = 8.0 * std::numeric_limits<double>::epsilon() * magnitude;
+    return visibleStart >= rasterStart - tolerance
+        && visibleEnd <= rasterEnd + tolerance;
+}
+
 double readF64(const char *data) {
     quint64 bits = qFromLittleEndian<quint64>(reinterpret_cast<const uchar *>(data));
     double value = 0.0;
@@ -145,7 +157,6 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     m_requestTimer.setSingleShot(true);
-    m_requestTimer.setInterval(40);
     m_positionUpdatedAt = std::chrono::steady_clock::now();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profile.enabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_WAVEFORM")
@@ -289,9 +300,7 @@ void WaveformEditorItem::updatePositionSeconds(double value, bool explicitSeek) 
         cacheNeedsUpdate = !m_zoomOutHandoffPending
             && !tiledPlayback
             && rangeMoved
-            && (m_cacheDirty
-                || start < m_cacheStartSeconds
-                || end > m_cacheEndSeconds);
+            && !cacheCoversRangeLocked(start, end);
         if (cacheNeedsUpdate) invalidateCacheLocked();
     }
     emit positionSecondsChanged();
@@ -337,9 +346,8 @@ void WaveformEditorItem::setZoomLevel(double value) {
         const bool detailReady = detailCoversRangeLocked(visibleStart, visibleEnd)
             && detailResolutionCoversLocked(visibleStart, visibleEnd);
         const auto [presentedStart, presentedEnd] = visibleRangeLocked();
-        const bool canHoldPresentation = !m_cacheDirty
-            && presentedStart >= m_cacheStartSeconds
-            && presentedEnd <= m_cacheEndSeconds;
+        const bool canHoldPresentation = cacheCoversRangeLocked(
+            presentedStart, presentedEnd);
         const bool deferZoomOut = value < previousPresentedZoom
             && !detailReady
             && canHoldPresentation;
@@ -353,9 +361,7 @@ void WaveformEditorItem::setZoomLevel(double value) {
         }
         const bool zoomingInInsideCache = !deferZoomOut
             && value > previousPresentedZoom
-            && !m_cacheDirty
-            && visibleStart >= m_cacheStartSeconds
-            && visibleEnd <= m_cacheEndSeconds;
+            && cacheCoversRangeLocked(visibleStart, visibleEnd);
         const bool samplePresentationChanged = !deferZoomOut
             && (previousSampleCurve != sampleCurveVisibleLocked()
                 || previousSamplePoints != samplePointsVisibleLocked());
@@ -508,9 +514,12 @@ bool WaveformEditorItem::parseWindow(const QByteArray &bytes, DetailWindow *wind
     return true;
 }
 
-void WaveformEditorItem::scheduleDetailRequest() {
-    if (thread() == QThread::currentThread() && !m_requestTimer.isActive()) {
-        m_requestTimer.start();
+void WaveformEditorItem::scheduleDetailRequest(bool immediate) {
+    const int delayMs = immediate ? 0 : 40;
+    if (thread() == QThread::currentThread()
+        && (!m_requestTimer.isActive()
+            || m_requestTimer.remainingTime() > delayMs)) {
+        m_requestTimer.start(delayMs);
     }
 }
 
@@ -658,9 +667,8 @@ void WaveformEditorItem::requestDetailWindow() {
                         visibleStart, visibleEnd, true);
                 }
                 const auto [presentedStart, presentedEnd] = visibleRangeLocked();
-                const bool cacheCoversViewport = !m_cacheDirty
-                    && presentedStart >= m_cacheStartSeconds
-                    && presentedEnd <= m_cacheEndSeconds;
+                const bool cacheCoversViewport = cacheCoversRangeLocked(
+                    presentedStart, presentedEnd);
                 const bool stageReplacement = !deferredZoomStage
                     && !m_zoomOutHandoffPending
                     && m_playing
@@ -1140,9 +1148,7 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
         if (!m_zoomOutHandoffPending
             && !direct
             && !tiledPlayback
-            && (m_cacheDirty
-                || start < m_cacheStartSeconds
-                || end > m_cacheEndSeconds)) {
+            && !cacheCoversRangeLocked(start, end)) {
             invalidateCacheLocked();
         }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -1183,8 +1189,15 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
             request ? 1 : 0);
     }
 #endif
-    if (request) scheduleDetailRequest();
+    // At the first raw-sample zoom, the point cap can leave less than 40 ms
+    // of headroom when prefetch becomes due. Do not spend it on zoom debounce.
+    if (request) scheduleDetailRequest(true);
     update();
+}
+
+bool WaveformEditorItem::cacheCoversRangeLocked(double start, double end) const {
+    return !m_cacheDirty
+        && rasterCoversRange(m_cacheStartSeconds, m_cacheEndSeconds, start, end);
 }
 
 void WaveformEditorItem::invalidateCacheLocked() {
@@ -1304,8 +1317,8 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
         ? visibleRangeForZoomLocked(m_zoomLevel)
         : visibleRangeLocked();
     bool presentationCommitted = false;
-    if (visibleStart >= m_stagedCacheStartSeconds
-        && visibleEnd <= m_stagedCacheEndSeconds) {
+    if (rasterCoversRange(m_stagedCacheStartSeconds, m_stagedCacheEndSeconds,
+            visibleStart, visibleEnd)) {
         m_cache = std::move(m_stagedCache);
         m_cacheStartSeconds = m_stagedCacheStartSeconds;
         m_cacheEndSeconds = m_stagedCacheEndSeconds;
@@ -1727,20 +1740,28 @@ bool WaveformEditorItem::playbackTilesEligibleLocked(
         && m_detail.framesPerPoint > 0;
     if (detailReady) return true;
 
-    // Keep complete presentation tiles alive while the next detail window is
-    // in flight. Falling back to the monolithic cache here would briefly show
-    // its coarser level between two otherwise compatible tile presentations.
+    // Keep compatible tiles even if playback overtakes their right edge while
+    // detail is in flight. Discarding the overlap forces a fullscreen raster
+    // rebuild, which delays the next result and repeatedly exhausts lookahead.
+    // Absolute tile coordinates keep retained pixels valid across nearby seeks;
+    // source, scale and appearance changes invalidate them separately.
     const int renderWidth = renderPixelWidthLocked();
     const double secondsPerPixel = (visibleEnd - visibleStart)
         / static_cast<double>(std::max(1, renderWidth));
     const double tolerance = std::max(1.0e-12, secondsPerPixel * 1.0e-7);
-    return !m_playbackTiles.empty()
+    const bool compatible = !m_playbackTiles.empty()
         && std::abs(m_playbackTileSecondsPerPixel - secondsPerPixel)
             <= tolerance
         && m_playbackTileHeight
             == std::max(1, static_cast<int>(std::floor(height())))
-        && m_playbackTileDisplayedChannels == displayedChannelCountLocked()
-        && playbackTilesCoverLocked(visibleStart, visibleEnd);
+        && m_playbackTileDisplayedChannels == displayedChannelCountLocked();
+    if (!compatible) return false;
+    const double tileDuration = secondsPerPixel * kPlaybackTileWidth;
+    const qint64 first = static_cast<qint64>(std::floor(
+        visibleStart / tileDuration + kGridAlignmentEpsilon));
+    const auto tile = m_playbackTiles.lower_bound(first);
+    return tile != m_playbackTiles.end()
+        && static_cast<double>(tile->first) * tileDuration < visibleEnd;
 }
 
 void WaveformEditorItem::clearPlaybackTilesLocked() {

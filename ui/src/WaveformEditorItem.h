@@ -197,7 +197,7 @@ private:
     static QByteArray decodeWindow(
         const QString &path, double startSeconds, double endSeconds, int maxPoints, const std::shared_ptr<std::atomic_bool> &cancelled);
     static bool parseWindow(const QByteArray &bytes, DetailWindow *window);
-    void scheduleDetailRequest();
+    void scheduleDetailRequest(bool immediate = false);
     void requestDetailWindow();
     void clearDetailLocked();
     void clearPendingRequestLocked();
@@ -239,6 +239,7 @@ private:
     void updateFpsEstimateLocked();
     void bindWindowFrameLoop(QQuickWindow *window);
     void handleWindowFrameSwapped();
+    bool cacheCoversRangeLocked(double start, double end) const;
     void invalidateCacheLocked();
     void clearStagedCacheLocked();
     void beginStagedCacheLocked();
