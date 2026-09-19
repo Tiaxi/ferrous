@@ -605,6 +605,7 @@ private slots:
     void spectrogramCenteredGaplessPreStagedFill();
     void spectrogramCenteredGaplessSnapsAnchorToZero();
     void spectrogramCenteredSeekRestartRebuildsEarlierWindow();
+    void spectrogramFullscreenRefillAfterSeekCoversLeftEdge();
     void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
     void spectrogramEndSeekReleasesCanvasOnFinalize();
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
@@ -7113,6 +7114,57 @@ void QmlSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
     const auto tokenMap = item.m_trackColumnToSeqByToken.value(token);
     QVERIFY(tokenMap.contains(static_cast<qint32>(item.m_precomputedCanvasDisplayLeft)));
     QVERIFY(tokenMap.contains(static_cast<qint32>(item.m_precomputedCanvasDisplayRight)));
+}
+
+void QmlSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() {
+    SpectrogramItem item;
+    item.setWidth(1200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    constexpr int bins = 4;
+    constexpr int rate = 48000;
+    constexpr int hop = 1024;
+    constexpr int total = 14063;
+    constexpr quint64 token = 1;
+    const auto feed = [&](int start, int count, bool reset, quint64 generation) {
+        item.feedPrecomputedChunk(QByteArray(count * bins, '\x50'), bins, 0,
+            count, start, total, rate, hop, false, reset, token, reset, generation);
+    };
+
+    // First playback, followed by a seek to 120 s at the default 1920 px
+    // retention floor. This session never decoded the future fullscreen left.
+    feed(0, 1000, true, 1);
+    item.applyExplicitSeekPosition(120.0);
+    feed(4571, 2500, true, 2);
+    QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QVERIFY(node);
+    item.setWidth(3840);
+    item.updatePaintNode(node.data(), nullptr);
+    const qint64 left = item.m_precomputedCanvasDisplayLeft;
+    QVERIFY(left > 0);
+    QVERIFY(left < 4571);
+    QVERIFY(item.ringSlotForDisplayIndexLocked(left, false) < 0);
+
+    // The backend requests the missing history through the existing seek
+    // reset protocol. Queued old data must not defeat the refill.
+    item.feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0,
+        0, 0, false, true, token, true);
+    feed(7071, 100, false, 2);
+    QCOMPARE(item.m_ringWriteSeq, qint64(0));
+    feed(3611, 0, true, 3);
+    feed(3611, 5500, false, 3);
+    const qint64 writeSeq = item.m_ringWriteSeq;
+    feed(4571, 2500, true, 2);
+    QCOMPARE(item.m_ringWriteSeq, writeSeq);
+    QCOMPARE(item.m_precomputedSessionGeneration, quint64(3));
+    item.updatePaintNode(node.data(), nullptr);
+
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, left);
+    QVERIFY(!item.m_zoomFillActive);
+    for (qint64 col = item.m_precomputedCanvasDisplayLeft;
+         col <= item.m_precomputedCanvasDisplayRight; ++col) {
+        QVERIFY(item.ringSlotForDisplayIndexLocked(col, false) >= 0);
+    }
 }
 
 void QmlSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {

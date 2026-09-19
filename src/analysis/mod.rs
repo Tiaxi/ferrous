@@ -524,20 +524,35 @@ impl AnalysisRuntimeState {
                 self.set_spectrogram_active(active, ctx);
             }
             AnalysisCommand::SetSpectrogramWidgetWidth(width) => {
+                let retained_start = self.centered_retained_start_seconds(ctx);
                 let w = width.max(320);
                 self.spectrogram_widget_width = w;
                 if w > self.spectrogram_max_widget_width {
                     self.spectrogram_max_widget_width = w;
-                    // Propagate to the running session so its
-                    // centered-mode lookahead park threshold grows to
-                    // fill the enlarged display.  Without this, a
-                    // fullscreen toggle that skips the session restart
-                    // (zoom unchanged) leaves the decoder parked at the
-                    // old lookahead and the right portion of the new
-                    // window stays black until playback catches up.
-                    let _ = ctx
-                        .spectrogram_cmd_tx
-                        .send(SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: w });
+                    let target = self.last_spectrogram_position;
+                    let visible_left = Self::centered_visible_left_edge_seconds(
+                        target,
+                        self.centered_margin_seconds(),
+                        ctx,
+                    );
+                    // A wider ring cannot restore columns skipped by an earlier
+                    // seek or already evicted at the OLD capacity. Refill only
+                    // when the enlarged centered viewport exposes that history.
+                    if self.spectrogram_active
+                        && self.active_track_path.is_some()
+                        && self.display_mode == SpectrogramDisplayMode::Centered
+                        && visible_left < retained_start
+                    {
+                        self.clear_early_continuation(ctx);
+                        self.cancel_centered_staging();
+                        self.refill_centered_spectrogram(target, ctx);
+                    } else {
+                        // Existing history covers the left edge; let the worker
+                        // extend its lookahead without clearing the Qt ring.
+                        let _ = ctx
+                            .spectrogram_cmd_tx
+                            .send(SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: w });
+                    }
                 }
             }
             AnalysisCommand::SetSpectrogramZoomLevel(level) => {
@@ -547,10 +562,9 @@ impl AnalysisRuntimeState {
                 // unchanged zoom.  Restarting the session in that case
                 // wipes the ring and flashes black for ~100 ms while
                 // the decoder catches up — but the existing session's
-                // data is still valid at the same hop, and the Qt-side
-                // ring realloc + canvas rebuild handle the width change
-                // on their own.  Skip the restart when the zoom level
-                // hasn't actually changed.
+                // data is still valid at the same hop. Width commands already
+                // refill missing history or extend the worker's lookahead.
+                // Skip the restart when the zoom level hasn't actually changed.
                 if (self.zoom_level - level).abs() < 0.001 {
                     return;
                 }
@@ -1302,6 +1316,25 @@ impl AnalysisRuntimeState {
         Some(config.limits(retention::lookahead_seconds()).capacity)
     }
 
+    fn centered_retained_start_seconds(&self, ctx: &AnalysisContext<'_>) -> f64 {
+        if let (Some(cols_per_second), Some(ring_capacity)) = (
+            self.current_centered_cols_per_second(),
+            self.centered_ring_capacity_columns(),
+        ) {
+            let produced = ctx
+                .spectrogram_decode_columns_produced
+                .load(Ordering::Relaxed);
+            let oldest_retained_col = produced.saturating_sub(ring_capacity);
+            // Column-to-seconds conversion only needs approximate
+            // floating-point precision for seek-window comparisons.
+            #[allow(clippy::cast_precision_loss)]
+            let oldest_retained_seconds = oldest_retained_col as f64 / cols_per_second;
+            oldest_retained_seconds.max(self.spectrogram_session_start)
+        } else {
+            self.spectrogram_session_start
+        }
+    }
+
     /// Compute the pre-decode margin for centered mode: how many seconds
     /// before the playhead to start decoding.  Based on the actual widget
     /// width, sample rate, zoom level, plus a small buffer.
@@ -1402,22 +1435,7 @@ impl AnalysisRuntimeState {
             // on its left.
             let visible_left =
                 Self::centered_visible_left_edge_seconds(position_seconds, margin, ctx);
-            let retained_window_start = if let (Some(cols_per_second), Some(ring_capacity)) = (
-                self.current_centered_cols_per_second(),
-                self.centered_ring_capacity_columns(),
-            ) {
-                let produced = ctx
-                    .spectrogram_decode_columns_produced
-                    .load(Ordering::Relaxed);
-                let oldest_retained_col = produced.saturating_sub(ring_capacity);
-                // Column-to-seconds conversion only needs approximate
-                // floating-point precision for seek-window comparisons.
-                #[allow(clippy::cast_precision_loss)]
-                let oldest_retained_seconds = oldest_retained_col as f64 / cols_per_second;
-                oldest_retained_seconds.max(window_start)
-            } else {
-                window_start
-            };
+            let retained_window_start = self.centered_retained_start_seconds(ctx);
             if visible_left >= retained_window_start && position_seconds <= window_end {
                 // Seek within decoded window — cheap position update.
                 let adjusted = position_seconds + self.spectrogram_position_offset;
@@ -1436,40 +1454,7 @@ impl AnalysisRuntimeState {
                 // property jumping and the worker's reset chunk arriving,
                 // during which old ring data can be briefly visible at the
                 // new playhead position.
-                let synth_channel_count =
-                    u8::try_from(self.active_session_channel_count.max(1)).unwrap_or(u8::MAX);
-                let _ = ctx
-                    .event_tx
-                    .send(AnalysisEvent::PrecomputedSpectrogramChunk(
-                        PrecomputedSpectrogramChunk {
-                            track_token: self.active_track_token,
-                            generation: 0,
-                            columns_u8: Vec::new(),
-                            bins_per_column: 0,
-                            column_count: 0,
-                            channel_count: synth_channel_count,
-                            start_column_index: 0,
-                            total_columns_estimate: 0,
-                            sample_rate_hz: 0,
-                            hop_size: 0,
-                            coverage_seconds: 0.0,
-                            complete: false,
-                            buffer_reset: true,
-                            clear_history: true,
-                        },
-                    ));
-                // Suppress the next PositionUpdate to prevent a race: the
-                // playback snapshot may send a PositionUpdate at the new
-                // position before the worker processes our NewTrack.
-                let start = self.spectrogram_restart_start_seconds(position_seconds, ctx);
-                self.start_spectrogram_session_with_target(
-                    start,
-                    position_seconds,
-                    true,
-                    true,
-                    ctx,
-                );
-                self.suppress_next_spectrogram_position_update = true;
+                self.refill_centered_spectrogram(position_seconds, ctx);
             }
         } else {
             // Rolling mode: an explicit seek breaks the continuous gapless
@@ -1478,6 +1463,37 @@ impl AnalysisRuntimeState {
                 .spectrogram_cmd_tx
                 .send(SpectrogramWorkerCommand::Seek { position_seconds });
         }
+    }
+
+    fn refill_centered_spectrogram(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
+        let synth_channel_count =
+            u8::try_from(self.active_session_channel_count.max(1)).unwrap_or(u8::MAX);
+        let _ = ctx
+            .event_tx
+            .send(AnalysisEvent::PrecomputedSpectrogramChunk(
+                PrecomputedSpectrogramChunk {
+                    track_token: self.active_track_token,
+                    generation: 0,
+                    columns_u8: Vec::new(),
+                    bins_per_column: 0,
+                    column_count: 0,
+                    channel_count: synth_channel_count,
+                    start_column_index: 0,
+                    total_columns_estimate: 0,
+                    sample_rate_hz: 0,
+                    hop_size: 0,
+                    coverage_seconds: 0.0,
+                    complete: false,
+                    buffer_reset: true,
+                    clear_history: true,
+                },
+            ));
+        // Suppress the next PositionUpdate to prevent a race: the
+        // playback snapshot may send a PositionUpdate at the new
+        // position before the worker processes our NewTrack.
+        let start = self.spectrogram_restart_start_seconds(position_seconds, ctx);
+        self.start_spectrogram_session_with_target(start, position_seconds, true, true, ctx);
+        self.suppress_next_spectrogram_position_update = true;
     }
 
     fn load_cached_waveform(&mut self, path: &Path) -> Option<Vec<f32>> {
@@ -3880,6 +3896,108 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_after_centered_seek_refills_newly_exposed_history() {
+        for (target, duration_ms, zoom, fullscreen_width) in [
+            (120.0, 300_000, 1.0, 3_840),
+            (290.0, 300_000, 1.0, 3_840), // EOF detaches the playhead from center.
+            (120.0, 300_000, 16.0, 8_192),
+        ] {
+            let mut state = AnalysisRuntimeState::new();
+            state.display_mode = SpectrogramDisplayMode::Centered;
+            state.active_track_path = Some(PathBuf::from("unused-test-track.flac"));
+            state.active_track_token = 1;
+            state.active_session_effective_rate = 48_000;
+            state.zoom_level = zoom;
+            state.hop_size = zoom_hop_size(state.fft_size, zoom);
+
+            let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+            let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+            let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+            let waveform_decode_active_token = AtomicU64::new(0);
+            let spectrogram_decode_generation = AtomicU64::new(0);
+            let spectrogram_track_duration_ms = AtomicU64::new(duration_ms);
+            let spectrogram_decode_columns_produced = AtomicU64::new(0);
+            let ctx = AnalysisContext {
+                event_tx: &event_tx,
+                waveform_job_tx: &waveform_job_tx,
+                waveform_decode_active_token: &waveform_decode_active_token,
+                spectrogram_cmd_tx: &spectrogram_cmd_tx,
+                spectrogram_decode_generation: &spectrogram_decode_generation,
+                spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+                spectrogram_track_duration_ms: &spectrogram_track_duration_ms,
+            };
+
+            state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1_200), &ctx);
+            state.seek_spectrogram_position(target, &ctx);
+            assert!(matches!(
+                spectrogram_cmd_rx.try_recv().unwrap(),
+                SpectrogramWorkerCommand::NewTrack { .. }
+            ));
+            let narrow_start = state.spectrogram_session_start;
+            let generation = spectrogram_decode_generation.load(Ordering::Relaxed);
+            event_rx.try_iter().for_each(drop);
+
+            state.handle_command(
+                AnalysisCommand::SetSpectrogramWidgetWidth(fullscreen_width),
+                &ctx,
+            );
+            let expected_start = state.spectrogram_restart_start_seconds(target, &ctx);
+            assert!(expected_start < narrow_start);
+            let commands: Vec<_> = spectrogram_cmd_rx.try_iter().collect();
+            assert!(
+                commands.iter().any(|cmd| matches!(cmd,
+                    SpectrogramWorkerCommand::NewTrack {
+                        start_seconds, target_position_seconds, widget_width,
+                        generation: new_generation, emit_initial_reset: true,
+                        clear_history_on_reset: true, ..
+                    } if (*start_seconds - expected_start).abs() < 0.001
+                        && (*target_position_seconds - target).abs() < 0.001
+                        && *widget_width == fullscreen_width && *new_generation > generation
+                )),
+                "fullscreen must decode the missing left edge: {commands:?}"
+            );
+            assert!(event_rx.try_iter().any(|event| matches!(event,
+                AnalysisEvent::PrecomputedSpectrogramChunk(chunk)
+                    if chunk.buffer_reset && chunk.clear_history && chunk.column_count == 0
+            )));
+
+            // The fullscreen width survives pane shrink and later tracks.
+            // Reopening at the same zoom must reuse the replenishing window.
+            state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1_200), &ctx);
+            state.handle_command(
+                AnalysisCommand::SetSpectrogramWidgetWidth(fullscreen_width),
+                &ctx,
+            );
+            state.handle_command(AnalysisCommand::SetSpectrogramZoomLevel(zoom), &ctx);
+            assert!(spectrogram_cmd_rx.try_recv().is_err());
+
+            // On a later track the session can start at zero yet lose older
+            // columns to ring eviction. Compare against the capacity BEFORE
+            // growing; sizing it at the new width would hide the missing data.
+            state.last_spectrogram_position = 120.0;
+            state.active_track_token = 2;
+            state.spectrogram_session_start = 0.0;
+            state.spectrogram_widget_width = 1_920;
+            state.spectrogram_max_widget_width = 1_920;
+            let old_capacity = state.centered_ring_capacity_columns().unwrap();
+            let oldest_column = if zoom > 1.0 { 88_900 } else { 4_300 };
+            spectrogram_decode_columns_produced
+                .store(old_capacity + oldest_column, Ordering::Relaxed);
+            state.handle_command(
+                AnalysisCommand::SetSpectrogramWidgetWidth(fullscreen_width),
+                &ctx,
+            );
+            assert!(
+                spectrogram_cmd_rx.try_iter().any(|cmd| matches!(
+                    cmd,
+                    SpectrogramWorkerCommand::NewTrack { track_token: 2, .. }
+                )),
+                "fullscreen must also recover evicted history"
+            );
+        }
+    }
+
+    #[test]
     fn set_widget_width_growth_notifies_worker_to_extend_lookahead() {
         // Regression for the fullscreen-regression-after-unchanged-zoom
         // skip: a widget-width increase (e.g. fullscreen toggle) must
@@ -3888,58 +4006,64 @@ mod tests {
         // Without this, the decoder stays parked at the old window's
         // lookahead and the right side of the new fullscreen view
         // shows only the slowly-advancing decode edge.
-        let mut state = AnalysisRuntimeState::new();
-        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
-        state.active_track_token = 1;
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            let mut state = AnalysisRuntimeState::new();
+            state.display_mode = mode;
+            state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+            state.active_track_token = 1;
 
-        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
-        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
-        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
-        let waveform_decode_active_token = AtomicU64::new(0);
-        let spectrogram_decode_generation = AtomicU64::new(0);
-        let spectrogram_track_duration_ms = AtomicU64::new(0);
-        let spectrogram_decode_columns_produced = AtomicU64::new(0);
-        let ctx = AnalysisContext {
-            event_tx: &event_tx,
-            waveform_job_tx: &waveform_job_tx,
-            waveform_decode_active_token: &waveform_decode_active_token,
-            spectrogram_cmd_tx: &spectrogram_cmd_tx,
-            spectrogram_decode_generation: &spectrogram_decode_generation,
-            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
-            spectrogram_track_duration_ms: &spectrogram_track_duration_ms,
-        };
+            let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+            let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+            let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+            let waveform_decode_active_token = AtomicU64::new(0);
+            let spectrogram_decode_generation = AtomicU64::new(0);
+            let spectrogram_track_duration_ms = AtomicU64::new(0);
+            let spectrogram_decode_columns_produced = AtomicU64::new(0);
+            let ctx = AnalysisContext {
+                event_tx: &event_tx,
+                waveform_job_tx: &waveform_job_tx,
+                waveform_decode_active_token: &waveform_decode_active_token,
+                spectrogram_cmd_tx: &spectrogram_cmd_tx,
+                spectrogram_decode_generation: &spectrogram_decode_generation,
+                spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+                spectrogram_track_duration_ms: &spectrogram_track_duration_ms,
+            };
 
-        // Default starts at 1920; first shrink to 1000 simulates the
-        // windowed layout.  No UpdateWidgetWidth should flow because the
-        // max has not grown.
-        state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1000), &ctx);
-        assert_eq!(state.spectrogram_widget_width, 1000);
-        assert_eq!(state.spectrogram_max_widget_width, 1920);
-        assert!(
-            spectrogram_cmd_rx.try_recv().is_err(),
-            "shrinking the widget must not refresh the worker's lookahead"
-        );
+            // Default starts at 1920; first shrink to 1000 simulates the
+            // windowed layout.  No UpdateWidgetWidth should flow because the
+            // max has not grown.
+            state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1000), &ctx);
+            assert_eq!(state.spectrogram_widget_width, 1000);
+            assert_eq!(state.spectrogram_max_widget_width, 1920);
+            assert!(
+                spectrogram_cmd_rx.try_recv().is_err(),
+                "shrinking the widget must not refresh the worker's lookahead"
+            );
 
-        // Growing past the previous max (fullscreen on a wider display)
-        // must dispatch an UpdateWidgetWidth carrying the new value.
-        state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(3840), &ctx);
-        assert_eq!(state.spectrogram_widget_width, 3840);
-        assert_eq!(state.spectrogram_max_widget_width, 3840);
-        let cmd = spectrogram_cmd_rx
-            .recv_timeout(Duration::from_millis(50))
-            .expect("widget-width growth must send a worker command");
-        match cmd {
-            SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width } => {
-                assert_eq!(widget_width, 3840);
+            // Growing past the previous max (fullscreen on a wider display)
+            // must dispatch an UpdateWidgetWidth carrying the new value.
+            state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(3840), &ctx);
+            assert_eq!(state.spectrogram_widget_width, 3840);
+            assert_eq!(state.spectrogram_max_widget_width, 3840);
+            let cmd = spectrogram_cmd_rx
+                .recv_timeout(Duration::from_millis(50))
+                .expect("widget-width growth must send a worker command");
+            match cmd {
+                SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width } => {
+                    assert_eq!(widget_width, 3840);
+                }
+                other => panic!("expected UpdateWidgetWidth, got {other:?}"),
             }
-            other => panic!("expected UpdateWidgetWidth, got {other:?}"),
-        }
 
-        // Shrinking back does not refresh again (would just waste work).
-        state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1200), &ctx);
-        assert_eq!(state.spectrogram_widget_width, 1200);
-        assert_eq!(state.spectrogram_max_widget_width, 3840);
-        assert!(spectrogram_cmd_rx.try_recv().is_err());
+            // Shrinking back does not refresh again (would just waste work).
+            state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1200), &ctx);
+            assert_eq!(state.spectrogram_widget_width, 1200);
+            assert_eq!(state.spectrogram_max_widget_width, 3840);
+            assert!(spectrogram_cmd_rx.try_recv().is_err());
+        }
     }
 
     #[test]
