@@ -1,3 +1,10 @@
+ferrous (0.2.2-1) unstable; urgency=low
+
+  * Fill spectrogram history when entering fullscreen after a seek.
+  * Update dependencies to resolve security and soundness advisories.
+
+ -- Ferrous contributors <ferrous@users.noreply.github.com>  Sat, 19 Sep 2026 17:13:55 +0300
+
 ferrous (0.2.1-1) unstable; urgency=low
 
   * Prevent fullscreen waveform stalls at the first raw-sample zoom level.
