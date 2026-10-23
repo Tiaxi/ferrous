@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::hash::{Hash, Hasher};
+mod cover_cache;
+
 use std::path::{Path, PathBuf};
 use std::{fs::File, io::ErrorKind};
 
@@ -32,6 +33,10 @@ use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, raw_surround_format_label,
     read_appended_apev2_text_metadata,
 };
+
+#[cfg(test)]
+pub(crate) use cover_cache::tests::{encoded_picture, test_cache, write_wav_with_picture};
+pub(crate) use cover_cache::EmbeddedCoverCache;
 
 #[derive(Debug, Clone, Default)]
 pub struct TrackMetadata {
@@ -194,11 +199,11 @@ fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
     metadata.track_number = tag.track();
 
     if let Some(pic) = tag.pictures().first() {
-        if let Some((cover_path, width, height, raw)) =
-            cached_embedded_cover_details(path, pic.data())
+        if let Some(cover_path) =
+            EmbeddedCoverCache::shared().and_then(|cache| cache.store(pic.data()))
         {
-            metadata.cover_art_path = Some(cover_path);
-            metadata.cover_art_rgba = Some((width, height, raw));
+            metadata.cover_art_path = Some(cover_path.to_string_lossy().into_owned());
+            metadata.cover_art_rgba = decode_cover_rgba(pic.data());
         }
     }
 }
@@ -554,7 +559,8 @@ fn codec_label(codec: CodecType) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bytes_to_kbps, format_label_from_extension, needs_stream_details_probe, MetadataEvent,
+        bytes_to_kbps, encoded_picture, format_label_from_extension, load_metadata_for_path,
+        needs_stream_details_probe, write_wav_with_picture, EmbeddedCoverCache, MetadataEvent,
         MetadataService, TrackMetadata,
     };
     use crate::raw_audio::write_test_apev2_file;
@@ -670,6 +676,31 @@ mod tests {
     }
 
     #[test]
+    fn embedded_cover_is_cached_with_its_original_bytes_and_decoded_for_display() {
+        let dir = metadata_test_path("embedded-cover", "d");
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let track = dir.join("01.wav");
+        let picture = encoded_picture(20, image::ImageFormat::Png);
+        write_wav_with_picture(&track, &picture);
+
+        let first = load_metadata_for_path(&track);
+        let second = load_metadata_for_path(&track);
+
+        let cache = EmbeddedCoverCache::shared().expect("test cache directory");
+        let entry = cache
+            .dir()
+            .join(format!("{:x}.png", md5::compute(&picture)));
+        let entry = entry.to_string_lossy().into_owned();
+        assert_eq!(first.cover_art_path.as_deref(), Some(entry.as_str()));
+        assert_eq!(second.cover_art_path, first.cover_art_path);
+        assert_eq!(std::fs::read(&entry).expect("read cache entry"), picture);
+        let (width, height, rgba) = first.cover_art_rgba.expect("decoded cover");
+        assert_eq!((width, height, rgba.len()), (8, 6, 8 * 6 * 4));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn metadata_service_keeps_raw_dts_format_label() {
         let path = metadata_test_path("dts-format", "dts");
         write_test_apev2_file(&path, &[("Title", "The Leper Affinity")], true);
@@ -736,76 +767,22 @@ fn find_folder_cover_path(track_path: &Path) -> Option<PathBuf> {
 }
 
 fn load_folder_cover_art(track_path: &Path) -> Option<(usize, usize, Vec<u8>)> {
-    let candidates = folder_cover_candidates(track_path);
-
-    for p in candidates {
-        if !p.is_file() {
-            continue;
-        }
-        if let Ok(bytes) = std::fs::read(&p) {
-            if let Ok(img) = image::load_from_memory(&bytes) {
-                let rgba = img.to_rgba8();
-                return Some((
-                    u32_to_usize(rgba.width()),
-                    u32_to_usize(rgba.height()),
-                    rgba.into_raw(),
-                ));
-            }
-        }
-    }
-    None
+    folder_cover_candidates(track_path)
+        .into_iter()
+        .filter(|path| path.is_file())
+        .find_map(|path| decode_cover_rgba(&std::fs::read(path).ok()?))
 }
 
-fn cover_cache_dir() -> Option<PathBuf> {
-    crate::paths::cache_dir().map(|dir| dir.join("embedded_covers"))
+fn decode_cover_rgba(encoded: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let rgba = image::load_from_memory(encoded).ok()?.to_rgba8();
+    Some((
+        u32_to_usize(rgba.width()),
+        u32_to_usize(rgba.height()),
+        rgba.into_raw(),
+    ))
 }
 
 pub(crate) fn cached_embedded_cover_path(track_path: &Path) -> Option<String> {
-    let tagged = lofty::read_from_path(track_path).ok()?;
-    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
-    let picture = tag.pictures().first()?;
-    let (cover_path, _, _, _) = cached_embedded_cover_details(track_path, picture.data())?;
-    Some(cover_path)
-}
-
-fn cached_embedded_cover_details(
-    track_path: &Path,
-    encoded_bytes: &[u8],
-) -> Option<(String, usize, usize, Vec<u8>)> {
-    let img = image::load_from_memory(encoded_bytes).ok()?;
-    let rgba = img.to_rgba8();
-    let width = u32_to_usize(rgba.width());
-    let height = u32_to_usize(rgba.height());
-    let raw = rgba.into_raw();
-    let cover_path = cache_embedded_cover_png(track_path, width, height, &raw)?;
-    Some((cover_path, width, height, raw))
-}
-
-fn cache_embedded_cover_png(
-    track_path: &Path,
-    width: usize,
-    height: usize,
-    rgba: &[u8],
-) -> Option<String> {
-    let cache_dir = cover_cache_dir()?;
-    if std::fs::create_dir_all(&cache_dir).is_err() {
-        return None;
-    }
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    track_path.hash(&mut hasher);
-    let key = hasher.finish();
-    let out_path = cache_dir.join(format!("{key:016x}.png"));
-
-    let width = u32::try_from(width).ok()?;
-    let height = u32::try_from(height).ok()?;
-    let dims_match = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
-    if dims_match
-        .save_with_format(&out_path, image::ImageFormat::Png)
-        .is_err()
-    {
-        return None;
-    }
-
-    Some(out_path.to_string_lossy().to_string())
+    let cover_path = EmbeddedCoverCache::shared()?.store_track_cover(track_path)?;
+    Some(cover_path.to_string_lossy().into_owned())
 }

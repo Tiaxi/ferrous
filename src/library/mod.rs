@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+mod cover_cache;
 mod scan;
 mod schema;
 
@@ -188,6 +189,24 @@ impl LibraryService {
                             snapshot.scan_in_progress = false;
                             snapshot.scan_progress = None;
                             emit_snapshot(&event_tx, &snapshot);
+                        }
+
+                        match cover_cache::migrate_legacy_embedded_covers(
+                            &conn,
+                            &mut snapshot,
+                            &event_tx,
+                        ) {
+                            Ok(false) => {}
+                            result => {
+                                if let Err(err) = result {
+                                    snapshot.last_error = Some(err);
+                                }
+                                load_snapshot(&conn, &mut snapshot);
+                                snapshot.bump_search_revision();
+                                snapshot.scan_in_progress = false;
+                                snapshot.scan_progress = None;
+                                emit_snapshot(&event_tx, &snapshot);
+                            }
                         }
 
                         while let Ok(cmd) = cmd_rx.recv() {

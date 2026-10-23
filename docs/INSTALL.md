@@ -88,3 +88,5 @@ See [supported formats](../README.md#supported-formats). Playback codec support 
 | Embedded cover art | `$XDG_CACHE_HOME/ferrous/embedded_covers` |
 
 Unset XDG variables fall back to `~/.local/share`, `~/.config`, and `~/.cache`. Last.fm session keys are stored in the system keyring.
+
+The embedded cover cache keeps one file per distinct embedded picture. Files that the library database no longer references are removed after each library scan.
