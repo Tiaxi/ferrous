@@ -55,4 +55,6 @@ fi
 dnf_cmd="${FERROUS_DNF_CMD:-${default_dnf_cmd}}"
 
 echo "Installing ${rpm_path}"
-/bin/sh -lc "${dnf_cmd} install -y \"${rpm_path}\""
+# The prefix may contain several words; pass the path as an argument so shell
+# metacharacters in it are never interpreted.
+/bin/sh -lc "${dnf_cmd} install -y \"\$1\"" sh "${rpm_path}"
