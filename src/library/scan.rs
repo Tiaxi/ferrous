@@ -237,6 +237,7 @@ pub(super) fn handle_add_root(
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<(), String> {
     let root = canonicalize_root(root)?;
+    reject_nested_root(conn, &root)?;
     insert_root(conn, &root, name)?;
     // Reflect the newly-added root in UI state immediately, before scan completion.
     snapshot.roots = load_roots(conn);
@@ -1158,6 +1159,42 @@ fn canonicalize_root(root: &Path) -> Result<PathBuf, String> {
     Ok(root)
 }
 
+/// Rejects a root that contains, or lies inside, another configured root.
+/// Overlapping roots would claim the same tracks in turn.
+fn reject_nested_root(conn: &Connection, root: &Path) -> Result<(), String> {
+    for known in load_roots(conn) {
+        if known.path == root {
+            continue;
+        }
+        if root.starts_with(&known.path) {
+            return Err(format!(
+                "cannot add library root '{}': it is inside library root '{}'",
+                root.display(),
+                known.path.display()
+            ));
+        }
+        if known.path.starts_with(root) {
+            return Err(format!(
+                "cannot add library root '{}': it contains library root '{}'; remove that root first",
+                root.display(),
+                known.path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Returns the string that paths strictly below `root` start with. Used with
+/// `substr(path, 1, length(?)) = ?`, which unlike `LIKE` is case-sensitive and
+/// treats `_` and `%` literally.
+fn descendant_prefix(root: &str) -> String {
+    if root.ends_with('/') {
+        root.to_string()
+    } else {
+        format!("{root}/")
+    }
+}
+
 fn insert_root(conn: &Connection, root: &Path, name: &str) -> Result<(), String> {
     let now = unix_ts_i64();
     let root_str = root.to_string_lossy().to_string();
@@ -1203,14 +1240,16 @@ pub(super) fn remove_root_and_purge(conn: &Connection, root: &Path) -> Result<()
     tx.execute("DELETE FROM roots WHERE path=?1", params![root_str.clone()])
         .map_err(|e| format!("failed to remove root '{}': {e}", root.display()))?;
 
+    // Tracks under the root's path that another configured root owns stay;
+    // path matching only collects legacy rows without a valid root.
     tx.execute(
         r"
         DELETE FROM tracks
         WHERE root_path = ?1
-           OR path = ?1
-           OR path LIKE ?1 || '/%'
+           OR ((path = ?1 OR substr(path, 1, length(?2)) = ?2)
+               AND NOT EXISTS (SELECT 1 FROM roots WHERE roots.path = tracks.root_path))
         ",
-        params![root_str],
+        params![root_str, descendant_prefix(&root_str)],
     )
     .map_err(|e| format!("failed to purge root tracks '{}': {e}", root.display()))?;
 
@@ -1276,10 +1315,10 @@ fn load_existing_tracks_for_root(
         SELECT path, title, track_no, mtime_ns, size_bytes, cover_checked, duration_secs, search_tags IS NULL
         FROM tracks
         WHERE root_path = ?1
-           OR (root_path = '' AND (path = ?1 OR path LIKE ?1 || '/%'))
+           OR (root_path = '' AND (path = ?1 OR substr(path, 1, length(?2)) = ?2))
         ",
     ) {
-        let mapped = stmt.query_map(params![root_str], |row| {
+        let mapped = stmt.query_map(params![root_str, descendant_prefix(root_str)], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -2254,6 +2293,93 @@ mod tests {
 
         let _ = fs::remove_dir_all(root_a);
         let _ = fs::remove_dir_all(root_b);
+    }
+
+    fn indexed_paths(conn: &Connection) -> Vec<PathBuf> {
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(conn, &mut snapshot);
+        let mut paths: Vec<PathBuf> = snapshot.tracks.into_iter().map(|t| t.path).collect();
+        paths.sort();
+        paths
+    }
+
+    fn scan(conn: &Connection, root: &Path) -> Vec<String> {
+        scan_root(conn, root, &mut |_| {}, &mut |_, _| {}).expect("scan")
+    }
+
+    fn insert_legacy_track(conn: &Connection, path: &Path) {
+        conn.execute(
+            "INSERT INTO tracks(path,root_path,title,artist,album,mtime_ns,size_bytes,indexed_at) \
+             VALUES (?1,'','Legacy','Artist','Album',0,0,0)",
+            params![path.to_string_lossy()],
+        )
+        .expect("legacy row");
+    }
+
+    #[test]
+    fn root_paths_match_exactly_when_removing_and_scanning() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("exact-prefix");
+        for name in ["a_b", "aXb", "A_B"] {
+            fs::create_dir_all(base.join(name)).expect("mkdir root");
+            write_stub(&base.join(name).join("song.mp3"), name.as_bytes());
+        }
+        let base = base.canonicalize().expect("canonical base");
+        for name in ["a_b", "aXb", "A_B"] {
+            scan(&conn, &base.join(name));
+        }
+        // Rows from databases that predate per-track roots.
+        insert_legacy_track(&conn, &base.join("a_b/legacy.mp3"));
+        insert_legacy_track(&conn, &base.join("aXb/legacy.mp3"));
+        insert_legacy_track(&conn, &base.join("A_B/legacy.mp3"));
+
+        // `LIKE 'a_b/%'` matched the other two roots' legacy rows.
+        let removed = scan(&conn, &base.join("a_b"));
+        assert_eq!(
+            removed,
+            [base.join("a_b/legacy.mp3").to_string_lossy().to_string()]
+        );
+
+        remove_root_and_purge(&conn, &base.join("a_b")).expect("remove a_b");
+
+        assert_eq!(
+            indexed_paths(&conn),
+            [
+                base.join("A_B/legacy.mp3"),
+                base.join("A_B/song.mp3"),
+                base.join("aXb/legacy.mp3"),
+                base.join("aXb/song.mp3"),
+            ]
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn add_root_rejects_nested_roots() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("nested-add");
+        fs::create_dir_all(base.join("music/inner")).expect("mkdir inner");
+        fs::create_dir_all(base.join("music-2")).expect("mkdir sibling");
+        let base = base.canonicalize().expect("canonical base");
+        let mut snapshot = LibrarySnapshot::default();
+        let (tx, _rx) = unbounded();
+        let add = |snapshot: &mut LibrarySnapshot, path: &Path| {
+            handle_add_root(&conn, path, "", snapshot, &tx)
+        };
+
+        add(&mut snapshot, &base.join("music")).expect("add root");
+        add(&mut snapshot, &base.join("music")).expect("re-adding a root rescans it");
+        add(&mut snapshot, &base.join("music-2")).expect("sibling with a shared prefix");
+        let inside = add(&mut snapshot, &base.join("music/inner")).expect_err("inside a root");
+        assert!(inside.contains("is inside library root"), "{inside}");
+        let contains = add(&mut snapshot, &base).expect_err("contains a root");
+        assert!(contains.contains("contains library root"), "{contains}");
+
+        let roots: Vec<PathBuf> = load_roots(&conn).into_iter().map(|r| r.path).collect();
+        assert_eq!(roots, [base.join("music"), base.join("music-2")]);
+        let _ = fs::remove_dir_all(base);
     }
     #[test]
     fn collects_all_repeated_and_credit_tags() {
