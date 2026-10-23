@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -236,7 +237,8 @@ pub(super) fn handle_add_root(
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<(), String> {
-    let root = canonicalize_root(root)?;
+    let root = canonicalize_root(root)
+        .map_err(|e| format!("cannot add library root '{}': {e}", root.display()))?;
     reject_nested_root(conn, &root)?;
     insert_root(conn, &root, name)?;
     // Reflect the newly-added root in UI state immediately, before scan completion.
@@ -383,6 +385,7 @@ fn run_scans(
     let roots_total = roots.len();
     let snapshot_emit_interval = scan_snapshot_emit_interval();
     let snapshot_min_processed_delta = scan_snapshot_min_processed_delta();
+    let mut problems = Vec::new();
     for (idx, root) in roots.iter().enumerate() {
         let mut final_progress = RootScanProgress::default();
         let mut root_track_indices: HashMap<String, usize> = HashMap::new();
@@ -392,6 +395,7 @@ fn run_scans(
             }
         }
         let pending_upserts = std::cell::RefCell::new(Vec::<(MetadataTask, IndexedTrack)>::new());
+        let revision_before_scan = snapshot.search_revision;
         let mut last_snapshot_emit = Instant::now()
             .checked_sub(snapshot_emit_interval)
             .unwrap_or_else(Instant::now);
@@ -431,14 +435,34 @@ fn run_scans(
             }
         };
 
-        let stale_paths = scan_root(conn, root, &mut on_progress, &mut collect_upsert)?;
-        apply_pending_upserts_for_root(snapshot, root, &mut root_track_indices, &pending_upserts);
-        if !stale_paths.is_empty() {
-            let stale_set: HashSet<String> = stale_paths.into_iter().collect();
-            snapshot
-                .tracks
-                .retain(|track| !stale_set.contains(track.path.to_string_lossy().as_ref()));
-            snapshot.bump_search_revision();
+        // Roots are independent: a root that fails or cannot be fully read is
+        // reported without stopping the remaining scans.
+        match scan_root(conn, root, &mut on_progress, &mut collect_upsert) {
+            Ok(outcome) => {
+                apply_pending_upserts_for_root(
+                    snapshot,
+                    root,
+                    &mut root_track_indices,
+                    &pending_upserts,
+                );
+                if !outcome.removed.is_empty() {
+                    let stale_set: HashSet<String> = outcome.removed.into_iter().collect();
+                    snapshot
+                        .tracks
+                        .retain(|track| !stale_set.contains(track.path.to_string_lossy().as_ref()));
+                    snapshot.bump_search_revision();
+                }
+                problems.extend(outcome.problem);
+            }
+            Err(err) => {
+                // The scan transaction was rolled back; drop any tracks this
+                // root already published to the snapshot.
+                if snapshot.search_revision != revision_before_scan {
+                    load_snapshot(conn, snapshot);
+                    snapshot.bump_search_revision();
+                }
+                problems.push(format!("failed to scan '{}': {err}", root.display()));
+            }
         }
 
         snapshot.scan_in_progress = true;
@@ -454,7 +478,30 @@ fn run_scans(
         emit_snapshot(event_tx, snapshot);
     }
 
-    Ok(())
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(summarize_scan_problems(&problems))
+    }
+}
+
+/// Joins per-root scan problems into one message for the library error state.
+fn summarize_scan_problems(problems: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let mut message = problems
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("; ");
+    if problems.len() > SHOWN {
+        let _ = write!(
+            message,
+            "; {} more library roots had problems",
+            problems.len() - SHOWN
+        );
+    }
+    message
 }
 
 fn apply_pending_upserts_for_root(
@@ -1149,12 +1196,12 @@ pub(crate) fn rename_indexed_metadata_paths(
     Ok(refreshed)
 }
 
+/// Resolves a root to its canonical directory path. Errors omit the path;
+/// callers add it with their own context.
 fn canonicalize_root(root: &Path) -> Result<PathBuf, String> {
-    let root = root
-        .canonicalize()
-        .map_err(|e| format!("failed to access '{}': {e}", root.display()))?;
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
     if !root.is_dir() {
-        return Err(format!("'{}' is not a directory", root.display()));
+        return Err("not a directory".to_string());
     }
     Ok(root)
 }
@@ -1432,6 +1479,218 @@ fn apply_metadata_result<U>(
     on_upsert(&task, &indexed);
 }
 
+/// Identity of a file independent of the path that reached it.
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(unix))]
+type FileIdentity = PathBuf;
+
+#[cfg(unix)]
+fn file_identity(_path: &Path, metadata: &fs::Metadata) -> FileIdentity {
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn file_identity(path: &Path, _metadata: &fs::Metadata) -> FileIdentity {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// A supported audio file found by [`LibraryWalk`].
+struct ScanCandidate {
+    path: PathBuf,
+    mtime_ns: i64,
+    size_bytes: i64,
+}
+
+/// A directory on the walk's current path.
+struct WalkAncestor {
+    path: PathBuf,
+    via_link: bool,
+}
+
+enum WalkStep {
+    Continue,
+    SkipDir,
+    Yield(ScanCandidate),
+}
+
+/// Walks a library root, following symbolic links, and yields each supported
+/// audio file once.
+///
+/// Files reached only through a link are yielded after the walk, and only
+/// when no path without links reached the same file, so the indexed path
+/// stays the same across scans. Paths that could not be read are recorded in
+/// `kept`: their tracks may still exist and must not be treated as deleted.
+struct LibraryWalk {
+    walk: walkdir::IntoIter,
+    root: PathBuf,
+    nested_roots: HashSet<PathBuf>,
+    ancestors: Vec<WalkAncestor>,
+    claimed: HashSet<FileIdentity>,
+    linked: VecDeque<(ScanCandidate, FileIdentity)>,
+    /// Supported audio files encountered, including unreadable and duplicate ones.
+    found: usize,
+    kept: HashSet<PathBuf>,
+    read_errors: usize,
+    first_read_error: Option<String>,
+}
+
+impl LibraryWalk {
+    fn new(root: &Path, nested_roots: HashSet<PathBuf>) -> Self {
+        Self {
+            walk: WalkDir::new(root)
+                .follow_links(true)
+                .sort_by_file_name()
+                .into_iter(),
+            root: root.to_path_buf(),
+            nested_roots,
+            ancestors: Vec::new(),
+            claimed: HashSet::new(),
+            linked: VecDeque::new(),
+            found: 0,
+            kept: HashSet::new(),
+            read_errors: 0,
+            first_read_error: None,
+        }
+    }
+
+    fn visit(&mut self, entry: &walkdir::DirEntry) -> WalkStep {
+        let depth = entry.depth();
+        let via_link = entry.path_is_symlink()
+            || depth
+                .checked_sub(1)
+                .and_then(|parent| self.ancestors.get(parent))
+                .is_some_and(|parent| parent.via_link);
+        let path = entry.path();
+        if entry.file_type().is_dir() {
+            if depth > 0 && self.nested_roots.contains(path) {
+                // Another root owns this folder (configured before nested
+                // roots were rejected); keep its tracks out of this scan.
+                self.kept.insert(path.to_path_buf());
+                return WalkStep::SkipDir;
+            }
+            self.ancestors.truncate(depth);
+            self.ancestors.push(WalkAncestor {
+                path: path.to_path_buf(),
+                via_link,
+            });
+            return WalkStep::Continue;
+        }
+        if !entry.file_type().is_file() || !is_supported_audio(path) {
+            return WalkStep::Continue;
+        }
+
+        self.found = self.found.saturating_add(1);
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                self.record_unreadable(path.to_path_buf(), &err);
+                return WalkStep::Continue;
+            }
+        };
+        let candidate = ScanCandidate {
+            path: path.to_path_buf(),
+            mtime_ns: metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| u128_to_i64(duration.as_nanos())),
+            size_bytes: u64_to_i64(metadata.len()),
+        };
+        let identity = file_identity(path, &metadata);
+        if via_link {
+            self.linked.push_back((candidate, identity));
+            return WalkStep::Continue;
+        }
+        if self.claim(identity) {
+            WalkStep::Yield(candidate)
+        } else {
+            WalkStep::Continue
+        }
+    }
+
+    /// Returns whether no earlier path claimed this file.
+    fn claim(&mut self, identity: FileIdentity) -> bool {
+        self.claimed.insert(identity)
+    }
+
+    fn record_walk_error(&mut self, err: &walkdir::Error) {
+        if err.loop_ancestor().is_some() {
+            // A link back to an ancestor: the walk already covers its files.
+            return;
+        }
+        let path = err.path().map_or_else(
+            || {
+                // Without a path, the error came from reading the directory
+                // one level above the failing entry.
+                err.depth()
+                    .checked_sub(1)
+                    .and_then(|parent| self.ancestors.get(parent))
+                    .map_or_else(|| self.root.clone(), |parent| parent.path.clone())
+            },
+            Path::to_path_buf,
+        );
+        match err.io_error() {
+            Some(io_err) => self.record_unreadable(path, io_err),
+            None => self.record_unreadable(path, err),
+        }
+    }
+
+    fn record_unreadable(&mut self, path: PathBuf, err: &dyn std::fmt::Display) {
+        self.read_errors = self.read_errors.saturating_add(1);
+        if self.first_read_error.is_none() {
+            self.first_read_error = Some(format!("'{}': {err}", path.display()));
+        }
+        self.kept.insert(path);
+    }
+
+    /// Returns whether the walk could not verify `path` because it, or a
+    /// folder above it, could not be read or belongs to another root.
+    fn keeps(&self, path: &Path) -> bool {
+        path.ancestors()
+            .any(|ancestor| self.kept.contains(ancestor))
+    }
+}
+
+impl Iterator for LibraryWalk {
+    type Item = ScanCandidate;
+
+    fn next(&mut self) -> Option<ScanCandidate> {
+        while let Some(entry) = self.walk.next() {
+            match entry {
+                Ok(entry) => match self.visit(&entry) {
+                    WalkStep::Continue => {}
+                    WalkStep::SkipDir => self.walk.skip_current_dir(),
+                    WalkStep::Yield(candidate) => return Some(candidate),
+                },
+                Err(err) => self.record_walk_error(&err),
+            }
+        }
+        while let Some((candidate, identity)) = self.linked.pop_front() {
+            if self.claim(identity) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+}
+
+/// Result of scanning one root.
+struct RootScanOutcome {
+    /// Tracks removed from the index because their files are gone.
+    removed: Vec<String>,
+    /// A condition that kept the scan from verifying tracks, for the user.
+    problem: Option<String>,
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
 // Full directory scan with progress reporting — sequential walk with interleaved DB writes.
 #[allow(clippy::too_many_lines)]
 fn scan_root<F, U>(
@@ -1439,7 +1698,7 @@ fn scan_root<F, U>(
     root: &Path,
     on_progress: &mut F,
     on_upsert: &mut U,
-) -> Result<Vec<String>, String>
+) -> Result<RootScanOutcome, String>
 where
     F: FnMut(RootScanProgress),
     U: FnMut(&MetadataTask, &IndexedTrack),
@@ -1450,6 +1709,11 @@ where
     let root_str = root.to_string_lossy().to_string();
     let existing = load_existing_tracks_for_root(conn, &root_str);
     let previous_index_count = existing.len();
+    let nested_roots = load_roots(conn)
+        .into_iter()
+        .map(|known| known.path)
+        .filter(|path| path != &root && path.starts_with(&root))
+        .collect();
     let mut seen_paths: HashSet<String> = HashSet::new();
     let tx = match conn.unchecked_transaction() {
         Ok(tx) => tx,
@@ -1464,33 +1728,15 @@ where
 
     let now = unix_ts_i64();
     let mut workers = MetadataWorkerPool::new(scan_worker_count());
+    let mut walk = LibraryWalk::new(&root, nested_roots);
 
-    for entry in WalkDir::new(&root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
+    for ScanCandidate {
+        path,
+        mtime_ns,
+        size_bytes,
+    } in walk.by_ref()
     {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if !is_supported_audio(path) {
-            continue;
-        }
-
         discovered = discovered.saturating_add(1);
-
-        let Ok(metadata) = fs::metadata(path) else {
-            processed = processed.saturating_add(1);
-            progress.emit(false, discovered, processed);
-            continue;
-        };
-        let size_bytes = u64_to_i64(metadata.len());
-        let mtime_ns = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |duration| u128_to_i64(duration.as_nanos()));
 
         let path_string = path.to_string_lossy().to_string();
         seen_paths.insert(path_string.clone());
@@ -1507,7 +1753,7 @@ where
 
         if needs_update {
             let task = MetadataTask {
-                path: path.to_path_buf(),
+                path,
                 path_string,
                 mtime_ns,
                 size_bytes,
@@ -1548,10 +1794,17 @@ where
     }
     drop(upsert_stmt);
 
-    let stale: Vec<String> = existing
-        .into_keys()
-        .filter(|p| !seen_paths.contains(p))
-        .collect();
+    // A root that previously had tracks but now has no audio files at all is
+    // most likely an unmounted or offline folder, not an emptied library.
+    let keep_all = walk.found == 0 && previous_index_count > 0;
+    let stale: Vec<String> = if keep_all {
+        Vec::new()
+    } else {
+        existing
+            .into_keys()
+            .filter(|p| !seen_paths.contains(p) && !walk.keeps(Path::new(p)))
+            .collect()
+    };
     for p in &stale {
         let _ = tx.execute("DELETE FROM tracks WHERE path=?1", params![p]);
     }
@@ -1560,7 +1813,25 @@ where
         .map_err(|e| format!("failed to finalize scan transaction: {e}"))?;
 
     progress.emit(true, discovered, processed);
-    Ok(stale)
+
+    let problem = match walk.first_read_error {
+        Some(first_error) => Some(format!(
+            "could not read {} in '{}'; kept the tracks indexed there ({first_error})",
+            count_label(walk.read_errors, "folder or file", "folders or files"),
+            root.display()
+        )),
+        None if keep_all => Some(format!(
+            "found no audio files in '{}'; kept its {} in case the folder is offline. \
+             Remove the root to drop them",
+            root.display(),
+            count_label(previous_index_count, "indexed track", "indexed tracks")
+        )),
+        None => None,
+    };
+    Ok(RootScanOutcome {
+        removed: stale,
+        problem,
+    })
 }
 
 pub(crate) fn is_supported_audio(path: &Path) -> bool {
@@ -2239,17 +2510,19 @@ mod tests {
         fs::create_dir_all(&root).expect("mkdir");
         let mp3 = root.join("song1.mp3");
         write_stub(&mp3, b"not-real-mp3");
+        write_stub(&root.join("song2.mp3"), b"not-real-mp3");
 
         let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("initial scan");
 
         let mut snapshot = LibrarySnapshot::default();
         load_snapshot(&conn, &mut snapshot);
-        assert_eq!(snapshot.tracks.len(), 1);
+        assert_eq!(snapshot.tracks.len(), 2);
 
         fs::remove_file(&mp3).expect("remove mp3");
-        let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("rescan");
-        load_snapshot(&conn, &mut snapshot);
-        assert!(snapshot.tracks.is_empty());
+        let outcome = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("rescan");
+        assert_eq!(outcome.removed, [mp3.to_string_lossy().to_string()]);
+        assert_eq!(outcome.problem, None);
+        assert_eq!(indexed_paths(&conn), [root.join("song2.mp3")]);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2303,7 +2576,7 @@ mod tests {
         paths
     }
 
-    fn scan(conn: &Connection, root: &Path) -> Vec<String> {
+    fn scan(conn: &Connection, root: &Path) -> RootScanOutcome {
         scan_root(conn, root, &mut |_| {}, &mut |_, _| {}).expect("scan")
     }
 
@@ -2335,9 +2608,9 @@ mod tests {
         insert_legacy_track(&conn, &base.join("A_B/legacy.mp3"));
 
         // `LIKE 'a_b/%'` matched the other two roots' legacy rows.
-        let removed = scan(&conn, &base.join("a_b"));
+        let outcome = scan(&conn, &base.join("a_b"));
         assert_eq!(
-            removed,
+            outcome.removed,
             [base.join("a_b/legacy.mp3").to_string_lossy().to_string()]
         );
 
@@ -2380,6 +2653,267 @@ mod tests {
         let roots: Vec<PathBuf> = load_roots(&conn).into_iter().map(|r| r.path).collect();
         assert_eq!(roots, [base.join("music"), base.join("music-2")]);
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn scan_root_keeps_tracks_when_a_previously_populated_root_is_empty() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("emptied-root").join("mount");
+        fs::create_dir_all(&root).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let song = root.join("song.mp3");
+        write_stub(&song, b"not-real-mp3");
+        scan(&conn, &root);
+
+        // An unmounted mount point is an empty directory.
+        fs::remove_file(&song).expect("remove song");
+        let outcome = scan(&conn, &root);
+
+        assert!(outcome.removed.is_empty());
+        let problem = outcome.problem.expect("empty root is reported");
+        assert!(problem.contains("found no audio files"), "{problem}");
+        assert!(problem.contains("1 indexed track"), "{problem}");
+        assert_eq!(indexed_paths(&conn), [song]);
+
+        let _ = fs::remove_dir_all(root.parent().expect("fixture parent"));
+    }
+
+    #[test]
+    fn scan_root_without_previous_tracks_accepts_an_empty_root() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("new-empty-root");
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let outcome = scan(&conn, &root);
+
+        assert!(outcome.removed.is_empty());
+        assert_eq!(outcome.problem, None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_root_keeps_tracks_in_unreadable_folders() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("unreadable");
+        fs::create_dir_all(root.join("open")).expect("mkdir open");
+        fs::create_dir_all(root.join("locked")).expect("mkdir locked");
+        let root = root.canonicalize().expect("canonical root");
+        let open_song = root.join("open/song.mp3");
+        let locked_song = root.join("locked/song.mp3");
+        write_stub(&open_song, b"open");
+        write_stub(&locked_song, b"locked");
+        scan(&conn, &root);
+        assert_eq!(indexed_paths(&conn).len(), 2);
+
+        let locked = root.join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock folder");
+        if fs::read_dir(&locked).is_ok() {
+            // Root and CAP_DAC_OVERRIDE ignore directory permissions; the
+            // dangling-link test covers unreadable paths in that case.
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
+            let _ = fs::remove_dir_all(root);
+            eprintln!("skipping: permission-denied folders are readable for this user");
+            return;
+        }
+        let outcome = scan(&conn, &root);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
+
+        assert!(outcome.removed.is_empty());
+        let problem = outcome.problem.expect("unreadable folder is reported");
+        assert!(
+            problem.contains("could not read 1 folder or file"),
+            "{problem}"
+        );
+        assert!(problem.contains(&locked.display().to_string()), "{problem}");
+        assert_eq!(indexed_paths(&conn), [locked_song, open_song]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_root_follows_links_and_keeps_tracks_behind_dangling_links() {
+        use std::os::unix::fs::symlink;
+
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("dangling-link");
+        let root = base.join("root");
+        let external = base.join("external");
+        fs::create_dir_all(root.join("local")).expect("mkdir local");
+        fs::create_dir_all(&external).expect("mkdir external");
+        let root = root.canonicalize().expect("canonical root");
+        let local_song = root.join("local/song.mp3");
+        write_stub(&local_song, b"local");
+        write_stub(&external.join("song.mp3"), b"external");
+        symlink(&external, root.join("linked")).expect("link folder");
+        let linked_song = root.join("linked/song.mp3");
+        scan(&conn, &root);
+        assert_eq!(
+            indexed_paths(&conn),
+            [linked_song.clone(), local_song.clone()]
+        );
+
+        // The link target disappears, as when the drive it points to is not
+        // mounted, and the local track is deleted.
+        fs::remove_dir_all(&external).expect("remove link target");
+        fs::remove_file(&local_song).expect("remove local song");
+        write_stub(&root.join("local/other.mp3"), b"other");
+        let outcome = scan(&conn, &root);
+
+        assert_eq!(outcome.removed, [local_song.to_string_lossy().to_string()]);
+        let problem = outcome.problem.expect("dangling link is reported");
+        assert!(
+            problem.contains("could not read 1 folder or file"),
+            "{problem}"
+        );
+        assert!(
+            problem.contains(&root.join("linked").display().to_string()),
+            "{problem}"
+        );
+        assert_eq!(
+            indexed_paths(&conn),
+            [linked_song, root.join("local/other.mp3")]
+        );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_root_indexes_each_file_once_and_prefers_paths_without_links() {
+        use std::os::unix::fs::symlink;
+
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("links-once");
+        let root = base.join("root");
+        fs::create_dir_all(root.join("Albums/Album")).expect("mkdir album");
+        fs::create_dir_all(base.join("external")).expect("mkdir external");
+        let root = root.canonicalize().expect("canonical root");
+        let song = root.join("Albums/Album/song.mp3");
+        write_stub(&song, b"song");
+        write_stub(&base.join("external/other.mp3"), b"other");
+        // "0 Links" sorts before "Albums", so the walk reaches the linked
+        // paths first.
+        symlink(root.join("Albums"), root.join("0 Links")).expect("link folder");
+        symlink(&song, root.join("0 single.mp3")).expect("link file");
+        symlink(base.join("external"), root.join("External")).expect("link external");
+        symlink(root.join("Albums"), root.join("Albums/Album/loop")).expect("link loop");
+
+        let mut upserts = 0usize;
+        let outcome = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| upserts += 1).expect("scan");
+
+        assert_eq!(outcome.problem, None);
+        assert_eq!(upserts, 2);
+        let expected = [
+            root.join("Albums/Album/song.mp3"),
+            root.join("External/other.mp3"),
+        ];
+        assert_eq!(indexed_paths(&conn), expected);
+
+        upserts = 0;
+        let outcome =
+            scan_root(&conn, &root, &mut |_| {}, &mut |_, _| upserts += 1).expect("rescan");
+        assert_eq!(upserts, 0);
+        assert!(outcome.removed.is_empty());
+        assert_eq!(indexed_paths(&conn), expected);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn rescan_all_scans_every_root_and_reports_failures() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let missing = test_dir("rescan-a-missing");
+        let healthy = test_dir("rescan-b-healthy");
+        fs::create_dir_all(&missing).expect("mkdir missing");
+        fs::create_dir_all(&healthy).expect("mkdir healthy");
+        let missing = missing.canonicalize().expect("canonical missing");
+        let healthy = healthy.canonicalize().expect("canonical healthy");
+        write_stub(&missing.join("kept.mp3"), b"kept");
+        write_stub(&healthy.join("old.mp3"), b"old");
+        scan(&conn, &missing);
+        scan(&conn, &healthy);
+        assert!(load_roots(&conn).first().is_some_and(|r| r.path == missing));
+
+        fs::remove_dir_all(&missing).expect("remove first root");
+        write_stub(&healthy.join("new.mp3"), b"new");
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let (tx, _rx) = unbounded();
+        let err = handle_rescan_all(&conn, &mut snapshot, &tx).expect_err("failure is reported");
+
+        assert!(
+            err.contains(&format!("failed to scan '{}'", missing.display())),
+            "{err}"
+        );
+        let expected = [
+            missing.join("kept.mp3"),
+            healthy.join("new.mp3"),
+            healthy.join("old.mp3"),
+        ];
+        assert_eq!(indexed_paths(&conn), expected);
+        let mut snapshot_paths: Vec<PathBuf> =
+            snapshot.tracks.iter().map(|t| t.path.clone()).collect();
+        snapshot_paths.sort();
+        assert_eq!(snapshot_paths, expected);
+
+        let _ = fs::remove_dir_all(healthy);
+    }
+
+    #[test]
+    fn scan_problems_are_summarized_per_root() {
+        let problems = ["a".to_string(), "b".to_string()];
+        assert_eq!(summarize_scan_problems(&problems), "a; b");
+        let problems: Vec<String> = (1..=5).map(|n| n.to_string()).collect();
+        assert_eq!(
+            summarize_scan_problems(&problems),
+            "1; 2; 3; 2 more library roots had problems"
+        );
+    }
+
+    #[test]
+    fn existing_nested_roots_keep_their_own_tracks() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let outer = test_dir("nested-legacy");
+        fs::create_dir_all(outer.join("inner")).expect("mkdir inner");
+        let outer = outer.canonicalize().expect("canonical outer");
+        let inner = outer.join("inner");
+        write_stub(&outer.join("outer.mp3"), b"outer");
+        write_stub(&inner.join("inner.mp3"), b"inner");
+        // Before nested roots were rejected, the outer root claimed the
+        // inner root's tracks.
+        scan(&conn, &outer);
+        insert_root(&conn, &inner, "").expect("legacy nested root");
+        scan(&conn, &inner);
+
+        let mut upserts = 0usize;
+        let outcome =
+            scan_root(&conn, &outer, &mut |_| {}, &mut |_, _| upserts += 1).expect("rescan outer");
+        assert_eq!(upserts, 0);
+        assert!(outcome.removed.is_empty());
+        let root_of = |path: &Path| -> String {
+            conn.query_row(
+                "SELECT root_path FROM tracks WHERE path=?1",
+                params![path.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .expect("track row")
+        };
+        assert_eq!(root_of(&inner.join("inner.mp3")), inner.to_string_lossy());
+
+        remove_root_and_purge(&conn, &outer).expect("remove outer");
+        assert_eq!(indexed_paths(&conn), [inner.join("inner.mp3")]);
+        let _ = fs::remove_dir_all(outer);
     }
     #[test]
     fn collects_all_repeated_and_credit_tags() {
