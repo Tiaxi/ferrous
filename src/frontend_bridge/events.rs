@@ -205,6 +205,8 @@ pub(super) fn process_playback_event(
             state.analysis.waveform_coverage_seconds = 0.0;
             state.analysis.waveform_complete = false;
             state.analysis_track_token = track_token;
+            state.last_track_change.generation = state.last_track_change.generation.wrapping_add(1);
+            state.last_track_change.path = Some(path.clone());
             metadata.request(path.clone());
             let is_gapless = matches!(kind, TrackChangeKind::Gapless);
             let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
@@ -566,29 +568,32 @@ pub(super) fn tick_lastfm_playback_at(
     now_utc: i64,
 ) {
     let current_path = state.playback.current.clone();
-    if tracker.active_path != current_path {
+    let track_change = &state.last_track_change;
+    // A track change for the current path starts a new play even though the
+    // path stays the same, as when the current file is played again. A change
+    // to another path takes effect once playback reports that path.
+    let restarted = track_change.path.is_some()
+        && track_change.path == current_path
+        && track_change.generation != tracker.track_change_generation;
+    if restarted || tracker.active_path != current_path {
         finalize_lastfm_track(state, lastfm_handle, tracker, now);
-        *tracker = LastFmPlaybackTracker::default();
-        tracker.active_path = current_path;
-        tracker.duration_seconds = match u32::try_from(state.playback.duration.as_secs()) {
-            Ok(value) if value > 0 => Some(value),
-            _ => None,
+        *tracker = LastFmPlaybackTracker {
+            active_path: current_path,
+            track_change_generation: track_change.generation,
+            duration_seconds: match u32::try_from(state.playback.duration.as_secs()) {
+                Ok(value) if value > 0 => Some(value),
+                _ => None,
+            },
+            ..LastFmPlaybackTracker::default()
         };
     }
 
     if state.playback.state == PlaybackState::Stopped || tracker.active_path.is_none() {
         finalize_lastfm_track(state, lastfm_handle, tracker, now);
-        tracker.active_path = None;
-        tracker.artist.clear();
-        tracker.track.clear();
-        tracker.album.clear();
-        tracker.track_number = None;
-        tracker.duration_seconds = None;
-        tracker.started_at_utc = None;
-        tracker.listened_duration = Duration::ZERO;
-        tracker.last_listen_tick = None;
-        tracker.now_playing_sent = false;
-        tracker.scrobble_queued = false;
+        *tracker = LastFmPlaybackTracker {
+            track_change_generation: tracker.track_change_generation,
+            ..LastFmPlaybackTracker::default()
+        };
         return;
     }
 
@@ -623,6 +628,9 @@ pub(super) fn tick_lastfm_playback_at(
     } else {
         tracker.last_listen_tick = None;
     }
+    // Queue as soon as the play qualifies, so that quitting or crashing
+    // later in the track cannot lose it.
+    queue_lastfm_scrobble_if_ready(state, lastfm_handle, tracker);
 
     if state.lastfm.enabled
         && !tracker.now_playing_sent
@@ -642,7 +650,9 @@ pub(super) fn tick_lastfm_playback_at(
     }
 }
 
-fn finalize_lastfm_track(
+/// Credits listening up to `now` and queues the scrobble if the play
+/// qualifies. Runs when a play ends, including at shutdown.
+pub(super) fn finalize_lastfm_track(
     state: &BridgeState,
     lastfm_handle: &LastFmHandle,
     tracker: &mut LastFmPlaybackTracker,
@@ -841,48 +851,12 @@ pub(super) fn pump_external_queue_detail_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lastfm::{self, ServiceOptions as LastFmServiceOptions};
-    use std::fs;
+    use crate::lastfm::{self, Command as LastFmCommand};
     use std::path::PathBuf;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
-    }
-
-    fn test_dir(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_nanos())
-            .unwrap_or(0);
-        path.push(format!(
-            "ferrous-events-{name}-{}-{nanos}",
-            std::process::id()
-        ));
-        path
-    }
-
-    fn test_guard() -> MutexGuard<'static, ()> {
-        static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-        TEST_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn wait_for_scrobble_queue(path: &Path, timeout: Duration) -> Option<Vec<LastFmScrobbleEntry>> {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if let Ok(text) = fs::read_to_string(path) {
-                if let Ok(entries) = serde_json::from_str::<Vec<LastFmScrobbleEntry>>(&text) {
-                    return Some(entries);
-                }
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        None
     }
 
     #[test]
@@ -1096,32 +1070,53 @@ mod tests {
             .is_err());
     }
 
-    #[test]
-    fn lastfm_scrobble_requires_actual_listened_time_instead_of_seek_position() {
-        let _guard = test_guard();
-        let queue_path = test_dir("lastfm-seek-scrobble").join("lastfm_queue.json");
-        let (lastfm_handle, _lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
-            queue_path: Some(queue_path.clone()),
-            initial_enabled: false,
-        });
-        let track_path = p("/music/seek-test.flac");
+    /// A playing 240 s track (scrobble threshold 120 s) with its metadata.
+    fn lastfm_playing_state(track_path: &Path) -> BridgeState {
         let mut state = BridgeState::default();
         state.lastfm.enabled = true;
-        state.playback.current = Some(track_path.clone());
+        state.playback.current = Some(track_path.to_path_buf());
         state.playback.state = PlaybackState::Playing;
         state.playback.duration = Duration::from_secs(240);
-        state.playback.position = Duration::from_secs(5);
         state.metadata.source_path = Some(track_path.to_string_lossy().into_owned());
         state.metadata.artist = "Artist".to_string();
         state.metadata.title = "Track".to_string();
         state.metadata.album = "Album".to_string();
+        state
+    }
+
+    fn queued_scrobbles(commands: &[LastFmCommand]) -> Vec<LastFmScrobbleEntry> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                LastFmCommand::QueueScrobble(entry) => Some(entry.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn now_playing_tracks(commands: &[LastFmCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                LastFmCommand::SendNowPlaying(track) => Some(track.track.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lastfm_scrobble_requires_actual_listened_time_instead_of_seek_position() {
+        let (lastfm_handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/music/seek-test.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        state.playback.position = Duration::from_secs(5);
 
         let mut tracker = LastFmPlaybackTracker::default();
         let start = Instant::now();
         tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, start, 1_700_000_000);
         assert_eq!(tracker.listened_duration, Duration::ZERO);
-        assert!(!tracker.scrobble_queued);
 
+        // Seeking past the threshold is not listening.
         state.playback.position = Duration::from_secs(180);
         tick_lastfm_playback_at(
             &state,
@@ -1131,7 +1126,15 @@ mod tests {
             1_700_000_001,
         );
         assert!(tracker.listened_duration < Duration::from_secs(2));
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(119),
+            1_700_000_119,
+        );
         assert!(!tracker.scrobble_queued);
+        assert!(queued_scrobbles(&commands.try_iter().collect::<Vec<_>>()).is_empty());
 
         tick_lastfm_playback_at(
             &state,
@@ -1140,48 +1143,63 @@ mod tests {
             start + Duration::from_secs(120),
             1_700_000_120,
         );
-        assert!(tracker.listened_duration >= Duration::from_secs(120));
-        assert!(!tracker.scrobble_queued);
-        assert!(!queue_path.exists());
+        assert!(tracker.scrobble_queued);
+        let queued = queued_scrobbles(&commands.try_iter().collect::<Vec<_>>());
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].artist, "Artist");
+        assert_eq!(queued[0].track, "Track");
+        assert_eq!(queued[0].timestamp_utc, 1_700_000_000);
+    }
 
-        state.playback.state = PlaybackState::Stopped;
-        state.playback.current = None;
+    #[test]
+    fn lastfm_scrobble_is_queued_at_the_threshold_once_per_play() {
+        let (lastfm_handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/music/threshold.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+
+        for seconds in [0, 60, 121] {
+            tick_lastfm_playback_at(
+                &state,
+                &lastfm_handle,
+                &mut tracker,
+                start + Duration::from_secs(seconds),
+                1_700_000_000,
+            );
+        }
+        // Queued while the track is still playing, before it ends.
+        assert_eq!(
+            queued_scrobbles(&commands.try_iter().collect::<Vec<_>>()).len(),
+            1
+        );
+
+        // Neither more listening, a seek back, nor stopping queues it again.
+        state.playback.position = Duration::ZERO;
         tick_lastfm_playback_at(
             &state,
             &lastfm_handle,
             &mut tracker,
-            start + Duration::from_secs(121),
-            1_700_000_121,
+            start + Duration::from_secs(239),
+            1_700_000_239,
         );
-        assert!(tracker.active_path.is_none());
-        assert!(!tracker.scrobble_queued);
-
-        let queued = wait_for_scrobble_queue(&queue_path, Duration::from_secs(1))
-            .expect("scrobble queued on stop");
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].artist, "Artist");
-        assert_eq!(queued[0].track, "Track");
-
-        assert!(lastfm_handle.shutdown(Duration::from_secs(1)));
+        state.playback.state = PlaybackState::Stopped;
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(240),
+            1_700_000_240,
+        );
+        assert!(queued_scrobbles(&commands.try_iter().collect::<Vec<_>>()).is_empty());
     }
 
     #[test]
     fn lastfm_scrobble_does_not_queue_when_disabled() {
-        let _guard = test_guard();
-        let queue_path = test_dir("lastfm-disabled-scrobble").join("lastfm_queue.json");
-        let (lastfm_handle, _lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
-            queue_path: Some(queue_path.clone()),
-            initial_enabled: false,
-        });
+        let (lastfm_handle, commands) = lastfm::test_support::command_handle();
         let track_path = p("/music/disabled-scrobble.flac");
-        let mut state = BridgeState::default();
-        state.playback.current = Some(track_path.clone());
-        state.playback.state = PlaybackState::Playing;
-        state.playback.duration = Duration::from_secs(200);
-        state.metadata.source_path = Some(track_path.to_string_lossy().into_owned());
-        state.metadata.artist = "Artist".to_string();
-        state.metadata.title = "Track".to_string();
-        state.metadata.album = "Album".to_string();
+        let mut state = lastfm_playing_state(&track_path);
+        state.lastfm.enabled = false;
 
         let mut tracker = LastFmPlaybackTracker::default();
         let start = Instant::now();
@@ -1190,8 +1208,8 @@ mod tests {
             &state,
             &lastfm_handle,
             &mut tracker,
-            start + Duration::from_secs(101),
-            1_700_000_101,
+            start + Duration::from_secs(150),
+            1_700_000_150,
         );
         state.playback.state = PlaybackState::Stopped;
         state.playback.current = None;
@@ -1199,31 +1217,25 @@ mod tests {
             &state,
             &lastfm_handle,
             &mut tracker,
-            start + Duration::from_secs(102),
-            1_700_000_102,
+            start + Duration::from_secs(151),
+            1_700_000_151,
         );
-        assert!(!tracker.scrobble_queued);
-        assert!(wait_for_scrobble_queue(&queue_path, Duration::from_millis(150)).is_none());
-        assert!(!queue_path.exists());
+        finalize_lastfm_track(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(152),
+        );
 
-        assert!(lastfm_handle.shutdown(Duration::from_secs(1)));
+        assert!(!tracker.scrobble_queued);
+        assert!(commands.try_iter().next().is_none());
     }
 
     #[test]
     fn lastfm_scrobble_omits_unknown_album_placeholder() {
-        let _guard = test_guard();
-        let queue_path = test_dir("lastfm-unknown-album-scrobble").join("lastfm_queue.json");
-        let (lastfm_handle, _lastfm_rx) = lastfm::spawn(LastFmServiceOptions {
-            queue_path: Some(queue_path.clone()),
-            initial_enabled: false,
-        });
+        let (lastfm_handle, commands) = lastfm::test_support::command_handle();
         let track_path = p("/music/unknown-album-scrobble.flac");
-        let mut state = BridgeState::default();
-        state.lastfm.enabled = true;
-        state.playback.current = Some(track_path.clone());
-        state.playback.state = PlaybackState::Playing;
-        state.playback.duration = Duration::from_secs(200);
-        state.metadata.source_path = Some(track_path.to_string_lossy().into_owned());
+        let mut state = lastfm_playing_state(&track_path);
         state.metadata.artist = "Boards of Canada".to_string();
         state.metadata.title = "Web Loops".to_string();
         state.metadata.album = "Unknown album".to_string();
@@ -1235,26 +1247,148 @@ mod tests {
             &state,
             &lastfm_handle,
             &mut tracker,
-            start + Duration::from_secs(101),
-            1_700_000_101,
-        );
-        state.playback.state = PlaybackState::Stopped;
-        state.playback.current = None;
-        tick_lastfm_playback_at(
-            &state,
-            &lastfm_handle,
-            &mut tracker,
-            start + Duration::from_secs(102),
-            1_700_000_102,
+            start + Duration::from_secs(121),
+            1_700_000_121,
         );
 
-        let queued = wait_for_scrobble_queue(&queue_path, Duration::from_secs(1))
-            .expect("scrobble queued without album tag");
+        let queued = queued_scrobbles(&commands.try_iter().collect::<Vec<_>>());
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].artist, "Boards of Canada");
         assert_eq!(queued[0].track, "Web Loops");
         assert!(queued[0].album.is_empty());
+    }
 
-        assert!(lastfm_handle.shutdown(Duration::from_secs(1)));
+    #[test]
+    fn lastfm_replaying_the_current_track_scrobbles_each_play() {
+        let (analysis, _analysis_rx) = AnalysisEngine::new();
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
+        let (lastfm_handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/music/repeat-one.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+
+        // Playing the file, its gapless repeat, and playing it again by hand.
+        // The mock backend reports every token as 0, so tokens cannot be
+        // what tells the plays apart.
+        for (offset, started_utc, kind) in [
+            (0, 1_700_000_000, TrackChangeKind::Manual),
+            (240, 1_700_000_240, TrackChangeKind::Gapless),
+            (480, 1_700_000_480, TrackChangeKind::Manual),
+        ] {
+            playback_tx
+                .send(PlaybackEvent::TrackChanged {
+                    path: track_path.clone(),
+                    queue_index: 0,
+                    kind,
+                    track_token: 0,
+                })
+                .expect("send track change");
+            pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+            tick_lastfm_playback_at(
+                &state,
+                &lastfm_handle,
+                &mut tracker,
+                start + Duration::from_secs(offset),
+                started_utc,
+            );
+            tick_lastfm_playback_at(
+                &state,
+                &lastfm_handle,
+                &mut tracker,
+                start + Duration::from_secs(offset + 130),
+                started_utc + 130,
+            );
+        }
+
+        let sent = commands.try_iter().collect::<Vec<_>>();
+        let timestamps = queued_scrobbles(&sent)
+            .iter()
+            .map(|entry| entry.timestamp_utc)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            timestamps,
+            vec![1_700_000_000, 1_700_000_240, 1_700_000_480]
+        );
+        assert_eq!(now_playing_tracks(&sent).len(), 3);
+    }
+
+    #[test]
+    fn lastfm_track_change_to_another_path_waits_for_playback_to_switch() {
+        let (analysis, _analysis_rx) = AnalysisEngine::new();
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
+        let (lastfm_handle, commands) = lastfm::test_support::command_handle();
+        let first = p("/music/first.flac");
+        let second = p("/music/second.flac");
+        let mut state = lastfm_playing_state(&first);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, start, 1_700_000_000);
+
+        playback_tx
+            .send(PlaybackEvent::TrackChanged {
+                path: second.clone(),
+                queue_index: 1,
+                kind: TrackChangeKind::Gapless,
+                track_token: 2,
+            })
+            .expect("send track change");
+        pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(10),
+            1_700_000_010,
+        );
+        // Still the first track's play until playback reports the switch.
+        assert_eq!(tracker.active_path.as_ref(), Some(&first));
+        assert_eq!(tracker.listened_duration, Duration::from_secs(10));
+
+        state.playback.current = Some(second.clone());
+        state.metadata.source_path = Some(second.to_string_lossy().into_owned());
+        state.metadata.title = "Second".to_string();
+        tick_lastfm_playback_at(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(11),
+            1_700_000_011,
+        );
+        assert_eq!(tracker.active_path.as_ref(), Some(&second));
+        assert_eq!(tracker.started_at_utc, Some(1_700_000_011));
+        assert_eq!(
+            now_playing_tracks(&commands.try_iter().collect::<Vec<_>>()),
+            vec!["Track".to_string(), "Second".to_string()]
+        );
+    }
+
+    #[test]
+    fn lastfm_finalize_queues_a_play_that_qualified_since_the_last_tick() {
+        let (lastfm_handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/music/final-track.flac");
+        let state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, start, 1_700_000_000);
+
+        finalize_lastfm_track(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(130),
+        );
+        finalize_lastfm_track(
+            &state,
+            &lastfm_handle,
+            &mut tracker,
+            start + Duration::from_secs(131),
+        );
+
+        let queued = queued_scrobbles(&commands.try_iter().collect::<Vec<_>>());
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].timestamp_utc, 1_700_000_000);
     }
 }
