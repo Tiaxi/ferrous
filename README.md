@@ -34,7 +34,7 @@ MP3, FLAC, M4A/AAC, Ogg Vorbis, Opus, WAV, AC-3, DTS, and M3U/M3U8 playlists. Ac
 
 ## Installation
 
-Prebuilt RPM (Fedora) and deb (Ubuntu/Debian) packages are available from [GitHub Releases](https://github.com/Tiaxi/ferrous/releases).
+Prebuilt Fedora RPM packages are available from [GitHub Releases](https://github.com/Tiaxi/ferrous/releases).
 
 To build from source, install the prerequisites in the [installation guide](docs/INSTALL.md), then:
 

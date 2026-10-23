@@ -67,60 +67,9 @@ jobs:
             !dist/rpm/RPMS/**/*-debuginfo-*.rpm
             !dist/rpm/RPMS/**/*-debugsource-*.rpm
 
-  build-deb:
-    name: Build deb (Ubuntu)
-    runs-on: ubuntu-latest
-    container:
-      image: ubuntu:25.04
-    steps:
-      - name: Install build dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update
-          apt-get install -y \
-            git \
-            cmake \
-            ninja-build \
-            g++ \
-            zsh \
-            curl \
-            pkg-config \
-            dpkg-dev \
-            debhelper \
-            libglib2.0-dev \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            qt6-base-dev \
-            qt6-declarative-dev \
-            qml6-module-qtquick-controls \
-            libkirigami-dev
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.94.1
-          . "$HOME/.cargo/env"
-
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Build deb
-        env:
-          FERROUS_LASTFM_API_KEY: ${{ secrets.FERROUS_LASTFM_API_KEY }}
-          FERROUS_LASTFM_SHARED_SECRET: ${{ secrets.FERROUS_LASTFM_SHARED_SECRET }}
-        run: |
-          . "$HOME/.cargo/env"
-          cp -r packaging/debian .
-          DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -us -uc -b
-          mkdir -p dist/deb
-          cp ../*.deb dist/deb/
-
-      - name: Upload deb artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: deb-package
-          path: dist/deb/*.deb
-
   create-release:
     name: Create GitHub Release
-    needs: [build-rpm, build-deb]
+    needs: [build-rpm]
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
@@ -134,4 +83,3 @@ jobs:
           generate_release_notes: true
           files: |
             packages/rpm-package-fc*/**/*.rpm
-            packages/deb-package/**/*.deb
