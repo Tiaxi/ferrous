@@ -79,6 +79,8 @@ public:
     QStringList loadedPaths() const;
     bool hasDirtyRows() const;
     QVector<TagEditorRowState> rows() const;
+    // Request names of the fields that differ from their loaded values.
+    static QStringList changedFields(const TagEditorRowState &row);
     void clearErrors();
     void applySaveResults(const QHash<QString, QString> &errorsByPath, const QSet<QString> &successPaths);
 

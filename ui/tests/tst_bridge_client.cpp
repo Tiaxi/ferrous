@@ -3,15 +3,20 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QDBusObjectPath>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QQuickWindow>
 #include <QSignalSpy>
 #include <QSemaphore>
 #include <QFutureWatcher>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <QTemporaryDir>
 #include <QUrl>
 #include <QtTest/QtTest>
@@ -96,6 +101,33 @@ QByteArray makePrecomputedFrame(
     return raw;
 }
 
+QByteArray littleEndian32(qsizetype value) {
+    const quint32 encoded = qToLittleEndian(static_cast<quint32>(value));
+    return QByteArray(reinterpret_cast<const char *>(&encoded), sizeof(encoded));
+}
+
+// A FLAC stream with a STREAMINFO block, the given Vorbis comments, and no audio frames.
+QByteArray flacWithComments(const QStringList &comments) {
+    QByteArray bytes("fLaC");
+    bytes.append(QByteArray::fromHex("00000022"));
+    bytes.append(QByteArray::fromHex("10001000000000000000"));
+    // 44.1 kHz, two channels, 16 bits, one second of samples.
+    const quint64 packed = (quint64(44100) << 44) | (quint64(1) << 41) | (quint64(15) << 36) | 44100;
+    const quint64 encodedPacked = qToBigEndian(packed);
+    bytes.append(reinterpret_cast<const char *>(&encodedPacked), sizeof(encodedPacked));
+    bytes.append(QByteArray(16, '\0'));
+
+    const QByteArray vendor("ferrous-test");
+    QByteArray block = littleEndian32(vendor.size()) + vendor + littleEndian32(comments.size());
+    for (const QString &comment : comments) {
+        const QByteArray entry = comment.toUtf8();
+        block.append(littleEndian32(entry.size()) + entry);
+    }
+    const quint32 blockHeader = qToBigEndian(quint32(0x84000000) | quint32(block.size()));
+    bytes.append(reinterpret_cast<const char *>(&blockHeader), sizeof(blockHeader));
+    return bytes + block;
+}
+
 } // namespace
 
 class BridgeClientTest : public QObject {
@@ -105,6 +137,9 @@ private slots:
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
+    void tagEditorSaveSendsOnlyChangedFields();
+    void tagEditorSavesFullDateRowAndKeepsOtherTags();
+    void tagEditorLoadReportsUnreadableFiles();
     void batchRemovalCodecPreservesIndices();
     void playAtDoesNotEmitImmediateSnapshotChanged();
     void playAtClearsPendingSeekAndPublishesRestartPosition();
@@ -294,6 +329,112 @@ void BridgeClientTest::tagEditorAsyncFileRoundTrip() {
     editor.reload();
     QTRY_VERIFY(!editor.loading());
     QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Renamed"));
+}
+
+void BridgeClientTest::tagEditorSaveSendsOnlyChangedFields() {
+    TagEditorController editor(nullptr);
+    QByteArray savePayload;
+    editor.m_executeOperation = [&savePayload](TagEditorController::Operation operation,
+                                               const QByteArray &payload) {
+        if (operation == TagEditorController::Operation::Save) {
+            savePayload = payload;
+            return QByteArray(R"({"results":[{"path":"/fixture/song.flac","ok":true}],)"
+                              R"("successfulPaths":["/fixture/song.flac"]})");
+        }
+        return QByteArray(R"({"resolvedPaths":["/fixture/song.flac"],"rows":[{)"
+                          R"("path":"/fixture/song.flac","title":"Old","artist":"A",)"
+                          R"("year":"1997-05-12","genre":"Rock"}]})");
+    };
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/song.flac")}));
+    QTRY_VERIFY(!editor.loading());
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("year")), QStringLiteral("1997-05-12"));
+
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+    editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Pop"));
+    editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Rock"));
+    editor.setCell(0, QStringLiteral("albumArtist"), QStringLiteral("Band"));
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QVERIFY(saved.first().first().toBool());
+
+    const QJsonArray rows = QJsonDocument::fromJson(savePayload).object().value(QStringLiteral("rows")).toArray();
+    QCOMPARE(rows.size(), 1);
+    const QJsonObject row = rows.first().toObject();
+    QCOMPARE(row.value(QStringLiteral("changedFields")).toArray(),
+             QJsonArray({QStringLiteral("title"), QStringLiteral("albumArtist")}));
+    QCOMPARE(row.value(QStringLiteral("year")).toString(), QStringLiteral("1997-05-12"));
+    QVERIFY(!editor.dirty());
+}
+
+void BridgeClientTest::tagEditorSavesFullDateRowAndKeepsOtherTags() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("song.flac"));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    const QByteArray flac = flacWithComments({
+        QStringLiteral("TITLE=Old"),
+        QStringLiteral("ARTIST=A"),
+        QStringLiteral("ARTIST=B"),
+        QStringLiteral("DATE=1997-05-12"),
+        QStringLiteral("ORIGINALDATE=1995"),
+        QStringLiteral("CUSTOM=kept"),
+    });
+    QCOMPARE(file.write(flac), qint64(flac.size()));
+    file.close();
+    BridgeClient bridge;
+    isolateBridgeClient(bridge);
+    TagEditorController editor(&bridge);
+    QVERIFY(editor.openForPaths({path}));
+    QTRY_VERIFY(!editor.loading());
+    QCOMPARE(editor.m_tableModel.rowCount(), 1);
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("year")), QStringLiteral("1997-05-12"));
+
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QVERIFY2(saved.first().first().toBool(), qPrintable(editor.statusText() + " " + editor.statusDetails()));
+    QVERIFY(!editor.dirty());
+
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QByteArray written = file.readAll();
+    file.close();
+    for (const char *expected : {"TITLE=New", "ARTIST=A", "ARTIST=B", "DATE=1997-05-12", "ORIGINALDATE=1995", "CUSTOM=kept"}) {
+        QVERIFY2(written.contains(expected), expected);
+    }
+    QVERIFY(written.indexOf("ARTIST=A") < written.indexOf("ARTIST=B"));
+    QCOMPARE(QDir(dir.path()).entryList(QDir::Files | QDir::Hidden), QStringList{QStringLiteral("song.flac")});
+
+    editor.reload();
+    QTRY_VERIFY(!editor.loading());
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("New"));
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("year")), QStringLiteral("1997-05-12"));
+}
+
+void BridgeClientTest::tagEditorLoadReportsUnreadableFiles() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString good = dir.filePath(QStringLiteral("good.ac3"));
+    const QString garbage = dir.filePath(QStringLiteral("garbage.flac"));
+    for (const auto &[path, bytes] : {std::pair{good, QByteArray(128, '\0')},
+                                      std::pair{garbage, QByteArray("not audio")}}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(bytes), qint64(bytes.size()));
+    }
+    TagEditorController editor(nullptr);
+    QVERIFY(editor.openForPaths({garbage, good}));
+    QTRY_VERIFY(!editor.loading());
+
+    QVERIFY(editor.isOpen());
+    QCOMPARE(editor.m_tableModel.rowCount(), 1);
+    QCOMPARE(editor.m_tableModel.rowAt(0)->path, good);
+    QCOMPARE(editor.statusText(), QStringLiteral("Loaded 1 file(s); 1 failed."));
+    QVERIFY2(editor.statusDetails().startsWith(QStringLiteral("Failed:\n  garbage.flac: ")),
+             qPrintable(editor.statusDetails()));
+    QCOMPARE(editor.loadedPaths(), (QStringList{garbage, good}));
 }
 
 void BridgeClientTest::batchRemovalCodecPreservesIndices() {

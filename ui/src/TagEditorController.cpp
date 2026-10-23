@@ -120,7 +120,12 @@ QByteArray buildSaveBlob(const QVector<TagEditorRowState> &rows) {
         if (!row.dirty) {
             continue;
         }
-        rowArray.push_back(rowToJson(row));
+        // The backend writes only these fields and keeps everything else in the file.
+        QJsonObject object = rowToJson(row);
+        object.insert(
+            QStringLiteral("changedFields"),
+            QJsonArray::fromStringList(TagEditorTableModel::changedFields(row)));
+        rowArray.push_back(object);
     }
     QJsonObject root;
     root.insert(QStringLiteral("rows"), rowArray);
@@ -449,6 +454,7 @@ void TagEditorController::applyLoadResult(const QByteArray &response) {
     QVector<TagEditorRowState> rows;
     QStringList resolvedPaths;
     QString errorText;
+    QStringList failureLines;
     const QJsonDocument document = QJsonDocument::fromJson(response);
     if (document.isObject()) {
         const QJsonObject root = document.object();
@@ -467,9 +473,22 @@ void TagEditorController::applyLoadResult(const QByteArray &response) {
                 rows.push_back(rowFromJson(value.toObject()));
             }
         }
+        const QJsonArray failures = root.value(QStringLiteral("failures")).toArray();
+        for (const QJsonValue &value : failures) {
+            const QJsonObject failure = value.toObject();
+            failureLines.push_back(QStringLiteral("%1: %2").arg(
+                displayNameForPath(readString(failure, "path")),
+                readString(failure, "error")));
+        }
     } else {
         errorText = QStringLiteral("failed to parse tag editor load response");
     }
+    if (errorText.isEmpty() && !failureLines.isEmpty()) {
+        errorText = QStringLiteral("Loaded %1 file(s); %2 failed.")
+                        .arg(rows.size())
+                        .arg(failureLines.size());
+    }
+    failureLines.sort();
 
     m_tableModel.setRows(std::move(rows));
     m_loadedPaths = resolvedPaths;
@@ -479,7 +498,7 @@ void TagEditorController::applyLoadResult(const QByteArray &response) {
     if (wasOpen != m_open) {
         emit openChanged();
     }
-    setStatusText(errorText);
+    setStatusText(errorText, buildActionDetails({}, failureLines));
 
     m_loading = false;
     emit loadingChanged();

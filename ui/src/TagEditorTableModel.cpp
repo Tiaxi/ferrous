@@ -2,7 +2,38 @@
 
 #include "TagEditorTableModel.h"
 
+#include <algorithm>
+#include <iterator>
 #include <utility>
+
+namespace {
+
+struct EditableField {
+    // Matches the field names of the Rust save request.
+    const char *name;
+    QString TagEditorRowState::*value;
+    QString TagEditorRowState::*original;
+};
+
+constexpr EditableField kEditableFields[] = {
+    {"title", &TagEditorRowState::title, &TagEditorRowState::originalTitle},
+    {"artist", &TagEditorRowState::artist, &TagEditorRowState::originalArtist},
+    {"album", &TagEditorRowState::album, &TagEditorRowState::originalAlbum},
+    {"albumArtist", &TagEditorRowState::albumArtist, &TagEditorRowState::originalAlbumArtist},
+    {"genre", &TagEditorRowState::genre, &TagEditorRowState::originalGenre},
+    {"year", &TagEditorRowState::year, &TagEditorRowState::originalYear},
+    {"trackNo", &TagEditorRowState::trackNo, &TagEditorRowState::originalTrackNo},
+    {"discNo", &TagEditorRowState::discNo, &TagEditorRowState::originalDiscNo},
+    {"totalTracks", &TagEditorRowState::totalTracks, &TagEditorRowState::originalTotalTracks},
+    {"totalDiscs", &TagEditorRowState::totalDiscs, &TagEditorRowState::originalTotalDiscs},
+    {"comment", &TagEditorRowState::comment, &TagEditorRowState::originalComment},
+};
+
+bool fieldChanged(const TagEditorRowState &row, const EditableField &field) {
+    return row.*field.value != row.*field.original;
+}
+
+} // namespace
 
 TagEditorTableModel::TagEditorTableModel(QObject *parent)
     : QAbstractListModel(parent) {}
@@ -133,6 +164,16 @@ QVector<TagEditorRowState> TagEditorTableModel::rows() const {
     return m_rows;
 }
 
+QStringList TagEditorTableModel::changedFields(const TagEditorRowState &row) {
+    QStringList out;
+    for (const EditableField &field : kEditableFields) {
+        if (fieldChanged(row, field)) {
+            out.push_back(QLatin1String(field.name));
+        }
+    }
+    return out;
+}
+
 void TagEditorTableModel::clearErrors() {
     for (int row = 0; row < static_cast<int>(m_rows.size()); ++row) {
         TagEditorRowState &item = m_rows[static_cast<size_t>(row)];
@@ -155,17 +196,9 @@ void TagEditorTableModel::applySaveResults(
         const bool success = successPaths.contains(item.path);
         const QString error = errorsByPath.value(item.path);
         if (success) {
-            item.originalTitle = item.title;
-            item.originalArtist = item.artist;
-            item.originalAlbum = item.album;
-            item.originalAlbumArtist = item.albumArtist;
-            item.originalGenre = item.genre;
-            item.originalYear = item.year;
-            item.originalTrackNo = item.trackNo;
-            item.originalDiscNo = item.discNo;
-            item.originalTotalTracks = item.totalTracks;
-            item.originalTotalDiscs = item.totalDiscs;
-            item.originalComment = item.comment;
+            for (const EditableField &field : kEditableFields) {
+                item.*field.original = item.*field.value;
+            }
             item.errorText.clear();
         } else if (!error.isEmpty()) {
             item.errorText = error;
@@ -273,17 +306,10 @@ const QString *TagEditorTableModel::fieldRef(const TagEditorRowState &row, const
 }
 
 bool TagEditorTableModel::refreshDirtyState(TagEditorRowState &row) {
-    const bool nextDirty = row.title != row.originalTitle
-        || row.artist != row.originalArtist
-        || row.album != row.originalAlbum
-        || row.albumArtist != row.originalAlbumArtist
-        || row.genre != row.originalGenre
-        || row.year != row.originalYear
-        || row.trackNo != row.originalTrackNo
-        || row.discNo != row.originalDiscNo
-        || row.totalTracks != row.originalTotalTracks
-        || row.totalDiscs != row.originalTotalDiscs
-        || row.comment != row.originalComment;
+    const bool nextDirty = std::any_of(
+        std::begin(kEditableFields),
+        std::end(kEditableFields),
+        [&row](const EditableField &field) { return fieldChanged(row, field); });
     const bool changed = row.dirty != nextDirty;
     row.dirty = nextDirty;
     return changed;

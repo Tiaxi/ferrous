@@ -11,4 +11,6 @@ mod paths;
 pub mod playback;
 mod profile_logging;
 mod raw_audio;
+mod safe_save;
 pub mod tag_editor;
+mod tag_write;
