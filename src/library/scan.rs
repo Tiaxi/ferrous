@@ -478,6 +478,12 @@ fn run_scans(
         emit_snapshot(event_tx, snapshot);
     }
 
+    // Tracks that a scan kept or could not finish still reference their
+    // covers, so the cache cleanup is safe even when a root had problems.
+    if let Err(err) = super::cover_cache::remove_unreferenced_embedded_covers(conn) {
+        problems.push(err);
+    }
+
     if problems.is_empty() {
         Ok(())
     } else {
@@ -1336,7 +1342,7 @@ fn scan_worker_count() -> usize {
     (cores.saturating_mul(2)).clamp(2, 24)
 }
 
-fn scan_snapshot_emit_interval() -> Duration {
+pub(super) fn scan_snapshot_emit_interval() -> Duration {
     std::env::var("FERROUS_LIBRARY_SNAPSHOT_EMIT_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
