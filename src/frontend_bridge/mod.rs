@@ -45,9 +45,9 @@ use config::{
 use events::{
     drain_analysis_events, drain_apply_album_art_events, drain_external_queue_detail_events,
     drain_lastfm_events, drain_library_events, drain_metadata_events, drain_playback_events,
-    note_precomputed_spectrogram_chunk, process_analysis_event, process_apply_album_art_event,
-    process_external_queue_detail_event, process_lastfm_event, process_library_event,
-    process_metadata_event, process_playback_event, tick_lastfm_playback,
+    finalize_lastfm_track, note_precomputed_spectrogram_chunk, process_analysis_event,
+    process_apply_album_art_event, process_external_queue_detail_event, process_lastfm_event,
+    process_library_event, process_metadata_event, process_playback_event, tick_lastfm_playback,
 };
 pub(crate) use search::is_main_album_disc_section;
 use search::{drain_search_results, process_search_results, SearchWorkerQuery};
@@ -485,11 +485,23 @@ pub(super) struct BridgeState {
     /// (already in the playback section).  Avoids the 100-250 ms model
     /// reset stall on the Qt side for large playlists.
     skip_queue_for_gapless: bool,
+    last_track_change: TrackChangeMarker,
+}
+
+/// The most recent `TrackChanged` event. The generation advances on every
+/// event, including one that restarts the current path, so consumers can
+/// tell a new play of a track from a continuing one.
+#[derive(Debug, Clone, Default)]
+struct TrackChangeMarker {
+    generation: u64,
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct LastFmPlaybackTracker {
     active_path: Option<PathBuf>,
+    /// `TrackChangeMarker::generation` when this play started.
+    track_change_generation: u64,
     artist: String,
     track: String,
     album: String,
@@ -698,6 +710,9 @@ impl FrontendBridgeHandle {
         (self.tx, self.rx, self.spectral_rx, self.spectral_generation)
     }
 }
+
+/// How long shutdown waits for the Last.fm service to save its queue.
+const LASTFM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct BridgeLoopRuntime {
     imports: imports::ImportWorker,
@@ -1545,7 +1560,18 @@ impl BridgeLoopRuntime {
             save_settings(&self.state.settings);
             save_session_snapshot(&session_snapshot_for_state(&self.state));
         }
-        self.lastfm.command(LastFmCommand::Shutdown);
+        finalize_lastfm_track(
+            &self.state,
+            &self.lastfm,
+            &mut self.lastfm_tracker,
+            Instant::now(),
+        );
+        if !self.lastfm.shutdown(LASTFM_SHUTDOWN_TIMEOUT) {
+            eprintln!(
+                "Last.fm: the service did not confirm shutdown; the latest scrobble may not \
+                 have been saved"
+            );
+        }
         let _ = try_send_event(event_tx, BridgeEvent::Stopped);
     }
 }
@@ -1970,6 +1996,59 @@ mod tests {
             assert_eq!(runtime.state.settings.display.show_level_meter, enabled);
             assert!(runtime.flags.settings_dirty);
         }
+    }
+
+    #[test]
+    fn shutdown_queues_an_eligible_scrobble_before_stopping_lastfm() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (lastfm, commands) = crate::lastfm::test_support::command_handle();
+        runtime.lastfm = lastfm;
+        let track = p("/music/last-of-session.flac");
+        runtime.state.lastfm.enabled = true;
+        runtime.state.playback.current = Some(track.clone());
+        runtime.state.playback.state = PlaybackState::Playing;
+        // A 40 s track qualifies after 20 s of listening.
+        runtime.state.playback.duration = Duration::from_secs(40);
+        runtime.state.metadata.source_path = Some(track.to_string_lossy().into_owned());
+        runtime.state.metadata.artist = "Artist".to_string();
+        runtime.state.metadata.title = "Track".to_string();
+        // The last tick came before the play qualified.
+        let last_tick = Instant::now()
+            .checked_sub(Duration::from_secs(21))
+            .expect("monotonic clock is past 21 s");
+        events::tick_lastfm_playback_at(
+            &runtime.state,
+            &runtime.lastfm,
+            &mut runtime.lastfm_tracker,
+            last_tick,
+            1_700_000_000,
+        );
+        let service = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            while let Ok(command) = commands.recv_timeout(Duration::from_secs(5)) {
+                received.push(match command {
+                    LastFmCommand::SendNowPlaying(_) => "now playing",
+                    LastFmCommand::QueueScrobble(_) => "scrobble",
+                    LastFmCommand::Shutdown(done) => {
+                        let _ = done.send(());
+                        received.push("shutdown");
+                        break;
+                    }
+                    _ => "other",
+                });
+            }
+            received
+        });
+
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        runtime.shutdown(&event_tx);
+
+        assert_eq!(
+            service.join().expect("join Last.fm stand-in"),
+            vec!["now playing", "scrobble", "shutdown"]
+        );
+        assert!(matches!(event_rx.try_recv(), Ok(BridgeEvent::Stopped)));
     }
 
     #[test]

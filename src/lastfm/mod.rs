@@ -1,23 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+mod queue_file;
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use keyring::Entry;
-use reqwest::blocking::Client;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use queue_file::LoadOutcome;
 
 pub const KEYRING_SERVICE: &str = "ferrous.lastfm";
 const API_ENDPOINT: &str = "https://ws.audioscrobbler.com/2.0/";
 const AUTH_ENDPOINT: &str = "https://www.last.fm/api/auth/";
+#[cfg(not(test))]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SCROBBLES_PER_BATCH: usize = 50;
+const LASTFM_ERROR_OPERATION_FAILED: i64 = 8;
 const LASTFM_ERROR_INVALID_SESSION: i64 = 9;
-const LASTFM_ERROR_TEMPORARY: i64 = 11;
-const LASTFM_ERROR_SERVICE_OFFLINE: i64 = 16;
+const LASTFM_ERROR_SERVICE_OFFLINE: i64 = 11;
+const LASTFM_ERROR_TEMPORARY: i64 = 16;
+const LASTFM_ERROR_RATE_LIMIT: i64 = 29;
+/// `ignoredMessage` code for a scrobble refused because the account reached
+/// its daily limit. Unlike the other ignore codes, it can succeed later.
+const LASTFM_IGNORED_DAILY_LIMIT: i64 = 5;
 const UNKNOWN_ALBUM_PLACEHOLDER: &str = "Unknown album";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,14 +88,20 @@ pub struct ScrobbleEntry {
 #[derive(Debug, Clone)]
 pub enum Command {
     SetEnabled(bool),
-    LoadStoredSession { username: String },
+    LoadStoredSession {
+        username: String,
+    },
     BeginDesktopAuth,
     CompleteDesktopAuth,
-    Disconnect { clear_queue: bool },
+    Disconnect {
+        clear_queue: bool,
+    },
     SendNowPlaying(NowPlayingTrack),
     QueueScrobble(ScrobbleEntry),
     Flush,
-    Shutdown,
+    /// Sent by [`Handle::shutdown`]; the sender is signalled once the
+    /// service has stopped.
+    Shutdown(Sender<()>),
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +118,20 @@ impl Handle {
     pub fn command(&self, command: Command) {
         let _ = self.tx.send(command);
     }
+
+    /// Stops the service once it has handled the commands sent before this
+    /// call, without starting network requests for them. Waits up to
+    /// `timeout` for the queue to be saved and returns whether the service
+    /// confirmed in time. It cannot confirm while a request that started
+    /// earlier is still running.
+    #[must_use]
+    pub fn shutdown(&self, timeout: Duration) -> bool {
+        let (done_tx, done_rx) = bounded(1);
+        if self.tx.send(Command::Shutdown(done_tx)).is_err() {
+            return false;
+        }
+        done_rx.recv_timeout(timeout).is_ok()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -113,12 +140,174 @@ pub struct ServiceOptions {
     pub initial_enabled: bool,
 }
 
-#[derive(Debug)]
+/// A reply from the Last.fm API, before it is interpreted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HttpReply {
+    pub(crate) status: u16,
+    pub(crate) body: String,
+}
+
+/// Sends requests to the Last.fm API.
+pub(crate) trait Transport: Send {
+    /// Posts `form` to `url`. Returns the reply, or a description of why no
+    /// reply arrived.
+    fn post_form(&self, url: &str, form: &[(String, String)]) -> Result<HttpReply, String>;
+}
+
+/// Stores the session keys that let Ferrous scrobble to an account.
+pub(crate) trait SessionKeyStore: Send {
+    /// Returns `Ok(None)` when no key is stored for `username`.
+    fn load(&self, username: &str) -> Result<Option<String>, String>;
+    fn store(&self, username: &str, session_key: &str) -> Result<(), String>;
+    /// Succeeds when no key is stored for `username`.
+    fn delete(&self, username: &str) -> Result<(), String>;
+}
+
+/// How long to wait before retrying a flush that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RetryPolicy {
+    pub(crate) initial: Duration,
+    pub(crate) max: Duration,
+}
+
+impl RetryPolicy {
+    const DEFAULT: Self = Self {
+        initial: Duration::from_secs(30),
+        max: Duration::from_secs(30 * 60),
+    };
+
+    /// Delay before retry `attempt` (counted from 1): doubles from `initial`
+    /// up to `max`.
+    fn delay(self, attempt: u32) -> Duration {
+        let doublings = attempt.saturating_sub(1).min(31);
+        self.initial.saturating_mul(1 << doublings).min(self.max)
+    }
+}
+
+/// External dependencies of the service.
+pub(crate) struct ServiceBackends {
+    pub(crate) transport: Box<dyn Transport>,
+    pub(crate) session_keys: Box<dyn SessionKeyStore>,
+    pub(crate) credentials: Option<AppCredentials>,
+    pub(crate) retry: RetryPolicy,
+}
+
+impl ServiceBackends {
+    #[cfg(not(test))]
+    fn for_build() -> Self {
+        Self {
+            transport: Box::new(HttpTransport::new()),
+            session_keys: Box::new(KeyringSessionKeys),
+            credentials: app_credentials(),
+            retry: RetryPolicy::DEFAULT,
+        }
+    }
+
+    /// Test builds never reach the network or the system keyring.
+    #[cfg(test)]
+    fn for_build() -> Self {
+        Self {
+            transport: Box::new(test_support::OfflineTransport),
+            session_keys: Box::new(test_support::MemorySessionKeys::default()),
+            credentials: None,
+            retry: RetryPolicy::DEFAULT,
+        }
+    }
+}
+
+#[cfg(not(test))]
+struct HttpTransport {
+    client: reqwest::blocking::Client,
+}
+
+#[cfg(not(test))]
+impl HttpTransport {
+    fn new() -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        Self { client }
+    }
+}
+
+#[cfg(not(test))]
+impl Transport for HttpTransport {
+    fn post_form(&self, url: &str, form: &[(String, String)]) -> Result<HttpReply, String> {
+        let response = self
+            .client
+            .post(url)
+            .form(form)
+            .send()
+            .map_err(|err| err.to_string())?;
+        let status = response.status().as_u16();
+        let body = response.text().map_err(|err| err.to_string())?;
+        Ok(HttpReply { status, body })
+    }
+}
+
+#[cfg(not(test))]
+struct KeyringSessionKeys;
+
+#[cfg(not(test))]
+impl KeyringSessionKeys {
+    fn entry(username: &str) -> Result<keyring::Entry, String> {
+        keyring::Entry::new(KEYRING_SERVICE, username).map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(not(test))]
+impl SessionKeyStore for KeyringSessionKeys {
+    fn load(&self, username: &str) -> Result<Option<String>, String> {
+        stored_session_key(Self::entry(username)?.get_password())
+    }
+
+    fn store(&self, username: &str, session_key: &str) -> Result<(), String> {
+        Self::entry(username)?
+            .set_password(session_key)
+            .map_err(|err| err.to_string())
+    }
+
+    fn delete(&self, username: &str) -> Result<(), String> {
+        session_key_deleted(Self::entry(username)?.delete_credential())
+    }
+}
+
+/// Interprets a keyring lookup; a missing or blank entry means no key.
+fn stored_session_key(lookup: keyring::Result<String>) -> Result<Option<String>, String> {
+    match lookup {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Interprets a keyring deletion; an entry that is already gone is deleted.
+fn session_key_deleted(deletion: keyring::Result<()>) -> Result<(), String> {
+    match deletion {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 struct Service {
-    client: Client,
+    transport: Box<dyn Transport>,
+    session_keys: Box<dyn SessionKeyStore>,
     credentials: Option<AppCredentials>,
+    retry_policy: RetryPolicy,
+    /// Failed flush attempts since the last batch Last.fm fully accepted.
+    retry_attempt: u32,
+    /// When the next automatic flush is due, if one is scheduled.
+    retry_due: Option<Instant>,
+    /// Cleared while handling the commands that precede shutdown, so that
+    /// shutdown does not wait for the network.
+    network_allowed: bool,
     queue_path: Option<PathBuf>,
     queue: Vec<ScrobbleEntry>,
+    /// Problem found while loading the queue file, shown for the session.
+    queue_load_notice: Option<String>,
+    /// Most recent failure to save the queue, until a save succeeds.
+    queue_save_error: Option<String>,
     session: Option<Session>,
     pending_auth: Option<PendingAuth>,
     state: RuntimeState,
@@ -127,9 +316,28 @@ struct Service {
 #[derive(Debug)]
 enum RequestError {
     Transport(String),
-    Api { code: i64, message: String },
+    /// A JSON-less or unsuccessful HTTP status without a Last.fm error code.
+    Http {
+        status: u16,
+    },
+    Api {
+        code: i64,
+        message: String,
+    },
     InvalidResponse(String),
     Keyring(String),
+}
+
+/// What Last.fm did with each entry of an accepted scrobble batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScrobbleOutcome {
+    /// Per entry, in request order: whether Last.fm deferred it, so it
+    /// stays queued.
+    deferred: Vec<bool>,
+    /// Entries Last.fm ignored permanently.
+    ignored: usize,
+    /// Reason given for the first ignored entry.
+    ignored_reason: Option<String>,
 }
 
 #[must_use]
@@ -169,67 +377,157 @@ pub(crate) fn normalize_album_for_submission(album: &str) -> String {
 
 #[must_use]
 pub fn spawn(options: ServiceOptions) -> (Handle, Receiver<Event>) {
+    spawn_with_backends(options, ServiceBackends::for_build())
+}
+
+pub(crate) fn spawn_with_backends(
+    options: ServiceOptions,
+    backends: ServiceBackends,
+) -> (Handle, Receiver<Event>) {
     let (cmd_tx, cmd_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
     let _ = std::thread::Builder::new()
         .name("ferrous-lastfm".to_string())
-        .spawn(move || run_service_loop(&cmd_rx, &event_tx, options));
+        .spawn(move || {
+            let service = Service::new(options, backends);
+            run_service_loop(&cmd_rx, &event_tx, service);
+        });
     (Handle { tx: cmd_tx }, event_rx)
 }
 
-fn run_service_loop(cmd_rx: &Receiver<Command>, event_tx: &Sender<Event>, options: ServiceOptions) {
-    let queue = options
-        .queue_path
-        .as_ref()
-        .and_then(|path| load_queue(path).ok())
-        .unwrap_or_default();
-    let credentials = app_credentials();
-    let mut service = Service {
-        client: Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| Client::new()),
-        credentials: credentials.clone(),
-        queue_path: options.queue_path,
-        queue,
-        session: None,
-        pending_auth: None,
-        state: RuntimeState {
-            enabled: options.initial_enabled,
-            build_configured: credentials.is_some(),
-            pending_scrobble_count: 0,
-            status_text: if credentials.is_some() {
-                String::new()
-            } else {
-                "Last.fm not configured in this build.".to_string()
-            },
-            ..RuntimeState::default()
-        },
-    };
-    service.state.pending_scrobble_count = service.queue.len();
-    let _ = emit_state(event_tx, &service.state);
-
-    while let Ok(command) = cmd_rx.recv() {
-        let keep_running = service.handle_command(command);
-        let _ = emit_state(event_tx, &service.state);
-        if !keep_running {
+fn run_service_loop(cmd_rx: &Receiver<Command>, event_tx: &Sender<Event>, mut service: Service) {
+    service.publish(event_tx);
+    loop {
+        let received = match service.retry_due {
+            Some(due) => cmd_rx.recv_deadline(due),
+            None => cmd_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let first = match received {
+            Ok(command) => command,
+            Err(RecvTimeoutError::Timeout) => {
+                service.flush_queue();
+                service.publish(event_tx);
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        // Take everything already waiting, so that a pending shutdown is seen
+        // before the commands ahead of it start network requests.
+        let mut commands = vec![first];
+        commands.extend(cmd_rx.try_iter());
+        let shutdown = commands.iter().find_map(|command| match command {
+            Command::Shutdown(done) => Some(done.clone()),
+            _ => None,
+        });
+        if shutdown.is_some() {
+            service.network_allowed = false;
+        }
+        for command in commands {
+            if matches!(command, Command::Shutdown(_)) {
+                break;
+            }
+            service.handle_command(command);
+            service.publish(event_tx);
+        }
+        if let Some(done) = shutdown {
+            let _ = done.send(());
             break;
         }
     }
 }
 
-fn emit_state(event_tx: &Sender<Event>, state: &RuntimeState) -> Result<(), ()> {
-    event_tx.send(Event::State(state.clone())).map_err(|_| ())
-}
-
 impl Service {
-    fn handle_command(&mut self, command: Command) -> bool {
+    fn new(options: ServiceOptions, backends: ServiceBackends) -> Self {
+        let build_configured = backends.credentials.is_some();
+        let mut service = Self {
+            transport: backends.transport,
+            session_keys: backends.session_keys,
+            credentials: backends.credentials,
+            retry_policy: backends.retry,
+            retry_attempt: 0,
+            retry_due: None,
+            network_allowed: true,
+            queue_path: options.queue_path,
+            queue: Vec::new(),
+            queue_load_notice: None,
+            queue_save_error: None,
+            session: None,
+            pending_auth: None,
+            state: RuntimeState {
+                enabled: options.initial_enabled,
+                build_configured,
+                status_text: if build_configured {
+                    String::new()
+                } else {
+                    "Last.fm not configured in this build.".to_string()
+                },
+                ..RuntimeState::default()
+            },
+        };
+        service.load_queue();
+        service
+    }
+
+    fn load_queue(&mut self) {
+        let Some(path) = self.queue_path.clone() else {
+            return;
+        };
+        match queue_file::load(&path) {
+            LoadOutcome::Loaded(entries) => self.queue = entries,
+            LoadOutcome::MovedAside { moved_to, reason } => {
+                eprintln!(
+                    "Last.fm: scrobble queue {} is not valid ({reason}); moved it to {}",
+                    path.display(),
+                    moved_to.display()
+                );
+                self.queue_load_notice = Some(format!(
+                    "Saved scrobbles could not be read; the file was kept as {}.",
+                    moved_to.display()
+                ));
+            }
+            LoadOutcome::Unavailable { error } => {
+                eprintln!(
+                    "Last.fm: cannot load scrobble queue {}: {error}",
+                    path.display()
+                );
+                // Saving now would replace a file that may still hold scrobbles.
+                self.queue_path = None;
+                self.queue_load_notice = Some(format!(
+                    "Saved scrobbles in {} could not be read ({error}). New scrobbles \
+                     will not be saved until Ferrous restarts.",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    /// The state shown in the UI. Queue file problems stay visible above
+    /// later status messages.
+    fn published_state(&self) -> RuntimeState {
+        let mut state = self.state.clone();
+        state.pending_scrobble_count = self.queue.len();
+        state.status_text = [
+            self.queue_load_notice.as_deref(),
+            self.queue_save_error.as_deref(),
+            Some(self.state.status_text.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+        state
+    }
+
+    fn publish(&self, event_tx: &Sender<Event>) {
+        let _ = event_tx.send(Event::State(self.published_state()));
+    }
+
+    fn handle_command(&mut self, command: Command) {
         match command {
             Command::SetEnabled(enabled) => {
                 self.state.enabled = enabled;
-                if enabled {
-                    self.flush_queue();
-                }
+                self.flush_queue();
             }
             Command::LoadStoredSession { username } => self.load_session(username),
             Command::BeginDesktopAuth => self.begin_desktop_auth(),
@@ -239,22 +537,24 @@ impl Service {
             Command::QueueScrobble(entry) => {
                 self.queue.push(entry);
                 self.save_queue();
-                self.state.pending_scrobble_count = self.queue.len();
                 self.flush_queue();
             }
             Command::Flush => self.flush_queue(),
-            Command::Shutdown => return false,
+            // The service loop stops before handing shutdown to a command.
+            Command::Shutdown(_) => {}
         }
-        true
     }
 
     fn begin_desktop_auth(&mut self) {
+        if !self.network_allowed {
+            return;
+        }
         let Some(credentials) = self.credentials.as_ref() else {
             self.state.auth_state = AuthState::Error;
             self.state.status_text = "Last.fm not configured in this build.".to_string();
             return;
         };
-        match request_token(&self.client, credentials) {
+        match request_token(self.transport.as_ref(), credentials) {
             Ok(token) => {
                 let auth_url = format!(
                     "{}?api_key={}&token={}",
@@ -272,12 +572,15 @@ impl Service {
             }
             Err(err) => {
                 self.state.auth_state = AuthState::Error;
-                self.state.status_text = request_error_message(err);
+                self.state.status_text = request_error_message(&err);
             }
         }
     }
 
     fn complete_desktop_auth(&mut self) {
+        if !self.network_allowed {
+            return;
+        }
         let Some(credentials) = self.credentials.as_ref() else {
             self.state.auth_state = AuthState::Error;
             self.state.status_text = "Last.fm not configured in this build.".to_string();
@@ -288,11 +591,14 @@ impl Service {
             self.state.status_text = "No Last.fm authorization is pending.".to_string();
             return;
         };
-        match request_session(&self.client, credentials, &pending_auth.token) {
+        match request_session(self.transport.as_ref(), credentials, &pending_auth.token) {
             Ok(session) => {
-                if let Err(err) = store_session_key(&session.username, &session.session_key) {
+                if let Err(err) = self
+                    .session_keys
+                    .store(&session.username, &session.session_key)
+                {
                     self.state.auth_state = AuthState::Error;
-                    self.state.status_text = request_error_message(err);
+                    self.state.status_text = request_error_message(&RequestError::Keyring(err));
                     return;
                 }
                 self.session = Some(session.clone());
@@ -301,11 +607,12 @@ impl Service {
                 self.state.auth_state = AuthState::Connected;
                 self.state.auth_url.clear();
                 self.state.status_text = "Last.fm account connected.".to_string();
+                self.retry_attempt = 0;
                 self.flush_queue();
             }
             Err(err) => {
                 self.state.auth_state = AuthState::Error;
-                self.state.status_text = request_error_message(err);
+                self.state.status_text = request_error_message(&err);
             }
         }
     }
@@ -314,7 +621,7 @@ impl Service {
         if username.trim().is_empty() {
             return;
         }
-        match load_session_key(&username) {
+        match self.session_keys.load(&username) {
             Ok(Some(session_key)) => {
                 self.session = Some(Session {
                     username: username.clone(),
@@ -335,7 +642,7 @@ impl Service {
                 self.state.status_text = "Reconnect Last.fm to resume scrobbling.".to_string();
             }
             Err(err) => {
-                let message = request_error_message(err);
+                let message = request_error_message(&RequestError::Keyring(err));
                 eprintln!(
                     "Last.fm: keyring error loading session for user \"{username}\": {message}"
                 );
@@ -347,24 +654,31 @@ impl Service {
     }
 
     fn disconnect(&mut self, clear_queue: bool) {
+        let mut status_text = "Last.fm disconnected.".to_string();
         if !self.state.username.trim().is_empty() {
-            let _ = delete_session_key(&self.state.username);
+            if let Err(err) = self.session_keys.delete(&self.state.username) {
+                status_text = format!(
+                    "Last.fm disconnected, but the session key could not be removed \
+                     from the keyring: {err}"
+                );
+            }
         }
         self.session = None;
         self.pending_auth = None;
+        self.retry_attempt = 0;
+        self.retry_due = None;
         self.state.username.clear();
         self.state.auth_url.clear();
         self.state.auth_state = AuthState::Disconnected;
-        self.state.status_text = "Last.fm disconnected.".to_string();
+        self.state.status_text = status_text;
         if clear_queue {
             self.queue.clear();
             self.save_queue();
         }
-        self.state.pending_scrobble_count = self.queue.len();
     }
 
     fn send_now_playing(&mut self, track: &NowPlayingTrack) {
-        if !self.state.enabled {
+        if !self.state.enabled || !self.network_allowed {
             return;
         }
         let Some(credentials) = self.credentials.as_ref() else {
@@ -376,9 +690,13 @@ impl Service {
         if track.artist.trim().is_empty() || track.track.trim().is_empty() {
             return;
         }
-        match send_now_playing_request(&self.client, credentials, session, track) {
+        match send_now_playing_request(self.transport.as_ref(), credentials, session, track) {
             Ok(()) => {
                 self.state.status_text = format!("Now playing: {} - {}", track.artist, track.track);
+                // Last.fm is reachable again; do not wait for the scheduled retry.
+                if self.retry_due.is_some() {
+                    self.flush_queue();
+                }
             }
             Err(err) if is_invalid_session(&err) => {
                 self.transition_to_reauth(
@@ -386,87 +704,137 @@ impl Service {
                 );
             }
             Err(err) => {
-                self.state.status_text = request_error_message(err);
+                self.state.status_text = request_error_message(&err);
             }
         }
     }
 
+    /// Submits queued scrobbles in batches. Stops at the first batch that
+    /// fails and keeps it queued; only entries that Last.fm accepted or
+    /// ignored for good leave the queue. Transient failures schedule a retry.
     fn flush_queue(&mut self) {
-        if !self.state.enabled || self.queue.is_empty() {
-            self.state.pending_scrobble_count = self.queue.len();
+        self.retry_due = None;
+        if !self.state.enabled || !self.network_allowed || self.queue.is_empty() {
             return;
         }
-        let Some(credentials) = self.credentials.as_ref() else {
-            self.state.pending_scrobble_count = self.queue.len();
-            return;
-        };
-        let Some(session) = self.session.as_ref() else {
-            self.state.pending_scrobble_count = self.queue.len();
+        let (Some(credentials), Some(session)) = (self.credentials.clone(), self.session.clone())
+        else {
             return;
         };
 
+        let mut ignored = 0;
+        let mut ignored_reason = None;
         while !self.queue.is_empty() {
             let batch_len = self.queue.len().min(MAX_SCROBBLES_PER_BATCH);
-            let batch = self
-                .queue
-                .iter()
-                .take(batch_len)
-                .cloned()
-                .collect::<Vec<_>>();
-            match send_scrobble_batch(&self.client, credentials, session, &batch) {
-                Ok(()) => {
-                    self.queue.drain(..batch_len);
+            let result = send_scrobble_batch(
+                self.transport.as_ref(),
+                &credentials,
+                &session,
+                &self.queue[..batch_len],
+            );
+            match result {
+                Ok(outcome) => {
+                    let mut index = 0;
+                    self.queue.retain(|_| {
+                        let keep = index >= batch_len || outcome.deferred[index];
+                        index += 1;
+                        keep
+                    });
                     self.save_queue();
-                    self.state.status_text = "Last.fm scrobble queue flushed.".to_string();
+                    ignored += outcome.ignored;
+                    ignored_reason = ignored_reason.or(outcome.ignored_reason);
+                    if outcome.deferred.contains(&true) {
+                        self.schedule_retry("Last.fm daily scrobble limit reached");
+                        return;
+                    }
+                    self.retry_attempt = 0;
                 }
                 Err(err) if is_invalid_session(&err) => {
                     self.transition_to_reauth(
                         "Last.fm session expired. Reconnect to flush queued scrobbles.",
                     );
-                    break;
+                    return;
                 }
                 Err(err) if is_transient(&err) => {
-                    self.state.status_text = request_error_message(err);
-                    break;
+                    self.schedule_retry(&request_error_message(&err));
+                    return;
                 }
                 Err(err) => {
-                    self.state.status_text = request_error_message(err);
-                    self.queue.drain(..batch_len);
-                    self.save_queue();
+                    // Last.fm refused the request itself, for example because
+                    // the API key is invalid. That says nothing about these
+                    // scrobbles, so they stay queued for the next flush.
+                    self.state.status_text =
+                        format!("{}. Scrobbles stay queued.", request_error_message(&err));
+                    return;
                 }
             }
         }
+        self.state.status_text = match ignored_reason {
+            None => "Last.fm scrobble queue flushed.".to_string(),
+            Some(reason) => format!(
+                "Last.fm ignored {ignored} {}: {reason}",
+                if ignored == 1 {
+                    "scrobble"
+                } else {
+                    "scrobbles"
+                }
+            ),
+        };
+    }
 
-        self.state.pending_scrobble_count = self.queue.len();
+    fn schedule_retry(&mut self, message: &str) {
+        self.retry_attempt = self.retry_attempt.saturating_add(1);
+        let delay = self.retry_policy.delay(self.retry_attempt);
+        self.retry_due = Some(Instant::now() + delay);
+        self.state.status_text = format!("{message}; retrying in {}.", describe_delay(delay));
     }
 
     fn transition_to_reauth(&mut self, message: &str) {
         self.session = None;
         self.pending_auth = None;
+        self.retry_attempt = 0;
+        self.retry_due = None;
         self.state.auth_url.clear();
         self.state.auth_state = AuthState::ReauthRequired;
         self.state.status_text = message.to_string();
     }
 
-    fn save_queue(&self) {
+    fn save_queue(&mut self) {
         let Some(path) = self.queue_path.as_ref() else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if self.queue.is_empty() {
-            let _ = fs::remove_file(path);
-            return;
-        }
-        if let Ok(text) = serde_json::to_string_pretty(&self.queue) {
-            let _ = fs::write(path, text);
+        match queue_file::save(path, &self.queue) {
+            Ok(()) => self.queue_save_error = None,
+            Err(err) => {
+                eprintln!(
+                    "Last.fm: failed to save scrobble queue {}: {err}",
+                    path.display()
+                );
+                self.queue_save_error = Some(format!(
+                    "Pending scrobbles could not be saved to {} ({err}).",
+                    path.display()
+                ));
+            }
         }
     }
 }
 
-fn request_token(client: &Client, credentials: &AppCredentials) -> Result<String, RequestError> {
-    let payload = send_signed_request(client, credentials, "auth.getToken", Vec::new())?;
+fn describe_delay(delay: Duration) -> String {
+    let seconds = delay.as_secs();
+    if seconds >= 120 {
+        format!("{} min", seconds / 60)
+    } else if seconds >= 1 {
+        format!("{seconds} s")
+    } else {
+        format!("{} ms", delay.as_millis())
+    }
+}
+
+fn request_token(
+    transport: &dyn Transport,
+    credentials: &AppCredentials,
+) -> Result<String, RequestError> {
+    let payload = send_signed_request(transport, credentials, "auth.getToken", Vec::new())?;
     payload
         .get("token")
         .and_then(Value::as_str)
@@ -478,12 +846,12 @@ fn request_token(client: &Client, credentials: &AppCredentials) -> Result<String
 }
 
 fn request_session(
-    client: &Client,
+    transport: &dyn Transport,
     credentials: &AppCredentials,
     token: &str,
 ) -> Result<Session, RequestError> {
     let payload = send_signed_request(
-        client,
+        transport,
         credentials,
         "auth.getSession",
         vec![("token".to_string(), token.to_string())],
@@ -512,7 +880,7 @@ fn request_session(
 }
 
 fn send_now_playing_request(
-    client: &Client,
+    transport: &dyn Transport,
     credentials: &AppCredentials,
     session: &Session,
     track: &NowPlayingTrack,
@@ -532,16 +900,16 @@ fn send_now_playing_request(
     if let Some(duration_seconds) = track.duration_seconds {
         params.push(("duration".to_string(), duration_seconds.to_string()));
     }
-    let _ = send_signed_request(client, credentials, "track.updateNowPlaying", params)?;
+    let _ = send_signed_request(transport, credentials, "track.updateNowPlaying", params)?;
     Ok(())
 }
 
 fn send_scrobble_batch(
-    client: &Client,
+    transport: &dyn Transport,
     credentials: &AppCredentials,
     session: &Session,
     batch: &[ScrobbleEntry],
-) -> Result<(), RequestError> {
+) -> Result<ScrobbleOutcome, RequestError> {
     let mut params = vec![("sk".to_string(), session.session_key.clone())];
     for (index, track) in batch.iter().enumerate() {
         let suffix = format!("[{index}]");
@@ -562,12 +930,62 @@ fn send_scrobble_batch(
             params.push((format!("duration{suffix}"), duration_seconds.to_string()));
         }
     }
-    let _ = send_signed_request(client, credentials, "track.scrobble", params)?;
-    Ok(())
+    let payload = send_signed_request(transport, credentials, "track.scrobble", params)?;
+    scrobble_outcome(&payload, batch.len())
+}
+
+/// Reads the per-entry results of a `track.scrobble` reply.
+fn scrobble_outcome(payload: &Value, batch_len: usize) -> Result<ScrobbleOutcome, RequestError> {
+    let Some(scrobbles) = payload.get("scrobbles").filter(|value| value.is_object()) else {
+        return Err(RequestError::InvalidResponse(
+            "Last.fm scrobble results missing from response".to_string(),
+        ));
+    };
+    // Last.fm sends a lone object instead of an array for a single result.
+    let results = match scrobbles.get("scrobble") {
+        Some(Value::Array(results)) => results.iter().collect(),
+        Some(result @ Value::Object(_)) => vec![result],
+        _ => Vec::new(),
+    };
+    let mut outcome = ScrobbleOutcome {
+        deferred: vec![false; batch_len],
+        ignored: 0,
+        ignored_reason: None,
+    };
+    // Results are in request order. Without one per entry they cannot be
+    // matched to entries, but Last.fm processed the batch, so it is done.
+    if results.len() != batch_len {
+        return Ok(outcome);
+    }
+    for (index, result) in results.into_iter().enumerate() {
+        let ignored_message = result.get("ignoredMessage");
+        let code = ignored_message
+            .and_then(|message| message.get("code"))
+            .and_then(json_integer)
+            .unwrap_or(0);
+        match code {
+            0 => {}
+            LASTFM_IGNORED_DAILY_LIMIT => outcome.deferred[index] = true,
+            _ => {
+                outcome.ignored += 1;
+                if outcome.ignored_reason.is_none() {
+                    let text = ignored_message
+                        .and_then(|message| message.get("#text"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty());
+                    outcome.ignored_reason = Some(
+                        text.map_or_else(|| format!("ignore code {code}"), ToString::to_string),
+                    );
+                }
+            }
+        }
+    }
+    Ok(outcome)
 }
 
 fn send_signed_request(
-    client: &Client,
+    transport: &dyn Transport,
     credentials: &AppCredentials,
     method: &str,
     mut params: Vec<(String, String)>,
@@ -578,15 +996,29 @@ fn send_signed_request(
     params.push(("api_sig".to_string(), api_sig));
     params.push(("format".to_string(), "json".to_string()));
 
-    let response = client
-        .post(API_ENDPOINT)
-        .form(&params)
-        .send()
-        .map_err(|err| RequestError::Transport(err.to_string()))?;
-    let payload = response
-        .json::<Value>()
-        .map_err(|err| RequestError::InvalidResponse(err.to_string()))?;
-    if let Some(code) = payload.get("error").and_then(Value::as_i64) {
+    let reply = transport
+        .post_form(API_ENDPOINT, &params)
+        .map_err(RequestError::Transport)?;
+    interpret_reply(&reply)
+}
+
+/// Last.fm reports API errors as JSON, sometimes with a 4xx status. A reply
+/// that is not JSON, such as a proxy error page or a captive portal, says
+/// nothing about the request.
+fn interpret_reply(reply: &HttpReply) -> Result<Value, RequestError> {
+    let Ok(payload) = serde_json::from_str::<Value>(&reply.body) else {
+        return Err(if reply.status >= 500 {
+            RequestError::Http {
+                status: reply.status,
+            }
+        } else {
+            RequestError::InvalidResponse(format!(
+                "unexpected non-JSON reply (HTTP {})",
+                reply.status
+            ))
+        });
+    };
+    if let Some(code) = payload.get("error").and_then(json_integer) {
         let message = payload
             .get("message")
             .and_then(Value::as_str)
@@ -594,7 +1026,19 @@ fn send_signed_request(
             .to_string();
         return Err(RequestError::Api { code, message });
     }
+    if !(200..300).contains(&reply.status) {
+        return Err(RequestError::Http {
+            status: reply.status,
+        });
+    }
     Ok(payload)
+}
+
+/// Reads an integer that Last.fm may send as a number or a string.
+fn json_integer(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
 }
 
 fn api_signature(params: &[(String, String)], shared_secret: &str) -> String {
@@ -612,43 +1056,6 @@ fn api_signature(params: &[(String, String)], shared_secret: &str) -> String {
     format!("{:x}", md5::compute(data.as_bytes()))
 }
 
-fn load_queue(path: &Path) -> Result<Vec<ScrobbleEntry>, std::io::Error> {
-    let text = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&text).unwrap_or_default())
-}
-
-fn keyring_entry(username: &str) -> Result<Entry, RequestError> {
-    Entry::new(KEYRING_SERVICE, username).map_err(|err| RequestError::Keyring(err.to_string()))
-}
-
-fn store_session_key(username: &str, session_key: &str) -> Result<(), RequestError> {
-    keyring_entry(username)?
-        .set_password(session_key)
-        .map_err(|err| RequestError::Keyring(err.to_string()))
-}
-
-fn load_session_key(username: &str) -> Result<Option<String>, RequestError> {
-    let entry = keyring_entry(username)?;
-    match entry.get_password() {
-        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
-        Ok(_) => Ok(None),
-        Err(err) => {
-            let message = err.to_string();
-            if message.contains("No entry") || message.contains("NoPasswordFound") {
-                Ok(None)
-            } else {
-                Err(RequestError::Keyring(message))
-            }
-        }
-    }
-}
-
-fn delete_session_key(username: &str) -> Result<(), RequestError> {
-    keyring_entry(username)?
-        .delete_credential()
-        .map_err(|err| RequestError::Keyring(err.to_string()))
-}
-
 fn is_invalid_session(error: &RequestError) -> bool {
     matches!(
         error,
@@ -659,19 +1066,27 @@ fn is_invalid_session(error: &RequestError) -> bool {
     )
 }
 
+/// Whether a failure is expected to clear up by itself, so that a flush
+/// should be retried on a timer.
 fn is_transient(error: &RequestError) -> bool {
     match error {
-        RequestError::Transport(_) => true,
-        RequestError::Api { code, .. } => {
-            *code == LASTFM_ERROR_TEMPORARY || *code == LASTFM_ERROR_SERVICE_OFFLINE
-        }
-        _ => false,
+        RequestError::Transport(_) | RequestError::InvalidResponse(_) => true,
+        RequestError::Http { status } => *status >= 500,
+        RequestError::Api { code, .. } => matches!(
+            *code,
+            LASTFM_ERROR_OPERATION_FAILED
+                | LASTFM_ERROR_SERVICE_OFFLINE
+                | LASTFM_ERROR_TEMPORARY
+                | LASTFM_ERROR_RATE_LIMIT
+        ),
+        RequestError::Keyring(_) => false,
     }
 }
 
-fn request_error_message(error: RequestError) -> String {
+fn request_error_message(error: &RequestError) -> String {
     match error {
         RequestError::Transport(message) => format!("Last.fm transport error: {message}"),
+        RequestError::Http { status } => format!("Last.fm HTTP error {status}"),
         RequestError::Api { code, message } => format!("Last.fm API error {code}: {message}"),
         RequestError::InvalidResponse(message) => format!("Last.fm response error: {message}"),
         RequestError::Keyring(message) => format!("Last.fm keyring error: {message}"),
@@ -679,8 +1094,250 @@ fn request_error_message(error: RequestError) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use crossbeam_channel::{unbounded, Receiver};
+
+    use super::{Command, Handle, HttpReply, SessionKeyStore, Transport};
+
+    /// A handle whose commands go to the returned receiver instead of a
+    /// running service.
+    pub(crate) fn command_handle() -> (Handle, Receiver<Command>) {
+        let (tx, rx) = unbounded();
+        (Handle { tx }, rx)
+    }
+
+    pub(crate) struct OfflineTransport;
+
+    impl Transport for OfflineTransport {
+        fn post_form(&self, _url: &str, _form: &[(String, String)]) -> Result<HttpReply, String> {
+            Err("network access is disabled in tests".to_string())
+        }
+    }
+
+    /// Answers requests with scripted replies, in order, and records them.
+    #[derive(Clone, Default)]
+    pub(crate) struct ScriptedTransport {
+        replies: Arc<Mutex<VecDeque<Result<HttpReply, String>>>>,
+        requests: Arc<Mutex<Vec<Vec<(String, String)>>>>,
+    }
+
+    impl ScriptedTransport {
+        pub(crate) fn with_replies(
+            replies: impl IntoIterator<Item = Result<HttpReply, String>>,
+        ) -> Self {
+            let transport = Self::default();
+            transport
+                .replies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend(replies);
+            transport
+        }
+
+        pub(crate) fn requests(&self) -> Vec<Vec<(String, String)>> {
+            self.requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl Transport for ScriptedTransport {
+        fn post_form(&self, _url: &str, form: &[(String, String)]) -> Result<HttpReply, String> {
+            self.requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(form.to_vec());
+            self.replies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or_else(|| Err("no scripted reply left".to_string()))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    pub(crate) struct MemorySessionKeys {
+        keys: Arc<Mutex<HashMap<String, String>>>,
+        failure: Option<String>,
+    }
+
+    impl MemorySessionKeys {
+        pub(crate) fn with_key(username: &str, session_key: &str) -> Self {
+            let store = Self::default();
+            store
+                .keys
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(username.to_string(), session_key.to_string());
+            store
+        }
+
+        pub(crate) fn failing(message: &str) -> Self {
+            Self {
+                failure: Some(message.to_string()),
+                ..Self::default()
+            }
+        }
+
+        fn check(&self) -> Result<(), String> {
+            self.failure.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    impl SessionKeyStore for MemorySessionKeys {
+        fn load(&self, username: &str) -> Result<Option<String>, String> {
+            self.check()?;
+            Ok(self
+                .keys
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(username)
+                .cloned())
+        }
+
+        fn store(&self, username: &str, session_key: &str) -> Result<(), String> {
+            self.check()?;
+            self.keys
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(username.to_string(), session_key.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, username: &str) -> Result<(), String> {
+            self.check()?;
+            self.keys
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(username);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::test_support::{MemorySessionKeys, ScriptedTransport};
     use super::*;
+
+    const USERNAME: &str = "tester";
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = crate::paths::test_root().join(format!(
+            "lastfm-{name}-{}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create scratch directory");
+        dir
+    }
+
+    fn entry(index: usize) -> ScrobbleEntry {
+        ScrobbleEntry {
+            artist: format!("Artist {index}"),
+            track: format!("Track {index}"),
+            album: String::new(),
+            track_number: None,
+            duration_seconds: Some(200),
+            timestamp_utc: 1_700_000_000 + i64::try_from(index).unwrap_or(0),
+        }
+    }
+
+    fn entries(range: std::ops::Range<usize>) -> Vec<ScrobbleEntry> {
+        range.map(entry).collect()
+    }
+
+    fn reply(status: u16, body: &str) -> Result<HttpReply, String> {
+        Ok(HttpReply {
+            status,
+            body: body.to_string(),
+        })
+    }
+
+    /// A `track.scrobble` reply with one result per ignore code.
+    fn scrobble_reply(ignore_codes: &[i64]) -> Result<HttpReply, String> {
+        let results = ignore_codes
+            .iter()
+            .map(|code| {
+                serde_json::json!({
+                    "ignoredMessage": {
+                        "code": code.to_string(),
+                        "#text": if *code == 0 { "" } else { "Ignored for testing" },
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        reply(
+            200,
+            &serde_json::json!({ "scrobbles": { "scrobble": results } }).to_string(),
+        )
+    }
+
+    fn accepted_reply(count: usize) -> Result<HttpReply, String> {
+        scrobble_reply(&vec![0; count])
+    }
+
+    fn backends(transport: &ScriptedTransport, keys: MemorySessionKeys) -> ServiceBackends {
+        ServiceBackends {
+            transport: Box::new(transport.clone()),
+            session_keys: Box::new(keys),
+            credentials: Some(AppCredentials {
+                api_key: "api-key".to_string(),
+                shared_secret: "secret".to_string(),
+            }),
+            retry: RetryPolicy::DEFAULT,
+        }
+    }
+
+    /// An enabled service with a stored session and `queued` pending.
+    fn connected_service(
+        transport: &ScriptedTransport,
+        queue_path: Option<PathBuf>,
+        queued: Vec<ScrobbleEntry>,
+    ) -> Service {
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path,
+                initial_enabled: true,
+            },
+            backends(transport, MemorySessionKeys::with_key(USERNAME, "session")),
+        );
+        service.handle_command(Command::LoadStoredSession {
+            username: USERNAME.to_string(),
+        });
+        assert_eq!(service.state.auth_state, AuthState::Connected);
+        service.queue = queued;
+        service
+    }
+
+    fn scrobble_requests(transport: &ScriptedTransport) -> Vec<Vec<(String, String)>> {
+        transport
+            .requests()
+            .into_iter()
+            .filter(|form| {
+                form.iter()
+                    .any(|(key, value)| key == "method" && value == "track.scrobble")
+            })
+            .collect()
+    }
+
+    fn batch_size(form: &[(String, String)]) -> usize {
+        form.iter()
+            .filter(|(key, _)| key.starts_with("artist["))
+            .count()
+    }
+
+    fn read_queue_file(path: &Path) -> Vec<ScrobbleEntry> {
+        serde_json::from_slice(&fs::read(path).expect("read queue file")).expect("parse queue")
+    }
 
     #[test]
     fn scrobble_threshold_matches_lastfm_rule() {
@@ -727,5 +1384,469 @@ mod tests {
             normalize_album_for_submission("Music Has the Right to Children"),
             "Music Has the Right to Children"
         );
+    }
+
+    #[test]
+    fn transient_failures_keep_the_batch_and_schedule_a_retry() {
+        let cases = [
+            ("transport error", Err("connection reset".to_string())),
+            (
+                "5xx HTML page",
+                reply(503, "<html><body>Service Unavailable</body></html>"),
+            ),
+            ("5xx without body", reply(502, "")),
+            (
+                "captive portal",
+                reply(200, "<html><title>Sign in to Wi-Fi</title></html>"),
+            ),
+            ("JSON without scrobble results", reply(200, "{}")),
+            (
+                "operation failed",
+                reply(200, r#"{"error":8,"message":"Operation failed"}"#),
+            ),
+            (
+                "service offline",
+                reply(200, r#"{"error":11,"message":"Service Offline"}"#),
+            ),
+            (
+                "temporary error",
+                reply(503, r#"{"error":16,"message":"Temporary error"}"#),
+            ),
+            (
+                "rate limit",
+                reply(429, r#"{"error":29,"message":"Rate limit exceeded"}"#),
+            ),
+        ];
+        for (name, failure) in cases {
+            let transport = ScriptedTransport::with_replies([failure]);
+            let mut service = connected_service(&transport, None, entries(0..3));
+
+            service.handle_command(Command::Flush);
+
+            assert_eq!(service.queue, entries(0..3), "{name}");
+            assert!(service.retry_due.is_some(), "{name}");
+            assert_eq!(service.state.auth_state, AuthState::Connected, "{name}");
+            assert_eq!(scrobble_requests(&transport).len(), 1, "{name}");
+            let state = service.published_state();
+            assert_eq!(state.pending_scrobble_count, 3, "{name}");
+            assert!(
+                state.status_text.contains("retrying in"),
+                "{name}: {}",
+                state.status_text
+            );
+        }
+    }
+
+    #[test]
+    fn flush_stops_at_the_first_failed_batch() {
+        let dir = scratch_dir("flush-stops");
+        let queue_path = dir.join("lastfm_queue.json");
+        let transport = ScriptedTransport::with_replies([
+            accepted_reply(MAX_SCROBBLES_PER_BATCH),
+            reply(503, "<html>Bad gateway</html>"),
+        ]);
+        let mut service = connected_service(&transport, Some(queue_path.clone()), entries(0..120));
+
+        service.handle_command(Command::Flush);
+
+        let sizes = scrobble_requests(&transport)
+            .iter()
+            .map(|form| batch_size(form))
+            .collect::<Vec<_>>();
+        assert_eq!(sizes, vec![50, 50]);
+        assert_eq!(service.queue, entries(50..120));
+        assert_eq!(read_queue_file(&queue_path), entries(50..120));
+        assert!(service.retry_due.is_some());
+    }
+
+    #[test]
+    fn refused_requests_keep_the_batch_without_a_timer() {
+        for (code, message) in [(6, "Invalid parameters"), (10, "Invalid API key")] {
+            let transport = ScriptedTransport::with_replies([reply(
+                400,
+                &serde_json::json!({ "error": code, "message": message }).to_string(),
+            )]);
+            let mut service = connected_service(&transport, None, entries(0..120));
+
+            service.handle_command(Command::Flush);
+
+            assert_eq!(scrobble_requests(&transport).len(), 1, "code {code}");
+            assert_eq!(service.queue, entries(0..120), "code {code}");
+            assert!(service.retry_due.is_none(), "code {code}");
+            let status = service.published_state().status_text;
+            assert!(status.contains(message), "{status}");
+            assert!(status.contains("Scrobbles stay queued"), "{status}");
+        }
+    }
+
+    #[test]
+    fn invalid_session_keeps_the_queue_and_requires_reconnecting() {
+        let transport = ScriptedTransport::with_replies([reply(
+            403,
+            r#"{"error":9,"message":"Invalid session key"}"#,
+        )]);
+        let mut service = connected_service(&transport, None, entries(0..3));
+
+        service.handle_command(Command::Flush);
+
+        assert_eq!(service.state.auth_state, AuthState::ReauthRequired);
+        assert_eq!(service.queue, entries(0..3));
+        assert!(service.retry_due.is_none());
+    }
+
+    #[test]
+    fn flush_drops_only_accepted_and_permanently_ignored_entries() {
+        let dir = scratch_dir("flush-ignored");
+        let queue_path = dir.join("lastfm_queue.json");
+        let transport = ScriptedTransport::with_replies([scrobble_reply(&[0, 1, 5])]);
+        let mut service = connected_service(&transport, Some(queue_path.clone()), entries(0..3));
+
+        service.handle_command(Command::Flush);
+
+        // The entry deferred by the daily limit stays queued for a retry.
+        assert_eq!(service.queue, vec![entry(2)]);
+        assert_eq!(read_queue_file(&queue_path), vec![entry(2)]);
+        assert!(service.retry_due.is_some());
+        assert!(service
+            .published_state()
+            .status_text
+            .contains("daily scrobble limit"));
+    }
+
+    #[test]
+    fn permanently_ignored_entries_are_reported() {
+        let transport = ScriptedTransport::with_replies([scrobble_reply(&[0, 3])]);
+        let mut service = connected_service(&transport, None, entries(0..2));
+
+        service.handle_command(Command::Flush);
+
+        assert!(service.queue.is_empty());
+        assert!(service.retry_due.is_none());
+        assert_eq!(
+            service.published_state().status_text,
+            "Last.fm ignored 1 scrobble: Ignored for testing"
+        );
+    }
+
+    #[test]
+    fn single_scrobble_result_object_is_matched_to_its_entry() {
+        let deferred = r##"{"scrobbles":{"scrobble":{"ignoredMessage":{"code":"5","#text":""}}}}"##;
+        let transport = ScriptedTransport::with_replies([reply(200, deferred)]);
+        let mut service = connected_service(&transport, None, entries(0..1));
+
+        service.handle_command(Command::Flush);
+
+        assert_eq!(service.queue, entries(0..1));
+        assert!(service.retry_due.is_some());
+    }
+
+    #[test]
+    fn successful_flush_submits_batches_and_removes_the_queue_file() {
+        let dir = scratch_dir("flush-success");
+        let queue_path = dir.join("lastfm_queue.json");
+        let transport = ScriptedTransport::with_replies([
+            accepted_reply(50),
+            accepted_reply(50),
+            accepted_reply(20),
+        ]);
+        let mut service = connected_service(&transport, Some(queue_path.clone()), entries(0..119));
+
+        service.handle_command(Command::QueueScrobble(entry(119)));
+
+        let sizes = scrobble_requests(&transport)
+            .iter()
+            .map(|form| batch_size(form))
+            .collect::<Vec<_>>();
+        assert_eq!(sizes, vec![50, 50, 20]);
+        assert!(service.queue.is_empty());
+        assert!(!queue_path.exists());
+        assert!(service.retry_due.is_none());
+        assert_eq!(
+            service.published_state().status_text,
+            "Last.fm scrobble queue flushed."
+        );
+    }
+
+    #[test]
+    fn retry_delay_doubles_up_to_the_limit() {
+        let policy = RetryPolicy::DEFAULT;
+        assert_eq!(policy.delay(1), Duration::from_secs(30));
+        assert_eq!(policy.delay(2), Duration::from_secs(60));
+        assert_eq!(policy.delay(3), Duration::from_secs(120));
+        assert_eq!(policy.delay(7), Duration::from_secs(30 * 60));
+        assert_eq!(policy.delay(u32::MAX), Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn repeated_failures_back_off_until_a_batch_succeeds() {
+        let transport = ScriptedTransport::with_replies([
+            Err("offline".to_string()),
+            Err("offline".to_string()),
+            accepted_reply(1),
+        ]);
+        let mut service = connected_service(&transport, None, entries(0..1));
+
+        service.handle_command(Command::Flush);
+        service.handle_command(Command::Flush);
+        let due = service.retry_due.expect("retry scheduled");
+        assert_eq!(service.retry_attempt, 2);
+        assert!(due >= Instant::now() + Duration::from_secs(50));
+        assert!(service
+            .published_state()
+            .status_text
+            .contains("retrying in 60 s"));
+
+        service.handle_command(Command::Flush);
+        assert!(service.queue.is_empty());
+        assert_eq!(service.retry_attempt, 0);
+        assert!(service.retry_due.is_none());
+    }
+
+    #[test]
+    fn scheduled_retry_flushes_the_backlog_without_a_new_scrobble() {
+        let transport =
+            ScriptedTransport::with_replies([Err("offline".to_string()), accepted_reply(1)]);
+        let mut backends = backends(&transport, MemorySessionKeys::with_key(USERNAME, "key"));
+        backends.retry = RetryPolicy {
+            initial: Duration::from_millis(20),
+            max: Duration::from_millis(50),
+        };
+        let (handle, events) = spawn_with_backends(
+            ServiceOptions {
+                queue_path: None,
+                initial_enabled: true,
+            },
+            backends,
+        );
+        handle.command(Command::LoadStoredSession {
+            username: USERNAME.to_string(),
+        });
+        handle.command(Command::QueueScrobble(entry(0)));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut flushed = false;
+        while let Ok(Event::State(state)) = events.recv_deadline(deadline) {
+            if state.status_text == "Last.fm scrobble queue flushed." {
+                assert_eq!(state.pending_scrobble_count, 0);
+                flushed = true;
+                break;
+            }
+        }
+        assert!(flushed, "the retry timer did not flush the backlog");
+        assert_eq!(scrobble_requests(&transport).len(), 2);
+        assert!(handle.shutdown(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn reaching_last_fm_again_flushes_a_waiting_backlog() {
+        let transport = ScriptedTransport::with_replies([
+            Err("offline".to_string()),
+            reply(200, r#"{"nowplaying":{}}"#),
+            accepted_reply(1),
+        ]);
+        let mut service = connected_service(&transport, None, entries(0..1));
+        service.handle_command(Command::Flush);
+        assert!(service.retry_due.is_some());
+
+        service.handle_command(Command::SendNowPlaying(NowPlayingTrack {
+            artist: "Artist".to_string(),
+            track: "Track".to_string(),
+            album: String::new(),
+            track_number: None,
+            duration_seconds: Some(200),
+        }));
+
+        assert!(service.queue.is_empty());
+        assert!(service.retry_due.is_none());
+    }
+
+    #[test]
+    fn truncated_queue_file_is_moved_aside_and_preserved() {
+        let dir = scratch_dir("truncated-queue");
+        let queue_path = dir.join("lastfm_queue.json");
+        let truncated = br#"[{"artist":"Artist","track":"Track","album":"","#;
+        fs::write(&queue_path, truncated).expect("write truncated queue");
+        let disabled = || ServiceOptions {
+            queue_path: Some(queue_path.clone()),
+            initial_enabled: false,
+        };
+        let transport = ScriptedTransport::default();
+
+        let mut service = Service::new(
+            disabled(),
+            backends(&transport, MemorySessionKeys::default()),
+        );
+
+        let kept = dir.join("lastfm_queue.json.corrupt");
+        assert!(service.queue.is_empty());
+        assert_eq!(fs::read(&kept).expect("kept copy"), truncated);
+        assert!(service
+            .published_state()
+            .status_text
+            .contains("could not be read"));
+
+        service.handle_command(Command::QueueScrobble(entry(1)));
+        assert_eq!(read_queue_file(&queue_path), vec![entry(1)]);
+        assert_eq!(fs::read(&kept).expect("kept copy"), truncated);
+
+        // A second unreadable file does not replace the first copy.
+        fs::write(&queue_path, b"not json").expect("write second corrupt queue");
+        let service = Service::new(
+            disabled(),
+            backends(&transport, MemorySessionKeys::default()),
+        );
+        assert!(service.queue.is_empty());
+        assert_eq!(fs::read(&kept).expect("first copy"), truncated);
+        assert_eq!(
+            fs::read(dir.join("lastfm_queue.json.corrupt-1")).expect("second copy"),
+            b"not json"
+        );
+    }
+
+    #[test]
+    fn unreadable_queue_file_is_never_overwritten() {
+        let dir = scratch_dir("unreadable-queue");
+        // A directory in place of the file fails to read but cannot be parsed
+        // or replaced either.
+        let queue_path = dir.join("lastfm_queue.json");
+        fs::create_dir(&queue_path).expect("create directory at queue path");
+        fs::write(queue_path.join("keep.txt"), b"keep").expect("write marker");
+        let transport = ScriptedTransport::default();
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: Some(queue_path.clone()),
+                initial_enabled: false,
+            },
+            backends(&transport, MemorySessionKeys::default()),
+        );
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+
+        let state = service.published_state();
+        assert_eq!(state.pending_scrobble_count, 1);
+        assert!(
+            state.status_text.contains("could not be read"),
+            "{}",
+            state.status_text
+        );
+        assert!(queue_path.is_dir());
+        assert_eq!(
+            fs::read(queue_path.join("keep.txt")).expect("marker"),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn queue_save_failure_is_shown_and_entries_stay_queued() {
+        let dir = scratch_dir("save-failure");
+        let blocker = dir.join("not-a-directory");
+        fs::write(&blocker, b"").expect("write blocking file");
+        let transport = ScriptedTransport::default();
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: Some(blocker.join("lastfm_queue.json")),
+                initial_enabled: false,
+            },
+            backends(&transport, MemorySessionKeys::default()),
+        );
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+
+        let state = service.published_state();
+        assert_eq!(state.pending_scrobble_count, 1);
+        assert!(
+            state.status_text.contains("could not be saved"),
+            "{}",
+            state.status_text
+        );
+    }
+
+    #[test]
+    fn queue_save_replaces_the_file_without_leaving_a_temporary_file() {
+        let dir = scratch_dir("atomic-save");
+        let queue_path = dir.join("lastfm_queue.json");
+        queue_file::save(&queue_path, &entries(0..2)).expect("first save");
+        queue_file::save(&queue_path, &entries(0..3)).expect("second save");
+
+        assert_eq!(read_queue_file(&queue_path), entries(0..3));
+        let names = fs::read_dir(&dir)
+            .expect("list directory")
+            .map(|item| item.expect("entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![std::ffi::OsString::from("lastfm_queue.json")]);
+    }
+
+    #[test]
+    fn missing_keyring_entry_means_no_session_key() {
+        assert_eq!(stored_session_key(Err(keyring::Error::NoEntry)), Ok(None));
+        assert_eq!(stored_session_key(Ok("  ".to_string())), Ok(None));
+        assert_eq!(
+            stored_session_key(Ok("key".to_string())),
+            Ok(Some("key".to_string()))
+        );
+        assert!(stored_session_key(Err(keyring::Error::NoStorageAccess("locked".into()))).is_err());
+        assert_eq!(session_key_deleted(Err(keyring::Error::NoEntry)), Ok(()));
+        assert!(
+            session_key_deleted(Err(keyring::Error::NoStorageAccess("locked".into()))).is_err()
+        );
+    }
+
+    #[test]
+    fn missing_session_key_disconnects_instead_of_failing() {
+        let transport = ScriptedTransport::default();
+        let load = |keys| {
+            let mut service = Service::new(ServiceOptions::default(), backends(&transport, keys));
+            service.handle_command(Command::LoadStoredSession {
+                username: USERNAME.to_string(),
+            });
+            service.state
+        };
+
+        let missing = load(MemorySessionKeys::default());
+        assert_eq!(missing.auth_state, AuthState::Disconnected);
+        assert_eq!(missing.username, USERNAME);
+
+        let failing = load(MemorySessionKeys::failing("keyring locked"));
+        assert_eq!(failing.auth_state, AuthState::Error);
+        assert!(failing.status_text.contains("keyring locked"));
+    }
+
+    #[test]
+    fn shutdown_saves_pending_scrobbles_without_network_requests() {
+        let dir = scratch_dir("shutdown");
+        let queue_path = dir.join("lastfm_queue.json");
+        let transport = ScriptedTransport::with_replies([accepted_reply(1)]);
+        let service = Service::new(
+            ServiceOptions {
+                queue_path: Some(queue_path.clone()),
+                initial_enabled: true,
+            },
+            backends(&transport, MemorySessionKeys::with_key(USERNAME, "key")),
+        );
+        let (cmd_tx, cmd_rx) = unbounded();
+        let (event_tx, _event_rx) = unbounded();
+        let (done_tx, done_rx) = bounded(1);
+        for command in [
+            Command::LoadStoredSession {
+                username: USERNAME.to_string(),
+            },
+            Command::QueueScrobble(entry(0)),
+            Command::Shutdown(done_tx),
+        ] {
+            cmd_tx.send(command).expect("queue command");
+        }
+
+        run_service_loop(&cmd_rx, &event_tx, service);
+
+        assert!(done_rx.try_recv().is_ok());
+        assert!(transport.requests().is_empty());
+        assert_eq!(read_queue_file(&queue_path), vec![entry(0)]);
+    }
+
+    #[test]
+    fn shutdown_reports_a_service_that_is_gone() {
+        let (handle, commands) = test_support::command_handle();
+        drop(commands);
+        assert!(!handle.shutdown(Duration::from_millis(10)));
     }
 }
