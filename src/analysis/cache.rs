@@ -38,7 +38,7 @@ fn usize_to_i64(value: usize) -> i64 {
 }
 
 pub(super) fn open_waveform_cache_db() -> anyhow::Result<Connection> {
-    let db_path = waveform_db_path()?;
+    let db_path = crate::paths::library_db_path()?;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -46,21 +46,6 @@ pub(super) fn open_waveform_cache_db() -> anyhow::Result<Connection> {
     let _ = conn.busy_timeout(Duration::from_millis(250));
     init_waveform_cache_schema(&conn)?;
     Ok(conn)
-}
-
-fn waveform_db_path() -> anyhow::Result<PathBuf> {
-    if let Some(xdg_home) = std::env::var_os("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(xdg_home)
-            .join("ferrous")
-            .join("library.sqlite3"));
-    }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| anyhow::anyhow!("HOME is not set and XDG_DATA_HOME is missing"))?;
-    Ok(PathBuf::from(home)
-        .join(".local")
-        .join("share")
-        .join("ferrous")
-        .join("library.sqlite3"))
 }
 
 fn init_waveform_cache_schema(conn: &Connection) -> anyhow::Result<()> {

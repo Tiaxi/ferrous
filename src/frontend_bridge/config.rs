@@ -23,27 +23,7 @@ pub(super) struct SessionSnapshot {
 }
 
 pub(super) fn config_base_path() -> Option<PathBuf> {
-    #[cfg(test)]
-    {
-        static TEST_CONFIG_BASE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        let path = TEST_CONFIG_BASE.get_or_init(|| {
-            let mut base = std::env::temp_dir();
-            base.push(format!("ferrous-test-config-{}", std::process::id()));
-            let _ = fs::create_dir_all(&base);
-            base
-        });
-        return Some(path.clone());
-    }
-
-    #[cfg(not(test))]
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|h| h.join(".config"))
-        })
-        .map(|base| base.join("ferrous"))
+    crate::paths::config_dir()
 }
 
 pub(super) fn settings_path() -> Option<PathBuf> {

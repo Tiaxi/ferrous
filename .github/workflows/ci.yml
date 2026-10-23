@@ -45,6 +45,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-features -- -D clippy::pedantic
 
+      - name: Isolate test user directories
+        run: |
+          mkdir -p "$RUNNER_TEMP/xdg/config" "$RUNNER_TEMP/xdg/data" "$RUNNER_TEMP/xdg/cache"
+          {
+            echo "XDG_CONFIG_HOME=$RUNNER_TEMP/xdg/config"
+            echo "XDG_DATA_HOME=$RUNNER_TEMP/xdg/data"
+            echo "XDG_CACHE_HOME=$RUNNER_TEMP/xdg/cache"
+          } >> "$GITHUB_ENV"
+
       - name: Test (GStreamer backend)
         run: cargo test --features gst
 
@@ -94,6 +103,15 @@ jobs:
 
       - name: Build UI
         run: cmake --build ui/build -j2
+
+      - name: Isolate test user directories
+        run: |
+          mkdir -p "$RUNNER_TEMP/xdg/config" "$RUNNER_TEMP/xdg/data" "$RUNNER_TEMP/xdg/cache"
+          {
+            echo "XDG_CONFIG_HOME=$RUNNER_TEMP/xdg/config"
+            echo "XDG_DATA_HOME=$RUNNER_TEMP/xdg/data"
+            echo "XDG_CACHE_HOME=$RUNNER_TEMP/xdg/cache"
+          } >> "$GITHUB_ENV"
 
       - name: Run UI smoke tests
         run: ctest --test-dir ui/build --output-on-failure -V

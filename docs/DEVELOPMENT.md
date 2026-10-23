@@ -32,7 +32,7 @@ Use the repository script for validation:
 | UI/QML only | `./scripts/run-tests.sh --ui-only` |
 | Both stacks, build configuration, or uncertain scope | `./scripts/run-tests.sh` |
 
-The Rust path runs formatting, `cargo check`, strict Clippy (`-D clippy::pedantic`), tests, and cargo-audit, in that order. The default feature set is `gst`. The UI path configures and builds with CMake, then runs all registered Qt tests through CTest with offscreen rendering where configured. UI builds also rebuild the Rust static library. The script configures profiling logs off.
+The Rust path runs formatting, `cargo check`, strict Clippy (`-D clippy::pedantic`), tests, and cargo-audit, in that order. The default feature set is `gst`. The UI path configures and builds with CMake, then runs all registered Qt tests through CTest with offscreen rendering where configured. UI builds also rebuild the Rust static library. The script configures profiling logs off. Tests run with temporary `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME` directories that the script removes afterwards; Rust unit tests also resolve the XDG directories under a per-process temporary root regardless of the environment.
 
 Keep Clippy and audit enabled. Fix failures and new warnings; report checks that could not run. For documentation-only changes, verify commands and claims against the source, check relative links, and run `git diff --check`.
 
