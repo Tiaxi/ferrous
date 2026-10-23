@@ -111,6 +111,20 @@ if ! command -v cargo >/dev/null 2>&1; then
     fi
 fi
 
+# Tests run against throwaway user and temporary directories so they never
+# touch real settings, library, or cache data and leave nothing behind.
+TEST_STATE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ferrous-test.XXXXXX")"
+trap 'rm -rf "${TEST_STATE_ROOT}"' EXIT
+mkdir -p "${TEST_STATE_ROOT}/tmp"
+
+with_test_user_dirs() {
+    TMPDIR="${TEST_STATE_ROOT}/tmp" \
+        XDG_CONFIG_HOME="${TEST_STATE_ROOT}/config" \
+        XDG_DATA_HOME="${TEST_STATE_ROOT}/data" \
+        XDG_CACHE_HOME="${TEST_STATE_ROOT}/cache" \
+        "$@"
+}
+
 if [[ ${RUN_RUST} -eq 1 ]]; then
     cargo fmt --check
     cargo check --features "${RUST_FEATURES}"
@@ -129,11 +143,11 @@ if [[ ${RUN_RUST} -eq 1 ]]; then
             echo "FERROUS_COVERAGE_MIN must be a number (got '${COVERAGE_MIN}')." >&2
             exit 1
         fi
-        cargo llvm-cov --features "${RUST_FEATURES}" \
+        with_test_user_dirs cargo llvm-cov --features "${RUST_FEATURES}" \
             --workspace --all-targets --summary-only \
             --fail-under-lines "${COVERAGE_MIN}"
     else
-        cargo test --features "${RUST_FEATURES}"
+        with_test_user_dirs cargo test --features "${RUST_FEATURES}"
     fi
     if [[ ${RUN_AUDIT} -eq 1 ]]; then
         if ! grep -qE '^[[:space:]]+audit([[:space:]]|$)' <<<"$(cargo --list)"; then
@@ -153,5 +167,5 @@ if [[ ${RUN_UI} -eq 1 ]]; then
     if [[ ${DO_BUILD} -eq 1 ]]; then
         cmake --build "${BUILD_DIR}"
     fi
-    ctest --test-dir "${BUILD_DIR}" --output-on-failure -V
+    with_test_user_dirs ctest --test-dir "${BUILD_DIR}" --output-on-failure -V
 fi

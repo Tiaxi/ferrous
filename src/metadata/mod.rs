@@ -757,10 +757,7 @@ fn load_folder_cover_art(track_path: &Path) -> Option<(usize, usize, Vec<u8>)> {
 }
 
 fn cover_cache_dir() -> Option<PathBuf> {
-    let cache_base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))?;
-    Some(cache_base.join("ferrous").join("embedded_covers"))
+    crate::paths::cache_dir().map(|dir| dir.join("embedded_covers"))
 }
 
 pub(crate) fn cached_embedded_cover_path(track_path: &Path) -> Option<String> {
