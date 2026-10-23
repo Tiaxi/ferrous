@@ -841,7 +841,7 @@ pub(super) fn pump_external_queue_detail_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lastfm::{self, Command as LastFmCommand, ServiceOptions as LastFmServiceOptions};
+    use crate::lastfm::{self, ServiceOptions as LastFmServiceOptions};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -1162,7 +1162,7 @@ mod tests {
         assert_eq!(queued[0].artist, "Artist");
         assert_eq!(queued[0].track, "Track");
 
-        lastfm_handle.command(LastFmCommand::Shutdown);
+        assert!(lastfm_handle.shutdown(Duration::from_secs(1)));
     }
 
     #[test]
@@ -1206,7 +1206,7 @@ mod tests {
         assert!(wait_for_scrobble_queue(&queue_path, Duration::from_millis(150)).is_none());
         assert!(!queue_path.exists());
 
-        lastfm_handle.command(LastFmCommand::Shutdown);
+        assert!(lastfm_handle.shutdown(Duration::from_secs(1)));
     }
 
     #[test]
@@ -1255,6 +1255,6 @@ mod tests {
         assert_eq!(queued[0].track, "Web Loops");
         assert!(queued[0].album.is_empty());
 
-        lastfm_handle.command(LastFmCommand::Shutdown);
+        assert!(lastfm_handle.shutdown(Duration::from_secs(1)));
     }
 }

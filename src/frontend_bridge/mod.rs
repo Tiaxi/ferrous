@@ -699,6 +699,9 @@ impl FrontendBridgeHandle {
     }
 }
 
+/// How long shutdown waits for the Last.fm service to save its queue.
+const LASTFM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
 struct BridgeLoopRuntime {
     imports: imports::ImportWorker,
     tree_worker: tree_worker::TreeWorker,
@@ -1545,7 +1548,12 @@ impl BridgeLoopRuntime {
             save_settings(&self.state.settings);
             save_session_snapshot(&session_snapshot_for_state(&self.state));
         }
-        self.lastfm.command(LastFmCommand::Shutdown);
+        if !self.lastfm.shutdown(LASTFM_SHUTDOWN_TIMEOUT) {
+            eprintln!(
+                "Last.fm: the service did not confirm shutdown; the latest scrobble may not \
+                 have been saved"
+            );
+        }
         let _ = try_send_event(event_tx, BridgeEvent::Stopped);
     }
 }

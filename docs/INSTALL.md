@@ -84,6 +84,7 @@ See [supported formats](../README.md#supported-formats). Playback codec support 
 | Library database and waveform cache | `$XDG_DATA_HOME/ferrous/library.sqlite3` |
 | Diagnostics log | `$XDG_DATA_HOME/ferrous/diagnostics.log` |
 | Settings | `$XDG_CONFIG_HOME/ferrous/settings.txt` |
+| Pending Last.fm scrobbles | `$XDG_CONFIG_HOME/ferrous/lastfm_queue.json`; an unreadable file is kept as `lastfm_queue.json.corrupt` |
 | Session restore | `$XDG_CONFIG_HOME/ferrous/session.json` |
 | Embedded cover art | `$XDG_CACHE_HOME/ferrous/embedded_covers` |
 
