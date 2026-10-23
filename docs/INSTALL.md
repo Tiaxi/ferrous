@@ -4,14 +4,10 @@ Ferrous is a Linux desktop app built with Qt6/Kirigami and an in-process Rust li
 
 ## Prebuilt packages
 
-Check [GitHub Releases](https://github.com/Tiaxi/ferrous/releases) for RPM and deb assets. Choose a package built for your distribution version and architecture:
+Check [GitHub Releases](https://github.com/Tiaxi/ferrous/releases) for Fedora RPM assets. Choose a package built for your Fedora version and architecture:
 
 ```bash
-# Fedora
 sudo dnf install ./ferrous-*.rpm
-
-# Ubuntu/Debian
-sudo apt install ./ferrous_*.deb
 ```
 
 ## Build dependencies
@@ -36,8 +32,6 @@ sudo dnf install git rust cargo zsh cmake ninja-build gcc-c++ \
   gstreamer1-plugins-base-devel qt6-qtbase-devel \
   qt6-qtdeclarative-devel qt6-qtquickcontrols2-devel kf6-kirigami-devel
 ```
-
-For Debian/Ubuntu package names, see [build dependencies](../packaging/debian/control) and the [release workflow](../.github/workflows/release.yml). Rust must also be installed. Older distributions may not provide the required Qt/Kirigami versions.
 
 ## Run from source
 
@@ -78,15 +72,6 @@ On Fedora, install the build dependencies above plus `rpm-build` and `desktop-fi
 ```
 
 The helper packages the current working tree, runs package checks, and writes RPMs under `dist/rpm/RPMS/`.
-
-On Debian/Ubuntu, install `dpkg-dev`, `debhelper`, Rust, and the dependencies listed in [packaging/debian/control](../packaging/debian/control), then:
-
-```bash
-cp -r packaging/debian .
-dpkg-buildpackage -us -uc -b
-```
-
-The deb is written to the parent directory. This manual packaging path also requires build credentials to be exported if Last.fm support is wanted.
 
 ## Formats
 

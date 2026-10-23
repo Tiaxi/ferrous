@@ -139,4 +139,4 @@ Other useful runtime controls:
 
 ## Packaging
 
-See [local package builds](INSTALL.md#local-package-builds) for RPM and deb instructions. `./scripts/install-rpm.sh` installs the newest local RPM without rebuilding it.
+See [local package builds](INSTALL.md#local-package-builds) for RPM instructions. `./scripts/install-rpm.sh` installs the newest local RPM without rebuilding it.
