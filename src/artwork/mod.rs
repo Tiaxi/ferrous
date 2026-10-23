@@ -8,14 +8,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView, ImageFormat};
-use lofty::config::WriteOptions;
-use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::file::TaggedFileExt;
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::Accessor;
 use lofty::tag::Tag;
 use url::Url;
 
 use crate::raw_audio::{is_raw_surround_file, read_appended_apev2_text_metadata};
+use crate::tag_write::save_tag;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItunesAlbumArtworkUrls {
@@ -234,6 +234,7 @@ fn rewrite_embedded_artwork(
 fn rewrite_embedded_artwork_for_file(path: &Path, artwork: &NormalizedArtwork) -> Result<()> {
     let mut tagged = lofty::read_from_path(path)
         .with_context(|| format!("failed to read tags from {}", path.to_string_lossy()))?;
+    let file_type = tagged.file_type();
     if tagged.primary_tag_mut().is_none() {
         tagged.insert_tag(Tag::new(tagged.primary_tag_type()));
     }
@@ -255,14 +256,7 @@ fn rewrite_embedded_artwork_for_file(path: &Path, artwork: &NormalizedArtwork) -
             .pic_type(PictureType::CoverFront)
             .build(),
     );
-    tagged
-        .save_to_path(path, WriteOptions::default())
-        .with_context(|| {
-            format!(
-                "failed to save updated artwork to {}",
-                path.to_string_lossy()
-            )
-        })
+    save_tag(path, file_type, tag).map_err(|err| anyhow!("failed to update artwork: {err}"))
 }
 
 fn sibling_supported_audio_files(track_path: &Path) -> Result<Vec<PathBuf>> {
@@ -450,5 +444,59 @@ mod tests {
 
         assert!(!sidecar_path.exists());
         assert!(dir.join("cover.png").exists());
+    }
+
+    #[test]
+    fn embedded_artwork_write_keeps_other_tag_data() {
+        use crate::tag_write::{write_test_flac, write_test_mp3_with_id3v23};
+        use lofty::config::ParseOptions;
+        use lofty::file::AudioFile;
+        use lofty::ogg::OggPictureStorage;
+        use lofty::tag::{ItemKey, TagType};
+
+        let dir = test_dir("embedded-keeps-tags");
+        let flac = dir.join("01.flac");
+        write_test_flac(
+            &flac,
+            &[
+                ("ARTIST", "A"),
+                ("ARTIST", "B"),
+                ("ALBUM", "Album"),
+                ("CUSTOM", "kept"),
+            ],
+        );
+        let mp3 = dir.join("02.mp3");
+        write_test_mp3_with_id3v23(&mp3);
+        let png = ImageBuffer::from_pixel(4, 4, Rgb([0, 0, 255]));
+        let mut cursor = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(png)
+            .write_to(&mut cursor, ImageFormat::Png)
+            .expect("encode png");
+        let artwork = normalize_artwork_bytes(&cursor.into_inner()).expect("normalize");
+
+        rewrite_embedded_artwork_for_file(&flac, &artwork).expect("write FLAC artwork");
+        rewrite_embedded_artwork_for_file(&mp3, &artwork).expect("write MP3 artwork");
+
+        let mut file = fs::File::open(&flac).expect("open FLAC");
+        let parsed =
+            lofty::flac::FlacFile::read_from(&mut file, ParseOptions::new()).expect("read FLAC");
+        assert_eq!(parsed.pictures().len(), 1);
+        let comments = parsed.vorbis_comments().expect("Vorbis comments");
+        assert_eq!(comments.get_all("ARTIST").collect::<Vec<_>>(), ["A", "B"]);
+        assert_eq!(comments.get("CUSTOM"), Some("kept"));
+
+        assert_eq!(&fs::read(&mp3).expect("read MP3")[..4], b"ID3\x03");
+        let tagged = lofty::read_from_path(&mp3).expect("read MP3 tags");
+        let tag = tagged.tag(TagType::Id3v2).expect("ID3v2 tag");
+        assert_eq!(tag.pictures().len(), 1);
+        assert_eq!(tag.get_string(ItemKey::RecordingDate), Some("1997-05-12"));
+
+        let mut entries = fs::read_dir(&dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries, ["01.flac", "02.mp3"]);
+        fs::remove_dir_all(dir).expect("remove test dir");
     }
 }
