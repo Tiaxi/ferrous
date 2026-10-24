@@ -109,12 +109,33 @@ struct Mapping {
     pictures: bool,
 }
 
+/// Numbers and their totals, which MP4 and APE tags store together in one
+/// item, such as a `trkn` atom or a `Track` item of `3/12`.
+const NUMBER_PAIRS: [(ItemKey, ItemKey); 2] = [
+    (ItemKey::TrackNumber, ItemKey::TrackTotal),
+    (ItemKey::DiscNumber, ItemKey::DiscTotal),
+];
+
 impl Mapping {
     /// The mapping of a native tag holding a single item, given as the
     /// generic tag lofty converts it to.
+    ///
+    /// The generic tag shows no key for an empty half of a number pair, but
+    /// the item holds its place: a new total replaces the item, so it has to
+    /// be rewritten with the number.
     fn of(tag: &Tag) -> Self {
+        let mut keys = tag.items().map(TagItem::key).collect::<Vec<_>>();
+        for (number, total) in NUMBER_PAIRS {
+            let has_number = keys.contains(&number);
+            let has_total = keys.contains(&total);
+            if has_number && !has_total {
+                keys.push(total);
+            } else if has_total && !has_number {
+                keys.push(number);
+            }
+        }
         Self {
-            keys: tag.items().map(TagItem::key).collect(),
+            keys,
             pictures: !tag.pictures().is_empty(),
         }
     }
@@ -128,7 +149,8 @@ impl Mapping {
 /// shows less than the file holds, so the file's own items for them are
 /// kept byte for byte. Items for the changed keys are rewritten from the
 /// edited tag. An item that holds several keys, such as an MP4 track number
-/// and total, is rewritten whole when any of them changed.
+/// and total, is rewritten whole when any of them changed, even one it holds
+/// no value for; see [`Mapping::of`].
 #[derive(Debug)]
 struct Changes {
     keys: HashSet<ItemKey>,
@@ -767,7 +789,7 @@ mod tests {
     use super::*;
     use crate::vorbis_comment_scan::fixtures;
     use lofty::file::TaggedFileExt;
-    use lofty::mp4::{AtomIdent, Mp4File};
+    use lofty::mp4::{AtomIdent, DataType, Mp4File};
     use lofty::ogg::OpusFile;
     use lofty::picture::{MimeType, Picture, PictureType};
     use lofty::prelude::Accessor;
@@ -1063,5 +1085,260 @@ mod tests {
             [("TITLE", "Title"), ("ENCODER", "Encoder X")]
         );
         assert_eq!(Tag::from(merged).title().as_deref(), Some("Title"));
+    }
+
+    /// The formats a number pair is saved through: the native MP4 and APE
+    /// edits, which store a number and its total in one item, the Vorbis
+    /// edit, which stores them apart, and lofty's `ID3v2` writer.
+    #[derive(Clone, Copy, Debug)]
+    enum PairFormat {
+        Mp4,
+        Ape,
+        Vorbis,
+        Id3v23,
+        Id3v24,
+    }
+
+    impl PairFormat {
+        const ALL: [Self; 5] = [
+            Self::Mp4,
+            Self::Ape,
+            Self::Vorbis,
+            Self::Id3v23,
+            Self::Id3v24,
+        ];
+
+        /// Write a file titled `Old` that holds the given halves of `pair`.
+        fn write(
+            self,
+            dir: &Path,
+            (number_key, total_key): (ItemKey, ItemKey),
+            (number, total): (Option<&str>, Option<&str>),
+        ) -> PathBuf {
+            let tag_type = match self {
+                Self::Mp4 => TagType::Mp4Ilst,
+                Self::Ape => TagType::Ape,
+                Self::Vorbis => TagType::VorbisComments,
+                Self::Id3v23 | Self::Id3v24 => TagType::Id3v2,
+            };
+            let mut tag = Tag::new(tag_type);
+            tag.insert_text(ItemKey::TrackTitle, "Old".to_string());
+            for (key, value) in [(number_key, number), (total_key, total)] {
+                if let Some(value) = value {
+                    tag.insert_text(key, value.to_string());
+                }
+            }
+            let extension = match self {
+                Self::Mp4 => "m4a",
+                Self::Ape => "wv",
+                Self::Vorbis => "flac",
+                Self::Id3v23 | Self::Id3v24 => "mp3",
+            };
+            let path = dir.join(format!("{self:?}.{extension}"));
+            match self {
+                Self::Mp4 => write_test_mp4(&path, &tag.into()),
+                Self::Ape => write_test_wavpack(&path, &tag.into()),
+                Self::Vorbis => {
+                    let comments = VorbisComments::from(tag);
+                    write_test_flac(&path, &comments.items().collect::<Vec<_>>());
+                }
+                Self::Id3v23 | Self::Id3v24 => {
+                    std::fs::write(&path, TEST_MP3).expect("write MP3 fixture");
+                    let options = WriteOptions::new().use_id3v23(matches!(self, Self::Id3v23));
+                    tag.save_to_path(&path, options).expect("write ID3v2 tag");
+                }
+            }
+            path
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Half {
+        Keep,
+        Set(&'static str),
+        Clear,
+    }
+
+    type Pair = (Option<&'static str>, Option<&'static str>);
+
+    /// The pair before the edit, the edits of the number and the total, and
+    /// the pair after it.
+    const PAIR_EDITS: [(Pair, Half, Half, Pair); 7] = [
+        // Only the total changes.
+        (
+            (Some("3"), Some("12")),
+            Half::Keep,
+            Half::Set("14"),
+            (Some("3"), Some("14")),
+        ),
+        // Only the number changes.
+        (
+            (Some("3"), Some("12")),
+            Half::Set("4"),
+            Half::Keep,
+            (Some("4"), Some("12")),
+        ),
+        // One half is cleared.
+        (
+            (Some("3"), Some("12")),
+            Half::Clear,
+            Half::Keep,
+            (None, Some("12")),
+        ),
+        (
+            (Some("3"), Some("12")),
+            Half::Keep,
+            Half::Clear,
+            (Some("3"), None),
+        ),
+        // A missing half is added.
+        (
+            (Some("3"), None),
+            Half::Keep,
+            Half::Set("12"),
+            (Some("3"), Some("12")),
+        ),
+        (
+            (None, Some("12")),
+            Half::Set("4"),
+            Half::Keep,
+            (Some("4"), Some("12")),
+        ),
+        // Both halves change.
+        (
+            (Some("3"), Some("12")),
+            Half::Set("4"),
+            Half::Set("14"),
+            (Some("4"), Some("14")),
+        ),
+    ];
+
+    /// The halves of `pair` the generic tag read from `path` shows. lofty
+    /// writes a missing number as `0` in APE and `ID3v2` pairs.
+    fn read_pair(
+        path: &Path,
+        (number_key, total_key): (ItemKey, ItemKey),
+    ) -> (Option<String>, Option<String>) {
+        let tagged = lofty::read_from_path(path).expect("read tags");
+        let tag = tagged.primary_tag().expect("primary tag");
+        let half = |key| {
+            tag.get_string(key)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "0")
+                .map(str::to_string)
+        };
+        (half(number_key), half(total_key))
+    }
+
+    fn owned((number, total): Pair) -> (Option<String>, Option<String>) {
+        (number.map(str::to_string), total.map(str::to_string))
+    }
+
+    #[test]
+    fn number_pair_edits_keep_the_other_half() {
+        let dir = test_dir("number-pairs");
+        for format in PairFormat::ALL {
+            for pair in NUMBER_PAIRS {
+                for (before, number, total, after) in PAIR_EDITS {
+                    let path = format.write(&dir, pair, before);
+                    assert_eq!(read_pair(&path, pair), owned(before), "{format:?} {pair:?}");
+                    let tagged = lofty::read_from_path(&path).expect("read tags");
+                    let mut tag = tagged.primary_tag().cloned().expect("primary tag");
+                    for (key, half) in [(pair.0, number), (pair.1, total)] {
+                        match half {
+                            Half::Keep => {}
+                            Half::Set(value) => {
+                                tag.insert_text(key, value.to_string());
+                            }
+                            Half::Clear => tag.remove_key(key),
+                        }
+                    }
+
+                    save_tag(&path, tagged.file_type(), &tag).expect("save tags");
+
+                    assert_eq!(
+                        read_pair(&path, pair),
+                        owned(after),
+                        "{format:?} {pair:?}: {before:?} edited by {number:?} and {total:?}"
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn unrelated_edits_keep_mp4_number_pairs_byte_for_byte() {
+        let dir = test_dir("mp4-pairs-kept");
+        let path = dir.join("song.m4a");
+        // iTunes writes six bytes for `disk`; lofty writes eight, so a
+        // rewritten atom would differ.
+        let pairs = [
+            (*b"trkn", vec![0, 0, 0, 3, 0, 12, 0, 0]),
+            (*b"disk", vec![0, 0, 0, 1, 0, 2]),
+        ]
+        .map(|(ident, data)| {
+            Atom::new(
+                AtomIdent::Fourcc(ident),
+                AtomData::Unknown {
+                    code: DataType::Reserved,
+                    data,
+                },
+            )
+        });
+        let mut ilst = Ilst::new();
+        for atom in &pairs {
+            ilst.insert(atom.clone());
+        }
+        write_test_mp4(&path, &ilst);
+        let read_ilst = || {
+            let mut file = File::open(&path).expect("open MP4");
+            Mp4File::read_from(&mut file, ParseOptions::new())
+                .expect("parse MP4")
+                .ilst()
+                .cloned()
+                .expect("ilst")
+        };
+        for atom in &pairs {
+            assert_eq!(read_ilst().get(atom.ident()), Some(atom));
+        }
+
+        save_title(&path, "New").expect("title save");
+
+        let after = read_ilst();
+        for atom in &pairs {
+            assert_eq!(after.get(atom.ident()), Some(atom));
+        }
+        assert_eq!(Tag::from(after).title().as_deref(), Some("New"));
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn unrelated_edits_keep_ape_number_pairs_byte_for_byte() {
+        let dir = test_dir("ape-pairs-kept");
+        let path = dir.join("song.wv");
+        // lofty writes numbers without leading zeros, so a rewritten item
+        // would differ.
+        let mut track =
+            ApeItem::new("Track".into(), ItemValue::Text("03/12".into())).expect("track");
+        track.read_only = true;
+        let disc = ApeItem::new("Disc".into(), ItemValue::Text("01/2".into())).expect("disc");
+        let mut tag = ApeTag::new();
+        tag.insert(track.clone());
+        tag.insert(disc.clone());
+        write_test_wavpack(&path, &tag);
+
+        save_title(&path, "New").expect("title save");
+
+        let mut file = File::open(&path).expect("open WavPack");
+        let after = WavPackFile::read_from(&mut file, ParseOptions::new())
+            .expect("parse WavPack")
+            .ape()
+            .cloned()
+            .expect("APE tag");
+        assert_eq!(after.get("Track"), Some(&track));
+        assert_eq!(after.get("Disc"), Some(&disc));
+        assert_eq!(Tag::from(after).title().as_deref(), Some("New"));
+        std::fs::remove_dir_all(dir).expect("remove test dir");
     }
 }
