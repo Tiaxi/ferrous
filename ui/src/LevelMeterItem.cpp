@@ -2,6 +2,7 @@
 
 #include "LevelMeterItem.h"
 #include "FerrousBridgeFfi.h"
+#include "PlaybackClock.h"
 
 #include <QFutureWatcher>
 #include <QImage>
@@ -73,6 +74,7 @@ LevelMeterItem::~LevelMeterItem() {
     disconnect(this, nullptr, this, nullptr);
     disconnect(m_frameConnection);
     disconnect(m_visibilityConnection);
+    disconnect(m_clockConnection);
 }
 
 void LevelMeterItem::cancelRequest() {
@@ -85,8 +87,8 @@ void LevelMeterItem::reset() {
     m_window = {};
     m_stagedWindow = {};
     m_channels.assign(static_cast<std::size_t>(m_channelCountHint), {});
-    m_readPosition = m_positionSeconds;
     m_frameAt = Clock::now();
+    m_readPosition = currentPosition(m_frameAt);
     m_retryAt = {};
     scheduleTick();
     update();
@@ -99,25 +101,28 @@ void LevelMeterItem::setSourcePath(const QString &value) {
     emit sourcePathChanged();
 }
 
-void LevelMeterItem::setPositionSeconds(double value) {
-    if (!std::isfinite(value)) return;
-    value = std::max(0.0, value);
-    if (m_positionSeconds == value) return;
-    const auto now = Clock::now();
-    const bool discontinuity = std::abs(value - currentPosition(now)) > 0.25;
-    m_positionSeconds = value;
-    m_positionAt = now;
-    if (discontinuity) reset();
-    emit positionSecondsChanged();
-    scheduleTick();
+void LevelMeterItem::setClock(PlaybackClock *value) {
+    if (m_clock == value) return;
+    disconnect(m_clockConnection);
+    m_clock = value;
+    if (m_clock) {
+        m_clockEpoch = m_clock->state().epoch;
+        m_clockConnection = connect(m_clock, &PlaybackClock::stateChanged,
+                                    this, &LevelMeterItem::clockStateChanged);
+    }
+    reset();
+    emit clockChanged();
 }
 
-void LevelMeterItem::resetForSeek(double seconds) {
-    if (!std::isfinite(seconds)) return;
-    m_positionSeconds = std::max(0.0, seconds);
-    m_positionAt = Clock::now();
-    reset();
-    emit positionSecondsChanged();
+void LevelMeterItem::clockStateChanged() {
+    const quint64 epoch = m_clock ? m_clock->state().epoch : 0;
+    if (epoch != m_clockEpoch) {
+        // Playback jumped: the levels from before belong elsewhere.
+        m_clockEpoch = epoch;
+        reset();
+        return;
+    }
+    scheduleTick();
 }
 
 void LevelMeterItem::setDurationSeconds(double value) {
@@ -132,8 +137,7 @@ void LevelMeterItem::setDurationSeconds(double value) {
 void LevelMeterItem::setPlaying(bool value) {
     if (m_playing == value) return;
     m_playing = value;
-    m_positionAt = Clock::now();
-    m_frameAt = m_positionAt;
+    m_frameAt = Clock::now();
     if (!value) cancelRequest();
     emit playingChanged();
     scheduleTick();
@@ -181,11 +185,8 @@ void LevelMeterItem::scheduleTick() {
 }
 
 double LevelMeterItem::currentPosition(Clock::time_point now) const {
-    // Fill the gaps between transport updates, stopping extrapolation if they stall.
-    const double elapsed = m_playing
-        ? std::clamp(std::chrono::duration<double>(now - m_positionAt).count(), 0.0, 0.25)
-        : 0.0;
-    const double position = m_positionSeconds + elapsed;
+    if (!m_clock) return 0.0;
+    const double position = m_clock->positionAt(monotonicNs(now));
     return m_durationSeconds > 0.0 ? std::min(position, m_durationSeconds) : position;
 }
 

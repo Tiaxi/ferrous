@@ -10,7 +10,8 @@ Item {
     id: root
 
     required property var uiBridge
-    property double positionSeconds: 0
+    // Where playback is; see PlaybackClock.
+    property var clock: null
     property var seekCommitted: null
 
     property bool viewerMode: false
@@ -231,7 +232,7 @@ Item {
                     logScale: root.uiBridge.logScale
                     showFpsOverlay: index === 0 ? (root.uiBridge.showFps || spectrogramPaneItem.forceFpsOverlay) : false
                     sampleRateHz: root.uiBridge.sampleRateHz
-                    positionSeconds: root.positionSeconds
+                    clock: root.clock
                     playing: (root.uiBridge.playbackState || "") === "Playing"
                     displayMode: root.uiBridge.spectrogramDisplayMode
                     crosshairEnabled: root.uiBridge.showSpectrogramCrosshair

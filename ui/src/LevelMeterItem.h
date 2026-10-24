@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <QPointer>
 #include <QQuickItem>
 #include <atomic>
 #include <chrono>
@@ -9,10 +10,13 @@
 #include <memory>
 #include <vector>
 
+#include "PlaybackClock.h"
+
 class LevelMeterItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(QString sourcePath READ sourcePath WRITE setSourcePath NOTIFY sourcePathChanged)
-    Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
+    // Where playback is; the meter shows the levels at its position.
+    Q_PROPERTY(PlaybackClock *clock READ clock WRITE setClock NOTIFY clockChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
     Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged)
     Q_PROPERTY(int channelCountHint READ channelCountHint WRITE setChannelCountHint NOTIFY channelCountHintChanged)
@@ -22,20 +26,19 @@ public:
     ~LevelMeterItem() override;
 
     QString sourcePath() const { return m_sourcePath; }
-    double positionSeconds() const { return m_positionSeconds; }
+    PlaybackClock *clock() const { return m_clock; }
     double durationSeconds() const { return m_durationSeconds; }
     bool playing() const { return m_playing; }
     int channelCountHint() const { return m_channelCountHint; }
     void setSourcePath(const QString &value);
-    void setPositionSeconds(double value);
+    void setClock(PlaybackClock *value);
     void setDurationSeconds(double value);
     void setPlaying(bool value);
     void setChannelCountHint(int value);
-    Q_INVOKABLE void resetForSeek(double seconds);
 
 signals:
     void sourcePathChanged();
-    void positionSecondsChanged();
+    void clockChanged();
     void durationSecondsChanged();
     void playingChanged();
     void channelCountHintChanged();
@@ -74,13 +77,15 @@ private:
     void requestWindow(double position);
     void advance(double position, double elapsed);
     double currentPosition(Clock::time_point now) const;
+    void clockStateChanged();
 
     QString m_sourcePath;
-    double m_positionSeconds{0.0};
+    QPointer<PlaybackClock> m_clock;
+    // The clock's epoch the meter last followed; a new one is a jump.
+    quint64 m_clockEpoch{0};
     double m_durationSeconds{0.0};
     bool m_playing{false};
     int m_channelCountHint{2};
-    Clock::time_point m_positionAt{Clock::now()};
     Clock::time_point m_frameAt{Clock::now()};
     Clock::time_point m_retryAt{};
     double m_readPosition{0.0};
@@ -93,5 +98,6 @@ private:
     Cancellation m_cancelled;
     QMetaObject::Connection m_frameConnection;
     QMetaObject::Connection m_visibilityConnection;
+    QMetaObject::Connection m_clockConnection;
     std::function<Window(const QString &, double, double, const Cancellation &)> m_decodeWindow{decodeWindow};
 };

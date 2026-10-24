@@ -284,6 +284,8 @@ int main(int argc, char *argv[]) {
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
+    qmlRegisterUncreatableType<PlaybackClock>(
+        "FerrousUi", 1, 0, "PlaybackClock", QStringLiteral("The bridge owns the playback clock"));
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &tagEditor);

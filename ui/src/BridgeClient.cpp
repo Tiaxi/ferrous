@@ -777,7 +777,8 @@ QVariant QueueRowsModel::trackNumberAt(int index) const {
 }
 
 BridgeClient::BridgeClient(QObject *parent)
-    : QObject(parent) {
+    : QObject(parent),
+      m_playbackClock(new PlaybackClock(this)) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profileUiEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
@@ -1998,16 +1999,8 @@ QString BridgeClient::playbackState() const {
     return m_playbackState;
 }
 
-QString BridgeClient::positionText() const {
-    return m_positionText;
-}
-
 QString BridgeClient::durationText() const {
     return m_durationText;
-}
-
-double BridgeClient::positionSeconds() const {
-    return m_positionSeconds;
 }
 
 double BridgeClient::durationSeconds() const {
@@ -2491,26 +2484,12 @@ void BridgeClient::seek(double seconds) {
     if (!sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(BinaryBridgeCodec::CmdSeek, target))) {
         return;
     }
-    m_pendingTrackRestartUntilMs = 0;
-    reanchorCenteredSpectrogramsForExplicitPosition(target);
     // Snapshots describe playback before this seek until the engine is done
-    // with it.
+    // with it; the clock shows the target meanwhile.
     m_pendingSeek = true;
     m_pendingSeekTargetSeconds = target;
     m_pendingSeekSerial = ++m_seeksSent;
-    const QString targetText = formatSeconds(target);
-    bool playbackSignalChanged = false;
-    if (m_positionText != targetText) {
-        m_positionText = targetText;
-        playbackSignalChanged = true;
-    }
-    if (std::abs(m_positionSeconds - target) >= 0.03) {
-        m_positionSeconds = target;
-        playbackSignalChanged = true;
-    }
-    if (playbackSignalChanged) {
-        schedulePlaybackChanged();
-    }
+    m_playbackClock->holdAt(target);
 }
 
 void BridgeClient::setVolume(double value) {
@@ -2787,19 +2766,6 @@ void BridgeClient::updateSpectrogramActivity() {
         BinaryBridgeCodec::CmdSetSpectrogramActive, active ? 1 : 0));
 }
 
-void BridgeClient::reanchorCenteredSpectrogramsForExplicitPosition(double seconds) {
-    emit transportPositionDiscontinuity(seconds);
-    m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) {
-        return route.item.isNull();
-    });
-    for (const SpectrogramRoute &route : std::as_const(m_spectrogramRoutes)) {
-        auto *item = qobject_cast<SpectrogramItem *>(route.item.data());
-        if (item != nullptr) {
-            item->applyExplicitSeekPosition(seconds);
-        }
-    }
-}
-
 void BridgeClient::setSystemMediaControlsEnabled(bool value) {
     if (m_systemMediaControlsEnabled != value) {
         m_systemMediaControlsEnabled = value;
@@ -2839,22 +2805,8 @@ void BridgeClient::playAt(int index) {
     if (index < 0) {
         return;
     }
-    m_pendingTrackRestartUntilMs = QDateTime::currentMSecsSinceEpoch() + 3000;
-    reanchorCenteredSpectrogramsForExplicitPosition(0.0);
-    m_pendingSeek = false;
-    m_pendingSeekTargetSeconds = 0.0;
-    bool playbackSignalChanged = false;
-    if (m_positionText != QStringLiteral("00:00")) {
-        m_positionText = QStringLiteral("00:00");
-        playbackSignalChanged = true;
-    }
-    if (std::abs(m_positionSeconds) >= 0.03) {
-        m_positionSeconds = 0.0;
-        playbackSignalChanged = true;
-    }
-    if (playbackSignalChanged) {
-        schedulePlaybackChanged();
-    }
+    // The clock goes on with the current track until the engine reports
+    // the switch.
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
         FERROUS_PROFILE_LOG_DIAGNOSTIC(
@@ -4615,13 +4567,6 @@ void BridgeClient::schedulePlaybackChanged() {
             QElapsedTimer t; t.start();
 #endif
             emit playbackChanged();
-            // QML's old interpolation clock can tick between the immediate
-            // reset and this queued notification, rearming the renderer's
-            // jump hold. Complete the handoff after bindings have consumed
-            // the new clock, including items registered in the meantime.
-            if (std::exchange(m_transportPositionDiscontinuityPending, false)) {
-                reanchorCenteredSpectrogramsForExplicitPosition(m_positionSeconds);
-            }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             {
                 const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
@@ -4872,7 +4817,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 
     const QString nextState = playbackStateText(snapshot.playback.state, m_playbackState);
     const bool isStopped = nextState == QStringLiteral("Stopped");
-    const double pos = snapshot.playback.present ? snapshot.playback.positionSeconds : m_positionSeconds;
+    const double pos = snapshot.playback.positionSeconds;
     const double dur = snapshot.playback.present ? snapshot.playback.durationSeconds : m_durationSeconds;
     const int repeatMode = std::clamp(snapshot.playback.present ? snapshot.playback.repeatMode : m_repeatMode, 0, 2);
     const bool shuffleEnabled = snapshot.playback.present ? snapshot.playback.shuffleEnabled : m_shuffleEnabled;
@@ -4933,20 +4878,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const int previousPlayingIndex = m_playingQueueIndex;
 #endif
 
-    // A stopped transport or new track invalidates the old visual clock and
-    // pending seek. Re-anchor before playbackChanged reaches QML, even when
-    // spectral decoding is delayed. Rolling history waits for the worker's
-    // reset/continuation; centered views can move immediately.
+    // A stopped transport or new track ends a pending seek: the engine drops
+    // it, and the snapshot describes playback after it.
     const bool stoppedTransition = snapshot.playback.present && isStopped
         && previousPlaybackState != nextState;
     if (stoppedTransition || playbackTrackChanged) {
         m_pendingSeek = false;
         m_pendingSeekTargetSeconds = 0.0;
-        m_pendingTrackRestartUntilMs = 0;
-        // Playback identity is authoritative even when decoding is delayed.
-        // Do not make a new track's playhead wait for spectral reset data.
-        reanchorCenteredSpectrogramsForExplicitPosition(stoppedTransition ? 0.0 : pos);
-        m_transportPositionDiscontinuityPending = true;
         playbackSignalChanged = true;
     }
 
@@ -4977,28 +4915,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         playbackSignalChanged = true;
     }
 
-    bool applyIncomingPosition = true;
-    if (m_pendingTrackRestartUntilMs != 0) {
-        if (nowMs >= m_pendingTrackRestartUntilMs) {
-            m_pendingTrackRestartUntilMs = 0;
-        } else if (snapshot.playback.present && pos <= 0.8) {
-            // Replaying the same path does not change track identity. Wait
-            // for its reset position instead of accepting queued old samples.
-            m_pendingTrackRestartUntilMs = 0;
-            reanchorCenteredSpectrogramsForExplicitPosition(pos);
-            m_transportPositionDiscontinuityPending = true;
-            playbackSignalChanged = true;
-        } else {
-            applyIncomingPosition = false;
-        }
-    }
+    // The engine is done with the pending seek: this snapshot shows where it
+    // landed, or where playback is if it did not land.
+    bool seekFinished = false;
     if (m_pendingSeek && snapshot.playback.present
         && snapshot.playback.seekSerial >= m_pendingSeekSerial) {
         m_pendingSeek = false;
-    }
-    if (m_pendingSeek) {
-        // Describes playback before the pending seek.
-        applyIncomingPosition = false;
+        seekFinished = true;
     }
     // A seek landed, and no newer seek waits: the incoming position is
     // where it landed. A stop or a new track replaces it.
@@ -5009,30 +4932,24 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     const bool reportSeekLanding = newSeekLanding && !m_pendingSeek && !isStopped
         && !stoppedTransition && !playbackTrackChanged;
-    if (reportSeekLanding && std::abs(pos - m_positionSeconds) >= 0.03) {
-        // The playhead went to the seek target, and the seek landed
-        // elsewhere, such as on a key frame.
-        reanchorCenteredSpectrogramsForExplicitPosition(pos);
-        m_transportPositionDiscontinuityPending = true;
-        playbackSignalChanged = true;
-    }
 
-    auto applyPlaybackPosition = [&](double nextPos) {
-        const QString posText = formatSeconds(nextPos);
-        if (m_positionText != posText) {
-            m_positionText = posText;
+    if (snapshot.playback.present) {
+        if (m_pendingSeek) {
+            // Describes playback before the pending seek, whose target the
+            // clock holds.
+            m_playbackClock->setDurationSeconds(dur);
+        } else {
+            PlaybackSample sample;
+            sample.positionSeconds = pos;
+            sample.sampledAtNs = snapshot.playback.positionSampledAtNs;
+            sample.advancing = snapshot.playback.positionAdvancing && !isStopped;
+            sample.durationSeconds = dur;
+            sample.trackToken = snapshot.playback.trackToken;
+            m_playbackClock->applySample(
+                sample,
+                stoppedTransition || playbackTrackChanged || seekFinished || reportSeekLanding);
             changed = true;
-            playbackSignalChanged = true;
         }
-        if (playbackTrackChanged || std::abs(m_positionSeconds - nextPos) >= 0.03) {
-            m_positionSeconds = nextPos;
-            changed = true;
-            playbackSignalChanged = true;
-        }
-    };
-
-    if (applyIncomingPosition) {
-        applyPlaybackPosition(pos);
     }
     if (reportSeekLanding) {
         emit seekLanded(pos);
@@ -5826,22 +5743,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 }
 
 QString BridgeClient::formatSeconds(double seconds) {
-    if (!std::isfinite(seconds) || seconds < 0.0) {
-        return QStringLiteral("--:--");
-    }
-    const int total = static_cast<int>(seconds + 0.5);
-    const int hours = total / 3600;
-    const int minutes = (total % 3600) / 60;
-    const int secs = total % 60;
-    if (hours > 0) {
-        return QStringLiteral("%1:%2:%3")
-            .arg(hours)
-            .arg(minutes, 2, 10, QChar('0'))
-            .arg(secs, 2, 10, QChar('0'));
-    }
-    return QStringLiteral("%1:%2")
-        .arg(minutes, 2, 10, QChar('0'))
-        .arg(secs, 2, 10, QChar('0'));
+    return PlaybackClock::formatSeconds(seconds);
 }
 
 QString BridgeClient::formatDurationCompact(double seconds) {

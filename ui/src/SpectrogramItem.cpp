@@ -55,7 +55,6 @@ namespace {
 constexpr double kMinFreqHz = 25.0;
 constexpr double kReferenceHopSamples = 1024.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
-constexpr double kPositionHeartbeatRegressionToleranceSeconds = 0.001;
 // Last-resort fallback only: the hold is normally released by
 // applyPrecomputedResetLocked() when the reset data arrives (~200–400 ms
 // after a seek or track change).  The timeout must be long enough that the
@@ -529,121 +528,126 @@ double SpectrogramItem::positionSeconds() const {
     return m_positionSeconds;
 }
 
-void SpectrogramItem::setPositionSeconds(double value) {
+PlaybackClock *SpectrogramItem::clock() const {
+    return m_clock;
+}
+
+void SpectrogramItem::setClock(PlaybackClock *value) {
+    if (m_clock == value) {
+        return;
+    }
+    disconnect(m_clockConnection);
+    m_clock = value;
+    if (m_clock) {
+        m_clockConnection = connect(
+            m_clock, &PlaybackClock::stateChanged, this, &SpectrogramItem::clockStateChanged);
+    }
+    emit clockChanged();
+    clockStateChanged();
+}
+
+void SpectrogramItem::clockStateChanged() {
     using Clock = std::chrono::steady_clock;
-    // Apply gapless offset: translates the new track's GStreamer
-    // position (which resets to 0) into the spectrogram's continuous
-    // coordinate space.
-    const double clamped = std::max(0.0, value + m_gaplessPositionOffset);
-    bool changed = false;
+    const PlaybackClockState next = m_clock ? m_clock->state() : PlaybackClockState{};
     {
         QMutexLocker lock(&m_stateMutex);
         const auto now = Clock::now();
-        const double currentPosition = currentRenderPositionSecondsLocked(now);
-        const bool largeJump = m_precomputedReady
-            && m_playing
-            && std::abs(clamped - currentPosition) >= kPositionJumpHoldThresholdSeconds;
-        // In centered mode, only hold for gapless transitions (position
-        // resets to near zero from deep in the track), not same-track
-        // seeks.  Seeks must apply immediately because the full-track
-        // ring already has data at the target position.
-        // Suppress the exemption briefly after a centered gapless
-        // transition so that any stale GStreamer positions still in the
-        // old track's coordinate space are held rather than applied.
-        const bool recentCenteredGapless =
-            m_centeredGaplessTransitionAt.time_since_epoch().count() != 0
-            && std::chrono::duration<double>(
-                   now - m_centeredGaplessTransitionAt).count() < 2.0;
-        const bool centeredSeek = m_displayMode == 1
-            && clamped >= 1.0
-            && !recentCenteredGapless;
-        if (centeredSeek) {
-            m_positionJumpHoldActive = false;
-            setPositionAnchorLocked(clamped, now);
-            changed = true;
-        } else if (largeJump) {
-            // Update the target position unconditionally, but only stamp the
-            // start time on the *first* activation.  Without this guard, each
-            // position heartbeat (~100 ms) during a natural track transition
-            // resets the timer, which prevents the 2-second fallback timeout
-            // from ever expiring and permanently freezes the display on the
-            // old track's spectrogram until the reset data arrives.
-            m_positionJumpHoldSeconds = clamped;
-            if (!m_positionJumpHoldActive) {
-                m_positionJumpHoldActive = true;
-                m_positionJumpHoldStartedAt = now;
-            }
-            return;
+        const qint64 nowNs = monotonicNs(now);
+        const bool held = positionHeldLocked(nowNs);
+        const PlaybackClockState previous = m_clockState;
+        const double previousPosition = currentRenderPositionSecondsLocked(now);
+        if (next.trackToken != previous.trackToken) {
+            // Where the previous track goes on, in case its successor
+            // follows it gaplessly.
+            m_previousTrackClockState = held ? m_positionHoldTrajectory : previous;
+            m_previousTrackPositionOffset = held ? m_positionHoldOffset : m_gaplessPositionOffset;
         }
-        if (!centeredSeek) {
-            // In rolling mode, ignore small backward heartbeat jitter to avoid
-            // scroll stutter.  In centered mode, backward jumps are real seeks
-            // that must be applied — the spectrogram stays in the ring buffer.
-            const bool regressedDuringPlayback =
-                m_displayMode == 0
-                && m_playing
-                && m_positionAnchorInitialized
-                && clamped + kPositionHeartbeatRegressionToleranceSeconds < currentPosition;
-            // Soft PLL: for small errors (normal heartbeat jitter ~10-20ms),
-            // blend toward the GStreamer position to smooth jitter while
-            // still converging to prevent drift.  For large errors (initial
-            // position set, post-seek correction), use the value directly.
-            const double error = clamped - currentPosition;
-            constexpr double kServoAlpha = 0.25;
-            constexpr double kServoMaxErrorSeconds = 0.15;
-            const bool smallCorrection = std::abs(error) < kServoMaxErrorSeconds;
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-            if (m_profileEnabled
-                && m_smoothnessProfile.active
-                && (regressedDuringPlayback
-                    || (smallCorrection && std::abs(error) >= 0.001))) {
-                noteSmoothnessServoLocked(error, regressedDuringPlayback);
-            }
-#endif
-            const double effectivePosition = regressedDuringPlayback
-                ? currentPosition
-                : (smallCorrection ? (currentPosition + kServoAlpha * error) : clamped);
-            if (m_positionAnchorInitialized
-                && std::abs(m_positionSeconds - effectivePosition) < 0.0001) {
-                return;
-            }
+        m_clockState = next;
+        if (m_displayMode != 0) {
+            // Centered views are random access: a seek or a new track moves
+            // them at once, even before its data arrives.
             m_positionJumpHoldActive = false;
-            setPositionAnchorLocked(effectivePosition, now);
-            changed = true;
+            m_positionJumpHoldUntilNs = 0;
+        } else if (m_gaplessContinuationPending
+            && next.trackToken != 0
+            && next.trackToken == m_precomputedTrackToken) {
+            m_gaplessContinuationPending = false;
+            continueGaplessLocked(now);
+        } else {
+            const double position = next.positionAt(nowNs) + m_gaplessPositionOffset;
+            // The rolling history and the clock describe different tracks
+            // until the worker's data for the clock's track arrives.
+            const bool tracksDisagree = next.trackToken != 0
+                && m_precomputedTrackToken != 0
+                && next.trackToken != m_precomputedTrackToken;
+            const bool sameTrackJump = next.trackToken == previous.trackToken
+                && std::abs(position - previousPosition) >= kPositionJumpHoldThresholdSeconds;
+            if (m_precomputedReady && m_playing && (tracksDisagree || sameTrackJump)) {
+                if (!held || m_positionJumpHoldUntilNs != 0) {
+                    holdPositionLocked(
+                        held ? m_positionHoldTrajectory : previous,
+                        held ? m_positionHoldOffset : m_gaplessPositionOffset,
+                        now);
+                }
+            } else if (!tracksDisagree && m_positionJumpHoldUntilNs == 0) {
+                m_positionJumpHoldActive = false;
+            }
         }
+        m_positionSeconds = currentRenderPositionSecondsLocked(now);
     }
-    if (changed) {
-        emit positionSecondsChanged();
-        update();
-    }
-    // update() wakes the item for anchor changes such as seeks; the
-    // steady-state precomputed render loop is still driven by
-    // handleWindowAfterAnimating().
+    emit positionSecondsChanged();
+    update();
 }
 
-void SpectrogramItem::applyExplicitSeekPosition(double value) {
-    using Clock = std::chrono::steady_clock;
-    bool changed = false;
-    {
-        QMutexLocker lock(&m_stateMutex);
-        // Rolling mode must wait for its restarted worker session because its
-        // ring is write-order history. Centered mode is random-access, so an
-        // explicit seek can move the viewport immediately. This separate path
-        // distinguishes a seek to 0 from a natural gapless position reset.
-        if (m_displayMode != 1) {
-            return;
-        }
+bool SpectrogramItem::positionHeldLocked(qint64 nowNs) const {
+    return m_positionJumpHoldActive
+        && (m_positionJumpHoldUntilNs == 0 || nowNs < m_positionJumpHoldUntilNs);
+}
 
-        const double clamped = std::max(0.0, value);
-        changed = m_positionJumpHoldActive
-            || !m_positionAnchorInitialized
-            || std::abs(m_positionSeconds - clamped) >= 0.0001;
-        m_positionJumpHoldActive = false;
-        setPositionAnchorLocked(clamped, Clock::now());
+void SpectrogramItem::holdPositionLocked(
+    const PlaybackClockState &trajectory,
+    double offset,
+    std::chrono::steady_clock::time_point now) {
+    m_positionJumpHoldActive = true;
+    m_positionHoldTrajectory = trajectory;
+    m_positionHoldOffset = offset;
+    m_positionJumpHoldUntilNs = 0;
+    m_positionJumpHoldStartedAt = now;
+}
+
+void SpectrogramItem::releasePositionHoldLocked(std::chrono::steady_clock::time_point now) {
+    m_positionJumpHoldActive = false;
+    m_positionJumpHoldUntilNs = 0;
+    m_positionSeconds = currentRenderPositionSecondsLocked(now);
+}
+
+void SpectrogramItem::continueGaplessLocked(std::chrono::steady_clock::time_point now) {
+    // The rolling history goes on with the successor's columns after all of
+    // the previous track's, so the successor starts at the end of that
+    // track. The engine stamps the successor's start with the time the
+    // previous track ends, which can still be ahead; until then the
+    // previous track plays on.
+    const qint64 nowNs = monotonicNs(now);
+    qint64 startNs = nowNs;
+    double startPosition = m_clockState.positionAt(nowNs);
+    if (m_clockState.advancing()) {
+        startNs = m_clockState.anchorNs
+            - static_cast<qint64>(std::llround(
+                m_clockState.anchorSeconds / m_clockState.rate * 1'000'000'000.0));
+        startPosition = 0.0;
     }
-    if (changed) {
-        emit positionSecondsChanged();
-        update();
+    const double previousDuration = m_previousTrackClockState.durationSeconds;
+    const double previousEnd = m_previousTrackPositionOffset
+        + (previousDuration > 0.0
+            ? previousDuration
+            : m_previousTrackClockState.positionAt(startNs));
+    m_gaplessPositionOffset = previousEnd - startPosition;
+    if (startNs > nowNs) {
+        holdPositionLocked(m_previousTrackClockState, m_previousTrackPositionOffset, now);
+        m_positionJumpHoldUntilNs = startNs;
+    } else {
+        m_positionJumpHoldActive = false;
+        m_positionJumpHoldUntilNs = 0;
     }
 }
 
@@ -660,10 +664,18 @@ void SpectrogramItem::setPlaying(bool value) {
         if (m_playing == value) {
             return;
         }
-        syncPositionAnchorLocked(Clock::now());
         m_playing = value;
-        if (!m_playing) {
-            m_positionJumpHoldActive = false;
+        if (!m_playing && m_positionJumpHoldActive) {
+            // Playback stopped while the playhead waited for data: it stays
+            // where it is, and the rolling history stays parked there until
+            // the worker restarts.
+            const auto now = Clock::now();
+            const double parked = currentRenderPositionSecondsLocked(now);
+            PlaybackClockState frozen;
+            frozen.anchorSeconds = parked;
+            frozen.anchorNs = monotonicNs(now);
+            holdPositionLocked(frozen, 0.0, now);
+            m_positionSeconds = parked;
         }
         changed = true;
     }
@@ -966,8 +978,10 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
             ? static_cast<double>(m_precomputedSampleRateHz)
                 / static_cast<double>(m_precomputedHopSize)
             : 1.0;
+        const double playheadSeconds = std::max(
+            0.0, currentRenderPositionSecondsLocked(std::chrono::steady_clock::now()));
         const qint64 displayRightCol = static_cast<qint64>(
-            std::max(0.0, m_positionSeconds) * cps) + screenWidth / 2;
+            playheadSeconds * cps) + screenWidth / 2;
         const qint64 displayRightCapped =
             m_precomputedTotalColumnsEstimate > 0
                 ? std::min(displayRightCol,
@@ -988,8 +1002,7 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
             / std::max(0.001, effectiveZoomLocked())));
         const qint64 estimateCount = std::max<qint64>(
             static_cast<qint64>(m_precomputedTotalColumnsEstimate), 1);
-        const qint64 nowCol = static_cast<qint64>(
-            std::max(0.0, m_positionSeconds) * cps);
+        const qint64 nowCol = static_cast<qint64>(playheadSeconds * cps);
         qint64 displayLeftCol;
         if (static_cast<qint64>(visibleWindowCols) * 100 / estimateCount >= 90) {
             displayLeftCol = 0;
@@ -1271,13 +1284,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         if (hopSize > 0) {
             m_precomputedHopSize = hopSize;
         }
-        if (sampleRate > 0 && hopSize > 0) {
-            const double seekPositionSeconds =
-                static_cast<double>(startIndex * hopSize)
-                / static_cast<double>(sampleRate);
-            m_positionJumpHoldActive = false;
-            setPositionAnchorLocked(seekPositionSeconds, Clock::now());
-        }
+        // The playhead follows the clock, which shows the new track.
+        releasePositionHoldLocked(Clock::now());
         m_precomputedTrackToken = trackToken;
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
@@ -1375,34 +1383,20 @@ void SpectrogramItem::feedPrecomputedChunk(
         // reflects the new track's range, not the old one's.
         m_precomputedMaxColumnIndex = -1;
 
-        // Gapless rolling transition: accumulate a position offset so
-        // the GStreamer position (which resets to 0) gets translated
-        // into the spectrogram's continuous coordinate space.  This
-        // makes setPositionSeconds(0.0) arrive as setPosition(331.18)
-        // — no large jump, no hold, no epoch remap, no phase
-        // discontinuity.  The position model and ring buffer stay
-        // perfectly continuous.
+        // Gapless rolling transition: the successor's columns follow the
+        // previous track's in the ring, so its position is shown with an
+        // offset, in the ring's continuous coordinate space. The clock and
+        // this data may report the new track in either order.
         if (m_displayMode == 0) {
-            const auto now = Clock::now();
-            m_gaplessPositionOffset =
-                currentRenderPositionSecondsLocked(now);
-            // Clear any jump hold that was activated by a
-            // setPositionSeconds(0.0) arriving before the offset was
-            // set.  Without this, the hold expires after 2 seconds
-            // and snaps the anchor to 0.0 in the wrong coordinate
-            // space, freezing the display.
-            if (m_positionJumpHoldActive) {
-                m_positionJumpHoldActive = false;
+            if (m_clockState.trackToken == trackToken) {
+                continueGaplessLocked(Clock::now());
+            } else {
+                m_gaplessContinuationPending = true;
             }
         } else {
-            // Centered mode: the new track uses 0-based position
-            // coordinates.  Snap the anchor to 0 immediately so the
-            // display jumps to column 0 instead of lingering at the
-            // old track's position until GStreamer reports >= 1 s.
-            const auto now = Clock::now();
-            setPositionAnchorLocked(0.0, now);
-            m_positionJumpHoldActive = false;
-            m_centeredGaplessTransitionAt = now;
+            // Centered mode: the new track uses 0-based coordinates, and
+            // the playhead already follows the clock.
+            releasePositionHoldLocked(Clock::now());
         }
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
@@ -1422,7 +1416,7 @@ void SpectrogramItem::feedPrecomputedChunk(
                 startIndex,
                 static_cast<long long>(m_ringWriteSeq),
                 static_cast<long long>(m_rollingEpoch),
-                m_positionAnchorSeconds,
+                m_positionSeconds,
                 m_gaplessPositionOffset,
                 static_cast<long long>(validCount), m_ringCapacity,
                 m_precomputedTotalColumnsEstimate);
@@ -1509,22 +1503,35 @@ void SpectrogramItem::feedPrecomputedChunk(
             }
             m_crosshairDirty = true;
         }
-        if (appliedReset && m_precomputedSampleRateHz > 0 && m_precomputedHopSize > 0) {
-            const double seekPositionSeconds =
-                static_cast<double>(startIndex * m_precomputedHopSize)
-                / static_cast<double>(m_precomputedSampleRateHz);
-            if (m_displayMode == 0) {
-                m_positionJumpHoldActive = false;
-                setPositionAnchorLocked(seekPositionSeconds, Clock::now());
-            } else if (isTrackChange) {
-                // Release hold AND snap anchor to the new track's start
-                // position.  Without the anchor snap, clearing the gapless
-                // offset in applyPrecomputedResetLocked makes the next
-                // setPositionSeconds see a 100+ second jump (old anchor
-                // vs new track's ~0), which immediately re-activates
-                // the hold.
-                m_positionJumpHoldActive = false;
-                setPositionAnchorLocked(seekPositionSeconds, Clock::now());
+        if (appliedReset) {
+            // The worker's data for the new position has arrived, so the
+            // playhead follows the clock again.
+            const auto now = Clock::now();
+            releasePositionHoldLocked(now);
+            if (m_displayMode == 0
+                && m_playing
+                && m_precomputedSampleRateHz > 0
+                && m_precomputedHopSize > 0) {
+                // Unless the data is for a track or position the clock does
+                // not show yet: then the playhead starts from the data until
+                // the clock catches up.
+                const double dataStartSeconds =
+                    static_cast<double>(startIndex * m_precomputedHopSize)
+                    / static_cast<double>(m_precomputedSampleRateHz);
+                const bool otherTrack = m_clockState.trackToken != 0
+                    && trackToken != 0
+                    && m_clockState.trackToken != trackToken;
+                const bool otherPosition =
+                    std::abs(m_clockState.positionAt(monotonicNs(now)) - dataStartSeconds)
+                    >= kPositionJumpHoldThresholdSeconds;
+                if (otherTrack || otherPosition) {
+                    PlaybackClockState dataStart;
+                    dataStart.anchorSeconds = dataStartSeconds;
+                    dataStart.anchorNs = monotonicNs(now);
+                    dataStart.rate = m_clockState.advancing() ? 1.0 : 0.0;
+                    holdPositionLocked(dataStart, 0.0, now);
+                    m_positionSeconds = dataStartSeconds;
+                }
             }
         }
     }
@@ -1866,8 +1873,9 @@ void SpectrogramItem::clearPrecomputed() {
     m_zoomFillActive = false;
     m_renderZoomLevel = m_zoomLevel;
     m_gaplessPositionOffset = 0.0;
+    m_gaplessContinuationPending = false;
     m_positionJumpHoldActive = false;
-    m_centeredGaplessTransitionAt = {};
+    m_positionJumpHoldUntilNs = 0;
     m_timeGridDirty = true;
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
@@ -1894,7 +1902,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     // per-track column tracking, and canvas display range so the
     // centered-mode monotonic clamp doesn't stick at old positions.
     m_gaplessPositionOffset = 0.0;
-    m_centeredGaplessTransitionAt = {};
+    m_gaplessContinuationPending = false;
     m_precomputedMaxColumnIndex = -1;
     if (!m_zoomFillActive) {
         m_precomputedCanvasDisplayLeft = 0;
@@ -2022,30 +2030,11 @@ void SpectrogramItem::truncateRollingTailLocked(qint64 newWriteSeq) {
 
 double SpectrogramItem::currentRenderPositionSecondsLocked(
     std::chrono::steady_clock::time_point now) const {
-    const double anchor = m_positionAnchorInitialized
-        ? m_positionAnchorSeconds
-        : m_positionSeconds;
-    if (!m_playing || !m_positionAnchorInitialized) {
-        return std::max(0.0, anchor);
+    const qint64 nowNs = monotonicNs(now);
+    if (positionHeldLocked(nowNs)) {
+        return std::max(0.0, m_positionHoldTrajectory.positionAt(nowNs) + m_positionHoldOffset);
     }
-    const double elapsedSeconds =
-        std::chrono::duration<double>(now - m_positionAnchorUpdatedAt).count();
-    return std::max(0.0, anchor + std::max(0.0, elapsedSeconds));
-}
-
-void SpectrogramItem::setPositionAnchorLocked(
-    double value,
-    std::chrono::steady_clock::time_point now) {
-    const double clamped = std::max(0.0, value);
-    m_positionSeconds = clamped;
-    m_positionAnchorSeconds = clamped;
-    m_positionAnchorUpdatedAt = now;
-    m_positionAnchorInitialized = true;
-}
-
-void SpectrogramItem::syncPositionAnchorLocked(
-    std::chrono::steady_clock::time_point now) {
-    setPositionAnchorLocked(currentRenderPositionSecondsLocked(now), now);
+    return std::max(0.0, m_clockState.positionAt(nowNs) + m_gaplessPositionOffset);
 }
 
 void SpectrogramItem::reset() {
@@ -2230,7 +2219,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     static_cast<unsigned long long>(m_precomputedTrackToken),
                     static_cast<long long>(validCount), m_ringCapacity,
                     m_precomputedTotalColumnsEstimate,
-                    m_positionAnchorSeconds,
+                    m_positionSeconds,
                     usePrecomputed ? 1 : 0,
                     static_cast<long long>(msSinceTransitionFeed));
             }
@@ -4595,11 +4584,16 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     m_lastAnimationTick = now;
     m_animationTickInitialized = true;
     if (m_positionJumpHoldActive) {
-        const double holdElapsedSeconds =
-            std::chrono::duration<double>(now - m_positionJumpHoldStartedAt).count();
-        if (holdElapsedSeconds >= kPositionJumpHoldTimeoutSeconds) {
-            setPositionAnchorLocked(m_positionJumpHoldSeconds, now);
-            m_positionJumpHoldActive = false;
+        // A hold for the start of a gapless successor ends then; one for
+        // data that does not arrive gives up after a timeout.
+        // A stopped or paused playhead may wait for as long as it stays.
+        const bool expired = m_positionJumpHoldUntilNs != 0
+            ? monotonicNs(now) >= m_positionJumpHoldUntilNs
+            : m_clockState.advancing()
+                && std::chrono::duration<double>(now - m_positionJumpHoldStartedAt).count()
+                    >= kPositionJumpHoldTimeoutSeconds;
+        if (expired) {
+            releasePositionHoldLocked(now);
         }
     }
 
@@ -4664,35 +4658,6 @@ void SpectrogramItem::maybeStartSmoothnessProfileLocked(qint64 nowMs) {
         m_smoothnessProfile.active = true;
         m_smoothnessProfile.startedAtMs = nowMs;
         m_smoothnessProfile.lastFrameAtMs = nowMs;
-    }
-}
-
-void SpectrogramItem::noteSmoothnessServoLocked(
-    double errorSeconds,
-    bool regressedDuringPlayback) {
-    if (!m_smoothnessProfile.active) {
-        return;
-    }
-
-    const double errorMs = std::abs(errorSeconds) * 1000.0;
-    m_smoothnessProfile.servoFrames += 1;
-    m_smoothnessProfile.servoErrorMsTotal += errorMs;
-    m_smoothnessProfile.maxServoErrorMs =
-        std::max(m_smoothnessProfile.maxServoErrorMs, errorMs);
-    if (regressedDuringPlayback) {
-        m_smoothnessProfile.servoRegressionDrops += 1;
-    }
-
-    if (m_profileEnabled
-        && errorMs >= 12.0
-        && shouldLogProfileSpike(&m_profileLastServoSpike, std::chrono::steady_clock::now(), 0.10)) {
-        FERROUS_SPECTROGRAM_LOGF(
-            stderr,
-            "[ui-spectrogram] position_servo error_ms=%.3f regressed=%d frames=%d drops=%d\n",
-            errorMs,
-            regressedDuringPlayback ? 1 : 0,
-            m_smoothnessProfile.servoFrames,
-            m_smoothnessProfile.servoRegressionDrops);
     }
 }
 
@@ -4766,7 +4731,7 @@ void SpectrogramItem::noteSmoothnessProfileFrameLocked(
         m_smoothnessProfile.incidentReported = true;
         FERROUS_SPECTROGRAM_LOGF(
             stderr,
-            "[ui-spectrogram] smoothness_hitch_detected sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d servo_frames=%d servo_drop_frames=%d servo_max_error_ms=%.3f pending_max=%d drain_passes=%d drained=%d advance_fallback_frames=%d advance_fallback_non_unity=%d advance_fallback_max_zoom_delta=%.6f paint_spikes=%d max_gap_ms=%.3f advanced=%d\n",
+            "[ui-spectrogram] smoothness_hitch_detected sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d pending_max=%d drain_passes=%d drained=%d advance_fallback_frames=%d advance_fallback_non_unity=%d advance_fallback_max_zoom_delta=%.6f paint_spikes=%d max_gap_ms=%.3f advanced=%d\n",
             m_sampleRateHz,
             rowsPerSecond,
             m_smoothnessProfile.framesObserved,
@@ -4776,9 +4741,6 @@ void SpectrogramItem::noteSmoothnessProfileFrameLocked(
             m_smoothnessProfile.pendingGapFrames,
             m_smoothnessProfile.stallClusters,
             m_smoothnessProfile.regressionCount,
-            m_smoothnessProfile.servoFrames,
-            m_smoothnessProfile.servoRegressionDrops,
-            m_smoothnessProfile.maxServoErrorMs,
             m_smoothnessProfile.maxPendingRows,
             m_smoothnessProfile.drainPasses,
             m_smoothnessProfile.drainedColumns,
@@ -4862,12 +4824,6 @@ void SpectrogramItem::finalizeSmoothnessProfileLocked(qint64 nowMs, const char *
     summary.insert(QStringLiteral("pendingGapFrames"), m_smoothnessProfile.pendingGapFrames);
     summary.insert(QStringLiteral("maxGapMs"), m_smoothnessProfile.maxGapMs);
     summary.insert(QStringLiteral("regressionCount"), m_smoothnessProfile.regressionCount);
-    summary.insert(QStringLiteral("servoFrames"), m_smoothnessProfile.servoFrames);
-    summary.insert(
-        QStringLiteral("servoRegressionDrops"),
-        m_smoothnessProfile.servoRegressionDrops);
-    summary.insert(QStringLiteral("servoErrorMsTotal"), m_smoothnessProfile.servoErrorMsTotal);
-    summary.insert(QStringLiteral("maxServoErrorMs"), m_smoothnessProfile.maxServoErrorMs);
     summary.insert(QStringLiteral("drainPasses"), m_smoothnessProfile.drainPasses);
     summary.insert(QStringLiteral("drainedColumns"), m_smoothnessProfile.drainedColumns);
     summary.insert(QStringLiteral("maxPendingRows"), m_smoothnessProfile.maxPendingRows);
@@ -4892,7 +4848,7 @@ void SpectrogramItem::finalizeSmoothnessProfileLocked(qint64 nowMs, const char *
 
     FERROUS_SPECTROGRAM_LOGF(
         stderr,
-        "[ui-spectrogram] smoothness_window reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d servo_frames=%d servo_drop_frames=%d servo_total_error_ms=%.3f servo_max_error_ms=%.3f drain_passes=%d drained=%d pending_max=%d advance_fallback_frames=%d advance_fallback_non_unity=%d advance_fallback_max_zoom_delta=%.6f paint_spikes=%d max_gap_ms=%.3f max_paint_ms=%.3f avg_paint_ms=%.3f incident=%d\n",
+        "[ui-spectrogram] smoothness_window reason=%s sample_rate_hz=%d rows_per_second=%.3f frames=%d pending_frames=%d gap_frames=%d severe_gap_frames=%d pending_gap_frames=%d stall_clusters=%d regressions=%d drain_passes=%d drained=%d pending_max=%d advance_fallback_frames=%d advance_fallback_non_unity=%d advance_fallback_max_zoom_delta=%.6f paint_spikes=%d max_gap_ms=%.3f max_paint_ms=%.3f avg_paint_ms=%.3f incident=%d\n",
         reason,
         m_sampleRateHz,
         rowsPerSecond,
@@ -4903,10 +4859,6 @@ void SpectrogramItem::finalizeSmoothnessProfileLocked(qint64 nowMs, const char *
         m_smoothnessProfile.pendingGapFrames,
         m_smoothnessProfile.stallClusters,
         m_smoothnessProfile.regressionCount,
-        m_smoothnessProfile.servoFrames,
-        m_smoothnessProfile.servoRegressionDrops,
-        m_smoothnessProfile.servoErrorMsTotal,
-        m_smoothnessProfile.maxServoErrorMs,
         m_smoothnessProfile.drainPasses,
         m_smoothnessProfile.drainedColumns,
         m_smoothnessProfile.maxPendingRows,
@@ -4942,12 +4894,6 @@ QVariantMap SpectrogramItem::debugSmoothnessProfileStateLocked() const {
         state.insert(QStringLiteral("pendingGapFrames"), m_smoothnessProfile.pendingGapFrames);
         state.insert(QStringLiteral("maxGapMs"), m_smoothnessProfile.maxGapMs);
         state.insert(QStringLiteral("regressionCount"), m_smoothnessProfile.regressionCount);
-        state.insert(QStringLiteral("servoFrames"), m_smoothnessProfile.servoFrames);
-        state.insert(
-            QStringLiteral("servoRegressionDrops"),
-            m_smoothnessProfile.servoRegressionDrops);
-        state.insert(QStringLiteral("servoErrorMsTotal"), m_smoothnessProfile.servoErrorMsTotal);
-        state.insert(QStringLiteral("maxServoErrorMs"), m_smoothnessProfile.maxServoErrorMs);
         state.insert(QStringLiteral("drainPasses"), m_smoothnessProfile.drainPasses);
         state.insert(QStringLiteral("drainedColumns"), m_smoothnessProfile.drainedColumns);
         state.insert(QStringLiteral("maxPendingRows"), m_smoothnessProfile.maxPendingRows);

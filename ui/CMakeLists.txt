@@ -71,6 +71,7 @@ qt_add_executable(ferrous
     src/GlobalSearchResultsModel.cpp
     src/LibraryTreeModel.cpp
     src/MprisController.cpp
+    src/PlaybackClock.cpp
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
     src/SpectrogramItem.cpp
@@ -198,9 +199,19 @@ install(FILES assets/ferrous.svg DESTINATION share/icons/hicolor/scalable/apps R
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
 
+    qt_add_executable(ferrous_playback_clock_tests
+        tests/tst_playback_clock.cpp
+        src/PlaybackClock.cpp
+    )
+    target_include_directories(ferrous_playback_clock_tests PRIVATE src)
+    target_link_libraries(ferrous_playback_clock_tests PRIVATE Qt6::Core Qt6::Test)
+    ferrous_enable_strict_warnings(ferrous_playback_clock_tests)
+    add_test(NAME ferrous_playback_clock_tests COMMAND ferrous_playback_clock_tests)
+
     qt_add_executable(ferrous_level_meter_tests
         tests/tst_level_meter.cpp
         src/LevelMeterItem.cpp
+        src/PlaybackClock.cpp
     )
     target_include_directories(ferrous_level_meter_tests PRIVATE src)
     set_target_properties(ferrous_level_meter_tests PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
@@ -223,6 +234,7 @@ if(BUILD_TESTING)
         src/DiagnosticsLog.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
+        src/PlaybackClock.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
@@ -310,6 +322,7 @@ if(BUILD_TESTING)
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
         src/MprisController.cpp
+        src/PlaybackClock.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp

@@ -43,10 +43,6 @@ constexpr int kPlaybackTilesPerPaint = 2;
 constexpr int kMaximumPlaybackTilesPerPaint = 8;
 constexpr int kPlaybackTilePrefetch = 2;
 constexpr double kGridAlignmentEpsilon = 1.0e-9;
-constexpr double kPositionRegressionToleranceSeconds = 0.03;
-constexpr double kPositionSeekJumpSeconds = 0.75;
-constexpr double kPositionServoMaximumErrorSeconds = 0.15;
-constexpr double kPositionServoAlpha = 0.25;
 constexpr QColor kBackground(5, 9, 7);
 constexpr QColor kWaveform(54, 225, 161);
 constexpr QColor kMutedWaveform(74, 104, 92);
@@ -157,7 +153,6 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     m_requestTimer.setSingleShot(true);
-    m_positionUpdatedAt = std::chrono::steady_clock::now();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profile.enabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_WAVEFORM")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
@@ -181,7 +176,8 @@ void WaveformEditorItem::invalidateDetailRequestLocked() {
 
 QString WaveformEditorItem::sourcePath() const { QMutexLocker lock(&m_stateMutex); return m_sourcePath; }
 QByteArray WaveformEditorItem::overviewData() const { QMutexLocker lock(&m_stateMutex); return m_overviewData; }
-double WaveformEditorItem::positionSeconds() const { QMutexLocker lock(&m_stateMutex); return m_positionSeconds; }
+PlaybackClock *WaveformEditorItem::clock() const { return m_clock; }
+double WaveformEditorItem::positionSeconds() const { QMutexLocker lock(&m_stateMutex); return displayedPositionSecondsLocked(); }
 double WaveformEditorItem::durationSeconds() const { QMutexLocker lock(&m_stateMutex); return m_durationSeconds; }
 double WaveformEditorItem::zoomLevel() const { QMutexLocker lock(&m_stateMutex); return m_zoomLevel; }
 bool WaveformEditorItem::playing() const { QMutexLocker lock(&m_stateMutex); return m_playing; }
@@ -256,37 +252,30 @@ void WaveformEditorItem::setOverviewComplete(bool value) {
     update();
 }
 
-void WaveformEditorItem::setPositionSeconds(double value) {
-    updatePositionSeconds(value, false);
+void WaveformEditorItem::setClock(PlaybackClock *value) {
+    if (m_clock == value) return;
+    disconnect(m_clockConnection);
+    m_clock = value;
+    if (m_clock) {
+        m_clockConnection = connect(m_clock, &PlaybackClock::stateChanged,
+                                    this, &WaveformEditorItem::clockStateChanged);
+    }
+    emit clockChanged();
+    clockStateChanged();
 }
 
-void WaveformEditorItem::applyExplicitSeekPosition(double value) {
-    updatePositionSeconds(value, true);
-}
-
-void WaveformEditorItem::updatePositionSeconds(double value, bool explicitSeek) {
+void WaveformEditorItem::clockStateChanged() {
+    const PlaybackClockState state = m_clock ? m_clock->state() : PlaybackClockState{};
     bool request = false;
     bool cacheNeedsUpdate = false;
     {
         QMutexLocker lock(&m_stateMutex);
-        value = std::clamp(value, 0.0, std::max(0.0, m_durationSeconds));
-        if (!explicitSeek && std::abs(m_positionSeconds - value) < 0.0001) return;
-        const auto now = std::chrono::steady_clock::now();
+        // A jump moves the view at once, and the detail of the old range is
+        // no longer needed.
+        const bool explicitSeek = state.epoch != m_clockState.epoch
+            || state.trackToken != m_clockState.trackToken;
         const auto previousRange = visibleRangeLocked();
-        if (m_playing && !explicitSeek) {
-            const double displayedPosition = displayedPositionSecondsLocked();
-            const double error = value - displayedPosition;
-            const bool heartbeatRegression =
-                error < -kPositionRegressionToleranceSeconds
-                && error > -kPositionSeekJumpSeconds;
-            if (heartbeatRegression) {
-                value = displayedPosition;
-            } else if (std::abs(error) < kPositionServoMaximumErrorSeconds) {
-                value = displayedPosition + kPositionServoAlpha * error;
-            }
-        }
-        m_positionSeconds = value;
-        m_positionUpdatedAt = now;
+        m_clockState = state;
         const auto [start, end] = visibleRangeLocked();
         const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
@@ -312,10 +301,7 @@ void WaveformEditorItem::setPlaying(bool value) {
     {
         QMutexLocker lock(&m_stateMutex);
         if (m_playing == value) return;
-        const auto now = std::chrono::steady_clock::now();
-        if (m_playing) m_positionSeconds = displayedPositionSecondsLocked();
         m_playing = value;
-        m_positionUpdatedAt = now;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (value) m_profile.frameInitialized = false;
 #endif
@@ -755,12 +741,8 @@ void WaveformEditorItem::clearPendingRequestLocked() {
 }
 
 double WaveformEditorItem::displayedPositionSecondsLocked() const {
-    double position = m_positionSeconds;
-    if (m_playing) {
-        position += std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - m_positionUpdatedAt).count();
-    }
-    return std::clamp(position, 0.0, std::max(0.0, m_durationSeconds));
+    return std::clamp(
+        m_clockState.positionAt(monotonicNowNs()), 0.0, std::max(0.0, m_durationSeconds));
 }
 
 bool WaveformEditorItem::detailOrPendingRequestCoversLocked(

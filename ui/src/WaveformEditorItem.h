@@ -13,6 +13,7 @@
 #include <QMutex>
 #include <QPainterPath>
 #include <QPointF>
+#include <QPointer>
 #include <QPolygonF>
 #include <QQuickItem>
 #include <QRectF>
@@ -23,6 +24,8 @@
 #include <chrono>
 #include <map>
 #include <vector>
+
+#include "PlaybackClock.h"
 
 class QHoverEvent;
 class QMouseEvent;
@@ -36,7 +39,9 @@ class WaveformEditorItem : public QQuickItem {
     Q_PROPERTY(QByteArray overviewData READ overviewData WRITE setOverviewData NOTIFY overviewDataChanged)
     Q_PROPERTY(double overviewCoverageSeconds READ overviewCoverageSeconds WRITE setOverviewCoverageSeconds NOTIFY overviewCoverageChanged)
     Q_PROPERTY(bool overviewComplete READ overviewComplete WRITE setOverviewComplete NOTIFY overviewCoverageChanged)
-    Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
+    // Where playback is; the view follows its position.
+    Q_PROPERTY(PlaybackClock *clock READ clock WRITE setClock NOTIFY clockChanged)
+    Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY positionSecondsChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
     Q_PROPERTY(double zoomLevel READ zoomLevel WRITE setZoomLevel NOTIFY zoomLevelChanged)
     Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged)
@@ -64,8 +69,9 @@ public:
     void setOverviewCoverageSeconds(double value);
     bool overviewComplete() const;
     void setOverviewComplete(bool value);
+    PlaybackClock *clock() const;
+    void setClock(PlaybackClock *value);
     double positionSeconds() const;
-    void setPositionSeconds(double value);
     double durationSeconds() const;
     void setDurationSeconds(double value);
     double zoomLevel() const;
@@ -93,7 +99,6 @@ public:
     bool samplePointsVisible() const;
 
     Q_INVOKABLE void resetZoom();
-    Q_INVOKABLE void applyExplicitSeekPosition(double seconds);
     Q_INVOKABLE double maximumZoomLevel() const;
     Q_INVOKABLE QString formatViewportDuration(double seconds) const;
     Q_INVOKABLE void setHoverPosition(double x, double y, bool active);
@@ -105,6 +110,7 @@ signals:
     void sourcePathChanged();
     void overviewDataChanged();
     void overviewCoverageChanged();
+    void clockChanged();
     void positionSecondsChanged();
     void durationSecondsChanged();
     void zoomLevelChanged();
@@ -132,7 +138,7 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
 
 private:
-    void updatePositionSeconds(double seconds, bool explicitSeek);
+    void clockStateChanged();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     struct ProfileState {
         bool enabled{false};
@@ -292,8 +298,10 @@ private:
     QByteArray m_overviewData;
     double m_overviewCoverageSeconds{0.0};
     bool m_overviewComplete{false};
-    double m_positionSeconds{0.0};
-    std::chrono::steady_clock::time_point m_positionUpdatedAt;
+    QPointer<PlaybackClock> m_clock;
+    QMetaObject::Connection m_clockConnection;
+    // A copy of the clock's state, which the render thread evaluates.
+    PlaybackClockState m_clockState;
     double m_durationSeconds{0.0};
     double m_zoomLevel{1.0};
     double m_presentedZoomLevel{1.0};

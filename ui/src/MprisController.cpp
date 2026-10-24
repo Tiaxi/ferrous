@@ -287,7 +287,14 @@ qlonglong MprisController::positionUs() const {
     if (m_bridge == nullptr) {
         return 0;
     }
-    return static_cast<qlonglong>(std::llround(std::max(0.0, m_bridge->positionSeconds()) * 1000000.0));
+    return static_cast<qlonglong>(std::llround(currentPositionSeconds() * 1000000.0));
+}
+
+double MprisController::currentPositionSeconds() const {
+    // Clients read Position when they need it, so it is extrapolated to now
+    // rather than to the last frame.
+    const PlaybackClock *clock = m_bridge->playbackClock();
+    return clock->positionAt(clock->nowNs());
 }
 
 double MprisController::volume() const {
@@ -419,7 +426,7 @@ void MprisController::seek(qlonglong offsetUs) {
         return;
     }
     const double nextSeconds = std::clamp(
-        m_bridge->positionSeconds() + (static_cast<double>(offsetUs) / 1000000.0),
+        currentPositionSeconds() + (static_cast<double>(offsetUs) / 1000000.0),
         0.0,
         std::max(0.0, m_bridge->durationSeconds()));
     m_bridge->seek(nextSeconds);

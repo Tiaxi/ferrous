@@ -8,148 +8,19 @@ QtObject {
 
     required property var uiBridge
     property bool visualFeedsEnabled: false
-    property bool seekPressed: false
 
-    property real displayedPositionSeconds: 0
-    property real spectrogramPositionSeconds: 0
-    property bool positionSmoothingPrimed: false
-    property real positionSmoothingAnchorSeconds: 0
-    property real positionSmoothingLastMs: 0
-    property string positionSmoothingTrackPath: ""
     property string stoppedSpectrogramTrackPath: ""
     property string lastSpectrogramPlaybackState: ""
     property real rememberedVolumeBeforeMute: 1.0
     property bool volumeMuted: false
 
-    // Local interpolation: advance position at 1 s/s between bridge
-    // updates, anchored to the last known position + wall-clock time.
-    property real interpolationAnchorPosition: 0
-    property real interpolationAnchorMs: 0
-    property bool interpolationActive: false
-    property real interpolationRate: 1.0
-    property bool visualSeekClockActive: false
-    readonly property real interpolationSnapThresholdSeconds: 0.2
-    readonly property real profileHeartbeatLogThresholdSeconds: 0.1
-    readonly property real interpolationCorrectionHorizonSeconds: 0.75
-    readonly property real interpolationCorrectionDeadbandSeconds: 0.025
-    readonly property real interpolationRateCorrectionLimit: 0.1
-
-    // Timer drives local interpolation at ~60 fps.
-    property Timer interpolationTimer: Timer {
-        interval: 16
-        repeat: true
-        running: root.interpolationActive && !root.seekPressed
-        onTriggered: root.stepInterpolationTo(root.currentTimeMs())
-    }
-
-    function clampPositionToDuration(value) {
-        const duration = Math.max(root.uiBridge.durationSeconds, 0)
-        let next = Math.max(0, value)
-        if (duration > 0) {
-            next = Math.min(next, duration)
-        }
-        return next
-    }
-
-    function playbackProfileLogsEnabled() {
-        return !!(root.uiBridge && root.uiBridge.profileLogsEnabled)
-    }
-
-    function logPlaybackProfile(tag, fields) {
-        if (!root.playbackProfileLogsEnabled()) {
-            return
-        }
-        console.warn("[qml-playback-profile] " + tag + " " + fields)
-    }
-
-    function currentTimeMs() {
-        return Date.now()
-    }
-
-    function applyInterpolatedPosition(position) {
-        root.displayedPositionSeconds = position
-        root.spectrogramPositionSeconds = position
-    }
-
-    function currentInterpolatedBasePosition(nowMs) {
-        if (!root.interpolationActive) {
-            return root.clampPositionToDuration(root.displayedPositionSeconds)
-        }
-        const elapsed = Math.max(0, (nowMs - root.interpolationAnchorMs) / 1000.0)
-        return root.clampPositionToDuration(
-                    root.interpolationAnchorPosition + elapsed * root.interpolationRate)
-    }
-
-    function resetInterpolationState(position, nowMs) {
-        const clampedPosition = root.clampPositionToDuration(position)
-        root.interpolationAnchorPosition = clampedPosition
-        root.interpolationAnchorMs = nowMs
-    }
-
-    function clearVisualSeekClock() {
-        root.visualSeekClockActive = false
-        root.interpolationRate = 1.0
-    }
-
-    function advanceInterpolationClock(nowMs) {
-        if (!root.interpolationActive) {
-            return root.clampPositionToDuration(root.displayedPositionSeconds)
-        }
-        const nextPosition = root.currentInterpolatedBasePosition(nowMs)
-        root.interpolationAnchorPosition = nextPosition
-        root.interpolationAnchorMs = nowMs
-        return nextPosition
-    }
-
-    function stepInterpolationTo(nowMs) {
-        const clampedNext = root.advanceInterpolationClock(nowMs)
-        root.applyInterpolatedPosition(clampedNext)
-        return clampedNext
-    }
-
-    function applyPlaybackHeartbeat(incomingPosition, nowMs) {
-        const currentDisplayed = root.interpolationActive
-            ? root.currentInterpolatedBasePosition(nowMs)
-            : root.clampPositionToDuration(root.displayedPositionSeconds)
-        const clampedPosition = root.clampPositionToDuration(incomingPosition)
-        const error = clampedPosition - currentDisplayed
-        root.clearVisualSeekClock()
-        const action = Math.abs(error) >= root.interpolationSnapThresholdSeconds ? "snap" : "follow"
-        let nextPosition = clampedPosition
-        let nextRate = 1.0
-        if (action === "follow") {
-            // Bridge delivery occasionally coalesces two position samples,
-            // producing a ~40 ms phase sawtooth even though audio remains at
-            // nominal speed. Keep the visual position continuous and correct
-            // only the phase outside a small transport-jitter deadband.
-            let correctionError = 0.0
-            if (error > root.interpolationCorrectionDeadbandSeconds) {
-                correctionError = error - root.interpolationCorrectionDeadbandSeconds
-            } else if (error < -root.interpolationCorrectionDeadbandSeconds) {
-                correctionError = error + root.interpolationCorrectionDeadbandSeconds
-            }
-            const correction = Math.max(
-                -root.interpolationRateCorrectionLimit,
-                Math.min(
-                    root.interpolationRateCorrectionLimit,
-                    correctionError / root.interpolationCorrectionHorizonSeconds))
-            nextPosition = currentDisplayed
-            nextRate += correction
-        }
-        root.applyInterpolatedPosition(nextPosition)
-        root.resetInterpolationState(nextPosition, nowMs)
-        root.interpolationActive = true
-        root.interpolationRate = nextRate
-        if (action !== "follow" || Math.abs(error) >= root.profileHeartbeatLogThresholdSeconds) {
-            root.logPlaybackProfile(
-                "heartbeat",
-                "incoming=" + incomingPosition.toFixed(3)
-                    + " displayed=" + currentDisplayed.toFixed(3)
-                    + " error_ms=" + Math.round(error * 1000)
-                    + " rate=" + nextRate.toFixed(4)
-                    + " action=" + action)
-        }
-    }
+    // Where playback is. The bridge's clock extrapolates the engine's
+    // position samples; everything that shows the position reads it.
+    readonly property var playbackClock: root.uiBridge && root.uiBridge.playbackClock
+        ? root.uiBridge.playbackClock
+        : null
+    readonly property real positionSeconds: root.playbackClock ? root.playbackClock.positionSeconds : 0
+    readonly property string positionText: root.playbackClock ? root.playbackClock.positionText : "00:00"
 
     function windowTitleContext() {
         const playbackState = (root.uiBridge.playbackState || "").trim()
@@ -224,41 +95,19 @@ QtObject {
         }
     }
 
-    function seekCommittedAtTime(value, nowMs) {
+    function seekCommitted(value) {
         // Play starts a stopped track from its beginning, so a stopped
         // track is not seekable.
         if ((root.uiBridge.playbackState || "") === "Stopped") {
             return
         }
-        root.clearVisualSeekClock()
-        root.interpolationActive = (root.uiBridge.playbackState || "") === "Playing"
-        root.interpolationRate = 1.0
-        root.visualSeekClockActive = root.interpolationActive
-        root.applyInterpolatedPosition(value)
-        root.resetInterpolationState(value, nowMs)
-        root.positionSmoothingPrimed = true
-        root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         root.uiBridge.seek(value)
-    }
-
-    function seekCommitted(value) {
-        root.seekCommittedAtTime(value, root.currentTimeMs())
     }
 
     function playAt(index) {
         if (index < 0) {
             return
         }
-
-        const nowMs = root.currentTimeMs()
-        root.clearVisualSeekClock()
-        root.interpolationActive = (root.uiBridge.playbackState || "") === "Playing"
-        root.interpolationRate = 1.0
-        root.applyInterpolatedPosition(0)
-        root.resetInterpolationState(0, nowMs)
-        root.positionSmoothingPrimed = true
-        root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
-
         root.uiBridge.playAt(index)
     }
 
@@ -291,7 +140,7 @@ QtObject {
         root.syncMutedVolumeState()
     }
 
-    function handlePlaybackChangedAtTime(nowMs, haltSpectrogram, resetSpectrogram) {
+    function handlePlaybackChanged(haltSpectrogram, resetSpectrogram) {
         const playbackState = root.uiBridge.playbackState || ""
         if (root.shouldResetSpectrogramForStoppedTrackSwitch(
                     root.lastSpectrogramPlaybackState,
@@ -301,53 +150,15 @@ QtObject {
             resetSpectrogram(true)
             root.stoppedSpectrogramTrackPath = root.uiBridge.currentTrackPath || ""
         }
-
-        const incomingPosition = root.uiBridge.positionSeconds
-        const trackChanged = root.positionSmoothingTrackPath !== root.uiBridge.currentTrackPath
-
-        if (playbackState !== "Playing") {
-            if (playbackState === "Stopped") {
-                haltSpectrogram()
-            }
-            root.clearVisualSeekClock()
-            root.interpolationActive = false
-            root.applyInterpolatedPosition(incomingPosition)
-            root.resetInterpolationState(incomingPosition, nowMs)
-            root.positionSmoothingPrimed = false
-            root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
-        } else if (!root.positionSmoothingPrimed || trackChanged) {
-            // First update or track change: snap to position, start interpolating.
-            root.clearVisualSeekClock()
-            root.applyInterpolatedPosition(root.clampPositionToDuration(incomingPosition))
-            root.resetInterpolationState(incomingPosition, nowMs)
-            root.interpolationActive = true
-            root.positionSmoothingPrimed = true
-            root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
-        } else {
-            root.applyPlaybackHeartbeat(incomingPosition, nowMs)
+        if (playbackState === "Stopped") {
+            haltSpectrogram()
         }
-
         root.lastSpectrogramPlaybackState = playbackState
     }
 
-    function handlePlaybackChanged(haltSpectrogram, resetSpectrogram) {
-        root.handlePlaybackChangedAtTime(root.currentTimeMs(), haltSpectrogram, resetSpectrogram)
-    }
-
-    function initializeFromBridgeAtTime(nowMs) {
-        root.displayedPositionSeconds = root.uiBridge.positionSeconds
-        root.spectrogramPositionSeconds = root.uiBridge.positionSeconds
+    function initializeFromBridge() {
         root.syncMutedVolumeState()
-        root.positionSmoothingPrimed = root.uiBridge.playbackState === "Playing"
-        root.resetInterpolationState(root.uiBridge.positionSeconds, nowMs)
-        root.interpolationActive = root.uiBridge.playbackState === "Playing"
-        root.clearVisualSeekClock()
-        root.positionSmoothingTrackPath = root.uiBridge.currentTrackPath
         root.stoppedSpectrogramTrackPath = root.uiBridge.currentTrackPath || ""
         root.lastSpectrogramPlaybackState = root.uiBridge.playbackState || ""
-    }
-
-    function initializeFromBridge() {
-        root.initializeFromBridgeAtTime(root.currentTimeMs())
     }
 }

@@ -7,6 +7,7 @@
 #include <QImage>
 #include <QMetaObject>
 #include <QMutex>
+#include <QPointer>
 #include <QQuickItem>
 #include <QTimer>
 #include <QVariantList>
@@ -16,6 +17,8 @@
 #include <deque>
 #include <memory>
 #include <vector>
+
+#include "PlaybackClock.h"
 
 class QQuickWindow;
 class QSGNode;
@@ -30,7 +33,9 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(bool forceFpsOverlay READ forceFpsOverlay CONSTANT)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz WRITE setSampleRateHz NOTIFY sampleRateHzChanged)
     Q_PROPERTY(int maxColumns READ maxColumns WRITE setMaxColumns NOTIFY maxColumnsChanged)
-    Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
+    // Where playback is; the playhead follows its position.
+    Q_PROPERTY(PlaybackClock *clock READ clock WRITE setClock NOTIFY clockChanged)
+    Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY positionSecondsChanged)
     Q_PROPERTY(bool playing READ isPlaying WRITE setPlaying NOTIFY playingChanged)
     Q_PROPERTY(bool precomputedReady READ precomputedReady NOTIFY precomputedReadyChanged)
     Q_PROPERTY(int displayMode READ displayMode WRITE setDisplayMode NOTIFY displayModeChanged)
@@ -61,9 +66,9 @@ public:
     int maxColumns() const;
     void setMaxColumns(int value);
 
+    PlaybackClock *clock() const;
+    void setClock(PlaybackClock *value);
     double positionSeconds() const;
-    void setPositionSeconds(double value);
-    void applyExplicitSeekPosition(double value);
 
     bool isPlaying() const;
     void setPlaying(bool value);
@@ -117,6 +122,7 @@ signals:
     void showFpsOverlayChanged();
     void sampleRateHzChanged();
     void maxColumnsChanged();
+    void clockChanged();
     void positionSecondsChanged();
     void playingChanged();
     void precomputedReadyChanged();
@@ -166,8 +172,14 @@ private:
     qint64 currentRollingDisplayRightLocked(std::chrono::steady_clock::time_point now) const;
     void truncateRollingTailLocked(qint64 newWriteSeq);
     double currentRenderPositionSecondsLocked(std::chrono::steady_clock::time_point now) const;
-    void setPositionAnchorLocked(double value, std::chrono::steady_clock::time_point now);
-    void syncPositionAnchorLocked(std::chrono::steady_clock::time_point now);
+    bool positionHeldLocked(qint64 nowNs) const;
+    void clockStateChanged();
+    void holdPositionLocked(
+        const PlaybackClockState &trajectory,
+        double offset,
+        std::chrono::steady_clock::time_point now);
+    void releasePositionHoldLocked(std::chrono::steady_clock::time_point now);
+    void continueGaplessLocked(std::chrono::steady_clock::time_point now);
     void rebuildPrecomputedCanvasLocked(
         int width,
         int height,
@@ -242,7 +254,6 @@ private:
     QVariantMap debugSeekProfileStateLocked() const;
     void resetSmoothnessProfileLocked();
     void maybeStartSmoothnessProfileLocked(qint64 nowMs);
-    void noteSmoothnessServoLocked(double errorSeconds, bool regressedDuringPlayback);
     void noteSmoothnessProfileFrameLocked(qint64 nowMs, double elapsedSeconds, bool pending, bool advanced);
     void noteSmoothnessAdvanceFallbackLocked(double effectiveZoom);
     void noteSmoothnessPaintLocked(double paintMs);
@@ -287,7 +298,6 @@ private:
     std::chrono::steady_clock::time_point m_profileLastFrameGapSpike{};
     std::chrono::steady_clock::time_point m_profileLastPaintSpike{};
     std::chrono::steady_clock::time_point m_profileLastWriteHeadClampSpike{};
-    std::chrono::steady_clock::time_point m_profileLastServoSpike{};
     std::chrono::steady_clock::time_point m_profileLastAdvanceFallbackSpike{};
     quint64 m_profilePaints{0};
     double m_profilePaintMs{0.0};
@@ -328,14 +338,28 @@ private:
     quint64 m_precomputedSessionGeneration{0};
     quint64 m_precomputedCommittedGeneration{0};
     bool m_precomputedReady{false};
+    // The playhead's position when the clock or the data last changed it.
     double m_positionSeconds{0.0};
-    double m_positionAnchorSeconds{0.0};
-    std::chrono::steady_clock::time_point m_positionAnchorUpdatedAt{};
-    bool m_positionAnchorInitialized{false};
+    QPointer<PlaybackClock> m_clock;
+    QMetaObject::Connection m_clockConnection;
+    // A copy of the clock's state, which the render thread evaluates.
+    PlaybackClockState m_clockState;
     bool m_playing{false};
+    // Rolling history is in write order, so after a jump the playhead
+    // goes on along m_positionHoldTrajectory (plus its offset) until the
+    // worker's data for the new position arrives, or, with a deadline in
+    // m_positionJumpHoldUntilNs, until then.
     bool m_positionJumpHoldActive{false};
-    double m_positionJumpHoldSeconds{0.0};
+    PlaybackClockState m_positionHoldTrajectory;
+    double m_positionHoldOffset{0.0};
+    qint64 m_positionJumpHoldUntilNs{0};
     std::chrono::steady_clock::time_point m_positionJumpHoldStartedAt{};
+    // Where the previous track was, for a gapless continuation: the clock's
+    // state before it changed tracks, and the offset it was shown with.
+    PlaybackClockState m_previousTrackClockState;
+    double m_previousTrackPositionOffset{0.0};
+    // Data for a gapless successor arrived before the clock changed tracks.
+    bool m_gaplessContinuationPending{false};
     bool m_precomputedResetPending{false};
     int m_precomputedPendingResetStartIndex{0};
     int m_precomputedPendingResetBins{0};
@@ -401,8 +425,9 @@ private:
     bool m_timeGridCachedRollingMode{false};
     int m_timeGridPadding{0};
 
+    // Rolling mode shows a gapless successor after the tracks before it:
+    // its position plus this offset.
     double m_gaplessPositionOffset{0.0};
-    std::chrono::steady_clock::time_point m_centeredGaplessTransitionAt{};
     int m_debugPaintCounter{0};
 
     mutable QMutex m_stateMutex;
@@ -430,10 +455,6 @@ private:
         int pendingGapFrames{0};
         double maxGapMs{0.0};
         int regressionCount{0};
-        int servoFrames{0};
-        int servoRegressionDrops{0};
-        double servoErrorMsTotal{0.0};
-        double maxServoErrorMs{0.0};
         int drainPasses{0};
         int drainedColumns{0};
         int maxPendingRows{0};

@@ -121,7 +121,6 @@ ApplicationWindow {
         id: playbackController
         uiBridge: root.uiBridge
         visualFeedsEnabled: root.visualFeedsEnabled
-        seekPressed: transportBar ? transportBar.seekPressed : false
     }
 
     Controllers.LibraryController {
@@ -171,9 +170,8 @@ ApplicationWindow {
     QtObject {
         id: bridgeFallback
         property string playbackState: "Stopped"
-        property string positionText: "00:00"
+        property var playbackClock: null
         property string durationText: "00:00"
-        property real positionSeconds: 0
         property real durationSeconds: 0
         property real volume: 1.0
         property int queueLength: 0
@@ -264,7 +262,6 @@ ApplicationWindow {
         property bool connected: false
         property string backendFailure: ""
         signal playbackChanged()
-        signal transportPositionDiscontinuity(double seconds)
         signal trackIdentityChanged()
         signal trackMetadataChanged()
         signal snapshotChanged()
@@ -954,6 +951,7 @@ ApplicationWindow {
         channelStatusIconSource: root.channelStatusIconSource
         themeIsDark: root.themeIsDark
         transientError: root.transientBridgeError
+        positionText: playbackController.positionText
     }
 
     ColumnLayout {
@@ -983,7 +981,8 @@ ApplicationWindow {
             nextAction: nextAction
             themeIsDark: root.themeIsDark
             volumeMuted: playbackController.volumeMuted
-            displayedPositionSeconds: playbackController.displayedPositionSeconds
+            displayedPositionSeconds: playbackController.positionSeconds
+            positionText: playbackController.positionText
             toggleMutedVolume: playbackController.toggleMutedVolume
             setAppVolume: playbackController.setAppVolume
             normalizedVolumeValue: playbackController.normalizedVolumeValue
@@ -1072,7 +1071,7 @@ ApplicationWindow {
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             uiBridge: root.uiBridge
-            positionSeconds: playbackController.spectrogramPositionSeconds
+            clock: playbackController.playbackClock
             seekCommitted: playbackController.seekCommitted
         }
 
@@ -1085,7 +1084,7 @@ ApplicationWindow {
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             uiBridge: root.uiBridge
-            positionSeconds: playbackController.spectrogramPositionSeconds
+            clock: playbackController.playbackClock
             seekCommitted: playbackController.seekCommitted
         }
 
@@ -1098,17 +1097,10 @@ ApplicationWindow {
             visible: root.uiBridge.showLevelMeter && !viewerController.spectrogramViewerOpen
             height: visible ? root.levelMeterHeight : 0
             sourcePath: visible && root.uiBridge.playbackState !== "Stopped" ? root.uiBridge.currentTrackPath : ""
-            positionSeconds: playbackController.displayedPositionSeconds
+            clock: playbackController.playbackClock
             durationSeconds: root.uiBridge.durationSeconds
             playing: root.uiBridge.connected && root.uiBridge.playbackState === "Playing"
             channelCountHint: root.uiBridge.currentTrackChannels > 0 ? root.uiBridge.currentTrackChannels : 2
-        }
-
-        Connections {
-            target: root.uiBridge
-            function onTransportPositionDiscontinuity(seconds) {
-                levelMeter.resetForSeek(seconds)
-            }
         }
     }
 

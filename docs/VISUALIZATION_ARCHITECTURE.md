@@ -2,7 +2,7 @@
 
 ## Playback and analysis
 
-Playback owns audio output and publishes transport position and track identity. It does not forward unused PCM to the visualizations. Analysis opens independent decoders, preserving native sample rate and timestamped frame positions. Exact seeks decode codec preroll and trim to the requested frame. Spectrogram sessions align their FFT windows to an absolute sample grid; timestamp gaps become bounded silence batches and overlaps are trimmed. Waveform detail preserves missing coverage separately from actual silence.
+Playback owns audio output and publishes transport position and track identity. The position is the pipeline's own, with the `CLOCK_MONOTONIC` time the engine read it and whether it advances from there; the UI's `PlaybackClock` extrapolates it once, and the transport bar, spectrogram, waveforms, level meter, and MPRIS all read that clock. It does not forward unused PCM to the visualizations. Analysis opens independent decoders, preserving native sample rate and timestamped frame positions. Exact seeks decode codec preroll and trim to the requested frame. Spectrogram sessions align their FFT windows to an absolute sample grid; timestamp gaps become bounded silence batches and overlaps are trimmed. Waveform detail preserves missing coverage separately from actual silence.
 
 The analysis control thread owns track identity, display settings, generation changes, and gapless staging. A spectrogram worker owns its decoder, FFT scratch storage, peak-hold state, and partial output batch. Seeking resets these objects without recursive decode loops or rebuilding FFT plans. Rolling continuation uses a continuous column timeline; centered transitions use the new track's timeline.
 
