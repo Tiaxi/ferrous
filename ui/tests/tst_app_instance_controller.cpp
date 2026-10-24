@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <QDBusAbstractAdaptor>
+#include <QWindow>
 #include <QtTest/QtTest>
 
 #include "../src/AppInstanceController.h"
+#include "../src/WindowActivation.h"
 
 #include <memory>
 
@@ -18,6 +21,7 @@ public:
     int remoteExistsCalls{0};
     int forwardCalls{0};
     QStringList forwardedPaths;
+    QString forwardedActivationToken;
     QObject *primaryObject{nullptr};
     QString startError{QStringLiteral("start failed")};
     QString forwardError{QStringLiteral("forward failed")};
@@ -41,9 +45,13 @@ public:
         return remoteExists;
     }
 
-    bool forwardToPrimary(const QStringList &paths, QString *errorMessage) override {
+    bool forwardToPrimary(
+        const QStringList &paths,
+        const QString &activationToken,
+        QString *errorMessage) override {
         ++forwardCalls;
         forwardedPaths = paths;
+        forwardedActivationToken = activationToken;
         if (forwardResult) {
             return true;
         }
@@ -65,6 +73,11 @@ private slots:
     void initializeForwardsToExistingPrimary();
     void initializeErrorsWhenForwardToPrimaryFails();
     void openPathsDispatchesImmediatelyWhenHandlerExists();
+    void initializeForwardsActivationTokenToPrimary();
+    void dbusOpenActivatesWithForwardedToken();
+    void pendingRequestsKeepTheirActivationToken();
+    void activationRaisesMainWindowNotHiddenViewer();
+    void activationTokenReachesOnlyWayland();
 };
 
 void AppInstanceControllerTest::sanitizeOpenTargetsDropsBlankEntries() {
@@ -138,6 +151,114 @@ void AppInstanceControllerTest::openPathsDispatchesImmediatelyWhenHandlerExists(
     controller.setOpenHandler([&dispatched](const QStringList &paths) { dispatched = paths; });
     QVERIFY(controller.openPaths(QStringList{QStringLiteral("/tmp/song.flac")}));
     QCOMPARE(dispatched, QStringList{QStringLiteral("/tmp/song.flac")});
+}
+
+void AppInstanceControllerTest::initializeForwardsActivationTokenToPrimary() {
+    auto transport = std::make_unique<FakeTransport>();
+    FakeTransport *transportPtr = transport.get();
+    transportPtr->startPrimaryResult = false;
+    transportPtr->remoteExists = true;
+    transportPtr->forwardResult = true;
+    AppInstanceController controller(std::move(transport));
+
+    QCOMPARE(
+        controller.initialize(
+            QStringList{QStringLiteral("/tmp/song.flac")},
+            nullptr,
+            QStringLiteral("token-123")),
+        AppInstanceController::StartupResult::ExitAfterForward);
+    QCOMPARE(transportPtr->forwardedActivationToken, QStringLiteral("token-123"));
+}
+
+void AppInstanceControllerTest::dbusOpenActivatesWithForwardedToken() {
+    AppInstanceController controller(std::make_unique<FakeTransport>());
+    QStringList events;
+    controller.setOpenHandler([&events](const QStringList &paths) {
+        events.push_back(QStringLiteral("open:") + paths.join(QLatin1Char(',')));
+    });
+    controller.setActivationHandler([&events](const QString &token) {
+        events.push_back(QStringLiteral("activate:") + token);
+    });
+
+    auto *adaptor = controller.findChild<QDBusAbstractAdaptor *>();
+    QVERIFY(adaptor != nullptr);
+    bool accepted = false;
+    QVariantMap platformData;
+    platformData.insert(QStringLiteral("activation-token"), QStringLiteral("wayland-token"));
+    QVERIFY(QMetaObject::invokeMethod(
+        adaptor,
+        "Open",
+        Q_RETURN_ARG(bool, accepted),
+        Q_ARG(QStringList, QStringList{QStringLiteral("/tmp/song.flac")}),
+        Q_ARG(QVariantMap, platformData)));
+    QVERIFY(accepted);
+    QCOMPARE(events, (QStringList{
+        QStringLiteral("open:/tmp/song.flac"),
+        QStringLiteral("activate:wayland-token"),
+    }));
+
+    // Activation without files still raises the window with the token.
+    events.clear();
+    QVERIFY(QMetaObject::invokeMethod(
+        adaptor,
+        "Open",
+        Q_RETURN_ARG(bool, accepted),
+        Q_ARG(QStringList, QStringList{}),
+        Q_ARG(QVariantMap, platformData)));
+    QCOMPARE(events, QStringList{QStringLiteral("activate:wayland-token")});
+
+    // The older method stays available for second instances of older builds.
+    events.clear();
+    QVERIFY(QMetaObject::invokeMethod(
+        adaptor,
+        "OpenPaths",
+        Q_RETURN_ARG(bool, accepted),
+        Q_ARG(QStringList, QStringList{QStringLiteral("/tmp/other.flac")})));
+    QCOMPARE(events, (QStringList{QStringLiteral("open:/tmp/other.flac"), QStringLiteral("activate:")}));
+}
+
+void AppInstanceControllerTest::pendingRequestsKeepTheirActivationToken() {
+    AppInstanceController controller(std::make_unique<FakeTransport>());
+    QStringList tokens;
+    controller.setActivationHandler([&tokens](const QString &token) { tokens.push_back(token); });
+
+    QVERIFY(controller.openPaths(QStringList{QStringLiteral("/tmp/song.flac")}, QStringLiteral("early")));
+    QVERIFY(tokens.isEmpty());
+
+    QStringList dispatched;
+    controller.setOpenHandler([&dispatched](const QStringList &paths) { dispatched = paths; });
+    QCOMPARE(dispatched, QStringList{QStringLiteral("/tmp/song.flac")});
+    QCOMPARE(tokens, QStringList{QStringLiteral("early")});
+}
+
+void AppInstanceControllerTest::activationRaisesMainWindowNotHiddenViewer() {
+    // The viewer exists first, so it leads the top-level window list.
+    QWindow viewer;
+    QWindow mainWindow;
+    viewer.create();
+    mainWindow.create();
+    const QWindowList windows = QGuiApplication::topLevelWindows();
+    QVERIFY(windows.indexOf(&viewer) < windows.indexOf(&mainWindow));
+
+    QVERIFY(!activateMainWindow());
+    setMainActivationWindow(&mainWindow);
+    QVERIFY(activateMainWindow());
+    QVERIFY(mainWindow.isVisible());
+    QVERIFY(!viewer.isVisible());
+
+    setMainActivationWindow(nullptr);
+}
+
+void AppInstanceControllerTest::activationTokenReachesOnlyWayland() {
+    qunsetenv("XDG_ACTIVATION_TOKEN");
+    provideActivationToken(QStringLiteral("xcb"), QStringLiteral("token"));
+    QVERIFY(!qEnvironmentVariableIsSet("XDG_ACTIVATION_TOKEN"));
+    provideActivationToken(QStringLiteral("wayland"), QString());
+    QVERIFY(!qEnvironmentVariableIsSet("XDG_ACTIVATION_TOKEN"));
+
+    provideActivationToken(QStringLiteral("wayland"), QStringLiteral("token"));
+    QCOMPARE(qEnvironmentVariable("XDG_ACTIVATION_TOKEN"), QStringLiteral("token"));
+    qunsetenv("XDG_ACTIVATION_TOKEN");
 }
 
 QTEST_MAIN(AppInstanceControllerTest)

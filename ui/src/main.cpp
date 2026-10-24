@@ -7,6 +7,7 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QStandardPaths>
+#include <QWindow>
 #include <qqml.h>
 
 #include <atomic>
@@ -31,6 +32,7 @@
 #include "SpectrogramItem.h"
 #include "TagEditorController.h"
 #include "WaveformItem.h"
+#include "WindowActivation.h"
 #include "WaveformEditorItem.h"
 #include "LevelMeterItem.h"
 
@@ -254,7 +256,10 @@ int main(int argc, char *argv[]) {
     ConsoleTeeManager consoleTee(DiagnosticsLog::defaultLogPath());
     AppInstanceController instanceController;
     QString instanceError;
-    switch (instanceController.initialize(QCoreApplication::arguments().mid(1), &instanceError)) {
+    switch (instanceController.initialize(
+        QCoreApplication::arguments().mid(1),
+        &instanceError,
+        qEnvironmentVariable("XDG_ACTIVATION_TOKEN"))) {
     case AppInstanceController::StartupResult::ExitAfterForward:
         return 0;
     case AppInstanceController::StartupResult::ExitWithError:
@@ -296,5 +301,8 @@ int main(int argc, char *argv[]) {
         Qt::QueuedConnection);
 
     engine.loadFromModule("FerrousUi", "Main");
+    if (!engine.rootObjects().isEmpty()) {
+        setMainActivationWindow(qobject_cast<QWindow *>(engine.rootObjects().constFirst()));
+    }
     return app.exec();
 }

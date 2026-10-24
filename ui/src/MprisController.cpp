@@ -325,7 +325,7 @@ bool MprisController::canControl() const {
 }
 
 void MprisController::raiseWindow() {
-    activateTopLevelWindow();
+    activateMainWindow();
 }
 
 void MprisController::quitApplication() {
