@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::artwork::apply_artwork_to_track;
 use crate::lastfm::{
@@ -14,6 +14,8 @@ use crate::library::{
     refresh_cover_paths_for_tracks_with_override, store_external_track_cache, IndexedTrack,
 };
 
+use crate::worker_thread::spawn_worker;
+
 use super::config::config_base_path;
 use super::search::{run_search_worker, SearchWorkerQuery};
 use super::{
@@ -21,28 +23,42 @@ use super::{
     ExternalQueueDetailsEvent, ExternalQueueDetailsRequest,
 };
 
-pub(super) fn spawn_bridge_support_threads(
-    search_query_rx: Receiver<SearchWorkerQuery>,
-    search_results_tx: Sender<BridgeSearchResultsFrame>,
-    external_queue_details_rx: Receiver<ExternalQueueDetailsRequest>,
-    external_queue_details_event_tx: Sender<ExternalQueueDetailsEvent>,
-    apply_album_art_rx: Receiver<ApplyAlbumArtRequest>,
-    apply_album_art_event_tx: Sender<ApplyAlbumArtEvent>,
+/// Start the search worker, and return its query and result channels.
+pub(super) fn spawn_search_worker() -> (
+    Sender<SearchWorkerQuery>,
+    Receiver<BridgeSearchResultsFrame>,
 ) {
-    let _ = std::thread::Builder::new()
-        .name("ferrous-bridge-search".to_string())
-        .spawn(move || run_search_worker(&search_query_rx, &search_results_tx));
-    let _ = std::thread::Builder::new()
-        .name("ferrous-queue-details".to_string())
-        .spawn(move || {
-            run_external_queue_detail_worker(
-                &external_queue_details_rx,
-                &external_queue_details_event_tx,
-            );
-        });
-    let _ = std::thread::Builder::new()
-        .name("ferrous-apply-artwork".to_string())
-        .spawn(move || run_apply_album_art_worker(&apply_album_art_rx, &apply_album_art_event_tx));
+    let (query_tx, query_rx) = unbounded();
+    let (results_tx, results_rx) = unbounded();
+    spawn_worker("ferrous-bridge-search", move || {
+        run_search_worker(&query_rx, &results_tx);
+    });
+    (query_tx, results_rx)
+}
+
+/// Start the worker that reads queued files outside the library, and return
+/// its request and result channels.
+pub(super) fn spawn_queue_detail_worker() -> (
+    Sender<ExternalQueueDetailsRequest>,
+    Receiver<ExternalQueueDetailsEvent>,
+) {
+    let (request_tx, request_rx) = unbounded();
+    let (event_tx, event_rx) = unbounded();
+    spawn_worker("ferrous-queue-details", move || {
+        run_external_queue_detail_worker(&request_rx, &event_tx);
+    });
+    (request_tx, event_rx)
+}
+
+/// Start the album art worker, and return its request and result channels.
+pub(super) fn spawn_apply_album_art_worker(
+) -> (Sender<ApplyAlbumArtRequest>, Receiver<ApplyAlbumArtEvent>) {
+    let (request_tx, request_rx) = unbounded();
+    let (event_tx, event_rx) = unbounded();
+    spawn_worker("ferrous-apply-artwork", move || {
+        run_apply_album_art_worker(&request_rx, &event_tx);
+    });
+    (request_tx, event_rx)
 }
 
 pub(super) fn spawn_lastfm_service(

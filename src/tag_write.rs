@@ -686,7 +686,9 @@ fn read<T: AudioFile, R>(
     take: impl FnOnce(T) -> R,
 ) -> Result<R, LoftyError> {
     let mut file = File::open(path)?;
-    Ok(take(T::read_from(&mut file, options)?))
+    Ok(take(crate::panic_guard::guard_tag_read(path, || {
+        T::read_from(&mut file, options)
+    })?))
 }
 
 /// Audio frames for MP3 fixtures.

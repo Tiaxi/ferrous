@@ -2374,6 +2374,19 @@ bool BridgeClient::connected() const {
     return m_connected;
 }
 
+QString BridgeClient::backendFailure() const {
+    return m_backendFailure;
+}
+
+void BridgeClient::setBackendFailure(const QString &message) {
+    if (!m_backendFailure.isEmpty()) {
+        return;
+    }
+    m_backendFailure = message;
+    logDiagnostic(QStringLiteral("bridge"), QStringLiteral("backend stopped: %1").arg(message));
+    emit backendFailureChanged();
+}
+
 void BridgeClient::play() {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
@@ -4644,6 +4657,7 @@ void BridgeClient::shutdownBridgeGracefully() {
         return;
     }
 
+    m_bridgeShutdownRequested = true;
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown));
 }
 
@@ -4768,7 +4782,9 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
         logDiagnostic(
             QStringLiteral("bridge"),
             QStringLiteral("failed to send command bytes=%1").arg(payload.size()));
-        emit bridgeError(QStringLiteral("failed to send command to in-process bridge"));
+        emit bridgeError(m_backendFailure.isEmpty()
+                ? QStringLiteral("failed to send command to in-process bridge")
+                : QStringLiteral("command not sent: the backend has stopped"));
         return false;
     }
     return true;
@@ -4805,6 +4821,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (m_connected) {
             m_connected = false;
             emit connectedChanged();
+        }
+        // The backend stops on its own only when something went wrong. Its
+        // reason comes with the stop, unless it ended without a chance to give one.
+        if (!m_bridgeShutdownRequested) {
+            const QString reason = snapshot.errorMessage.trimmed();
+            setBackendFailure(reason.isEmpty()
+                    ? QStringLiteral("The Ferrous backend stopped unexpectedly. "
+                                     "Restart Ferrous to continue.")
+                    : reason);
         }
         return false;
     }

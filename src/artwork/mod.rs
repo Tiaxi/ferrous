@@ -339,7 +339,7 @@ fn rewrite_embedded_artwork_for_file(
 /// one that starts from the tag readers show, as the tag editor does, so the
 /// new tag does not hide the title, artist, and album. The other tags stay.
 fn edited_artwork_tag(path: &Path, artwork: &NormalizedArtwork) -> Result<(FileType, Tag), String> {
-    let tagged = lofty::read_from_path(path)
+    let tagged = crate::panic_guard::read_tags(path)
         .map_err(|err| format!("failed to read tags from {}: {err}", path.display()))?;
     let file_type = tagged.file_type();
     let primary_type = tagged.primary_tag_type();
@@ -415,7 +415,7 @@ fn is_apple_double_sidecar(path: &Path) -> bool {
 fn track_album(path: &Path) -> Result<String, String> {
     let read_error =
         |err: &dyn std::fmt::Display| format!("failed to read tags from {}: {err}", path.display());
-    let tagged = lofty::read_from_path(path);
+    let tagged = crate::panic_guard::read_tags(path);
     let album = |tagged: &TaggedFile| {
         tagged
             .primary_tag()

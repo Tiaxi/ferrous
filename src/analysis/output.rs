@@ -30,7 +30,9 @@ pub(super) struct AnalysisOutputs {
 impl AnalysisEventOutput for AnalysisOutputs {
     fn send(&self, mut event: AnalysisEvent) -> Result<(), ()> {
         let generation = match &event {
-            AnalysisEvent::Snapshot(_) => return self.snapshots.send(event).map_err(|_| ()),
+            AnalysisEvent::Snapshot(_) | AnalysisEvent::WorkerFailed(_) => {
+                return self.snapshots.send(event).map_err(|_| ());
+            }
             AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => chunk.generation,
         };
         loop {

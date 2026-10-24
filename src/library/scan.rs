@@ -135,20 +135,37 @@ impl MetadataWorkerPool {
         let (tx_tasks, rx_tasks) = unbounded::<MetadataTask>();
         let (tx_results, rx_results) = unbounded::<MetadataResult>();
         let mut workers = Vec::new();
-        for _ in 0..worker_count {
+        for index in 0..worker_count {
             let rx_tasks = rx_tasks.clone();
             let tx_results = tx_results.clone();
-            workers.push(thread::spawn(move || {
-                while let Ok(task) = rx_tasks.recv() {
-                    let indexed = read_track_info_with_cover_cache(&task.path, covers);
-                    if tx_results.send(MetadataResult { task, indexed }).is_err() {
-                        break;
+            let spawned = thread::Builder::new()
+                .name(format!("ferrous-scan-{index}"))
+                .spawn(move || {
+                    while let Ok(task) = rx_tasks.recv() {
+                        let result = read_scan_task(task, covers);
+                        if tx_results.send(result).is_err() {
+                            break;
+                        }
                     }
-                }
-            }));
+                });
+            match spawned {
+                Ok(worker) => workers.push(worker),
+                // The scan goes on with the workers that started.
+                Err(error) => eprintln!("[ferrous] failed to start a scan worker: {error}"),
+            }
         }
         drop(rx_tasks);
         drop(tx_results);
+        if workers.is_empty() {
+            // The scan reads every file itself, as with one worker.
+            return Self {
+                task_tx: None,
+                result_rx: None,
+                workers,
+                pending_tasks: 0,
+                max_pending_tasks,
+            };
+        }
 
         Self {
             task_tx: Some(tx_tasks),
@@ -1473,6 +1490,7 @@ fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
                 path_string: path.to_string_lossy().to_string(),
                 mtime_ns: fingerprint.mtime_ns,
                 size_bytes: fingerprint.size_bytes,
+                indexed_before: false,
             };
             let indexed = read_track_info(path);
             apply_metadata_result(
@@ -1480,7 +1498,11 @@ fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
                 &root.to_string_lossy(),
                 unix_ts_i64(),
                 &mut |_, _| {},
-                MetadataResult { task, indexed },
+                MetadataResult {
+                    task,
+                    indexed,
+                    failure: None,
+                },
             )
             .expect("index fixture");
         }
@@ -1631,12 +1653,92 @@ struct MetadataTask {
     path_string: String,
     mtime_ns: i64,
     size_bytes: i64,
+    /// Whether the index already has a row for the file.
+    indexed_before: bool,
 }
 
 #[derive(Debug, Clone)]
 struct MetadataResult {
     task: MetadataTask,
     indexed: IndexedTrack,
+    /// Why the file's tags could not be read, when reading them failed
+    /// abnormally; a file the index already has keeps its row then, and a
+    /// new one is indexed by its name.
+    failure: Option<String>,
+}
+
+/// Read the file of `task` for the index.
+///
+/// A panic while reading one file, in the tag reader or elsewhere, fails
+/// that file alone, and the scan goes on and reports it.
+fn read_scan_task(task: MetadataTask, covers: Option<&EmbeddedCoverCache>) -> MetadataResult {
+    let read = crate::panic_guard::catch(&format!("reading '{}'", task.path.display()), || {
+        #[cfg(test)]
+        scan_test_hooks::before_read(&task.path);
+        read_track_info_with_cover_cache(&task.path, covers)
+    });
+    let (indexed, failure) =
+        read.unwrap_or_else(|failure| (untagged_track(&task.path), Some(failure)));
+    MetadataResult {
+        task,
+        indexed,
+        failure,
+    }
+}
+
+/// The files of a scan whose tags could not be read.
+#[derive(Default)]
+struct UnreadableTracks {
+    count: usize,
+    first: Option<(PathBuf, String)>,
+}
+
+impl UnreadableTracks {
+    fn note(&mut self, result: &MetadataResult) {
+        let Some(failure) = &result.failure else {
+            return;
+        };
+        self.count += 1;
+        self.first
+            .get_or_insert_with(|| (result.task.path.clone(), failure.clone()));
+    }
+
+    fn problem(&self, root: &Path) -> Option<String> {
+        let (path, failure) = self.first.as_ref()?;
+        Some(format!(
+            "could not read the tags of {} in '{}'; kept the tags indexed before, \
+             or indexed new files by file name (first: '{}': {failure})",
+            count_label(self.count, "file", "files"),
+            root.display(),
+            path.display()
+        ))
+    }
+}
+
+/// Make reading chosen files panic during a scan.
+#[cfg(test)]
+pub(crate) mod scan_test_hooks {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, PoisonError};
+
+    static PANIC_ON_READ: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// Make every scan read of `path` panic.
+    pub(crate) fn panic_on_read(path: &Path) {
+        PANIC_ON_READ
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(path.to_path_buf());
+    }
+
+    pub(super) fn before_read(path: &Path) {
+        let panics = PANIC_ON_READ
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|chosen| chosen == path);
+        assert!(!panics, "test panic while reading {}", path.display());
+    }
 }
 
 fn scan_worker_count() -> usize {
@@ -1777,6 +1879,12 @@ fn apply_metadata_result<U>(
 where
     U: FnMut(&MetadataTask, &IndexedTrack),
 {
+    if result.failure.is_some() && result.task.indexed_before {
+        // The row holds the tags of the last good read; replacing them with
+        // the file name would lose them. The scan reports the file, and the
+        // row's old file state makes the next scan read it again.
+        return Ok(());
+    }
     let task = result.task;
     let indexed = result.indexed;
     upsert_stmt
@@ -2053,6 +2161,7 @@ where
     let now = unix_ts_i64();
     let mut workers = MetadataWorkerPool::new(scan_worker_count(), covers);
     let mut walk = LibraryWalk::new(&root, nested_roots);
+    let mut unreadable = UnreadableTracks::default();
 
     for ScanCandidate {
         path,
@@ -2065,15 +2174,13 @@ where
         let path_string = path.to_string_lossy().to_string();
         seen_paths.insert(path_string.clone());
 
-        let needs_update = match existing.get(&path_string) {
-            Some(existing_state) => {
-                existing_state.mtime_ns != mtime_ns
-                    || existing_state.size_bytes != size_bytes
-                    || !existing_state.has_cover_path
-                    || existing_state.suspicious_metadata
-            }
-            None => true,
-        };
+        let existing_state = existing.get(&path_string);
+        let needs_update = existing_state.is_none_or(|existing_state| {
+            existing_state.mtime_ns != mtime_ns
+                || existing_state.size_bytes != size_bytes
+                || !existing_state.has_cover_path
+                || existing_state.suspicious_metadata
+        });
 
         if needs_update {
             let task = MetadataTask {
@@ -2081,16 +2188,12 @@ where
                 path_string,
                 mtime_ns,
                 size_bytes,
+                indexed_before: existing_state.is_some(),
             };
             if let Err(task) = workers.submit(task) {
-                let indexed = read_track_info_with_cover_cache(&task.path, covers);
-                apply_metadata_result(
-                    &mut upsert_stmt,
-                    &root_str,
-                    now,
-                    on_upsert,
-                    MetadataResult { task, indexed },
-                )?;
+                let result = read_scan_task(task, covers);
+                unreadable.note(&result);
+                apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
                 processed = processed.saturating_add(1);
                 progress.emit(false, discovered, processed);
             }
@@ -2100,11 +2203,13 @@ where
         }
 
         for result in workers.drain_ready()? {
+            unreadable.note(&result);
             apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
             processed = processed.saturating_add(1);
             progress.emit(false, discovered, processed);
         }
         if let Some(result) = workers.wait_for_capacity()? {
+            unreadable.note(&result);
             apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
             processed = processed.saturating_add(1);
             progress.emit(false, discovered, processed);
@@ -2112,6 +2217,7 @@ where
     }
 
     for result in workers.finish()? {
+        unreadable.note(&result);
         apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
         processed = processed.saturating_add(1);
         progress.emit(false, discovered, processed);
@@ -2139,7 +2245,7 @@ where
 
     progress.emit(true, discovered, processed);
 
-    let problem = match walk.first_read_error {
+    let walk_problem = match walk.first_read_error {
         Some(first_error) => Some(format!(
             "could not read {} in '{}'; kept the tracks indexed there ({first_error})",
             count_label(walk.read_errors, "folder or file", "folders or files"),
@@ -2153,9 +2259,13 @@ where
         )),
         None => None,
     };
+    let problems: Vec<String> = walk_problem
+        .into_iter()
+        .chain(unreadable.problem(&root))
+        .collect();
     Ok(RootScanOutcome {
         removed: stale,
-        problem,
+        problem: (!problems.is_empty()).then(|| problems.join("; ")),
     })
 }
 
@@ -2208,31 +2318,26 @@ fn collect_search_tags(tag: &lofty::tag::Tag, tags: &mut super::SearchTags) {
 }
 
 pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
-    read_track_info_with_cover_cache(path, EmbeddedCoverCache::shared())
+    read_track_info_with_cover_cache(path, EmbeddedCoverCache::shared()).0
 }
 
-/// Like [`read_track_info`], but caches an embedded picture in `covers`.
+/// Like [`read_track_info`], but caches an embedded picture in `covers`, and
+/// also returns why the tags could not be read if the tag reader panicked.
+///
+/// A file whose tags lofty cannot read, or that has none, is indexed by its
+/// name with no failure: raw surround files, for one, are read that way and
+/// get their tags from an appended `APEv2` tag.
 fn read_track_info_with_cover_cache(
     path: &Path,
     covers: Option<&EmbeddedCoverCache>,
-) -> IndexedTrack {
-    let mut out = IndexedTrack {
-        search_tags: crate::library::SearchTags::default(),
-        title: path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_owned(),
-        artist: String::new(),
-        album: String::new(),
-        cover_path: String::new(),
-        genre: String::new(),
-        year: None,
-        track_no: None,
-        duration_secs: None,
-    };
+) -> (IndexedTrack, Option<String>) {
+    let mut out = untagged_track(path);
 
-    if let Ok(tagged) = lofty::read_from_path(path) {
+    let (tagged, failure) = match crate::panic_guard::read_tags_catching_panic(path) {
+        Ok(read) => (read.ok(), None),
+        Err(failure) => (None, Some(failure)),
+    };
+    if let Some(tagged) = tagged {
         for tag in tagged.tags() {
             collect_search_tags(tag, &mut out.search_tags);
         }
@@ -2297,13 +2402,33 @@ fn read_track_info_with_cover_cache(
     }
 
     out.cover_path = find_cover_path_for_track(path);
-    if out.cover_path.is_empty() {
+    // The embedded picture would come from the reader that just panicked.
+    if out.cover_path.is_empty() && failure.is_none() {
         out.cover_path = covers
             .and_then(|cache| cache.store_track_cover(path))
             .map(|cover_path| cover_path.to_string_lossy().into_owned())
             .unwrap_or_default();
     }
-    out
+    (out, failure)
+}
+
+/// The index entry of a file without readable tags: its name as the title.
+fn untagged_track(path: &Path) -> IndexedTrack {
+    IndexedTrack {
+        search_tags: crate::library::SearchTags::default(),
+        title: path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_owned(),
+        artist: String::new(),
+        album: String::new(),
+        cover_path: String::new(),
+        genre: String::new(),
+        year: None,
+        track_no: None,
+        duration_secs: None,
+    }
 }
 
 pub(super) fn find_cover_path_for_track(path: &Path) -> String {
@@ -2921,6 +3046,96 @@ mod tests {
 
     fn scan(conn: &Connection, root: &Path) -> RootScanOutcome {
         scan_root(conn, root, &mut |_| {}, &mut |_, _| {}).expect("scan")
+    }
+
+    #[test]
+    fn a_file_that_panics_its_reader_is_indexed_by_name_and_reported() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("reader-panic");
+        fs::create_dir_all(&root).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let names = ["a.mp3", "broken.mp3", "c.mp3", "d.mp3"];
+        for name in names {
+            write_stub(&root.join(name), b"not-real-mp3");
+        }
+        let broken = root.join("broken.mp3");
+        scan_test_hooks::panic_on_read(&broken);
+
+        let outcome = scan(&conn, &root);
+
+        let expected: Vec<PathBuf> = names.iter().map(|name| root.join(name)).collect();
+        assert_eq!(indexed_paths(&conn), expected);
+        let problem = outcome.problem.expect("the unreadable file is reported");
+        assert!(
+            problem.contains("could not read the tags of 1 file"),
+            "{problem}"
+        );
+        assert!(problem.contains(&broken.display().to_string()), "{problem}");
+        assert!(problem.contains("test panic"), "{problem}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_tag_reader_panic_keeps_the_indexed_tags_and_is_reported() {
+        use crate::vorbis_comment_scan::fixtures::{comment_block, flac};
+
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("tag-reader-panic");
+        fs::create_dir_all(&root).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let saved = root.join("track.flac");
+        let tags: [&[u8]; 3] = [
+            b"TITLE=Saved Title",
+            b"ARTIST=Saved Artist",
+            b"ALBUM=Saved Album",
+        ];
+        fs::write(&saved, flac(&[&comment_block(&tags)])).expect("write track");
+        assert!(scan(&conn, &root).problem.is_none());
+        let saved_tags = |conn: &Connection| {
+            let mut snapshot = LibrarySnapshot::default();
+            load_snapshot(conn, &mut snapshot);
+            snapshot
+                .tracks
+                .into_iter()
+                .map(|track| (track.path, track.title, track.artist, track.album))
+                .collect::<Vec<_>>()
+        };
+        let indexed = vec![(
+            saved.clone(),
+            "Saved Title".to_string(),
+            "Saved Artist".to_string(),
+            "Saved Album".to_string(),
+        )];
+        assert_eq!(saved_tags(&conn), indexed);
+
+        // The same tags with a `COVERART` picture that makes lofty panic, and
+        // a new file that does too.
+        let broken_tags: [&[u8]; 4] = [tags[0], tags[1], tags[2], b"COVERART=AAAA"];
+        fs::write(&saved, flac(&[&comment_block(&broken_tags)])).expect("break track");
+        let new = root.join("new.flac");
+        fs::write(&new, crate::panic_guard::fixtures::short_coverart_flac()).expect("write new");
+
+        let problem = scan(&conn, &root)
+            .problem
+            .expect("the unreadable files are reported");
+
+        assert!(
+            problem.contains("could not read the tags of 2 files"),
+            "{problem}"
+        );
+        assert!(problem.contains("the tag reader for"), "{problem}");
+        let mut expected = vec![(new, "new".to_string(), String::new(), String::new())];
+        expected.extend(indexed);
+        assert_eq!(saved_tags(&conn), expected);
+        // The row keeps its old file state, so the next scan tries again.
+        let problem = scan(&conn, &root).problem.expect("still reported");
+        assert!(
+            problem.contains("could not read the tags of 1 file"),
+            "{problem}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     fn insert_legacy_track(conn: &Connection, path: &Path) {

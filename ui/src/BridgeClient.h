@@ -180,6 +180,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
+    // Why the backend stopped without being asked to; empty while it runs.
+    Q_PROPERTY(QString backendFailure READ backendFailure NOTIFY backendFailureChanged)
     Q_PROPERTY(bool profileLogsEnabled READ profileLogsEnabled CONSTANT)
 
 public:
@@ -283,6 +285,7 @@ public:
     QString diagnosticsText() const;
     QString diagnosticsLogPath() const;
     bool connected() const;
+    QString backendFailure() const;
     bool profileLogsEnabled() const { return m_profileUiEnabled; }
 
     Q_INVOKABLE void play();
@@ -401,6 +404,7 @@ signals:
     void imageFileDetailsChanged(const QString &path);
     void diagnosticsChanged();
     void connectedChanged();
+    void backendFailureChanged();
     void bridgeError(const QString &message);
 
 private:
@@ -584,6 +588,7 @@ private:
     void scheduleAnalysisChanged();
     void reanchorCenteredSpectrogramsForExplicitPosition(double seconds);
     void shutdownBridgeGracefully();
+    void setBackendFailure(const QString &message);
     static QString detectFileBrowserNameHeuristic();
     static QString detectFileBrowserName();
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
@@ -737,6 +742,9 @@ private:
     QString m_pendingAddRootPath;
     qint64 m_pendingAddRootIssuedMs{0};
     bool m_connected{false};
+    QString m_backendFailure;
+    // Set once the UI has asked the backend to stop, after which its stop is expected.
+    bool m_bridgeShutdownRequested{false};
     bool m_loggedStartupQueueMissing{false};
     bool m_loggedStartupQueuePresent{false};
     bool m_playbackChangedPending{false};

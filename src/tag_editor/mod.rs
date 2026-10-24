@@ -15,6 +15,7 @@ use crate::file_edit_lock;
 use crate::library::{
     read_library_snapshot_from_db, rename_indexed_metadata_paths, LibraryRoot, LibrarySnapshot,
 };
+use crate::panic_guard;
 use crate::raw_audio::{
     edit_appended_apev2_text_items, format_ape_number_pair, is_raw_surround_file,
     read_appended_apev2_text_metadata, ApeTextField,
@@ -301,7 +302,7 @@ fn text_value(tag: &Tag, key: ItemKey) -> String {
 }
 
 fn load_standard_row(path: &Path) -> Result<TagEditorRow, String> {
-    let tagged = lofty::read_from_path(path).map_err(|err| {
+    let tagged = crate::panic_guard::read_tags(path).map_err(|err| {
         format!(
             "failed to read tag data for {}: {err}",
             path.to_string_lossy()
@@ -728,7 +729,7 @@ fn apply_standard_row_to_tag(
         return Ok(());
     }
     let edit = file_edit_lock::lock(path);
-    let mut tagged = lofty::read_from_path(path).map_err(|err| {
+    let mut tagged = crate::panic_guard::read_tags(path).map_err(|err| {
         format!(
             "failed to read tag data for {}: {err}",
             path.to_string_lossy()
@@ -843,11 +844,15 @@ pub(crate) fn load_rows_for_paths(paths: &[PathBuf]) -> LoadResponse {
     let mut rows = Vec::new();
     let mut failures = Vec::new();
     for path in paths {
-        let loaded = if is_raw_surround_file(path) {
-            load_raw_row(path)
-        } else {
-            load_standard_row(path)
-        };
+        // A panic while reading one file fails that file, not the whole load.
+        let loaded = panic_guard::catch(&format!("loading '{}'", path.display()), || {
+            if is_raw_surround_file(path) {
+                load_raw_row(path)
+            } else {
+                load_standard_row(path)
+            }
+        })
+        .and_then(|loaded| loaded);
         match loaded {
             Ok(row) => rows.push(row),
             Err(error) => failures.push(LoadFailure {
@@ -888,11 +893,16 @@ pub(crate) fn save_rows(request: SaveRequest) -> SaveResponse {
         let changed = save_row.changed_fields();
         let row = save_row.row;
         let path = PathBuf::from(&row.path);
-        let result = if is_raw_surround_file(&path) {
-            apply_raw_row(&path, &row, &changed)
-        } else {
-            apply_standard_row_to_tag(&path, &row, &changed)
-        };
+        // A panic while saving one file fails that file, and the others are
+        // still saved and reported.
+        let result = panic_guard::catch(&format!("saving '{}'", path.display()), || {
+            if is_raw_surround_file(&path) {
+                apply_raw_row(&path, &row, &changed)
+            } else {
+                apply_standard_row_to_tag(&path, &row, &changed)
+            }
+        })
+        .and_then(|result| result);
         match result {
             Ok(()) => {
                 successful_paths.push(row.path.clone());
@@ -1049,6 +1059,14 @@ pub(crate) fn serialize_save_response(response: &SaveResponse) -> Result<Vec<u8>
 pub(crate) fn serialize_rename_response(response: &RenameResponse) -> Result<Vec<u8>, String> {
     serde_json::to_vec(response)
         .map_err(|error| format!("failed to serialize tag editor rename response: {error}"))
+}
+
+/// A response that reports `message` instead of any file's result, for a
+/// request that failed as a whole.
+pub(crate) fn serialize_error_response(message: &str) -> Vec<u8> {
+    serde_json::json!({ "error": message })
+        .to_string()
+        .into_bytes()
 }
 
 #[cfg(test)]

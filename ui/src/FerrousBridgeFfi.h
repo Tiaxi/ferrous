@@ -19,7 +19,6 @@ bool ferrous_ffi_bridge_send_binary(
     FerrousFfiBridge *handle,
     const std::uint8_t *cmd_ptr,
     std::size_t cmd_len);
-bool ferrous_ffi_bridge_poll(FerrousFfiBridge *handle, std::uint32_t max_events);
 int ferrous_ffi_bridge_wakeup_fd(FerrousFfiBridge *handle);
 void ferrous_ffi_bridge_ack_wakeup(FerrousFfiBridge *handle);
 std::uint8_t *ferrous_ffi_bridge_pop_binary_event(FerrousFfiBridge *handle, std::size_t *len_out);
@@ -39,10 +38,6 @@ std::uint8_t *ferrous_ffi_bridge_pop_search_results(
     std::size_t *len_out,
     std::uint32_t *seq_out);
 void ferrous_ffi_bridge_free_search_results(std::uint8_t *ptr, std::size_t len);
-bool ferrous_ffi_bridge_refresh_edited_paths(
-    FerrousFfiBridge *handle,
-    const std::uint8_t *paths_ptr,
-    std::size_t paths_len);
 FerrousFfiRenameGate *ferrous_ffi_bridge_rename_gate(FerrousFfiBridge *handle);
 void ferrous_ffi_rename_gate_free(FerrousFfiRenameGate *gate);
 // Renames files on disk and waits for another rename: call it from a worker thread.
@@ -62,13 +57,6 @@ std::uint8_t *ferrous_ffi_tag_editor_save(
 std::uint8_t *ferrous_ffi_tag_editor_rename(
     const std::uint8_t *data, std::size_t size, std::size_t *len_out);
 void ferrous_ffi_tag_editor_free_buffer(std::uint8_t *ptr, std::size_t len);
-std::uint8_t *ferrous_ffi_waveform_window(
-    const std::uint8_t *path_ptr,
-    std::size_t path_len,
-    double start_seconds,
-    double end_seconds,
-    std::uint32_t max_points,
-    std::size_t *len_out);
 std::uint8_t *ferrous_ffi_waveform_window_cancellable(
     const std::uint8_t *path_ptr, std::size_t path_len,
     double start_seconds, double end_seconds, std::uint32_t max_points,

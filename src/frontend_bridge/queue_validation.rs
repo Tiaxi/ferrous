@@ -35,62 +35,59 @@ impl QueueValidationWorker {
         let (result_tx, results) = unbounded();
         let generation = Arc::new(AtomicU64::new(0));
         let active = Arc::clone(&generation);
-        let _ = std::thread::Builder::new()
-            .name("ferrous-queue-validation".into())
-            .spawn(move || {
-                let mut cache = None;
-                while let Ok(mut state) = rx.recv() {
-                    for newer in rx.try_iter() {
-                        state = newer;
-                    }
-                    let cancelled =
-                        || active.load(Ordering::Relaxed) != state.queue_detail_generation;
-                    if cancelled() {
-                        continue;
-                    }
-                    let request_generation = state.queue_detail_generation;
-                    let (request_tx, requests) = unbounded();
-                    validate_queue_details(
-                        &mut state,
-                        &request_tx,
-                        &|| active.load(Ordering::Relaxed) != request_generation,
-                        |pending| {
-                            if pending.is_empty() {
-                                return HashMap::new();
-                            }
-                            cache.get_or_insert_with(&cache_factory).load_many(pending)
-                        },
-                    );
-                    for request in requests.try_iter() {
-                        if active.load(Ordering::Relaxed) != state.queue_detail_generation {
-                            break;
+        crate::worker_thread::spawn_worker("ferrous-queue-validation", move || {
+            let mut cache = None;
+            while let Ok(mut state) = rx.recv() {
+                for newer in rx.try_iter() {
+                    state = newer;
+                }
+                let cancelled = || active.load(Ordering::Relaxed) != state.queue_detail_generation;
+                if cancelled() {
+                    continue;
+                }
+                let request_generation = state.queue_detail_generation;
+                let (request_tx, requests) = unbounded();
+                validate_queue_details(
+                    &mut state,
+                    &request_tx,
+                    &|| active.load(Ordering::Relaxed) != request_generation,
+                    |pending| {
+                        if pending.is_empty() {
+                            return HashMap::new();
                         }
-                        let indexed = read_track_info(&request.path);
-                        // Files may change while metadata is read; never cache or publish mismatched data.
-                        if track_file_fingerprint(&request.path) != Some(request.fingerprint) {
-                            continue;
-                        }
-                        if let Some(cache) = &cache {
-                            cache.store(&request.path, request.fingerprint, &indexed);
-                        }
-                        state
-                            .queue_detail_fingerprints
-                            .insert(request.path.clone(), request.fingerprint);
-                        Arc::make_mut(&mut state.queue_details).insert(request.path, indexed);
-                    }
-                    if active.load(Ordering::Relaxed) == state.queue_detail_generation
-                        && result_tx
-                            .send(ValidationResult {
-                                generation: state.queue_detail_generation,
-                                details: state.queue_details,
-                                fingerprints: state.queue_detail_fingerprints,
-                            })
-                            .is_err()
-                    {
+                        cache.get_or_insert_with(&cache_factory).load_many(pending)
+                    },
+                );
+                for request in requests.try_iter() {
+                    if active.load(Ordering::Relaxed) != state.queue_detail_generation {
                         break;
                     }
+                    let indexed = read_track_info(&request.path);
+                    // Files may change while metadata is read; never cache or publish mismatched data.
+                    if track_file_fingerprint(&request.path) != Some(request.fingerprint) {
+                        continue;
+                    }
+                    if let Some(cache) = &cache {
+                        cache.store(&request.path, request.fingerprint, &indexed);
+                    }
+                    state
+                        .queue_detail_fingerprints
+                        .insert(request.path.clone(), request.fingerprint);
+                    Arc::make_mut(&mut state.queue_details).insert(request.path, indexed);
                 }
-            });
+                if active.load(Ordering::Relaxed) == state.queue_detail_generation
+                    && result_tx
+                        .send(ValidationResult {
+                            generation: state.queue_detail_generation,
+                            details: state.queue_details,
+                            fingerprints: state.queue_detail_fingerprints,
+                        })
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        });
         Self {
             tx,
             results,

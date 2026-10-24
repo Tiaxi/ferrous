@@ -672,6 +672,14 @@ pub(super) struct ImportExpandOutcome {
 }
 
 impl ImportExpandOutcome {
+    /// The outcome of an import that could read none of its `count` inputs.
+    pub(super) fn all_unreadable(count: usize) -> Self {
+        Self {
+            unreadable_count: count,
+            ..Self::default()
+        }
+    }
+
     fn skipped_count(&self) -> usize {
         self.missing_count
             + self.unsupported_count

@@ -17,9 +17,7 @@ mod waveform_pyramid;
 mod waveform_service;
 mod waveform_window;
 
-pub(crate) use waveform_window::{
-    decode_waveform_window, decode_waveform_window_cancellable, WaveformWindow,
-};
+pub(crate) use waveform_window::{decode_waveform_window_cancellable, WaveformWindow};
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -47,7 +45,7 @@ use fft::{ensure_sample_buffer, peak_across_channels, WaveformAccumulator};
 use gst_waveform::decode_waveform_peaks_stream_gst;
 use session::{
     spawn_centered_staging_worker, spawn_spectrogram_decode_worker, SpectrogramWorkerCommand,
-    SpectrogramWorkerHandles,
+    SpectrogramWorkerHandles, SpectrogramWorkerStatus,
 };
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -194,6 +192,8 @@ pub struct PrecomputedSpectrogramChunk {
 pub enum AnalysisEvent {
     Snapshot(AnalysisSnapshot),
     PrecomputedSpectrogramChunk(PrecomputedSpectrogramChunk),
+    /// Part of the analysis stopped working; the message is for the user.
+    WorkerFailed(String),
 }
 
 pub(crate) struct SpectrogramOutputRoute {
@@ -359,12 +359,14 @@ impl AnalysisEngine {
         };
         let worker_columns_produced = Arc::new(AtomicU64::new(0));
         let worker_track_duration_ms = Arc::new(AtomicU64::new(0));
+        let spectrogram_status = SpectrogramWorkerStatus::default();
         spawn_spectrogram_decode_worker(
             spectrogram_cmd_rx,
             event_tx.clone(),
             Arc::clone(&spectrogram_decode_generation),
             Arc::clone(&worker_columns_produced),
             Arc::clone(&worker_track_duration_ms),
+            &spectrogram_status,
         );
 
         spawn_analysis_worker(
@@ -377,6 +379,7 @@ impl AnalysisEngine {
                 decode_generation: spectrogram_decode_generation,
                 columns_produced: worker_columns_produced,
                 track_duration_ms: worker_track_duration_ms,
+                status: spectrogram_status,
             },
         );
 
@@ -1600,34 +1603,32 @@ fn spawn_waveform_decode_worker(
     waveform_tx: Sender<AnalysisCommand>,
     waveform_decode_active_token: Arc<AtomicU64>,
 ) {
-    let _ = std::thread::Builder::new()
-        .name("ferrous-waveform-decode".to_string())
-        .spawn(move || {
-            while let Ok(mut job) = waveform_job_rx.recv() {
-                while let Ok(next_job) = waveform_job_rx.try_recv() {
-                    job = next_job;
-                }
-                let track_token = job.track_token;
-                let _ = decode_waveform_peaks_stream(
-                    &job.path,
-                    1024,
-                    |peaks, coverage_seconds, done| {
-                        if waveform_decode_active_token.load(Ordering::Relaxed) != track_token {
-                            return false;
-                        }
-                        let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
-                            track_token,
-                            peaks,
-                            coverage_seconds,
-                            complete: done,
-                            done,
-                        });
-                        true
-                    },
-                    || waveform_decode_active_token.load(Ordering::Relaxed) != track_token,
-                );
+    crate::worker_thread::spawn_worker("ferrous-waveform-decode", move || {
+        while let Ok(mut job) = waveform_job_rx.recv() {
+            while let Ok(next_job) = waveform_job_rx.try_recv() {
+                job = next_job;
             }
-        });
+            let track_token = job.track_token;
+            let _ = decode_waveform_peaks_stream(
+                &job.path,
+                1024,
+                |peaks, coverage_seconds, done| {
+                    if waveform_decode_active_token.load(Ordering::Relaxed) != track_token {
+                        return false;
+                    }
+                    let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
+                        track_token,
+                        peaks,
+                        coverage_seconds,
+                        complete: done,
+                        done,
+                    });
+                    true
+                },
+                || waveform_decode_active_token.load(Ordering::Relaxed) != track_token,
+            );
+        }
+    });
 }
 
 /// Saturating conversion from `f64` to `u64`, clamping to `[0, u64::MAX]`.
@@ -1661,24 +1662,55 @@ fn spawn_analysis_worker(
     waveform_decode_active_token: Arc<AtomicU64>,
     spectrogram: SpectrogramWorkerHandles,
 ) {
-    let _ = std::thread::Builder::new()
-        .name("ferrous-analysis".to_string())
-        .spawn(move || {
-            let mut state = AnalysisRuntimeState::new();
-            while let Ok(cmd) = cmd_rx.recv() {
-                event_tx.begin_command(&cmd);
-                let ctx = AnalysisContext {
-                    event_tx: &event_tx,
-                    waveform_job_tx: &waveform_job_tx,
-                    waveform_decode_active_token: waveform_decode_active_token.as_ref(),
-                    spectrogram_cmd_tx: &spectrogram.cmd_tx,
-                    spectrogram_decode_generation: spectrogram.decode_generation.as_ref(),
-                    spectrogram_decode_columns_produced: spectrogram.columns_produced.as_ref(),
-                    spectrogram_track_duration_ms: spectrogram.track_duration_ms.as_ref(),
-                };
-                state.handle_command(cmd, &ctx);
-            }
-        });
+    crate::worker_thread::spawn_worker("ferrous-analysis", move || {
+        let mut state = AnalysisRuntimeState::new();
+        let mut spectrogram_loss_reported = false;
+        report_lost_spectrogram_worker(
+            &spectrogram.status,
+            &mut spectrogram_loss_reported,
+            &event_tx,
+        );
+        while let Ok(cmd) = cmd_rx.recv() {
+            event_tx.begin_command(&cmd);
+            let ctx = AnalysisContext {
+                event_tx: &event_tx,
+                waveform_job_tx: &waveform_job_tx,
+                waveform_decode_active_token: waveform_decode_active_token.as_ref(),
+                spectrogram_cmd_tx: &spectrogram.cmd_tx,
+                spectrogram_decode_generation: spectrogram.decode_generation.as_ref(),
+                spectrogram_decode_columns_produced: spectrogram.columns_produced.as_ref(),
+                spectrogram_track_duration_ms: spectrogram.track_duration_ms.as_ref(),
+            };
+            state.handle_command(cmd, &ctx);
+            report_lost_spectrogram_worker(
+                &spectrogram.status,
+                &mut spectrogram_loss_reported,
+                &event_tx,
+            );
+        }
+    });
+}
+
+/// Tell the user, once, that the spectrogram decode worker is gone: the
+/// commands sent to it fail without a word, so the spectrogram would just
+/// stay empty.
+fn report_lost_spectrogram_worker(
+    status: &SpectrogramWorkerStatus,
+    reported: &mut bool,
+    event_tx: &dyn AnalysisEventOutput,
+) {
+    if *reported {
+        return;
+    }
+    let Some(reason) = status.stopped() else {
+        return;
+    };
+    *reported = true;
+    let message = format!(
+        "The spectrogram is unavailable because {reason}. Restart Ferrous to use it again."
+    );
+    eprintln!("[ferrous] {message}");
+    let _ = event_tx.send(AnalysisEvent::WorkerFailed(message));
 }
 
 fn source_stamp(path: &Path) -> Option<WaveformSourceStamp> {
@@ -1953,9 +1985,57 @@ mod tests {
                     c.complete,
                 ),
                 AnalysisEvent::Snapshot(_) => "snapshot".to_string(),
+                AnalysisEvent::WorkerFailed(message) => format!("failed({message})"),
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn a_spectrogram_worker_that_cannot_start_is_reported() {
+        session::spawn_test_hooks::fail_next_spawn();
+        let (engine, event_rx) = AnalysisEngine::new();
+
+        // Nothing has to be sent to the missing worker for the user to hear.
+        let message = loop {
+            match event_rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(AnalysisEvent::WorkerFailed(message)) => break message,
+                Ok(_) => {}
+                Err(error) => panic!("the failed start is not reported: {error}"),
+            }
+        };
+        assert_eq!(
+            message,
+            "The spectrogram is unavailable because its thread could not start \
+             (injected spawn failure). Restart Ferrous to use it again."
+        );
+        drop(engine);
+    }
+
+    #[test]
+    fn a_lost_spectrogram_worker_is_reported_once() {
+        let status = SpectrogramWorkerStatus::default();
+        let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
+        let mut reported = false;
+
+        report_lost_spectrogram_worker(&status, &mut reported, &event_tx);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a running worker is not reported"
+        );
+
+        session::stop_spectrogram_worker_for_test(&status);
+        report_lost_spectrogram_worker(&status, &mut reported, &event_tx);
+        report_lost_spectrogram_worker(&status, &mut reported, &event_tx);
+        let reports: Vec<_> = event_rx.try_iter().collect();
+        assert!(
+            matches!(
+                reports.as_slice(),
+                [AnalysisEvent::WorkerFailed(message)]
+                    if message.contains("because it stopped unexpectedly")
+            ),
+            "{reports:?}"
+        );
     }
 
     // End-to-end: while stopped, the middle-click zoom reset must still

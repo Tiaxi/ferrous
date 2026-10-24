@@ -34,8 +34,12 @@ ToolBar {
     }
 
     readonly property bool hasError: root.transientError.length > 0
+    readonly property string backendFailure: root.uiBridge.backendFailure || ""
+    readonly property bool backendStopped: root.backendFailure.length > 0
     readonly property bool isDisconnected: !root.uiBridge.connected && !root.hasError
+        && !root.backendStopped
     readonly property bool showTrackSections: !root.hasError && !root.isDisconnected
+        && !root.backendStopped
 
     readonly property string channelText: (root.uiBridge.currentTrackChannelLayoutText || "").trim()
     readonly property string channelIconKey: (root.uiBridge.currentTrackChannelLayoutIconKey || "").trim()
@@ -60,6 +64,17 @@ ToolBar {
             objectName: "statusBarErrorLabel"
             visible: root.hasError
             text: "Error: " + root.transientError
+            color: ColorUtils.mixColor(
+                Kirigami.Theme.negativeTextColor,
+                root.uiPalette.uiTextColor,
+                root.themeIsDark ? 0.18 : 0.08)
+            font.weight: Font.DemiBold
+        }
+
+        Label {
+            objectName: "statusBarBackendStoppedLabel"
+            visible: root.backendStopped && !root.hasError
+            text: "Backend stopped"
             color: ColorUtils.mixColor(
                 Kirigami.Theme.negativeTextColor,
                 root.uiPalette.uiTextColor,

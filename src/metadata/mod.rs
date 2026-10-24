@@ -83,9 +83,9 @@ impl MetadataService {
         let (req_tx, req_rx) = unbounded::<PathBuf>();
         let (event_tx, event_rx) = unbounded::<MetadataEvent>();
 
-        let _ = std::thread::Builder::new()
-            .name("ferrous-metadata".to_string())
-            .spawn(move || run_metadata_worker(&req_rx, &event_tx, delay));
+        crate::worker_thread::spawn_worker("ferrous-metadata", move || {
+            run_metadata_worker(&req_rx, &event_tx, delay);
+        });
 
         (Self { tx: req_tx }, event_rx)
     }
@@ -169,7 +169,7 @@ fn load_metadata_for_path(path: &Path) -> TrackMetadata {
 }
 
 fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
-    let Ok(tagged) = lofty::read_from_path(path) else {
+    let Ok(tagged) = crate::panic_guard::read_tags(path) else {
         return;
     };
     let props = tagged.properties();

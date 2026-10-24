@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex, PoisonError,
 };
 use std::time::Duration;
 
@@ -264,6 +264,8 @@ pub(super) struct SpectrogramWorkerHandles {
     /// thread to model the centered display's visible window (full-track
     /// lock / EOF detach) when choosing session decode windows.
     pub(super) track_duration_ms: Arc<AtomicU64>,
+    /// Whether the worker is still there to take commands.
+    pub(super) status: SpectrogramWorkerStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -575,24 +577,104 @@ pub(super) fn spawn_centered_staging_worker(
 // Spectrogram decode worker
 // ---------------------------------------------------------------------------
 
+/// Why the spectrogram decode worker is gone, once it is.
+///
+/// Commands to a gone worker fail without a word, and the other analysis
+/// threads keep the bridge's event channel open, so the bridge cannot see
+/// it either; the analysis worker reads this to tell the user.
+#[derive(Clone, Default)]
+pub(super) struct SpectrogramWorkerStatus(Arc<Mutex<Option<String>>>);
+
+impl SpectrogramWorkerStatus {
+    fn stop(&self, reason: String) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert(reason);
+    }
+
+    /// Why the worker stopped, if it has.
+    pub(super) fn stopped(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Marks the worker stopped when its thread ends, by a panic included.
+struct StopOnExit(SpectrogramWorkerStatus);
+
+impl Drop for StopOnExit {
+    fn drop(&mut self) {
+        self.0.stop("it stopped unexpectedly".to_string());
+    }
+}
+
 pub(super) fn spawn_spectrogram_decode_worker(
     cmd_rx: Receiver<SpectrogramWorkerCommand>,
     event_tx: AnalysisOutputs,
     generation: Arc<AtomicU64>,
     columns_produced: Arc<AtomicU64>,
     track_duration_ms: Arc<AtomicU64>,
+    status: &SpectrogramWorkerStatus,
 ) {
-    let _ = std::thread::Builder::new()
-        .name("ferrous-spectrogram-decode".to_string())
-        .spawn(move || {
-            spectrogram_worker_loop(
-                &cmd_rx,
-                &event_tx,
-                &generation,
-                &columns_produced,
-                &track_duration_ms,
-            );
-        });
+    let thread_status = status.clone();
+    let work = move || {
+        let _stopped = StopOnExit(thread_status);
+        spectrogram_worker_loop(
+            &cmd_rx,
+            &event_tx,
+            &generation,
+            &columns_produced,
+            &track_duration_ms,
+        );
+    };
+    let builder = std::thread::Builder::new().name("ferrous-spectrogram-decode".to_string());
+    #[cfg(test)]
+    let spawned = if spawn_test_hooks::take_spawn_failure() {
+        drop(work);
+        Err(std::io::Error::other("injected spawn failure"))
+    } else {
+        builder.spawn(work)
+    };
+    #[cfg(not(test))]
+    let spawned = builder.spawn(work);
+    if let Err(error) = spawned {
+        eprintln!("[ferrous] failed to start the spectrogram decode thread: {error}");
+        status.stop(format!("its thread could not start ({error})"));
+    }
+}
+
+/// Mark `status` stopped the way a spectrogram worker that panics does.
+#[cfg(test)]
+pub(super) fn stop_spectrogram_worker_for_test(status: &SpectrogramWorkerStatus) {
+    let status = status.clone();
+    let worker = std::thread::spawn(move || {
+        let _stopped = StopOnExit(status);
+        panic!("test panic in the spectrogram worker");
+    });
+    assert!(worker.join().is_err(), "the test worker panics");
+}
+
+/// Make starting the spectrogram decode thread fail.
+#[cfg(test)]
+pub(crate) mod spawn_test_hooks {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAIL_NEXT_SPAWN: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Make the next spectrogram decode thread started on this thread fail
+    /// to start.
+    pub(crate) fn fail_next_spawn() {
+        FAIL_NEXT_SPAWN.with(|cell| cell.set(true));
+    }
+
+    pub(super) fn take_spawn_failure() -> bool {
+        FAIL_NEXT_SPAWN.with(|cell| cell.replace(false))
+    }
 }
 
 /// Session parameters cached by the worker loop so that a

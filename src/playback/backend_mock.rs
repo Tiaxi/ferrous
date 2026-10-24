@@ -23,37 +23,35 @@ pub fn spawn_engine(
     _failure: &Arc<OnceLock<String>>,
 ) -> Sender<PlaybackCommand> {
     let (cmd_tx, cmd_rx) = unbounded();
-    let _ = std::thread::Builder::new()
-        .name("ferrous-playback-sim".to_string())
-        .spawn(move || {
-            let mut runtime = MockPlaybackRuntime {
-                snapshot: PlaybackSnapshot {
-                    volume: 1.0,
-                    ..PlaybackSnapshot::default()
-                },
-                queue: GaplessQueue::new(),
-                about_to_finish_fired: false,
-                track_token_counter: 0,
-                solo_pre_mask: None,
-                soloed_channel: None,
-                event_tx,
-                analysis_tx,
-            };
-            let mut last_tick = Instant::now();
-            while let Ok(cmd) = cmd_rx.recv() {
-                if runtime.snapshot.state == PlaybackState::Playing {
-                    runtime.snapshot.position = runtime
-                        .snapshot
-                        .position
-                        .saturating_add(last_tick.elapsed());
-                }
-                last_tick = Instant::now();
-                runtime.handle_command(cmd);
-                let _ = runtime
-                    .event_tx
-                    .send(PlaybackEvent::Snapshot(runtime.snapshot.clone()));
+    crate::worker_thread::spawn_worker("ferrous-playback-sim", move || {
+        let mut runtime = MockPlaybackRuntime {
+            snapshot: PlaybackSnapshot {
+                volume: 1.0,
+                ..PlaybackSnapshot::default()
+            },
+            queue: GaplessQueue::new(),
+            about_to_finish_fired: false,
+            track_token_counter: 0,
+            solo_pre_mask: None,
+            soloed_channel: None,
+            event_tx,
+            analysis_tx,
+        };
+        let mut last_tick = Instant::now();
+        while let Ok(cmd) = cmd_rx.recv() {
+            if runtime.snapshot.state == PlaybackState::Playing {
+                runtime.snapshot.position = runtime
+                    .snapshot
+                    .position
+                    .saturating_add(last_tick.elapsed());
             }
-        });
+            last_tick = Instant::now();
+            runtime.handle_command(cmd);
+            let _ = runtime
+                .event_tx
+                .send(PlaybackEvent::Snapshot(runtime.snapshot.clone()));
+        }
+    });
     cmd_tx
 }
 

@@ -48,6 +48,8 @@ ApplicationWindow {
     property string pendingLibraryRootPath: ""
     property string pendingLibraryRootName: ""
     property string transientBridgeError: ""
+    // The backend stopped without being asked to, so no control works anymore.
+    readonly property bool backendStopped: (root.uiBridge.backendFailure || "").length > 0
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
@@ -260,6 +262,7 @@ ApplicationWindow {
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
         property bool connected: false
+        property string backendFailure: ""
         signal playbackChanged()
         signal transportPositionDiscontinuity(double seconds)
         signal trackIdentityChanged()
@@ -957,9 +960,20 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
 
+        Kirigami.InlineMessage {
+            objectName: "backendStoppedMessage"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Error
+            showCloseButton: false
+            visible: root.backendStopped
+            text: root.uiBridge.backendFailure || ""
+        }
+
         Panes.TransportBar {
             id: transportBar
+            objectName: "transportBar"
             Layout.fillWidth: true
+            enabled: !root.backendStopped
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             previousAction: previousAction
@@ -978,8 +992,10 @@ ApplicationWindow {
 
         SplitView {
             id: mainSplit
+            objectName: "mainSplit"
             Layout.fillWidth: true
             Layout.fillHeight: true
+            enabled: !root.backendStopped
             orientation: Qt.Horizontal
 
             Panes.SidebarPane {

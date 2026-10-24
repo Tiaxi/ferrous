@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{atomic::AtomicU64, Arc};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{after, bounded, select, unbounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{after, bounded, never, select, unbounded, Receiver, Sender, TrySendError};
 
 use crate::analysis::{
     AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot, SpectrogramDisplayMode,
@@ -52,7 +52,10 @@ use events::{
 };
 pub(crate) use search::is_main_album_disc_section;
 use search::{drain_search_results, process_search_results, SearchWorkerQuery};
-use workers::{spawn_bridge_support_threads, spawn_lastfm_service};
+use workers::{
+    spawn_apply_album_art_worker, spawn_lastfm_service, spawn_queue_detail_worker,
+    spawn_search_worker,
+};
 
 #[cfg(feature = "profiling-logs")]
 macro_rules! profile_eprintln {
@@ -328,6 +331,8 @@ pub enum BridgeEvent {
     PrecomputedSpectrogramChunk(crate::analysis::PrecomputedSpectrogramChunk),
     Error(String),
     Stopped,
+    /// The bridge stopped without being asked to, for this reason.
+    Failed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -638,20 +643,24 @@ impl Default for BridgeRuntimeOptions {
 }
 
 impl FrontendBridgeHandle {
-    #[must_use]
-    pub fn spawn() -> Self {
+    /// Start the bridge thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the thread cannot be started.
+    pub fn spawn() -> Result<Self, String> {
         Self::spawn_with_options(BridgeRuntimeOptions::default())
     }
 
     #[cfg(all(test, not(feature = "gst")))]
-    fn spawn_with_metadata_delay(metadata_delay: Duration) -> Self {
+    fn spawn_with_metadata_delay(metadata_delay: Duration) -> Result<Self, String> {
         Self::spawn_with_options(BridgeRuntimeOptions {
             metadata_delay,
             ..BridgeRuntimeOptions::default()
         })
     }
 
-    fn spawn_with_options(options: BridgeRuntimeOptions) -> Self {
+    fn spawn_with_options(options: BridgeRuntimeOptions) -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = unbounded::<BridgeCommand>();
         // Keep snapshot/event queue bounded so a slow UI consumer cannot grow memory unbounded.
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
@@ -664,16 +673,17 @@ impl FrontendBridgeHandle {
 
         let imports = imports::ImportWorker::new();
         let import_gate = imports.gate();
-        let _ = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("ferrous-bridge".to_string())
-            .spawn(move || run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route, imports));
-        Self {
+            .spawn(move || run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route, imports))
+            .map_err(|error| format!("failed to start the bridge thread: {error}"))?;
+        Ok(Self {
             tx: cmd_tx,
             rx: event_rx,
             spectral_rx,
             spectral_generation,
             import_gate,
-        }
+        })
     }
 
     pub fn command(&self, cmd: BridgeCommand) {
@@ -704,7 +714,7 @@ impl FrontendBridgeHandle {
             AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
                 Some(BridgeEvent::PrecomputedSpectrogramChunk(chunk))
             }
-            AnalysisEvent::Snapshot(_) => None,
+            AnalysisEvent::Snapshot(_) | AnalysisEvent::WorkerFailed(_) => None,
         }
     }
 
@@ -772,6 +782,11 @@ struct BridgeLoopRuntime {
     last_tree_emit_track_count: usize,
     deferred_tree_rebuild_at: Option<Instant>,
     persisted_state_enabled: bool,
+    /// How often each worker was restarted after it stopped.
+    worker_restarts: HashMap<Worker, u32>,
+    /// How often the loop woke because a worker had stopped.
+    #[cfg(test)]
+    stopped_worker_wakes: usize,
 }
 
 struct BridgeLoopFlags {
@@ -821,9 +836,63 @@ enum BridgeLoopWake {
     ExternalQueueDetails(ExternalQueueDetailsEvent),
     ApplyAlbumArt(ApplyAlbumArtEvent),
     LastFm(LastFmEvent),
+    /// A worker's channel to the loop closed: the worker thread has ended.
+    WorkerStopped(Worker),
     Tick,
     Shutdown,
 }
+
+/// A thread that sends the bridge loop its results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Worker {
+    Imports,
+    LibraryTree,
+    QueueValidation,
+    Playback,
+    Analysis,
+    Metadata,
+    Library,
+    Search,
+    QueueDetails,
+    ApplyAlbumArt,
+    LastFm,
+}
+
+impl Worker {
+    /// What the user loses while the worker is stopped.
+    fn feature(self) -> &'static str {
+        match self {
+            Self::Imports => "Adding files to the queue",
+            Self::LibraryTree => "The library view",
+            Self::QueueValidation => "Checking the queue's files",
+            Self::Playback => "Playback",
+            Self::Analysis => "The waveform and spectrogram",
+            Self::Metadata => "Track details",
+            Self::Library => "The library",
+            Self::Search => "Search",
+            Self::QueueDetails => "Reading details of queued files",
+            Self::ApplyAlbumArt => "Applying album art",
+            Self::LastFm => "Last.fm scrobbling",
+        }
+    }
+
+    /// Whether a new thread can take over: it must hold no state that
+    /// outlives a request, and the loop must own all of its channels.
+    fn restartable(self) -> bool {
+        matches!(
+            self,
+            Self::LibraryTree
+                | Self::QueueValidation
+                | Self::Search
+                | Self::QueueDetails
+                | Self::ApplyAlbumArt
+        )
+    }
+}
+
+/// How often a worker that keeps stopping is restarted before the loop
+/// stops listening to it.
+const MAX_WORKER_RESTARTS: u32 = 3;
 
 fn env_duration_ms(var: &str, default: u64, min: u64, max: u64) -> Duration {
     Duration::from_millis(
@@ -849,23 +918,10 @@ impl BridgeLoopRuntime {
         let (playback, playback_rx) = PlaybackEngine::new(analysis.sender());
         let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
         let (library, library_rx) = LibraryService::new();
-        let (search_query_tx, search_query_rx) = unbounded::<SearchWorkerQuery>();
-        let (search_results_tx, search_results_rx) = unbounded::<BridgeSearchResultsFrame>();
-        let (external_queue_details_tx, external_queue_details_rx) =
-            unbounded::<ExternalQueueDetailsRequest>();
-        let (external_queue_details_event_tx, external_queue_details_event_rx) =
-            unbounded::<ExternalQueueDetailsEvent>();
-        let (apply_album_art_tx, apply_album_art_rx) = unbounded::<ApplyAlbumArtRequest>();
-        let (apply_album_art_event_tx, apply_album_art_event_rx) =
-            unbounded::<ApplyAlbumArtEvent>();
-        spawn_bridge_support_threads(
-            search_query_rx,
-            search_results_tx,
-            external_queue_details_rx,
-            external_queue_details_event_tx,
-            apply_album_art_rx,
-            apply_album_art_event_tx,
-        );
+        let (search_query_tx, search_results_rx) = spawn_search_worker();
+        let (external_queue_details_tx, external_queue_details_event_rx) =
+            spawn_queue_detail_worker();
+        let (apply_album_art_tx, apply_album_art_event_rx) = spawn_apply_album_art_worker();
 
         let (state, lastfm, lastfm_rx) =
             prepare_initial_bridge_state(options, &analysis, &playback, &external_queue_details_tx);
@@ -941,6 +997,9 @@ impl BridgeLoopRuntime {
             last_tree_emit_track_count: 0,
             deferred_tree_rebuild_at: None,
             persisted_state_enabled: options.persisted_state_enabled,
+            worker_restarts: HashMap::new(),
+            #[cfg(test)]
+            stopped_worker_wakes: 0,
         }
     }
 
@@ -964,23 +1023,23 @@ impl BridgeLoopRuntime {
     fn wait_for_wake(&mut self, cmd_rx: &Receiver<BridgeCommand>) -> BridgeLoopWake {
         let wake_delay = self.next_wake_delay();
         select! {
-            recv(&self.imports.results) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Import),
-            recv(&self.tree_worker.results) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Tree),
-            recv(&self.queue_validator.results) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::QueueValidated),
+            recv(&self.imports.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Imports), BridgeLoopWake::Import),
+            recv(&self.tree_worker.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::LibraryTree), BridgeLoopWake::Tree),
+            recv(&self.queue_validator.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::QueueValidation), BridgeLoopWake::QueueValidated),
             recv(cmd_rx) -> msg => {
                 match msg {
                     Ok(cmd) => BridgeLoopWake::Command(cmd),
                     Err(_) => BridgeLoopWake::Shutdown,
                 }
             }
-            recv(&self.playback_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Playback),
-            recv(&self.analysis_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Analysis),
-            recv(&self.metadata_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Metadata),
-            recv(&self.library_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::Library),
-            recv(&self.search_results_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::SearchResults),
-            recv(&self.external_queue_details_event_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::ExternalQueueDetails),
-            recv(&self.apply_album_art_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::ApplyAlbumArt),
-            recv(&self.lastfm_rx) -> msg => msg.map_or(BridgeLoopWake::Tick, BridgeLoopWake::LastFm),
+            recv(&self.playback_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Playback), BridgeLoopWake::Playback),
+            recv(&self.analysis_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Analysis), BridgeLoopWake::Analysis),
+            recv(&self.metadata_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Metadata), BridgeLoopWake::Metadata),
+            recv(&self.library_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Library), BridgeLoopWake::Library),
+            recv(&self.search_results_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Search), BridgeLoopWake::SearchResults),
+            recv(&self.external_queue_details_event_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::QueueDetails), BridgeLoopWake::ExternalQueueDetails),
+            recv(&self.apply_album_art_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::ApplyAlbumArt), BridgeLoopWake::ApplyAlbumArt),
+            recv(&self.lastfm_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::LastFm), BridgeLoopWake::LastFm),
             recv(after(wake_delay)) -> _ => BridgeLoopWake::Tick,
         }
     }
@@ -1111,6 +1170,10 @@ impl BridgeLoopRuntime {
                 self.handle_apply_album_art_event(event, event_tx)
             }
             BridgeLoopWake::LastFm(event) => self.handle_lastfm_event(event),
+            BridgeLoopWake::WorkerStopped(worker) => {
+                self.handle_stopped_worker(worker, event_tx);
+                SnapshotUrgency::None
+            }
             BridgeLoopWake::Tick => SnapshotUrgency::None,
             BridgeLoopWake::Shutdown => {
                 self.flags.running = false;
@@ -1193,6 +1256,73 @@ impl BridgeLoopRuntime {
         urgency
     }
 
+    /// Replace a worker whose thread ended with a new one, or stop listening
+    /// to it, and tell the user. Either way its closed channel leaves the
+    /// loop's `select!`, which would otherwise find it ready at once on every
+    /// pass and never block again.
+    fn handle_stopped_worker(&mut self, worker: Worker, event_tx: &Sender<BridgeEvent>) {
+        #[cfg(test)]
+        {
+            self.stopped_worker_wakes += 1;
+        }
+        let restarts = self.worker_restarts.entry(worker).or_insert(0);
+        let restart = worker.restartable() && *restarts < MAX_WORKER_RESTARTS;
+        if restart {
+            *restarts += 1;
+        }
+        match worker {
+            Worker::LibraryTree if restart => {
+                self.tree_worker = tree_worker::TreeWorker::new();
+                // The tree the old worker was building is lost.
+                self.request_tree();
+            }
+            Worker::LibraryTree => self.tree_worker.results = never(),
+            Worker::QueueValidation if restart => {
+                self.queue_validator = queue_validation::QueueValidationWorker::new();
+                self.state.queue_detail_validation_requested = true;
+            }
+            Worker::QueueValidation => self.queue_validator.results = never(),
+            Worker::Search if restart => {
+                (self.search_query_tx, self.search_results_rx) = spawn_search_worker();
+            }
+            Worker::Search => self.search_results_rx = never(),
+            Worker::QueueDetails if restart => {
+                (
+                    self.external_queue_details_tx,
+                    self.external_queue_details_event_rx,
+                ) = spawn_queue_detail_worker();
+                // Requests the old worker never answered are asked again.
+                self.state.pending_queue_detail_fingerprints.clear();
+                self.state.queue_detail_validation_requested = true;
+            }
+            Worker::QueueDetails => self.external_queue_details_event_rx = never(),
+            Worker::ApplyAlbumArt if restart => {
+                (self.apply_album_art_tx, self.apply_album_art_rx) = spawn_apply_album_art_worker();
+            }
+            Worker::ApplyAlbumArt => self.apply_album_art_rx = never(),
+            Worker::Imports => self.imports.results = never(),
+            Worker::Playback => self.playback_rx = never(),
+            Worker::Analysis => self.analysis_rx = never(),
+            Worker::Metadata => self.metadata_rx = never(),
+            Worker::Library => self.library_rx = never(),
+            Worker::LastFm => self.lastfm_rx = never(),
+        }
+        let message = if restart {
+            format!(
+                "{} stopped unexpectedly and was restarted; \
+                 a request in progress may have been lost.",
+                worker.feature()
+            )
+        } else {
+            format!(
+                "{} stopped unexpectedly. Restart Ferrous to use it again.",
+                worker.feature()
+            )
+        };
+        eprintln!("[ferrous] {message}");
+        let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+    }
+
     fn request_tree(&self) {
         self.tree_worker.request(
             Arc::clone(&self.state.library),
@@ -1221,6 +1351,8 @@ impl BridgeLoopRuntime {
         cmd: BridgeCommand,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
+        #[cfg(test)]
+        crate::panic_guard::test_hooks::checkpoint("bridge_command");
         if let Some(request) = commands::queue_request(&cmd, &self.state) {
             return match self.imports.submit(request) {
                 Ok(changes) => self.apply_queue_changes(changes, event_tx),
@@ -1322,6 +1454,10 @@ impl BridgeLoopRuntime {
                     self.flags.session_dirty = true;
                 }
                 urgency
+            }
+            AnalysisEvent::WorkerFailed(message) => {
+                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+                SnapshotUrgency::None
             }
         }
     }
@@ -1728,8 +1864,21 @@ fn run_bridge_loop(
     spectral_tx: SpectrogramOutputRoute,
     imports: imports::ImportWorker,
 ) {
-    let mut runtime = BridgeLoopRuntime::with_imports(options, Some(spectral_tx), imports);
-    runtime.run(cmd_rx, event_tx);
+    let ran = crate::panic_guard::catch("the bridge thread", || {
+        let mut runtime = BridgeLoopRuntime::with_imports(options, Some(spectral_tx), imports);
+        runtime.run(cmd_rx, event_tx);
+    });
+    // The runtime was dropped while unwinding, which stopped its workers.
+    // The relay shows the UI this reason; if the event queue is full, it
+    // reports the closed channel instead.
+    if let Err(message) = ran {
+        let _ = try_send_event(
+            event_tx,
+            BridgeEvent::Failed(format!(
+                "The Ferrous backend stopped after an {message}. Restart Ferrous to continue."
+            )),
+        );
+    }
 }
 
 pub(super) fn try_send_event(
@@ -1907,6 +2056,113 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn error_messages(event_rx: &Receiver<BridgeEvent>) -> Vec<String> {
+        event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(message) => Some(message),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_stopped_worker_is_reported_once_and_does_not_wake_the_loop_again() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        // The import results channel closes, as when the worker thread ends.
+        let (results_tx, results_rx) = unbounded();
+        drop(results_tx);
+        runtime.imports.results = results_rx;
+        let (cmd_tx, cmd_rx) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        // A closed channel left in the loop's `select!` is ready on every
+        // pass, so it would win about half of the passes that take these.
+        for _ in 0..64 {
+            cmd_tx.send(BridgeCommand::RequestSnapshot).unwrap();
+        }
+        cmd_tx.send(BridgeCommand::Shutdown).unwrap();
+
+        runtime.run(&cmd_rx, &event_tx);
+
+        assert_eq!(runtime.stopped_worker_wakes, 1);
+        let errors = error_messages(&event_rx);
+        let reports = errors
+            .iter()
+            .filter(|message| {
+                message.starts_with("Adding files to the queue stopped unexpectedly.")
+            })
+            .count();
+        assert_eq!(reports, 1, "{errors:?}");
+    }
+
+    #[test]
+    fn a_stopped_worker_is_restarted_a_few_times_and_then_dropped() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = unbounded();
+        for _ in 0..MAX_WORKER_RESTARTS {
+            runtime.handle_stopped_worker(Worker::LibraryTree, &event_tx);
+            // The new worker builds the tree the old one lost.
+            let result = runtime
+                .tree_worker
+                .results
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the restarted worker builds the tree");
+            assert!(runtime.tree_worker.is_current(&result));
+        }
+        runtime.handle_stopped_worker(Worker::LibraryTree, &event_tx);
+
+        let errors = error_messages(&event_rx);
+        assert_eq!(errors.len(), 4, "{errors:?}");
+        assert!(
+            errors[..3]
+                .iter()
+                .all(|message| message.contains("was restarted")),
+            "{errors:?}"
+        );
+        assert!(errors[3].contains("Restart Ferrous"), "{errors:?}");
+        // The loop stops listening instead of finding a closed channel.
+        assert!(matches!(
+            runtime.tree_worker.results.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn a_panic_on_the_bridge_thread_reaches_the_ui_as_a_failure() {
+        let _guard = test_guard();
+        let (cmd_tx, cmd_rx) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        let (spectral_tx, _spectral_rx) = bounded(4);
+        let route = SpectrogramOutputRoute {
+            sender: spectral_tx,
+            generation: Arc::new(AtomicU64::new(0)),
+        };
+        cmd_tx.send(BridgeCommand::RequestSnapshot).unwrap();
+        crate::panic_guard::test_hooks::panic_at("bridge_command");
+
+        run_bridge_loop(
+            &cmd_rx,
+            &event_tx,
+            BridgeRuntimeOptions::default(),
+            route,
+            imports::ImportWorker::new(),
+        );
+
+        let failure = event_rx
+            .try_iter()
+            .find_map(|event| match event {
+                BridgeEvent::Failed(message) => Some(message),
+                _ => None,
+            })
+            .expect("the failure is reported");
+        assert!(
+            failure.contains("test panic at bridge_command"),
+            "{failure}"
+        );
     }
 
     /// Drain all initial background-thread events (playback engine startup
@@ -2782,7 +3038,7 @@ mod tests {
     #[test]
     fn bridge_queue_roundtrip_snapshot_integration() {
         let _guard = test_guard();
-        let bridge = FrontendBridgeHandle::spawn();
+        let bridge = FrontendBridgeHandle::spawn().expect("spawn bridge");
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
             tracks: vec![p("/music/a.flac"), p("/music/b.flac")],
             autoplay: false,
@@ -2834,6 +3090,34 @@ mod tests {
         assert_eq!(snapshot.playback.state, PlaybackState::Stopped);
         assert_eq!(snapshot.playback.current.as_ref(), Some(&track));
         assert_eq!(snapshot.metadata.title, "ferrous_reactive_stopped_metadata");
+    }
+
+    #[test]
+    fn analysis_worker_failures_reach_the_ui_as_errors() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
+        runtime.analysis_rx = analysis_rx;
+
+        // One failure wakes the loop; the next is found by the drain path.
+        analysis_tx
+            .send(AnalysisEvent::WorkerFailed("drained".to_string()))
+            .expect("queue drained failure");
+        runtime.handle_wake(
+            BridgeLoopWake::Analysis(AnalysisEvent::WorkerFailed("woken".to_string())),
+            &event_tx,
+        );
+
+        let errors: Vec<String> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors, ["woken", "drained"]);
     }
 
     #[test]
@@ -3002,7 +3286,7 @@ mod tests {
     #[test]
     fn bridge_queue_play_seek_clamp_and_remove_integration() {
         let _guard = test_guard();
-        let bridge = FrontendBridgeHandle::spawn();
+        let bridge = FrontendBridgeHandle::spawn().expect("spawn bridge");
         let first = p("/music/a.flac");
         let second = p("/music/b.flac");
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
@@ -3070,7 +3354,7 @@ mod tests {
     #[test]
     fn bridge_natural_handoff_advances_current_track_and_keeps_playing() {
         let _guard = test_guard();
-        let bridge = FrontendBridgeHandle::spawn();
+        let bridge = FrontendBridgeHandle::spawn().expect("spawn bridge");
         let first = p("/tmp/ferrous_gapless_case_a.flac");
         let second = p("/tmp/ferrous_gapless_case_b.flac");
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
@@ -3133,7 +3417,7 @@ mod tests {
     #[test]
     fn bridge_reports_each_play_of_a_repeated_or_duplicated_file() {
         let _guard = test_guard();
-        let bridge = FrontendBridgeHandle::spawn();
+        let bridge = FrontendBridgeHandle::spawn().expect("spawn bridge");
         let track = p("/tmp/ferrous_repeat_case.flac");
         let poll_for = |predicate: &dyn Fn(&BridgeSnapshot) -> bool| {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -3185,7 +3469,8 @@ mod tests {
     #[test]
     fn bridge_natural_handoff_keeps_old_metadata_until_new_metadata_arrives() {
         let _guard = test_guard();
-        let bridge = FrontendBridgeHandle::spawn_with_metadata_delay(Duration::from_secs(2));
+        let bridge = FrontendBridgeHandle::spawn_with_metadata_delay(Duration::from_secs(2))
+            .expect("spawn bridge");
         let first = p("/tmp/ferrous_metadata_case_a.flac");
         let second = p("/tmp/ferrous_metadata_case_b.flac");
         let first_title = "ferrous_metadata_case_a";
