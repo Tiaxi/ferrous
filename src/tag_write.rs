@@ -48,11 +48,7 @@ use crate::vorbis_comment_scan::skipped_comments;
 pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<(), String> {
     let describe = |err: LoftyError| format!("failed to save tags for {}: {err}", path.display());
     let mut tag = tag.clone();
-    let write_options = if tag.tag_type() == TagType::Id3v2
-        && matches!(
-            id3v2_version(path, file_type).map_err(describe)?,
-            Some(Id3v2Version::V2 | Id3v2Version::V3)
-        ) {
+    let write_options = if writes_id3v23(path, file_type, tag.tag_type())? {
         describe_pictures(&mut tag);
         WriteOptions::new().use_id3v23(true)
     } else {
@@ -86,6 +82,25 @@ pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<()
         }
         .map_err(describe)
     })
+}
+
+/// Whether [`save_tag`] writes a tag of `tag_type` into `path` as `ID3v2.3`:
+/// for an `ID3v2` tag where the file's tag is v2.3 or v2.2.
+///
+/// # Errors
+///
+/// Returns a message when the file's `ID3v2` tag cannot be read.
+pub(crate) fn writes_id3v23(
+    path: &Path,
+    file_type: FileType,
+    tag_type: TagType,
+) -> Result<bool, String> {
+    if tag_type != TagType::Id3v2 {
+        return Ok(false);
+    }
+    id3v2_version(path, file_type)
+        .map(|version| matches!(version, Some(Id3v2Version::V2 | Id3v2Version::V3)))
+        .map_err(|err| format!("failed to save tags for {}: {err}", path.display()))
 }
 
 /// lofty 0.24 ends a missing picture description with one zero byte, but

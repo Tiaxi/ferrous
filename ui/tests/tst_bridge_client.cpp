@@ -147,6 +147,7 @@ private slots:
     void tagEditorRenameReachesTheBridgeQueue();
     void tagEditorSaveSendsOnlyChangedFields();
     void tagEditorSavesFullDateRowAndKeepsOtherTags();
+    void tagEditorShowsRefusedEditsAndKeepsTheFile();
     void tagEditorLoadReportsUnreadableFiles();
     void batchRemovalCodecPreservesIndices();
     void playAtDoesNotEmitImmediateSnapshotChanged();
@@ -500,6 +501,60 @@ void BridgeClientTest::tagEditorSavesFullDateRowAndKeepsOtherTags() {
     QTRY_VERIFY(!editor.loading());
     QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("New"));
     QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("year")), QStringLiteral("1997-05-12"));
+}
+
+void BridgeClientTest::tagEditorShowsRefusedEditsAndKeepsTheFile() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("song.flac"));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    const QByteArray flac = flacWithComments({QStringLiteral("TITLE=Old"), QStringLiteral("TRACKNUMBER=1")});
+    QCOMPARE(file.write(flac), qint64(flac.size()));
+    file.close();
+    TagEditorController editor(nullptr);
+    QVERIFY(editor.openForPaths({path}));
+    QTRY_VERIFY(!editor.loading());
+    QCOMPARE(editor.m_tableModel.rowCount(), 1);
+
+    // A refused value fails the whole row, so the title is not written either.
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+    editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("0"));
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QVERIFY(!saved.first().first().toBool());
+    const QString error = QStringLiteral(
+        "invalid Track '0' for Vorbis comments: a number must be from 1 to 4294967295; any other label, such as A1 "
+        "or Side A, is stored as typed");
+    QCOMPARE(editor.m_tableModel.rowAt(0)->errorText, error);
+    QVERIFY(editor.dirty());
+    QCOMPARE(editor.statusText(), QStringLiteral("Saved 0 file(s); 1 failed."));
+    QCOMPARE(editor.statusDetails(), QStringLiteral("Failed:\n  song.flac: ") + error);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QCOMPARE(file.readAll(), flac);
+    file.close();
+
+    // Vorbis comments keep any other track text as typed.
+    editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("A-1"));
+    editor.setCell(0, QStringLiteral("year"), QStringLiteral("1997-02-29"));
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 2);
+    QVERIFY(!saved.last().first().toBool());
+    QCOMPARE(editor.m_tableModel.rowAt(0)->errorText,
+             QStringLiteral("invalid year '1997-02-29' for Vorbis comments: February 1997 has no day 29"));
+
+    editor.setCell(0, QStringLiteral("year"), QStringLiteral("1997-05"));
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 3);
+    QVERIFY2(saved.last().first().toBool(), qPrintable(editor.statusText() + " " + editor.statusDetails()));
+    QVERIFY(!editor.dirty());
+    QVERIFY(editor.m_tableModel.rowAt(0)->errorText.isEmpty());
+    editor.reload();
+    QTRY_VERIFY(!editor.loading());
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("New"));
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("trackNo")), QStringLiteral("A-1"));
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("year")), QStringLiteral("1997-05"));
 }
 
 void BridgeClientTest::tagEditorLoadReportsUnreadableFiles() {

@@ -6,13 +6,12 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use lofty::config::ParsingMode;
 use lofty::file::TaggedFileExt;
 use lofty::prelude::Accessor;
-use lofty::tag::items::Timestamp;
 use lofty::tag::{ItemKey, Tag};
 use serde::{Deserialize, Serialize};
 
+use crate::file_edit_lock;
 use crate::library::{
     read_library_snapshot_from_db, rename_indexed_metadata_paths, LibraryRoot, LibrarySnapshot,
 };
@@ -20,10 +19,16 @@ use crate::raw_audio::{
     edit_appended_apev2_text_items, format_ape_number_pair, is_raw_surround_file,
     read_appended_apev2_text_metadata, ApeTextField,
 };
-use crate::tag_write::{save_tag, seeded_tag};
+use crate::tag_write::{save_tag, seeded_tag, writes_id3v23};
+use validation::TagTarget;
 
 #[cfg(test)]
+mod concurrency_tests;
+#[cfg(test)]
 mod rename_tests;
+#[cfg(test)]
+mod save_validation_tests;
+mod validation;
 
 fn lofty_file_type_label(file_type: lofty::file::FileType) -> &'static str {
     match file_type {
@@ -365,10 +370,7 @@ fn load_raw_row(path: &Path) -> Result<TagEditorRow, String> {
         album: tagged.album.unwrap_or_default(),
         album_artist: tagged.album_artist.unwrap_or_default(),
         genre: tagged.genre.unwrap_or_default(),
-        year: tagged
-            .year
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
+        year: tagged.year_text.unwrap_or_default(),
         track_no: tagged
             .track_no
             .map(|value| value.to_string())
@@ -551,40 +553,6 @@ fn resolve_selection_paths(selections: &[SelectionEntry]) -> Result<Vec<PathBuf>
     Ok(out)
 }
 
-fn parse_optional_u32(value: &str) -> Result<Option<u32>, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed
-        .parse::<u32>()
-        .map(Some)
-        .map_err(|err| format!("invalid numeric value '{trimmed}': {err}"))
-}
-
-/// Check an edited Year value: a year or an ISO 8601 date such as
-/// `1997-05-12`. Returns the trimmed text to store; empty clears the date.
-///
-/// Only text that lofty writes back unchanged is accepted. Its `ID3v2.3`
-/// writer drops recording dates it cannot parse.
-fn validated_year(value: &str) -> Result<String, String> {
-    let trimmed = value.trim();
-    let round_trips = || {
-        trimmed.len() <= Timestamp::MAX_LENGTH
-            && Timestamp::parse(&mut trimmed.as_bytes(), ParsingMode::Strict)
-                .ok()
-                .flatten()
-                .is_some_and(|timestamp| timestamp.to_string() == trimmed)
-    };
-    if trimmed.is_empty() || round_trips() {
-        Ok(trimmed.to_string())
-    } else {
-        Err(format!(
-            "invalid year '{trimmed}': use a year or a date such as 1997-05-12"
-        ))
-    }
-}
-
 fn sanitized_file_stem(title: &str) -> String {
     let mut out = String::new();
     let mut previous_was_space = false;
@@ -679,16 +647,51 @@ fn set_text_key(tag: &mut Tag, key: ItemKey, value: &str) {
     }
 }
 
-/// Write the changed fields of `row` into `tag`, leaving every other item alone.
+/// The value of a track or disc number field, or total.
+fn number_value(row: &TagEditorRow, field: TagField) -> &str {
+    match field {
+        TagField::TrackNo => &row.track_no,
+        TagField::DiscNo => &row.disc_no,
+        TagField::TotalTracks => &row.total_tracks,
+        TagField::TotalDiscs => &row.total_discs,
+        _ => "",
+    }
+}
+
+const NUMBER_FIELDS: [TagField; 4] = [
+    TagField::TrackNo,
+    TagField::DiscNo,
+    TagField::TotalTracks,
+    TagField::TotalDiscs,
+];
+
+/// Check the changed number fields of `row` for `target`, before anything is
+/// written. Returns the checked year when it changed.
+fn validated_changes(
+    row: &TagEditorRow,
+    changed: &HashSet<TagField>,
+    target: TagTarget,
+) -> Result<Option<String>, String> {
+    for field in NUMBER_FIELDS {
+        if changed.contains(&field) {
+            target.validated_number(field, number_value(row, field))?;
+        }
+    }
+    changed
+        .contains(&TagField::Year)
+        .then(|| target.validated_year(&row.year))
+        .transpose()
+}
+
+/// Write the changed fields of `row` into `tag`, leaving every other item
+/// alone. Values `target` cannot store are refused and `tag` is unchanged.
 fn apply_changed_fields(
     tag: &mut Tag,
     row: &TagEditorRow,
     changed: &HashSet<TagField>,
+    target: TagTarget,
 ) -> Result<(), String> {
-    let year = changed
-        .contains(&TagField::Year)
-        .then(|| validated_year(&row.year))
-        .transpose()?;
+    let year = validated_changes(row, changed, target)?;
     for field in TagField::ALL {
         if !changed.contains(&field) {
             continue;
@@ -724,6 +727,7 @@ fn apply_standard_row_to_tag(
     if changed.is_empty() {
         return Ok(());
     }
+    let edit = file_edit_lock::lock(path);
     let mut tagged = lofty::read_from_path(path).map_err(|err| {
         format!(
             "failed to read tag data for {}: {err}",
@@ -763,8 +767,16 @@ fn apply_standard_row_to_tag(
             path.to_string_lossy()
         ));
     };
-    apply_changed_fields(tag, row, changed)?;
-    save_tag(path, file_type, tag)
+    let target = TagTarget::for_tag(
+        writable_type,
+        writes_id3v23(path, file_type, writable_type)?,
+    );
+    apply_changed_fields(tag, row, changed, target)?;
+    #[cfg(test)]
+    edit.checkpoint();
+    let saved = save_tag(path, file_type, tag);
+    drop(edit);
+    saved
 }
 
 fn apply_raw_row(
@@ -772,6 +784,12 @@ fn apply_raw_row(
     row: &TagEditorRow,
     changed: &HashSet<TagField>,
 ) -> Result<(), String> {
+    let target = TagTarget::RAW_APEV2;
+    let year = validated_changes(row, changed, target)?;
+    // A number and its total share one item, so the unchanged one is written
+    // back as the file holds it. `validated_changes` has checked the changed
+    // ones, and this tag keeps no labels, so each is empty or a number.
+    let number = |field| number_value(row, field).trim().parse::<u32>().ok();
     let mut edits = Vec::new();
     for (field, ape_field, value) in [
         (TagField::Title, ApeTextField::Title, &row.title),
@@ -789,31 +807,26 @@ fn apply_raw_row(
             edits.push((ape_field, Some(value.trim().to_string())));
         }
     }
-    if changed.contains(&TagField::Year) {
-        edits.push((ApeTextField::Year, Some(validated_year(&row.year)?)));
+    if let Some(year) = year {
+        edits.push((ApeTextField::Year, Some(year)));
     }
     // APEv2 stores a number and its total in one item.
     if changed.contains(&TagField::TrackNo) || changed.contains(&TagField::TotalTracks) {
         edits.push((
             ApeTextField::Track,
-            format_ape_number_pair(
-                parse_optional_u32(&row.track_no)?,
-                parse_optional_u32(&row.total_tracks)?,
-            ),
+            format_ape_number_pair(number(TagField::TrackNo), number(TagField::TotalTracks)),
         ));
     }
     if changed.contains(&TagField::DiscNo) || changed.contains(&TagField::TotalDiscs) {
         edits.push((
             ApeTextField::Disc,
-            format_ape_number_pair(
-                parse_optional_u32(&row.disc_no)?,
-                parse_optional_u32(&row.total_discs)?,
-            ),
+            format_ape_number_pair(number(TagField::DiscNo), number(TagField::TotalDiscs)),
         ));
     }
     if edits.is_empty() {
         return Ok(());
     }
+    let _edit = file_edit_lock::lock(path);
     edit_appended_apev2_text_items(path, &edits)
 }
 
@@ -1061,7 +1074,7 @@ mod tests {
         write_test_mp3_with_only_id3v1, write_test_mp4, write_test_opus, write_test_wavpack,
     };
 
-    fn test_dir(name: &str) -> PathBuf {
+    pub(super) fn test_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
@@ -1073,7 +1086,7 @@ mod tests {
         dir
     }
 
-    fn dir_entries(dir: &Path) -> Vec<String> {
+    pub(super) fn dir_entries(dir: &Path) -> Vec<String> {
         let mut names = fs::read_dir(dir)
             .expect("read test dir")
             .map(|entry| {
@@ -1096,24 +1109,24 @@ mod tests {
             .unwrap_or_default()
     }
 
-    fn load_one(path: &Path) -> TagEditorRow {
+    pub(super) fn load_one(path: &Path) -> TagEditorRow {
         let response = load_rows_for_paths(&[path.to_path_buf()]);
         assert!(response.failures.is_empty(), "{:?}", response.failures);
         response.rows.into_iter().next().expect("loaded row")
     }
 
-    fn save_json(rows: &[serde_json::Value]) -> SaveResponse {
+    pub(super) fn save_json(rows: &[serde_json::Value]) -> SaveResponse {
         let blob = serde_json::to_vec(&serde_json::json!({ "rows": rows })).expect("encode");
         save_rows(parse_save_request(&blob).expect("parse save request"))
     }
 
-    fn edited(row: &TagEditorRow, changed: &[&str]) -> serde_json::Value {
+    pub(super) fn edited(row: &TagEditorRow, changed: &[&str]) -> serde_json::Value {
         let mut value = serde_json::to_value(row).expect("encode row");
         value["changedFields"] = serde_json::json!(changed);
         value
     }
 
-    fn assert_saved(response: &SaveResponse) {
+    pub(super) fn assert_saved(response: &SaveResponse) {
         assert!(
             response.results.iter().all(|result| result.ok),
             "{:?}",
@@ -1451,34 +1464,6 @@ mod tests {
         let unknown =
             serde_json::to_vec(&serde_json::json!({ "rows": [with_fields] })).expect("encode");
         assert!(parse_save_request(&unknown).is_err());
-    }
-
-    #[test]
-    fn year_validation_accepts_years_and_dates() {
-        for value in [
-            "",
-            "1997",
-            " 1997 ",
-            "1997-05",
-            "1997-05-12",
-            "1997-05-12T10:30:00",
-        ] {
-            assert_eq!(
-                validated_year(value),
-                Ok(value.trim().to_string()),
-                "{value}"
-            );
-        }
-        for value in [
-            "May 1997",
-            "1997/05/12",
-            "12.05.1997",
-            "97",
-            "1997-5-12",
-            "1997-05-12x",
-        ] {
-            assert!(validated_year(value).is_err(), "{value}");
-        }
     }
 
     fn picture(data: &[u8], mime_type: MimeType) -> Picture {
