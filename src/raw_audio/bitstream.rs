@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! AC3 (A/52) and DTS frame headers: sync words and bitrates.
+//! AC3 (A/52) and DTS frame headers: sync words, frame lengths, and bitrates.
 
 /// AC3 bitrate lookup indexed by `frmsizecod / 2` (kbps) — A/52 Table 5.18.
 const AC3_BITRATES_KBPS: [u32; 19] = [
@@ -12,9 +12,116 @@ const DTS_SAMPLE_RATES: [u32; 16] = [
     0, 8000, 16000, 32000, 0, 0, 11025, 22050, 44100, 0, 0, 12000, 24000, 48000, 0, 0,
 ];
 
+const AC3_SYNC: [u8; 2] = [0x0B, 0x77];
+const DTS_SYNC: [u8; 4] = [0x7F, 0xFE, 0x80, 0x01];
+
+/// The bitstream format of a raw surround file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Codec {
+    /// AC3 (A/52), including E-AC3 frames.
+    Ac3,
+    /// DTS core frames in the 16-bit big-endian layout.
+    Dts,
+}
+
+impl Codec {
+    pub(super) fn of_path(path: &std::path::Path) -> Self {
+        if super::is_dts_file(path) {
+            Self::Dts
+        } else {
+            Self::Ac3
+        }
+    }
+
+    fn sync(self) -> &'static [u8] {
+        match self {
+            Self::Ac3 => &AC3_SYNC,
+            Self::Dts => &DTS_SYNC,
+        }
+    }
+
+    /// Length in bytes of the frame whose header starts `data`.
+    fn frame_len(self, data: &[u8]) -> Option<usize> {
+        match self {
+            Self::Ac3 => ac3_frame_len(data),
+            Self::Dts => dts_frame_len(data),
+        }
+    }
+}
+
 /// Find the byte offset of the first AC3 sync word (`0x0B77`) in `data`.
+#[cfg(feature = "gst")]
 pub(super) fn find_ac3_sync(data: &[u8]) -> Option<usize> {
-    data.windows(2).position(|w| w == [0x0B, 0x77])
+    data.windows(2).position(|w| w == AC3_SYNC)
+}
+
+/// Find the byte offset of the first DTS sync word (`0x7FFE8001`) in `data`.
+#[cfg(feature = "gst")]
+pub(super) fn find_dts_sync(data: &[u8]) -> Option<usize> {
+    data.windows(4).position(|w| w == DTS_SYNC)
+}
+
+/// Offset of the first frame in `data`, the start of a raw surround file.
+///
+/// Files ripped from discs often start with the end of the previous
+/// track's last frame, which can contain the sync word by chance. A sync
+/// word counts only with a valid header and, when `data` reaches that far,
+/// another sync word right after the frame.
+pub(super) fn first_frame_offset(data: &[u8], codec: Codec) -> Option<usize> {
+    let sync = codec.sync();
+    (0..data.len().saturating_sub(sync.len() - 1)).find(|&offset| {
+        let frame = &data[offset..];
+        if !frame.starts_with(sync) {
+            return false;
+        }
+        let Some(len) = codec.frame_len(frame) else {
+            return false;
+        };
+        match frame.get(len..) {
+            Some(next) if next.len() >= sync.len() => next.starts_with(sync),
+            // The frame ends at or after the end of `data`: nothing to compare.
+            _ => true,
+        }
+    })
+}
+
+/// Length of an AC3 or E-AC3 frame from its header (A/52 Table 5.18 and
+/// Annex E).
+fn ac3_frame_len(header: &[u8]) -> Option<usize> {
+    if header.len() < 6 || !header.starts_with(&AC3_SYNC) {
+        return None;
+    }
+    let bsid = header[5] >> 3;
+    if bsid > 10 {
+        if bsid > 16 {
+            return None;
+        }
+        // E-AC3: `frmsiz` counts 16-bit words minus one.
+        let words = (usize::from(header[2] & 0x07) << 8) | usize::from(header[3]);
+        return Some((words + 1) * 2);
+    }
+    let frmsizecod = usize::from(header[4] & 0x3F);
+    let kbps = usize::try_from(*AC3_BITRATES_KBPS.get(frmsizecod / 2)?).ok()?;
+    // 1536 samples per frame, in 16-bit words.
+    let words = match header[4] >> 6 {
+        0 => kbps * 2,
+        1 => kbps * 1_536_000 / (44_100 * 16) + (frmsizecod & 1),
+        2 => kbps * 3,
+        _ => return None,
+    };
+    Some(words * 2)
+}
+
+/// Length of a DTS core frame from its `FSIZE` field.
+fn dts_frame_len(header: &[u8]) -> Option<usize> {
+    if header.len() < 8 || !header.starts_with(&DTS_SYNC) {
+        return None;
+    }
+    let fsize = (usize::from(header[5] & 0x03) << 12)
+        | (usize::from(header[6]) << 4)
+        | (usize::from(header[7]) >> 4);
+    // Values below 95 are invalid.
+    (fsize >= 95).then_some(fsize + 1)
 }
 
 /// Parse the bitrate from an AC3 (A/52) sync frame header.
@@ -30,11 +137,6 @@ pub(super) fn parse_ac3_bitrate(header: &[u8]) -> Option<u32> {
     let frmsizcod = usize::from(header[4] & 0x3F);
     let kbps = *AC3_BITRATES_KBPS.get(frmsizcod / 2)?;
     Some(kbps * 1000)
-}
-
-/// Find the byte offset of the first DTS sync word (`0x7FFE8001`) in `data`.
-pub(super) fn find_dts_sync(data: &[u8]) -> Option<usize> {
-    data.windows(4).position(|w| w == [0x7F, 0xFE, 0x80, 0x01])
 }
 
 /// Parse the bitrate from a DTS frame header.

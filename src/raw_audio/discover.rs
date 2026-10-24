@@ -3,10 +3,6 @@
 //! Technical details of raw AC3/DTS files from the `GStreamer` Discoverer,
 //! with a bitstream estimate when it reports no duration.
 
-#[cfg(any(feature = "gst", test))]
-use std::fs::File;
-#[cfg(any(feature = "gst", test))]
-use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 #[cfg(feature = "gst")]
@@ -15,11 +11,9 @@ use gstreamer as gst;
 use gstreamer_pbutils as gst_pbutils;
 
 #[cfg(any(feature = "gst", test))]
-use super::apev2::{has_ape_preamble, read_apev2_footer, APE_TAG_HEADER_BYTES_U64};
+use super::bitstream::{parse_ac3_bitrate, parse_dts_bitrate, Codec};
 #[cfg(any(feature = "gst", test))]
-use super::bitstream::{find_ac3_sync, find_dts_sync, parse_ac3_bitrate, parse_dts_bitrate};
-#[cfg(any(feature = "gst", test))]
-use super::is_dts_file;
+use super::byte_filter::read_audio_layout;
 #[cfg(feature = "gst")]
 use super::{is_raw_surround_file, raw_surround_format_label, register_raw_surround_typefinders};
 
@@ -123,52 +117,25 @@ pub(crate) fn probe_raw_surround_technical_details(
     None
 }
 
-/// Estimate duration from the bitstream frame header bitrate and file size,
-/// subtracting the `APEv2` tag if present.  Works for AC3 (A/52) and DTS files.
+/// Estimate duration from the bitrate in the first frame header and the
+/// length of the frames, which excludes a leading partial frame and the
+/// `APEv2` tag.  Works for AC3 (A/52) and DTS files.
 // Duration estimate from byte count — f64 precision loss is negligible.
 #[allow(clippy::cast_precision_loss)]
 #[cfg(any(feature = "gst", test))]
 fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
-    let mut file = File::open(path).ok()?;
-    let file_len = file.seek(SeekFrom::End(0)).ok()?;
-
-    // Determine audio-only size by subtracting the APEv2 tag.
-    let apev2_size = read_apev2_footer(&mut file, file_len).map_or(0, |footer| {
-        let tag_size = u64::from(footer.tag_size);
-        // tag_size covers items + footer; check for a separate header.
-        let with_header = tag_size.saturating_add(APE_TAG_HEADER_BYTES_U64);
-        if let Some(header_start) = file_len.checked_sub(with_header) {
-            if has_ape_preamble(&mut file, header_start) {
-                return with_header;
-            }
-        }
-        tag_size
-    });
-    let audio_bytes = file_len.saturating_sub(apev2_size);
-    if audio_bytes == 0 {
-        return None;
-    }
-
-    // Read enough bytes to scan for the first valid frame header.
-    // AC3 files ripped from DVDs may start with a partial frame
-    // (up to ~1792 bytes of leftover data from the previous track).
-    file.seek(SeekFrom::Start(0)).ok()?;
-    let scan_len = usize::try_from(2048u64.min(audio_bytes)).unwrap_or(2048);
-    let mut buf = vec![0u8; scan_len];
-    file.read_exact(&mut buf).ok()?;
-
-    let bitrate_bps = if is_dts_file(path) {
-        let offset = find_dts_sync(&buf)?;
-        parse_dts_bitrate(&buf[offset..])?
-    } else {
-        let offset = find_ac3_sync(&buf)?;
-        parse_ac3_bitrate(&buf[offset..])?
+    let layout = read_audio_layout(path)?;
+    let first_frame = layout.first_frame?;
+    let header = layout.head.get(usize::try_from(first_frame).ok()?..)?;
+    let bitrate_bps = match Codec::of_path(path) {
+        Codec::Dts => parse_dts_bitrate(header)?,
+        Codec::Ac3 => parse_ac3_bitrate(header)?,
     };
-
     if bitrate_bps == 0 {
         return None;
     }
 
+    let audio_bytes = layout.audio_end - first_frame;
     let duration = (audio_bytes as f64 * 8.0) / f64::from(bitrate_bps);
     // f64 → f32 for duration display — intentional.
     #[allow(clippy::cast_possible_truncation)]
@@ -185,31 +152,22 @@ fn kbps_from_bits_per_second(bits_per_second: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::apev2::build_test_apev2_tag;
-    use crate::raw_audio::test_path;
+    use crate::raw_audio::{ripped_surround_bytes, test_path, TEST_AC3, TEST_DTS};
 
     #[test]
-    fn estimate_duration_from_ac3_with_apev2() {
-        // Build a fake AC3 file: valid header + padding + APEv2 tag
-        let path = test_path("ac3-duration", "ac3");
+    fn duration_estimate_counts_only_the_frames_of_ripped_files() {
+        // 32 frames of 1536 samples at 48 kHz, and 47 frames of 512.
+        for (stream, ext, expected) in [(TEST_AC3, "ac3", 1.024), (TEST_DTS, "dts", 0.501)] {
+            let path = test_path("duration", ext);
+            let (bytes, _) = ripped_surround_bytes(stream);
+            std::fs::write(&path, bytes).expect("write test file");
 
-        // AC3 header: 0x0B77, CRC, fscod=00 frmsizecod=26 → index 13 → 320 kbps
-        let ac3_header = [0x0B, 0x77, 0x00, 0x00, 0b00_011010];
-        let audio_size: usize = 320_000; // 320 kB of audio → 8 seconds at 320 kbps
-        let mut data = Vec::with_capacity(audio_size + 200);
-        data.extend_from_slice(&ac3_header);
-        data.resize(audio_size, 0x00);
-        let tag = build_test_apev2_tag(&[("Title", "Test")], true);
-        data.extend_from_slice(&tag);
-
-        std::fs::write(&path, &data).expect("write test file");
-
-        let duration = super::estimate_duration_from_bitstream(&path);
-        assert!(duration.is_some(), "should estimate duration");
-        let d = duration.unwrap();
-        // audio_size = 320000 bytes, bitrate = 320000 bps → duration = 320000*8/320000 = 8.0s
-        assert!((d - 8.0).abs() < 0.1, "expected ~8.0s, got {d}");
-
-        let _ = std::fs::remove_file(path);
+            let duration = super::estimate_duration_from_bitstream(&path).expect("duration");
+            assert!(
+                (duration - expected).abs() < 0.01,
+                "{ext}: expected {expected} s, got {duration} s"
+            );
+            let _ = std::fs::remove_file(path);
+        }
     }
 }

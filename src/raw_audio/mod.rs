@@ -14,10 +14,8 @@ mod discover;
 
 use std::path::Path;
 
-#[cfg(all(test, feature = "gst"))]
-pub(crate) use apev2::build_test_apev2_tag;
 #[cfg(test)]
-pub(crate) use apev2::write_test_apev2_file;
+pub(crate) use apev2::{build_test_apev2_tag, write_test_apev2_file};
 pub(crate) use apev2::{
     edit_appended_apev2_text_items, format_ape_number_pair, read_appended_apev2_text_metadata,
     ApeTextField,
@@ -55,6 +53,30 @@ pub(crate) fn raw_surround_format_label(path: &Path) -> String {
         "dts" => "DTS".to_string(),
         _ => String::new(),
     }
+}
+
+/// 32 AC3 frames (1.024 s) of a 48 kHz mono tone; see `fixtures/README.md`.
+#[cfg(test)]
+pub(crate) const TEST_AC3: &[u8] = include_bytes!("../analysis/fixtures/raw-tone.ac3");
+/// 47 DTS frames (about 0.5 s) of a 48 kHz mono tone.
+#[cfg(test)]
+pub(crate) const TEST_DTS: &[u8] = include_bytes!("../analysis/fixtures/raw-tone.dts");
+
+/// A raw surround stream as ripped from a disc: the end of the previous
+/// track's last frame, the stream, and an appended `APEv2` tag. Returns the
+/// bytes and the range of the stream within them.
+#[cfg(test)]
+pub(crate) fn ripped_surround_bytes(stream: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
+    let partial_frame = &stream[stream.len() - 100..];
+    let comment = "Ripped from disc. ".repeat(40);
+    let mut bytes = partial_frame.to_vec();
+    bytes.extend_from_slice(stream);
+    let audio = partial_frame.len()..bytes.len();
+    bytes.extend_from_slice(&build_test_apev2_tag(
+        &[("Title", "Tone"), ("Comment", &comment)],
+        true,
+    ));
+    (bytes, audio)
 }
 
 #[cfg(test)]

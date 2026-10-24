@@ -9,9 +9,9 @@ use std::path::Path;
 
 use super::is_raw_surround_file;
 
-pub(super) const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
+const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
 const APE_TAG_HEADER_BYTES: usize = 32;
-pub(super) const APE_TAG_HEADER_BYTES_U64: u64 = 32;
+const APE_TAG_HEADER_BYTES_U64: u64 = 32;
 const APE_MIN_ITEM_BYTES: u64 = 11;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -68,7 +68,7 @@ pub(crate) fn read_appended_apev2_text_metadata(path: &Path) -> Option<RawAudioT
     parse_apev2_text_items(&mut file, items_start, items_end, footer.item_count)
 }
 
-pub(super) fn read_apev2_footer(file: &mut File, file_len: u64) -> Option<Apev2Footer> {
+fn read_apev2_footer(file: &mut File, file_len: u64) -> Option<Apev2Footer> {
     if file_len < APE_TAG_HEADER_BYTES_U64 {
         return None;
     }
@@ -100,6 +100,26 @@ pub(super) fn read_apev2_footer(file: &mut File, file_len: u64) -> Option<Apev2F
     })
 }
 
+/// Length of the `APEv2` tag at the end of a file, including its optional
+/// header; 0 when the file has no tag.
+#[cfg(any(feature = "gst", test))]
+pub(super) fn appended_tag_len(file: &mut File, file_len: u64) -> u64 {
+    let Some(footer) = read_apev2_footer(file, file_len) else {
+        return 0;
+    };
+    // The tag size covers the items and the footer, not the header.
+    let tag_size = u64::from(footer.tag_size);
+    let with_header = tag_size.saturating_add(APE_TAG_HEADER_BYTES_U64);
+    if file_len
+        .checked_sub(with_header)
+        .is_some_and(|header_start| has_ape_preamble(file, header_start))
+    {
+        with_header
+    } else {
+        tag_size
+    }
+}
+
 fn locate_apev2_items_start(file: &mut File, file_len: u64, tag_size: u32) -> Option<u64> {
     let tag_size = u64::from(tag_size);
 
@@ -116,7 +136,7 @@ fn locate_apev2_items_start(file: &mut File, file_len: u64, tag_size: u32) -> Op
     file_len.checked_sub(tag_size)
 }
 
-pub(super) fn has_ape_preamble(file: &mut File, offset: u64) -> bool {
+fn has_ape_preamble(file: &mut File, offset: u64) -> bool {
     let Ok(current_pos) = file.stream_position() else {
         return false;
     };
