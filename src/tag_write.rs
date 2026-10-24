@@ -366,7 +366,7 @@ fn ape_mapping(item: &ApeItem) -> Mapping {
 /// # Errors
 ///
 /// Returns a message when kept UTF-16 text cannot be written without merging
-/// atoms; see [`utf16_text_as_utf8`].
+/// atoms or changing which value is read; see [`utf16_text_as_utf8`].
 fn edit_ilst(mut original: Ilst, edited: &Tag) -> Result<Ilst, String> {
     let mut changes = Changes::between(&original.clone().into(), edited);
     let mappings = (&original)
@@ -386,9 +386,15 @@ fn edit_ilst(mut original: Ilst, edited: &Tag) -> Result<Ilst, String> {
             .into_iter()
             .any(|new_atom| new_atom.ident() == atom.ident());
     }
+    let kept_mappings = mappings
+        .into_iter()
+        .zip(&replaced)
+        .filter(|&(_, &replaced)| !replaced)
+        .map(|(mapping, _)| mapping)
+        .collect::<Vec<_>>();
     let mut replaced = replaced.into_iter();
     original.retain(|_| !replaced.next().unwrap_or_default());
-    let mut original = utf16_text_as_utf8(original)?;
+    let mut original = utf16_text_as_utf8(original, &kept_mappings)?;
     // Inserting merges the values of atoms with the same identifier, as the
     // edited tag holds one item per value.
     for atom in new {
@@ -399,36 +405,26 @@ fn edit_ilst(mut original: Ilst, edited: &Tag) -> Result<Ilst, String> {
 
 /// lofty 0.24 writes UTF-16 text as UTF-8 bytes marked as UTF-16, which reads
 /// back as other text. Kept UTF-16 values are written as UTF-8 instead, with
-/// the same text, as the generic tag writes them.
+/// the same text, as the generic tag writes them. `mappings` holds the mapping
+/// of each atom of `ilst`, in order.
 ///
-/// Only the atoms holding UTF-16 values are taken out, converted, and put back
-/// at the end; the others stay as they are, including atoms that share an
-/// identifier, whose boundaries players read. lofty cannot change an atom in
-/// place or put back two atoms with one identifier without merging them, so
-/// an identifier holding UTF-16 values that also has another atom cannot be
-/// saved without losing that boundary, and the save is refused.
-fn utf16_text_as_utf8(mut ilst: Ilst) -> Result<Ilst, String> {
+/// lofty cannot change an atom in place, and inserting an atom merges it into
+/// an atom with its identifier. When no identifier repeats, which is the
+/// common case, nothing can merge, so the `ilst` is rebuilt in its order with
+/// each UTF-16 atom converted where it was. Every atom keeps its place, so the
+/// first atom read for a generic key stays the same.
+///
+/// When identifiers repeat, rebuilding would merge those atoms, whose
+/// boundaries players read. Only the UTF-16 atoms are then taken out,
+/// converted, and put back at the end; the others stay as they are. Putting
+/// an atom back merges it into another atom with its identifier, and moving
+/// it can change which value is read first for a generic key it shares with
+/// another atom, such as `----:com.apple.iTunes:BPM` and
+/// `----:com.apple.iTunes:bpm`. If a UTF-16 atom shares its identifier or a
+/// generic key with any other atom, the save is refused.
+fn utf16_text_as_utf8(mut ilst: Ilst, mappings: &[Mapping]) -> Result<Ilst, String> {
     let is_utf16 = |atom: &Atom<'_>| atom.data().any(|data| matches!(data, AtomData::UTF16(_)));
-    let utf16 = (&ilst)
-        .into_iter()
-        .filter(|atom| is_utf16(atom))
-        .cloned()
-        .collect::<Vec<_>>();
-    if let Some(atom) = utf16.iter().find(|atom| {
-        (&ilst)
-            .into_iter()
-            .filter(|other| other.ident() == atom.ident())
-            .nth(1)
-            .is_some()
-    }) {
-        return Err(format!(
-            "the existing tag has more than one {} atom and one of them holds \
-             UTF-16 text, which cannot be saved without merging them",
-            describe_atom(atom.ident())
-        ));
-    }
-    ilst.retain(|atom| !is_utf16(atom));
-    for atom in utf16 {
+    let as_utf8 = |atom: Atom<'static>| {
         let ident = atom.ident().clone().into_owned();
         let data = atom
             .into_data()
@@ -438,9 +434,68 @@ fn utf16_text_as_utf8(mut ilst: Ilst) -> Result<Ilst, String> {
             })
             .collect();
         // Every atom read holds at least one value.
-        if let Some(atom) = Atom::from_collection(ident, data) {
-            ilst.insert(atom);
+        Atom::from_collection(ident, data)
+    };
+    if !(&ilst).into_iter().any(is_utf16) {
+        return Ok(ilst);
+    }
+    let atoms = (&ilst).into_iter().collect::<Vec<_>>();
+    let repeats = atoms.iter().enumerate().any(|(index, atom)| {
+        atoms[..index]
+            .iter()
+            .any(|earlier| earlier.ident() == atom.ident())
+    });
+    if !repeats {
+        let mut rebuilt = Ilst::new();
+        for atom in ilst {
+            let atom = if is_utf16(&atom) {
+                as_utf8(atom)
+            } else {
+                Some(atom)
+            };
+            if let Some(atom) = atom {
+                rebuilt.insert(atom);
+            }
         }
+        return Ok(rebuilt);
+    }
+
+    for ((index, atom), mapping) in atoms.iter().enumerate().zip(mappings) {
+        if !is_utf16(atom) {
+            continue;
+        }
+        let others = atoms.iter().zip(mappings).enumerate();
+        for (_, (other, other_mapping)) in others.filter(|&(other, _)| other != index) {
+            if other.ident() == atom.ident() {
+                return Err(format!(
+                    "the existing tag has more than one {} atom and one of them holds \
+                     UTF-16 text, which cannot be saved without merging them",
+                    describe_atom(atom.ident())
+                ));
+            }
+            if mapping
+                .keys
+                .iter()
+                .any(|key| other_mapping.keys.contains(key))
+            {
+                return Err(format!(
+                    "the existing tag's {} atom holds UTF-16 text and is read as the \
+                     same field as its {} atom, so it cannot be saved without changing \
+                     which of them is read",
+                    describe_atom(atom.ident()),
+                    describe_atom(other.ident())
+                ));
+            }
+        }
+    }
+    let utf16 = atoms
+        .into_iter()
+        .filter(|atom| is_utf16(atom))
+        .cloned()
+        .collect::<Vec<_>>();
+    ilst.retain(|atom| !is_utf16(atom));
+    for atom in utf16.into_iter().filter_map(as_utf8) {
+        ilst.insert(atom);
     }
     Ok(ilst)
 }

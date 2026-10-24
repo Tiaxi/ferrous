@@ -1970,6 +1970,114 @@ mod tests {
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 
+    const UPPER_BPM_ATOM: AtomIdent<'static> = AtomIdent::Freeform {
+        mean: std::borrow::Cow::Borrowed("com.apple.iTunes"),
+        name: std::borrow::Cow::Borrowed("BPM"),
+    };
+    const LOWER_BPM_ATOM: AtomIdent<'static> = AtomIdent::Freeform {
+        mean: std::borrow::Cow::Borrowed("com.apple.iTunes"),
+        name: std::borrow::Cow::Borrowed("bpm"),
+    };
+
+    /// An MP4 with a UTF-16 `----:com.apple.iTunes:BPM` (`90`) followed by a
+    /// UTF-8 `----:com.apple.iTunes:bpm` (`120`). lofty reads both names as
+    /// the BPM and takes the first, 90. With `split`, it also has two
+    /// separate `©ART` atoms (`A`, `B`).
+    fn bpm_mp4_fixture(dir: &Path, split: bool) -> PathBuf {
+        let path = dir.join("song.m4a");
+        let mut ilst = Ilst::new();
+        ilst.insert(text_atom(TITLE_ATOM, &["Old"]));
+        ilst.insert(text_atom(ARTIST_ATOM, &["A"]));
+        if split {
+            ilst.insert(text_atom(AtomIdent::Fourcc(*b"\xa9ARx"), &["B"]));
+        }
+        ilst.insert(text_atom(UPPER_BPM_ATOM, &["WXYZ"]));
+        ilst.insert(text_atom(LOWER_BPM_ATOM, &["120"]));
+        ilst.insert(text_atom(DATE_ATOM, &["1997"]));
+        let renames: &[(&[u8; 4], &[u8; 4])] = if split {
+            &[(b"\xa9ARx", b"\xa9ART")]
+        } else {
+            &[]
+        };
+        write_split_atoms_mp4(&path, &ilst, renames);
+        let (from, to) = utf16_data_atom("WXYZ", "90");
+        let bytes = patched(&path, &from, &to);
+        fs::write(&path, bytes).expect("write fixture");
+
+        let written = read_ilst(&path);
+        assert_eq!(
+            atom_count(&written, &ARTIST_ATOM),
+            if split { 2 } else { 1 }
+        );
+        assert_eq!(
+            atom_values(&written, &UPPER_BPM_ATOM),
+            [AtomData::UTF16("90".to_string())]
+        );
+        assert_eq!(
+            Tag::from(written).get_string(ItemKey::Bpm),
+            Some("90"),
+            "lofty reads the first BPM atom"
+        );
+        path
+    }
+
+    /// With no repeated identifier, the UTF-16 atom is converted where it
+    /// was, so it still comes before the other atom read as the BPM.
+    #[test]
+    fn mp4_saves_keep_utf16_atoms_in_place() {
+        let dir = test_dir("mp4-utf16-order");
+        let path = bpm_mp4_fixture(&dir, false);
+        let before = read_ilst(&path);
+
+        let mut row = load_one(&path);
+        row.title = "New".to_string();
+        assert_saved(&save_json(&[edited(&row, &["title"])]));
+
+        let after = read_ilst(&path);
+        let expected = atoms_except(&before, &[TITLE_ATOM])
+            .into_iter()
+            .map(|atom| {
+                if atom.ident() == &UPPER_BPM_ATOM {
+                    text_atom(UPPER_BPM_ATOM, &["90"])
+                } else {
+                    atom
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(atoms_except(&after, &[TITLE_ATOM]), expected);
+        assert_eq!(
+            atom_values(&after, &TITLE_ATOM),
+            [AtomData::UTF8("New".to_string())]
+        );
+        assert_eq!(Tag::from(after).get_string(ItemKey::Bpm), Some("90"));
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    /// With a repeated identifier, a UTF-16 atom can only be moved to the end,
+    /// which would put it after the other atom read as the BPM and change the
+    /// BPM read, so the save is refused.
+    #[test]
+    fn mp4_saves_refuse_moving_utf16_atoms_past_atoms_of_their_field() {
+        let dir = test_dir("mp4-utf16-field");
+        let path = bpm_mp4_fixture(&dir, true);
+        let bytes = fs::read(&path).expect("read fixture");
+
+        let mut row = load_one(&path);
+        row.title = "New".to_string();
+        let response = save_json(&[edited(&row, &["title"])]);
+
+        assert!(response.successful_paths.is_empty());
+        let error = response.results[0].error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("----:com.apple.iTunes:BPM atom holds UTF-16 text")
+                && error.contains("same field as its ----:com.apple.iTunes:bpm atom"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&path).expect("read file"), bytes);
+        assert_eq!(dir_entries(&dir), ["song.m4a"]);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
     /// The Ogg CRC-32 of `bytes`.
     fn ogg_crc(bytes: &[u8]) -> u32 {
         bytes.iter().fold(0, |crc, &byte| {
