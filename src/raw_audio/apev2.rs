@@ -13,6 +13,7 @@ const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
 const APE_TAG_HEADER_BYTES: usize = 32;
 const APE_TAG_HEADER_BYTES_U64: u64 = 32;
 const APE_MIN_ITEM_BYTES: u64 = 11;
+const APE_ITEM_READ_ONLY: u32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RawAudioTagMetadata {
@@ -88,9 +89,8 @@ fn read_apev2_footer(file: &mut File, file_len: u64) -> Option<Apev2Footer> {
 
     let tag_size = u32::from_le_bytes(footer[12..16].try_into().ok()?);
     let item_count = u32::from_le_bytes(footer[16..20].try_into().ok()?);
-    if tag_size < u32::try_from(APE_TAG_HEADER_BYTES).ok()?
-        || tag_size > u32::try_from(file_len).ok()?
-    {
+    // Compare in 64 bits: files over 4 GiB still end in a tag.
+    if u64::from(tag_size) < APE_TAG_HEADER_BYTES_U64 || u64::from(tag_size) > file_len {
         return None;
     }
 
@@ -353,8 +353,10 @@ pub(crate) fn format_ape_number_pair(number: Option<u32>, total: Option<u32>) ->
 /// Change the given fields of the `APEv2` tag appended to a raw surround file.
 ///
 /// A `None` or empty value removes the field. All other items, including
-/// binary items and unknown keys, are kept unchanged. The file is replaced
-/// through [`crate::safe_save::rewrite_via_temp_copy`].
+/// binary items and unknown keys, are kept byte for byte. An edited item
+/// keeps the key spelling and read-only flag of the item it replaces. A tag
+/// whose items do not exactly fill its declared size is not rewritten. The
+/// file is replaced through [`crate::safe_save::rewrite_via_temp_copy`].
 pub(crate) fn edit_appended_apev2_text_items(
     path: &Path,
     edits: &[(ApeTextField, Option<String>)],
@@ -387,9 +389,14 @@ fn apply_apev2_text_edits(
 
     for (field, value) in edits {
         let first = items.iter().position(|item| field.matches(&item.key));
-        let key = first.map_or_else(
-            || field.keys()[0].to_string(),
-            |index| items[index].key.clone(),
+        // An edited item keeps the key spelling and read-only flag of the item
+        // it replaces; its value becomes UTF-8 text.
+        let (key, flags) = first.map_or_else(
+            || (field.keys()[0].to_string(), 0),
+            |index| {
+                let item = &items[index];
+                (item.key.clone(), item.flags & APE_ITEM_READ_ONLY)
+            },
         );
         items.retain(|item| !field.matches(&item.key));
         if let Some(value) = value
@@ -402,7 +409,7 @@ fn apply_apev2_text_edits(
                 index,
                 ApeItem {
                     key,
-                    flags: 0,
+                    flags,
                     value: value.as_bytes().to_vec(),
                 },
             );
@@ -438,8 +445,9 @@ fn read_apev2_items(
         .and_then(|_| file.read_exact(&mut bytes))
         .map_err(|err| err.to_string())?;
     // Rewriting a tag that cannot be parsed completely would drop the rest of it.
-    let items = parse_apev2_items(&bytes, footer.item_count)
-        .ok_or_else(|| "the existing tag is malformed".to_string())?;
+    let items = parse_apev2_items(&bytes, footer.item_count).ok_or_else(|| {
+        "the existing tag is malformed: its items do not match its item count and size".to_string()
+    })?;
     Ok((tag_start, items))
 }
 
@@ -464,7 +472,9 @@ fn parse_apev2_items(mut bytes: &[u8], item_count: u32) -> Option<Vec<ApeItem>> 
         });
         bytes = &rest[value_end..];
     }
-    Some(items)
+    // Bytes left over are items the count leaves out; dropping them would
+    // lose them.
+    bytes.is_empty().then_some(items)
 }
 
 /// Build a complete `APEv2` tag with a header and a footer.
@@ -754,6 +764,120 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(tagless);
+    }
+
+    fn raw_items(path: &Path) -> Vec<super::ApeItem> {
+        let mut file = std::fs::File::open(path).expect("open tagged file");
+        let file_len = std::io::Seek::seek(&mut file, std::io::SeekFrom::End(0)).expect("seek");
+        let footer = super::read_apev2_footer(&mut file, file_len).expect("APEv2 footer");
+        super::read_apev2_items(&mut file, file_len, footer)
+            .expect("items")
+            .1
+    }
+
+    fn ape_item(key: &str, flags: u32, value: &[u8]) -> super::ApeItem {
+        super::ApeItem {
+            key: key.to_string(),
+            flags,
+            value: value.to_vec(),
+        }
+    }
+
+    #[test]
+    fn apev2_edits_keep_read_only_flags() {
+        let path = test_path("read-only", "ac3");
+        let original = [
+            ape_item("TITLE", 1, b"Old"),
+            ape_item("Artist", 1, b"A\0B"),
+            ape_item("Locator", 0b101, b"http://example.com"),
+        ];
+        let mut bytes = b"stub".to_vec();
+        bytes.extend_from_slice(&super::build_apev2_tag(&original).expect("build tag"));
+        std::fs::write(&path, &bytes).expect("write file");
+
+        edit_appended_apev2_text_items(&path, &[(ApeTextField::Title, Some("New".into()))])
+            .expect("edit title");
+
+        assert_eq!(
+            raw_items(&path),
+            vec![
+                ape_item("TITLE", 1, b"New"),
+                original[1].clone(),
+                original[2].clone()
+            ]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn apev2_edits_refuse_tags_with_uncounted_items() {
+        let path = test_path("uncounted", "dts");
+        let mut bytes = b"stub".to_vec();
+        let mut tag = build_test_apev2_tag(
+            &[("Title", "Old"), ("Artist", "Kept"), ("Composer", "Hidden")],
+            true,
+        );
+        // Claim one item fewer than the tag holds, in the header and the footer.
+        tag[16] = 2;
+        let footer = tag.len() - 32;
+        tag[footer + 16] = 2;
+        bytes.append(&mut tag);
+        std::fs::write(&path, &bytes).expect("write file");
+
+        let error =
+            edit_appended_apev2_text_items(&path, &[(ApeTextField::Title, Some("New".into()))])
+                .expect_err("tag with uncounted items is not rewritten");
+
+        assert!(error.contains("malformed"), "{error}");
+        assert_eq!(std::fs::read(&path).expect("read file"), bytes);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn apev2_tags_of_files_over_4_gib_are_read_and_replaced() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        // A sparse file: only the tag at the end takes space on disk.
+        let path = test_path("over-4-gib", "ac3");
+        let audio_len = (1_u64 << 32) + 4;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create sparse file");
+        file.set_len(audio_len).expect("extend sparse file");
+        file.seek(SeekFrom::End(0)).expect("seek to end");
+        file.write_all(&build_test_apev2_tag(
+            &[("Title", "Old"), ("Composer", "Kept")],
+            true,
+        ))
+        .expect("append tag");
+
+        let metadata = read_appended_apev2_text_metadata(&path).expect("tag is found");
+        assert_eq!(metadata.title.as_deref(), Some("Old"));
+
+        // The edit itself; the safe save would copy all 4 GiB.
+        super::apply_apev2_text_edits(&mut file, &[(ApeTextField::Title, Some("New".into()))])
+            .expect("edit title");
+
+        let new_tag = super::build_apev2_tag(&[
+            ape_item("Title", 0, b"New"),
+            ape_item("Composer", 0, b"Kept"),
+        ])
+        .expect("build tag");
+        let file_len = file.seek(SeekFrom::End(0)).expect("seek to end");
+        let new_tag_len = u64::try_from(new_tag.len()).expect("tag length");
+        assert_eq!(file_len, audio_len + new_tag_len, "one tag, replaced");
+        assert_eq!(
+            raw_items(&path),
+            vec![
+                ape_item("Title", 0, b"New"),
+                ape_item("Composer", 0, b"Kept")
+            ]
+        );
+        drop(file);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
