@@ -21,6 +21,7 @@ use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, read_appended_apev2_text_metadata,
 };
 
+use super::no_replace::rename_no_replace;
 use super::schema::{
     init_schema, load_roots, load_snapshot, normalize_root_name, open_library_db, u128_to_i64,
     u64_to_i64, usize_to_f32,
@@ -850,11 +851,16 @@ pub(crate) fn refresh_indexed_metadata_for_paths(
 
 /// The renames made on disk for one request, in order, so that a failure
 /// can put every file back. Files are identified by their index in the
-/// request.
+/// request. Every rename, including those that put files back, fails rather
+/// than replace a file that has the target name.
 struct DiskRenameJournal {
     originals: Vec<PathBuf>,
     locations: Vec<PathBuf>,
     moves: Vec<DiskMove>,
+    /// Runs just before each rename on disk, so tests can take a name in
+    /// between the checks and the rename.
+    #[cfg(test)]
+    before_move: Option<Box<dyn FnMut(&Path, &Path)>>,
 }
 
 struct DiskMove {
@@ -873,13 +879,61 @@ impl DiskRenameJournal {
             locations: originals.clone(),
             originals,
             moves: Vec::new(),
+            #[cfg(test)]
+            before_move: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn run_before_move(&mut self, from: &Path, to: &Path) {
+        if let Some(hook) = &mut self.before_move {
+            hook(from, to);
         }
     }
 
     fn rename(&mut self, file: usize, from: &Path, to: &Path) -> std::io::Result<()> {
-        fs::rename(from, to)?;
+        #[cfg(test)]
+        self.run_before_move(from, to);
+        rename_no_replace(from, to)?;
         self.record(file, from, to);
         Ok(())
+    }
+
+    /// Moves `file`, staged at `temp_path`, to `new_path`, its final name.
+    fn finalize(
+        &mut self,
+        file: usize,
+        temp_path: &Path,
+        new_path: &Path,
+        old_path: &Path,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        self.run_before_move(temp_path, new_path);
+        if let Err(e) = finalize_staged_rename(temp_path, new_path, old_path) {
+            // The rename can land even when it is not seen to finish.
+            if !path_entry_exists(temp_path) && path_entry_exists(new_path) {
+                self.record(file, temp_path, new_path);
+            }
+            return Err(e);
+        }
+        self.record(file, temp_path, new_path);
+        Ok(())
+    }
+
+    /// Renames `file` from `old_path` to `new_path` in two steps through a
+    /// temporary name. A case-insensitive filesystem cannot rename a file to
+    /// another case of its name in one step without replacing, because it
+    /// finds the new name taken by the file itself.
+    fn rename_through_temp(
+        &mut self,
+        file: usize,
+        old_path: &Path,
+        new_path: &Path,
+    ) -> Result<(), String> {
+        let temp_path = build_temp_rename_path(old_path, file);
+        self.rename(file, old_path, &temp_path)
+            .map_err(|e| rename_failure("stage rename", old_path, &temp_path, &e))?;
+        self.finalize(file, &temp_path, new_path, old_path)
     }
 
     fn record(&mut self, file: usize, from: &Path, to: &Path) {
@@ -904,15 +958,21 @@ impl DiskRenameJournal {
                 // Undoing a later rename of this file failed.
                 continue;
             }
-            let restored = if from.exists() && !paths_refer_to_same_file(&from, &to) {
+            let restored = if path_entry_exists(&from) {
                 Err(format!("{} already exists", from.to_string_lossy()))
             } else {
-                fs::rename(&to, &from).map_err(|e| {
-                    format!(
-                        "failed to rename {} to {}: {e}",
-                        to.to_string_lossy(),
-                        from.to_string_lossy()
-                    )
+                #[cfg(test)]
+                self.run_before_move(&to, &from);
+                rename_no_replace(&to, &from).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        format!("{} already exists", from.to_string_lossy())
+                    } else {
+                        format!(
+                            "failed to rename {} to {}: {e}",
+                            to.to_string_lossy(),
+                            from.to_string_lossy()
+                        )
+                    }
                 })
             };
             match restored {
@@ -923,11 +983,13 @@ impl DiskRenameJournal {
         if failures.is_empty() {
             return format!("{error}; the files keep their original names");
         }
-        let stranded = self
+        let (stranded, kept): (Vec<_>, Vec<_>) = self
             .originals
             .iter()
             .zip(&self.locations)
-            .filter(|(original, location)| original != location)
+            .partition(|(original, location)| original != location);
+        let stranded = stranded
+            .into_iter()
             .map(|(original, location)| {
                 format!(
                     "{} is now at {}",
@@ -936,12 +998,38 @@ impl DiskRenameJournal {
                 )
             })
             .collect::<Vec<_>>();
-        format!(
+        let mut message = format!(
             "{error}; restoring the original file names failed ({}); {}",
             failures.join("; "),
             stranded.join("; ")
-        )
+        );
+        if !kept.is_empty() {
+            message.push_str("; the other files keep their original names");
+        }
+        message
     }
+}
+
+/// Whether `path` names a directory entry, also a dangling symbolic link,
+/// which `Path::exists` reports as missing.
+fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+/// Describes a failed rename of `from` to `to`, as `action` (such as
+/// "rename"), with a refusal when `to` was taken.
+fn rename_failure(action: &str, from: &Path, to: &Path, error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        return format!(
+            "refusing to overwrite existing file {}",
+            to.to_string_lossy()
+        );
+    }
+    format!(
+        "failed to {action} {} to {}: {error}",
+        from.to_string_lossy(),
+        to.to_string_lossy()
+    )
 }
 
 fn build_temp_rename_path(path: &Path, salt: usize) -> PathBuf {
@@ -958,7 +1046,7 @@ fn build_temp_rename_path(path: &Path, salt: usize) -> PathBuf {
         let candidate = parent.join(format!(
             ".ferrous-rename-{timestamp}-{salt}-{attempt}-{stem}"
         ));
-        if !candidate.exists() {
+        if !path_entry_exists(&candidate) {
             return candidate;
         }
     }
@@ -967,10 +1055,10 @@ fn build_temp_rename_path(path: &Path, salt: usize) -> PathBuf {
 
 fn exact_directory_entry_exists(path: &Path) -> Result<bool, String> {
     let Some(parent) = path.parent() else {
-        return Ok(path.exists());
+        return Ok(path_entry_exists(path));
     };
     let Some(file_name) = path.file_name() else {
-        return Ok(path.exists());
+        return Ok(path_entry_exists(path));
     };
     let entries = fs::read_dir(parent)
         .map_err(|e| format!("failed to read directory {}: {e}", parent.to_string_lossy()))?;
@@ -991,16 +1079,14 @@ fn finalize_staged_rename(
     const RENAME_ATTEMPTS: usize = 8;
     const VISIBILITY_ATTEMPTS: usize = 8;
     for attempt in 0..RENAME_ATTEMPTS {
-        if let Err(e) = fs::rename(temp_path, new_path) {
+        if let Err(e) = rename_no_replace(temp_path, new_path) {
+            // A case-insensitive filesystem can briefly still see the old
+            // name, which is the new one in another case.
             if attempt + 1 < RENAME_ATTEMPTS && is_case_only_rename(old_path, new_path) {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            return Err(format!(
-                "failed to rename {} to {}: {e}",
-                old_path.to_string_lossy(),
-                new_path.to_string_lossy()
-            ));
+            return Err(rename_failure("rename", old_path, new_path, &e));
         }
 
         for visibility_attempt in 0..VISIBILITY_ATTEMPTS {
@@ -1009,7 +1095,7 @@ fn finalize_staged_rename(
             if target_exists && !temp_exists {
                 return Ok(());
             }
-            if !temp_exists && new_path.exists() {
+            if !temp_exists && path_entry_exists(new_path) {
                 return Ok(());
             }
             if visibility_attempt + 1 < VISIBILITY_ATTEMPTS {
@@ -1069,6 +1155,7 @@ fn is_case_only_rename(current: &Path, target: &Path) -> bool {
 ///
 /// Either everything succeeds or the database is unchanged and the files are
 /// put back under their original names; the error says if that failed.
+/// No rename replaces an existing file.
 pub(crate) fn rename_indexed_metadata_paths(
     renames: &[(PathBuf, PathBuf)],
 ) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
@@ -1081,13 +1168,20 @@ fn rename_indexed_metadata_paths_in_conn(
     conn: &mut Connection,
     renames: &[(PathBuf, PathBuf)],
 ) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
+    rename_with_journal(conn, renames, DiskRenameJournal::new(renames))
+}
+
+fn rename_with_journal(
+    conn: &mut Connection,
+    renames: &[(PathBuf, PathBuf)],
+    mut journal: DiskRenameJournal,
+) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
     // Take the write lock before any file moves. A deferred transaction that
     // reads first cannot wait for the lock when it then writes: SQLite fails
     // it at once with "database is locked" if another writer holds the lock.
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("failed to start rename transaction: {e}"))?;
-    let mut journal = DiskRenameJournal::new(renames);
     let updated = apply_disk_renames(renames, &mut journal)
         .and_then(|()| update_renamed_track_rows(&tx, renames));
     let committed = match updated {
@@ -1131,48 +1225,31 @@ fn apply_disk_renames(
                     new_path.to_string_lossy()
                 ));
             }
-            if !old_path.exists() && new_path.exists() {
+            if !old_path.exists() && path_entry_exists(new_path) {
                 continue;
             }
-            if new_path.exists()
-                && !path_matches_any_source(&source_paths, new_path)
-                && !is_case_only_rename(old_path, new_path)
-            {
+            if path_entry_exists(new_path) && !path_matches_any_source(&source_paths, new_path) {
                 return Err(format!(
                     "refusing to overwrite existing file {}",
                     new_path.to_string_lossy()
                 ));
             }
             let temp_path = build_temp_rename_path(old_path, index);
-            journal.rename(index, old_path, &temp_path).map_err(|e| {
-                format!(
-                    "failed to stage rename {} to {}: {e}",
-                    old_path.to_string_lossy(),
-                    temp_path.to_string_lossy()
-                )
-            })?;
+            journal
+                .rename(index, old_path, &temp_path)
+                .map_err(|e| rename_failure("stage rename", old_path, &temp_path, &e))?;
             staged.push((index, temp_path));
         }
 
         for (index, temp_path) in staged {
             let (old_path, new_path) = &renames[index];
-            if new_path.exists()
-                && !path_matches_any_source(&source_paths, new_path)
-                && !is_case_only_rename(old_path, new_path)
-            {
+            if path_entry_exists(new_path) && !path_matches_any_source(&source_paths, new_path) {
                 return Err(format!(
                     "refusing to overwrite existing file {}",
                     new_path.to_string_lossy()
                 ));
             }
-            if let Err(e) = finalize_staged_rename(&temp_path, new_path, old_path) {
-                // The rename can land even when it is not seen to finish.
-                if !temp_path.exists() && new_path.exists() {
-                    journal.record(index, &temp_path, new_path);
-                }
-                return Err(e);
-            }
-            journal.record(index, &temp_path, new_path);
+            journal.finalize(index, &temp_path, new_path, old_path)?;
         }
     } else {
         for (index, (old_path, new_path)) in renames.iter().enumerate() {
@@ -1185,25 +1262,23 @@ fn apply_disk_renames(
                     new_path.to_string_lossy()
                 ));
             }
-            if !old_path.exists() && new_path.exists() {
+            if !old_path.exists() && path_entry_exists(new_path) {
                 continue;
             }
-            if new_path.exists()
-                && !paths_refer_to_same_file(old_path, new_path)
-                && !is_case_only_rename(old_path, new_path)
-            {
+            if !path_entry_exists(new_path) {
+                journal
+                    .rename(index, old_path, new_path)
+                    .map_err(|e| rename_failure("rename", old_path, new_path, &e))?;
+            } else if paths_refer_to_same_file(old_path, new_path) {
+                // The new name is another case of the old one on a
+                // case-insensitive filesystem.
+                journal.rename_through_temp(index, old_path, new_path)?;
+            } else {
                 return Err(format!(
                     "refusing to overwrite existing file {}",
                     new_path.to_string_lossy()
                 ));
             }
-            journal.rename(index, old_path, new_path).map_err(|e| {
-                format!(
-                    "failed to rename {} to {}: {e}",
-                    old_path.to_string_lossy(),
-                    new_path.to_string_lossy()
-                )
-            })?;
         }
     }
     Ok(())
@@ -3576,5 +3651,286 @@ mod tests {
         assert_eq!(fs::read(&paths[0]).expect("read"), b"newcomer");
         assert_eq!(fs::read(&moved).expect("read"), original);
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// Creates `blocker` at `path`: a file with `bytes`, or a dangling
+    /// symbolic link when `bytes` is `None`.
+    fn create_blocker(path: &Path, bytes: Option<&[u8]>) {
+        match bytes {
+            Some(bytes) => write_stub(path, bytes),
+            None => std::os::unix::fs::symlink(path.with_extension("missing"), path)
+                .expect("dangling symlink"),
+        }
+    }
+
+    fn assert_blocker(path: &Path, bytes: Option<&[u8]>) {
+        match bytes {
+            Some(bytes) => assert_eq!(fs::read(path).expect("read blocker"), bytes),
+            None => assert!(fs::symlink_metadata(path)
+                .expect("blocker link")
+                .is_symlink()),
+        }
+    }
+
+    /// A journal that creates a blocker at `blocked` just before the first
+    /// rename to that name.
+    fn journal_blocking(
+        renames: &[(PathBuf, PathBuf)],
+        blocked: &Path,
+        bytes: Option<&'static [u8]>,
+    ) -> DiskRenameJournal {
+        let mut journal = DiskRenameJournal::new(renames);
+        let blocked = blocked.to_path_buf();
+        let mut created = false;
+        journal.before_move = Some(Box::new(move |_from: &Path, to: &Path| {
+            if to == blocked && !created {
+                created = true;
+                create_blocker(&blocked, bytes);
+            }
+        }));
+        journal
+    }
+
+    #[test]
+    fn rename_refuses_a_different_file_whose_name_differs_only_in_case() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-case-collision", &["One", "Two", "Three"]);
+        let lower = dir.join("01 - one.flac");
+        crate::tag_write::write_test_flac(&lower, &[("TITLE", "Other")]);
+        if file_names(&dir).len() != 4 {
+            eprintln!("skipping: {} is case-insensitive", dir.display());
+            fs::remove_dir_all(dir).expect("cleanup");
+            return;
+        }
+        insert_indexed_tracks(&mut conn, &dir, &paths);
+        let before = track_rows(&conn);
+        let bytes = [&paths[0], &lower].map(|path| fs::read(path).expect("read"));
+
+        // On its own, and with a swap that stages every rename.
+        for renames in [
+            vec![(paths[0].clone(), lower.clone())],
+            vec![
+                (paths[0].clone(), lower.clone()),
+                (paths[1].clone(), paths[2].clone()),
+                (paths[2].clone(), paths[1].clone()),
+            ],
+        ] {
+            let error = rename_indexed_metadata_paths_in_conn(&mut conn, &renames)
+                .expect_err("case collision");
+
+            assert!(
+                error.starts_with(&format!(
+                    "refusing to overwrite existing file {}",
+                    lower.to_string_lossy()
+                )),
+                "{error}"
+            );
+            assert_eq!(fs::read(&paths[0]).expect("read"), bytes[0]);
+            assert_eq!(fs::read(&lower).expect("read"), bytes[1]);
+            assert_eq!(
+                file_names(&dir),
+                [
+                    "01 - One.flac",
+                    "01 - one.flac",
+                    "02 - Two.flac",
+                    "03 - Three.flac"
+                ]
+            );
+            assert_eq!(track_rows(&conn), before);
+        }
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_changes_only_the_case_of_a_name() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-case-only", &["One"]);
+        insert_indexed_tracks(&mut conn, &dir, &paths);
+        let before = track_rows(&conn);
+        let bytes = fs::read(&paths[0]).expect("read");
+        let upper = dir.join("01 - ONE.flac");
+
+        rename_indexed_metadata_paths_in_conn(&mut conn, &[(paths[0].clone(), upper.clone())])
+            .expect("case-only rename");
+
+        assert_eq!(file_names(&dir), ["01 - ONE.flac"]);
+        assert_eq!(fs::read(&upper).expect("read"), bytes);
+        assert_eq!(
+            track_rows(&conn),
+            [(before[0].0, upper, dir.clone(), "One".to_string())]
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_through_temp_moves_a_file_in_two_steps_and_restores_it() {
+        let (dir, paths) = rename_fixture("rename-through-temp", &["One"]);
+        let bytes = fs::read(&paths[0]).expect("read");
+        let renamed = dir.join("01 - ONE.flac");
+        let renames = [(paths[0].clone(), renamed.clone())];
+        let mut journal = DiskRenameJournal::new(&renames);
+
+        journal
+            .rename_through_temp(0, &paths[0], &renamed)
+            .expect("two-step rename");
+
+        assert_eq!(file_names(&dir), ["01 - ONE.flac"]);
+        assert_eq!(fs::read(&renamed).expect("read"), bytes);
+        assert_eq!(journal.moves.len(), 2);
+        let error = journal.restore("injected failure".to_string());
+        assert_eq!(
+            error,
+            "injected failure; the files keep their original names"
+        );
+        assert_eq!(file_names(&dir), ["01 - One.flac"]);
+        assert_eq!(fs::read(&paths[0]).expect("read"), bytes);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_does_not_replace_another_name_of_the_same_file() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-alias", &["One"]);
+        let alias = dir.join("alias.flac");
+        std::os::unix::fs::symlink(&paths[0], &alias).expect("symlink");
+        let bytes = fs::read(&paths[0]).expect("read");
+
+        let error =
+            rename_indexed_metadata_paths_in_conn(&mut conn, &[(paths[0].clone(), alias.clone())])
+                .expect_err("alias");
+
+        assert!(
+            error.starts_with(&format!(
+                "refusing to overwrite existing file {}",
+                alias.to_string_lossy()
+            )),
+            "{error}"
+        );
+        assert!(
+            error.ends_with("the files keep their original names"),
+            "{error}"
+        );
+        assert_eq!(file_names(&dir), ["01 - One.flac", "alias.flac"]);
+        assert_eq!(fs::read(&paths[0]).expect("read"), bytes);
+        assert!(fs::symlink_metadata(&alias).expect("alias").is_symlink());
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_never_replaces_a_file_created_at_the_target() {
+        for (kind, blocker) in [("file", Some(&b"newcomer"[..])), ("symlink", None)] {
+            let mut conn = rename_conn();
+            let (dir, paths) =
+                rename_fixture(&format!("rename-target-race-{kind}"), &["One", "Two"]);
+            insert_indexed_tracks(&mut conn, &dir, &paths);
+            let before = track_rows(&conn);
+            let bytes = paths
+                .iter()
+                .map(|path| fs::read(path).expect("read"))
+                .collect::<Vec<_>>();
+            let target = dir.join("03 - Taken.flac");
+            let mut expected_names = vec![
+                "01 - One.flac".to_string(),
+                "02 - Two.flac".to_string(),
+                "03 - Taken.flac".to_string(),
+            ];
+            expected_names.sort();
+
+            // A plain rename after another that succeeds, and the final step
+            // of a staged rename.
+            for renames in [
+                vec![
+                    (paths[0].clone(), dir.join("00 - First.flac")),
+                    (paths[1].clone(), target.clone()),
+                ],
+                vec![
+                    (paths[0].clone(), paths[1].clone()),
+                    (paths[1].clone(), target.clone()),
+                ],
+            ] {
+                let journal = journal_blocking(&renames, &target, blocker);
+
+                let error =
+                    rename_with_journal(&mut conn, &renames, journal).expect_err("target taken");
+
+                assert!(
+                    error.starts_with(&format!(
+                        "refusing to overwrite existing file {}",
+                        target.to_string_lossy()
+                    )),
+                    "{kind}: {error}"
+                );
+                assert!(
+                    error.ends_with("the files keep their original names"),
+                    "{kind}: {error}"
+                );
+                assert_blocker(&target, blocker);
+                for (path, original) in paths.iter().zip(&bytes) {
+                    assert_eq!(&fs::read(path).expect("read"), original, "{kind}");
+                }
+                assert_eq!(file_names(&dir), expected_names, "{kind}");
+                assert_eq!(track_rows(&conn), before, "{kind}");
+                fs::remove_file(&target).expect("remove blocker");
+            }
+            fs::remove_dir_all(dir).expect("cleanup");
+        }
+    }
+
+    #[test]
+    fn rename_restore_never_replaces_a_file_created_at_an_original_name() {
+        for (kind, blocker) in [("file", Some(&b"newcomer"[..])), ("symlink", None)] {
+            let mut conn = rename_conn();
+            let (dir, paths) =
+                rename_fixture(&format!("rename-restore-race-{kind}"), &["One", "Two"]);
+            insert_indexed_tracks(&mut conn, &dir, &paths);
+            let renamed = [dir.join("03 - One.flac"), dir.join("04 - Two.flac")];
+            conn.execute(
+                &format!(
+                    "CREATE TRIGGER fail_rename BEFORE UPDATE OF path ON tracks \
+                     WHEN new.path = '{}' BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+                    renamed[1].to_string_lossy()
+                ),
+                [],
+            )
+            .expect("failure trigger");
+            let before = track_rows(&conn);
+            let bytes = paths
+                .iter()
+                .map(|path| fs::read(path).expect("read"))
+                .collect::<Vec<_>>();
+            let renames = [
+                (paths[0].clone(), renamed[0].clone()),
+                (paths[1].clone(), renamed[1].clone()),
+            ];
+            // Only putting the first file back renames it to its original name.
+            let journal = journal_blocking(&renames, &paths[0], blocker);
+
+            let error =
+                rename_with_journal(&mut conn, &renames, journal).expect_err("injected failure");
+
+            assert_eq!(
+                error,
+                format!(
+                    "failed to update renamed track row: injected failure; \
+                     restoring the original file names failed \
+                     ({} already exists); {} is now at {}; \
+                     the other files keep their original names",
+                    paths[0].to_string_lossy(),
+                    paths[0].to_string_lossy(),
+                    renamed[0].to_string_lossy()
+                ),
+                "{kind}"
+            );
+            assert_blocker(&paths[0], blocker);
+            assert_eq!(fs::read(&renamed[0]).expect("read"), bytes[0], "{kind}");
+            assert_eq!(fs::read(&paths[1]).expect("read"), bytes[1], "{kind}");
+            assert_eq!(
+                file_names(&dir),
+                ["01 - One.flac", "02 - Two.flac", "03 - One.flac"],
+                "{kind}"
+            );
+            assert_eq!(track_rows(&conn), before, "{kind}");
+            fs::remove_dir_all(dir).expect("cleanup");
+        }
     }
 }

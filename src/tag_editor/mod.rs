@@ -665,11 +665,10 @@ fn path_matches_any_source(sources: &HashSet<PathBuf>, target: &Path) -> bool {
         .any(|source| paths_refer_to_same_file(source, target))
 }
 
-fn is_case_only_rename(current: &Path, target: &Path) -> bool {
-    if current == target {
-        return false;
-    }
-    current.to_string_lossy().to_lowercase() == target.to_string_lossy().to_lowercase()
+/// Whether `path` names a directory entry, also a dangling symbolic link,
+/// which `Path::exists` reports as missing.
+fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
 fn set_text_key(tag: &mut Tag, key: ItemKey, value: &str) {
@@ -956,9 +955,9 @@ pub(crate) fn rename_rows(request: RenameRequest) -> RenameResponse {
             });
             continue;
         }
-        if target_path.exists()
-            && !path_matches_any_source(&source_paths, &target_path)
-            && !is_case_only_rename(&current_path, &target_path)
+        // A target that is the file itself, in another case on a
+        // case-insensitive filesystem, matches its source.
+        if path_entry_exists(&target_path) && !path_matches_any_source(&source_paths, &target_path)
         {
             if !current_path.exists() {
                 claimed_targets.insert(target_path.clone(), row.path.clone());
