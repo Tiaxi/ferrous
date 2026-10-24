@@ -1108,6 +1108,7 @@ ApplicationWindow {
         setVisualizationMode: viewerController.setVisualizationMode
         displaySleepInhibitor: root.displaySleepInhibitorApi
         displaySleepInhibitionEnabled: root.uiBridge.preventDisplaySleepInFullscreen
+        playbackPlaying: root.uiBridge.playbackState === "Playing"
     }
 
     Dialogs.ItunesArtworkDialog {

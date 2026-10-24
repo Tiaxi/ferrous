@@ -1321,6 +1321,7 @@ ApplicationWindow {
         closeViewer: function() {}
         displaySleepInhibitor: sleepInhibitor
         displaySleepInhibitionEnabled: true
+        playbackPlaying: false
     }
 }
 )QML"), baseUrl, &errorText));
@@ -1332,31 +1333,46 @@ ApplicationWindow {
     QVERIFY(sleepInhibitor != nullptr);
     QVERIFY(!sleepInhibitor->property("inhibited").toBool());
 
+    // A fullscreen view that is not playing must not keep the screen awake.
     QVERIFY(shell->setProperty("viewerOpen", true));
     QTRY_VERIFY(shell->property("fullscreenDisplayActive").toBool());
+    QTest::qWait(20);
+    QVERIFY(!sleepInhibitor->property("inhibited").toBool());
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 0);
+
+    QVERIFY(shell->setProperty("playbackPlaying", true));
     QTRY_VERIFY(sleepInhibitor->property("inhibited").toBool());
     QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 1);
 
-    QVERIFY(shell->setProperty("displaySleepInhibitionEnabled", false));
+    QVERIFY(shell->setProperty("playbackPlaying", false));
     QTRY_VERIFY(!sleepInhibitor->property("inhibited").toBool());
     QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 2);
+    QVERIFY(shell->property("fullscreenDisplayActive").toBool());
+
+    QVERIFY(shell->setProperty("playbackPlaying", true));
+    QTRY_VERIFY(sleepInhibitor->property("inhibited").toBool());
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 3);
+
+    QVERIFY(shell->setProperty("displaySleepInhibitionEnabled", false));
+    QTRY_VERIFY(!sleepInhibitor->property("inhibited").toBool());
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 4);
 
     QVERIFY(shell->setProperty("displaySleepInhibitionEnabled", true));
     QTRY_VERIFY(sleepInhibitor->property("inhibited").toBool());
-    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 3);
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 5);
 
     QVERIFY(shell->setProperty("useWholeScreenViewerMode", false));
     QTRY_VERIFY(!shell->property("fullscreenDisplayActive").toBool());
     QTRY_VERIFY(!sleepInhibitor->property("inhibited").toBool());
-    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 4);
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 6);
 
     QVERIFY(shell->setProperty("useWholeScreenViewerMode", true));
     QTRY_VERIFY(sleepInhibitor->property("inhibited").toBool());
-    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 5);
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 7);
 
     QVERIFY(shell->setProperty("viewerOpen", false));
     QTRY_VERIFY(!sleepInhibitor->property("inhibited").toBool());
-    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 6);
+    QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 8);
 }
 
 void QmlSmokeTest::spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers() {
