@@ -21,6 +21,7 @@ use lofty::prelude::{SplitTag, TagExt};
 use lofty::tag::{ItemKey, Tag, TagItem, TagType};
 
 use crate::safe_save::rewrite_via_temp_copy;
+use crate::vorbis_comment_scan::skipped_comments;
 
 /// Save `tag`, as read from `path` and then edited, back into the file.
 ///
@@ -35,6 +36,9 @@ use crate::safe_save::rewrite_via_temp_copy;
 ///   two, and keeps only the first value of each MP4 atom and the first MP4
 ///   picture, so the edit is applied to the file's own tag instead. See
 ///   [`Changes`] for how an edit is told apart from what the generic tag lost.
+///
+/// lofty does not read some Vorbis comments, such as ones whose value is
+/// not UTF-8, so its own tag cannot keep them. Such files are not saved.
 ///
 /// # Errors
 ///
@@ -57,6 +61,13 @@ pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<()
     // Edit before the file is touched, so a refused edit leaves it unchanged.
     let edited = match read_native_tag(path, file_type, tag.tag_type()).map_err(describe)? {
         Some(NativeTag::Vorbis(original)) => {
+            let refuse = |err: String| format!("failed to save tags for {}: {err}", path.display());
+            if let Some(refusal) = skipped_comments(path, file_type)
+                .map_err(refuse)?
+                .save_refusal()
+            {
+                return Err(refuse(refusal));
+            }
             Some(NativeTag::Vorbis(edit_vorbis_comments(original, &tag)))
         }
         Some(NativeTag::Ape(original)) => Some(NativeTag::Ape(edit_ape_tag(original, &tag))),
@@ -622,36 +633,15 @@ pub(crate) const TEST_MP3: &[u8] = include_bytes!("analysis/fixtures/seek-tone.m
 /// Write a FLAC stream with the given Vorbis comments and no audio frames.
 #[cfg(test)]
 pub(crate) fn write_test_flac(path: &Path, comments: &[(&str, &str)]) {
-    let le_u32 = |len: usize| u32::try_from(len).expect("fixture length").to_le_bytes();
-    let mut bytes = b"fLaC".to_vec();
-    // STREAMINFO: 4096-sample blocks, no frame sizes, then the packed fields.
-    bytes.extend_from_slice(&[0x00, 0, 0, 34]);
-    bytes.extend_from_slice(&4096_u16.to_be_bytes());
-    bytes.extend_from_slice(&4096_u16.to_be_bytes());
-    bytes.extend_from_slice(&[0; 6]);
-    let (sample_rate, channels, bits_per_sample, total_samples) =
-        (44_100_u64, 2_u64, 16_u64, 44_100_u64);
-    let packed = (sample_rate << 44)
-        | ((channels - 1) << 41)
-        | ((bits_per_sample - 1) << 36)
-        | total_samples;
-    bytes.extend_from_slice(&packed.to_be_bytes());
-    bytes.extend_from_slice(&[0; 16]);
+    use crate::vorbis_comment_scan::fixtures;
 
-    let vendor = b"ferrous-test";
-    let mut block = le_u32(vendor.len()).to_vec();
-    block.extend_from_slice(vendor);
-    block.extend_from_slice(&le_u32(comments.len()));
-    for (key, value) in comments {
-        let entry = format!("{key}={value}");
-        block.extend_from_slice(&le_u32(entry.len()));
-        block.extend_from_slice(entry.as_bytes());
-    }
-    // The last metadata block: VORBIS_COMMENT.
-    bytes.push(0x84);
-    bytes.extend_from_slice(&u32::try_from(block.len()).expect("block").to_be_bytes()[1..]);
-    bytes.extend_from_slice(&block);
-    std::fs::write(path, bytes).expect("write FLAC fixture");
+    let comments = comments
+        .iter()
+        .map(|(key, value)| format!("{key}={value}").into_bytes())
+        .collect::<Vec<_>>();
+    let comments = comments.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let block = fixtures::comment_block(&comments);
+    std::fs::write(path, fixtures::flac(&[&block])).expect("write FLAC fixture");
 }
 
 /// Write an MP3 with an ID3v2.3 tag holding a full recording date and a cover.
@@ -730,6 +720,7 @@ pub(crate) fn write_test_monkeys_audio(path: &Path, tag: &ApeTag) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vorbis_comment_scan::fixtures;
     use lofty::file::TaggedFileExt;
     use lofty::mp4::{AtomIdent, Mp4File};
     use lofty::ogg::OpusFile;
@@ -863,6 +854,121 @@ mod tests {
         let cover = after.get("Cover Art (Front)").expect("cover").value();
         assert_eq!(cover, &ItemValue::Binary(picture(b"new").as_ape_bytes()));
         assert_eq!(after.into_iter().count(), 2);
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    /// Files of each Vorbis comment format holding `comments` byte for byte.
+    fn vorbis_comment_files(dir: &Path, comments: &[&[u8]]) -> Vec<PathBuf> {
+        let block = fixtures::comment_block(comments);
+        [
+            ("song.flac", fixtures::flac(&[&block])),
+            ("song.opus", fixtures::opus(comments)),
+            ("song.ogg", fixtures::vorbis(comments)),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("write fixture");
+            path
+        })
+        .collect()
+    }
+
+    fn save_title(path: &Path, title: &str) -> Result<(), String> {
+        let tagged = lofty::read_from_path(path).expect("read tags");
+        let mut tag = tagged.primary_tag().cloned().expect("primary tag");
+        tag.set_title(title.to_string());
+        save_tag(path, tagged.file_type(), &tag)
+    }
+
+    #[test]
+    fn saves_that_would_delete_unreadable_vorbis_comments_are_refused() {
+        let dir = test_dir("vorbis-unreadable");
+        let comments: [&[u8]; 5] = [
+            b"TITLE=Old",
+            b"N\xc3\x84ME=non-ASCII name",
+            b"no separator",
+            b"ARTIST=\xff not UTF-8",
+            b"ALBUM=Album",
+        ];
+        for path in vorbis_comment_files(&dir, &comments) {
+            let before = std::fs::read(&path).expect("read file");
+
+            let error = save_title(&path, "New").expect_err("title save");
+
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(
+                error.ends_with(
+                    "3 comments in this file can't be read safely (1 with an invalid name, \
+                     1 without \"=\", 1 with a value that is not UTF-8); saving would delete them"
+                ),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&path).expect("read file"), before);
+            // A cover change goes through the same check.
+            let tagged = lofty::read_from_path(&path).expect("read tags");
+            let mut tag = tagged.primary_tag().cloned().expect("primary tag");
+            tag.push_picture(picture(b"new"));
+            let error = save_tag(&path, tagged.file_type(), &tag).expect_err("cover save");
+            assert!(error.contains("can't be read safely"), "{error}");
+            assert_eq!(std::fs::read(&path).expect("read file"), before);
+        }
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn files_with_readable_vorbis_comments_still_save() {
+        let dir = test_dir("vorbis-readable");
+        let comments: [&[u8]; 3] = [b"TITLE=Old", b"=empty name", b"ALBUM=Album"];
+        for path in vorbis_comment_files(&dir, &comments) {
+            save_title(&path, "New").expect("title save");
+
+            let tagged = lofty::read_from_path(&path).expect("read tags");
+            let tag = tagged.primary_tag().expect("primary tag");
+            assert_eq!(tag.title().as_deref(), Some("New"), "{}", path.display());
+            let mut file = File::open(&path).expect("open file");
+            let options = ParseOptions::new();
+            let comments = match tagged.file_type() {
+                FileType::Flac => lofty::flac::FlacFile::read_from(&mut file, options)
+                    .expect("parse FLAC")
+                    .vorbis_comments()
+                    .cloned()
+                    .expect("comments"),
+                FileType::Opus => OpusFile::read_from(&mut file, options)
+                    .expect("parse Opus")
+                    .vorbis_comments()
+                    .clone(),
+                _ => lofty::ogg::VorbisFile::read_from(&mut file, options)
+                    .expect("parse Vorbis")
+                    .vorbis_comments()
+                    .clone(),
+            };
+            // Comments with an empty name go first; see edit_vorbis_comments.
+            assert_eq!(
+                comments.items().collect::<Vec<_>>(),
+                [("", "empty name"), ("TITLE", "New"), ("ALBUM", "Album")],
+                "{}",
+                path.display()
+            );
+        }
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn malformed_vorbis_comments_fail_to_save_without_a_change() {
+        let dir = test_dir("vorbis-malformed");
+        let mut block = fixtures::comment_block(&[b"TITLE=Old"]);
+        // The comment claims more bytes than the block holds.
+        block[20..24].copy_from_slice(&1000_u32.to_le_bytes());
+        let path = dir.join("song.flac");
+        std::fs::write(&path, fixtures::flac(&[&block])).expect("write FLAC");
+        let before = std::fs::read(&path).expect("read file");
+
+        let error = save_tag(&path, FileType::Flac, &Tag::new(TagType::VorbisComments))
+            .expect_err("malformed save");
+
+        assert!(error.starts_with("failed to save tags for "), "{error}");
+        assert_eq!(std::fs::read(&path).expect("read file"), before);
         std::fs::remove_dir_all(dir).expect("remove test dir");
     }
 

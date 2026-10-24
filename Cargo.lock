@@ -290,6 +290,7 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
+ "data-encoding",
  "gstreamer",
  "gstreamer-app",
  "gstreamer-audio",

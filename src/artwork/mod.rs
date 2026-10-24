@@ -704,6 +704,39 @@ mod tests {
     }
 
     #[test]
+    fn tracks_whose_comments_would_be_deleted_are_reported_and_unchanged() {
+        use crate::vorbis_comment_scan::fixtures;
+
+        let root = test_dir("unreadable-comments");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let track = album.join("01.flac");
+        let block = fixtures::comment_block(&[b"ALBUM=Album", b"no separator"]);
+        fs::write(&track, fixtures::flac(&[&block])).expect("write track");
+        let before = fs::read(&track).expect("read track");
+        let (artwork, _) = artwork_file(&root, ImageFormat::Png);
+
+        let outcome = apply_artwork_to_track(&track, &artwork).expect("apply artwork");
+
+        assert!(outcome.affected_track_paths.is_empty());
+        let summary = outcome.failure_summary().unwrap_or_default();
+        assert!(
+            summary
+                .starts_with("album art was applied to 0 of 1 album tracks; not updated: 01.flac"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(
+                "1 comment in this file can't be read safely (1 without \"=\"); \
+                 saving would delete it"
+            ),
+            "{summary}"
+        );
+        assert_eq!(fs::read(&track).expect("read track"), before);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[test]
     fn tracks_that_fail_while_written_are_reported_and_the_rest_are_written() {
         let tracks = ["01.flac", "02.flac", "03.flac"].map(|name| Path::new("/music").join(name));
 

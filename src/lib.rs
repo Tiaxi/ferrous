@@ -15,3 +15,4 @@ mod raw_audio;
 mod safe_save;
 pub mod tag_editor;
 mod tag_write;
+mod vorbis_comment_scan;
