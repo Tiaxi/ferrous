@@ -99,9 +99,20 @@ pub enum Command {
     SendNowPlaying(NowPlayingTrack),
     QueueScrobble(ScrobbleEntry),
     Flush,
-    /// Sent by [`Handle::shutdown`]; the sender is signalled once the
-    /// service has stopped.
-    Shutdown(Sender<()>),
+    /// Sent by [`Handle::shutdown`]; the sender receives the result of
+    /// saving the queue once the service has stopped.
+    Shutdown(Sender<Result<(), String>>),
+}
+
+/// How the service stopped, as seen by [`Handle::shutdown`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    /// The service stopped with its queue saved.
+    Stopped,
+    /// The service stopped, but pending scrobbles could not be saved.
+    SaveFailed(String),
+    /// The service did not confirm in time, or had already stopped.
+    Unconfirmed,
 }
 
 #[derive(Debug, Clone)]
@@ -121,16 +132,19 @@ impl Handle {
 
     /// Stops the service once it has handled the commands sent before this
     /// call, without starting network requests for them. Waits up to
-    /// `timeout` for the queue to be saved and returns whether the service
-    /// confirmed in time. It cannot confirm while a request that started
-    /// earlier is still running.
+    /// `timeout` for the queue to be saved. The service cannot confirm while
+    /// a request that started earlier is still running.
     #[must_use]
-    pub fn shutdown(&self, timeout: Duration) -> bool {
+    pub fn shutdown(&self, timeout: Duration) -> ShutdownOutcome {
         let (done_tx, done_rx) = bounded(1);
         if self.tx.send(Command::Shutdown(done_tx)).is_err() {
-            return false;
+            return ShutdownOutcome::Unconfirmed;
         }
-        done_rx.recv_timeout(timeout).is_ok()
+        match done_rx.recv_timeout(timeout) {
+            Ok(Ok(())) => ShutdownOutcome::Stopped,
+            Ok(Err(error)) => ShutdownOutcome::SaveFailed(error),
+            Err(_) => ShutdownOutcome::Unconfirmed,
+        }
     }
 }
 
@@ -302,6 +316,11 @@ struct Service {
     /// Cleared while handling the commands that precede shutdown, so that
     /// shutdown does not wait for the network.
     network_allowed: bool,
+    /// The service's own command channel. A flush checks it between batches
+    /// so that waiting commands, such as shutdown, go first.
+    waiting_commands: Option<Receiver<Command>>,
+    /// Entries ignored since a flush last completed, reported when one does.
+    flush_ignored: IgnoredScrobbles,
     queue_path: Option<PathBuf>,
     queue: Vec<ScrobbleEntry>,
     /// Problem found while loading the queue file, shown for the session.
@@ -326,6 +345,14 @@ enum RequestError {
     },
     InvalidResponse(String),
     Keyring(String),
+}
+
+/// Entries that Last.fm ignored permanently during a flush.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct IgnoredScrobbles {
+    count: usize,
+    /// Reason given for the first ignored entry.
+    reason: Option<String>,
 }
 
 /// What Last.fm did with each entry of an accepted scrobble batch.
@@ -377,25 +404,28 @@ pub(crate) fn normalize_album_for_submission(album: &str) -> String {
 
 #[must_use]
 pub fn spawn(options: ServiceOptions) -> (Handle, Receiver<Event>) {
-    spawn_with_backends(options, ServiceBackends::for_build())
+    spawn_with_backends(options, ServiceBackends::for_build)
 }
 
+/// Starts the service thread. `backends` runs on that thread, because
+/// building the HTTP client starts and waits for a runtime.
 pub(crate) fn spawn_with_backends(
     options: ServiceOptions,
-    backends: ServiceBackends,
+    backends: impl FnOnce() -> ServiceBackends + Send + 'static,
 ) -> (Handle, Receiver<Event>) {
     let (cmd_tx, cmd_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
     let _ = std::thread::Builder::new()
         .name("ferrous-lastfm".to_string())
         .spawn(move || {
-            let service = Service::new(options, backends);
+            let service = Service::new(options, backends());
             run_service_loop(&cmd_rx, &event_tx, service);
         });
     (Handle { tx: cmd_tx }, event_rx)
 }
 
 fn run_service_loop(cmd_rx: &Receiver<Command>, event_tx: &Sender<Event>, mut service: Service) {
+    service.waiting_commands = Some(cmd_rx.clone());
     service.publish(event_tx);
     loop {
         let received = match service.retry_due {
@@ -409,7 +439,10 @@ fn run_service_loop(cmd_rx: &Receiver<Command>, event_tx: &Sender<Event>, mut se
                 service.publish(event_tx);
                 continue;
             }
-            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = service.save_unsaved_queue();
+                break;
+            }
         };
         // Take everything already waiting, so that a pending shutdown is seen
         // before the commands ahead of it start network requests.
@@ -430,7 +463,9 @@ fn run_service_loop(cmd_rx: &Receiver<Command>, event_tx: &Sender<Event>, mut se
             service.publish(event_tx);
         }
         if let Some(done) = shutdown {
-            let _ = done.send(());
+            let saved = service.save_unsaved_queue();
+            service.publish(event_tx);
+            let _ = done.send(saved);
             break;
         }
     }
@@ -447,6 +482,8 @@ impl Service {
             retry_attempt: 0,
             retry_due: None,
             network_allowed: true,
+            waiting_commands: None,
+            flush_ignored: IgnoredScrobbles::default(),
             queue_path: options.queue_path,
             queue: Vec::new(),
             queue_load_notice: None,
@@ -712,6 +749,8 @@ impl Service {
     /// Submits queued scrobbles in batches. Stops at the first batch that
     /// fails and keeps it queued; only entries that Last.fm accepted or
     /// ignored for good leave the queue. Transient failures schedule a retry.
+    /// Between batches, commands that are waiting go first; the flush then
+    /// resumes.
     fn flush_queue(&mut self) {
         self.retry_due = None;
         if !self.state.enabled || !self.network_allowed || self.queue.is_empty() {
@@ -722,8 +761,6 @@ impl Service {
             return;
         };
 
-        let mut ignored = 0;
-        let mut ignored_reason = None;
         while !self.queue.is_empty() {
             let batch_len = self.queue.len().min(MAX_SCROBBLES_PER_BATCH);
             let result = send_scrobble_batch(
@@ -741,13 +778,21 @@ impl Service {
                         keep
                     });
                     self.save_queue();
-                    ignored += outcome.ignored;
-                    ignored_reason = ignored_reason.or(outcome.ignored_reason);
+                    self.flush_ignored.count += outcome.ignored;
+                    if self.flush_ignored.reason.is_none() {
+                        self.flush_ignored.reason = outcome.ignored_reason;
+                    }
                     if outcome.deferred.contains(&true) {
                         self.schedule_retry("Last.fm daily scrobble limit reached");
                         return;
                     }
                     self.retry_attempt = 0;
+                    if !self.queue.is_empty() && self.commands_waiting() {
+                        // The service loop handles the waiting commands, then
+                        // resumes the flush at once.
+                        self.retry_due = Some(Instant::now());
+                        return;
+                    }
                 }
                 Err(err) if is_invalid_session(&err) => {
                     self.transition_to_reauth(
@@ -769,17 +814,25 @@ impl Service {
                 }
             }
         }
-        self.state.status_text = match ignored_reason {
+        let ignored = std::mem::take(&mut self.flush_ignored);
+        self.state.status_text = match ignored.reason {
             None => "Last.fm scrobble queue flushed.".to_string(),
             Some(reason) => format!(
-                "Last.fm ignored {ignored} {}: {reason}",
-                if ignored == 1 {
+                "Last.fm ignored {} {}: {reason}",
+                ignored.count,
+                if ignored.count == 1 {
                     "scrobble"
                 } else {
                     "scrobbles"
                 }
             ),
         };
+    }
+
+    fn commands_waiting(&self) -> bool {
+        self.waiting_commands
+            .as_ref()
+            .is_some_and(|commands| !commands.is_empty())
     }
 
     fn schedule_retry(&mut self, message: &str) {
@@ -797,6 +850,27 @@ impl Service {
         self.state.auth_url.clear();
         self.state.auth_state = AuthState::ReauthRequired;
         self.state.status_text = message.to_string();
+    }
+
+    /// Saves the queue if the last save failed. Every change to the queue
+    /// is saved, so it differs from the file only after a failed save.
+    fn save_unsaved_queue(&mut self) -> Result<(), String> {
+        if self.queue_save_error.is_none() {
+            return Ok(());
+        }
+        self.save_queue();
+        match &self.queue_save_error {
+            None => Ok(()),
+            Some(error) => Err(format!(
+                "Last.fm: {} {} lost on quit. {error}",
+                self.queue.len(),
+                if self.queue.len() == 1 {
+                    "scrobble was"
+                } else {
+                    "scrobbles were"
+                }
+            )),
+        }
     }
 
     fn save_queue(&mut self) {
@@ -934,12 +1008,12 @@ fn send_scrobble_batch(
     scrobble_outcome(&payload, batch.len())
 }
 
-/// Reads the per-entry results of a `track.scrobble` reply.
+/// Reads the per-entry results of a `track.scrobble` reply. A reply that does
+/// not account for every entry is invalid, so the whole batch stays queued.
 fn scrobble_outcome(payload: &Value, batch_len: usize) -> Result<ScrobbleOutcome, RequestError> {
+    let invalid = |message: String| Err(RequestError::InvalidResponse(message));
     let Some(scrobbles) = payload.get("scrobbles").filter(|value| value.is_object()) else {
-        return Err(RequestError::InvalidResponse(
-            "Last.fm scrobble results missing from response".to_string(),
-        ));
+        return invalid("Last.fm scrobble results missing from response".to_string());
     };
     // Last.fm sends a lone object instead of an array for a single result.
     let results = match scrobbles.get("scrobble") {
@@ -947,22 +1021,48 @@ fn scrobble_outcome(payload: &Value, batch_len: usize) -> Result<ScrobbleOutcome
         Some(result @ Value::Object(_)) => vec![result],
         _ => Vec::new(),
     };
+    // Results are in request order, so only one per entry can be matched to
+    // the entries.
+    if results.len() != batch_len {
+        return invalid(format!(
+            "Last.fm returned {} scrobble results for {batch_len} scrobbles",
+            results.len()
+        ));
+    }
+    // Every result carries an ignore code, 0 when it was accepted.
+    let Some(codes) = results
+        .iter()
+        .map(|result| {
+            result
+                .get("ignoredMessage")
+                .and_then(|message| message.get("code"))
+                .and_then(json_integer)
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return invalid("Last.fm scrobble result without an ignore code".to_string());
+    };
+    let accepted = codes.iter().filter(|code| **code == 0).count();
+    let attr = scrobbles.get("@attr");
+    for (name, expected) in [("accepted", accepted), ("ignored", batch_len - accepted)] {
+        let Some(value) = attr.and_then(|attr| attr.get(name)) else {
+            continue;
+        };
+        let count = json_integer(value).and_then(|count| usize::try_from(count).ok());
+        if count != Some(expected) {
+            return invalid(format!(
+                "Last.fm reported {value} {name} scrobbles, but the results show {expected}"
+            ));
+        }
+    }
+
     let mut outcome = ScrobbleOutcome {
         deferred: vec![false; batch_len],
         ignored: 0,
         ignored_reason: None,
     };
-    // Results are in request order. Without one per entry they cannot be
-    // matched to entries, but Last.fm processed the batch, so it is done.
-    if results.len() != batch_len {
-        return Ok(outcome);
-    }
-    for (index, result) in results.into_iter().enumerate() {
+    for (index, (result, code)) in results.into_iter().zip(codes).enumerate() {
         let ignored_message = result.get("ignoredMessage");
-        let code = ignored_message
-            .and_then(|message| message.get("code"))
-            .and_then(json_integer)
-            .unwrap_or(0);
         match code {
             0 => {}
             LASTFM_IGNORED_DAILY_LIMIT => outcome.deferred[index] = true,
@@ -1616,7 +1716,7 @@ mod tests {
                 queue_path: None,
                 initial_enabled: true,
             },
-            backends,
+            move || backends,
         );
         handle.command(Command::LoadStoredSession {
             username: USERNAME.to_string(),
@@ -1634,7 +1734,10 @@ mod tests {
         }
         assert!(flushed, "the retry timer did not flush the backlog");
         assert_eq!(scrobble_requests(&transport).len(), 2);
-        assert!(handle.shutdown(Duration::from_secs(1)));
+        assert_eq!(
+            handle.shutdown(Duration::from_secs(1)),
+            ShutdownOutcome::Stopped
+        );
     }
 
     #[test]
@@ -1838,7 +1941,7 @@ mod tests {
 
         run_service_loop(&cmd_rx, &event_tx, service);
 
-        assert!(done_rx.try_recv().is_ok());
+        assert_eq!(done_rx.try_recv(), Ok(Ok(())));
         assert!(transport.requests().is_empty());
         assert_eq!(read_queue_file(&queue_path), vec![entry(0)]);
     }
@@ -1847,6 +1950,278 @@ mod tests {
     fn shutdown_reports_a_service_that_is_gone() {
         let (handle, commands) = test_support::command_handle();
         drop(commands);
-        assert!(!handle.shutdown(Duration::from_millis(10)));
+        assert_eq!(
+            handle.shutdown(Duration::from_millis(10)),
+            ShutdownOutcome::Unconfirmed
+        );
+    }
+
+    #[test]
+    fn malformed_scrobble_results_keep_the_batch() {
+        let code = |code: &str| serde_json::json!({ "ignoredMessage": { "code": code } });
+        let results = |results: Vec<Value>, attr: Option<Value>| {
+            let mut scrobbles = serde_json::json!({ "scrobble": results });
+            if let Some(attr) = attr {
+                scrobbles["@attr"] = attr;
+            }
+            reply(
+                200,
+                &serde_json::json!({ "scrobbles": scrobbles }).to_string(),
+            )
+        };
+        let cases = [
+            ("no results", reply(200, r#"{"scrobbles":{}}"#)),
+            ("short list", results(vec![code("0"), code("0")], None)),
+            // The missing result could not be matched to the deferred entry.
+            ("short list with a deferral", results(vec![code("5")], None)),
+            (
+                "result without a code",
+                results(
+                    vec![code("0"), code("0"), serde_json::json!({ "track": {} })],
+                    None,
+                ),
+            ),
+            (
+                "accepted count disagrees",
+                results(
+                    vec![code("0"), code("0"), code("0")],
+                    Some(serde_json::json!({ "accepted": 2, "ignored": 0 })),
+                ),
+            ),
+            (
+                "ignored count disagrees",
+                results(
+                    vec![code("0"), code("0"), code("1")],
+                    Some(serde_json::json!({ "accepted": "2", "ignored": "0" })),
+                ),
+            ),
+        ];
+        for (name, malformed) in cases {
+            let transport = ScriptedTransport::with_replies([malformed]);
+            let mut service = connected_service(&transport, None, entries(0..3));
+
+            service.handle_command(Command::Flush);
+
+            assert_eq!(service.queue, entries(0..3), "{name}");
+            assert!(service.retry_due.is_some(), "{name}");
+            let status = service.published_state().status_text;
+            assert!(status.contains("response error"), "{name}: {status}");
+        }
+
+        // Counts that agree with the results are accepted.
+        let transport = ScriptedTransport::with_replies([results(
+            vec![code("0"), code("1"), code("0")],
+            Some(serde_json::json!({ "accepted": "2", "ignored": 1 })),
+        )]);
+        let mut service = connected_service(&transport, None, entries(0..3));
+        service.handle_command(Command::Flush);
+        assert!(service.queue.is_empty());
+    }
+
+    #[test]
+    fn a_server_that_always_answers_malformed_is_retried_with_backoff() {
+        let malformed = || reply(200, r#"{"scrobbles":{}}"#);
+        let transport = ScriptedTransport::with_replies([malformed(), malformed(), malformed()]);
+        let mut service = connected_service(&transport, None, entries(0..1));
+
+        for attempt in 1..=3 {
+            let before = Instant::now();
+            service.handle_command(Command::Flush);
+            assert_eq!(service.retry_attempt, attempt);
+            let due = service.retry_due.expect("retry scheduled");
+            assert!(due >= before + RetryPolicy::DEFAULT.delay(attempt));
+        }
+        assert_eq!(scrobble_requests(&transport).len(), 3);
+        assert_eq!(service.queue, entries(0..1));
+    }
+
+    /// Sends commands to the service while it waits for a request, as if
+    /// they arrived during the request. Each request sends the next group.
+    struct InterruptingTransport {
+        inner: ScriptedTransport,
+        commands: Sender<Command>,
+        during_requests: std::sync::Mutex<std::collections::VecDeque<Vec<Command>>>,
+    }
+
+    impl Transport for InterruptingTransport {
+        fn post_form(&self, url: &str, form: &[(String, String)]) -> Result<HttpReply, String> {
+            let group = self
+                .during_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            for command in group.into_iter().flatten() {
+                self.commands.send(command).expect("send command");
+            }
+            self.inner.post_form(url, form)
+        }
+    }
+
+    /// Runs a connected service with `queued` pending until it shuts down.
+    /// Its first command is a flush, and requests send `during_requests`.
+    fn run_interrupted_flush(
+        transport: &ScriptedTransport,
+        queue_path: &Path,
+        queued: Vec<ScrobbleEntry>,
+        during_requests: Vec<Vec<Command>>,
+    ) -> Vec<RuntimeState> {
+        let (cmd_tx, cmd_rx) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        let mut backends = backends(transport, MemorySessionKeys::with_key(USERNAME, "key"));
+        backends.transport = Box::new(InterruptingTransport {
+            inner: transport.clone(),
+            commands: cmd_tx.clone(),
+            during_requests: std::sync::Mutex::new(during_requests.into()),
+        });
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: Some(queue_path.to_path_buf()),
+                initial_enabled: true,
+            },
+            backends,
+        );
+        service.handle_command(Command::LoadStoredSession {
+            username: USERNAME.to_string(),
+        });
+        service.queue = queued;
+        cmd_tx.send(Command::Flush).expect("queue flush");
+
+        run_service_loop(&cmd_rx, &event_tx, service);
+
+        event_rx
+            .try_iter()
+            .map(|Event::State(state)| state)
+            .collect()
+    }
+
+    #[test]
+    fn shutdown_during_a_multi_batch_flush_stops_after_the_current_batch() {
+        let dir = scratch_dir("flush-shutdown");
+        let queue_path = dir.join("lastfm_queue.json");
+        let transport = ScriptedTransport::with_replies([accepted_reply(50), accepted_reply(50)]);
+        let (done_tx, done_rx) = bounded(1);
+
+        run_interrupted_flush(
+            &transport,
+            &queue_path,
+            entries(0..120),
+            vec![vec![
+                Command::QueueScrobble(entry(120)),
+                Command::Shutdown(done_tx),
+            ]],
+        );
+
+        assert_eq!(scrobble_requests(&transport).len(), 1);
+        assert_eq!(done_rx.try_recv(), Ok(Ok(())));
+        assert_eq!(read_queue_file(&queue_path), entries(50..121));
+    }
+
+    #[test]
+    fn a_scrobble_during_a_multi_batch_flush_is_handled_before_the_next_batch() {
+        let dir = scratch_dir("flush-new-scrobble");
+        let queue_path = dir.join("lastfm_queue.json");
+        let transport = ScriptedTransport::with_replies([
+            accepted_reply(50),
+            accepted_reply(50),
+            accepted_reply(21),
+        ]);
+        let (done_tx, done_rx) = bounded(1);
+
+        let states = run_interrupted_flush(
+            &transport,
+            &queue_path,
+            entries(0..120),
+            vec![
+                vec![Command::QueueScrobble(entry(120))],
+                Vec::new(),
+                vec![Command::Shutdown(done_tx)],
+            ],
+        );
+
+        let sizes = scrobble_requests(&transport)
+            .iter()
+            .map(|form| batch_size(form))
+            .collect::<Vec<_>>();
+        // Handled after the flush, the new scrobble would need a fourth batch.
+        assert_eq!(sizes, vec![50, 50, 21]);
+        assert_eq!(
+            states.last().map(|state| state.status_text.as_str()),
+            Some("Last.fm scrobble queue flushed.")
+        );
+        assert_eq!(done_rx.try_recv(), Ok(Ok(())));
+        assert!(!queue_path.exists());
+    }
+
+    #[test]
+    fn shutdown_saves_a_queue_whose_last_save_failed() {
+        let dir = scratch_dir("shutdown-unsaved");
+        let config_dir = dir.join("config");
+        let queue_path = config_dir.join("lastfm_queue.json");
+        // A file in place of the directory makes saving fail.
+        fs::write(&config_dir, b"").expect("write blocking file");
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: Some(queue_path.clone()),
+                initial_enabled: false,
+            },
+            backends(&ScriptedTransport::default(), MemorySessionKeys::default()),
+        );
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        assert!(service.queue_save_error.is_some());
+
+        // The directory is writable again, but no command has saved since.
+        fs::remove_file(&config_dir).expect("remove blocking file");
+        let (cmd_tx, cmd_rx) = unbounded();
+        let (event_tx, _event_rx) = unbounded();
+        let (done_tx, done_rx) = bounded(1);
+        cmd_tx
+            .send(Command::Shutdown(done_tx))
+            .expect("queue shutdown");
+
+        run_service_loop(&cmd_rx, &event_tx, service);
+
+        assert_eq!(done_rx.try_recv(), Ok(Ok(())));
+        assert_eq!(read_queue_file(&queue_path), vec![entry(0)]);
+    }
+
+    #[test]
+    fn shutdown_reports_scrobbles_it_could_not_save() {
+        let dir = scratch_dir("shutdown-save-failure");
+        let config_dir = dir.join("config");
+        fs::write(&config_dir, b"").expect("write blocking file");
+        let (handle, _events) = spawn_with_backends(
+            ServiceOptions {
+                queue_path: Some(config_dir.join("lastfm_queue.json")),
+                initial_enabled: false,
+            },
+            || backends(&ScriptedTransport::default(), MemorySessionKeys::default()),
+        );
+        handle.command(Command::QueueScrobble(entry(0)));
+
+        match handle.shutdown(Duration::from_secs(5)) {
+            ShutdownOutcome::SaveFailed(message) => {
+                assert!(message.contains("1 scrobble was lost"), "{message}");
+                assert!(message.contains("could not be saved"), "{message}");
+            }
+            other => panic!("expected a save failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backends_are_built_on_the_service_thread() {
+        let (built_on_tx, built_on_rx) = bounded(1);
+        let (handle, _events) = spawn_with_backends(ServiceOptions::default(), move || {
+            let _ = built_on_tx.send(std::thread::current().name().map(str::to_owned));
+            backends(&ScriptedTransport::default(), MemorySessionKeys::default())
+        });
+
+        assert_eq!(
+            built_on_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(Some("ferrous-lastfm".to_string()))
+        );
+        assert_eq!(
+            handle.shutdown(Duration::from_secs(5)),
+            ShutdownOutcome::Stopped
+        );
     }
 }

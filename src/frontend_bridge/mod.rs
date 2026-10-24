@@ -14,7 +14,7 @@ use crate::analysis::{
 };
 use crate::lastfm::{
     Command as LastFmCommand, Event as LastFmEvent, Handle as LastFmHandle,
-    RuntimeState as LastFmRuntimeState,
+    RuntimeState as LastFmRuntimeState, ShutdownOutcome as LastFmShutdownOutcome,
 };
 use crate::library::{
     IndexedTrack, LibraryEvent, LibraryService, LibrarySnapshot, TrackFileFingerprint,
@@ -1141,6 +1141,7 @@ impl BridgeLoopRuntime {
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         self.imports.remap_pending_paths(number, &renames);
+        let current = self.state.playback.current.clone();
         if commands::refresh_renamed_paths(
             &mut self.state,
             renames,
@@ -1151,6 +1152,14 @@ impl BridgeLoopRuntime {
         ) {
             self.flags.session_dirty = true;
             self.snapshot_plan.include_queue_in_next_snapshot = true;
+        }
+        // Renaming the playing file continues its play. The tracker follows
+        // the current path here, before the next tick could take the new
+        // path for a new play.
+        if self.lastfm_tracker.active_path == current {
+            self.lastfm_tracker
+                .active_path
+                .clone_from(&self.state.playback.current);
         }
         self.request_tree();
         SnapshotUrgency::Immediate
@@ -1635,11 +1644,17 @@ impl BridgeLoopRuntime {
             &mut self.lastfm_tracker,
             Instant::now(),
         );
-        if !self.lastfm.shutdown(LASTFM_SHUTDOWN_TIMEOUT) {
-            eprintln!(
-                "Last.fm: the service did not confirm shutdown; the latest scrobble may not \
-                 have been saved"
-            );
+        let lastfm_problem = match self.lastfm.shutdown(LASTFM_SHUTDOWN_TIMEOUT) {
+            LastFmShutdownOutcome::Stopped => None,
+            LastFmShutdownOutcome::SaveFailed(message) => Some(message),
+            LastFmShutdownOutcome::Unconfirmed => Some(
+                "Last.fm did not confirm shutdown; the latest scrobble may not have been saved."
+                    .to_string(),
+            ),
+        };
+        if let Some(message) = lastfm_problem {
+            eprintln!("{message}");
+            let _ = try_send_event(event_tx, BridgeEvent::Error(message));
         }
         let _ = try_send_event(event_tx, BridgeEvent::Stopped);
     }
@@ -2085,7 +2100,7 @@ mod tests {
                     LastFmCommand::SendNowPlaying(_) => "now playing",
                     LastFmCommand::QueueScrobble(_) => "scrobble",
                     LastFmCommand::Shutdown(done) => {
-                        let _ = done.send(());
+                        let _ = done.send(Ok(()));
                         received.push("shutdown");
                         break;
                     }
@@ -2103,6 +2118,83 @@ mod tests {
             vec!["now playing", "scrobble", "shutdown"]
         );
         assert!(matches!(event_rx.try_recv(), Ok(BridgeEvent::Stopped)));
+    }
+
+    #[test]
+    fn shutdown_reports_scrobbles_that_lastfm_could_not_save() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (lastfm, commands) = crate::lastfm::test_support::command_handle();
+        runtime.lastfm = lastfm;
+        let service = std::thread::spawn(move || {
+            while let Ok(command) = commands.recv_timeout(Duration::from_secs(5)) {
+                if let LastFmCommand::Shutdown(done) = command {
+                    let _ = done.send(Err("Last.fm: 2 scrobbles were lost on quit.".to_string()));
+                    break;
+                }
+            }
+        });
+
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        runtime.shutdown(&event_tx);
+        service.join().expect("join Last.fm stand-in");
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(BridgeEvent::Error(message)) if message == "Last.fm: 2 scrobbles were lost on quit."
+        ));
+        assert!(matches!(event_rx.try_recv(), Ok(BridgeEvent::Stopped)));
+    }
+
+    #[test]
+    fn renaming_the_playing_file_continues_its_lastfm_play() {
+        let _guard = test_guard();
+        let (mut runtime, _engine_rx, event_tx, _album) = queue_order_runtime();
+        let (lastfm, commands) = crate::lastfm::test_support::command_handle();
+        runtime.lastfm = lastfm;
+        let (old_path, new_path) = (p("/music/old name.flac"), p("/music/new name.flac"));
+        runtime.state.queue = vec![old_path.clone()];
+        runtime.state.lastfm.enabled = true;
+        runtime.state.playback.current = Some(old_path.clone());
+        runtime.state.playback.current_queue_index = Some(0);
+        runtime.state.playback.state = PlaybackState::Playing;
+        // A 600 s track qualifies after 240 s of listening.
+        runtime.state.playback.duration = Duration::from_secs(600);
+        runtime.state.metadata.source_path = Some(old_path.to_string_lossy().into_owned());
+        runtime.state.metadata.artist = "Artist".to_string();
+        runtime.state.metadata.title = "Track".to_string();
+        runtime.state.last_track_change.path = Some(old_path.clone());
+        let start = Instant::now();
+        let tick = |runtime: &mut BridgeLoopRuntime, seconds| {
+            events::tick_lastfm_playback_at(
+                &runtime.state,
+                &runtime.lastfm,
+                &mut runtime.lastfm_tracker,
+                start + Duration::from_secs(seconds),
+                1_700_000_000 + i64::try_from(seconds).expect("seconds fit"),
+            );
+        };
+        tick(&mut runtime, 0);
+
+        runtime.apply_renamed_paths(
+            1,
+            Arc::new(PathRenames::from([(old_path, new_path.clone())])),
+            &event_tx,
+        );
+        assert_eq!(runtime.state.playback.current.as_ref(), Some(&new_path));
+        tick(&mut runtime, 120);
+        tick(&mut runtime, 240);
+        tick(&mut runtime, 300);
+
+        let received = commands
+            .try_iter()
+            .map(|command| match command {
+                LastFmCommand::SendNowPlaying(_) => "now playing".to_string(),
+                LastFmCommand::QueueScrobble(entry) => format!("scrobble {}", entry.timestamp_utc),
+                other => format!("{other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(received, vec!["now playing", "scrobble 1700000000"]);
     }
 
     /// A runtime whose playback commands the test receives instead of an
