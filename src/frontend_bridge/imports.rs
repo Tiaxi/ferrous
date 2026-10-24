@@ -46,6 +46,10 @@ struct PendingChange {
     id: u64,
     /// `None` while the worker is expanding the request.
     change: Option<QueueChange>,
+    /// Renames made while the request was expanding, applied in order to its
+    /// result. The worker may have read a path before or after the rename, so
+    /// the result is renamed when it arrives rather than when it is sent.
+    renames: Vec<Arc<PathRenames>>,
 }
 
 struct ImportJob {
@@ -152,7 +156,11 @@ impl ImportWorker {
                 warning: None,
             }),
         };
-        self.pending.push_back(PendingChange { id, change });
+        self.pending.push_back(PendingChange {
+            id,
+            change,
+            renames: Vec::new(),
+        });
         Ok(self.take_ready())
     }
 
@@ -172,8 +180,15 @@ impl ImportWorker {
             if result.replace { "open" } else { "append" },
             &result.outcome,
         );
+        let mut tracks = result.outcome.tracks;
+        for renames in &pending.renames {
+            for path in &mut tracks {
+                remap_path(path, renames);
+            }
+        }
+        pending.renames.clear();
         pending.change = Some(QueueChange {
-            command: tracks_command(result.outcome.tracks, result.replace),
+            command: tracks_command(tracks, result.replace),
             warning,
         });
         self.take_ready()
@@ -185,16 +200,18 @@ impl ImportWorker {
         self.pending.clear();
     }
 
-    /// Rename tracks in changes that are waiting to apply. Imports still
-    /// expanding are left alone: their paths may already have the new names.
-    pub(super) fn remap_pending_paths(&mut self, renames: &PathRenames) {
-        let commands = self
-            .pending
-            .iter_mut()
-            .filter_map(|pending| pending.change.as_mut()?.command.as_mut());
-        for command in commands {
-            if let BridgeQueueCommand::Replace { tracks, .. } | BridgeQueueCommand::Append(tracks) =
-                command
+    /// Rename tracks in changes that are waiting to apply. Imports without a
+    /// result yet, whether still expanding or waiting in `results`, keep the
+    /// renames for [`Self::complete`]; changes submitted later are untouched.
+    pub(super) fn remap_pending_paths(&mut self, renames: &Arc<PathRenames>) {
+        for pending in &mut self.pending {
+            let Some(change) = pending.change.as_mut() else {
+                pending.renames.push(Arc::clone(renames));
+                continue;
+            };
+            if let Some(
+                BridgeQueueCommand::Replace { tracks, .. } | BridgeQueueCommand::Append(tracks),
+            ) = change.command.as_mut()
             {
                 for path in tracks {
                     remap_path(path, renames);
@@ -266,6 +283,10 @@ mod tests {
             id: job.id,
             generation: job.generation,
         }
+    }
+
+    fn rename(old: &str, new: &str) -> Arc<PathRenames> {
+        Arc::new(PathRenames::from([(p(old), p(new))]))
     }
 
     fn commands(changes: Vec<QueueChange>) -> Vec<BridgeQueueCommand> {
@@ -480,10 +501,7 @@ mod tests {
                 replace: false,
             })
             .expect("queued");
-        worker.remap_pending_paths(&PathRenames::from([(
-            p("/album/old.flac"),
-            p("/album/new.flac"),
-        )]));
+        worker.remap_pending_paths(&rename("/album/old.flac", "/album/new.flac"));
         let waiting = worker
             .pending
             .back()
@@ -493,5 +511,79 @@ mod tests {
             Some(BridgeQueueCommand::Append(tracks))
                 if tracks == vec![p("/album/new.flac"), p("/album/other.flac")]
         ));
+    }
+
+    #[test]
+    fn renames_reach_an_import_that_is_still_expanding() {
+        let (mut worker, jobs) = manual_worker();
+        worker
+            .submit(QueueRequest::Import {
+                paths: vec![p("/album")],
+                replace: false,
+            })
+            .expect("queued");
+        worker.remap_pending_paths(&rename("/album/old.flac", "/album/new.flac"));
+        // The worker read the folder before the rename.
+        let job = jobs.try_recv().expect("job");
+        let applied = commands(worker.complete(finish(
+            &job,
+            vec![p("/album/old.flac"), p("/album/other.flac")],
+        )));
+        assert_eq!(
+            applied.iter().map(tracks_of).collect::<Vec<_>>(),
+            vec![("append", vec![p("/album/new.flac"), p("/album/other.flac")])]
+        );
+    }
+
+    #[test]
+    fn renames_reach_a_finished_import_waiting_to_apply() {
+        let (mut worker, jobs) = manual_worker();
+        worker
+            .submit(QueueRequest::Import {
+                paths: vec![p("/album")],
+                replace: true,
+            })
+            .expect("queued");
+        let job = jobs.try_recv().expect("job");
+        let result = finish(&job, vec![p("/album/old.flac")]);
+        worker.remap_pending_paths(&rename("/album/old.flac", "/album/new.flac"));
+        worker.remap_pending_paths(&rename("/album/new.flac", "/album/newer.flac"));
+        let applied = commands(worker.complete(result));
+        assert_eq!(
+            applied.iter().map(tracks_of).collect::<Vec<_>>(),
+            vec![("replace", vec![p("/album/newer.flac")])]
+        );
+    }
+
+    #[test]
+    fn renames_skip_an_import_submitted_after_them() {
+        let (mut worker, jobs) = manual_worker();
+        worker
+            .submit(QueueRequest::Import {
+                paths: vec![p("/first")],
+                replace: false,
+            })
+            .expect("queued");
+        worker.remap_pending_paths(&rename("/music/a.flac", "/music/b.flac"));
+        // A new file now has the old name.
+        worker
+            .submit(QueueRequest::Import {
+                paths: vec![p("/music/a.flac")],
+                replace: false,
+            })
+            .expect("queued");
+        let first = jobs.try_recv().expect("first job");
+        let second = jobs.try_recv().expect("second job");
+        assert!(worker
+            .complete(finish(&second, vec![p("/music/a.flac")]))
+            .is_empty());
+        let applied = commands(worker.complete(finish(&first, vec![p("/music/a.flac")])));
+        assert_eq!(
+            applied.iter().map(tracks_of).collect::<Vec<_>>(),
+            vec![
+                ("append", vec![p("/music/b.flac")]),
+                ("append", vec![p("/music/a.flac")]),
+            ]
+        );
     }
 }

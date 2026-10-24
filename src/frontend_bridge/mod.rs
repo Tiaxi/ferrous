@@ -1180,7 +1180,7 @@ impl BridgeLoopRuntime {
             }
             BridgeCommand::Library(BridgeLibraryCommand::RefreshRenamedPaths(renames)) => {
                 self.imports
-                    .remap_pending_paths(&renames.iter().cloned().collect());
+                    .remap_pending_paths(&Arc::new(renames.iter().cloned().collect()));
             }
             _ => {}
         }
