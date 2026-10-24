@@ -345,6 +345,8 @@ struct GstPlaybackRuntime {
     consecutive_failures: u32,
     /// The first missing plugin reported in the current pipeline run.
     missing_plugin: Option<MissingPlugin>,
+    #[cfg(test)]
+    about_to_finish: Arc<AboutToFinishCalls>,
 }
 
 pub fn spawn_engine(
@@ -459,6 +461,8 @@ impl GstPlaybackRuntime {
             soloed_channel: None,
             consecutive_failures: 0,
             missing_plugin: None,
+            #[cfg(test)]
+            about_to_finish: Arc::default(),
         }
     }
 
@@ -2023,22 +2027,6 @@ fn start_gst_engine(
 
     let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
 
-    {
-        let queue_state = Arc::clone(&queue_state);
-        let stream_durations = Arc::clone(&stream_durations);
-        let analysis_tx = analysis_tx.clone();
-        // Runs on a streaming thread once the pipeline has read all of the
-        // last stream it was given, usually about 2 s before that stream
-        // ends and at once for a short file.
-        playbin.connect("about-to-finish", false, move |values| {
-            let playbin = values.first()?.get::<gst::Element>().ok()?;
-            stage_successor(&queue_state, &stream_durations, &analysis_tx, |uri| {
-                playbin.set_property("uri", uri);
-            });
-            None
-        });
-    }
-
     let bus = playbin.bus().context("playbin has no bus")?;
     let runtime = GstPlaybackRuntime::new(
         playbin,
@@ -2049,10 +2037,49 @@ fn start_gst_engine(
         stream_durations,
         stream_ends,
     );
+    connect_about_to_finish(&runtime);
     runtime
         .playbin
         .set_property("volume", f64::from(runtime.applied_volume));
     Ok((runtime, bus))
+}
+
+/// Stage the successor whenever the pipeline of `runtime` asks for one.
+fn connect_about_to_finish(runtime: &GstPlaybackRuntime) {
+    let queue_state = Arc::clone(&runtime.queue_state);
+    let stream_durations = Arc::clone(&runtime.stream_durations);
+    let analysis_tx = runtime.analysis_tx.clone();
+    #[cfg(test)]
+    let calls = Arc::clone(&runtime.about_to_finish);
+    // Runs on a streaming thread once the pipeline has read all of the
+    // last stream it was given, usually about 2 s before that stream ends
+    // and at once for a short file.
+    runtime
+        .playbin
+        .connect("about-to-finish", false, move |values| {
+            #[cfg(test)]
+            calls.emitted.fetch_add(1, Ordering::SeqCst);
+            if let Some(playbin) = values
+                .first()
+                .and_then(|value| value.get::<gst::Element>().ok())
+            {
+                stage_successor(&queue_state, &stream_durations, &analysis_tx, |uri| {
+                    playbin.set_property("uri", uri);
+                });
+            }
+            #[cfg(test)]
+            calls.returned.fetch_add(1, Ordering::SeqCst);
+            None
+        });
+}
+
+/// How often the pipeline emitted about-to-finish and how often the
+/// engine's handler returned, for the reports of engine tests.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct AboutToFinishCalls {
+    emitted: AtomicU64,
+    returned: AtomicU64,
 }
 
 fn run_gst_engine(
@@ -3798,6 +3825,171 @@ mod engine_tests {
             .build()?)
     }
 
+    /// Bus messages that a report lists.
+    const TRACED_MESSAGES: usize = 24;
+    /// How long a report waits for the pipeline to answer its queries.
+    const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// Records what the pipeline of a test does, to report it when a wait
+    /// times out.
+    struct Trace {
+        started: Instant,
+        playbin: gst::Element,
+        queue: Arc<Mutex<GaplessQueue>>,
+        about_to_finish: Arc<AboutToFinishCalls>,
+        /// The latest bus messages as they were posted, with the time since
+        /// the test started, without the state changes of the pipeline's
+        /// elements and the status of its streaming threads.
+        messages: Arc<Mutex<VecDeque<(Duration, gst::Message)>>>,
+    }
+
+    impl Trace {
+        fn new(runtime: &GstPlaybackRuntime) -> Self {
+            let started = Instant::now();
+            let messages = Arc::new(Mutex::new(VecDeque::new()));
+            let bus = runtime.playbin.bus().unwrap();
+            bus.enable_sync_message_emission();
+            let log = Arc::clone(&messages);
+            let playbin = runtime.playbin.downgrade();
+            // Runs on the posting thread, so it only stores the message.
+            bus.connect_sync_message(None, move |_, message| {
+                let noise = match message.view() {
+                    gst::MessageView::StreamStatus(_) => true,
+                    gst::MessageView::StateChanged(_) => playbin
+                        .upgrade()
+                        .is_none_or(|playbin| message.src() != Some(playbin.upcast_ref())),
+                    _ => false,
+                };
+                if noise {
+                    return;
+                }
+                if let Ok(mut log) = log.lock() {
+                    if log.len() == TRACED_MESSAGES {
+                        log.pop_front();
+                    }
+                    log.push_back((started.elapsed(), message.clone()));
+                }
+            });
+            Self {
+                started,
+                playbin: runtime.playbin.clone(),
+                queue: Arc::clone(&runtime.queue_state),
+                about_to_finish: Arc::clone(&runtime.about_to_finish),
+                messages,
+            }
+        }
+
+        /// Report `what` the test waited for, `engine`, a description of
+        /// the engine, and what the pipeline does. The pipeline is queried
+        /// on another thread, so a pipeline that blocks is reported too.
+        fn report(&self, what: &str, engine: &str) -> String {
+            let (tx, rx) = bounded(1);
+            let playbin = self.playbin.clone();
+            let messages = Arc::clone(&self.messages);
+            let queue = Arc::clone(&self.queue);
+            std::thread::spawn(move || {
+                let _ = tx.send(pipeline_report(&playbin, &messages, &queue));
+            });
+            let pipeline = rx.recv_timeout(REPORT_TIMEOUT).unwrap_or_else(|_| {
+                format!("the pipeline did not answer its queries within {REPORT_TIMEOUT:?}")
+            });
+            format!(
+                "{what}\n  waited until {:.3} s after the test started\n  \
+                 about-to-finish: emitted {} times, the handler returned {} times\n\
+                 {engine}{pipeline}",
+                self.started.elapsed().as_secs_f64(),
+                self.about_to_finish.emitted.load(Ordering::SeqCst),
+                self.about_to_finish.returned.load(Ordering::SeqCst),
+            )
+        }
+    }
+
+    /// Describe the state of `playbin` and its elements, the queue, and the
+    /// latest bus `messages`.
+    fn pipeline_report(
+        playbin: &gst::Element,
+        messages: &Mutex<VecDeque<(Duration, gst::Message)>>,
+        queue: &Mutex<GaplessQueue>,
+    ) -> String {
+        use std::fmt::Write;
+
+        let mut report = String::new();
+        let (result, current, pending) = playbin.state(Some(gst::ClockTime::ZERO));
+        let _ = writeln!(
+            report,
+            "  pipeline: {current:?}, pending {pending:?} ({result:?}), position {:?}",
+            playbin.query_position::<gst::ClockTime>()
+        );
+        let queue = match queue.try_lock() {
+            Ok(queue) => format!(
+                "free, current row {:?}, successor handed to the pipeline: {}",
+                queue.current_index(),
+                queue.successor_handed_to_pipeline()
+            ),
+            Err(std::sync::TryLockError::WouldBlock) => "held".to_string(),
+            Err(std::sync::TryLockError::Poisoned(_)) => "poisoned".to_string(),
+        };
+        let _ = writeln!(report, "  queue lock: {queue}");
+        let unsettled: Vec<_> = playbin
+            .clone()
+            .downcast::<gst::Bin>()
+            .unwrap()
+            .iterate_recurse()
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter_map(|element| {
+                let (current, pending) = (element.current_state(), element.pending_state());
+                (pending != gst::State::VoidPending)
+                    .then(|| format!("{} {current:?} → {pending:?}", element.name()))
+            })
+            .collect();
+        let _ = writeln!(report, "  elements changing state: {unsettled:?}");
+        let _ = writeln!(report, "  latest bus messages:");
+        let messages: Vec<_> = messages
+            .lock()
+            .map(|log| log.clone())
+            .unwrap_or_default()
+            .into();
+        for (at, message) in messages {
+            let _ = writeln!(
+                report,
+                "    {:8.3} s {}",
+                at.as_secs_f64(),
+                describe_message(&message)
+            );
+        }
+        report
+    }
+
+    fn describe_message(message: &gst::Message) -> String {
+        let detail = match message.view() {
+            gst::MessageView::StateChanged(change) => format!(
+                "{:?} → {:?}, pending {:?}",
+                change.old(),
+                change.current(),
+                change.pending()
+            ),
+            gst::MessageView::StreamStart(start) => format!("group {:?}", start.group_id()),
+            gst::MessageView::AsyncDone(done) => format!("running time {:?}", done.running_time()),
+            gst::MessageView::Error(error) => format!("{} ({:?})", error.error(), error.debug()),
+            gst::MessageView::Warning(warning) => {
+                format!("{} ({:?})", warning.error(), warning.debug())
+            }
+            gst::MessageView::Buffering(buffering) => format!("{} %", buffering.percent()),
+            _ => message
+                .structure()
+                .map(|structure| structure.name().to_string())
+                .unwrap_or_default(),
+        };
+        format!(
+            "{:?} from {}: {detail}",
+            message.type_(),
+            message
+                .src()
+                .map_or_else(|| "?".to_string(), |src| src.path_string().to_string())
+        )
+    }
+
     #[derive(Debug, Clone)]
     struct Change {
         path: PathBuf,
@@ -3823,6 +4015,9 @@ mod engine_tests {
         seeked: Vec<Duration>,
         prepared: Vec<PathBuf>,
         cancelled_staging: usize,
+        trace: Trace,
+        /// When the engine last reported an event.
+        last_event_at: Option<Instant>,
     }
 
     impl Engine {
@@ -3834,6 +4029,7 @@ mod engine_tests {
                 start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
             let playbin = runtime.playbin.clone();
             let queue = Arc::clone(&runtime.queue_state);
+            let trace = Trace::new(&runtime);
             let (commands, command_rx) = unbounded();
             std::thread::spawn(move || run_gst_engine(runtime, &bus, &command_rx));
             Self {
@@ -3849,6 +4045,8 @@ mod engine_tests {
                 seeked: Vec::new(),
                 prepared: Vec::new(),
                 cancelled_staging: 0,
+                trace,
+                last_event_at: None,
             }
         }
 
@@ -3856,18 +4054,41 @@ mod engine_tests {
             self.commands.send(command).unwrap();
         }
 
-        /// Poll and record until `done` holds. Returns `false` on timeout.
-        fn run_until(&mut self, timeout: Duration, mut done: impl FnMut(&Self) -> bool) -> bool {
-            let deadline = Instant::now() + timeout;
+        /// Describe what the engine and its pipeline do, for a wait for
+        /// `what` that timed out.
+        fn report(&self, what: &str) -> String {
+            let snapshot = &self.snapshot;
+            let engine = format!(
+                "  last snapshot: {:?}, row {:?}, position {:?} of {:?}, current {:?}\n  \
+                 last event {:?} ago\n  changes: {:?}\n  errors: {:?}\n  \
+                 staged spectrograms: {:?}, cancelled {}\n",
+                snapshot.state,
+                snapshot.current_queue_index,
+                snapshot.position,
+                snapshot.duration,
+                snapshot.current,
+                self.last_event_at.map(|at| at.elapsed()),
+                self.changes,
+                self.errors,
+                self.prepared,
+                self.cancelled_staging,
+            );
+            self.trace.report(what, &engine)
+        }
+
+        /// Poll and record until `done` holds, or panic with a report of
+        /// `what` was awaited.
+        #[track_caller]
+        fn wait_until(&mut self, what: &str, mut done: impl FnMut(&Self) -> bool) {
+            let deadline = Instant::now() + TIMEOUT;
             loop {
                 if done(self) {
-                    return true;
+                    return;
                 }
-                if Instant::now() >= deadline {
-                    return false;
-                }
+                assert!(Instant::now() < deadline, "{}", self.report(what));
                 self.send(PlaybackCommand::Poll);
                 while let Ok(event) = self.events.recv_timeout(Duration::from_millis(20)) {
+                    self.last_event_at = Some(Instant::now());
                     self.record(event);
                 }
                 while let Ok(command) = self.analysis.try_recv() {
@@ -3906,15 +4127,12 @@ mod engine_tests {
         }
 
         /// Wait until about-to-finish staged `successor`.
+        #[track_caller]
         fn wait_for_window(&mut self, successor: &Path) {
-            assert!(
-                self.run_until(TIMEOUT, |engine| engine
-                    .prepared
-                    .iter()
-                    .any(|path| path == successor)),
-                "about-to-finish did not stage {}",
-                successor.display()
-            );
+            let what = format!("about-to-finish did not stage {}", successor.display());
+            self.wait_until(&what, |engine| {
+                engine.prepared.iter().any(|path| path == successor)
+            });
         }
 
         /// Wait inside the window until the current track has played 1 s.
@@ -3922,23 +4140,24 @@ mod engine_tests {
         /// the successor; a state change at that moment can deadlock
         /// uridecodebin3 (seen with GStreamer 1.28), independent of this
         /// engine.
+        #[track_caller]
         fn wait_for_settled_window(&mut self, successor: &Path) {
             self.wait_for_window(successor);
             let row = self.snapshot.current_queue_index;
-            assert!(self.run_until(TIMEOUT, |engine| engine.snapshot.position
-                >= Duration::from_secs(1)));
+            self.wait_until("the current track did not play 1 s", |engine| {
+                engine.snapshot.position >= Duration::from_secs(1)
+            });
             assert_eq!(
                 self.snapshot.current_queue_index, row,
                 "the successor is not audible yet"
             );
         }
 
+        #[track_caller]
         fn wait_for_errors(&mut self, count: usize) -> PlaybackError {
-            assert!(
-                self.run_until(TIMEOUT, |engine| engine.errors.len() >= count),
-                "expected {count} errors, got {:?}",
-                self.errors
-            );
+            self.wait_until(&format!("expected {count} errors"), |engine| {
+                engine.errors.len() >= count
+            });
             self.errors[count - 1].clone()
         }
 
@@ -3957,26 +4176,24 @@ mod engine_tests {
             );
         }
 
+        #[track_caller]
         fn wait_for_changes(&mut self, count: usize) -> Change {
-            assert!(
-                self.run_until(TIMEOUT, |engine| engine.changes.len() >= count),
-                "expected {count} track changes, got {:?}",
-                self.changes
-            );
+            self.wait_until(&format!("expected {count} track changes"), |engine| {
+                engine.changes.len() >= count
+            });
             self.changes[count - 1].clone()
         }
 
         /// Wait until the snapshot shows row `index` with about `duration`,
         /// which identifies the fixture the pipeline plays.
+        #[track_caller]
         fn wait_for_playing(&mut self, index: usize, duration: Duration) {
-            let reached = self.run_until(TIMEOUT, |engine| {
-                engine.snapshot.current_queue_index == Some(index)
-                    && engine.snapshot.duration.abs_diff(duration) < Duration::from_millis(100)
-            });
-            assert!(
-                reached,
-                "expected row {index} lasting {duration:?}, got {:?}",
-                self.snapshot
+            self.wait_until(
+                &format!("expected row {index} lasting {duration:?}"),
+                |engine| {
+                    engine.snapshot.current_queue_index == Some(index)
+                        && engine.snapshot.duration.abs_diff(duration) < Duration::from_millis(100)
+                },
             );
         }
     }
@@ -4068,7 +4285,9 @@ mod engine_tests {
         engine.send(PlaybackCommand::Play);
         engine.wait_for_window(&b);
         // Well after the pipeline opened B, before A ends.
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(3_000)));
+        engine.wait_until("the position did not reach 3 s", |engine| {
+            engine.snapshot.position >= millis(3_000)
+        });
         assert_eq!(engine.snapshot.current_queue_index, Some(0));
 
         std::fs::rename(&b, &renamed).unwrap();
@@ -4175,7 +4394,9 @@ mod engine_tests {
         engine.send(PlaybackCommand::Play);
         engine.wait_for_settled_window(&b);
         engine.send(PlaybackCommand::RemoveAt(1));
-        assert!(engine.run_until(TIMEOUT, |engine| engine.cancelled_staging == 1));
+        engine.wait_until("the staged spectrogram was not cancelled", |engine| {
+            engine.cancelled_staging == 1
+        });
         assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
         assert_eq!(engine.snapshot.current_queue_index, Some(0));
 
@@ -4237,7 +4458,9 @@ mod engine_tests {
         let mut engine = Engine::start();
         engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
         engine.send(PlaybackCommand::Seek(millis(3_000)));
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.seek_serial == 1));
+        engine.wait_until("the seek was not acknowledged", |engine| {
+            engine.snapshot.seek_serial == 1
+        });
         assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
         assert_eq!(engine.snapshot.position, Duration::ZERO);
         assert_eq!(engine.snapshot.seek_landed_serial, 0);
@@ -4245,7 +4468,9 @@ mod engine_tests {
 
         engine.send(PlaybackCommand::Play);
         engine.wait_for_playing(0, millis(6_000));
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position > Duration::ZERO));
+        engine.wait_until("the position did not advance", |engine| {
+            engine.snapshot.position > Duration::ZERO
+        });
         assert!(
             engine.snapshot.position < millis(1_500),
             "{:?}",
@@ -4256,7 +4481,9 @@ mod engine_tests {
         // Paused, the track is seekable, and Play goes on from there.
         engine.send(PlaybackCommand::Pause);
         engine.send(PlaybackCommand::Seek(millis(3_000)));
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.seek_landed_serial == 2));
+        engine.wait_until("the second seek did not land", |engine| {
+            engine.snapshot.seek_landed_serial == 2
+        });
         assert_eq!(engine.seeked.len(), 1);
         assert!(
             engine.seeked[0].abs_diff(millis(3_000)) < millis(50),
@@ -4266,7 +4493,9 @@ mod engine_tests {
         assert_eq!(engine.snapshot.position, engine.seeked[0]);
         assert_eq!(engine.snapshot.state, PlaybackState::Paused);
         engine.send(PlaybackCommand::Play);
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(3_300)));
+        engine.wait_until("the position did not reach 3.3 s", |engine| {
+            engine.snapshot.position >= millis(3_300)
+        });
         assert!(
             engine.snapshot.position < millis(4_500),
             "{:?}",
@@ -4287,12 +4516,16 @@ mod engine_tests {
         let heard = listen_for_sound(&engine.playbin);
         engine.send(PlaybackCommand::LoadQueue(vec![track]));
         engine.send(PlaybackCommand::Play);
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(300)));
+        engine.wait_until("the position did not reach 0.3 s", |engine| {
+            engine.snapshot.position >= millis(300)
+        });
         assert_eq!(*heard.lock().unwrap(), None);
 
         let target = MARKER_AT - millis(400);
         engine.send(PlaybackCommand::Seek(target));
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.seek_landed_serial == 1));
+        engine.wait_until("the seek did not land", |engine| {
+            engine.snapshot.seek_landed_serial == 1
+        });
         assert_eq!(engine.seeked.len(), 1);
         let landing = engine.seeked[0];
         assert!(
@@ -4306,9 +4539,9 @@ mod engine_tests {
             .unwrap();
         assert_eq!(landed.position, landing);
 
-        assert!(
-            engine.run_until(TIMEOUT, |_| heard.lock().unwrap().is_some()),
-            "the tone at {MARKER_AT:?} was not heard after seeking to {target:?}"
+        engine.wait_until(
+            &format!("the tone at {MARKER_AT:?} was not heard after seeking to {target:?}"),
+            |_| heard.lock().unwrap().is_some(),
         );
         let heard_at = heard.lock().unwrap().unwrap();
         // Within a frame or two: the tone's first frame refers to audio
@@ -4325,7 +4558,9 @@ mod engine_tests {
         let a = fixtures.wav("a.wav", 8_000);
         let mut engine = DirectEngine::start();
         engine.play_until_opened(vec![a], RepeatMode::Off);
-        assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(200)));
+        engine.wait_until("the position did not reach 0.2 s", |runtime| {
+            runtime.snapshot.position >= millis(200)
+        });
         let before = engine.runtime.snapshot.position;
         let _ = engine.events.try_iter().count();
 
@@ -4347,7 +4582,9 @@ mod engine_tests {
                 serial: 4
             })
         );
-        assert!(engine.run_until(|runtime| runtime.snapshot.seek_serial == 4));
+        engine.wait_until("the seeks were not acknowledged", |runtime| {
+            runtime.snapshot.seek_serial == 4
+        });
         assert!(!engine.runtime.seek_pending());
 
         let events: Vec<_> = engine.events.try_iter().collect();
@@ -4391,13 +4628,17 @@ mod engine_tests {
         assert!(engine.runtime.seek_in_flight.is_none());
         assert!(engine.runtime.playbin.current_state() < gst::State::Paused);
         hold.release();
-        assert!(engine.run_until(|runtime| runtime.snapshot.seek_landed_serial == 1));
+        engine.wait_until("the seek did not land", |runtime| {
+            runtime.snapshot.seek_landed_serial == 1
+        });
         assert!(
             engine.runtime.snapshot.position.abs_diff(millis(3_000)) < millis(50),
             "{:?}",
             engine.runtime.snapshot
         );
-        assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(3_200)));
+        engine.wait_until("the position did not reach 3.2 s", |runtime| {
+            runtime.snapshot.position >= millis(3_200)
+        });
     }
 
     #[test]
@@ -4408,14 +4649,14 @@ mod engine_tests {
         let mut engine = DirectEngine::start();
         engine.play_until_opened(vec![a, b], RepeatMode::Off);
         // Well after the pipeline was given B.
-        assert!(engine.run_until(|runtime| {
+        engine.wait_until("the successor was not handed over by 3 s", |runtime| {
             runtime
                 .queue_state
                 .lock()
                 .unwrap()
                 .successor_handed_to_pipeline()
                 && runtime.snapshot.position >= millis(3_000)
-        }));
+        });
         engine.runtime.apply_command(PlaybackCommand::Pause);
         engine
             .runtime
@@ -4424,14 +4665,18 @@ mod engine_tests {
         engine.runtime.apply_command(PlaybackCommand::Play);
         assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
         assert!(engine.runtime.playbin.current_state() <= gst::State::Paused);
-        assert!(engine.run_until(|runtime| runtime.snapshot.seek_landed_serial == 1));
+        engine.wait_until("the seek did not land", |runtime| {
+            runtime.snapshot.seek_landed_serial == 1
+        });
         assert!(
             engine.runtime.snapshot.position.abs_diff(millis(500)) < millis(50),
             "{:?}",
             engine.runtime.snapshot
         );
         assert_eq!(engine.runtime.restart, None);
-        assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(700)));
+        engine.wait_until("the position did not reach 0.7 s", |runtime| {
+            runtime.snapshot.position >= millis(700)
+        });
         assert_eq!(engine.runtime.playbin.current_state(), gst::State::Playing);
         assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
     }
@@ -4456,13 +4701,17 @@ mod engine_tests {
         // Playback then has the usual time to start.
         engine.runtime.playing_state_timeout = GstPlaybackRuntime::PLAYING_STATE_TIMEOUT;
         hold.release();
-        assert!(engine.run_until(|runtime| runtime.snapshot.seek_landed_serial == 1));
+        engine.wait_until("the seek did not land", |runtime| {
+            runtime.snapshot.seek_landed_serial == 1
+        });
         assert!(
             engine.runtime.snapshot.position.abs_diff(millis(500)) < millis(50),
             "{:?}",
             engine.runtime.snapshot
         );
-        assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(700)));
+        engine.wait_until("the position did not reach 0.7 s", |runtime| {
+            runtime.snapshot.position >= millis(700)
+        });
         assert_eq!(engine.runtime.playbin.current_state(), gst::State::Playing);
         assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
         assert!(engine.errors().is_empty());
@@ -4493,10 +4742,10 @@ mod engine_tests {
         assert_eq!(engine.runtime.snapshot.seek_landed_serial, 0);
 
         hold.release();
-        assert!(engine.run_until(|runtime| {
+        engine.wait_until("row 1 did not play 0.2 s", |runtime| {
             runtime.snapshot.current_queue_index == Some(1)
                 && runtime.snapshot.position >= millis(200)
-        }));
+        });
         assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
         assert!(engine.errors().is_empty());
     }
@@ -4568,8 +4817,9 @@ mod engine_tests {
         assert_eq!(changes.len(), 1, "{changes:?}");
         assert_eq!((&changes[0].0, changes[0].1), (&queue[3], 3));
         assert!(matches!(changes[0].2, TrackChangeKind::Manual));
-        assert!(engine
-            .run_until(|runtime| runtime.snapshot.duration.abs_diff(millis(5_500)) < millis(100)));
+        engine.wait_until("the last track did not start", |runtime| {
+            runtime.snapshot.duration.abs_diff(millis(5_500)) < millis(100)
+        });
 
         // From the bridge, however the presses fall into bursts.
         let mut engine = Engine::start();
@@ -4630,7 +4880,9 @@ mod engine_tests {
         engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
         engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
         engine.send(PlaybackCommand::Play);
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(300)));
+        engine.wait_until("the position did not reach 0.3 s", |engine| {
+            engine.snapshot.position >= millis(300)
+        });
         // Before the pipeline asked for the replay, then inside its window.
         engine.send(PlaybackCommand::Seek(millis(2_500)));
         let replay = engine.wait_for_changes(2);
@@ -4673,10 +4925,9 @@ mod engine_tests {
         let replay = engine.wait_for_changes(2);
         assert_change(&replay, &a, 0, Expect::Gapless);
         assert_ne!(replay.token, engine.changes[0].token);
-        assert!(
-            engine.run_until(TIMEOUT, |engine| engine.snapshot.track_token
-                == replay.token)
-        );
+        engine.wait_until("the replay did not become current", |engine| {
+            engine.snapshot.track_token == replay.token
+        });
         assert_eq!(engine.snapshot.current_queue_index, Some(0));
         assert!(engine.snapshot.position < millis(1_000));
         assert_eq!(engine.changes.len(), 2, "one track change per play");
@@ -4691,10 +4942,9 @@ mod engine_tests {
         engine.send(PlaybackCommand::Play);
         let second = engine.wait_for_changes(2);
         assert_change(&second, &a, 1, Expect::Gapless);
-        assert!(
-            engine.run_until(TIMEOUT, |engine| engine.snapshot.current_queue_index
-                == Some(1))
-        );
+        engine.wait_until("row 1 did not become current", |engine| {
+            engine.snapshot.current_queue_index == Some(1)
+        });
         assert_eq!(engine.snapshot.track_token, second.token);
         assert_eq!(engine.changes.len(), 2, "one track change per play");
     }
@@ -4846,6 +5096,7 @@ mod engine_tests {
         bus: gst::Bus,
         events: Receiver<PlaybackEvent>,
         _analysis: Receiver<AnalysisCommand>,
+        trace: Trace,
     }
 
     impl DirectEngine {
@@ -4855,18 +5106,46 @@ mod engine_tests {
             let (event_tx, events) = unbounded();
             let (runtime, bus) =
                 start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
+            let trace = Trace::new(&runtime);
             Self {
                 runtime,
                 bus,
                 events,
                 _analysis: analysis,
+                trace,
             }
         }
 
+        /// Describe what the runtime and its pipeline do, for a wait for
+        /// `what` that timed out.
+        fn report(&self, what: &str) -> String {
+            let runtime = &self.runtime;
+            let snapshot = &runtime.snapshot;
+            let engine = format!(
+                "  snapshot: {:?}, row {:?}, position {:?} of {:?}, current {:?}\n  \
+                 restart {:?}, queued seek {:?}, seek in flight {:?}, Playing requested \
+                 {:?} ago, awaiting the run's stream start: {}\n",
+                snapshot.state,
+                snapshot.current_queue_index,
+                snapshot.position,
+                snapshot.duration,
+                snapshot.current,
+                runtime.restart,
+                runtime.queued_seek,
+                runtime.seek_in_flight,
+                runtime.playing_state_requested_at.map(|at| at.elapsed()),
+                runtime.awaiting_run_stream_start,
+            );
+            self.trace.report(what, &engine)
+        }
+
         /// Handle bus messages until one matches `stop`, which is returned
-        /// unhandled.
+        /// unhandled. Panics with a report of `what` was awaited on
+        /// timeout.
+        #[track_caller]
         fn handle_messages_until(
             &mut self,
+            what: &str,
             mut stop: impl FnMut(&gst::Message) -> bool,
         ) -> gst::Message {
             let deadline = Instant::now() + TIMEOUT;
@@ -4879,23 +5158,21 @@ mod engine_tests {
                 }
                 self.runtime.handle_bus_message(&message);
             }
-            panic!("no matching bus message");
+            panic!("{}", self.report(&format!("no {what} on the bus")));
         }
 
-        /// Handle bus messages and poll until `done` holds. Returns `false`
-        /// on timeout.
-        fn run_until(&mut self, mut done: impl FnMut(&GstPlaybackRuntime) -> bool) -> bool {
+        /// Handle bus messages and poll until `done` holds, or panic with a
+        /// report of `what` was awaited.
+        #[track_caller]
+        fn wait_until(&mut self, what: &str, mut done: impl FnMut(&GstPlaybackRuntime) -> bool) {
             let deadline = Instant::now() + TIMEOUT;
             while !done(&self.runtime) {
-                if Instant::now() >= deadline {
-                    return false;
-                }
+                assert!(Instant::now() < deadline, "{}", self.report(what));
                 if let Some(message) = self.bus.timed_pop(gst::ClockTime::from_mseconds(20)) {
                     self.runtime.handle_bus_message(&message);
                 }
                 self.runtime.poll();
             }
-            true
         }
 
         /// Play `queue` until the pipeline has opened the first track, and
@@ -4907,7 +5184,7 @@ mod engine_tests {
             self.runtime
                 .apply_command(PlaybackCommand::LoadQueue(queue));
             self.runtime.apply_command(PlaybackCommand::Play);
-            let stream_start = self.handle_messages_until(|message| {
+            let stream_start = self.handle_messages_until("stream start", |message| {
                 matches!(message.view(), gst::MessageView::StreamStart(_))
             });
             self.runtime.handle_bus_message(&stream_start);
@@ -4940,19 +5217,19 @@ mod engine_tests {
         /// from landing.
         fn hold_seek_of_a_restart(&mut self, queue: Vec<PathBuf>) -> OutputHold {
             self.play_until_opened(queue, RepeatMode::Off);
-            assert!(self.run_until(|runtime| {
+            self.wait_until("the successor was not handed over by 3 s", |runtime| {
                 runtime
                     .queue_state
                     .lock()
                     .unwrap()
                     .successor_handed_to_pipeline()
                     && runtime.snapshot.position >= millis(3_000)
-            }));
+            });
             self.runtime
                 .apply_command(PlaybackCommand::Seek(millis(500)));
             assert_eq!(self.runtime.restart, Some(RunRestart::Prerolling));
             let playbin = self.runtime.playbin.clone();
-            let prerolled = self.handle_messages_until(|message| {
+            let prerolled = self.handle_messages_until("async-done of the restart", |message| {
                 matches!(message.view(), gst::MessageView::AsyncDone(_))
                     && message.src().is_some_and(|src| src == &playbin)
             });
@@ -4979,7 +5256,7 @@ mod engine_tests {
                     .src(source)
                     .build();
             self.bus.post(error).unwrap();
-            let error = self.handle_messages_until(|message| {
+            let error = self.handle_messages_until("posted error", |message| {
                 matches!(message.view(), gst::MessageView::Error(_))
             });
             self.runtime.handle_bus_message(&error);
@@ -5017,8 +5294,9 @@ mod engine_tests {
             .runtime
             .apply_command(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone(), c]));
         engine.runtime.apply_command(PlaybackCommand::Play);
-        let failure = engine
-            .handle_messages_until(|message| matches!(message.view(), gst::MessageView::Error(_)));
+        let failure = engine.handle_messages_until("error", |message| {
+            matches!(message.view(), gst::MessageView::Error(_))
+        });
         engine
             .runtime
             .apply_command(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
@@ -5058,7 +5336,12 @@ mod engine_tests {
                 engine.runtime.handle_bus_message(&message);
             }
         };
-        assert_eq!(change, Some((renamed, 1)));
+        assert_eq!(
+            change,
+            Some((renamed, 1)),
+            "{}",
+            engine.report("the renamed track did not start")
+        );
     }
 
     #[test]
@@ -5087,12 +5370,10 @@ mod engine_tests {
         assert_eq!(errors[0].path.as_deref(), Some(b.as_path()), "A's new name");
         assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Skipped);
         // B plays under its new name, which was A's.
-        assert!(
-            engine.run_until(|runtime| runtime.snapshot.current_queue_index == Some(1)
-                && runtime.snapshot.duration.abs_diff(millis(9_000)) < millis(100)),
-            "{:?}",
-            engine.runtime.snapshot
-        );
+        engine.wait_until("row 1 did not start", |runtime| {
+            runtime.snapshot.current_queue_index == Some(1)
+                && runtime.snapshot.duration.abs_diff(millis(9_000)) < millis(100)
+        });
         assert_eq!(
             engine.runtime.snapshot.current.as_deref(),
             Some(a.as_path())
@@ -5152,12 +5433,10 @@ mod engine_tests {
             errors[0].message()
         );
         assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Skipped);
-        assert!(
-            engine.run_until(|runtime| runtime.snapshot.current_queue_index == Some(1)
-                && runtime.snapshot.duration.abs_diff(millis(4_500)) < millis(100)),
-            "{:?}",
-            engine.runtime.snapshot
-        );
+        engine.wait_until("row 1 did not start", |runtime| {
+            runtime.snapshot.current_queue_index == Some(1)
+                && runtime.snapshot.duration.abs_diff(millis(4_500)) < millis(100)
+        });
         assert_eq!(
             engine.runtime.snapshot.current.as_deref(),
             Some(b.as_path())
@@ -5215,8 +5494,9 @@ mod engine_tests {
         engine.send(PlaybackCommand::LoadQueue(queue.clone()));
         engine.send(PlaybackCommand::Play);
         let last = engine.wait_for_errors(5);
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.state
-            == PlaybackState::Stopped));
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
 
         for (index, error) in engine.errors.iter().enumerate().take(4) {
             assert_eq!(error.path.as_deref(), Some(queue[index].as_path()));
@@ -5247,8 +5527,9 @@ mod engine_tests {
         assert_eq!(engine.errors[0].outcome, PlaybackErrorOutcome::Skipped);
         assert_eq!(stopped.path.as_deref(), Some(queue[1].as_path()));
         assert_eq!(stopped.outcome, PlaybackErrorOutcome::Stopped);
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.state
-            == PlaybackState::Stopped));
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
 
         // Repeat-one plays only the failed track, so it stops at once.
         engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
@@ -5256,8 +5537,9 @@ mod engine_tests {
         let stopped = engine.wait_for_errors(3);
         assert_eq!(stopped.path.as_deref(), Some(queue[1].as_path()));
         assert_eq!(stopped.outcome, PlaybackErrorOutcome::Stopped);
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.state
-            == PlaybackState::Stopped));
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
         assert_eq!(engine.errors.len(), 3);
         assert_eq!(engine.changes.len(), 2, "{:?}", engine.changes);
     }
@@ -5278,7 +5560,9 @@ mod engine_tests {
         ]));
         engine.send(PlaybackCommand::Play);
         // The pipeline read all of A, so it asked for the successor.
-        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(3_000)));
+        engine.wait_until("the position did not reach 3 s", |engine| {
+            engine.snapshot.position >= millis(3_000)
+        });
         assert_eq!(engine.snapshot.current_queue_index, Some(0));
 
         engine.post_shared_error(gst::StreamError::Decode, "injected decoder failure");
