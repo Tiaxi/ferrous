@@ -274,16 +274,28 @@ fn a_mixed_selection_saves_each_file_that_can_store_the_year() {
 #[test]
 fn refused_numbers_leave_every_format_unchanged() {
     for format in &FORMATS {
-        for (field, value) in [
-            ("trackNo", "1.5"),
+        // Vorbis comments keep any other track text as a label.
+        let not_numbers = if KEEPS_LABELS
+            .iter()
+            .any(|keeps| keeps.file_name == format.file_name)
+        {
+            [].as_slice()
+        } else {
+            [("trackNo", "1.5"), ("trackNo", "-1")].as_slice()
+        };
+        for &(field, value) in [
             ("trackNo", "3/12"),
             ("trackNo", "0"),
-            ("trackNo", "-1"),
+            ("trackNo", "4294967296"),
             ("discNo", "1/2"),
+            ("discNo", "00"),
             ("totalTracks", "x"),
             ("totalTracks", "B"),
             ("totalDiscs", "0"),
-        ] {
+        ]
+        .iter()
+        .chain(not_numbers)
+        {
             let error = assert_refused(format, field, |row| match field {
                 "trackNo" => row.track_no = value.to_string(),
                 "discNo" => row.disc_no = value.to_string(),
@@ -335,7 +347,7 @@ fn an_empty_number_clears_it() {
     }
 }
 
-/// The formats whose tag keeps a track label such as `A1` exactly.
+/// The formats whose tag keeps any track text, such as `A1` or `Side A`, exactly.
 const KEEPS_LABELS: [Format; 2] = [FLAC, OPUS];
 /// The formats whose tag would drop a label: lofty reads no number back.
 const DROPS_LABELS: [Format; 6] = [ID3V23, ID3V24, MP4, WAVPACK, MONKEYS_AUDIO, RAW_AC3];
@@ -343,19 +355,43 @@ const DROPS_LABELS: [Format; 6] = [ID3V23, ID3V24, MP4, WAVPACK, MONKEYS_AUDIO, 
 #[test]
 fn track_and_disc_labels_read_back_exactly_in_vorbis_comments() {
     for format in &KEEPS_LABELS {
-        for label in ["A1", "B2"] {
+        for label in ["A1", "B2", "A-1", "1A", "A3a", "Side A", "CD1"] {
             let row = saved(format, "trackNo", |row| row.track_no = label.to_string());
             assert_eq!(row.track_no, label, "{}", format.file_name);
         }
-        let row = saved(format, "discNo", |row| row.disc_no = "A".to_string());
-        assert_eq!(row.disc_no, "A", "{}", format.file_name);
+        for label in ["A", "Side B"] {
+            let row = saved(format, "discNo", |row| row.disc_no = label.to_string());
+            assert_eq!(row.disc_no, label, "{}", format.file_name);
+        }
+    }
+}
+
+#[test]
+fn vorbis_comments_still_refuse_a_slash_or_an_out_of_range_number() {
+    for format in &KEEPS_LABELS {
+        let error = assert_refused(format, "trackNo", |row| row.track_no = "3/12".to_string());
+        assert_eq!(
+            error,
+            "invalid Track '3/12' for Vorbis comments: enter only the track number here and the \
+             total under Tracks"
+        );
+        for value in ["0", "4294967296"] {
+            let error = assert_refused(format, "trackNo", |row| row.track_no = value.to_string());
+            assert_eq!(
+                error,
+                format!(
+                    "invalid Track '{value}' for Vorbis comments: a number must be from 1 to \
+                     4294967295; any other label, such as A1 or Side A, is stored as typed"
+                )
+            );
+        }
     }
 }
 
 #[test]
 fn labels_are_refused_where_the_tag_drops_them() {
     for format in &DROPS_LABELS {
-        for label in ["A1", "B2"] {
+        for label in ["A1", "B2", "A-1", "Side A"] {
             let error = assert_refused(format, "trackNo", |row| row.track_no = label.to_string());
             assert!(
                 error.starts_with(&format!(
@@ -383,7 +419,7 @@ fn a_mixed_selection_saves_a_label_only_where_the_tag_keeps_it() {
         let path = dir.join(format!("{index}-{}", format.file_name));
         (format.write)(&path);
         let mut row = load_one(&path);
-        row.track_no = "A1".to_string();
+        row.track_no = "A-1".to_string();
         rows.push(edited(&row, &["trackNo"]));
         let bytes = fs::read(&path).expect("read fixture");
         files.push((path, keeps, bytes));
@@ -396,7 +432,7 @@ fn a_mixed_selection_saves_a_label_only_where_the_tag_keeps_it() {
         assert_eq!(result.path, path.to_string_lossy());
         assert_eq!(result.ok, *keeps, "{result:?}");
         if *keeps {
-            assert_eq!(load_one(path).track_no, "A1", "{}", path.display());
+            assert_eq!(load_one(path).track_no, "A-1", "{}", path.display());
         } else {
             let error = result.error.as_deref().unwrap_or_default();
             assert!(error.contains("stores only whole numbers"), "{error}");

@@ -519,14 +519,14 @@ void BridgeClientTest::tagEditorShowsRefusedEditsAndKeepsTheFile() {
 
     // A refused value fails the whole row, so the title is not written either.
     editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
-    editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("1.5"));
+    editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("0"));
     QSignalSpy saved(&editor, &TagEditorController::saveFinished);
     QVERIFY(editor.save());
     QTRY_COMPARE(saved.size(), 1);
     QVERIFY(!saved.first().first().toBool());
     const QString error = QStringLiteral(
-        "invalid Track '1.5' for Vorbis comments: use a whole number from 1 to 4294967295, a label such as A1, or "
-        "leave it empty");
+        "invalid Track '0' for Vorbis comments: a number must be from 1 to 4294967295; any other label, such as A1 "
+        "or Side A, is stored as typed");
     QCOMPARE(editor.m_tableModel.rowAt(0)->errorText, error);
     QVERIFY(editor.dirty());
     QCOMPARE(editor.statusText(), QStringLiteral("Saved 0 file(s); 1 failed."));
@@ -535,8 +535,8 @@ void BridgeClientTest::tagEditorShowsRefusedEditsAndKeepsTheFile() {
     QCOMPARE(file.readAll(), flac);
     file.close();
 
-    // Vorbis comments keep a vinyl side label as typed.
-    editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("A1"));
+    // Vorbis comments keep any other track text as typed.
+    editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("A-1"));
     editor.setCell(0, QStringLiteral("year"), QStringLiteral("1997-02-29"));
     QVERIFY(editor.save());
     QTRY_COMPARE(saved.size(), 2);
@@ -553,7 +553,7 @@ void BridgeClientTest::tagEditorShowsRefusedEditsAndKeepsTheFile() {
     editor.reload();
     QTRY_VERIFY(!editor.loading());
     QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("New"));
-    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("trackNo")), QStringLiteral("A1"));
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("trackNo")), QStringLiteral("A-1"));
     QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("year")), QStringLiteral("1997-05"));
 }
 

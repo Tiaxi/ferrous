@@ -18,9 +18,10 @@ pub(super) struct TagTarget {
     date: DateStorage,
     /// The largest track or disc number, or total, the tag stores.
     max_number: u32,
-    /// Whether the tag keeps a track or disc label such as `A1` as text and
-    /// reads it back exactly. Only Vorbis comments do: lofty drops labels
-    /// from `ID3v2` `TRCK`, `MP4` `trkn`, and `APEv2` `Track` items, and the
+    /// Whether the tag keeps any track or disc text, such as `A1` or
+    /// `Side A`, and reads it back exactly. Only Vorbis comments do: lofty
+    /// drops a label from `ID3v2` `TRCK` and `MP4` `trkn`, the `ApeTag::from`
+    /// conversion in the `APEv2` save path drops it before writing, and the
     /// raw AC3/DTS reader takes only numbers.
     keeps_labels: bool,
 }
@@ -118,8 +119,9 @@ impl TagTarget {
 
     /// Check an edited track or disc number, or total: empty clears it, and
     /// anything else must be a whole number from 1 to what this tag stores.
-    /// Leading zeros are allowed. A track or disc may also be a label such as
-    /// `A1` where the tag keeps one; a total is a count and stays a number.
+    /// Leading zeros are allowed. Where the tag keeps track text, a track or
+    /// disc may be any other label, such as `A1` or `Side A`, stored as typed;
+    /// a total is a count and stays a number.
     pub(super) fn validated_number(self, field: TagField, value: &str) -> Result<(), String> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -129,7 +131,6 @@ impl TagTarget {
         let invalid =
             |reason: String| format!("invalid {label} '{trimmed}' for {}: {reason}", self.name);
         let total = total_label(field);
-        let is_position = total.is_some();
         if let Some(total_label) = total {
             if trimmed.contains('/') {
                 return Err(invalid(format!(
@@ -138,42 +139,33 @@ impl TagTarget {
                 )));
             }
         }
-        if is_position && is_side_label(trimmed) {
-            if self.keeps_labels {
+        let keeps_label = total.is_some() && self.keeps_labels;
+        let max = self.max_number;
+        if !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+            if keeps_label {
                 return Ok(());
             }
+            if total.is_some() && trimmed.chars().any(char::is_alphabetic) {
+                return Err(invalid(format!(
+                    "it stores only whole numbers, so use one from 1 to {max}, or leave it empty"
+                )));
+            }
             return Err(invalid(format!(
-                "it stores only whole numbers, so use one from 1 to {}, or leave it empty",
-                self.max_number
+                "use a whole number from 1 to {max}, or leave it empty"
             )));
-        }
-        let forms = if is_position && self.keeps_labels {
-            format!(
-                "use a whole number from 1 to {}, a label such as A1, or leave it empty",
-                self.max_number
-            )
-        } else {
-            format!(
-                "use a whole number from 1 to {}, or leave it empty",
-                self.max_number
-            )
-        };
-        if !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(invalid(forms));
         }
         // All digits, so the only parse failure is a number above `u32::MAX`.
         match trimmed.parse::<u32>() {
-            Ok(number) if (1..=self.max_number).contains(&number) => Ok(()),
-            _ => Err(invalid(forms)),
+            Ok(number) if (1..=max).contains(&number) => Ok(()),
+            _ if keeps_label => Err(invalid(format!(
+                "a number must be from 1 to {max}; any other label, such as A1 or Side A, \
+                 is stored as typed"
+            ))),
+            _ => Err(invalid(format!(
+                "use a whole number from 1 to {max}, or leave it empty"
+            ))),
         }
     }
-}
-
-/// Whether `text` is a vinyl-style position such as `A`, `A1`, or `AA12`:
-/// ASCII letters, then optionally digits.
-fn is_side_label(text: &str) -> bool {
-    let digits = text.trim_start_matches(|c: char| c.is_ascii_alphabetic());
-    digits.len() < text.len() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// The field's name in the tag editor.
@@ -442,22 +434,16 @@ mod tests {
                 assert_eq!(vorbis.validated_number(field, value), Ok(()), "{value}");
             }
             assert_eq!(mp4.validated_number(field, "65535"), Ok(()));
-            for value in [
-                "0",
-                "00",
-                "-1",
-                "+5",
-                "1.5",
-                "1 2",
-                "5x",
-                "A-1",
-                "4294967296",
-            ] {
-                let error = vorbis.validated_number(field, value).expect_err(value);
-                assert!(
-                    error.ends_with("4294967295, or leave it empty")
-                        || error.ends_with("4294967295, a label such as A1, or leave it empty"),
-                    "{error}"
+            // Values with letters are covered with the labels below.
+            for value in ["0", "00", "-1", "+5", "1.5", "1 2", "4294967296"] {
+                assert_eq!(
+                    mp4.validated_number(field, value),
+                    Err(format!(
+                        "invalid {} '{value}' for MP4: use a whole number from 1 to 65535, or \
+                         leave it empty",
+                        number_label(field)
+                    )),
+                    "{value}"
                 );
             }
             let error = mp4.validated_number(field, "65536").expect_err("too large");
@@ -469,23 +455,30 @@ mod tests {
                 )
             );
         }
+        // An all-digit track or disc in Vorbis comments is still a number.
+        for field in [TagField::TrackNo, TagField::DiscNo] {
+            for value in ["0", "00", "4294967296"] {
+                assert_eq!(
+                    vorbis.validated_number(field, value),
+                    Err(format!(
+                        "invalid {} '{value}' for Vorbis comments: a number must be from 1 to \
+                         4294967295; any other label, such as A1 or Side A, is stored as typed",
+                        number_label(field)
+                    ))
+                );
+            }
+        }
     }
 
     #[test]
-    fn only_vorbis_comments_keep_track_and_disc_labels() {
+    fn vorbis_comments_keep_any_track_and_disc_label() {
         let vorbis = TagTarget::for_tag(TagType::VorbisComments, false);
         for field in [TagField::TrackNo, TagField::DiscNo] {
-            for value in ["A", "A1", " B2 ", "b12", "AA1"] {
+            for value in [
+                "A", "A1", " B2 ", "b12", "AA1", "A-1", "1A", "A3a", "Side A", "CD1", "1.5", "-1",
+            ] {
                 assert_eq!(vorbis.validated_number(field, value), Ok(()), "{value}");
             }
-            assert_eq!(
-                vorbis.validated_number(field, "1A"),
-                Err(format!(
-                    "invalid {} '1A' for Vorbis comments: use a whole number from 1 to \
-                     4294967295, a label such as A1, or leave it empty",
-                    number_label(field)
-                ))
-            );
         }
         let mut targets = [
             (TagType::Id3v2, false),
@@ -497,25 +490,29 @@ mod tests {
         .to_vec();
         targets.push(TagTarget::RAW_APEV2);
         for target in targets {
-            assert_eq!(
-                target.validated_number(TagField::TrackNo, "A1"),
-                Err(format!(
-                    "invalid Track 'A1' for {}: it stores only whole numbers, so use one from \
-                     1 to {}, or leave it empty",
-                    target.name, target.max_number
-                ))
-            );
+            for value in ["A1", "A-1", "Side A"] {
+                assert_eq!(
+                    target.validated_number(TagField::TrackNo, value),
+                    Err(format!(
+                        "invalid Track '{value}' for {}: it stores only whole numbers, so use \
+                         one from 1 to {}, or leave it empty",
+                        target.name, target.max_number
+                    ))
+                );
+            }
         }
         // A total counts tracks or discs, so it is a number in every tag.
         for field in [TagField::TotalTracks, TagField::TotalDiscs] {
-            assert_eq!(
-                vorbis.validated_number(field, "B"),
-                Err(format!(
-                    "invalid {} 'B' for Vorbis comments: use a whole number from 1 to \
-                     4294967295, or leave it empty",
-                    number_label(field)
-                ))
-            );
+            for value in ["B", "A-1", "1.5"] {
+                assert_eq!(
+                    vorbis.validated_number(field, value),
+                    Err(format!(
+                        "invalid {} '{value}' for Vorbis comments: use a whole number from 1 \
+                         to 4294967295, or leave it empty",
+                        number_label(field)
+                    ))
+                );
+            }
         }
     }
 
@@ -536,5 +533,14 @@ mod tests {
             .validated_number(TagField::TotalTracks, "3/12")
             .expect_err("total with a slash");
         assert!(error.contains("use a whole number"), "{error}");
+        let vorbis = TagTarget::for_tag(TagType::VorbisComments, false);
+        assert_eq!(
+            vorbis.validated_number(TagField::TrackNo, "A/1"),
+            Err(
+                "invalid Track 'A/1' for Vorbis comments: enter only the track number here and \
+                 the total under Tracks"
+                    .to_string()
+            )
+        );
     }
 }
