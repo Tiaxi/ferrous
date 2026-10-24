@@ -1316,6 +1316,30 @@ mod tests {
     }
 
     #[test]
+    fn raw_surround_total_edits_keep_the_number() {
+        let dir = test_dir("raw-totals");
+        let path = dir.join("song.ac3");
+        crate::raw_audio::write_test_apev2_file(&path, &[("Track", "3"), ("Disc", "1/2")], true);
+
+        let mut row = load_one(&path);
+        row.total_tracks = "12".to_string();
+        row.total_discs = "3".to_string();
+        assert_saved(&save_json(&[edited(&row, &["totalTracks", "totalDiscs"])]));
+
+        let reloaded = load_one(&path);
+        assert_eq!(
+            [
+                reloaded.track_no,
+                reloaded.total_tracks,
+                reloaded.disc_no,
+                reloaded.total_discs
+            ],
+            ["03", "12", "1", "3"]
+        );
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
     fn loading_reports_unreadable_files_and_keeps_the_rest() {
         let dir = test_dir("load-failures");
         let good = flac_with_full_date(&dir);
