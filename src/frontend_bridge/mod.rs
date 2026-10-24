@@ -2651,6 +2651,58 @@ mod tests {
 
     #[cfg(not(feature = "gst"))]
     #[test]
+    fn bridge_reports_each_play_of_a_repeated_or_duplicated_file() {
+        let _guard = test_guard();
+        let bridge = FrontendBridgeHandle::spawn();
+        let track = p("/tmp/ferrous_repeat_case.flac");
+        let poll_for = |predicate: &dyn Fn(&BridgeSnapshot) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                bridge.command(BridgeCommand::RequestSnapshot);
+                if let Some(snapshot) =
+                    wait_for_snapshot_matching(&bridge, Duration::from_millis(200), predicate)
+                {
+                    return snapshot;
+                }
+            }
+            panic!("no matching snapshot");
+        };
+        bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
+            tracks: vec![track.clone(), track.clone()],
+            autoplay: true,
+        }));
+        let first = poll_for(&|s| {
+            s.queue.len() == 2
+                && s.playback.current.as_ref() == Some(&track)
+                && s.playback.state == crate::playback::PlaybackState::Playing
+        });
+        assert_eq!(first.playback.current_queue_index, Some(0));
+
+        bridge.command(BridgeCommand::Playback(
+            BridgePlaybackCommand::SetRepeatMode(RepeatMode::One),
+        ));
+        bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
+            Duration::from_secs(180),
+        )));
+        let replay = poll_for(&|s| s.playback.track_token > first.playback.track_token);
+        assert_eq!(replay.playback.current_queue_index, Some(0));
+        assert_eq!(replay.playback.current.as_ref(), Some(&track));
+
+        bridge.command(BridgeCommand::Playback(
+            BridgePlaybackCommand::SetRepeatMode(RepeatMode::Off),
+        ));
+        bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
+            Duration::from_secs(180),
+        )));
+        let second_row = poll_for(&|s| s.playback.track_token > replay.playback.track_token);
+        assert_eq!(second_row.playback.current_queue_index, Some(1));
+        assert_eq!(second_row.playback.current.as_ref(), Some(&track));
+
+        bridge.command(BridgeCommand::Shutdown);
+    }
+
+    #[cfg(not(feature = "gst"))]
+    #[test]
     fn bridge_natural_handoff_keeps_old_metadata_until_new_metadata_arrives() {
         let _guard = test_guard();
         let bridge = FrontendBridgeHandle::spawn_with_metadata_delay(Duration::from_secs(2));

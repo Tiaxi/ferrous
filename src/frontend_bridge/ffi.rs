@@ -2572,6 +2572,7 @@ mod tests {
                 shuffle_enabled: false,
                 muted_channels_mask: 0,
                 soloed_channel: None,
+                track_token: 7,
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
