@@ -15,8 +15,10 @@
 //! - The owner and group, where the process may set them. Only root may give
 //!   a file to another user, so in a shared, group-writable folder the owner
 //!   becomes the user who saves. The group is still kept when that user
-//!   belongs to it, so the other members can keep editing the file. The save
-//!   goes ahead either way.
+//!   belongs to it, so the other members can keep editing the file. Network
+//!   and FUSE file systems may refuse either change, or not support it, with
+//!   various errors. The save goes ahead regardless, with the owner and group
+//!   the copy got.
 //! - Every `user.*` extended attribute and the POSIX access ACL
 //!   (`system.posix_acl_access`). The save is refused, naming the attribute,
 //!   when one of them cannot be copied. `security.*` attributes are left to
@@ -25,7 +27,10 @@
 //!   specific attributes are not copied either.
 //! - The permissions, including those the access ACL grants. The ACL sets
 //!   the group permission bits, so it is applied after the mode, and the save
-//!   is refused when the result differs from the original.
+//!   is refused when the result differs from the original. Some file systems,
+//!   such as NTFS-3G, report an ACL built from the mode for a file without
+//!   one. Such a minimal ACL, with only owner, group, and other entries, says
+//!   no more than the mode and counts as no ACL.
 //!
 //! The replaced path gets a new inode. Other hard links to the file keep its
 //! previous contents, and the edited path splits off from them. Hard links
@@ -165,6 +170,31 @@ pub(crate) fn check_rewritable(path: &Path) -> Result<(), String> {
     TempSibling::create_private(&writable.target).map(drop)
 }
 
+/// The calls that carry metadata over whose outcome depends on the file
+/// system. Tests stand in for file systems they cannot mount.
+trait MetadataCalls {
+    fn chown(&self, file: &File, uid: Option<u32>, gid: Option<u32>) -> io::Result<()> {
+        fchown(file, uid, gid)
+    }
+
+    fn access_acl(&self, file: &File) -> io::Result<Option<Vec<u8>>> {
+        xattr::get(file, ACCESS_ACL)
+    }
+
+    fn set_access_acl(&self, file: &File, acl: &[u8]) -> io::Result<()> {
+        xattr::set(file, ACCESS_ACL, acl)
+    }
+
+    fn remove_access_acl(&self, file: &File) -> io::Result<()> {
+        xattr::remove(file, ACCESS_ACL)
+    }
+}
+
+/// The calls as the system makes them.
+struct System;
+
+impl MetadataCalls for System {}
+
 /// An existing file opened the way a rewrite needs it.
 struct Writable {
     /// `path` with links resolved.
@@ -185,7 +215,7 @@ impl Writable {
             .write(true)
             .open(&target)
             .map_err(|err| format!("failed to open {} for writing: {err}", target.display()))?;
-        let metadata = KeptMetadata::read(&original, &target)?;
+        let metadata = KeptMetadata::read(&original, &target, &System)?;
         Ok(Self {
             target,
             original,
@@ -200,12 +230,14 @@ struct KeptMetadata {
     mode: u32,
     uid: u32,
     gid: u32,
-    /// The copied extended attributes, as names and values.
+    /// The copied `user.*` extended attributes, as names and values.
     xattrs: Vec<(CString, Vec<u8>)>,
+    /// The access ACL, when it grants more than the mode.
+    access_acl: Option<Vec<u8>>,
 }
 
 impl KeptMetadata {
-    fn read(file: &File, path: &Path) -> Result<Self, String> {
+    fn read(file: &File, path: &Path, calls: &impl MetadataCalls) -> Result<Self, String> {
         let metadata = file
             .metadata()
             .map_err(|err| format!("failed to read metadata for {}: {err}", path.display()))?;
@@ -229,24 +261,21 @@ impl KeptMetadata {
                 xattrs.push((name, value));
             }
         }
+        // Read by name, because some file systems that build the ACL from
+        // the mode leave it out of the list.
+        let access_acl = read_access_acl(file, path, calls)?;
         Ok(Self {
             mode: metadata.mode() & 0o7777,
             uid: metadata.uid(),
             gid: metadata.gid(),
             xattrs,
+            access_acl,
         })
     }
 
-    fn access_acl(&self) -> Option<&[u8]> {
-        self.xattrs
-            .iter()
-            .find(|(name, _)| name.as_c_str() == ACCESS_ACL)
-            .map(|(_, value)| value.as_slice())
-    }
-
     /// Give `copy` this metadata before it replaces `target`.
-    fn apply(&self, copy: &File, target: &Path) -> Result<(), String> {
-        keep_owner(copy, self.uid, self.gid).map_err(|err| {
+    fn apply(&self, copy: &File, target: &Path, calls: &impl MetadataCalls) -> Result<(), String> {
+        keep_owner(copy, self.uid, self.gid, calls).map_err(|err| {
             format!(
                 "failed to keep the owner and group of {}: {err}",
                 target.display()
@@ -255,9 +284,7 @@ impl KeptMetadata {
         // Writing attributes needs write access, which the owner-only mode
         // the copy has until now grants.
         for (name, value) in &self.xattrs {
-            if name.as_c_str() != ACCESS_ACL {
-                xattr::set(copy, name, value).map_err(|err| xattr_error(name, target, &err))?;
-            }
+            xattr::set(copy, name, value).map_err(|err| xattr_error(name, target, &err))?;
         }
         copy.set_permissions(Permissions::from_mode(self.mode))
             .map_err(|err| {
@@ -269,16 +296,24 @@ impl KeptMetadata {
         // The access ACL sets the group permission bits from its mask, so it
         // comes after the mode. Without one the copy may still have an ACL
         // that a default ACL of the directory gave it.
-        match self.access_acl() {
-            Some(acl) => xattr::set(copy, ACCESS_ACL, acl),
-            None => xattr::remove(copy, ACCESS_ACL),
+        match &self.access_acl {
+            Some(acl) => calls.set_access_acl(copy, acl),
+            None if read_access_acl(copy, target, calls)?.is_some() => {
+                calls.remove_access_acl(copy)
+            }
+            None => Ok(()),
         }
         .map_err(|err| xattr_error(ACCESS_ACL, target, &err))?;
-        self.check_permissions(copy, target)
+        self.check_permissions(copy, target, calls)
     }
 
     /// Confirm that `copy` grants exactly what the original did.
-    fn check_permissions(&self, copy: &File, target: &Path) -> Result<(), String> {
+    fn check_permissions(
+        &self,
+        copy: &File,
+        target: &Path,
+        calls: &impl MetadataCalls,
+    ) -> Result<(), String> {
         let mode = copy
             .metadata()
             .map_err(|err| format!("failed to read metadata for {}: {err}", target.display()))?
@@ -291,13 +326,7 @@ impl KeptMetadata {
                 self.mode
             ));
         }
-        let acl = xattr::get(copy, ACCESS_ACL).map_err(|err| {
-            format!(
-                "failed to read the access control list of {}: {err}",
-                target.display()
-            )
-        })?;
-        if acl.as_deref() != self.access_acl() {
+        if read_access_acl(copy, target, calls)? != self.access_acl {
             return Err(format!(
                 "failed to keep the access control list of {}",
                 target.display()
@@ -307,10 +336,49 @@ impl KeptMetadata {
     }
 }
 
-/// Whether a replacement copies the extended attribute `name`; see the
-/// module docs for those it leaves out.
+/// Whether a replacement copies the extended attribute `name` along with
+/// the other `user.*` attributes. The access ACL is handled on its own, and
+/// the module docs list the attributes left out.
 fn is_copied(name: &CStr) -> bool {
-    name.to_bytes().starts_with(b"user.") || name == ACCESS_ACL
+    name.to_bytes().starts_with(b"user.")
+}
+
+/// The access ACL of `file`, the one at `path`, when it grants more than the
+/// mode.
+fn read_access_acl(
+    file: &File,
+    path: &Path,
+    calls: &impl MetadataCalls,
+) -> Result<Option<Vec<u8>>, String> {
+    let acl = calls.access_acl(file).map_err(|err| {
+        format!(
+            "failed to read the access control list of {}: {err}",
+            path.display()
+        )
+    })?;
+    Ok(acl.filter(|acl| !is_minimal_acl(acl)))
+}
+
+/// Whether `acl`, in the kernel's `system.posix_acl_*` encoding, has only
+/// the owner, group, and other entries that mirror the mode. The kernel
+/// stores no such ACL, but some file systems report one for every file.
+fn is_minimal_acl(acl: &[u8]) -> bool {
+    const VERSION: [u8; 4] = 2u32.to_le_bytes();
+    const ENTRY_SIZE: usize = 8;
+    const USER_OBJ: u16 = 0x01;
+    const GROUP_OBJ: u16 = 0x04;
+    const OTHER: u16 = 0x20;
+    let Some((version, entries)) = acl.split_first_chunk::<4>() else {
+        return false;
+    };
+    *version == VERSION
+        && entries.len() % ENTRY_SIZE == 0
+        && entries.chunks_exact(ENTRY_SIZE).all(|entry| {
+            matches!(
+                u16::from_le_bytes([entry[0], entry[1]]),
+                USER_OBJ | GROUP_OBJ | OTHER
+            )
+        })
 }
 
 fn xattr_error(name: &CStr, target: &Path, err: &io::Error) -> String {
@@ -325,30 +393,22 @@ fn xattr_error(name: &CStr, target: &Path, err: &io::Error) -> String {
 ///
 /// Only a privileged process may give a file to another user, so the owner
 /// can stay the process's user. The group is then still kept when the user
-/// belongs to it. Either refusal leaves the copy usable and is not an error.
-fn keep_owner(copy: &File, uid: u32, gid: u32) -> io::Result<()> {
+/// belongs to it. A failed change leaves the copy usable and is not an error,
+/// whatever the reason: `EPERM` locally, `EINVAL` for IDs a user namespace
+/// such as a Flatpak sandbox does not map, `EACCES` from an SMB server that
+/// wants `WRITE_OWNER` even for a group change, and `ENOTSUP` or `ENOSYS`
+/// from FUSE and network file systems without ownership. An I/O error shows
+/// again when the copy is flushed.
+fn keep_owner(copy: &File, uid: u32, gid: u32, calls: &impl MetadataCalls) -> io::Result<()> {
     let current = copy.metadata()?;
     if current.uid() == uid && current.gid() == gid {
         return Ok(());
     }
-    match fchown(copy, Some(uid), Some(gid)) {
-        Err(err) if is_not_permitted(&err) => {}
-        result => return result,
+    if calls.chown(copy, Some(uid), Some(gid)).is_err() && current.gid() != gid {
+        // The copy keeps the group it got when this is refused too.
+        let _ = calls.chown(copy, None, Some(gid));
     }
-    if current.gid() == gid {
-        return Ok(());
-    }
-    match fchown(copy, None, Some(gid)) {
-        Err(err) if is_not_permitted(&err) => Ok(()),
-        result => result,
-    }
-}
-
-/// Whether `err` refuses an ownership change the process may not make. In a
-/// user namespace, such as a Flatpak sandbox, IDs from outside it are
-/// invalid there (`EINVAL`) rather than forbidden.
-fn is_not_permitted(err: &io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(libc::EPERM | libc::EINVAL))
+    Ok(())
 }
 
 /// A new file next to the target that is removed unless persisted.
@@ -418,7 +478,7 @@ impl TempSibling {
     /// file it replaces if given.
     fn commit(mut self, target: &Path, replaced: Option<&KeptMetadata>) -> Result<(), String> {
         if let Some(replaced) = replaced {
-            replaced.apply(&self.file, target)?;
+            replaced.apply(&self.file, target, &System)?;
         }
         self.file
             .sync_all()
@@ -452,6 +512,8 @@ impl Drop for TempSibling {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::io::{Read, Write};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -762,12 +824,191 @@ mod tests {
             );
         }
 
-        keep_owner(&copy, own + 1, group).expect("keep owner");
+        keep_owner(&copy, own + 1, group, &System).expect("keep owner");
 
         let metadata = copy.metadata().expect("metadata");
         assert_eq!(metadata.uid(), own);
         assert_eq!(metadata.gid(), group);
         fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    /// Refuses every ownership change the way an SMB server does that wants
+    /// `WRITE_OWNER` for it, and records the attempts.
+    #[derive(Default)]
+    struct RefusingChown {
+        attempts: RefCell<Vec<(Option<u32>, Option<u32>)>>,
+    }
+
+    impl MetadataCalls for RefusingChown {
+        fn chown(&self, _file: &File, uid: Option<u32>, gid: Option<u32>) -> io::Result<()> {
+            self.attempts.borrow_mut().push((uid, gid));
+            Err(io::Error::from_raw_os_error(libc::EACCES))
+        }
+    }
+
+    #[test]
+    fn refused_ownership_changes_do_not_stop_the_save() {
+        let dir = test_dir("refused-owner");
+        let path = dir.join("song.flac");
+        let copy = File::create(&path).expect("create copy");
+        let current = copy.metadata().expect("metadata");
+        let (uid, gid) = (current.uid() + 1, current.gid() + 1);
+        let kept = KeptMetadata {
+            mode: 0o640,
+            uid,
+            gid,
+            xattrs: Vec::new(),
+            access_acl: None,
+        };
+        let calls = RefusingChown::default();
+
+        kept.apply(&copy, &path, &calls).expect("apply metadata");
+
+        assert_eq!(
+            *calls.attempts.borrow(),
+            vec![(Some(uid), Some(gid)), (None, Some(gid))]
+        );
+        let metadata = copy.metadata().expect("metadata");
+        assert_eq!(
+            (metadata.uid(), metadata.gid()),
+            (current.uid(), current.gid())
+        );
+        assert_eq!(metadata.mode() & 0o7777, 0o640);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    /// A minimal ACL in the kernel's encoding that mirrors `mode`.
+    fn minimal_acl(mode: u32) -> Vec<u8> {
+        const UNDEFINED_ID: u32 = u32::MAX;
+        let mut value = 2u32.to_le_bytes().to_vec();
+        for (tag, shift) in [(0x01u16, 6), (0x04, 3), (0x20, 0)] {
+            let perm = u16::try_from((mode >> shift) & 0o7).expect("permission bits");
+            value.extend_from_slice(&tag.to_le_bytes());
+            value.extend_from_slice(&perm.to_le_bytes());
+            value.extend_from_slice(&UNDEFINED_ID.to_le_bytes());
+        }
+        value
+    }
+
+    /// Stands in for NTFS-3G with ACL support: a file without an ACL of its
+    /// own reports one built from its mode. `silent` names a file that
+    /// reports no ACL instead, and `drops_acls` makes set ACLs vanish.
+    #[derive(Default)]
+    struct SynthesizedAcls {
+        stored: RefCell<HashMap<u64, Vec<u8>>>,
+        silent: Option<u64>,
+        drops_acls: bool,
+    }
+
+    impl MetadataCalls for SynthesizedAcls {
+        fn access_acl(&self, file: &File) -> io::Result<Option<Vec<u8>>> {
+            let metadata = file.metadata()?;
+            if let Some(acl) = self.stored.borrow().get(&metadata.ino()) {
+                return Ok(Some(acl.clone()));
+            }
+            Ok((self.silent != Some(metadata.ino())).then(|| minimal_acl(metadata.mode())))
+        }
+
+        fn set_access_acl(&self, file: &File, acl: &[u8]) -> io::Result<()> {
+            if !self.drops_acls {
+                let ino = file.metadata()?.ino();
+                self.stored.borrow_mut().insert(ino, acl.to_vec());
+            }
+            Ok(())
+        }
+
+        fn remove_access_acl(&self, file: &File) -> io::Result<()> {
+            let ino = file.metadata()?.ino();
+            self.stored.borrow_mut().remove(&ino);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn acl_built_from_the_mode_matches_no_acl() {
+        let dir = test_dir("synthesized-acl");
+        let path = dir.join("song.flac");
+        fs::write(&path, b"original").expect("write original");
+        fs::set_permissions(&path, Permissions::from_mode(0o640)).expect("chmod");
+        let original = File::open(&path).expect("open original");
+        let copy = TempSibling::create_private(&path).expect("create copy");
+        let inodes = [
+            original.metadata().expect("metadata").ino(),
+            copy.file.metadata().expect("metadata").ino(),
+        ];
+
+        // Both files report a minimal ACL, or only one of them does.
+        for silent in [None, Some(inodes[0]), Some(inodes[1])] {
+            let calls = SynthesizedAcls {
+                silent,
+                ..SynthesizedAcls::default()
+            };
+            copy.file
+                .set_permissions(Permissions::from_mode(0o600))
+                .expect("chmod copy");
+            let kept = KeptMetadata::read(&original, &path, &calls).expect("read metadata");
+            assert_eq!(kept.access_acl, None, "silent {silent:?}");
+
+            kept.apply(&copy.file, &path, &calls)
+                .unwrap_or_else(|err| panic!("silent {silent:?}: {err}"));
+            assert_eq!(mode_of(&copy.path), 0o640);
+        }
+        drop(copy);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn extended_acl_is_kept_and_checked_exactly_where_acls_are_built() {
+        let dir = test_dir("synthesized-extended-acl");
+        let path = dir.join("song.flac");
+        fs::write(&path, b"original").expect("write original");
+        fs::set_permissions(&path, Permissions::from_mode(0o660)).expect("chmod");
+        let original = File::open(&path).expect("open original");
+        let metadata = original.metadata().expect("metadata");
+        let acl = acl_value(metadata.uid());
+
+        for drops_acls in [false, true] {
+            let calls = SynthesizedAcls {
+                drops_acls,
+                ..SynthesizedAcls::default()
+            };
+            calls
+                .stored
+                .borrow_mut()
+                .insert(metadata.ino(), acl.clone());
+            let kept = KeptMetadata::read(&original, &path, &calls).expect("read metadata");
+            assert_eq!(kept.access_acl.as_ref(), Some(&acl));
+            let copy = TempSibling::create_private(&path).expect("create copy");
+
+            let result = kept.apply(&copy.file, &path, &calls);
+
+            if drops_acls {
+                let error = result.expect_err("a lost ACL refuses the save");
+                assert!(error.contains("access control list"), "{error}");
+            } else {
+                result.expect("apply metadata");
+                let ino = copy.file.metadata().expect("metadata").ino();
+                assert_eq!(calls.stored.borrow().get(&ino), Some(&acl));
+            }
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn only_minimal_acls_count_as_none() {
+        assert!(is_minimal_acl(&minimal_acl(0o640)));
+        assert!(!is_minimal_acl(&acl_value(1000)));
+        // A mask without named entries still comes from an ACL of its own.
+        let mut masked = minimal_acl(0o640);
+        masked.extend_from_slice(&0x10u16.to_le_bytes());
+        masked.extend_from_slice(&4u16.to_le_bytes());
+        masked.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(!is_minimal_acl(&masked));
+        // Values in an unknown encoding are compared exactly.
+        let mut other_version = minimal_acl(0o640);
+        other_version[0] = 3;
+        assert!(!is_minimal_acl(&other_version));
+        assert!(!is_minimal_acl(&[]));
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub(super) fn remove(file: &File, name: &CStr) -> io::Result<()> {
 }
 
 /// Run a call that fills a buffer and returns how much it used: first to
-/// learn the size, then to read, again when the value grew in between.
+/// learn the size, then to read, and again when the value grew in between.
 /// Returns `None` when the attribute or attribute support is missing.
 fn read_sized(mut call: impl FnMut(&mut [u8]) -> io::Result<usize>) -> io::Result<Option<Vec<u8>>> {
     loop {
@@ -52,10 +52,13 @@ fn read_sized(mut call: impl FnMut(&mut [u8]) -> io::Result<usize>) -> io::Resul
         };
         let mut buffer = vec![0; size];
         match call(&mut buffer) {
-            Ok(used) => {
+            Ok(used) if used <= buffer.len() => {
                 buffer.truncate(used);
                 return Ok(Some(buffer));
             }
+            // A value that grew from empty is measured again, not read: with
+            // an empty buffer the call only reports the size.
+            Ok(_) => {}
             Err(err) if err.raw_os_error() == Some(libc::ERANGE) => {}
             Err(err) if is_missing(&err) => return Ok(None),
             Err(err) => return Err(err),
@@ -154,5 +157,32 @@ mod platform {
 
     pub(super) fn remove(_file: &File, _name: &CStr) -> io::Result<()> {
         Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_that_grows_from_empty_is_read_again() {
+        // The value is empty when measured and has grown to `keep` by the
+        // read, which the empty buffer turns into another measurement.
+        let mut calls = 0;
+        let value = read_sized(|buffer| {
+            calls += 1;
+            match calls {
+                1 => Ok(0),
+                2 | 3 => Ok(4),
+                _ => {
+                    buffer.copy_from_slice(b"keep");
+                    Ok(4)
+                }
+            }
+        })
+        .expect("read value");
+
+        assert_eq!(value, Some(b"keep".to_vec()));
+        assert_eq!(calls, 4);
     }
 }
