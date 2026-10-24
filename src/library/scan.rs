@@ -18,11 +18,11 @@ use walkdir::WalkDir;
 
 use crate::folder_cover::find_folder_cover;
 use crate::metadata::EmbeddedCoverCache;
+use crate::no_replace::rename_no_replace;
 use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, read_appended_apev2_text_metadata,
 };
 
-use super::no_replace::rename_no_replace;
 use super::schema::{
     init_schema, load_roots, load_snapshot, normalize_root_name, open_library_db, u128_to_i64,
     u64_to_i64, usize_to_f32,
