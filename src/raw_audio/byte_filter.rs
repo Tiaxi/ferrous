@@ -303,6 +303,7 @@ mod tests {
 #[cfg(all(test, feature = "gst"))]
 mod gst_tests {
     use super::install_raw_surround_source_probe;
+    use crate::playback::pipeline_trace::PipelineTrace;
     use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes, test_path};
     use crate::raw_audio::{TEST_AC3, TEST_DTS};
     use gst::prelude::*;
@@ -380,6 +381,7 @@ mod gst_tests {
         playbin: gst::Element,
         decoded: Arc<Mutex<Vec<(Duration, Duration)>>>,
         delivered: Arc<Mutex<Vec<Delivered>>>,
+        trace: PipelineTrace,
     }
 
     impl Player {
@@ -391,6 +393,7 @@ mod gst_tests {
                 .expect("playbin3");
             install_raw_surround_source_probe(&playbin);
             let player = Self {
+                trace: PipelineTrace::new(&playbin),
                 playbin,
                 decoded: Arc::default(),
                 delivered: Arc::default(),
@@ -473,11 +476,22 @@ mod gst_tests {
                     gst::ClockTime::from_seconds(10),
                     &[wanted, gst::MessageType::Error],
                 )
-                .ok_or_else(|| format!("timed out waiting for {wanted:?}"))?;
+                .ok_or_else(|| self.report(&format!("timed out waiting for {wanted:?}")))?;
             match message.view() {
                 gst::MessageView::Error(err) => Err(format!("{} ({:?})", err.error(), err.debug())),
                 _ => Ok(()),
             }
+        }
+
+        /// Describe what the player recorded and what its pipeline does,
+        /// for a wait for `what` that timed out.
+        fn report(&self, what: &str) -> String {
+            let decoded = self.decoded.lock().map_or(0, |decoded| decoded.len());
+            let delivered = self.delivered.lock().map_or(0, |delivered| delivered.len());
+            let details = format!(
+                "  since the last seek: {decoded} buffers decoded, {delivered} left the sources\n"
+            );
+            self.trace.report(what, &details)
         }
 
         fn clear(&self) {

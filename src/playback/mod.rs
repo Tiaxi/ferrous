@@ -1227,6 +1227,8 @@ mod tests {
     }
 }
 
+#[cfg(all(test, feature = "gst"))]
+pub(crate) mod pipeline_trace;
 mod queue;
 
 #[cfg(not(feature = "gst"))]

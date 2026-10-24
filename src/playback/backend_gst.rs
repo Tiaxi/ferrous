@@ -4088,6 +4088,7 @@ mod gst_integration_tests {
 #[cfg(all(test, feature = "gst"))]
 mod engine_tests {
     use super::*;
+    use crate::playback::pipeline_trace::PipelineTrace;
     use crate::playback::PathRenames;
 
     const TIMEOUT: Duration = Duration::from_secs(10);
@@ -4351,169 +4352,43 @@ mod engine_tests {
             .build()?)
     }
 
-    /// Bus messages that a report lists.
-    const TRACED_MESSAGES: usize = 24;
-    /// How long a report waits for the pipeline to answer its queries.
-    const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
-
-    /// Records what the pipeline of a test does, to report it when a wait
-    /// times out.
+    /// Records what the pipeline of a test does, to report it with the
+    /// engine's state when a wait times out.
     struct Trace {
-        started: Instant,
-        playbin: gst::Element,
+        pipeline: PipelineTrace,
         queue: Arc<Mutex<GaplessQueue>>,
         about_to_finish: Arc<AboutToFinishCalls>,
-        /// The latest bus messages as they were posted, with the time since
-        /// the test started, without the state changes of the pipeline's
-        /// elements and the status of its streaming threads.
-        messages: Arc<Mutex<VecDeque<(Duration, gst::Message)>>>,
     }
 
     impl Trace {
         fn new(runtime: &GstPlaybackRuntime) -> Self {
-            let started = Instant::now();
-            let messages = Arc::new(Mutex::new(VecDeque::new()));
-            let bus = runtime.playbin.bus().unwrap();
-            bus.enable_sync_message_emission();
-            let log = Arc::clone(&messages);
-            let playbin = runtime.playbin.downgrade();
-            // Runs on the posting thread, so it only stores the message.
-            bus.connect_sync_message(None, move |_, message| {
-                let noise = match message.view() {
-                    gst::MessageView::StreamStatus(_) => true,
-                    gst::MessageView::StateChanged(_) => playbin
-                        .upgrade()
-                        .is_none_or(|playbin| message.src() != Some(playbin.upcast_ref())),
-                    _ => false,
-                };
-                if noise {
-                    return;
-                }
-                if let Ok(mut log) = log.lock() {
-                    if log.len() == TRACED_MESSAGES {
-                        log.pop_front();
-                    }
-                    log.push_back((started.elapsed(), message.clone()));
-                }
-            });
             Self {
-                started,
-                playbin: runtime.playbin.clone(),
+                pipeline: PipelineTrace::new(&runtime.playbin),
                 queue: Arc::clone(&runtime.queue_state),
                 about_to_finish: Arc::clone(&runtime.about_to_finish),
-                messages,
             }
         }
 
         /// Report `what` the test waited for, `engine`, a description of
-        /// the engine, and what the pipeline does. The pipeline is queried
-        /// on another thread, so a pipeline that blocks is reported too.
+        /// the engine, the queue, and what the pipeline does.
         fn report(&self, what: &str, engine: &str) -> String {
-            let (tx, rx) = bounded(1);
-            let playbin = self.playbin.clone();
-            let messages = Arc::clone(&self.messages);
-            let queue = Arc::clone(&self.queue);
-            std::thread::spawn(move || {
-                let _ = tx.send(pipeline_report(&playbin, &messages, &queue));
-            });
-            let pipeline = rx.recv_timeout(REPORT_TIMEOUT).unwrap_or_else(|_| {
-                format!("the pipeline did not answer its queries within {REPORT_TIMEOUT:?}")
-            });
-            format!(
-                "{what}\n  waited until {:.3} s after the test started\n  \
-                 about-to-finish: emitted {} times, the handler returned {} times\n\
-                 {engine}{pipeline}",
-                self.started.elapsed().as_secs_f64(),
+            let queue = match self.queue.try_lock() {
+                Ok(queue) => format!(
+                    "free, current row {:?}, successor handed to the pipeline: {}",
+                    queue.current_index(),
+                    queue.successor_handed_to_pipeline()
+                ),
+                Err(std::sync::TryLockError::WouldBlock) => "held".to_string(),
+                Err(std::sync::TryLockError::Poisoned(_)) => "poisoned".to_string(),
+            };
+            let details = format!(
+                "  about-to-finish: emitted {} times, the handler returned {} times\n\
+                 {engine}  queue lock: {queue}\n",
                 self.about_to_finish.emitted.load(Ordering::SeqCst),
                 self.about_to_finish.returned.load(Ordering::SeqCst),
-            )
-        }
-    }
-
-    /// Describe the state of `playbin` and its elements, the queue, and the
-    /// latest bus `messages`.
-    fn pipeline_report(
-        playbin: &gst::Element,
-        messages: &Mutex<VecDeque<(Duration, gst::Message)>>,
-        queue: &Mutex<GaplessQueue>,
-    ) -> String {
-        use std::fmt::Write;
-
-        let mut report = String::new();
-        let (result, current, pending) = playbin.state(Some(gst::ClockTime::ZERO));
-        let _ = writeln!(
-            report,
-            "  pipeline: {current:?}, pending {pending:?} ({result:?}), position {:?}",
-            playbin.query_position::<gst::ClockTime>()
-        );
-        let queue = match queue.try_lock() {
-            Ok(queue) => format!(
-                "free, current row {:?}, successor handed to the pipeline: {}",
-                queue.current_index(),
-                queue.successor_handed_to_pipeline()
-            ),
-            Err(std::sync::TryLockError::WouldBlock) => "held".to_string(),
-            Err(std::sync::TryLockError::Poisoned(_)) => "poisoned".to_string(),
-        };
-        let _ = writeln!(report, "  queue lock: {queue}");
-        let unsettled: Vec<_> = playbin
-            .clone()
-            .downcast::<gst::Bin>()
-            .unwrap()
-            .iterate_recurse()
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter_map(|element| {
-                let (current, pending) = (element.current_state(), element.pending_state());
-                (pending != gst::State::VoidPending)
-                    .then(|| format!("{} {current:?} → {pending:?}", element.name()))
-            })
-            .collect();
-        let _ = writeln!(report, "  elements changing state: {unsettled:?}");
-        let _ = writeln!(report, "  latest bus messages:");
-        let messages: Vec<_> = messages
-            .lock()
-            .map(|log| log.clone())
-            .unwrap_or_default()
-            .into();
-        for (at, message) in messages {
-            let _ = writeln!(
-                report,
-                "    {:8.3} s {}",
-                at.as_secs_f64(),
-                describe_message(&message)
             );
+            self.pipeline.report(what, &details)
         }
-        report
-    }
-
-    fn describe_message(message: &gst::Message) -> String {
-        let detail = match message.view() {
-            gst::MessageView::StateChanged(change) => format!(
-                "{:?} → {:?}, pending {:?}",
-                change.old(),
-                change.current(),
-                change.pending()
-            ),
-            gst::MessageView::StreamStart(start) => format!("group {:?}", start.group_id()),
-            gst::MessageView::AsyncDone(done) => format!("running time {:?}", done.running_time()),
-            gst::MessageView::Error(error) => format!("{} ({:?})", error.error(), error.debug()),
-            gst::MessageView::Warning(warning) => {
-                format!("{} ({:?})", warning.error(), warning.debug())
-            }
-            gst::MessageView::Buffering(buffering) => format!("{} %", buffering.percent()),
-            _ => message
-                .structure()
-                .map(|structure| structure.name().to_string())
-                .unwrap_or_default(),
-        };
-        format!(
-            "{:?} from {}: {detail}",
-            message.type_(),
-            message
-                .src()
-                .map_or_else(|| "?".to_string(), |src| src.path_string().to_string())
-        )
     }
 
     #[derive(Debug, Clone)]
