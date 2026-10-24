@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -682,7 +683,7 @@ impl GstPlaybackRuntime {
 
     fn stop_with_empty_queue(&mut self) {
         self.mute();
-        let _ = self.playbin.set_state(gst::State::Ready);
+        let _ = self.set_pipeline_state(gst::State::Ready);
         self.begin_pipeline_run(false);
         self.startup_gain_ramp = false;
         self.startup_ramp_hold_until = None;
@@ -907,7 +908,7 @@ impl GstPlaybackRuntime {
             self.emit_snapshot();
             return;
         }
-        if self.playbin.set_state(gst::State::Playing).is_ok() {
+        if self.set_pipeline_state(gst::State::Playing).is_ok() {
             let now = Instant::now();
             self.playing_state_requested_at = Some(now);
             self.position_clock.reset(self.snapshot.position, now);
@@ -936,7 +937,7 @@ impl GstPlaybackRuntime {
             return;
         }
         self.playing_state_requested_at = None;
-        if self.playbin.set_state(gst::State::Paused).is_ok() {
+        if self.set_pipeline_state(gst::State::Paused).is_ok() {
             self.snapshot.state = PlaybackState::Paused;
             self.position_clock
                 .reset(self.snapshot.position, Instant::now());
@@ -947,7 +948,7 @@ impl GstPlaybackRuntime {
     fn stop(&mut self) {
         self.mute();
         self.playing_state_requested_at = None;
-        if self.playbin.set_state(gst::State::Ready).is_ok() {
+        if self.set_pipeline_state(gst::State::Ready).is_ok() {
             self.reset_channel_mute_state();
             self.enter_stopped();
             self.emit_snapshot();
@@ -1227,8 +1228,8 @@ impl GstPlaybackRuntime {
             return;
         };
         self.mute();
-        let _ = self.playbin.set_state(gst::State::Null);
-        let _ = self.playbin.set_state(gst::State::Ready);
+        let _ = self.set_pipeline_state(gst::State::Null);
+        let _ = self.set_pipeline_state(gst::State::Ready);
         // Also drops a successor staged while the old run was stopping.
         self.begin_pipeline_run(true);
         self.set_run_uri(&path, &uri);
@@ -1238,7 +1239,7 @@ impl GstPlaybackRuntime {
         self.playing_state_requested_at = Some(Instant::now());
         // A failure posts an error, which ends the restart.
         if matches!(
-            self.playbin.set_state(gst::State::Paused),
+            self.set_pipeline_state(gst::State::Paused),
             Ok(gst::StateChangeSuccess::Success | gst::StateChangeSuccess::NoPreroll)
         ) {
             // Prerolled at once, so no async-done follows.
@@ -1249,7 +1250,7 @@ impl GstPlaybackRuntime {
     /// Set the pipeline playing from silence, with the fade-in of a track
     /// start.
     fn start_playing_muted(&mut self) {
-        let _ = self.playbin.set_state(gst::State::Playing);
+        let _ = self.set_pipeline_state(gst::State::Playing);
         self.playing_state_requested_at = Some(Instant::now());
         self.applied_volume = 0.0;
         self.playbin.set_property("volume", 0.0_f64);
@@ -1288,6 +1289,15 @@ impl GstPlaybackRuntime {
         if let Ok(mut queue) = self.queue_state.lock() {
             queue.release_handoffs();
         }
+    }
+
+    /// Change the state of the pipeline, which activates the sources of a
+    /// new run; see `activate_sources`.
+    fn set_pipeline_state(
+        &self,
+        state: gst::State,
+    ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
+        activate_sources(|| self.playbin.set_state(state))
     }
 
     /// Give the stopped pipeline the current track at `path`, which starts
@@ -1705,8 +1715,8 @@ impl GstPlaybackRuntime {
     /// Tear down the faulted pipeline and stop on the current track.
     fn stop_after_failure(&mut self) {
         self.mute();
-        let _ = self.playbin.set_state(gst::State::Null);
-        let _ = self.playbin.set_state(gst::State::Ready);
+        let _ = self.set_pipeline_state(gst::State::Null);
+        let _ = self.set_pipeline_state(gst::State::Ready);
         self.enter_stopped();
     }
 
@@ -1823,13 +1833,13 @@ impl GstPlaybackRuntime {
                 let percent = buffering.percent();
                 if percent < 100 {
                     if self.snapshot.state == PlaybackState::Playing && !self.buffering_active {
-                        let _ = self.playbin.set_state(gst::State::Paused);
+                        let _ = self.set_pipeline_state(gst::State::Paused);
                         self.buffering_active = true;
                     }
                 } else if self.buffering_active {
                     self.buffering_active = false;
                     if self.snapshot.state == PlaybackState::Playing {
-                        let _ = self.playbin.set_state(gst::State::Playing);
+                        let _ = self.set_pipeline_state(gst::State::Playing);
                     }
                 }
             }
@@ -1858,7 +1868,7 @@ impl GstPlaybackRuntime {
                 self.clear_recent_seek_trace();
                 self.startup_gain_ramp = false;
                 self.startup_ramp_hold_until = None;
-                let _ = self.playbin.set_state(gst::State::Ready);
+                let _ = self.set_pipeline_state(gst::State::Ready);
                 self.begin_pipeline_run(false);
                 super::stop_snapshot_at_terminal_eos(&mut self.snapshot);
                 self.emit_snapshot();
@@ -1956,13 +1966,13 @@ impl GstPlaybackRuntime {
         let was_playing = self.snapshot.state == PlaybackState::Playing || force_play;
         self.mute();
         self.playing_state_requested_at = None;
-        let _ = self.playbin.set_state(gst::State::Null);
-        let _ = self.playbin.set_state(gst::State::Ready);
+        let _ = self.set_pipeline_state(gst::State::Null);
+        let _ = self.set_pipeline_state(gst::State::Ready);
         // Also drops a successor staged while the old run was stopping.
         self.begin_pipeline_run(false);
         self.set_run_uri(path, uri);
         if was_playing {
-            let _ = self.playbin.set_state(gst::State::Playing);
+            let _ = self.set_pipeline_state(gst::State::Playing);
             self.playing_state_requested_at = Some(Instant::now());
             // Re-assert mute after state transition to close the race window
             // where new internal elements may not have volume=0.
@@ -1979,7 +1989,7 @@ impl GstPlaybackRuntime {
                 None
             };
         } else if self.snapshot.state == PlaybackState::Paused {
-            let _ = self.playbin.set_state(gst::State::Paused);
+            let _ = self.set_pipeline_state(gst::State::Paused);
             self.startup_gain_ramp = false;
             self.startup_ramp_hold_until = None;
         } else {
@@ -2037,6 +2047,7 @@ fn start_gst_engine(
         stream_durations,
         stream_ends,
     );
+    connect_type_finding_hold(&runtime.playbin);
     connect_about_to_finish(&runtime);
     runtime
         .playbin
@@ -2064,7 +2075,8 @@ fn connect_about_to_finish(runtime: &GstPlaybackRuntime) {
                 .and_then(|value| value.get::<gst::Element>().ok())
             {
                 stage_successor(&queue_state, &stream_durations, &analysis_tx, |uri| {
-                    playbin.set_property("uri", uri);
+                    // Activates the successor's source.
+                    activate_sources(|| playbin.set_property("uri", uri));
                 });
             }
             #[cfg(test)]
@@ -2305,6 +2317,66 @@ impl StreamDurations {
     fn clear(&mut self) {
         self.streams.clear();
     }
+}
+
+thread_local! {
+    /// While the thread runs `activate_sources`, the probes that hold back
+    /// the type finding of the sources it activates.
+    static TYPE_FINDING_HOLDS: RefCell<Option<Vec<(gst::Pad, gst::PadProbeId)>>> =
+        const { RefCell::new(None) };
+}
+
+/// Run `activate`, which can activate sources of `playbin`: a state change
+/// of the pipeline, or a successor handed over. The sources find the type
+/// of their files only once it has returned.
+///
+/// `urisourcebin` starts to find the type of its file while it still changes
+/// state. Its streaming thread then adds a `parsebin` and changes its state,
+/// which deadlocks when the activating thread changes the state of the new
+/// `parsebin` too: each waits for a lock that the other holds. Under load
+/// the activating thread is slow enough for that to happen. See
+/// <https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/4472>, open
+/// in 1.28.
+fn activate_sources<R>(activate: impl FnOnce() -> R) -> R {
+    let outer = TYPE_FINDING_HOLDS.with(|holds| holds.replace(Some(Vec::new())));
+    let result = activate();
+    let holds = TYPE_FINDING_HOLDS.with(|holds| holds.replace(outer));
+    for (pad, probe) in holds.into_iter().flatten() {
+        pad.remove_probe(probe);
+    }
+    result
+}
+
+/// Hold back the type finding of every source that `urisourcebin` sets up
+/// in `activate_sources`, until that returns. The type finder of a source
+/// first announces the stream it starts, so the probe holds it there,
+/// before it reads the file.
+fn connect_type_finding_hold(playbin: &gst::Element) {
+    // Runs on the thread that adds the type finder, before it starts.
+    playbin.connect("deep-element-added", false, |values| {
+        let bin = values.get(1)?.get::<gst::Bin>().ok()?;
+        let element = values.get(2)?.get::<gst::Element>().ok()?;
+        let factory_is = |element: &gst::Element, name: &str| {
+            element
+                .factory()
+                .is_some_and(|factory| factory.name() == name)
+        };
+        if !factory_is(&element, "typefind") || !factory_is(bin.upcast_ref(), "urisourcebin") {
+            return None;
+        }
+        TYPE_FINDING_HOLDS.with(|holds| {
+            let mut holds = holds.borrow_mut();
+            let holds = holds.as_mut()?;
+            let pad = element.static_pad("src")?;
+            let probe = pad.add_probe(
+                gst::PadProbeType::BLOCK | gst::PadProbeType::DATA_DOWNSTREAM,
+                |_, _| gst::PadProbeReturn::Ok,
+            )?;
+            holds.push((pad, probe));
+            Some(())
+        });
+        None
+    });
 }
 
 /// While a seek is prepared, holds back the end of every stream that the
@@ -5341,6 +5413,120 @@ mod engine_tests {
             Some((renamed, 1)),
             "{}",
             engine.report("the renamed track did not start")
+        );
+    }
+
+    /// What came first while the thread that activated the source of a file
+    /// was held in the source's state change.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ActivationRace {
+        /// The type finding of the source was held back.
+        TypeFindingHeld,
+        /// `urisourcebin` found the type of the file and set up a
+        /// `parsebin`, which can deadlock with the activating thread.
+        ParsebinSetUp,
+        /// Neither happened within `TIMEOUT`.
+        Neither,
+    }
+
+    /// Hold the thread that activates the source of `file` when the source
+    /// becomes Paused, which is while its `urisourcebin` changes state,
+    /// until the type finding of the source is held back or `urisourcebin`
+    /// has set up a `parsebin` for it. Returns which came first.
+    fn race_type_finding_with_activation(
+        playbin: &gst::Element,
+        file: &Path,
+    ) -> Arc<Mutex<Option<ActivationRace>>> {
+        let outcome = Arc::new(Mutex::new(None));
+        let recorded = Arc::clone(&outcome);
+        let file = file.to_path_buf();
+        let bus = playbin.bus().unwrap();
+        bus.enable_sync_message_emission();
+        bus.connect_sync_message(None, move |_, message| {
+            let gst::MessageView::StateChanged(change) = message.view() else {
+                return;
+            };
+            let Some(source) = message
+                .src()
+                .and_then(|src| src.downcast_ref::<gst::Element>())
+                .filter(|source| {
+                    source
+                        .factory()
+                        .is_some_and(|factory| factory.name() == "filesrc")
+                })
+            else {
+                return;
+            };
+            let location = source.property::<Option<String>>("location");
+            if (change.old(), change.current()) != (gst::State::Ready, gst::State::Paused)
+                || location.as_deref().map(Path::new) != Some(file.as_path())
+                || recorded.lock().unwrap().is_some()
+            {
+                return;
+            }
+            let urisourcebin = source
+                .parent()
+                .and_downcast::<gst::Bin>()
+                .expect("urisourcebin");
+            let deadline = Instant::now() + TIMEOUT;
+            let race = loop {
+                let parsebin = urisourcebin
+                    .iterate_elements()
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .any(|element| {
+                        element
+                            .factory()
+                            .is_some_and(|factory| factory.name() == "parsebin")
+                    });
+                if parsebin {
+                    break ActivationRace::ParsebinSetUp;
+                }
+                let held = urisourcebin
+                    .iterate_elements()
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter_map(|element| element.static_pad("src"))
+                    .any(|pad| pad.is_blocking());
+                if held {
+                    break ActivationRace::TypeFindingHeld;
+                }
+                if Instant::now() >= deadline {
+                    break ActivationRace::Neither;
+                }
+                std::thread::sleep(millis(1));
+            };
+            *recorded.lock().unwrap() = Some(race);
+        });
+        outcome
+    }
+
+    #[test]
+    fn sources_find_the_type_of_their_files_only_once_activated() {
+        // urisourcebin starts to find the type of a file while it changes
+        // state. Once found, it sets up a parsebin, which can deadlock with
+        // the thread that changes its state (GStreamer issue 4472). The
+        // engine's own state changes and handovers must hold it back.
+        let fixtures = Fixtures::new("activation-race");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = DirectEngine::start();
+        let first = race_type_finding_with_activation(&engine.runtime.playbin, &a);
+        let second = race_type_finding_with_activation(&engine.runtime.playbin, &b);
+        // The state change of the pipeline activates A's source.
+        engine.play_until_opened(vec![a, b], RepeatMode::Off);
+        assert_eq!(
+            *first.lock().unwrap(),
+            Some(ActivationRace::TypeFindingHeld)
+        );
+        // The successor handed over in about-to-finish activates B's.
+        engine.wait_until("B did not start", |runtime| {
+            runtime.snapshot.current_queue_index == Some(1)
+                && runtime.snapshot.duration.abs_diff(millis(4_500)) < millis(100)
+        });
+        assert_eq!(
+            *second.lock().unwrap(),
+            Some(ActivationRace::TypeFindingHeld)
         );
     }
 
