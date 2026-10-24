@@ -195,6 +195,12 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
         && (!reader.readU64(&seekSerial) || !reader.readU64(&seekLandedSerial))) {
         return false;
     }
+    quint64 sampledAtNs = 0;
+    quint8 advancing = 0;
+    if (!reader.atEnd()
+        && (!reader.readU64(&sampledAtNs) || !reader.readU8(&advancing) || advancing > 1)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -209,6 +215,9 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     out->trackToken = trackToken;
     out->seekSerial = seekSerial;
     out->seekLandedSerial = seekLandedSerial;
+    out->positionSampledAtNs = static_cast<qint64>(
+        std::min<quint64>(sampledAtNs, std::numeric_limits<qint64>::max()));
+    out->positionAdvancing = advancing != 0;
     return true;
 }
 

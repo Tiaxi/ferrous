@@ -113,6 +113,11 @@ struct DecodedPlayback {
     // position.
     quint64 seekSerial{0};
     quint64 seekLandedSerial{0};
+    // positionSeconds is where the pipeline was at this CLOCK_MONOTONIC time,
+    // in nanoseconds; it advances from there in real time while
+    // positionAdvancing is set. See PlaybackClock.
+    qint64 positionSampledAtNs{0};
+    bool positionAdvancing{false};
 };
 
 struct DecodedQueueTrack {

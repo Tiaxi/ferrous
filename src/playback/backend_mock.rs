@@ -47,6 +47,10 @@ pub fn spawn_engine(
             }
             last_tick = Instant::now();
             runtime.handle_command(cmd);
+            // The simulated position is where playback is now, and
+            // advances while it plays.
+            runtime.snapshot.position_sampled_at = super::monotonic_now();
+            runtime.snapshot.position_advancing = runtime.snapshot.state == PlaybackState::Playing;
             let _ = runtime
                 .event_tx
                 .send(PlaybackEvent::Snapshot(runtime.snapshot.clone()));
@@ -308,7 +312,7 @@ impl MockPlaybackRuntime {
             self.snapshot.position = Duration::ZERO;
             self.change_track(successor.path, successor.index, TrackChangeKind::Natural);
         } else {
-            super::stop_snapshot_at_terminal_eos(&mut self.snapshot);
+            super::stop_snapshot_at_terminal_eos(&mut self.snapshot, super::monotonic_now());
         }
     }
 }
