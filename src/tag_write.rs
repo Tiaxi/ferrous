@@ -14,7 +14,7 @@ use lofty::config::{ParseOptions, WriteOptions};
 use lofty::error::LoftyError;
 use lofty::file::{AudioFile, FileType};
 use lofty::id3::v2::{Id3v2Tag, Id3v2Version};
-use lofty::mp4::Ilst;
+use lofty::mp4::{Atom, AtomData, Ilst};
 use lofty::ogg::{OggPictureStorage, VorbisComments};
 use lofty::picture::PictureInformation;
 use lofty::prelude::{SplitTag, TagExt};
@@ -214,7 +214,10 @@ const VORBIS_ENCODER_KEY: &str = "ENCODER";
 
 fn edit_vorbis_comments(mut original: VorbisComments, edited: &Tag) -> VorbisComments {
     let mut changes = Changes::between(&original.clone().into(), edited);
-    let items = original.take_items().collect::<Vec<_>>();
+    let items = original
+        .items()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<Vec<_>>();
     let mappings = items
         .iter()
         .map(|(key, value)| vorbis_mapping(key, value))
@@ -239,11 +242,26 @@ fn edit_vorbis_comments(mut original: VorbisComments, edited: &Tag) -> VorbisCom
             ((key, value), mapping)
         });
     // Keys are case-insensitive, so an edited comment keeps its spelling.
-    let merged = place_items(
+    let mut merged = place_items(
         items.into_iter().zip(mappings).zip(replaced),
         new,
         |(key, _), (_, value)| (key.clone(), value),
     );
+    if merged.iter().all(|(key, _)| pushable_vorbis_key(key)) {
+        drop(original.take_items());
+    } else {
+        // lofty reads and writes comments with an empty name but will not
+        // push them, so the comments are not taken out. Splitting removes
+        // the ones with a generic key and keeps the others, which are never
+        // replaced, in order. The rest follow them.
+        let pictures = original.remove_pictures();
+        original = original.split_tag().0.into();
+        for (picture, info) in pictures {
+            // Cannot fail: the information is given, not read from the picture.
+            let _ = original.insert_picture(picture, Some(info));
+        }
+        merged.retain(|(key, value)| !vorbis_mapping(key, value).keys.is_empty());
+    }
     for (key, value) in merged {
         original.push(key, value);
     }
@@ -266,9 +284,20 @@ fn edit_vorbis_comments(mut original: VorbisComments, edited: &Tag) -> VorbisCom
     original
 }
 
+fn pushable_vorbis_key(key: &str) -> bool {
+    let mut single = VorbisComments::new();
+    single.push(key.to_string(), String::new());
+    !single.is_empty()
+}
+
 fn vorbis_mapping(key: &str, value: &str) -> Mapping {
     let mut single = VorbisComments::new();
     single.push(key.to_string(), value.to_string());
+    // No generic key has a name lofty will not push, such as an empty one.
+    // The split below would show only the vendor string, as the encoder.
+    if single.is_empty() {
+        return Mapping::default();
+    }
     let (remainder, tag) = single.split_tag();
     // The split adds the vendor string after the comment's own item, which
     // stays in the remainder when lofty has no generic key for it.
@@ -348,12 +377,40 @@ fn edit_ilst(mut original: Ilst, edited: &Tag) -> Ilst {
     }
     let mut replaced = replaced.into_iter();
     original.retain(|_| !replaced.next().unwrap_or_default());
+    let mut original = utf16_text_as_utf8(original);
     // Inserting merges the values of atoms with the same identifier, as the
     // edited tag holds one item per value.
     for atom in new {
         original.insert(atom);
     }
     original
+}
+
+/// lofty 0.24 writes UTF-16 text as UTF-8 bytes marked as UTF-16, which reads
+/// back as other text. Kept UTF-16 values are written as UTF-8 instead, with
+/// the same text, as the generic tag writes them. Rebuilding the `ilst` then
+/// merges atoms that share an identifier into one, keeping every value in order.
+fn utf16_text_as_utf8(ilst: Ilst) -> Ilst {
+    let is_utf16 = |data: &AtomData| matches!(data, AtomData::UTF16(_));
+    if !(&ilst).into_iter().any(|atom| atom.data().any(is_utf16)) {
+        return ilst;
+    }
+    let mut converted = Ilst::new();
+    for atom in ilst {
+        let ident = atom.ident().clone().into_owned();
+        let data = atom
+            .into_data()
+            .map(|data| match data {
+                AtomData::UTF16(text) => AtomData::UTF8(text),
+                data => data,
+            })
+            .collect();
+        // Every atom read holds at least one value.
+        if let Some(atom) = Atom::from_collection(ident, data) {
+            converted.insert(atom);
+        }
+    }
+    converted
 }
 
 fn id3v2_version(path: &Path, file_type: FileType) -> Result<Option<Id3v2Version>, LoftyError> {
@@ -578,7 +635,7 @@ pub(crate) fn write_test_monkeys_audio(path: &Path, tag: &ApeTag) {
 mod tests {
     use super::*;
     use lofty::file::TaggedFileExt;
-    use lofty::mp4::{Atom, AtomData, AtomIdent, Mp4File};
+    use lofty::mp4::{AtomIdent, Mp4File};
     use lofty::ogg::OpusFile;
     use lofty::picture::{MimeType, Picture, PictureType};
     use lofty::prelude::Accessor;
@@ -710,6 +767,35 @@ mod tests {
         let cover = after.get("Cover Art (Front)").expect("cover").value();
         assert_eq!(cover, &ItemValue::Binary(picture(b"new").as_ape_bytes()));
         assert_eq!(after.into_iter().count(), 2);
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn edited_vorbis_encoder_keeps_comments_with_an_empty_name() {
+        let dir = test_dir("flac-empty-name-encoder");
+        let path = dir.join("song.flac");
+        write_test_flac(&path, &[("TITLE", "Title"), ("", "keep me")]);
+        let mut file = File::open(&path).expect("open FLAC");
+        let original = lofty::flac::FlacFile::read_from(&mut file, ParseOptions::new())
+            .expect("parse FLAC")
+            .vorbis_comments()
+            .cloned()
+            .expect("comments");
+        assert_eq!(original.items().len(), 2);
+        let mut edited = Tag::from(original.clone());
+        edited.insert_text(ItemKey::EncoderSoftware, "Encoder X".to_string());
+
+        let merged = edit_vorbis_comments(original, &edited);
+
+        assert_eq!(merged.vendor(), "ferrous-test");
+        assert_eq!(
+            merged.items().collect::<Vec<_>>(),
+            [
+                ("", "keep me"),
+                ("TITLE", "Title"),
+                ("ENCODER", "Encoder X")
+            ]
+        );
         std::fs::remove_dir_all(dir).expect("remove test dir");
     }
 

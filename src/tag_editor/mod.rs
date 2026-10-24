@@ -1679,6 +1679,259 @@ mod tests {
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 
+    /// The bytes of `path` with the only occurrence of `from` replaced by
+    /// `to`, which has the same length.
+    fn patched(path: &Path, from: &[u8], to: &[u8]) -> Vec<u8> {
+        assert_eq!(from.len(), to.len());
+        let mut bytes = fs::read(path).expect("read fixture");
+        let matches = bytes
+            .windows(from.len())
+            .enumerate()
+            .filter(|(_, window)| *window == from)
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "{from:?}");
+        bytes[matches[0]..matches[0] + to.len()].copy_from_slice(to);
+        bytes
+    }
+
+    fn contains(bytes: &[u8], part: &[u8]) -> bool {
+        bytes.windows(part.len()).any(|window| window == part)
+    }
+
+    /// The `data` atom holding `text` as UTF-8, and the same atom holding
+    /// `utf16`, which has as many bytes, as big-endian UTF-16.
+    fn utf16_data_atom(text: &str, utf16: &str) -> (Vec<u8>, Vec<u8>) {
+        let atom = |data_type: u8, payload: &[u8]| {
+            let mut atom = b"data\0\0\0".to_vec();
+            atom.push(data_type);
+            atom.extend_from_slice(&[0; 4]);
+            atom.extend_from_slice(payload);
+            atom
+        };
+        let utf16 = utf16
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<_>>();
+        (atom(1, text.as_bytes()), atom(2, &utf16))
+    }
+
+    const CUSTOM_ATOM: AtomIdent<'static> = AtomIdent::Freeform {
+        mean: std::borrow::Cow::Borrowed("com.apple.iTunes"),
+        name: std::borrow::Cow::Borrowed("CUSTOM"),
+    };
+
+    /// An MP4 whose first artist and freeform atom are UTF-16. lofty cannot
+    /// write UTF-16, so placeholders are written as UTF-8 and then patched.
+    fn utf16_mp4_fixture(dir: &Path) -> PathBuf {
+        let path = dir.join("song.m4a");
+        let mut ilst = Ilst::new();
+        ilst.insert(text_atom(TITLE_ATOM, &["Old"]));
+        ilst.insert(text_atom(ARTIST_ATOM, &["WXYZ", "Cd"]));
+        ilst.insert(text_atom(CUSTOM_ATOM, &["PQRS"]));
+        ilst.insert(text_atom(DATE_ATOM, &["1997"]));
+        write_test_mp4(&path, &ilst);
+        for (placeholder, text) in [("WXYZ", "AB"), ("PQRS", "KX")] {
+            let (from, to) = utf16_data_atom(placeholder, text);
+            let bytes = patched(&path, &from, &to);
+            fs::write(&path, bytes).expect("write fixture");
+        }
+        let written = read_ilst(&path);
+        assert_eq!(
+            atom_values(&written, &ARTIST_ATOM),
+            [
+                AtomData::UTF16("AB".to_string()),
+                AtomData::UTF8("Cd".to_string())
+            ]
+        );
+        assert_eq!(
+            atom_values(&written, &CUSTOM_ATOM),
+            [AtomData::UTF16("KX".to_string())]
+        );
+        path
+    }
+
+    #[test]
+    fn mp4_saves_keep_the_text_of_unedited_utf16_values() {
+        let dir = test_dir("mp4-utf16");
+        for field in ["title", "year"] {
+            let path = utf16_mp4_fixture(&dir);
+
+            let mut row = load_one(&path);
+            assert_eq!(row.artist, "AB");
+            let (title, year) = if field == "title" {
+                ("New", "1997")
+            } else {
+                ("Old", "1998")
+            };
+            row.title = title.to_string();
+            row.year = year.to_string();
+            assert_saved(&save_json(&[edited(&row, &[field])]));
+
+            let after = read_ilst(&path);
+            assert_eq!(
+                atom_values(&after, &ARTIST_ATOM),
+                [
+                    AtomData::UTF8("AB".to_string()),
+                    AtomData::UTF8("Cd".to_string())
+                ],
+                "{field}"
+            );
+            assert_eq!(
+                atom_values(&after, &CUSTOM_ATOM),
+                [AtomData::UTF8("KX".to_string())],
+                "{field}"
+            );
+            let reloaded = load_one(&path);
+            assert_eq!(
+                (
+                    reloaded.artist.as_str(),
+                    reloaded.title.as_str(),
+                    reloaded.year.as_str()
+                ),
+                ("AB", title, year),
+                "{field}"
+            );
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    /// The Ogg CRC-32 of `bytes`.
+    fn ogg_crc(bytes: &[u8]) -> u32 {
+        bytes.iter().fold(0, |crc, &byte| {
+            (0..8).fold(crc ^ (u32::from(byte) << 24), |crc, _| {
+                if crc & 0x8000_0000 == 0 {
+                    crc << 1
+                } else {
+                    (crc << 1) ^ 0x04c1_1db7
+                }
+            })
+        })
+    }
+
+    /// Recompute the checksum of every Ogg page, after the pages were patched.
+    fn fix_ogg_checksums(bytes: &mut [u8]) {
+        let mut start = 0;
+        while start < bytes.len() {
+            assert_eq!(&bytes[start..start + 4], b"OggS");
+            let segments = usize::from(bytes[start + 26]);
+            let table = start + 27;
+            let body = bytes[table..table + segments]
+                .iter()
+                .map(|&len| usize::from(len))
+                .sum::<usize>();
+            let end = table + segments + body;
+            bytes[start + 22..start + 26].fill(0);
+            let crc = ogg_crc(&bytes[start..end]);
+            bytes[start + 22..start + 26].copy_from_slice(&crc.to_le_bytes());
+            start = end;
+        }
+    }
+
+    /// A comment with an empty name, which lofty reads and writes but will
+    /// not push. It is written as a placeholder of the same length and
+    /// patched.
+    const EMPTY_NAME_PLACEHOLDER: &str = "Q=keep me";
+    const EMPTY_NAME_COMMENT: &str = "==keep me";
+
+    /// FLAC and Opus files holding [`EMPTY_NAME_COMMENT`] between two artists.
+    fn empty_name_vorbis_fixtures(dir: &Path) -> Vec<PathBuf> {
+        let items = [
+            ("TITLE", "Old"),
+            ("ARTIST", "A"),
+            ("Q", "keep me"),
+            ("artist", "B"),
+            ("CUSTOM", "kept"),
+        ];
+        let flac = dir.join("song.flac");
+        write_flac(&flac, &items);
+        let opus = dir.join("song.opus");
+        let mut comments = VorbisComments::new();
+        comments.set_vendor("ferrous-test".to_string());
+        for (key, value) in items {
+            comments.push(key.to_string(), value.to_string());
+        }
+        write_test_opus(&opus, &comments);
+        for path in [&flac, &opus] {
+            let mut bytes = patched(
+                path,
+                EMPTY_NAME_PLACEHOLDER.as_bytes(),
+                EMPTY_NAME_COMMENT.as_bytes(),
+            );
+            if path == &opus {
+                fix_ogg_checksums(&mut bytes);
+            }
+            fs::write(path, bytes).expect("write fixture");
+            let (comments, _) = read_vorbis(path);
+            let mut expected = items.map(|(key, value)| (key.to_string(), value.to_string()));
+            expected[2] = (String::new(), "=keep me".to_string());
+            assert_eq!(vorbis_items(&comments), expected, "{path:?}");
+        }
+        vec![flac, opus]
+    }
+
+    /// Whether the file stores [`EMPTY_NAME_COMMENT`] unchanged: its length,
+    /// then its bytes.
+    fn stores_empty_name_comment(path: &Path) -> bool {
+        let comment = EMPTY_NAME_COMMENT.as_bytes();
+        let mut stored = u32::try_from(comment.len())
+            .expect("comment length")
+            .to_le_bytes()
+            .to_vec();
+        stored.extend_from_slice(comment);
+        contains(&fs::read(path).expect("read file"), &stored)
+    }
+
+    #[test]
+    fn title_only_vorbis_saves_keep_comments_with_an_empty_name() {
+        let dir = test_dir("vorbis-empty-name-title");
+        for path in empty_name_vorbis_fixtures(&dir) {
+            let (before, _) = read_vorbis(&path);
+
+            let mut row = load_one(&path);
+            row.title = "New".to_string();
+            assert_saved(&save_json(&[edited(&row, &["title"])]));
+
+            let (after, _) = read_vorbis(&path);
+            // Comments with a generic key follow the ones without.
+            let expected = [
+                ("", "=keep me"),
+                ("CUSTOM", "kept"),
+                ("TITLE", "New"),
+                ("ARTIST", "A"),
+                ("artist", "B"),
+            ]
+            .map(|(key, value)| (key.to_string(), value.to_string()));
+            assert_eq!(vorbis_items(&after), expected, "{path:?}");
+            assert_eq!(after.vendor(), before.vendor(), "{path:?}");
+            assert!(stores_empty_name_comment(&path), "{path:?}");
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn edited_vorbis_fields_keep_comments_with_an_empty_name() {
+        let dir = test_dir("vorbis-empty-name-edit");
+        for path in empty_name_vorbis_fixtures(&dir) {
+            let mut row = load_one(&path);
+            row.artist = "C".to_string();
+            assert_saved(&save_json(&[edited(&row, &["artist"])]));
+
+            let (after, _) = read_vorbis(&path);
+            let expected = [
+                ("", "=keep me"),
+                ("CUSTOM", "kept"),
+                ("TITLE", "Old"),
+                ("ARTIST", "C"),
+            ]
+            .map(|(key, value)| (key.to_string(), value.to_string()));
+            assert_eq!(vorbis_items(&after), expected, "{path:?}");
+            assert!(stores_empty_name_comment(&path), "{path:?}");
+            assert_eq!(load_one(&path).artist, "C");
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
     fn ape_item(key: &str, value: ItemValue, read_only: bool) -> ApeItem {
         let mut item = ApeItem::new(key.to_string(), value).expect("APE item");
         item.read_only = read_only;
