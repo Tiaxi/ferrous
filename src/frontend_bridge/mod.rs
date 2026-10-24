@@ -1085,8 +1085,8 @@ impl BridgeLoopRuntime {
             BridgeLoopWake::Import(imports::ImportMessage::Finished(result)) => {
                 self.apply_import_result(result, event_tx)
             }
-            BridgeLoopWake::Import(imports::ImportMessage::Renamed(renames)) => {
-                self.apply_renamed_paths(renames, event_tx)
+            BridgeLoopWake::Import(imports::ImportMessage::Renamed { number, renames }) => {
+                self.apply_renamed_paths(number, renames, event_tx)
             }
             BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
             BridgeLoopWake::QueueValidated(result) => {
@@ -1131,15 +1131,16 @@ impl BridgeLoopRuntime {
         self.apply_queue_changes(changes, event_tx)
     }
 
-    /// Apply files renamed on disk. Imports that have no result yet read the
-    /// files after the renames, so they are left alone; see
-    /// [`imports::ImportGate`].
+    /// Apply the files renamed on disk by rename `number`. Imports that have
+    /// no result yet read the files after the renames, so they are left
+    /// alone; see [`imports::ImportGate`].
     fn apply_renamed_paths(
         &mut self,
+        number: u64,
         renames: Arc<PathRenames>,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
-        self.imports.remap_pending_paths(&renames);
+        self.imports.remap_pending_paths(number, &renames);
         if commands::refresh_renamed_paths(
             &mut self.state,
             renames,
@@ -2430,46 +2431,76 @@ mod tests {
         }
     }
 
+    /// Create `playlist` as a FIFO, which blocks the import reading it.
+    fn make_fifo(playlist: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+
+        let fifo = std::ffi::CString::new(playlist.as_os_str().as_bytes()).expect("fifo path");
+        // SAFETY: `fifo` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+    }
+
+    /// Open the FIFO `playlist` to write. This waits for the worker to open
+    /// it to read, and the worker's read cannot end before the writer closes.
+    fn playlist_writer(playlist: &Path) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(playlist)
+            .expect("open fifo")
+    }
+
+    fn playlist_lines(tracks: &[PathBuf]) -> String {
+        tracks
+            .iter()
+            .map(|track| format!("{}\n", track.display()))
+            .collect()
+    }
+
+    /// Replace `playlist` with a regular file listing `tracks`, so a read
+    /// that starts after this does not block.
+    fn replace_playlist(playlist: &Path, tracks: &[PathBuf]) {
+        let staged = playlist.with_extension("tmp");
+        std::fs::write(&staged, playlist_lines(tracks)).expect("playlist");
+        std::fs::rename(&staged, playlist).expect("replace playlist");
+    }
+
     #[test]
     fn a_rename_does_not_wait_for_an_import_blocked_on_a_read() {
         use std::io::Write;
-        use std::os::unix::ffi::OsStrExt;
-
-        fn playlist_lines(tracks: &[PathBuf]) -> String {
-            tracks
-                .iter()
-                .map(|track| format!("{}\n", track.display()))
-                .collect()
-        }
 
         let _guard = test_guard();
         let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
         let (dir, before) = rename_fixture("blocked-read", &["01.flac", "02.flac"]);
         let playlist = dir.join("blocked.m3u");
-        let fifo = std::ffi::CString::new(playlist.as_os_str().as_bytes()).expect("fifo path");
-        // SAFETY: `fifo` is a NUL-terminated path that outlives the call.
-        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+        make_fifo(&playlist);
         runtime.handle_command(
             BridgeCommand::Library(BridgeLibraryCommand::AddTrack(playlist.clone())),
             &event_tx,
         );
-        // Opening the FIFO to write waits for the worker to open it to read,
-        // and the worker's read cannot end before the writer closes it.
-        let mut writer = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&playlist)
-            .expect("open fifo");
+        let mut writer = playlist_writer(&playlist);
 
-        // A rename that waited for the read would never return here.
+        // A rename that waited for the read would wait for the writer this
+        // thread holds. So the rename runs on another thread, and after a
+        // generous deadline the test releases the read and fails instead of
+        // hanging.
         let pairs = [("01.flac", "02.flac"), ("02.flac", "03.flac")];
-        runtime
-            .imports
-            .gate()
-            .rename(|| ((), rename_files(&dir, &pairs)));
+        let (renamed_tx, renamed) = unbounded();
+        let renamer = {
+            let gate = runtime.imports.gate();
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                gate.rename(|| ((), rename_files(&dir, &pairs)));
+                let _ = renamed_tx.send(());
+            })
+        };
+        if renamed.recv_timeout(Duration::from_secs(10)).is_err() {
+            drop(writer);
+            renamer.join().expect("rename thread");
+            panic!("the rename waited for the blocked read");
+        }
+        renamer.join().expect("rename thread");
         let after: Vec<_> = pairs.iter().map(|(_, new)| dir.join(new)).collect();
-        let staged = dir.join("playlist.tmp");
-        std::fs::write(&staged, playlist_lines(&after)).expect("playlist");
-        std::fs::rename(&staged, &playlist).expect("replace playlist");
+        replace_playlist(&playlist, &after);
         // The blocked read gets the playlist as it was before the rename.
         writer
             .write_all(playlist_lines(&before).as_bytes())
@@ -2479,6 +2510,70 @@ mod tests {
         apply_next_import_result(&mut runtime, &event_tx);
 
         assert_eq!(runtime.state.queue, after, "the overlapped read was redone");
+        assert_eq!(queued_tracks(&engine_rx), vec![after]);
+        assert!(runtime.imports.results.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_renamed_during_its_import_is_queued_under_its_new_name() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let (dir, files) = rename_fixture("renamed-during-read", &["old.flac"]);
+        let playlist = dir.join("blocked.m3u");
+        make_fifo(&playlist);
+        // The worker finds `old.flac`, then blocks reading the playlist.
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(vec![
+                files[0].clone(),
+                playlist.clone(),
+            ])),
+            &event_tx,
+        );
+        let writer = playlist_writer(&playlist);
+        runtime
+            .imports
+            .gate()
+            .rename(|| ((), rename_files(&dir, &[("old.flac", "new.flac")])));
+        replace_playlist(&playlist, &[]);
+        drop(writer);
+        apply_next_import_result(&mut runtime, &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        let after = vec![dir.join("new.flac")];
+        assert_eq!(runtime.state.queue, after, "read again under its new name");
+        assert_eq!(queued_tracks(&engine_rx), vec![after]);
+        assert!(runtime.imports.results.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_renamed_while_its_import_waits_is_queued_under_its_new_name() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let (dir, files) = rename_fixture("renamed-while-waiting", &["old.flac"]);
+        let playlist = dir.join("blocked.m3u");
+        make_fifo(&playlist);
+        for path in [playlist.clone(), files[0].clone()] {
+            runtime.handle_command(
+                BridgeCommand::Library(BridgeLibraryCommand::AddTrack(path)),
+                &event_tx,
+            );
+        }
+        // The worker blocks on the playlist, so `old.flac` waits behind it.
+        let writer = playlist_writer(&playlist);
+        runtime
+            .imports
+            .gate()
+            .rename(|| ((), rename_files(&dir, &[("old.flac", "new.flac")])));
+        replace_playlist(&playlist, &[]);
+        drop(writer);
+        for _ in 0..3 {
+            apply_next_import_result(&mut runtime, &event_tx);
+        }
+
+        let after = vec![dir.join("new.flac")];
+        assert_eq!(runtime.state.queue, after, "read under its new name");
         assert_eq!(queued_tracks(&engine_rx), vec![after]);
         assert!(runtime.imports.results.is_empty());
         let _ = std::fs::remove_dir_all(dir);
@@ -2538,10 +2633,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        runtime.apply_renamed_paths(
-            Arc::new(PathRenames::from([(old_path, new_path.clone())])),
-            &event_tx,
-        );
+        runtime
+            .imports
+            .gate()
+            .rename(|| ((), PathRenames::from([(old_path, new_path.clone())])));
+        apply_next_import_result(&mut runtime, &event_tx);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             assert_eq!(runtime.state.playback.current.as_ref(), Some(&new_path));
