@@ -29,6 +29,7 @@
 #include "GlobalSearchResultsModel.h"
 
 struct FerrousFfiBridge;
+struct FerrousFfiRenameGate;
 class QNetworkReply;
 class QSocketNotifier;
 class QTemporaryDir;
@@ -371,8 +372,9 @@ public:
     Q_INVOKABLE void shutdown();
     Q_INVOKABLE void clearDiagnostics();
     Q_INVOKABLE void reloadDiagnosticsFromDisk();
-    void refreshRenamedPaths(const QStringList &pairs);
-    QByteArray renameEditedFiles(const QByteArray &payload);
+    // Tag editor renames go through this gate so the bridge applies them in
+    // order with the imports that read the same files. Null without a bridge.
+    std::shared_ptr<FerrousFfiRenameGate> renameGate() const;
 
 signals:
     void transportPositionDiscontinuity(double seconds);

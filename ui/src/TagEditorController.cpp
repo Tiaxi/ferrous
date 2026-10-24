@@ -351,7 +351,8 @@ TagEditorController::TagEditorController(BridgeClient *bridge, QObject *parent)
     connect(&m_tableModel, &TagEditorTableModel::rowsChanged, this, &TagEditorController::bulkSummaryChanged);
 }
 
-QByteArray TagEditorController::executeOperation(Operation operation, const QByteArray &payload) {
+QByteArray TagEditorController::executeOperation(Operation operation, const QByteArray &payload,
+                                                 const RenameGate &renameGate) {
     const auto *data = reinterpret_cast<const std::uint8_t *>(payload.constData());
     const auto size = static_cast<std::size_t>(payload.size());
     std::size_t len = 0;
@@ -359,7 +360,11 @@ QByteArray TagEditorController::executeOperation(Operation operation, const QByt
     switch (operation) {
     case Operation::Load: raw = ferrous_ffi_tag_editor_load(data, size, &len); break;
     case Operation::Save: raw = ferrous_ffi_tag_editor_save(data, size, &len); break;
-    case Operation::Rename: raw = ferrous_ffi_tag_editor_rename(data, size, &len); break;
+    case Operation::Rename:
+        // Through the gate, the bridge learns of the renames in order with imports.
+        raw = renameGate ? ferrous_ffi_rename_gate_rename(renameGate.get(), data, size, &len)
+                         : ferrous_ffi_tag_editor_rename(data, size, &len);
+        break;
     }
     QByteArray response;
     if (raw != nullptr) {
@@ -372,14 +377,17 @@ QByteArray TagEditorController::executeOperation(Operation operation, const QByt
 void TagEditorController::runOperation(Operation operation, const QByteArray &payload,
                                        std::function<void(const QByteArray &)> apply) {
     const quint64 generation = ++m_operationGeneration;
+    RenameGate renameGate;
+    if (operation == Operation::Rename && m_bridge != nullptr) renameGate = m_bridge->renameGate();
     auto *watcher = new QFutureWatcher<QByteArray>(this);
     connect(watcher, &QFutureWatcher<QByteArray>::finished, this,
             [this, watcher, generation, apply = std::move(apply)]() {
         watcher->deleteLater();
         if (generation == m_operationGeneration) apply(watcher->result());
     });
-    // The worker owns its input and function; it never accesses a controller or bridge.
-    watcher->setFuture(QtConcurrent::run(m_executeOperation, operation, payload));
+    // The worker owns its input, function, and gate reference; it never accesses a
+    // controller or bridge.
+    watcher->setFuture(QtConcurrent::run(m_executeOperation, operation, payload, renameGate));
 }
 
 QObject *TagEditorController::tableModel() const {
@@ -696,11 +704,6 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
         status = QStringLiteral("failed to parse file rename response");
     }
 
-    QStringList pairs;
-    for (auto it = renamedPaths.cbegin(); it != renamedPaths.cend(); ++it) {
-        pairs << it.key() << it.value();
-    }
-    if (m_bridge != nullptr && !pairs.isEmpty()) m_bridge->refreshRenamedPaths(pairs);
     QVector<TagEditorRowState> updatedRows = m_tableModel.rows();
     for (TagEditorRowState &row : updatedRows) {
         const auto renamedIt = renamedPaths.constFind(row.path);

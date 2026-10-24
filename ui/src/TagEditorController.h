@@ -4,6 +4,7 @@
 
 #include <QObject>
 #include <functional>
+#include <memory>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -12,6 +13,7 @@
 #include "TagEditorTableModel.h"
 
 class BridgeClient;
+struct FerrousFfiRenameGate;
 
 class TagEditorController final : public QObject {
     Q_OBJECT
@@ -74,13 +76,16 @@ signals:
 
 private:
     enum class Operation { Load, Save, Rename };
-    static QByteArray executeOperation(Operation operation, const QByteArray &payload);
+    using RenameGate = std::shared_ptr<FerrousFfiRenameGate>;
+    static QByteArray executeOperation(Operation operation, const QByteArray &payload,
+                                       const RenameGate &renameGate);
     void runOperation(Operation operation, const QByteArray &payload,
                       std::function<void(const QByteArray &)> apply);
     void applyLoadResult(const QByteArray &response);
     void applySaveResult(const QByteArray &response);
     void applyRenameResult(const QByteArray &response);
-    std::function<QByteArray(Operation, const QByteArray &)> m_executeOperation{executeOperation};
+    std::function<QByteArray(Operation, const QByteArray &, const RenameGate &)> m_executeOperation{
+        executeOperation};
     quint64 m_operationGeneration{0};
     QVector<int> targetRows() const;
     void setStatusText(const QString &text, const QString &details = QString());

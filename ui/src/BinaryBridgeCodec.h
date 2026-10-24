@@ -87,7 +87,7 @@ enum CommandId : quint16 {
     CmdSetPreventDisplaySleepInFullscreen = 59,
     CmdSetLibraryViewState = 60,
     CmdShowTrackInLibrary = 61,
-    CmdRefreshRenamedPaths = 62,
+    // 62 was CmdRefreshRenamedPaths; renames now reach the bridge through its rename gate.
     CmdRemoveMany = 63,
     CmdSetSpectrogramActive = 64,
     CmdSetShowLevelMeter = 65,

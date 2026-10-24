@@ -46,7 +46,6 @@ pub(super) struct BridgeCommandContext<'a> {
 }
 
 struct LibraryCommandRuntime<'a> {
-    playback: &'a PlaybackEngine,
     metadata: &'a MetadataService,
     library: &'a LibraryService,
     external_queue_details_tx: &'a Sender<ExternalQueueDetailsRequest>,
@@ -81,7 +80,6 @@ pub(super) fn handle_bridge_command(
             cmd,
             state,
             &LibraryCommandRuntime {
-                playback: context.playback,
                 metadata: context.metadata,
                 library: context.library,
                 external_queue_details_tx: context.external_queue_details_tx,
@@ -489,14 +487,6 @@ fn handle_library_collection_command(
         BridgeLibraryCommand::RefreshEditedPaths(paths) => Some(refresh_edited_paths(
             state,
             &paths,
-            runtime.metadata,
-            runtime.external_queue_details_tx,
-            runtime.event_tx,
-        )),
-        BridgeLibraryCommand::RefreshRenamedPaths(renames) => Some(refresh_renamed_paths(
-            state,
-            &renames,
-            runtime.playback,
             runtime.metadata,
             runtime.external_queue_details_tx,
             runtime.event_tx,
@@ -1166,23 +1156,22 @@ fn refresh_edited_paths(
     changed
 }
 
-fn refresh_renamed_paths(
+/// Apply one map of files renamed on disk to the library, the queue, and the
+/// engine. The whole map applies at once, so a swap or renumbering, where a
+/// file takes another renamed file's old name, renames each file exactly once.
+pub(super) fn refresh_renamed_paths(
     state: &mut BridgeState,
-    renames: &[(PathBuf, PathBuf)],
+    rename_map: Arc<PathRenames>,
     playback: &PlaybackEngine,
     metadata: &MetadataService,
     external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
-    if renames.is_empty() {
+    if rename_map.is_empty() {
         return false;
     }
 
-    let rename_map: PathRenames = renames.iter().cloned().collect();
-    let new_paths = renames
-        .iter()
-        .map(|(_, new_path)| new_path.clone())
-        .collect::<Vec<_>>();
+    let new_paths = rename_map.values().cloned().collect::<Vec<_>>();
     let indexed_by_path = match refresh_indexed_metadata_for_paths(&new_paths) {
         Ok(indexed) => indexed,
         Err(err) => {
@@ -1193,12 +1182,11 @@ fn refresh_renamed_paths(
 
     let mut changed = false;
     changed |= apply_renamed_library_paths(state, &rename_map, &indexed_by_path);
-    changed |= apply_renamed_queue_paths(state, renames, &rename_map, &indexed_by_path, metadata);
+    changed |= apply_renamed_queue_paths(state, &rename_map, &indexed_by_path, metadata);
     changed |= update_queue_track_details(state, &indexed_by_path);
     changed |= sync_queue_details(state, external_queue_details_tx);
     // The engine plays from its own copy of the queue. Until it acknowledges
     // the renames, its events are remapped so they cannot restore old paths.
-    let rename_map = Arc::new(rename_map);
     state
         .unacknowledged_engine_renames
         .push_back(Arc::clone(&rename_map));
@@ -1269,7 +1257,6 @@ fn apply_renamed_library_paths(
 
 fn apply_renamed_queue_paths(
     state: &mut BridgeState,
-    renames: &[(PathBuf, PathBuf)],
     rename_map: &PathRenames,
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
     metadata: &MetadataService,
@@ -1292,35 +1279,43 @@ fn apply_renamed_queue_paths(
     if let Some(pending) = state.pending_waveform_track.as_mut() {
         remap_path(&mut pending.path, rename_map);
     }
-    for (old_path, new_path) in renames {
-        if let Some(details) = Arc::make_mut(&mut state.queue_details).remove(old_path) {
-            if state
-                .library
-                .tracks
-                .iter()
-                .any(|track| track.path == *new_path)
-            {
-                changed = true;
-            } else {
-                Arc::make_mut(&mut state.queue_details).insert(
-                    new_path.clone(),
-                    indexed_by_path.get(new_path).cloned().unwrap_or(details),
-                );
-                changed = true;
-            }
-        }
-        if let Some(fingerprint) = state.queue_detail_fingerprints.remove(old_path) {
-            state
-                .queue_detail_fingerprints
-                .insert(new_path.clone(), fingerprint);
-        }
-        if let Some(fingerprint) = state.pending_queue_detail_fingerprints.remove(old_path) {
-            state
-                .pending_queue_detail_fingerprints
-                .insert(new_path.clone(), fingerprint);
+    for (new_path, details) in
+        take_renamed_entries(Arc::make_mut(&mut state.queue_details), rename_map)
+    {
+        changed = true;
+        if !state
+            .library
+            .tracks
+            .iter()
+            .any(|track| track.path == new_path)
+        {
+            let details = indexed_by_path.get(&new_path).cloned().unwrap_or(details);
+            Arc::make_mut(&mut state.queue_details).insert(new_path, details);
         }
     }
+    for fingerprints in [
+        &mut state.queue_detail_fingerprints,
+        &mut state.pending_queue_detail_fingerprints,
+    ] {
+        let moved = take_renamed_entries(fingerprints, rename_map);
+        fingerprints.extend(moved);
+    }
     changed
+}
+
+/// Remove the entries of renamed paths from `map` and return them under their
+/// new paths. Every entry is removed before any is reinserted, so an entry is
+/// never overwritten by another file moving to its old path.
+fn take_renamed_entries<V>(
+    map: &mut HashMap<PathBuf, V>,
+    rename_map: &PathRenames,
+) -> Vec<(PathBuf, V)> {
+    rename_map
+        .iter()
+        .filter_map(|(old_path, new_path)| {
+            map.remove(old_path).map(|value| (new_path.clone(), value))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2275,13 +2270,13 @@ mod tests {
         state.last_track_change.path = Some(old_current.clone());
         let stale = state.playback.clone();
 
-        let renames = vec![
+        let renames = PathRenames::from([
             (old_current.clone(), new_current.clone()),
             (old_next.clone(), new_next.clone()),
-        ];
+        ]);
         assert!(refresh_renamed_paths(
             &mut state,
-            &renames,
+            Arc::new(renames.clone()),
             &playback,
             &metadata,
             &details_tx,
@@ -2299,7 +2294,7 @@ mod tests {
         assert_eq!(state.last_track_change.path.as_ref(), Some(&new_current));
         match engine_rx.try_recv() {
             Ok(PlaybackCommand::RemapPaths(sent)) => {
-                assert_eq!(*sent, renames.iter().cloned().collect::<PathRenames>());
+                assert_eq!(*sent, renames);
             }
             other => panic!("expected a path remap for the engine, got {other:?}"),
         }
@@ -2340,6 +2335,47 @@ mod tests {
             &mut state,
         );
         assert_eq!(state.playback.current.as_ref(), Some(&old_current));
+    }
+
+    #[test]
+    fn a_swap_moves_each_file_once() {
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (engine_tx, engine_rx) = crossbeam_channel::unbounded();
+        let playback = PlaybackEngine::from_command_sender(engine_tx);
+        let (details_tx, _details_rx) = crossbeam_channel::unbounded();
+        let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        let (a, b, other) = (p("/music/a.flac"), p("/music/b.flac"), p("/music/c.flac"));
+        let fingerprint = |size_bytes| crate::library::TrackFileFingerprint {
+            mtime_ns: 1,
+            size_bytes,
+        };
+        let mut state = BridgeState {
+            queue: vec![a.clone(), b.clone(), other.clone()],
+            queue_detail_fingerprints: HashMap::from([
+                (a.clone(), fingerprint(1)),
+                (b.clone(), fingerprint(2)),
+            ]),
+            ..BridgeState::default()
+        };
+        let swap = PathRenames::from([(a.clone(), b.clone()), (b.clone(), a.clone())]);
+        assert!(refresh_renamed_paths(
+            &mut state,
+            Arc::new(swap.clone()),
+            &playback,
+            &metadata,
+            &details_tx,
+            &event_tx,
+        ));
+        assert_eq!(state.queue, vec![b.clone(), a.clone(), other]);
+        assert_eq!(
+            state.queue_detail_fingerprints,
+            HashMap::from([(b.clone(), fingerprint(1)), (a.clone(), fingerprint(2))])
+        );
+        assert!(matches!(
+            engine_rx.try_recv(),
+            Ok(PlaybackCommand::RemapPaths(sent)) if *sent == swap
+        ));
+        assert!(engine_rx.try_recv().is_err(), "one remap for the whole map");
     }
 
     #[test]
