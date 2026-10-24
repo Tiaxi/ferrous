@@ -3,10 +3,13 @@
 #pragma once
 
 #include <QDBusContext>
+#include <QDBusMessage>
 #include <QObject>
 #include <QString>
 #include <QStringList>
 #include <QVariantMap>
+
+#include <functional>
 
 class BridgeClient;
 
@@ -76,6 +79,7 @@ private:
         QString loopStatus;
         QVariantMap metadata;
         QString currentTrackPath;
+        quint64 trackToken{0};
         qlonglong positionUs{0};
         double volume{1.0};
         bool shuffle{false};
@@ -93,13 +97,14 @@ private:
     void publishPlayerState();
     void emitPropertiesChanged(const QString &interfaceName, const QVariantMap &changed) const;
     void emitSeeked(qlonglong positionUs) const;
+    void sendSignal(const QDBusMessage &message) const;
     void handleBridgeChange(bool trackChanged);
     qlonglong currentLengthUs() const;
     void rebuildMetadata();
     QString currentTrackIdPath() const;
     QVariantMap buildMetadata() const;
     PublishedPlayerState currentPlayerState() const;
-    bool shouldEmitSeeked(const PublishedPlayerState &nextState) const;
+    bool replayedSameTrack(const PublishedPlayerState &nextState) const;
 
     BridgeClient *m_bridge{nullptr};
     bool m_enabled{true};
@@ -112,4 +117,7 @@ private:
     QVariantMap m_metadata;
     QString m_trackIdPath;
     qlonglong m_metadataLengthUs{0};
+    // Tests capture the signals here instead of sending them on the session
+    // bus.
+    std::function<void(const QDBusMessage &)> m_signalSink;
 };

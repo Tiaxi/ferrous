@@ -20,6 +20,7 @@
 
 #include <condition_variable>
 #include <limits>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -189,6 +190,8 @@ public:
     QString positionText() const;
     QString durationText() const;
     double positionSeconds() const;
+    // Changes on every track change, also when the same file plays again.
+    quint64 currentTrackToken() const { return m_currentTrackToken; }
     double durationSeconds() const;
     double volume() const;
     int queueLength() const;
@@ -378,6 +381,8 @@ public:
 
 signals:
     void transportPositionDiscontinuity(double seconds);
+    // A seek landed at `seconds`, and no newer seek waits.
+    void seekLanded(double seconds);
     void playbackChanged();
     void trackIdentityChanged();
     void trackMetadataChanged();
@@ -582,7 +587,8 @@ private:
     static QString detectFileBrowserNameHeuristic();
     static QString detectFileBrowserName();
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
-    void sendBinaryCommand(const QByteArray &payload);
+    // Returns whether the bridge took the command.
+    bool sendBinaryCommand(const QByteArray &payload);
     void sendLibraryRootCommand(quint16 cmdId, const QString &path);
     void sendLibraryRootCommand(quint16 cmdId, const QString &path, const QString &name);
     static QString formatSeconds(double seconds);
@@ -744,10 +750,17 @@ private:
     bool m_pollTrackMetadataChanged{false};
     bool m_pollSnapshotChanged{false};
     qint64 m_pendingTrackRestartUntilMs{0};
+    // The playhead shows the target of the seek with serial
+    // m_pendingSeekSerial until the engine is done with that seek. The
+    // engine numbers seeks in the order it receives them, which is the
+    // order they are sent.
     bool m_pendingSeek{false};
     double m_pendingSeekTargetSeconds{0.0};
-    qint64 m_pendingSeekStartedAtMs{0};
-    qint64 m_pendingSeekUntilMs{0};
+    quint64 m_pendingSeekSerial{0};
+    quint64 m_seeksSent{0};
+    quint64 m_seekLandedSerial{0};
+    // Tests capture commands here instead of sending them to the bridge.
+    std::function<bool(const QByteArray &)> m_sendCommandOverride;
     int m_pendingQueueSelection{-1};
     qint64 m_pendingQueueSelectionUntilMs{0};
     QTimer m_diagnosticsFlushTimer;

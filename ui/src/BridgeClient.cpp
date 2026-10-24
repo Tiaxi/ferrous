@@ -2455,9 +2455,12 @@ void BridgeClient::previous() {
 }
 
 void BridgeClient::seek(double seconds) {
-    m_pendingTrackRestartUntilMs = 0;
+    // Play starts a stopped track from its beginning, so a stopped track is
+    // not seekable; the engine ignores such a seek too.
+    if (m_playbackState == QStringLiteral("Stopped") || !std::isfinite(seconds)) {
+        return;
+    }
     const double target = std::max(0.0, seconds);
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     SpectrogramSeekTrace::noteSeekIssued(target);
     if (m_profileUiEnabled) {
@@ -2472,11 +2475,16 @@ void BridgeClient::seek(double seconds) {
                 .arg(m_selectedQueueIndex));
     }
 #endif
+    if (!sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(BinaryBridgeCodec::CmdSeek, target))) {
+        return;
+    }
+    m_pendingTrackRestartUntilMs = 0;
     reanchorCenteredSpectrogramsForExplicitPosition(target);
+    // Snapshots describe playback before this seek until the engine is done
+    // with it.
     m_pendingSeek = true;
     m_pendingSeekTargetSeconds = target;
-    m_pendingSeekStartedAtMs = nowMs;
-    m_pendingSeekUntilMs = nowMs + 3000;
+    m_pendingSeekSerial = ++m_seeksSent;
     const QString targetText = formatSeconds(target);
     bool playbackSignalChanged = false;
     if (m_positionText != targetText) {
@@ -2490,7 +2498,6 @@ void BridgeClient::seek(double seconds) {
     if (playbackSignalChanged) {
         schedulePlaybackChanged();
     }
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(BinaryBridgeCodec::CmdSeek, target));
 }
 
 void BridgeClient::setVolume(double value) {
@@ -2823,8 +2830,6 @@ void BridgeClient::playAt(int index) {
     reanchorCenteredSpectrogramsForExplicitPosition(0.0);
     m_pendingSeek = false;
     m_pendingSeekTargetSeconds = 0.0;
-    m_pendingSeekStartedAtMs = 0;
-    m_pendingSeekUntilMs = 0;
     bool playbackSignalChanged = false;
     if (m_positionText != QStringLiteral("00:00")) {
         m_positionText = QStringLiteral("00:00");
@@ -4744,16 +4749,19 @@ bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFold
     return QDesktopServices::openUrl(QUrl::fromLocalFile(targetPath));
 }
 
-void BridgeClient::sendBinaryCommand(const QByteArray &payload) {
+bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
     if (payload.isEmpty()) {
         logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop empty command payload"));
         emit bridgeError(QStringLiteral("failed to encode binary bridge command"));
-        return;
+        return false;
+    }
+    if (m_sendCommandOverride) {
+        return m_sendCommandOverride(payload);
     }
     if (m_ffiBridge == nullptr) {
         logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command: bridge not initialized"));
         emit bridgeError(QStringLiteral("bridge is not initialized"));
-        return;
+        return false;
     }
     const auto *ptr = reinterpret_cast<const std::uint8_t *>(payload.constData());
     if (!ferrous_ffi_bridge_send_binary(m_ffiBridge, ptr, static_cast<std::size_t>(payload.size()))) {
@@ -4761,8 +4769,9 @@ void BridgeClient::sendBinaryCommand(const QByteArray &payload) {
             QStringLiteral("bridge"),
             QStringLiteral("failed to send command bytes=%1").arg(payload.size()));
         emit bridgeError(QStringLiteral("failed to send command to in-process bridge"));
-        return;
+        return false;
     }
+    return true;
 }
 
 void BridgeClient::sendLibraryRootCommand(quint16 cmdId, const QString &path) {
@@ -4908,8 +4917,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (stoppedTransition || playbackTrackChanged) {
         m_pendingSeek = false;
         m_pendingSeekTargetSeconds = 0.0;
-        m_pendingSeekStartedAtMs = 0;
-        m_pendingSeekUntilMs = 0;
         m_pendingTrackRestartUntilMs = 0;
         // Playback identity is authoritative even when decoding is delayed.
         // Do not make a new track's playhead wait for spectral reset data.
@@ -4960,14 +4967,29 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             applyIncomingPosition = false;
         }
     }
+    if (m_pendingSeek && snapshot.playback.present
+        && snapshot.playback.seekSerial >= m_pendingSeekSerial) {
+        m_pendingSeek = false;
+    }
     if (m_pendingSeek) {
-        if (nowMs >= m_pendingSeekUntilMs) {
-            m_pendingSeek = false;
-        } else if (std::abs(pos - m_pendingSeekTargetSeconds) <= 0.8) {
-            m_pendingSeek = false;
-        } else {
-            applyIncomingPosition = false;
-        }
+        // Describes playback before the pending seek.
+        applyIncomingPosition = false;
+    }
+    // A seek landed, and no newer seek waits: the incoming position is
+    // where it landed. A stop or a new track replaces it.
+    const bool newSeekLanding = snapshot.playback.present
+        && snapshot.playback.seekLandedSerial > m_seekLandedSerial;
+    if (snapshot.playback.present) {
+        m_seekLandedSerial = snapshot.playback.seekLandedSerial;
+    }
+    const bool reportSeekLanding = newSeekLanding && !m_pendingSeek && !isStopped
+        && !stoppedTransition && !playbackTrackChanged;
+    if (reportSeekLanding && std::abs(pos - m_positionSeconds) >= 0.03) {
+        // The playhead went to the seek target, and the seek landed
+        // elsewhere, such as on a key frame.
+        reanchorCenteredSpectrogramsForExplicitPosition(pos);
+        m_transportPositionDiscontinuityPending = true;
+        playbackSignalChanged = true;
     }
 
     auto applyPlaybackPosition = [&](double nextPos) {
@@ -4985,10 +5007,10 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     };
 
     if (applyIncomingPosition) {
-        if (!m_pendingSeek) {
-            m_pendingSeekStartedAtMs = 0;
-        }
         applyPlaybackPosition(pos);
+    }
+    if (reportSeekLanding) {
+        emit seekLanded(pos);
     }
 
     const QString durText = formatSeconds(dur);

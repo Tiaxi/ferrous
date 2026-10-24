@@ -151,6 +151,10 @@ pub(super) fn playback_snapshot_urgency(
         || previous.repeat_mode != next.repeat_mode
         || previous.shuffle_enabled != next.shuffle_enabled
         || previous.duration != next.duration
+        // The UI holds its playhead at a seek target until the engine is
+        // done with that seek.
+        || previous.seek_serial != next.seek_serial
+        || previous.seek_landed_serial != next.seek_landed_serial
     {
         return SnapshotUrgency::Immediate;
     }
@@ -929,6 +933,44 @@ mod tests {
         let trace =
             playback_position_trace(Duration::from_millis(8_000), Duration::from_millis(7_100));
         assert_eq!(trace.delta, -900);
+    }
+
+    #[test]
+    fn finished_seeks_reach_the_ui_without_waiting_for_a_heartbeat() {
+        let previous = PlaybackSnapshot {
+            state: PlaybackState::Playing,
+            position: Duration::from_secs(10),
+            seek_serial: 4,
+            seek_landed_serial: 3,
+            ..PlaybackSnapshot::default()
+        };
+        let moved = PlaybackSnapshot {
+            position: Duration::from_secs(11),
+            ..previous.clone()
+        };
+        assert_eq!(
+            playback_snapshot_urgency(&previous, &moved),
+            SnapshotUrgency::Heartbeat
+        );
+        // A refused or superseded seek: the playhead must stop waiting.
+        let refused = PlaybackSnapshot {
+            seek_serial: 5,
+            ..previous.clone()
+        };
+        assert_eq!(
+            playback_snapshot_urgency(&previous, &refused),
+            SnapshotUrgency::Immediate
+        );
+        let landed = PlaybackSnapshot {
+            position: Duration::from_secs(60),
+            seek_serial: 5,
+            seek_landed_serial: 5,
+            ..previous.clone()
+        };
+        assert_eq!(
+            playback_snapshot_urgency(&previous, &landed),
+            SnapshotUrgency::Immediate
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
-use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_pbutils as gst_pbutils;
@@ -21,7 +21,7 @@ use crate::raw_audio::{
 };
 
 use super::queue::{
-    same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff,
+    same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff, ManualMove,
 };
 use super::{
     PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent, PlaybackSnapshot,
@@ -260,6 +260,27 @@ fn recent_seek_trace(
     }
 }
 
+/// A position to seek the current track to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeekTarget {
+    position: Duration,
+    /// Serial of the newest `Seek` command that this seek carries out, or
+    /// 0 for a seek the engine makes to restart the track where it plays.
+    serial: u64,
+}
+
+/// Progress of a pipeline run that restarts the current track for a seek.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunRestart {
+    /// The pipeline must start a new run before it takes the queued seek,
+    /// because it was given a successor that has been dropped since.
+    Required,
+    /// Waiting for the new run to preroll before it is given the seek.
+    Prerolling,
+    /// The new run was given the seek and waits for it to land.
+    Seeking,
+}
+
 struct GstPlaybackRuntime {
     playbin: gst::Element,
     /// Shared with the about-to-finish callback, which hands a successor
@@ -283,7 +304,18 @@ struct GstPlaybackRuntime {
     /// Time of the previous fade step; `None` while no fade is running.
     volume_ramp_tick_at: Option<Instant>,
     buffering_active: bool,
-    seek_hold: Option<(Instant, Duration)>,
+    /// Number of `Seek` commands received, which numbers each seek.
+    seek_requests: u64,
+    /// The newest seek that the pipeline has not been given yet.
+    queued_seek: Option<SeekTarget>,
+    /// The seek the pipeline was given, until it reports `async-done`.
+    seek_in_flight: Option<SeekTarget>,
+    /// A new pipeline run for the queued seek. The run prerolls in Paused
+    /// and plays once the seek has landed, if playback is playing then.
+    restart: Option<RunRestart>,
+    /// Shared with the parser probes, which hold the end of each stream
+    /// while a seek is prepared.
+    stream_ends: Arc<Mutex<StreamEndHold>>,
     last_seek_issued_at: Option<Instant>,
     last_seek_released_at: Option<Instant>,
     last_seek_target: Option<Duration>,
@@ -296,10 +328,15 @@ struct GstPlaybackRuntime {
     last_stream_group: Option<gst::GroupId>,
     /// Shared with the about-to-finish callback and the parser probes.
     stream_durations: Arc<Mutex<StreamDurations>>,
-    /// Set when `set_state(Playing)` is called in `switch_track`.
+    /// Set when the pipeline is set playing, or a restarted run prerolls.
     /// Cleared when the bus handler sees `StateChanged(_, Playing)` for
     /// the playbin.  Used by `poll()` to detect stuck state transitions.
+    /// A seek in flight holds the pipeline back from Playing, so the wait
+    /// starts over once the seek has landed.
     playing_state_requested_at: Option<Instant>,
+    /// How long the pipeline may take to reach Playing:
+    /// `PLAYING_STATE_TIMEOUT`, which tests shorten.
+    playing_state_timeout: Duration,
     channel_mute_mask: Arc<AtomicU64>,
     solo_pre_mask: Option<u64>,
     soloed_channel: Option<u8>,
@@ -366,7 +403,6 @@ impl GstPlaybackRuntime {
             VOLUME_RAMP_TICK
         } else if self.snapshot.state == PlaybackState::Playing
             || self.buffering_active
-            || self.seek_hold.is_some()
             || self.startup_gain_ramp
         {
             Duration::from_millis(20)
@@ -385,6 +421,7 @@ impl GstPlaybackRuntime {
         event_tx: Sender<PlaybackEvent>,
         channel_mute_mask: Arc<AtomicU64>,
         stream_durations: Arc<Mutex<StreamDurations>>,
+        stream_ends: Arc<Mutex<StreamEndHold>>,
     ) -> Self {
         Self {
             playbin,
@@ -403,7 +440,11 @@ impl GstPlaybackRuntime {
             startup_ramp_hold_until: None,
             volume_ramp_tick_at: None,
             buffering_active: false,
-            seek_hold: None,
+            seek_requests: 0,
+            queued_seek: None,
+            seek_in_flight: None,
+            restart: None,
+            stream_ends,
             last_seek_issued_at: None,
             last_seek_released_at: None,
             last_seek_target: None,
@@ -412,6 +453,7 @@ impl GstPlaybackRuntime {
             last_stream_group: None,
             stream_durations,
             playing_state_requested_at: None,
+            playing_state_timeout: Self::PLAYING_STATE_TIMEOUT,
             channel_mute_mask,
             solo_pre_mask: None,
             soloed_channel: None,
@@ -432,14 +474,20 @@ impl GstPlaybackRuntime {
         self.last_seek_target = None;
     }
 
-    fn begin_seek_hold(&mut self, target: Duration) {
-        let issued_at = Instant::now();
-        self.snapshot.position = target;
-        self.position_clock.enter_seek_hold(target, issued_at);
-        self.last_seek_issued_at = Some(issued_at);
-        self.last_seek_released_at = None;
-        self.last_seek_target = Some(target);
-        self.seek_hold = Some((issued_at + Duration::from_millis(220), target));
+    /// Whether a seek waits for the pipeline. Positions are not sampled
+    /// meanwhile: until the seek lands they describe neither the old nor
+    /// the new position.
+    fn seek_pending(&self) -> bool {
+        self.queued_seek.is_some() || self.seek_in_flight.is_some()
+    }
+
+    /// Whether the pipeline runs a restart that waits for its seek before
+    /// it may play.
+    fn restarting(&self) -> bool {
+        matches!(
+            self.restart,
+            Some(RunRestart::Prerolling | RunRestart::Seeking)
+        )
     }
 
     #[cfg(feature = "profiling-logs")]
@@ -572,31 +620,6 @@ impl GstPlaybackRuntime {
         );
     }
 
-    fn poll_seek_hold(&mut self) -> (bool, bool, Option<(Duration, Instant)>) {
-        let mut position_locked = false;
-        let mut snapshot_changed = false;
-        let mut released_seek_sample = None;
-        if let Some((until, target)) = self.seek_hold.as_ref().copied() {
-            let now = Instant::now();
-            if now < until {
-                let hold_position = self.position_clock.current_position(now);
-                if self.snapshot.position != hold_position {
-                    self.snapshot.position = hold_position;
-                    snapshot_changed = true;
-                }
-                position_locked = true;
-            } else {
-                self.seek_hold = None;
-                let released_at = now;
-                self.last_seek_released_at = Some(released_at);
-                released_seek_sample = Some((target, released_at));
-                #[cfg(feature = "profiling-logs")]
-                self.log_seek_hold_release(target);
-            }
-        }
-        (position_locked, snapshot_changed, released_seek_sample)
-    }
-
     /// Advance identity for every track change.
     fn advance_track_token(&mut self) -> u64 {
         self.track_token_counter += 1;
@@ -654,7 +677,7 @@ impl GstPlaybackRuntime {
     }
 
     fn stop_with_empty_queue(&mut self) {
-        self.soft_mute();
+        self.mute();
         let _ = self.playbin.set_state(gst::State::Ready);
         self.begin_pipeline_run(false);
         self.startup_gain_ramp = false;
@@ -800,18 +823,30 @@ impl GstPlaybackRuntime {
         self.switch_to_path(target.path, target.index, TrackChangeKind::Manual, false);
     }
 
-    fn advance_manual(&mut self, next: bool) {
+    /// Apply a burst of Next (`true`) and Previous presses: move once per
+    /// press, and start only the track the moves end on.
+    fn navigate(&mut self, moves: &[bool]) {
         let Ok(mut state) = self.queue_state.lock() else {
             return;
         };
         let repeat_mode = state.repeat_mode();
         let shuffle_enabled = state.shuffle_enabled();
         let resume_from_pause = self.snapshot.state == PlaybackState::Paused;
-        let target = if next {
-            state.next_manual()
-        } else {
-            state.previous_manual()
-        };
+        let mut target: Option<ManualMove> = None;
+        for &next in moves {
+            let step = if next {
+                state.next_manual()
+            } else {
+                state.previous_manual()
+            };
+            if let Some(mut step) = step {
+                step.cancelled = CancelledAdvance::merge(
+                    target.as_ref().and_then(|target| target.cancelled),
+                    step.cancelled,
+                );
+                target = Some(step);
+            }
+        }
         drop(state);
         self.set_queue_flags(repeat_mode, shuffle_enabled);
         let Some(target) = target else {
@@ -861,6 +896,13 @@ impl GstPlaybackRuntime {
             };
         }
         self.buffering_active = false;
+        if self.restarting() {
+            // The restarted run would play from its start; it plays once
+            // its seek has landed.
+            self.snapshot.state = PlaybackState::Playing;
+            self.emit_snapshot();
+            return;
+        }
         if self.playbin.set_state(gst::State::Playing).is_ok() {
             let now = Instant::now();
             self.playing_state_requested_at = Some(now);
@@ -882,8 +924,14 @@ impl GstPlaybackRuntime {
         if self.snapshot.state != PlaybackState::Playing {
             return;
         }
-        self.playing_state_requested_at = None;
         self.buffering_active = false;
+        if self.restarting() {
+            // The restarted run stays in Paused until its seek has landed.
+            self.snapshot.state = PlaybackState::Paused;
+            self.emit_snapshot();
+            return;
+        }
+        self.playing_state_requested_at = None;
         if self.playbin.set_state(gst::State::Paused).is_ok() {
             self.snapshot.state = PlaybackState::Paused;
             self.position_clock
@@ -893,7 +941,7 @@ impl GstPlaybackRuntime {
     }
 
     fn stop(&mut self) {
-        self.soft_mute();
+        self.mute();
         self.playing_state_requested_at = None;
         if self.playbin.set_state(gst::State::Ready).is_ok() {
             self.reset_channel_mute_state();
@@ -917,7 +965,6 @@ impl GstPlaybackRuntime {
         self.startup_gain_ramp = false;
         self.startup_ramp_hold_until = None;
         self.buffering_active = false;
-        self.seek_hold = None;
         self.clear_recent_seek_trace();
         self.snapshot.state = PlaybackState::Stopped;
         self.snapshot.position = Duration::ZERO;
@@ -926,37 +973,183 @@ impl GstPlaybackRuntime {
         self.snapshot.current_bitrate_kbps = None;
     }
 
-    fn seek(&mut self, pos: Duration) {
-        let nanos = u64::try_from(pos.as_nanos().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
-        let target = gst::ClockTime::from_nseconds(nanos);
-        let requested = pos.min(self.snapshot.duration);
-
-        // playbin3 applies a seek to a successor it was given, so the
-        // pipeline gets none until the seek is applied, and a seek inside
-        // the about-to-finish window restarts the displayed track and seeks
-        // there instead.
-        self.hold_handoffs();
-        let cancelled_gapless_advance = self
-            .cancel_pending_advance(true)
-            .is_some_and(|cancelled| cancelled.handed_to_pipeline);
-        let restarted = if cancelled_gapless_advance {
-            self.restart_current_track(target)
+    /// Handle `requests` Seek commands in a row, of which only the last
+    /// one, to `position`, is carried out. A newer seek replaces one that
+    /// waits for the pipeline, so a burst of seeks lands only at its last
+    /// target.
+    fn seek(&mut self, position: Duration, requests: u64) {
+        self.seek_requests = self.seek_requests.saturating_add(requests);
+        let serial = self.seek_requests;
+        if self.snapshot.current.is_none() || self.snapshot.state == PlaybackState::Stopped {
+            // Play starts a stopped track from its beginning, so a stopped
+            // track is not seekable.
+            self.snapshot.seek_serial = serial;
+            self.emit_snapshot();
+            return;
+        }
+        let position = if self.snapshot.duration.is_zero() {
+            position
         } else {
-            None
+            position.min(self.snapshot.duration)
         };
-        let seek_result_ok = restarted.unwrap_or_else(|| {
-            let seek_flags = seek_flags_for_path(self.snapshot.current.as_deref());
-            self.playbin.seek_simple(seek_flags, target).is_ok()
-        });
+        self.queue_seek(SeekTarget { position, serial });
+    }
+
+    /// Queue `seek` for the pipeline, replacing a seek that waits.
+    fn queue_seek(&mut self, seek: SeekTarget) {
+        if !self.seek_pending() {
+            // Positions are not sampled until the seek lands.
+            self.position_clock
+                .enter_seek_hold(self.snapshot.position, Instant::now());
+        }
+        self.queued_seek = Some(seek);
+        self.issue_queued_seek();
+    }
+
+    /// Give the pipeline the queued seek once it can take it: when it has
+    /// prerolled, no other seek is in flight, and it has no successor that
+    /// the seek would reach. Called again when the pipeline reports
+    /// `async-done`.
+    fn issue_queued_seek(&mut self) {
+        // A run that is restarted need not have prerolled, and a pipeline
+        // that a failure stopped never will.
+        if self.restart == Some(RunRestart::Required) || self.pipeline_prerolled() {
+            self.give_queued_seek();
+        }
+    }
+
+    /// Give the queued seek to the pipeline, which has prerolled, or
+    /// restart the run for it.
+    fn give_queued_seek(&mut self) {
+        if self.seek_in_flight.is_some() || self.restart == Some(RunRestart::Prerolling) {
+            return;
+        }
+        let Some(seek) = self.queued_seek else {
+            return;
+        };
+        // playbin3 applies a seek to a successor it was given, and it asks
+        // for the successor of a stream it has read to the end only once.
+        // Until the seek has been applied, successors are held back and so
+        // is the end of every stream, so that the pipeline asks for the
+        // successor of the current track after the seek.
+        self.hold_handoffs();
+        self.hold_stream_ends();
+        let cancelled = self.cancel_pending_advance(true);
+        if self.restart == Some(RunRestart::Required)
+            || cancelled.is_some_and(|cancelled| cancelled.handed_to_pipeline)
+        {
+            self.restart_for_seek();
+            return;
+        }
+        self.queued_seek = None;
+        let applied = self
+            .playbin
+            .seek_simple(
+                seek_flags_for_path(self.snapshot.current.as_deref()),
+                clock_time(seek.position),
+            )
+            .is_ok();
         self.release_handoffs();
-        #[cfg(not(feature = "profiling-logs"))]
-        let _ = seek_result_ok;
-        self.begin_seek_hold(requested);
+        self.release_stream_ends();
         #[cfg(feature = "profiling-logs")]
-        self.log_seek_event(pos, requested, cancelled_gapless_advance, seek_result_ok);
-        let _ = self.event_tx.send(PlaybackEvent::Seeked {
-            position: self.snapshot.position,
-        });
+        self.log_seek_event(seek.position, seek.position, self.restarting(), applied);
+        self.last_seek_issued_at = Some(Instant::now());
+        self.last_seek_released_at = None;
+        self.last_seek_target = Some(seek.position);
+        if applied {
+            self.seek_in_flight = Some(seek);
+        } else {
+            self.finish_seek(seek, None);
+        }
+    }
+
+    /// Whether the pipeline has prerolled in this run, so that it takes a
+    /// seek, without waiting for it. Its state becomes Paused before it
+    /// posts the `async-done` of its preroll, and stays Paused or Playing
+    /// while it goes on to Playing or prerolls again after a seek.
+    fn pipeline_prerolled(&self) -> bool {
+        let (_, current, _) = self.playbin.state(Some(gst::ClockTime::ZERO));
+        current >= gst::State::Paused
+    }
+
+    /// The pipeline prerolled after a state change or a seek. It may still
+    /// be on its way to Playing, which does not keep it from taking a seek.
+    fn handle_async_done(&mut self) {
+        if self.restart == Some(RunRestart::Prerolling) {
+            // The restarted run takes its seek now.
+            self.restart = Some(RunRestart::Seeking);
+            self.give_queued_seek();
+            return;
+        }
+        let Some(seek) = self.seek_in_flight.take() else {
+            // Give the pipeline a seek that waited for it to preroll.
+            self.give_queued_seek();
+            return;
+        };
+        if self.queued_seek.is_some() {
+            // A newer seek replaces this one before it is reported.
+            self.give_queued_seek();
+            return;
+        }
+        let landing = self
+            .playbin
+            .query_position::<gst::ClockTime>()
+            .map(|position| Duration::from_nanos(position.nseconds()));
+        self.finish_seek(seek, Some(landing.unwrap_or(seek.position)));
+    }
+
+    /// Account for `seek`, which landed at `landing`, or failed with
+    /// `None`. A seek of the user is reported, and a restarted run plays
+    /// again if playback is playing.
+    fn finish_seek(&mut self, seek: SeekTarget, landing: Option<Duration>) {
+        let now = Instant::now();
+        self.last_seek_released_at = Some(now);
+        #[cfg(feature = "profiling-logs")]
+        self.log_seek_hold_release(seek.position);
+        if let Some(landing) = landing {
+            release_seek_hold_sample(&mut self.position_clock, seek.position, now, landing, now);
+            self.snapshot.position = landing;
+        } else {
+            // Playback goes on where the pipeline is, which is the start of
+            // the track for a restarted run.
+            if let Some(position) = self.playbin.query_position::<gst::ClockTime>() {
+                self.snapshot.position = Duration::from_nanos(position.nseconds());
+            }
+            self.position_clock.reset(self.snapshot.position, now);
+        }
+        if self.playing_state_requested_at.is_some() {
+            // The pipeline goes on to Playing now that the seek is done.
+            self.playing_state_requested_at = Some(now);
+        }
+        if seek.serial != 0 {
+            self.snapshot.seek_serial = self.snapshot.seek_serial.max(seek.serial);
+            if let Some(landing) = landing {
+                self.snapshot.seek_landed_serial = seek.serial;
+                let _ = self
+                    .event_tx
+                    .send(PlaybackEvent::Seeked { position: landing });
+            }
+        }
+        if self.restarting() {
+            self.restart = None;
+            if self.snapshot.state == PlaybackState::Playing {
+                self.start_playing_muted();
+            } else {
+                self.playing_state_requested_at = None;
+            }
+        }
+        self.emit_snapshot();
+    }
+
+    /// Drop seeks that wait for the pipeline, because the track changed or
+    /// playback stopped. Every seek received so far is done with.
+    fn abandon_seeks(&mut self) {
+        self.queued_seek = None;
+        self.seek_in_flight = None;
+        self.restart = None;
+        self.release_handoffs();
+        self.release_stream_ends();
+        self.snapshot.seek_serial = self.seek_requests;
     }
 
     /// Drop every staged successor so the committed track stays current.
@@ -966,7 +1159,8 @@ impl GstPlaybackRuntime {
     ///
     /// When the result reports a successor handed to the pipeline, the
     /// caller must either restart the committed track with
-    /// `restart_current_track` or switch tracks before playback continues.
+    /// `restart_at_current_position` or switch tracks before playback
+    /// continues.
     fn cancel_pending_advance(&mut self, current_continues: bool) -> Option<CancelledAdvance> {
         let cancelled = self
             .queue_state
@@ -986,61 +1180,98 @@ impl GstPlaybackRuntime {
         }
     }
 
-    /// Restart the committed track where it plays now, in a new pipeline
-    /// run without staged successors.
+    /// Restart the committed track in a new pipeline run without the
+    /// successors the pipeline was given: where it plays now, or at the
+    /// target of a seek that waits.
     fn restart_at_current_position(&mut self) {
+        if self.restart != Some(RunRestart::Prerolling) {
+            // A run that prerolls has not been given a successor.
+            self.restart = Some(RunRestart::Required);
+        }
+        if let Some(seek) = self.seek_in_flight.take() {
+            // The old run's seek is redone in the new run.
+            self.queued_seek.get_or_insert(seek);
+        }
+        if self.queued_seek.is_some() {
+            self.issue_queued_seek();
+            return;
+        }
         let position = self
             .playbin
             .query_position::<gst::ClockTime>()
-            .unwrap_or_else(|| {
-                gst::ClockTime::from_nseconds(
-                    u64::try_from(self.snapshot.position.as_nanos()).unwrap_or(u64::MAX),
-                )
+            .map_or(self.snapshot.position, |position| {
+                Duration::from_nanos(position.nseconds())
             });
-        if self.restart_current_track(position).is_some() {
-            let position = Duration::from_nanos(position.nseconds());
-            self.snapshot.position = position;
-            self.position_clock.reset(position, Instant::now());
-        }
+        self.queue_seek(SeekTarget {
+            position,
+            serial: 0,
+        });
     }
 
-    /// Restart the committed track at `position` in a new pipeline run,
-    /// dropping a successor the pipeline was given. Returns whether the
-    /// seek was accepted, or `None` without a current track.
-    fn restart_current_track(&mut self, position: gst::ClockTime) -> Option<bool> {
-        let path = self.snapshot.current.clone()?;
-        let uri = file_uri(&path)?;
-        // A short track can reach about-to-finish while it prerolls, before
-        // the seek below.
-        self.hold_handoffs();
-        self.soft_mute();
+    /// Start a new pipeline run of the current track that prerolls in
+    /// Paused, without the successors the old run was given. Once it has
+    /// prerolled, it takes the queued seek, and it plays once that seek has
+    /// landed. Stream ends stay held until then; see `issue_queued_seek`.
+    fn restart_for_seek(&mut self) {
+        let Some((path, uri)) = self
+            .snapshot
+            .current
+            .clone()
+            .and_then(|path| file_uri(&path).map(|uri| (path, uri)))
+        else {
+            self.abandon_seeks();
+            return;
+        };
+        self.mute();
         let _ = self.playbin.set_state(gst::State::Null);
         let _ = self.playbin.set_state(gst::State::Ready);
         // Also drops a successor staged while the old run was stopping.
         self.begin_pipeline_run(true);
         self.set_run_uri(&path, &uri);
-
-        // Preroll in Paused so the pipeline accepts the seek. For local
-        // files this is sub-millisecond.
-        let _ = self.playbin.set_state(gst::State::Paused);
-        let _ = self.playbin.state(Some(gst::ClockTime::from_mseconds(500)));
-        let seek_result_ok = self
-            .playbin
-            .seek_simple(seek_flags_for_path(Some(&path)), position)
-            .is_ok();
-        self.release_handoffs();
-
-        if self.snapshot.state == PlaybackState::Playing {
-            let _ = self.playbin.set_state(gst::State::Playing);
-            self.playbin.set_property("volume", 0.0_f64);
-            self.startup_gain_ramp = true;
-            self.startup_ramp_hold_until = if is_raw_surround_file(&path) {
-                Some(Instant::now() + Duration::from_millis(80))
-            } else {
-                None
-            };
+        self.restart = Some(RunRestart::Prerolling);
+        // A run that never prerolls is reported like one that never plays.
+        // The seek it then takes is not timed.
+        self.playing_state_requested_at = Some(Instant::now());
+        // A failure posts an error, which ends the restart.
+        if matches!(
+            self.playbin.set_state(gst::State::Paused),
+            Ok(gst::StateChangeSuccess::Success | gst::StateChangeSuccess::NoPreroll)
+        ) {
+            // Prerolled at once, so no async-done follows.
+            self.handle_async_done();
         }
-        Some(seek_result_ok)
+    }
+
+    /// Set the pipeline playing from silence, with the fade-in of a track
+    /// start.
+    fn start_playing_muted(&mut self) {
+        let _ = self.playbin.set_state(gst::State::Playing);
+        self.playing_state_requested_at = Some(Instant::now());
+        self.applied_volume = 0.0;
+        self.playbin.set_property("volume", 0.0_f64);
+        self.startup_gain_ramp = true;
+        self.startup_ramp_hold_until = if self
+            .snapshot
+            .current
+            .as_deref()
+            .is_some_and(is_raw_surround_file)
+        {
+            Some(Instant::now() + Duration::from_millis(80))
+        } else {
+            None
+        };
+    }
+
+    fn hold_stream_ends(&self) {
+        if let Ok(mut stream_ends) = self.stream_ends.lock() {
+            stream_ends.hold();
+        }
+    }
+
+    fn release_stream_ends(&self) {
+        if let Ok(mut stream_ends) = self.stream_ends.lock() {
+            stream_ends.release();
+        }
     }
 
     fn hold_handoffs(&self) {
@@ -1066,11 +1297,15 @@ impl GstPlaybackRuntime {
 
     /// Account for a new pipeline run after the pipeline was stopped:
     /// discard the previous run's bus messages, streams, and staged
-    /// successors.
+    /// successors. Unless the current track continues in the new run,
+    /// also drop the seeks that wait.
     fn begin_pipeline_run(&mut self, current_continues: bool) {
         if let Some(bus) = self.playbin.bus() {
             bus.set_flushing(true);
             bus.set_flushing(false);
+        }
+        if !current_continues {
+            self.abandon_seeks();
         }
         self.awaiting_run_stream_start = true;
         self.last_stream_group = None;
@@ -1136,7 +1371,8 @@ impl GstPlaybackRuntime {
             .map_or(Duration::ZERO, |position| {
                 Duration::from_nanos(position.nseconds())
             });
-        self.seek_hold = None;
+        // A seek for the previous track no longer applies.
+        self.abandon_seeks();
         self.clear_recent_seek_trace();
         self.snapshot.current = Some(committed.path.clone());
         self.snapshot.current_queue_index = Some(committed.index);
@@ -1283,15 +1519,13 @@ impl GstPlaybackRuntime {
     fn poll(&mut self) {
         if self.snapshot.state == PlaybackState::Stopped
             && !self.startup_gain_ramp
-            && self.seek_hold.is_none()
             && self.startup_ramp_hold_until.is_none()
         {
             return;
         }
 
-        let (position_locked, seek_hold_changed, released_seek_sample) = self.poll_seek_hold();
-        let mut snapshot_changed = seek_hold_changed;
-        if !position_locked && self.snapshot.state != PlaybackState::Stopped {
+        let mut snapshot_changed = false;
+        if !self.seek_pending() && self.snapshot.state != PlaybackState::Stopped {
             if let Some(pos) = self.playbin.query_position::<gst::ClockTime>() {
                 let now = Instant::now();
                 let previous_raw_pos = self
@@ -1299,18 +1533,10 @@ impl GstPlaybackRuntime {
                     .last_raw_position()
                     .unwrap_or(self.snapshot.position);
                 let raw_pos = Duration::from_nanos(pos.nseconds());
+                #[cfg(feature = "profiling-logs")]
+                let mode_before_sample = self.position_clock.mode();
                 let next_pos = if self.snapshot.state == PlaybackState::Playing {
-                    if let Some((target, released_at)) = released_seek_sample {
-                        release_seek_hold_sample(
-                            &mut self.position_clock,
-                            target,
-                            released_at,
-                            raw_pos,
-                            now,
-                        )
-                    } else {
-                        self.position_clock.update_playing_sample(raw_pos, now)
-                    }
+                    self.position_clock.update_playing_sample(raw_pos, now)
                 } else {
                     self.position_clock.reset(raw_pos, now);
                     raw_pos
@@ -1321,18 +1547,11 @@ impl GstPlaybackRuntime {
                 }
                 if previous_raw_pos != raw_pos {
                     #[cfg(feature = "profiling-logs")]
-                    {
-                        let mode_before_sample = if released_seek_sample.is_some() {
-                            PlaybackClockMode::SeekReacquire
-                        } else {
-                            self.position_clock.mode()
-                        };
-                        self.log_position_sample(
-                            gst_position_trace(previous_raw_pos, raw_pos),
-                            mode_before_sample,
-                            next_pos,
-                        );
-                    }
+                    self.log_position_sample(
+                        gst_position_trace(previous_raw_pos, raw_pos),
+                        mode_before_sample,
+                        next_pos,
+                    );
                 }
             }
         }
@@ -1365,7 +1584,10 @@ impl GstPlaybackRuntime {
         let Some(requested_at) = self.playing_state_requested_at else {
             return false;
         };
-        if requested_at.elapsed() < Self::PLAYING_STATE_TIMEOUT {
+        // A seek can take long, such as an accurate seek in a long file
+        // without an index, and the pipeline plays only once it has landed.
+        // A seek that fails posts an error.
+        if self.seek_in_flight.is_some() || requested_at.elapsed() < self.playing_state_timeout {
             return false;
         }
         let current_path = self.snapshot.current.as_ref().map_or("?", |p| {
@@ -1373,7 +1595,7 @@ impl GstPlaybackRuntime {
         });
         eprintln!(
             "[ferrous] pipeline stuck: Playing state not confirmed within {}s for {current_path}, advancing",
-            Self::PLAYING_STATE_TIMEOUT.as_secs(),
+            self.playing_state_timeout.as_secs(),
         );
         let (file, detail) = match self.missing_plugin.take() {
             Some(missing) => (missing.file, missing_plugin_detail(&missing.description)),
@@ -1381,7 +1603,7 @@ impl GstPlaybackRuntime {
                 None,
                 format!(
                     "playback did not start within {} s",
-                    Self::PLAYING_STATE_TIMEOUT.as_secs()
+                    self.playing_state_timeout.as_secs()
                 ),
             ),
         };
@@ -1478,10 +1700,21 @@ impl GstPlaybackRuntime {
 
     /// Tear down the faulted pipeline and stop on the current track.
     fn stop_after_failure(&mut self) {
-        self.soft_mute();
+        self.mute();
         let _ = self.playbin.set_state(gst::State::Null);
         let _ = self.playbin.set_state(gst::State::Ready);
         self.enter_stopped();
+    }
+
+    fn apply_step(&mut self, step: EngineStep) {
+        match step {
+            EngineStep::Command(cmd) => self.apply_command(cmd),
+            EngineStep::Seek { position, requests } => self.seek(position, requests),
+            EngineStep::Navigate(moves) => {
+                self.reset_failures();
+                self.navigate(&moves);
+            }
+        }
     }
 
     fn apply_command(&mut self, cmd: PlaybackCommand) {
@@ -1520,12 +1753,12 @@ impl GstPlaybackRuntime {
             PlaybackCommand::MoveQueue { from, to } => self.move_queue_item(from, to),
             PlaybackCommand::ClearQueue => self.clear_queue(),
             PlaybackCommand::PlayAt(idx) => self.play_at(idx),
-            PlaybackCommand::Next => self.advance_manual(true),
-            PlaybackCommand::Previous => self.advance_manual(false),
+            PlaybackCommand::Next => self.navigate(&[true]),
+            PlaybackCommand::Previous => self.navigate(&[false]),
             PlaybackCommand::Play => self.play(),
             PlaybackCommand::Pause => self.pause(),
             PlaybackCommand::Stop => self.stop(),
-            PlaybackCommand::Seek(pos) => self.seek(pos),
+            PlaybackCommand::Seek(pos) => self.seek(pos, 1),
             PlaybackCommand::SetVolume(volume) => self.set_volume(volume),
             PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(mode),
             PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
@@ -1617,7 +1850,6 @@ impl GstPlaybackRuntime {
                 // Normal EOS: end of queue
                 self.playing_state_requested_at = None;
                 self.buffering_active = false;
-                self.seek_hold = None;
                 self.position_clock.reset(Duration::ZERO, Instant::now());
                 self.clear_recent_seek_trace();
                 self.startup_gain_ramp = false;
@@ -1649,6 +1881,11 @@ impl GstPlaybackRuntime {
                     warn.error(),
                     warn.debug()
                 );
+            }
+            gst::MessageView::AsyncDone(_) => {
+                if msg.src().is_some_and(|src| src == &self.playbin) {
+                    self.handle_async_done();
+                }
             }
             gst::MessageView::StateChanged(sc) => {
                 if sc.src().is_some_and(|s| s == &self.playbin) {
@@ -1702,33 +1939,18 @@ impl GstPlaybackRuntime {
         }
     }
 
-    fn soft_mute(&mut self) {
-        if self.applied_volume <= 0.0001 {
-            self.applied_volume = 0.0;
-            self.playbin
-                .set_property("volume", f64::from(self.applied_volume));
-            return;
-        }
-        for _ in 0..3 {
-            self.applied_volume *= 0.35;
-            if self.applied_volume <= 0.0001 {
-                self.applied_volume = 0.0;
-            }
-            self.playbin
-                .set_property("volume", f64::from(self.applied_volume));
-            std::thread::sleep(Duration::from_millis(4));
-            if self.applied_volume == 0.0 {
-                break;
-            }
-        }
+    /// Silence the pipeline before it is stopped or restarted. The samples
+    /// it has queued are dropped with the run, so a stepped fade would only
+    /// delay the switch.
+    fn mute(&mut self) {
         self.applied_volume = 0.0;
-        self.playbin
-            .set_property("volume", f64::from(self.applied_volume));
+        self.volume_ramp_tick_at = None;
+        self.playbin.set_property("volume", 0.0_f64);
     }
 
     fn switch_track(&mut self, path: &Path, uri: &str, force_play: bool) {
         let was_playing = self.snapshot.state == PlaybackState::Playing || force_play;
-        self.soft_mute();
+        self.mute();
         self.playing_state_requested_at = None;
         let _ = self.playbin.set_state(gst::State::Null);
         let _ = self.playbin.set_state(gst::State::Ready);
@@ -1796,7 +2018,8 @@ fn start_gst_engine(
     install_raw_surround_source_probe(&playbin);
 
     let stream_durations = Arc::new(Mutex::new(StreamDurations::default()));
-    install_stream_duration_probes(&playbin, &stream_durations);
+    let stream_ends = Arc::new(Mutex::new(StreamEndHold::default()));
+    install_stream_probes(&playbin, &stream_durations, &stream_ends);
 
     let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
 
@@ -1824,6 +2047,7 @@ fn start_gst_engine(
         event_tx,
         channel_mute_mask,
         stream_durations,
+        stream_ends,
     );
     runtime
         .playbin
@@ -1836,22 +2060,87 @@ fn run_gst_engine(
     bus: &gst::Bus,
     cmd_rx: &Receiver<PlaybackCommand>,
 ) {
+    // Wake for bus messages, such as the async-done that tells where a seek
+    // landed, instead of finding them at the next timeout.
+    let (bus_wake_tx, bus_wake_rx) = bounded::<()>(1);
+    bus.set_sync_handler(move |_, _| {
+        let _ = bus_wake_tx.try_send(());
+        gst::BusSyncReply::Pass
+    });
     loop {
-        match cmd_rx.recv_timeout(runtime.command_wait_timeout()) {
-            Ok(cmd) => {
-                // Act on the pipeline's latest state, such as a successor
-                // that has just started.
-                runtime.drain_bus(bus);
-                runtime.apply_command(cmd);
+        crossbeam_channel::select! {
+            recv(cmd_rx) -> cmd => {
+                let Ok(cmd) = cmd else {
+                    break;
+                };
+                // Commands that queued up while the engine was busy are
+                // handled as one burst.
+                let burst: Vec<_> = std::iter::once(cmd).chain(cmd_rx.try_iter()).collect();
+                for step in merge_burst(burst) {
+                    // Act on the pipeline's latest state, such as a successor
+                    // that has just started.
+                    runtime.drain_bus(bus);
+                    runtime.apply_step(step);
+                }
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
+            recv(bus_wake_rx) -> _ => {}
+            default(runtime.command_wait_timeout()) => {}
         }
         runtime.drain_bus(bus);
         runtime.poll_volume_ramp(Instant::now());
     }
 
+    bus.unset_sync_handler();
     let _ = runtime.playbin.set_state(gst::State::Null);
+}
+
+/// A step of the engine: a command, or a burst of commands merged into one.
+#[derive(Debug)]
+enum EngineStep {
+    Command(PlaybackCommand),
+    /// `requests` Seek commands in a row, of which only the last one, to
+    /// `position`, is carried out.
+    Seek {
+        position: Duration,
+        requests: u64,
+    },
+    /// Next (`true`) and Previous presses in a row.
+    Navigate(Vec<bool>),
+}
+
+/// Merge a burst of commands: seeks in a row become one seek to the last
+/// target, and Next and Previous presses in a row become one move by all of
+/// them, which starts only the track it ends on. The bridge's polls are
+/// answered once, after the burst.
+fn merge_burst(commands: Vec<PlaybackCommand>) -> Vec<EngineStep> {
+    let mut steps: Vec<EngineStep> = Vec::new();
+    let mut poll = false;
+    for command in commands {
+        match (command, steps.last_mut()) {
+            (PlaybackCommand::Poll, _) => poll = true,
+            (PlaybackCommand::Seek(target), Some(EngineStep::Seek { position, requests })) => {
+                *position = target;
+                *requests += 1;
+            }
+            (PlaybackCommand::Seek(position), _) => steps.push(EngineStep::Seek {
+                position,
+                requests: 1,
+            }),
+            (command @ (PlaybackCommand::Next | PlaybackCommand::Previous), last) => {
+                let next = matches!(command, PlaybackCommand::Next);
+                if let Some(EngineStep::Navigate(moves)) = last {
+                    moves.push(next);
+                } else {
+                    steps.push(EngineStep::Navigate(vec![next]));
+                }
+            }
+            (command, _) => steps.push(EngineStep::Command(command)),
+        }
+    }
+    if poll {
+        steps.push(EngineStep::Command(PlaybackCommand::Poll));
+    }
+    steps
 }
 
 /// Stage the natural successor when the pipeline asks for one, and give
@@ -1991,14 +2280,85 @@ impl StreamDurations {
     }
 }
 
-/// Record the duration of every parsed stream under its file, from the
-/// streaming thread that parses it: when its first buffer leaves the
-/// parser and again at its end, when the parser has read all of it. Queries
-/// on the parser's own pad cannot describe another stream, and they avoid
-/// the playbin locks that a state change on the engine thread holds. (The
-/// group of a stream is no key: the pipeline may restamp it.)
-fn install_stream_duration_probes(playbin: &gst::Element, durations: &Arc<Mutex<StreamDurations>>) {
+/// While a seek is prepared, holds back the end of every stream that the
+/// pipeline parses, so the pipeline asks for a successor only after the
+/// seek. playbin3 asks for the successor of a stream once, when it has read
+/// the stream to its end; a short track is read to its end while a
+/// restarted run prerolls, before its seek. Without the hold, its successor
+/// could then only start after end of stream, with a gap.
+#[derive(Default)]
+struct StreamEndHold {
+    held: bool,
+    /// Source pads of the parsers, which carry the parsed streams.
+    pads: Vec<gst::glib::WeakRef<gst::Pad>>,
+    /// The blocking probes of a hold.
+    blocks: Vec<(gst::glib::WeakRef<gst::Pad>, gst::PadProbeId)>,
+}
+
+impl StreamEndHold {
+    /// A parser exposed `pad`. Hold its end too while a hold lasts.
+    fn add_pad(&mut self, pad: &gst::Pad) {
+        self.pads.retain(|pad| pad.upgrade().is_some());
+        self.pads.push(pad.downgrade());
+        if self.held {
+            self.block(pad);
+        }
+    }
+
+    fn hold(&mut self) {
+        if std::mem::replace(&mut self.held, true) {
+            return;
+        }
+        let pads: Vec<_> = self
+            .pads
+            .iter()
+            .filter_map(gst::glib::WeakRef::upgrade)
+            .collect();
+        for pad in &pads {
+            self.block(pad);
+        }
+    }
+
+    fn release(&mut self) {
+        self.held = false;
+        for (pad, probe) in self.blocks.drain(..) {
+            if let Some(pad) = pad.upgrade() {
+                pad.remove_probe(probe);
+            }
+        }
+    }
+
+    /// Block `pad` at its end of stream. A flush, as from a seek, drops
+    /// the held end; the stream ends again after the seek.
+    fn block(&mut self, pad: &gst::Pad) {
+        let probe = pad.add_probe(
+            gst::PadProbeType::BLOCK | gst::PadProbeType::EVENT_DOWNSTREAM,
+            |_, info| match info.data {
+                Some(gst::PadProbeData::Event(ref event))
+                    if event.type_() == gst::EventType::Eos =>
+                {
+                    gst::PadProbeReturn::Ok
+                }
+                _ => gst::PadProbeReturn::Pass,
+            },
+        );
+        if let Some(probe) = probe {
+            self.blocks.push((pad.downgrade(), probe));
+        }
+    }
+}
+
+/// Install the probes on the source pads of every parser of the pipeline:
+/// they record each stream's duration and hold its end during a seek. See
+/// `install_stream_duration_probe` and `StreamEndHold`. Lock order: the
+/// probes take `durations` and `stream_ends` one at a time.
+fn install_stream_probes(
+    playbin: &gst::Element,
+    durations: &Arc<Mutex<StreamDurations>>,
+    stream_ends: &Arc<Mutex<StreamEndHold>>,
+) {
     let durations = Arc::clone(durations);
+    let stream_ends = Arc::clone(stream_ends);
     playbin.connect("deep-element-added", false, move |values| {
         let element = values.get(2)?.get::<gst::Element>().ok()?;
         if element
@@ -2006,9 +2366,13 @@ fn install_stream_duration_probes(playbin: &gst::Element, durations: &Arc<Mutex<
             .is_some_and(|factory| factory.name() == "parsebin")
         {
             let durations = Arc::clone(&durations);
+            let stream_ends = Arc::clone(&stream_ends);
             element.connect_pad_added(move |_, pad| {
                 if pad.direction() == gst::PadDirection::Src {
                     install_stream_duration_probe(pad, Arc::clone(&durations));
+                    if let Ok(mut stream_ends) = stream_ends.lock() {
+                        stream_ends.add_pad(pad);
+                    }
                 }
             });
         }
@@ -2016,6 +2380,12 @@ fn install_stream_duration_probes(playbin: &gst::Element, durations: &Arc<Mutex<
     });
 }
 
+/// Record the duration of every parsed stream under its file, from the
+/// streaming thread that parses it: when its first buffer leaves the
+/// parser and again at its end, when the parser has read all of it. Queries
+/// on the parser's own pad cannot describe another stream, and they avoid
+/// the playbin locks that a state change on the engine thread holds. (The
+/// group of a stream is no key: the pipeline may restamp it.)
 fn install_stream_duration_probe(pad: &gst::Pad, durations: Arc<Mutex<StreamDurations>>) {
     let first_buffer_seen = AtomicBool::new(false);
     pad.add_probe(
@@ -2103,26 +2473,20 @@ fn configure_playbin_buffering(playbin: &gst::Element) {
     playbin.set_property_from_value("flags", &tuned_flags);
 }
 
+/// Seek flags for the track at `path`. Seeks are accurate: without the
+/// flag, parsers such as those of MP3 and ADTS AAC estimate where the target
+/// is from the bitrate and label the audio found there with the target time,
+/// so the pipeline itself cannot tell where the seek landed, and playback
+/// is offset from the spectrogram, which seeks accurately. An accurate seek
+/// can make a parser scan, but bursts of seeks are merged, so scrubbing
+/// pays for one. DTS seeks to the key frame before the target; its
+/// position is reported as where the seek landed.
 fn seek_flags_for_path(path: Option<&Path>) -> gst::SeekFlags {
     if path.is_some_and(is_dts_file) {
         gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
-    } else if path.is_some_and(is_flac_file) {
-        // Fast FLAC seeks can leave flacparse in an internally errored state
-        // after rapid synced seeks. Accurate flushed seeks avoid that parser
-        // stall while keeping other formats on the low-latency path.
-        gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
     } else {
-        // Accurate seeks can force parsers/demuxers to scan large files.
-        // Default playback should prefer responsiveness, especially on slow
-        // network-backed filesystems.
-        gst::SeekFlags::FLUSH
+        gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
     }
-}
-
-fn is_flac_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("flac"))
 }
 
 /// Installs a buffer probe on `capsfilter`'s src pad that silences
@@ -2387,6 +2751,7 @@ mod tests {
             event_tx,
             Arc::new(AtomicU64::new(0)),
             Arc::new(Mutex::new(StreamDurations::default())),
+            Arc::new(Mutex::new(StreamEndHold::default())),
         );
         runtime.playbin.set_property("volume", 1.0_f64);
         (runtime, event_rx)
@@ -2790,11 +3155,18 @@ mod tests {
     }
 
     #[test]
-    fn flac_seek_uses_accurate_mode_to_avoid_parser_stall() {
-        let flags = seek_flags_for_path(Some(Path::new("/tmp/test.flac")));
-        assert!(flags.contains(gst::SeekFlags::FLUSH));
-        assert!(flags.contains(gst::SeekFlags::ACCURATE));
-        assert!(!flags.contains(gst::SeekFlags::KEY_UNIT));
+    fn seeks_are_accurate_except_for_dts() {
+        for path in [
+            "/tmp/test.flac",
+            "/tmp/test.mp3",
+            "/tmp/test.aac",
+            "/tmp/test.ogg",
+        ] {
+            let flags = seek_flags_for_path(Some(Path::new(path)));
+            assert!(flags.contains(gst::SeekFlags::FLUSH), "{path}");
+            assert!(flags.contains(gst::SeekFlags::ACCURATE), "{path}");
+            assert!(!flags.contains(gst::SeekFlags::KEY_UNIT), "{path}");
+        }
     }
 
     #[test]
@@ -2804,6 +3176,10 @@ mod tests {
         assert!(flags.contains(gst::SeekFlags::KEY_UNIT));
         assert!(!flags.contains(gst::SeekFlags::ACCURATE));
     }
+}
+
+fn clock_time(position: Duration) -> gst::ClockTime {
+    gst::ClockTime::from_nseconds(u64::try_from(position.as_nanos()).unwrap_or(u64::MAX))
 }
 
 fn file_uri(path: &Path) -> Option<String> {
@@ -2937,6 +3313,7 @@ mod gst_integration_tests {
                 event_tx,
                 Arc::new(AtomicU64::new(0)),
                 Arc::new(Mutex::new(StreamDurations::default())),
+                Arc::new(Mutex::new(StreamEndHold::default())),
             );
             Self {
                 runtime,
@@ -3244,6 +3621,162 @@ mod engine_tests {
         }
     }
 
+    impl Fixtures {
+        /// MPEG-1 Layer III at 48 kHz without a Xing header, silent but for
+        /// the tone of `seek-tone.mp3` from `MARKER_AT` on: 24 s of 32
+        /// kbit/s frames, then 320 kbit/s frames. A seek that estimates
+        /// its target from the bitrate lands seconds from it. (The parser
+        /// seeks accurately anyway to a target less than 20 s after the
+        /// audio it has read.)
+        fn marked_mp3(&self, name: &str) -> PathBuf {
+            let silent = |bitrate_index: u8, bitrate: usize| {
+                let mut frame = vec![0xFF, 0xFB, (bitrate_index << 4) | 0x04, 0xC0];
+                // Zeroed side information decodes as silence.
+                frame.resize(144 * bitrate / 48_000, 0);
+                frame
+            };
+            let mut bytes = Vec::new();
+            for _ in 0..1_000 {
+                bytes.extend(silent(1, 32_000));
+            }
+            for _ in 0..250 {
+                bytes.extend(silent(14, 320_000));
+            }
+            bytes.extend(tone_frames());
+            for _ in 0..100 {
+                bytes.extend(silent(14, 320_000));
+            }
+            let path = self.dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+    }
+
+    /// Where the tone of `marked_mp3` starts: after 1,250 frames of 24 ms.
+    const MARKER_AT: Duration = Duration::from_secs(30);
+
+    /// The audio frames of `seek-tone.mp3`, a 48 kHz mono tone, without its
+    /// tags and its silent Info frame.
+    fn tone_frames() -> Vec<u8> {
+        const KBITS: [usize; 15] = [
+            0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+        ];
+        let bytes = include_bytes!("../analysis/fixtures/seek-tone.mp3");
+        let tag_size = (bytes[6..10])
+            .iter()
+            .fold(0, |size, byte| (size << 7) | usize::from(*byte));
+        let mut offset = 10 + tag_size;
+        let mut frames = Vec::new();
+        while offset + 4 <= bytes.len() && bytes[offset] == 0xFF && bytes[offset + 1] == 0xFB {
+            assert_eq!(bytes[offset + 2] & 0x0C, 0x04, "48 kHz frames");
+            let bitrate = KBITS[usize::from(bytes[offset + 2] >> 4)] * 1_000;
+            let padding = usize::from((bytes[offset + 2] >> 1) & 1);
+            let size = 144 * bitrate / 48_000 + padding;
+            frames.push(&bytes[offset..offset + size]);
+            offset += size;
+        }
+        assert!(frames.len() > 20, "{} frames", frames.len());
+        frames[1..].concat()
+    }
+
+    /// The sink pad of the fake output that `playbin` plays to.
+    fn output_sink_pad(playbin: &gst::Element) -> gst::Pad {
+        let output = playbin
+            .property::<gst::Element>("audio-sink")
+            .downcast::<gst::Bin>()
+            .unwrap();
+        let sink = output
+            .iterate_elements()
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|element| {
+                element
+                    .factory()
+                    .is_some_and(|factory| factory.name() == "fakesink")
+            })
+            .expect("fake output");
+        sink.static_pad("sink").unwrap()
+    }
+
+    /// Holds every buffer before the output until it is released, so the
+    /// pipeline can neither preroll nor land a seek it is given.
+    struct OutputHold {
+        pad: gst::Pad,
+        probe: Option<gst::PadProbeId>,
+    }
+
+    impl OutputHold {
+        fn new(playbin: &gst::Element) -> Self {
+            let pad = output_sink_pad(playbin);
+            let probe = pad.add_probe(
+                gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+                |_, _| gst::PadProbeReturn::Ok,
+            );
+            assert!(probe.is_some());
+            Self { pad, probe }
+        }
+
+        fn release(&mut self) {
+            if let Some(probe) = self.probe.take() {
+                self.pad.remove_probe(probe);
+            }
+        }
+    }
+
+    impl Drop for OutputHold {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    /// Record the stream time at which the output first carries sound
+    /// louder than a tenth of full scale.
+    fn listen_for_sound(playbin: &gst::Element) -> Arc<Mutex<Option<Duration>>> {
+        let heard = Arc::new(Mutex::new(None));
+        let pad = output_sink_pad(playbin);
+        let recorded = Arc::clone(&heard);
+        pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let format = pad
+                .current_caps()
+                .and_then(|caps| Some(caps.structure(0)?.get::<String>("format").ok()?))
+                .unwrap_or_default();
+            let Ok(map) = buffer.map_readable() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let loud = match format.as_str() {
+                "S16LE" => map.chunks_exact(2).any(|sample| {
+                    i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs() > 3_277
+                }),
+                "S32LE" => map.chunks_exact(4).any(|sample| {
+                    i32::from_le_bytes(sample.try_into().unwrap()).unsigned_abs() > 214_748_365
+                }),
+                "F32LE" => map
+                    .chunks_exact(4)
+                    .any(|sample| f32::from_le_bytes(sample.try_into().unwrap()).abs() > 0.1),
+                "F64LE" => map
+                    .chunks_exact(8)
+                    .any(|sample| f64::from_le_bytes(sample.try_into().unwrap()).abs() > 0.1),
+                other => panic!("unexpected sample format {other:?}"),
+            };
+            let stream_time = pad
+                .sticky_event::<gst::event::Segment>(0)
+                .and_then(|segment| {
+                    segment
+                        .segment()
+                        .downcast_ref::<gst::ClockTime>()?
+                        .to_stream_time(buffer.pts()?)
+                });
+            if let (true, Some(time), Ok(mut heard)) = (loud, stream_time, recorded.lock()) {
+                heard.get_or_insert(Duration::from_nanos(time.nseconds()));
+            }
+            gst::PadProbeReturn::Ok
+        });
+        heard
+    }
+
     impl Drop for Fixtures {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
@@ -3286,6 +3819,8 @@ mod engine_tests {
         snapshots: Vec<PlaybackSnapshot>,
         changes: Vec<Change>,
         errors: Vec<PlaybackError>,
+        /// Positions of the `Seeked` events.
+        seeked: Vec<Duration>,
         prepared: Vec<PathBuf>,
         cancelled_staging: usize,
     }
@@ -3311,6 +3846,7 @@ mod engine_tests {
                 snapshots: Vec::new(),
                 changes: Vec::new(),
                 errors: Vec::new(),
+                seeked: Vec::new(),
                 prepared: Vec::new(),
                 cancelled_staging: 0,
             }
@@ -3364,7 +3900,8 @@ mod engine_tests {
                     token: track_token,
                 }),
                 PlaybackEvent::Error(error) => self.errors.push(error),
-                PlaybackEvent::Seeked { .. } | PlaybackEvent::PathsRemapped => {}
+                PlaybackEvent::Seeked { position } => self.seeked.push(position),
+                PlaybackEvent::PathsRemapped => {}
             }
         }
 
@@ -3448,8 +3985,8 @@ mod engine_tests {
     enum Expect {
         Manual,
         Gapless,
-        /// After a restart of the audible track, which happens gaplessly
-        /// unless a short track reached about-to-finish while it prerolled.
+        /// After a failure, which can leave only end of stream to start the
+        /// next track.
         Automatic,
     }
 
@@ -3642,7 +4179,7 @@ mod engine_tests {
         assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
         assert_eq!(engine.snapshot.current_queue_index, Some(0));
 
-        assert_change(&engine.wait_for_changes(2), &c, 1, Expect::Automatic);
+        assert_change(&engine.wait_for_changes(2), &c, 1, Expect::Gapless);
         engine.wait_for_playing(1, millis(5_000));
         assert!(!engine
             .snapshots
@@ -3685,12 +4222,428 @@ mod engine_tests {
         engine.wait_for_settled_window(&b);
         engine.send(PlaybackCommand::Seek(millis(500)));
         let sought = Instant::now();
-        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
         assert!(
             sought.elapsed() >= millis(3_000),
             "the successor became current {:?} after the seek",
             sought.elapsed()
         );
+    }
+
+    #[test]
+    fn stopped_track_is_not_seekable_and_plays_from_its_start() {
+        let fixtures = Fixtures::new("stopped-seek");
+        let a = fixtures.wav("a.wav", 6_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Seek(millis(3_000)));
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.seek_serial == 1));
+        assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
+        assert_eq!(engine.snapshot.position, Duration::ZERO);
+        assert_eq!(engine.snapshot.seek_landed_serial, 0);
+        assert!(engine.seeked.is_empty());
+
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(6_000));
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position > Duration::ZERO));
+        assert!(
+            engine.snapshot.position < millis(1_500),
+            "{:?}",
+            engine.snapshot
+        );
+        assert!(engine.seeked.is_empty());
+
+        // Paused, the track is seekable, and Play goes on from there.
+        engine.send(PlaybackCommand::Pause);
+        engine.send(PlaybackCommand::Seek(millis(3_000)));
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.seek_landed_serial == 2));
+        assert_eq!(engine.seeked.len(), 1);
+        assert!(
+            engine.seeked[0].abs_diff(millis(3_000)) < millis(50),
+            "{:?}",
+            engine.seeked
+        );
+        assert_eq!(engine.snapshot.position, engine.seeked[0]);
+        assert_eq!(engine.snapshot.state, PlaybackState::Paused);
+        engine.send(PlaybackCommand::Play);
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(3_300)));
+        assert!(
+            engine.snapshot.position < millis(4_500),
+            "{:?}",
+            engine.snapshot
+        );
+    }
+
+    #[test]
+    fn seek_lands_where_the_audio_it_plays_is() {
+        // Without the accurate flag, the MP3 parser estimates where the
+        // target is from the bitrate and labels the audio found there with
+        // the target time: the playhead would show the target while the
+        // audio comes from elsewhere.
+        assert_mp3_playback();
+        let fixtures = Fixtures::new("seek-landing");
+        let track = fixtures.marked_mp3("marked.mp3");
+        let mut engine = Engine::start();
+        let heard = listen_for_sound(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![track]));
+        engine.send(PlaybackCommand::Play);
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(300)));
+        assert_eq!(*heard.lock().unwrap(), None);
+
+        let target = MARKER_AT - millis(400);
+        engine.send(PlaybackCommand::Seek(target));
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.seek_landed_serial == 1));
+        assert_eq!(engine.seeked.len(), 1);
+        let landing = engine.seeked[0];
+        assert!(
+            landing.abs_diff(target) < millis(50),
+            "landed at {landing:?}"
+        );
+        let landed = engine
+            .snapshots
+            .iter()
+            .find(|snapshot| snapshot.seek_landed_serial == 1)
+            .unwrap();
+        assert_eq!(landed.position, landing);
+
+        assert!(
+            engine.run_until(TIMEOUT, |_| heard.lock().unwrap().is_some()),
+            "the tone at {MARKER_AT:?} was not heard after seeking to {target:?}"
+        );
+        let heard_at = heard.lock().unwrap().unwrap();
+        // Within a frame or two: the tone's first frame refers to audio
+        // before it.
+        assert!(
+            heard_at.abs_diff(MARKER_AT) < millis(100),
+            "the tone at {MARKER_AT:?} plays at {heard_at:?}"
+        );
+    }
+
+    #[test]
+    fn seeks_that_wait_for_the_pipeline_land_only_at_the_last_target() {
+        let fixtures = Fixtures::new("seek-burst");
+        let a = fixtures.wav("a.wav", 8_000);
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(200)));
+        let before = engine.runtime.snapshot.position;
+        let _ = engine.events.try_iter().count();
+
+        // The first seek is in flight when the others arrive; they replace
+        // each other while they wait.
+        for target in [1_000, 2_000, 5_000, 3_000] {
+            engine
+                .runtime
+                .apply_command(PlaybackCommand::Seek(millis(target)));
+        }
+        assert_eq!(
+            engine.runtime.seek_in_flight.map(|seek| seek.serial),
+            Some(1)
+        );
+        assert_eq!(
+            engine.runtime.queued_seek,
+            Some(SeekTarget {
+                position: millis(3_000),
+                serial: 4
+            })
+        );
+        assert!(engine.run_until(|runtime| runtime.snapshot.seek_serial == 4));
+        assert!(!engine.runtime.seek_pending());
+
+        let events: Vec<_> = engine.events.try_iter().collect();
+        let seeked: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                PlaybackEvent::Seeked { position } => Some(*position),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seeked.len(), 1, "{seeked:?}");
+        assert!(seeked[0].abs_diff(millis(3_000)) < millis(50), "{seeked:?}");
+        // No snapshot shows where an earlier seek landed.
+        for event in &events {
+            if let PlaybackEvent::Snapshot(snapshot) = event {
+                assert!(
+                    snapshot.position == before || snapshot.position >= seeked[0],
+                    "{snapshot:?}"
+                );
+                assert!(snapshot.seek_landed_serial == 0 || snapshot.seek_landed_serial == 4);
+            }
+        }
+        assert_eq!(engine.runtime.snapshot.seek_landed_serial, 4);
+    }
+
+    #[test]
+    fn seek_before_the_pipeline_prerolls_lands_once_it_has() {
+        let fixtures = Fixtures::new("seek-preroll");
+        let a = fixtures.wav("a.wav", 6_000);
+        let mut engine = DirectEngine::start();
+        // The pipeline cannot preroll until the seek waits for it.
+        let mut hold = OutputHold::new(&engine.runtime.playbin);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(vec![a]));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::Seek(millis(3_000)));
+        assert!(engine.runtime.queued_seek.is_some());
+        assert!(engine.runtime.seek_in_flight.is_none());
+        assert!(engine.runtime.playbin.current_state() < gst::State::Paused);
+        hold.release();
+        assert!(engine.run_until(|runtime| runtime.snapshot.seek_landed_serial == 1));
+        assert!(
+            engine.runtime.snapshot.position.abs_diff(millis(3_000)) < millis(50),
+            "{:?}",
+            engine.runtime.snapshot
+        );
+        assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(3_200)));
+    }
+
+    #[test]
+    fn play_during_a_restart_waits_for_its_seek() {
+        let fixtures = Fixtures::new("restart-play");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(vec![a, b], RepeatMode::Off);
+        // Well after the pipeline was given B.
+        assert!(engine.run_until(|runtime| {
+            runtime
+                .queue_state
+                .lock()
+                .unwrap()
+                .successor_handed_to_pipeline()
+                && runtime.snapshot.position >= millis(3_000)
+        }));
+        engine.runtime.apply_command(PlaybackCommand::Pause);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::Seek(millis(500)));
+        assert_eq!(engine.runtime.restart, Some(RunRestart::Prerolling));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+        assert!(engine.runtime.playbin.current_state() <= gst::State::Paused);
+        assert!(engine.run_until(|runtime| runtime.snapshot.seek_landed_serial == 1));
+        assert!(
+            engine.runtime.snapshot.position.abs_diff(millis(500)) < millis(50),
+            "{:?}",
+            engine.runtime.snapshot
+        );
+        assert_eq!(engine.runtime.restart, None);
+        assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(700)));
+        assert_eq!(engine.runtime.playbin.current_state(), gst::State::Playing);
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
+    }
+
+    #[test]
+    fn seek_that_takes_longer_than_playback_may_take_to_start_lands_and_plays() {
+        let fixtures = Fixtures::new("slow-seek");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = DirectEngine::start();
+        let mut hold = engine.hold_seek_of_a_restart(vec![a, b]);
+        // However long the seek takes, the track has not failed to start.
+        engine.runtime.playing_state_timeout = Duration::ZERO;
+        for _ in 0..3 {
+            engine.handle_posted_messages();
+        }
+        assert!(engine.errors().is_empty());
+        assert!(engine.runtime.seek_in_flight.is_some());
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+
+        // Playback then has the usual time to start.
+        engine.runtime.playing_state_timeout = GstPlaybackRuntime::PLAYING_STATE_TIMEOUT;
+        hold.release();
+        assert!(engine.run_until(|runtime| runtime.snapshot.seek_landed_serial == 1));
+        assert!(
+            engine.runtime.snapshot.position.abs_diff(millis(500)) < millis(50),
+            "{:?}",
+            engine.runtime.snapshot
+        );
+        assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(700)));
+        assert_eq!(engine.runtime.playbin.current_state(), gst::State::Playing);
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
+        assert!(engine.errors().is_empty());
+    }
+
+    #[test]
+    fn seek_that_fails_in_flight_is_reported_and_skipped() {
+        let fixtures = Fixtures::new("failed-seek");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = DirectEngine::start();
+        let mut hold = engine.hold_seek_of_a_restart(vec![a.clone(), b]);
+        engine.runtime.playing_state_timeout = Duration::ZERO;
+        engine.handle_posted_messages();
+        assert!(engine.errors().is_empty());
+        engine.runtime.playing_state_timeout = GstPlaybackRuntime::PLAYING_STATE_TIMEOUT;
+
+        let source = engine.file_source();
+        engine.fail_reading(&source);
+        let errors = engine.errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path.as_deref(), Some(a.as_path()));
+        assert_eq!(errors[0].detail, "injected read failure");
+        assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Skipped);
+        assert!(!engine.runtime.seek_pending());
+        assert_eq!(engine.runtime.restart, None);
+        assert_eq!(engine.runtime.snapshot.seek_serial, 1);
+        assert_eq!(engine.runtime.snapshot.seek_landed_serial, 0);
+
+        hold.release();
+        assert!(engine.run_until(|runtime| {
+            runtime.snapshot.current_queue_index == Some(1)
+                && runtime.snapshot.position >= millis(200)
+        }));
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+        assert!(engine.errors().is_empty());
+    }
+
+    #[test]
+    fn bursts_merge_seeks_and_count_every_next_press() {
+        let merged = merge_burst(vec![
+            PlaybackCommand::Seek(millis(1_000)),
+            PlaybackCommand::Poll,
+            PlaybackCommand::Seek(millis(2_000)),
+            PlaybackCommand::Seek(millis(3_000)),
+            PlaybackCommand::Next,
+            PlaybackCommand::Poll,
+            PlaybackCommand::Next,
+            PlaybackCommand::Previous,
+            PlaybackCommand::Next,
+            PlaybackCommand::Pause,
+            PlaybackCommand::Next,
+            PlaybackCommand::Seek(millis(4_000)),
+        ]);
+        let summary: Vec<String> = merged
+            .iter()
+            .map(|step| match step {
+                EngineStep::Command(command) => format!("{command:?}"),
+                EngineStep::Seek { position, requests } => {
+                    format!("seek {} x{requests}", position.as_millis())
+                }
+                EngineStep::Navigate(moves) => format!("navigate {moves:?}"),
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                "seek 3000 x3",
+                "navigate [true, true, false, true]",
+                "Pause",
+                "navigate [true]",
+                "seek 4000 x1",
+                "Poll",
+            ]
+        );
+    }
+
+    #[test]
+    fn next_presses_in_a_burst_start_only_the_track_they_end_on() {
+        let fixtures = Fixtures::new("next-burst");
+        let queue: Vec<_> = (0..5)
+            .map(|index| fixtures.wav(&format!("{index}.wav"), 4_000 + 500 * index))
+            .collect();
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(queue.clone(), RepeatMode::Off);
+        let _ = engine.events.try_iter().count();
+        engine
+            .runtime
+            .apply_step(EngineStep::Navigate(vec![true, true, true]));
+        let changes: Vec<_> = engine
+            .events
+            .try_iter()
+            .filter_map(|event| match event {
+                PlaybackEvent::TrackChanged {
+                    path,
+                    queue_index,
+                    kind,
+                    ..
+                } => Some((path, queue_index, kind)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!((&changes[0].0, changes[0].1), (&queue[3], 3));
+        assert!(matches!(changes[0].2, TrackChangeKind::Manual));
+        assert!(engine
+            .run_until(|runtime| runtime.snapshot.duration.abs_diff(millis(5_500)) < millis(100)));
+
+        // From the bridge, however the presses fall into bursts.
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(queue.clone()));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_000));
+        for _ in 0..3 {
+            engine.send(PlaybackCommand::Next);
+        }
+        engine.send(PlaybackCommand::Previous);
+        engine.wait_for_playing(2, millis(5_000));
+        let rows: Vec<_> = engine.changes.iter().map(|change| change.index).collect();
+        assert_eq!(rows.first(), Some(&0));
+        assert_eq!(rows.last(), Some(&2));
+        assert!(rows.len() <= 5, "{rows:?}");
+        assert!(engine
+            .changes
+            .iter()
+            .all(|change| matches!(change.kind, TrackChangeKind::Manual)));
+    }
+
+    #[test]
+    fn seek_in_a_short_track_keeps_its_successor_gapless() {
+        // B is shorter than the pipeline reads ahead, so the pipeline was
+        // given C before B became audible, and the seek restarts B. The new
+        // run reads all of B while it prerolls, before its seek.
+        let fixtures = Fixtures::new("short-seek");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 1_500);
+        let c = fixtures.wav("c.wav", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone(), c.clone()]));
+        engine.send(PlaybackCommand::Play);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        engine.send(PlaybackCommand::Seek(millis(300)));
+        let sought = Instant::now();
+        assert_change(&engine.wait_for_changes(3), &c, 2, Expect::Gapless);
+        assert!(
+            sought.elapsed() >= millis(1_000),
+            "C became current {:?} after the seek",
+            sought.elapsed()
+        );
+        assert_eq!(engine.seeked.len(), 1);
+        assert!(
+            engine.seeked[0].abs_diff(millis(300)) < millis(50),
+            "{:?}",
+            engine.seeked
+        );
+        engine.wait_for_playing(2, millis(4_500));
+    }
+
+    #[test]
+    fn repeat_one_replays_gaplessly_after_seeks() {
+        let fixtures = Fixtures::new("repeat-seek");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
+        engine.send(PlaybackCommand::Play);
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(300)));
+        // Before the pipeline asked for the replay, then inside its window.
+        engine.send(PlaybackCommand::Seek(millis(2_500)));
+        let replay = engine.wait_for_changes(2);
+        assert_change(&replay, &a, 0, Expect::Gapless);
+        engine.prepared.clear();
+        engine.wait_for_settled_window(&a);
+        engine.send(PlaybackCommand::Seek(millis(2_000)));
+        let sought = Instant::now();
+        let second = engine.wait_for_changes(3);
+        assert_change(&second, &a, 0, Expect::Gapless);
+        assert!(sought.elapsed() >= millis(1_500), "{:?}", sought.elapsed());
+        assert_ne!(second.token, replay.token);
+        assert_eq!(engine.seeked.len(), 2, "{:?}", engine.seeked);
     }
 
     #[test]
@@ -3703,7 +4656,7 @@ mod engine_tests {
         engine.send(PlaybackCommand::Play);
         engine.wait_for_settled_window(&b);
         engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
-        assert_change(&engine.wait_for_changes(2), &a, 0, Expect::Automatic);
+        assert_change(&engine.wait_for_changes(2), &a, 0, Expect::Gapless);
         engine.wait_for_playing(0, millis(4_000));
     }
 
@@ -3746,8 +4699,7 @@ mod engine_tests {
         assert_eq!(engine.changes.len(), 2, "one track change per play");
     }
 
-    #[test]
-    fn duration_refinements_apply_after_a_gapless_switch() {
+    fn assert_mp3_playback() {
         gst::init().unwrap();
         assert!(
             gst::ElementFactory::find("mpegaudioparse").is_some()
@@ -3756,6 +4708,11 @@ mod engine_tests {
                     .any(|name| gst::ElementFactory::find(name).is_some()),
             "install an MP3 parser and decoder (GStreamer good and libav plugins)"
         );
+    }
+
+    #[test]
+    fn duration_refinements_apply_after_a_gapless_switch() {
+        assert_mp3_playback();
         let fixtures = Fixtures::new("vbr");
         let track = fixtures.vbr_mp3("vbr.mp3");
         let mut engine = Engine::start();
@@ -3954,8 +4911,14 @@ mod engine_tests {
                 matches!(message.view(), gst::MessageView::StreamStart(_))
             });
             self.runtime.handle_bus_message(&stream_start);
-            let source = self
-                .runtime
+            let source = self.file_source();
+            assert_eq!(input_file(Some(source.upcast_ref())), Some(first));
+            source
+        }
+
+        /// The file source of the pipeline's run.
+        fn file_source(&self) -> gst::Element {
+            self.runtime
                 .playbin
                 .clone()
                 .downcast::<gst::Bin>()
@@ -3968,9 +4931,44 @@ mod engine_tests {
                         .factory()
                         .is_some_and(|factory| factory.name() == "filesrc")
                 })
-                .expect("file source");
-            assert_eq!(input_file(Some(source.upcast_ref())), Some(first));
-            source
+                .expect("file source")
+        }
+
+        /// Play `queue`, of two tracks, and seek to 0.5 s after the pipeline
+        /// was given the second, so that the first restarts. Returns once
+        /// the restarted run was given the seek, which `OutputHold` keeps
+        /// from landing.
+        fn hold_seek_of_a_restart(&mut self, queue: Vec<PathBuf>) -> OutputHold {
+            self.play_until_opened(queue, RepeatMode::Off);
+            assert!(self.run_until(|runtime| {
+                runtime
+                    .queue_state
+                    .lock()
+                    .unwrap()
+                    .successor_handed_to_pipeline()
+                    && runtime.snapshot.position >= millis(3_000)
+            }));
+            self.runtime
+                .apply_command(PlaybackCommand::Seek(millis(500)));
+            assert_eq!(self.runtime.restart, Some(RunRestart::Prerolling));
+            let playbin = self.runtime.playbin.clone();
+            let prerolled = self.handle_messages_until(|message| {
+                matches!(message.view(), gst::MessageView::AsyncDone(_))
+                    && message.src().is_some_and(|src| src == &playbin)
+            });
+            let hold = OutputHold::new(&playbin);
+            self.runtime.handle_bus_message(&prerolled);
+            assert_eq!(self.runtime.restart, Some(RunRestart::Seeking));
+            assert!(self.runtime.seek_in_flight.is_some());
+            hold
+        }
+
+        /// Handle the bus messages posted so far, and poll.
+        fn handle_posted_messages(&mut self) {
+            while let Some(message) = self.bus.pop() {
+                self.runtime.handle_bus_message(&message);
+            }
+            self.runtime.poll();
         }
 
         /// Fail reading from `source`, as a disk error would, and handle
@@ -4367,7 +5365,7 @@ mod engine_tests {
         // open, so the bridge does not spin on a closed channel.
         assert!(matches!(
             events.recv_timeout(millis(100)),
-            Err(RecvTimeoutError::Timeout)
+            Err(crossbeam_channel::RecvTimeoutError::Timeout)
         ));
     }
 }

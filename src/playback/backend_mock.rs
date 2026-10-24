@@ -135,6 +135,13 @@ impl MockPlaybackRuntime {
                 self.snapshot.current_queue_index = None;
             }
             PlaybackCommand::Seek(pos) => {
+                self.snapshot.seek_serial += 1;
+                // Like the GStreamer backend, a stopped track is not
+                // seekable.
+                if self.snapshot.current.is_none() || self.snapshot.state == PlaybackState::Stopped
+                {
+                    return;
+                }
                 // Like the GStreamer backend, keep the seek away from a
                 // successor the pipeline was given.
                 self.queue.hold_handoffs();
@@ -142,6 +149,7 @@ impl MockPlaybackRuntime {
                 self.queue.release_handoffs();
                 self.about_to_finish_fired = false;
                 self.snapshot.position = pos.min(self.snapshot.duration);
+                self.snapshot.seek_landed_serial = self.snapshot.seek_serial;
                 let _ = self.event_tx.send(PlaybackEvent::Seeked {
                     position: self.snapshot.position,
                 });

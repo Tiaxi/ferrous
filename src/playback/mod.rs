@@ -61,6 +61,16 @@ pub struct PlaybackSnapshot {
     /// current, or 0 before any. It changes on every track change, also
     /// when the same file plays again.
     pub track_token: u64,
+    /// Serial of the last [`PlaybackCommand::Seek`] the engine is done
+    /// with: applied, refused because nothing plays, failed, or superseded
+    /// by a newer seek or a track change. The engine numbers seeks from 1
+    /// in the order it receives them. Until this reaches the serial of a
+    /// seek, `position` describes playback before that seek.
+    pub seek_serial: u64,
+    /// Serial of the last seek that the pipeline applied, or 0. The first
+    /// snapshot with a new value carries where that seek landed in
+    /// `position`, and follows its [`PlaybackEvent::Seeked`].
+    pub seek_landed_serial: u64,
 }
 
 /// New paths of renamed files, keyed by their old paths.
@@ -83,11 +93,16 @@ pub enum PlaybackCommand {
     },
     ClearQueue,
     PlayAt(usize),
+    /// Move to the next track. A burst of Next and Previous presses moves
+    /// once per press and starts only the track it ends on.
     Next,
     Previous,
     Play,
     Pause,
     Stop,
+    /// Seek in the current track. Ignored while stopped: Play starts a
+    /// stopped track from its beginning. A burst of seeks lands only at
+    /// the last target.
     Seek(Duration),
     SetVolume(f32),
     SetRepeatMode(RepeatMode),
@@ -115,6 +130,8 @@ pub enum PlaybackEvent {
         kind: TrackChangeKind,
         track_token: u64,
     },
+    /// A seek was applied; `position` is where it landed. Seeks that are
+    /// refused, fail, or are superseded before they land send none.
     Seeked {
         position: Duration,
     },
@@ -684,6 +701,32 @@ mod tests {
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap.duration, Duration::from_secs(180));
         assert_eq!(snap.position, Duration::from_secs(180));
+    }
+
+    #[test]
+    fn stopped_seek_is_refused_but_acknowledged() {
+        let (engine, rx) = make_test_engine();
+        engine.command(PlaybackCommand::LoadQueue(vec![PathBuf::from(
+            "/tmp/a.flac",
+        )]));
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(42)));
+        let events = recv_events(&rx, Duration::from_millis(50));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, PlaybackEvent::Seeked { .. })));
+        let snap = last_snapshot(&events);
+        assert_eq!(snap.position, Duration::ZERO);
+        assert_eq!((snap.seek_serial, snap.seek_landed_serial), (1, 0));
+
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(42)));
+        let events = recv_events(&rx, Duration::from_millis(50));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            PlaybackEvent::Seeked { position } if *position == Duration::from_secs(42)
+        )));
+        let snap = last_snapshot(&events);
+        assert_eq!((snap.seek_serial, snap.seek_landed_serial), (2, 2));
     }
 
     #[test]

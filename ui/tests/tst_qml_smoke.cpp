@@ -2581,6 +2581,17 @@ Item {
 
     QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 23.16);
     QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 23.16);
+
+    // A stopped track is not seekable: the playhead stays and no seek is sent.
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekCommitted",
+        Q_ARG(QVariant, QVariant::fromValue(90.0))));
+    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 23.16);
+    QCOMPARE(bridge->property("seekCalls").toList().size(), 2);
 }
 
 void QmlSmokeTest::playbackControllerDeterministicTimeHooksDriveInterpolation() {

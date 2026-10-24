@@ -170,6 +170,11 @@ MprisController::MprisController(BridgeClient *bridge, QObject *parent)
         connect(m_bridge, &BridgeClient::connectedChanged, this, [this]() {
             handleBridgeChange(false);
         });
+        connect(m_bridge, &BridgeClient::seekLanded, this, [this](double seconds) {
+            if (m_serviceRegistered) {
+                emitSeeked(static_cast<qlonglong>(std::llround(std::max(0.0, seconds) * 1000000.0)));
+            }
+        });
     }
 
     QTimer::singleShot(0, this, [this]() {
@@ -315,9 +320,12 @@ bool MprisController::canPause() const {
 }
 
 bool MprisController::canSeek() const {
+    // Play starts a stopped track from its beginning, so the bridge does not
+    // seek a stopped track.
     return m_bridge != nullptr
         && !m_bridge->currentTrackPath().trimmed().isEmpty()
-        && m_bridge->durationSeconds() > 0.0;
+        && m_bridge->durationSeconds() > 0.0
+        && normalizedPlaybackState(m_bridge) != QStringLiteral("Stopped");
 }
 
 bool MprisController::canControl() const {
@@ -561,7 +569,8 @@ void MprisController::publishPlayerState() {
     if (!changed.isEmpty()) {
         emitPropertiesChanged(QString::fromUtf8(kMprisPlayerInterface), changed);
     }
-    if (m_hasPublishedPlayerState && shouldEmitSeeked(nextState)) {
+    // Seeks are reported when they land; see the seekLanded connection.
+    if (m_hasPublishedPlayerState && replayedSameTrack(nextState)) {
         emitSeeked(nextState.positionUs);
     }
     m_lastPlayerState = nextState;
@@ -579,7 +588,7 @@ void MprisController::emitPropertiesChanged(
         QStringLiteral("org.freedesktop.DBus.Properties"),
         QStringLiteral("PropertiesChanged"));
     message << interfaceName << changed << QStringList{};
-    QDBusConnection::sessionBus().send(message);
+    sendSignal(message);
 }
 
 void MprisController::emitSeeked(qlonglong positionUs) const {
@@ -588,6 +597,14 @@ void MprisController::emitSeeked(qlonglong positionUs) const {
         QString::fromUtf8(kMprisPlayerInterface),
         QStringLiteral("Seeked"));
     message << positionUs;
+    sendSignal(message);
+}
+
+void MprisController::sendSignal(const QDBusMessage &message) const {
+    if (m_signalSink) {
+        m_signalSink(message);
+        return;
+    }
     QDBusConnection::sessionBus().send(message);
 }
 
@@ -699,6 +716,7 @@ MprisController::PublishedPlayerState MprisController::currentPlayerState() cons
     state.loopStatus = loopStatus();
     state.metadata = metadata();
     state.currentTrackPath = m_bridge != nullptr ? m_bridge->currentTrackPath().trimmed() : QString{};
+    state.trackToken = m_bridge != nullptr ? m_bridge->currentTrackToken() : 0;
     state.positionUs = positionUs();
     state.volume = volume();
     state.shuffle = shuffle();
@@ -711,21 +729,13 @@ MprisController::PublishedPlayerState MprisController::currentPlayerState() cons
     return state;
 }
 
-bool MprisController::shouldEmitSeeked(const PublishedPlayerState &nextState) const {
-    if (!nextState.canSeek) {
-        return false;
-    }
-    if (m_lastPlayerState.currentTrackPath != nextState.currentTrackPath) {
-        return true;
-    }
-    const qlonglong delta = nextState.positionUs - m_lastPlayerState.positionUs;
-    if (m_lastPlayerState.playbackStatus == QStringLiteral("Playing")
-        && nextState.playbackStatus == QStringLiteral("Playing")
-        && delta >= 0
-        && delta < 2000000) {
-        return false;
-    }
-    return std::llabs(delta) >= 500000;
+bool MprisController::replayedSameTrack(const PublishedPlayerState &nextState) const {
+    // The same file plays again, as with Repeat-One: its track ID stays, but
+    // its position starts over.
+    return nextState.trackToken != m_lastPlayerState.trackToken
+        && !nextState.currentTrackPath.isEmpty()
+        && nextState.currentTrackPath == m_lastPlayerState.currentTrackPath
+        && nextState.playbackStatus != QStringLiteral("Stopped");
 }
 
 #include "MprisController.moc"

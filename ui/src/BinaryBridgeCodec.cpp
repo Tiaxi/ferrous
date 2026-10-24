@@ -189,6 +189,12 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     if (!reader.atEnd() && !reader.readU64(&trackToken)) {
         return false;
     }
+    quint64 seekSerial = 0;
+    quint64 seekLandedSerial = 0;
+    if (!reader.atEnd()
+        && (!reader.readU64(&seekSerial) || !reader.readU64(&seekLandedSerial))) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -201,6 +207,8 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     out->mutedChannelsMask = mutedMask;
     out->soloedChannel = (soloedRaw == 0xFF) ? -1 : static_cast<int>(soloedRaw);
     out->trackToken = trackToken;
+    out->seekSerial = seekSerial;
+    out->seekLandedSerial = seekLandedSerial;
     return true;
 }
 

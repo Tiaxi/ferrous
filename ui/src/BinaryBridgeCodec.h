@@ -107,6 +107,12 @@ struct DecodedPlayback {
     int soloedChannel{-1};
     // Changes on every track change, also when the same file plays again.
     quint64 trackToken{0};
+    // Serial of the last seek the engine is done with, and of the last one
+    // it applied; the engine numbers seeks from 1 in the order it gets them.
+    // The first snapshot with a new seekLandedSerial carries the landing
+    // position.
+    quint64 seekSerial{0};
+    quint64 seekLandedSerial{0};
 };
 
 struct DecodedQueueTrack {
