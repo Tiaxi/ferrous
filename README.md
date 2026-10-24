@@ -16,7 +16,7 @@ Ferrous is a personal project built for my own daily listening. It pairs a Rust 
 
 **Tag editor** — Multi-file tag editing with bulk operations and auto-numbering.
 
-**Album art** — Embedded cover art display with the option to fetch high-resolution artwork from the iTunes catalog.
+**Album art** — Folder and embedded cover art display with the option to fetch high-resolution artwork from the iTunes catalog. A folder's cover is its `cover`, `folder`, or `front` image, in that order and in any letter case, or else its first JPEG or PNG image by name. Applied artwork replaces that named image in its current format, or adds a `cover.jpg` or `cover.png` and leaves other images, such as back scans, untouched. In folders without such images, the artwork is embedded in every track there with the same album tag, and no track is changed unless all of them can be updated.
 
 **Visualization** — Live spectrogram and waveform displays rendered alongside embedded cover art. The spectrogram is inspired by Adobe Audition's spectral view — something I've spent countless hours using to analyze songs. It supports mono downmix or per-channel display, fullscreen viewing, logarithmic or linear frequency scale, adjustable dB range, configurable FFT window size, and centered or rolling display modes. Rolling mode scrolls continuously; centered mode shows a zoomable window around playback, with the view clamped at track boundaries. The waveform viewer supports zooming and per-channel inspection.
 
