@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -121,6 +121,56 @@ pub enum PlaybackEvent {
     /// The engine applied a [`PlaybackCommand::RemapPaths`]. Events sent
     /// before this one may still carry the old paths; later ones do not.
     PathsRemapped,
+    /// A track could not be played, or the engine cannot play at all.
+    Error(PlaybackError),
+}
+
+/// What playback did after an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackErrorOutcome {
+    /// Playback goes on without the failed track.
+    Skipped,
+    /// Playback stopped because no other track is left to play.
+    Stopped,
+    /// Playback stopped because this many tracks failed in a row.
+    StoppedAfterFailures(u32),
+    /// The engine is not running, so no command is carried out.
+    EngineUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackError {
+    /// The track that failed, if a track failed.
+    pub path: Option<PathBuf>,
+    /// What went wrong, such as the `GStreamer` error or the missing codec.
+    pub detail: String,
+    pub outcome: PlaybackErrorOutcome,
+}
+
+impl PlaybackError {
+    /// The message shown to the user.
+    #[must_use]
+    pub fn message(&self) -> String {
+        let detail = self.detail.trim().trim_end_matches('.');
+        let failure = || match self.path.as_deref().and_then(std::path::Path::file_name) {
+            Some(name) => format!(
+                "Couldn't play \u{201c}{}\u{201d} ({detail})",
+                name.to_string_lossy()
+            ),
+            None => format!("Playback failed ({detail})"),
+        };
+        match self.outcome {
+            PlaybackErrorOutcome::Skipped => format!("{}; skipped it.", failure()),
+            PlaybackErrorOutcome::Stopped => format!("{}; playback stopped.", failure()),
+            PlaybackErrorOutcome::StoppedAfterFailures(count) => format!(
+                "{}; playback stopped after {count} tracks in a row failed.",
+                failure()
+            ),
+            PlaybackErrorOutcome::EngineUnavailable => {
+                format!("Playback is unavailable: {detail}.")
+            }
+        }
+    }
 }
 
 /// Rename `path` if `renames` lists it. Returns whether it changed.
@@ -168,6 +218,10 @@ pub(crate) fn remove_queue_indices<T>(
 
 pub struct PlaybackEngine {
     tx: Sender<PlaybackCommand>,
+    /// Reports commands that cannot reach the engine.
+    event_tx: Sender<PlaybackEvent>,
+    /// Why the engine stopped, if it failed to start.
+    failure: Arc<OnceLock<String>>,
 }
 
 fn stop_snapshot_at_terminal_eos(snapshot: &mut PlaybackSnapshot) {
@@ -179,18 +233,57 @@ fn stop_snapshot_at_terminal_eos(snapshot: &mut PlaybackSnapshot) {
 impl PlaybackEngine {
     #[must_use]
     pub fn new(analysis_tx: Sender<AnalysisCommand>) -> (Self, Receiver<PlaybackEvent>) {
-        let (tx, rx) = backend::spawn_engine(analysis_tx);
-        (Self { tx }, rx)
+        Self::spawn(|event_tx, failure| backend::spawn_engine(analysis_tx, event_tx, failure))
     }
 
+    /// Start an engine with `start`, which receives the event sender and
+    /// the slot for a start failure, and returns the command sender.
+    fn spawn(
+        start: impl FnOnce(Sender<PlaybackEvent>, &Arc<OnceLock<String>>) -> Sender<PlaybackCommand>,
+    ) -> (Self, Receiver<PlaybackEvent>) {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let failure = Arc::new(OnceLock::new());
+        let tx = start(event_tx.clone(), &failure);
+        (
+            Self {
+                tx,
+                event_tx,
+                failure,
+            },
+            event_rx,
+        )
+    }
+
+    /// Send `cmd` to the engine. When the engine is not running, report an
+    /// [`PlaybackErrorOutcome::EngineUnavailable`] error instead, except
+    /// for the bridge's own polls.
     pub fn command(&self, cmd: PlaybackCommand) {
-        let _ = self.tx.send(cmd);
+        let Err(crossbeam_channel::SendError(cmd)) = self.tx.send(cmd) else {
+            return;
+        };
+        if matches!(cmd, PlaybackCommand::Poll) {
+            return;
+        }
+        let detail = self
+            .failure
+            .get()
+            .cloned()
+            .unwrap_or_else(|| "the playback engine has stopped".to_string());
+        let _ = self.event_tx.send(PlaybackEvent::Error(PlaybackError {
+            path: None,
+            detail,
+            outcome: PlaybackErrorOutcome::EngineUnavailable,
+        }));
     }
 
     /// An engine whose commands go to `tx` instead of a backend.
     #[cfg(test)]
     pub(crate) fn from_command_sender(tx: Sender<PlaybackCommand>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            event_tx: crossbeam_channel::unbounded().0,
+            failure: Arc::new(OnceLock::new()),
+        }
     }
 }
 
@@ -201,8 +294,81 @@ mod shared_tests {
 
     use super::{
         remove_queue_indices, stop_snapshot_at_terminal_eos, volume_gain_to_level,
-        volume_level_to_gain, PlaybackSnapshot, PlaybackState,
+        volume_level_to_gain, PlaybackCommand, PlaybackEngine, PlaybackError, PlaybackErrorOutcome,
+        PlaybackEvent, PlaybackSnapshot, PlaybackState,
     };
+
+    #[test]
+    fn playback_errors_name_the_track_and_what_playback_did() {
+        let error = |path: Option<&str>, detail: &str, outcome| {
+            PlaybackError {
+                path: path.map(PathBuf::from),
+                detail: detail.to_string(),
+                outcome,
+            }
+            .message()
+        };
+        assert_eq!(
+            error(
+                Some("/music/b.flac"),
+                "Resource not found.",
+                PlaybackErrorOutcome::Skipped
+            ),
+            "Couldn't play \u{201c}b.flac\u{201d} (Resource not found); skipped it."
+        );
+        assert_eq!(
+            error(
+                Some("/music/b.flac"),
+                "missing GStreamer plugin: FLAC decoder",
+                PlaybackErrorOutcome::Stopped
+            ),
+            "Couldn't play \u{201c}b.flac\u{201d} (missing GStreamer plugin: FLAC decoder); \
+             playback stopped."
+        );
+        assert_eq!(
+            error(
+                None,
+                "decoder failed",
+                PlaybackErrorOutcome::StoppedAfterFailures(5)
+            ),
+            "Playback failed (decoder failed); playback stopped after 5 tracks in a row failed."
+        );
+        assert_eq!(
+            error(
+                None,
+                "no audio output",
+                PlaybackErrorOutcome::EngineUnavailable
+            ),
+            "Playback is unavailable: no audio output."
+        );
+    }
+
+    #[test]
+    fn commands_to_a_stopped_engine_report_it() {
+        let (engine, events) = PlaybackEngine::spawn(|_, failure| {
+            failure.set("no audio output".to_string()).unwrap();
+            // The engine is gone: nothing receives its commands.
+            crossbeam_channel::unbounded().0
+        });
+        engine.command(PlaybackCommand::Poll);
+        assert!(events.try_recv().is_err(), "polls are not reported");
+        engine.command(PlaybackCommand::Next);
+        match events.try_recv() {
+            Ok(PlaybackEvent::Error(error)) => {
+                assert_eq!(error.outcome, PlaybackErrorOutcome::EngineUnavailable);
+                assert_eq!(error.detail, "no audio output");
+            }
+            other => panic!("expected the engine failure, got {other:?}"),
+        }
+
+        let (engine, events) = PlaybackEngine::spawn(|_, _| crossbeam_channel::unbounded().0);
+        engine.command(PlaybackCommand::Play);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(PlaybackEvent::Error(PlaybackError { detail, .. }))
+                if detail == "the playback engine has stopped"
+        ));
+    }
 
     #[test]
     fn volume_levels_map_to_cubic_gain_and_back() {

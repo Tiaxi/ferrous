@@ -2585,6 +2585,27 @@ fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
 }
 
 #[cfg(test)]
+mod error_packet_tests {
+    use super::encode_error_event;
+
+    #[test]
+    fn playback_error_packet_layout_matches_the_qt_decoder() {
+        // Mirrored by BridgeClientTest::playbackErrorPacketReachesBridgeError.
+        let message = "Couldn't play \u{201c}bad.flac\u{201d} (Resource not found); skipped it.";
+        let text = message.as_bytes();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&0xFE55_0001_u32.to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(18 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&(1_u16 << 6).to_le_bytes());
+        expected.extend_from_slice(&0_u16.to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(2 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u16::try_from(text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(text);
+        assert_eq!(encode_error_event(message), expected);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::analysis::AnalysisSnapshot;

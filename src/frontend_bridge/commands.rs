@@ -2250,7 +2250,7 @@ mod tests {
         let (engine_tx, engine_rx) = crossbeam_channel::unbounded();
         let playback = PlaybackEngine::from_command_sender(engine_tx);
         let (details_tx, _details_rx) = crossbeam_channel::unbounded();
-        let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (old_current, new_current) = (p("/music/old current.flac"), p("/music/current.flac"));
         let (old_next, new_next) = (p("/music/old next.flac"), p("/music/next.flac"));
         let mut state = BridgeState {
@@ -2304,27 +2304,49 @@ mod tests {
             PlaybackEvent::Snapshot(stale.clone()),
             &analysis,
             &metadata,
+            &event_tx,
             &mut state,
         );
         assert_eq!(state.playback.current.as_ref(), Some(&new_current));
         let _ = process_playback_event(
             PlaybackEvent::TrackChanged {
-                path: old_next,
+                path: old_next.clone(),
                 queue_index: 2,
                 kind: TrackChangeKind::Gapless,
                 track_token: 3,
             },
             &analysis,
             &metadata,
+            &event_tx,
             &mut state,
         );
         assert_eq!(state.last_track_change.path.as_ref(), Some(&new_next));
+        while event_rx.try_recv().is_ok() {}
+        let _ = process_playback_event(
+            PlaybackEvent::Error(crate::playback::PlaybackError {
+                path: Some(old_next.clone()),
+                detail: "Resource not found.".to_string(),
+                outcome: crate::playback::PlaybackErrorOutcome::Skipped,
+            }),
+            &analysis,
+            &metadata,
+            &event_tx,
+            &mut state,
+        );
+        match event_rx.try_recv() {
+            Ok(BridgeEvent::Error(message)) => assert_eq!(
+                message,
+                "Couldn't play \u{201c}next.flac\u{201d} (Resource not found); skipped it."
+            ),
+            other => panic!("expected the playback error, got {other:?}"),
+        }
 
         // After the acknowledgement, engine paths are taken as reported.
         let _ = process_playback_event(
             PlaybackEvent::PathsRemapped,
             &analysis,
             &metadata,
+            &event_tx,
             &mut state,
         );
         assert!(state.unacknowledged_engine_renames.is_empty());
@@ -2332,6 +2354,7 @@ mod tests {
             PlaybackEvent::Snapshot(stale),
             &analysis,
             &metadata,
+            &event_tx,
             &mut state,
         );
         assert_eq!(state.playback.current.as_ref(), Some(&old_current));

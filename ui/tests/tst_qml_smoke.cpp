@@ -477,6 +477,7 @@ private slots:
     void spectrogramHoverChannelButtonsRemainClickable();
     void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
     void mainWindowContentStartsBelowMenuBar();
+    void playbackErrorShowsInStatusBar();
     void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
@@ -1758,6 +1759,36 @@ void QmlSmokeTest::mainWindowContentStartsBelowMenuBar() {
     QVERIFY2(
         contentItem->property("y").toReal() >= menuBar->property("height").toReal(),
         "Application content must start below the menu bar");
+}
+
+void QmlSmokeTest::playbackErrorShowsInStatusBar() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
+    engine.load(QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
+    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+    QObject *root = engine.rootObjects().constFirst();
+    QObject *bridge = qvariant_cast<QObject *>(root->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *errorLabel = root->findChild<QObject *>(QStringLiteral("statusBarErrorLabel"));
+    QVERIFY(errorLabel != nullptr);
+    QVERIFY(!errorLabel->property("visible").toBool());
+
+    // The message the Rust bridge sends for a skipped track.
+    const QString message = QStringLiteral(
+        "Couldn't play \u201cbad.flac\u201d (Resource not found); skipped it.");
+    clearCapturedMessages();
+    QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, message)));
+    QCOMPARE(root->property("transientBridgeError").toString(), message);
+    QTRY_VERIFY(errorLabel->property("visible").toBool());
+    QCOMPARE(errorLabel->property("text").toString(), QStringLiteral("Error: ") + message);
+    // The error also goes to the diagnostics log.
+    QCOMPARE(takeCapturedMessagesText(), QStringLiteral("bridge error: ") + message);
 }
 
 void QmlSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {

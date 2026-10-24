@@ -1099,7 +1099,7 @@ impl BridgeLoopRuntime {
                 }
             }
             BridgeLoopWake::Command(cmd) => self.handle_command(cmd, event_tx),
-            BridgeLoopWake::Playback(event) => self.handle_playback_event(event),
+            BridgeLoopWake::Playback(event) => self.handle_playback_event(event, event_tx),
             BridgeLoopWake::Analysis(event) => self.handle_analysis_event(event, event_tx),
             BridgeLoopWake::Metadata(event) => self.handle_metadata_event(event),
             BridgeLoopWake::Library(event) => self.handle_library_event(event),
@@ -1278,9 +1278,18 @@ impl BridgeLoopRuntime {
         urgency
     }
 
-    fn handle_playback_event(&mut self, event: PlaybackEvent) -> SnapshotUrgency {
-        let urgency =
-            process_playback_event(event, &self.analysis, &self.metadata, &mut self.state);
+    fn handle_playback_event(
+        &mut self,
+        event: PlaybackEvent,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
+        let urgency = process_playback_event(
+            event,
+            &self.analysis,
+            &self.metadata,
+            event_tx,
+            &mut self.state,
+        );
         if urgency.is_pending() {
             self.flags.session_dirty = true;
         }
@@ -1407,6 +1416,7 @@ impl BridgeLoopRuntime {
             &self.playback_rx,
             &self.analysis,
             &self.metadata,
+            event_tx,
             &mut self.state,
         );
         let analysis_urgency = drain_analysis_events(&self.analysis_rx, event_tx, &mut self.state);
