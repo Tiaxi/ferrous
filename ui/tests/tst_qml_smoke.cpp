@@ -478,6 +478,7 @@ private slots:
     void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
     void mainWindowContentStartsBelowMenuBar();
     void playbackErrorShowsInStatusBar();
+    void stoppedBackendShowsMessageAndDisablesControls();
     void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
@@ -1789,6 +1790,45 @@ void QmlSmokeTest::playbackErrorShowsInStatusBar() {
     QCOMPARE(errorLabel->property("text").toString(), QStringLiteral("Error: ") + message);
     // The error also goes to the diagnostics log.
     QCOMPARE(takeCapturedMessagesText(), QStringLiteral("bridge error: ") + message);
+}
+
+void QmlSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
+    engine.load(QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
+    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+    QObject *root = engine.rootObjects().constFirst();
+    QObject *bridge = qvariant_cast<QObject *>(root->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *message = root->findChild<QObject *>(QStringLiteral("backendStoppedMessage"));
+    QObject *statusLabel = root->findChild<QObject *>(QStringLiteral("statusBarBackendStoppedLabel"));
+    QObject *transportBar = root->findChild<QObject *>(QStringLiteral("transportBar"));
+    QObject *mainSplit = root->findChild<QObject *>(QStringLiteral("mainSplit"));
+    QVERIFY(message != nullptr);
+    QVERIFY(statusLabel != nullptr);
+    QVERIFY(transportBar != nullptr);
+    QVERIFY(mainSplit != nullptr);
+    QVERIFY(!message->property("visible").toBool());
+    QVERIFY(!statusLabel->property("visible").toBool());
+    QVERIFY(transportBar->property("enabled").toBool());
+    QVERIFY(mainSplit->property("enabled").toBool());
+
+    // What the bridge client reports when the relay finds the backend gone.
+    const QString reason = QStringLiteral(
+        "The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.");
+    QVERIFY(bridge->setProperty("backendFailure", reason));
+
+    QTRY_VERIFY(message->property("visible").toBool());
+    QCOMPARE(message->property("text").toString(), reason);
+    QVERIFY(statusLabel->property("visible").toBool());
+    QVERIFY(!transportBar->property("enabled").toBool());
+    QVERIFY(!mainSplit->property("enabled").toBool());
 }
 
 void QmlSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {

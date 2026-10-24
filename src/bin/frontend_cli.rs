@@ -15,7 +15,13 @@ fn main() {
         .without_time()
         .init();
 
-    let bridge = FrontendBridgeHandle::spawn();
+    let bridge = match FrontendBridgeHandle::spawn() {
+        Ok(bridge) => bridge,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
     run_interactive_cli(&bridge);
 }
 
@@ -172,6 +178,10 @@ fn drain_bridge_events(bridge: &FrontendBridgeHandle) {
             }
             BridgeEvent::Stopped => {
                 println!("bridge stopped");
+                return;
+            }
+            BridgeEvent::Failed(err) => {
+                eprintln!("bridge failed: {err}");
                 return;
             }
         }

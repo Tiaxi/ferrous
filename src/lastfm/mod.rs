@@ -415,12 +415,10 @@ pub(crate) fn spawn_with_backends(
 ) -> (Handle, Receiver<Event>) {
     let (cmd_tx, cmd_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
-    let _ = std::thread::Builder::new()
-        .name("ferrous-lastfm".to_string())
-        .spawn(move || {
-            let service = Service::new(options, backends());
-            run_service_loop(&cmd_rx, &event_tx, service);
-        });
+    crate::worker_thread::spawn_worker("ferrous-lastfm", move || {
+        let service = Service::new(options, backends());
+        run_service_loop(&cmd_rx, &event_tx, service);
+    });
     (Handle { tx: cmd_tx }, event_rx)
 }
 

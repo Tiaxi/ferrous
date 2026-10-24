@@ -41,3 +41,9 @@ walkdir = "2"
 default = []
 gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-audio", "dep:gstreamer-pbutils"]
 profiling-logs = []
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

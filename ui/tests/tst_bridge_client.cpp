@@ -207,6 +207,9 @@ private slots:
     void mprisCannotSeekAStoppedTrack();
     void mprisReportsAReplayOfTheSameFileAsSeeked();
     void playbackErrorPacketReachesBridgeError();
+    void backendFailurePacketShowsStoppedState();
+    void requestedStopIsNotABackendFailure();
+    void commandsToAStoppedBackendFailVisibly();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
@@ -2358,6 +2361,98 @@ void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
     QVERIFY(!client.processBinarySnapshot(decoded));
     QCOMPARE(errors.count(), 1);
     QCOMPARE(errors.at(0).at(0).toString(), message);
+}
+
+namespace {
+
+// The packet the Rust relay encodes when the backend stops without being asked
+// to: the error section with the reason, then an empty stopped section.
+QByteArray backendFailurePacket(const QString &message) {
+    const QByteArray text = message.toUtf8();
+    QByteArray payload;
+    QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+    payloadStream.setByteOrder(QDataStream::LittleEndian);
+    payloadStream << quint16(text.size());
+    payload.append(text);
+    QByteArray packet;
+    QDataStream stream(&packet, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    stream << quint32(0xFE550001u) << quint32(20 + payload.size())
+           << quint16(BinaryBridgeCodec::SectionError | BinaryBridgeCodec::SectionStopped)
+           << quint16(0) << quint32(payload.size());
+    stream.writeRawData(payload.constData(), static_cast<int>(payload.size()));
+    stream << quint32(0);
+    return packet;
+}
+
+} // namespace
+
+void BridgeClientTest::backendFailurePacketShowsStoppedState() {
+    // Mirrored by ffi::error_packet_tests::failure_packet_layout_matches_the_qt_decoder.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_bridgeShutdownRequested = false;
+    client.m_connected = true;
+    const QString message = QStringLiteral("The Ferrous backend stopped.");
+
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(
+        BinaryBridgeCodec::decodeSnapshotPacket(backendFailurePacket(message), &decoded, &error),
+        qPrintable(error));
+    QSignalSpy failures(&client, &BridgeClient::backendFailureChanged);
+    QSignalSpy connection(&client, &BridgeClient::connectedChanged);
+    QVERIFY(!client.processBinarySnapshot(decoded));
+    QCOMPARE(failures.count(), 1);
+    QCOMPARE(client.backendFailure(), message);
+    QCOMPARE(client.property("backendFailure").toString(), message);
+    QCOMPARE(connection.count(), 1);
+    QVERIFY(!client.connected());
+
+    // The first reason stays.
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+        backendFailurePacket(QStringLiteral("later")), &decoded, &error));
+    QVERIFY(!client.processBinarySnapshot(decoded));
+    QCOMPARE(failures.count(), 1);
+    QCOMPARE(client.backendFailure(), message);
+}
+
+void BridgeClientTest::requestedStopIsNotABackendFailure() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(client.m_bridgeShutdownRequested);
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    decoded.hasStopped = true;
+    QSignalSpy failures(&client, &BridgeClient::backendFailureChanged);
+    QVERIFY(!client.processBinarySnapshot(decoded));
+    QCOMPARE(failures.count(), 0);
+    QVERIFY(client.backendFailure().isEmpty());
+}
+
+void BridgeClientTest::commandsToAStoppedBackendFailVisibly() {
+    BridgeClient client;
+    QVERIFY(client.m_ffiBridge != nullptr);
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+
+    // Stop the backend behind the client's back, as if it had ended on its own.
+    const QByteArray shutdown =
+        BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown);
+    QVERIFY(ferrous_ffi_bridge_send_binary(
+        client.m_ffiBridge,
+        reinterpret_cast<const std::uint8_t *>(shutdown.constData()),
+        static_cast<std::size_t>(shutdown.size())));
+    QTRY_VERIFY_WITH_TIMEOUT(!client.backendFailure().isEmpty(), 10000);
+    QVERIFY(!client.connected());
+    QVERIFY(client.backendFailure().contains(QStringLiteral("stopped unexpectedly")));
+
+    // Once the backend thread has ended, commands fail and say why.
+    const QByteArray snapshot =
+        BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot);
+    QTRY_VERIFY_WITH_TIMEOUT(!client.sendBinaryCommand(snapshot), 10000);
+    QVERIFY(!errors.isEmpty());
+    QCOMPARE(
+        errors.constLast().at(0).toString(),
+        QStringLiteral("command not sent: the backend has stopped"));
 }
 
 void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {

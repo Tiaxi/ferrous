@@ -169,6 +169,8 @@ impl WindowAccumulator {
     }
 }
 
+/// Decode a window without cancellation, for tests.
+#[cfg(test)]
 pub(crate) fn decode_waveform_window(
     path: &Path,
     start_seconds: f64,

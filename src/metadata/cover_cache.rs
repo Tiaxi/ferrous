@@ -64,7 +64,7 @@ impl EmbeddedCoverCache {
         &self,
         track_path: &Path,
     ) -> Result<Option<PathBuf>, String> {
-        let tagged = lofty::read_from_path(track_path).map_err(|error| {
+        let tagged = crate::panic_guard::read_tags(track_path).map_err(|error| {
             format!(
                 "could not read the tags of '{}': {error}",
                 track_path.display()

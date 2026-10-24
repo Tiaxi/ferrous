@@ -334,18 +334,22 @@ impl ImportWorker {
         let generation = Arc::new(AtomicU64::new(0));
         let active = Arc::clone(&generation);
         let reader = Arc::clone(&gate);
-        let _ = std::thread::Builder::new()
-            .name("ferrous-import".into())
-            .spawn(move || {
-                while let Ok(job) = rx.recv() {
-                    let expand = |paths, cancelled: &dyn Fn() -> bool| {
+        crate::worker_thread::spawn_worker("ferrous-import", move || {
+            while let Ok(job) = rx.recv() {
+                let expand = |paths: Vec<PathBuf>, cancelled: &dyn Fn() -> bool| {
+                    // A panic fails this import alone, which still completes,
+                    // so the changes queued behind it are not held up.
+                    let count = paths.len();
+                    crate::panic_guard::catch("importing files", || {
                         expand_import_paths_cancellable(paths, &cancelled)
-                    };
-                    if run_import(&reader, job, &active, expand).is_break() {
-                        return;
-                    }
+                    })
+                    .unwrap_or_else(|_| ImportExpandOutcome::all_unreadable(count))
+                };
+                if run_import(&reader, job, &active, expand).is_break() {
+                    return;
                 }
-            });
+            }
+        });
         Self::with_channels(tx, results, gate, generation)
     }
 

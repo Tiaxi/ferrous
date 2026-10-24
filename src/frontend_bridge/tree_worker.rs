@@ -35,45 +35,43 @@ impl TreeWorker {
         let (result_tx, results) = unbounded();
         let generation = Arc::new(AtomicU64::new(0));
         let active = Arc::clone(&generation);
-        let _ = std::thread::Builder::new()
-            .name("ferrous-library-tree".into())
-            .spawn(move || {
-                let mut cached: Option<(Arc<LibrarySnapshot>, LibraryTreeCache)> = None;
-                while let Ok(mut request) = rx.recv() {
-                    for newer in rx.try_iter() {
-                        request = newer;
-                    }
-                    if active.load(Ordering::Relaxed) != request.generation {
-                        continue;
-                    }
-                    let (cached_library, cache) = cached.get_or_insert_with(|| {
-                        (
-                            Arc::clone(&request.library),
-                            LibraryTreeCache::new(&request.library),
-                        )
-                    });
-                    if !Arc::ptr_eq(cached_library, &request.library) {
-                        *cache = LibraryTreeCache::new(&request.library);
-                        *cached_library = Arc::clone(&request.library);
-                    }
-                    if !request.library.scan_in_progress {
-                        cache.retain_expanded_keys(&mut request.expanded);
-                    }
-                    let bytes = cache.build(request.sort_mode, Some(&request.expanded));
-                    if active.load(Ordering::Relaxed) == request.generation
-                        && result_tx
-                            .send(TreeResult {
-                                bytes: Arc::new(bytes),
-                                expanded: request.expanded,
-                                counts: cache.counts,
-                                generation: request.generation,
-                            })
-                            .is_err()
-                    {
-                        break;
-                    }
+        crate::worker_thread::spawn_worker("ferrous-library-tree", move || {
+            let mut cached: Option<(Arc<LibrarySnapshot>, LibraryTreeCache)> = None;
+            while let Ok(mut request) = rx.recv() {
+                for newer in rx.try_iter() {
+                    request = newer;
                 }
-            });
+                if active.load(Ordering::Relaxed) != request.generation {
+                    continue;
+                }
+                let (cached_library, cache) = cached.get_or_insert_with(|| {
+                    (
+                        Arc::clone(&request.library),
+                        LibraryTreeCache::new(&request.library),
+                    )
+                });
+                if !Arc::ptr_eq(cached_library, &request.library) {
+                    *cache = LibraryTreeCache::new(&request.library);
+                    *cached_library = Arc::clone(&request.library);
+                }
+                if !request.library.scan_in_progress {
+                    cache.retain_expanded_keys(&mut request.expanded);
+                }
+                let bytes = cache.build(request.sort_mode, Some(&request.expanded));
+                if active.load(Ordering::Relaxed) == request.generation
+                    && result_tx
+                        .send(TreeResult {
+                            bytes: Arc::new(bytes),
+                            expanded: request.expanded,
+                            counts: cache.counts,
+                            generation: request.generation,
+                        })
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        });
         Self {
             tx,
             results,

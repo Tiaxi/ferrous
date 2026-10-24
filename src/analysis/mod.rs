@@ -17,9 +17,7 @@ mod waveform_pyramid;
 mod waveform_service;
 mod waveform_window;
 
-pub(crate) use waveform_window::{
-    decode_waveform_window, decode_waveform_window_cancellable, WaveformWindow,
-};
+pub(crate) use waveform_window::{decode_waveform_window_cancellable, WaveformWindow};
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -1600,34 +1598,32 @@ fn spawn_waveform_decode_worker(
     waveform_tx: Sender<AnalysisCommand>,
     waveform_decode_active_token: Arc<AtomicU64>,
 ) {
-    let _ = std::thread::Builder::new()
-        .name("ferrous-waveform-decode".to_string())
-        .spawn(move || {
-            while let Ok(mut job) = waveform_job_rx.recv() {
-                while let Ok(next_job) = waveform_job_rx.try_recv() {
-                    job = next_job;
-                }
-                let track_token = job.track_token;
-                let _ = decode_waveform_peaks_stream(
-                    &job.path,
-                    1024,
-                    |peaks, coverage_seconds, done| {
-                        if waveform_decode_active_token.load(Ordering::Relaxed) != track_token {
-                            return false;
-                        }
-                        let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
-                            track_token,
-                            peaks,
-                            coverage_seconds,
-                            complete: done,
-                            done,
-                        });
-                        true
-                    },
-                    || waveform_decode_active_token.load(Ordering::Relaxed) != track_token,
-                );
+    crate::worker_thread::spawn_worker("ferrous-waveform-decode", move || {
+        while let Ok(mut job) = waveform_job_rx.recv() {
+            while let Ok(next_job) = waveform_job_rx.try_recv() {
+                job = next_job;
             }
-        });
+            let track_token = job.track_token;
+            let _ = decode_waveform_peaks_stream(
+                &job.path,
+                1024,
+                |peaks, coverage_seconds, done| {
+                    if waveform_decode_active_token.load(Ordering::Relaxed) != track_token {
+                        return false;
+                    }
+                    let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
+                        track_token,
+                        peaks,
+                        coverage_seconds,
+                        complete: done,
+                        done,
+                    });
+                    true
+                },
+                || waveform_decode_active_token.load(Ordering::Relaxed) != track_token,
+            );
+        }
+    });
 }
 
 /// Saturating conversion from `f64` to `u64`, clamping to `[0, u64::MAX]`.
@@ -1661,24 +1657,22 @@ fn spawn_analysis_worker(
     waveform_decode_active_token: Arc<AtomicU64>,
     spectrogram: SpectrogramWorkerHandles,
 ) {
-    let _ = std::thread::Builder::new()
-        .name("ferrous-analysis".to_string())
-        .spawn(move || {
-            let mut state = AnalysisRuntimeState::new();
-            while let Ok(cmd) = cmd_rx.recv() {
-                event_tx.begin_command(&cmd);
-                let ctx = AnalysisContext {
-                    event_tx: &event_tx,
-                    waveform_job_tx: &waveform_job_tx,
-                    waveform_decode_active_token: waveform_decode_active_token.as_ref(),
-                    spectrogram_cmd_tx: &spectrogram.cmd_tx,
-                    spectrogram_decode_generation: spectrogram.decode_generation.as_ref(),
-                    spectrogram_decode_columns_produced: spectrogram.columns_produced.as_ref(),
-                    spectrogram_track_duration_ms: spectrogram.track_duration_ms.as_ref(),
-                };
-                state.handle_command(cmd, &ctx);
-            }
-        });
+    crate::worker_thread::spawn_worker("ferrous-analysis", move || {
+        let mut state = AnalysisRuntimeState::new();
+        while let Ok(cmd) = cmd_rx.recv() {
+            event_tx.begin_command(&cmd);
+            let ctx = AnalysisContext {
+                event_tx: &event_tx,
+                waveform_job_tx: &waveform_job_tx,
+                waveform_decode_active_token: waveform_decode_active_token.as_ref(),
+                spectrogram_cmd_tx: &spectrogram.cmd_tx,
+                spectrogram_decode_generation: spectrogram.decode_generation.as_ref(),
+                spectrogram_decode_columns_produced: spectrogram.columns_produced.as_ref(),
+                spectrogram_track_duration_ms: spectrogram.track_duration_ms.as_ref(),
+            };
+            state.handle_command(cmd, &ctx);
+        }
+    });
 }
 
 fn source_stamp(path: &Path) -> Option<WaveformSourceStamp> {

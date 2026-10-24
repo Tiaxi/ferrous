@@ -198,28 +198,43 @@ impl LibraryService {
         let (cmd_tx, cmd_rx) = unbounded::<LibraryCommand>();
         let (event_tx, event_rx) = unbounded::<LibraryEvent>();
 
-        let _ = std::thread::Builder::new()
-            .name("ferrous-library".to_string())
-            .spawn(move || {
-                let mut snapshot = LibrarySnapshot::default();
+        crate::worker_thread::spawn_worker("ferrous-library", move || {
+            let mut snapshot = LibrarySnapshot::default();
 
-                match open_library_db() {
-                    Ok(conn) => {
-                        if let Err(err) = init_schema(&conn) {
-                            snapshot.last_error = Some(format!("library DB init failed: {err}"));
-                            emit_snapshot(&event_tx, &snapshot);
-                            return;
+            match open_library_db() {
+                Ok(conn) => {
+                    if let Err(err) = init_schema(&conn) {
+                        snapshot.last_error = Some(format!("library DB init failed: {err}"));
+                        emit_snapshot(&event_tx, &snapshot);
+                        return;
+                    }
+                    load_snapshot(&conn, &mut snapshot);
+                    snapshot.bump_search_revision();
+                    emit_snapshot(&event_tx, &snapshot);
+
+                    // Publish the cached library first, then fill new tag columns on this
+                    // library worker. Existing libraries need no manual rescan after upgrade.
+                    if schema::needs_search_tag_backfill(&conn) {
+                        if let Err(err) =
+                            scan::backfill_search_tags(&conn, &mut snapshot, &event_tx)
+                        {
+                            snapshot.last_error = Some(err);
                         }
                         load_snapshot(&conn, &mut snapshot);
                         snapshot.bump_search_revision();
+                        snapshot.scan_in_progress = false;
+                        snapshot.scan_progress = None;
                         emit_snapshot(&event_tx, &snapshot);
+                    }
 
-                        // Publish the cached library first, then fill new tag columns on this
-                        // library worker. Existing libraries need no manual rescan after upgrade.
-                        if schema::needs_search_tag_backfill(&conn) {
-                            if let Err(err) =
-                                scan::backfill_search_tags(&conn, &mut snapshot, &event_tx)
-                            {
+                    match cover_cache::migrate_legacy_embedded_covers(
+                        &conn,
+                        &mut snapshot,
+                        &event_tx,
+                    ) {
+                        Ok(false) => {}
+                        result => {
+                            if let Err(err) = result {
                                 snapshot.last_error = Some(err);
                             }
                             load_snapshot(&conn, &mut snapshot);
@@ -228,35 +243,18 @@ impl LibraryService {
                             snapshot.scan_progress = None;
                             emit_snapshot(&event_tx, &snapshot);
                         }
-
-                        match cover_cache::migrate_legacy_embedded_covers(
-                            &conn,
-                            &mut snapshot,
-                            &event_tx,
-                        ) {
-                            Ok(false) => {}
-                            result => {
-                                if let Err(err) = result {
-                                    snapshot.last_error = Some(err);
-                                }
-                                load_snapshot(&conn, &mut snapshot);
-                                snapshot.bump_search_revision();
-                                snapshot.scan_in_progress = false;
-                                snapshot.scan_progress = None;
-                                emit_snapshot(&event_tx, &snapshot);
-                            }
-                        }
-
-                        while let Ok(cmd) = cmd_rx.recv() {
-                            handle_command(&conn, cmd, &mut snapshot, &event_tx);
-                        }
                     }
-                    Err(err) => {
-                        snapshot.last_error = Some(format!("library DB open failed: {err}"));
-                        emit_snapshot(&event_tx, &snapshot);
+
+                    while let Ok(cmd) = cmd_rx.recv() {
+                        handle_command(&conn, cmd, &mut snapshot, &event_tx);
                     }
                 }
-            });
+                Err(err) => {
+                    snapshot.last_error = Some(format!("library DB open failed: {err}"));
+                    emit_snapshot(&event_tx, &snapshot);
+                }
+            }
+        });
 
         (Self { tx: cmd_tx }, event_rx)
     }

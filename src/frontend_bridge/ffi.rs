@@ -5,7 +5,7 @@ use std::ffi::c_uchar;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -22,6 +22,9 @@ use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
 };
 use crate::library::{IndexedTrack, LibraryTrack};
+use crate::panic_guard;
+#[cfg(test)]
+use crate::panic_guard::test_hooks;
 use crate::playback::{PathRenames, PlaybackState, RepeatMode};
 use crate::tag_editor;
 
@@ -36,6 +39,9 @@ const MAX_PENDING_LIBRARY_TREES: usize = 1;
 const MAX_PENDING_SEARCH_RESULTS: usize = 2;
 const MAX_PENDING_SPECTROGRAM_BYTES: usize = 16 * 1024 * 1024;
 const RELAY_RECV_TIMEOUT: Duration = Duration::from_millis(250);
+/// What the UI shows when the bridge thread ends without stopping normally.
+const BACKEND_STOPPED_MESSAGE: &str =
+    "The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.";
 
 const SNAPSHOT_MAGIC: u32 = 0xFE55_0001;
 const SECTION_PLAYBACK: u16 = 1 << 0;
@@ -51,6 +57,7 @@ const SECTION_LASTFM: u16 = 1 << 8;
 #[cfg(unix)]
 fn create_nonblocking_pipe() -> Option<(RawFd, RawFd)> {
     let mut fds = [0; 2];
+    // SAFETY: `fds` is a writable array of the two descriptors `pipe2` fills.
     let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
     if rc != 0 {
         return None;
@@ -185,6 +192,8 @@ impl FfiRuntime {
 
         let byte = [1u8; 1];
         loop {
+            // SAFETY: `byte` is readable for its length, and the descriptor is
+            // the pipe this runtime owns until `close_wakeup_pipe`.
             let written =
                 unsafe { libc::write(self.wake_write_fd, byte.as_ptr().cast(), byte.len()) };
             if written == 1 {
@@ -219,6 +228,8 @@ impl FfiRuntime {
 
         let mut buffer = [0u8; 64];
         loop {
+            // SAFETY: `buffer` is writable for its length, and the descriptor
+            // is the pipe this runtime owns until `close_wakeup_pipe`.
             let read =
                 unsafe { libc::read(self.wake_read_fd, buffer.as_mut_ptr().cast(), buffer.len()) };
             if read > 0 {
@@ -250,10 +261,14 @@ impl FfiRuntime {
         #[cfg(unix)]
         {
             if self.wake_read_fd >= 0 {
+                // SAFETY: The runtime owns this descriptor and forgets it here,
+                // so it is closed once.
                 unsafe { libc::close(self.wake_read_fd) };
                 self.wake_read_fd = -1;
             }
             if self.wake_write_fd >= 0 {
+                // SAFETY: The runtime owns this descriptor and forgets it here,
+                // so it is closed once.
                 unsafe { libc::close(self.wake_write_fd) };
                 self.wake_write_fd = -1;
             }
@@ -378,12 +393,49 @@ impl FfiRuntime {
         }
     }
 
-    fn send_binary_command(&mut self, payload: &[u8]) -> Result<(), String> {
-        let cmd = parse_binary_command(payload)?;
-        if let Some(cmd) = cmd {
-            let _ = self.command_tx.send(cmd);
+    /// Send a parsed command to the bridge. Reports a command that did not
+    /// parse, or a bridge that can no longer take commands, to the UI.
+    fn send_command(&mut self, parsed: Result<Option<BridgeCommand>, String>) -> bool {
+        match parsed {
+            Ok(None) => true,
+            Ok(Some(cmd)) => {
+                if self.command_tx.send(cmd).is_ok() {
+                    return true;
+                }
+                // The bridge thread has ended, so the command was lost.
+                self.fail(BACKEND_STOPPED_MESSAGE);
+                false
+            }
+            Err(message) => {
+                self.push_binary_event(encode_error_event(&message));
+                false
+            }
         }
-        Ok(())
+    }
+
+    /// Tell the UI that the bridge has stopped and why, unless it stopped
+    /// already, normally or not.
+    fn fail(&mut self, message: &str) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        self.push_binary_event(encode_failure_event(message));
+    }
+
+    /// Restore the runtime's invariants after a panic while it was locked.
+    ///
+    /// The queues stay valid through a panic, but the byte count of the
+    /// spectrogram queue may lag a push or pop, and the wake pipe may not
+    /// have been signalled for queued work.
+    fn recover_after_panic(&mut self) {
+        self.pending_spectrogram_bytes = self
+            .pending_precomputed_spectrogram
+            .iter()
+            .map(|frame| frame.bytes.len())
+            .sum();
+        self.wake_signaled = false;
+        self.signal_wakeup_if_needed();
     }
 
     #[cfg(test)]
@@ -489,6 +541,11 @@ impl FfiEncoder {
                     prepared.push(PreparedEvent::Binary(encode_stopped_event()));
                     prepared.push(PreparedEvent::Stopped);
                 }
+                BridgeEvent::Failed(message) => {
+                    self.stopped = true;
+                    prepared.push(PreparedEvent::Binary(encode_failure_event(&message)));
+                    prepared.push(PreparedEvent::Stopped);
+                }
             }
         }
 
@@ -589,12 +646,30 @@ fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Recei
         let first_event = match event_rx.recv_timeout(RELAY_RECV_TIMEOUT) {
             Ok(event) => event,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                // The bridge sends `Stopped` or `Failed` before it drops the
+                // channel, so a channel closed without either means the bridge
+                // thread ended abnormally.
+                shared.lock_runtime().fail(BACKEND_STOPPED_MESSAGE);
+                break;
+            }
         };
 
         let mut events = vec![first_event];
         events.extend(event_rx.try_iter().take(63));
-        if !prepare_and_publish(&shared, &mut encoder, events) {
+        let published = panic_guard::catch("the bridge event relay", || {
+            prepare_and_publish(&shared, &mut encoder, events);
+        });
+        if let Err(message) = published {
+            // Without the relay the UI hears nothing more from the bridge, so
+            // stop the bridge too and show the UI why.
+            let mut runtime = shared.lock_runtime();
+            runtime.fail(&format!(
+                "The Ferrous backend stopped after an {message}. Restart Ferrous to continue."
+            ));
+            let _ = runtime.command_tx.send(BridgeCommand::Shutdown);
+            drop(runtime);
+            shared.request_stop();
             break;
         }
         if encoder.stopped {
@@ -606,6 +681,23 @@ fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Recei
 
 // Dedicated spectral relay may wait for UI consumption; control publication never waits here.
 fn run_spectral_relay(shared: &FfiShared, event_rx: &crossbeam_channel::Receiver<AnalysisEvent>) {
+    let relayed = panic_guard::catch("the spectrogram relay", || {
+        relay_spectral_events(shared, event_rx);
+    });
+    if let Err(message) = relayed {
+        // Playback goes on; only the spectrogram stops updating.
+        shared
+            .lock_runtime()
+            .push_binary_event(encode_error_event(&format!(
+                "The spectrogram stopped updating after an {message}."
+            )));
+    }
+}
+
+fn relay_spectral_events(
+    shared: &FfiShared,
+    event_rx: &crossbeam_channel::Receiver<AnalysisEvent>,
+) {
     while !shared.stop_requested.load(Ordering::Relaxed) {
         let event = crossbeam_channel::select! {
             recv(shared.spectral_stop_rx) -> _ => return,
@@ -615,9 +707,7 @@ fn run_spectral_relay(shared: &FfiShared, event_rx: &crossbeam_channel::Receiver
             continue;
         };
         let bytes = encode_precomputed_spectrogram_chunk(&chunk);
-        let Ok(mut runtime) = shared.runtime.lock() else {
-            break;
-        };
+        let mut runtime = shared.lock_runtime();
         loop {
             runtime.advance_spectral_generation(shared.spectral_generation.load(Ordering::Relaxed));
             if shared.stop_requested.load(Ordering::Relaxed) {
@@ -629,12 +719,12 @@ fn run_spectral_relay(shared: &FfiShared, event_rx: &crossbeam_channel::Receiver
             if runtime.pending_spectrogram_bytes + bytes.len() <= MAX_PENDING_SPECTROGRAM_BYTES {
                 break;
             }
-            let Ok((guard, _)) = shared
+            // A poisoned runtime is repaired by the next `lock_runtime`; the
+            // queues this loop reads stay valid meanwhile.
+            let (guard, _) = shared
                 .spectral_space
                 .wait_timeout(runtime, Duration::from_millis(50))
-            else {
-                return;
-            };
+                .unwrap_or_else(PoisonError::into_inner);
             runtime = guard;
         }
         runtime.push_precomputed_frame(chunk.generation, bytes);
@@ -645,15 +735,11 @@ fn prepare_and_publish(
     shared: &FfiShared,
     encoder: &mut FfiEncoder,
     events: impl IntoIterator<Item = BridgeEvent>,
-) -> bool {
+) {
     // Serialization and metadata indexing belong exclusively to the relay thread.
     // The UI mutex protects only publication and removal of completed buffers.
     let prepared = encoder.prepare(events);
-    let Ok(mut runtime) = shared.runtime.lock() else {
-        return false;
-    };
-    runtime.publish(prepared);
-    true
+    shared.lock_runtime().publish(prepared);
 }
 
 #[repr(C)]
@@ -679,6 +765,17 @@ impl FfiShared {
         }
     }
 
+    /// Lock the runtime, repairing it if a panic poisoned the lock, so one
+    /// failed call does not disable every later one.
+    fn lock_runtime(&self) -> MutexGuard<'_, FfiRuntime> {
+        self.runtime.lock().unwrap_or_else(|poisoned| {
+            let mut runtime = poisoned.into_inner();
+            runtime.recover_after_panic();
+            self.runtime.clear_poison();
+            runtime
+        })
+    }
+
     fn request_stop(&self) {
         self.stop_requested.store(true, Ordering::Relaxed);
         let _ = self.spectral_stop_tx.try_send(());
@@ -690,8 +787,210 @@ impl FfiShared {
 pub struct FerrousFfiBridge {
     shared: Arc<FfiShared>,
     import_gate: Arc<ImportGate>,
-    relay_thread: Mutex<Option<JoinHandle<()>>>,
-    spectral_relay_thread: Mutex<Option<JoinHandle<()>>>,
+    relay_thread: Option<JoinHandle<()>>,
+    spectral_relay_thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for FerrousFfiBridge {
+    fn drop(&mut self) {
+        self.shared.request_stop();
+        let _ = self
+            .shared
+            .lock_runtime()
+            .command_tx
+            .send(BridgeCommand::Shutdown);
+        for thread in [self.relay_thread.take(), self.spectral_relay_thread.take()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = thread.join();
+        }
+        self.shared.lock_runtime().close_wakeup_pipe();
+    }
+}
+
+/// Start the bridge thread and the threads that relay its output to the UI.
+fn create_bridge() -> Result<FerrousFfiBridge, String> {
+    let handle = FrontendBridgeHandle::spawn()?;
+    let import_gate = handle.import_gate();
+    let (command_tx, event_rx, spectral_rx, spectral_generation) = handle.into_parts();
+    let (wake_read_fd, wake_write_fd) = create_nonblocking_pipe().unwrap_or((-1, -1));
+    let shared = Arc::new(FfiShared::new(
+        FfiRuntime::new(command_tx, wake_read_fd, wake_write_fd),
+        spectral_generation,
+    ));
+    let _ = shared
+        .lock_runtime()
+        .command_tx
+        .send(BridgeCommand::RequestSnapshot);
+
+    // Dropping `bridge` on an error below stops everything started so far.
+    let mut bridge = FerrousFfiBridge {
+        shared: Arc::clone(&shared),
+        import_gate,
+        relay_thread: None,
+        spectral_relay_thread: None,
+    };
+    let relay_shared = Arc::clone(&shared);
+    bridge.relay_thread = Some(
+        thread::Builder::new()
+            .name("ferrous-ffi-relay".to_string())
+            .spawn(move || run_ffi_relay_loop(relay_shared, event_rx))
+            .map_err(|error| format!("failed to start the bridge event relay: {error}"))?,
+    );
+    bridge.spectral_relay_thread = Some(
+        thread::Builder::new()
+            .name("ferrous-spectral-relay".to_string())
+            .spawn(move || run_spectral_relay(&shared, &spectral_rx))
+            .map_err(|error| format!("failed to start the spectrogram relay: {error}"))?,
+    );
+    Ok(bridge)
+}
+
+/// Run the body of the exported function `name`, returning `on_panic`'s
+/// value for the panic's message if it panics. A panic must not unwind out
+/// of an `extern "C"` function, which would abort the process.
+fn ffi_call<R>(name: &str, on_panic: impl FnOnce(String) -> R, body: impl FnOnce() -> R) -> R {
+    panic_guard::catch(name, || {
+        #[cfg(test)]
+        test_hooks::checkpoint(name);
+        body()
+    })
+    .unwrap_or_else(on_panic)
+}
+
+/// Write `value` through `out` unless it is null.
+///
+/// # Safety
+///
+/// `out` must be null or valid for writing one `T`.
+unsafe fn write_out<T: Copy>(out: *mut T, value: T) {
+    if !out.is_null() {
+        // SAFETY: The caller guarantees that a non-null `out` is writable.
+        unsafe { *out = value };
+    }
+}
+
+/// The `len` bytes at `ptr`, or `None` for a null or empty input.
+///
+/// # Safety
+///
+/// A non-null `ptr` must point to `len` readable bytes that stay unchanged
+/// for `'a`.
+unsafe fn input_bytes<'a>(ptr: *const c_uchar, len: usize) -> Option<&'a [u8]> {
+    if ptr.is_null() || len == 0 {
+        return None;
+    }
+    // SAFETY: The caller guarantees `len` readable bytes at the non-null `ptr`.
+    Some(unsafe { std::slice::from_raw_parts(ptr, len) })
+}
+
+/// The bridge behind `handle`, or `None` for a null handle.
+///
+/// # Safety
+///
+/// `handle` must be null or a pointer returned by
+/// [`ferrous_ffi_bridge_create`] that has not been destroyed, and it must
+/// stay alive for `'a`.
+unsafe fn bridge_ref<'a>(handle: *mut FerrousFfiBridge) -> Option<&'a FerrousFfiBridge> {
+    // SAFETY: The caller guarantees that a non-null `handle` is a live bridge.
+    unsafe { handle.as_ref() }
+}
+
+/// Hand `bytes` to the caller, who frees them with [`free_raw_buffer`]
+/// through the matching exported free function.
+///
+/// # Safety
+///
+/// `len_out` must be null or writable for one `usize`.
+unsafe fn into_raw_buffer(bytes: Vec<u8>, len_out: *mut usize) -> *mut c_uchar {
+    let len = bytes.len();
+    let ptr = Box::into_raw(bytes.into_boxed_slice()).cast::<c_uchar>();
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { write_out(len_out, len) };
+    ptr
+}
+
+/// Free a buffer that [`into_raw_buffer`] handed out.
+///
+/// # Safety
+///
+/// `ptr` must be null, or `ptr` and `len` must be a pointer and length from
+/// [`into_raw_buffer`] whose buffer has not been freed.
+unsafe fn free_raw_buffer(ptr: *mut c_uchar, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    // SAFETY: The caller guarantees that `ptr` and `len` describe a boxed
+    // slice that `into_raw_buffer` leaked and nothing has freed.
+    drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
+}
+
+/// Pop one buffer from the bridge's runtime with `pop` and hand it out.
+///
+/// # Safety
+///
+/// `handle` must be null or a live bridge, and `len_out` must be null or
+/// writable for one `usize`.
+unsafe fn pop_buffer(
+    name: &str,
+    handle: *mut FerrousFfiBridge,
+    len_out: *mut usize,
+    pop: impl FnOnce(&FfiShared, &mut FfiRuntime) -> Option<Vec<u8>>,
+) -> *mut c_uchar {
+    // Zeroed before anything can panic, so a failed call reports no buffer.
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { write_out(len_out, 0) };
+    ffi_call(
+        name,
+        |_| std::ptr::null_mut(),
+        || {
+            // SAFETY: The caller guarantees that a non-null `handle` is live.
+            let Some(bridge) = (unsafe { bridge_ref(handle) }) else {
+                return std::ptr::null_mut();
+            };
+            let bytes = pop(&bridge.shared, &mut bridge.shared.lock_runtime());
+            match bytes {
+                // SAFETY: The caller guarantees that `len_out` is null or writable.
+                Some(bytes) => unsafe { into_raw_buffer(bytes, len_out) },
+                None => std::ptr::null_mut(),
+            }
+        },
+    )
+}
+
+/// Run a tag editor request that answers with a JSON buffer. A panic in the
+/// request answers with an error response, which the UI shows like any
+/// failed request; invalid input answers with null.
+///
+/// # Safety
+///
+/// `len_out` must be null or writable for one `usize`.
+unsafe fn tag_editor_call(
+    name: &str,
+    len_out: *mut usize,
+    request: impl FnOnce() -> Option<Vec<u8>>,
+) -> *mut c_uchar {
+    // Zeroed before anything can panic, so a failed call reports no buffer.
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { write_out(len_out, 0) };
+    ffi_call(
+        name,
+        |_| std::ptr::null_mut(),
+        || {
+            let response = panic_guard::catch(name, || {
+                #[cfg(test)]
+                test_hooks::checkpoint("tag_editor_request");
+                request()
+            })
+            .unwrap_or_else(|message| Some(tag_editor::serialize_error_response(&message)));
+            match response {
+                // SAFETY: The caller guarantees that `len_out` is null or writable.
+                Some(bytes) => unsafe { into_raw_buffer(bytes, len_out) },
+                None => std::ptr::null_mut(),
+            }
+        },
+    )
 }
 
 /// Shared retention policy used by the decoder and each Qt channel view.
@@ -705,192 +1004,146 @@ pub extern "C" fn ferrous_ffi_spectrogram_ring_capacity(
     zoom: f64,
     centered: bool,
 ) -> u64 {
-    crate::analysis::retention::SpectrogramBufferConfig {
-        width,
-        sample_rate,
-        hop,
-        bins,
-        channels,
-        zoom,
-        centered,
-    }
-    .limits(crate::analysis::retention::lookahead_seconds())
-    .capacity
+    ffi_call(
+        "ferrous_ffi_spectrogram_ring_capacity",
+        |_| 0,
+        || {
+            crate::analysis::retention::SpectrogramBufferConfig {
+                width,
+                sample_rate,
+                hop,
+                bins,
+                channels,
+                zoom,
+                centered,
+            }
+            .limits(crate::analysis::retention::lookahead_seconds())
+            .capacity
+        },
+    )
 }
 
+/// Start the bridge. Returns null if it cannot start.
 #[no_mangle]
 pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
-    let bridge = FrontendBridgeHandle::spawn();
-    let import_gate = bridge.import_gate();
-    let (command_tx, event_rx, spectral_rx, spectral_generation) = bridge.into_parts();
-    let (wake_read_fd, wake_write_fd) = create_nonblocking_pipe().unwrap_or((-1, -1));
-    let shared = Arc::new(FfiShared::new(
-        FfiRuntime::new(command_tx, wake_read_fd, wake_write_fd),
-        spectral_generation,
-    ));
-    if let Ok(runtime) = shared.runtime.lock() {
-        let _ = runtime.command_tx.send(BridgeCommand::RequestSnapshot);
-    }
-
-    let relay_shared = Arc::clone(&shared);
-    let relay_thread = thread::Builder::new()
-        .name("ferrous-ffi-relay".to_string())
-        .spawn(move || run_ffi_relay_loop(relay_shared, event_rx))
-        .ok();
-
-    let spectral_shared = Arc::clone(&shared);
-    let spectral_relay_thread = thread::Builder::new()
-        .name("ferrous-spectral-relay".to_string())
-        .spawn(move || run_spectral_relay(&spectral_shared, &spectral_rx))
-        .ok();
-
-    Box::into_raw(Box::new(FerrousFfiBridge {
-        shared,
-        import_gate,
-        relay_thread: Mutex::new(relay_thread),
-        spectral_relay_thread: Mutex::new(spectral_relay_thread),
-    }))
+    ffi_call(
+        "ferrous_ffi_bridge_create",
+        |_| std::ptr::null_mut(),
+        || match create_bridge() {
+            Ok(bridge) => Box::into_raw(Box::new(bridge)),
+            Err(message) => {
+                eprintln!("[ferrous] {message}");
+                std::ptr::null_mut()
+            }
+        },
+    )
 }
 
 #[no_mangle]
 /// # Safety
 ///
-/// `handle` must be a pointer previously returned by
-/// [`ferrous_ffi_bridge_create`] and must not be used again after this call.
+/// `handle` must be null or a pointer previously returned by
+/// [`ferrous_ffi_bridge_create`], and must not be used again after this call.
 pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridge) {
-    if handle.is_null() {
-        return;
-    }
-    let bridge = Box::from_raw(handle);
-    let shared = Arc::clone(&bridge.shared);
-    shared.request_stop();
-    if let Ok(runtime) = shared.runtime.lock() {
-        let _ = runtime.command_tx.send(BridgeCommand::Shutdown);
-    }
-    if let Ok(mut relay_thread) = bridge.relay_thread.lock() {
-        if let Some(join_handle) = relay_thread.take() {
-            let _ = join_handle.join();
-        }
-    }
-    if let Ok(mut relay) = bridge.spectral_relay_thread.lock() {
-        if let Some(handle) = relay.take() {
-            let _ = handle.join();
-        }
-    }
-    {
-        let runtime_lock = shared.runtime.lock();
-        if let Ok(mut runtime) = runtime_lock {
-            runtime.close_wakeup_pipe();
-        }
-    }
+    ffi_call(
+        "ferrous_ffi_bridge_destroy",
+        |_| (),
+        || {
+            if !handle.is_null() {
+                // SAFETY: The caller hands over the pointer `Box::into_raw`
+                // made in `ferrous_ffi_bridge_create` and never uses it again.
+                drop(unsafe { Box::from_raw(handle) });
+            }
+        },
+    );
 }
 
 #[no_mangle]
+/// Send a binary command to the bridge. Returns false if the command is
+/// invalid or the bridge has stopped; the UI receives the reason as an event.
+///
 /// # Safety
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`].
 /// `cmd_ptr` must point to `cmd_len` readable bytes for the duration of this call.
 pub unsafe extern "C" fn ferrous_ffi_bridge_send_binary(
     handle: *mut FerrousFfiBridge,
     cmd_ptr: *const c_uchar,
     cmd_len: usize,
 ) -> bool {
-    if handle.is_null() || cmd_ptr.is_null() || cmd_len == 0 {
-        return false;
-    }
-    let bridge = &*handle;
-    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
-        return false;
-    };
-    let payload = std::slice::from_raw_parts(cmd_ptr, cmd_len);
-    match runtime.send_binary_command(payload) {
-        Ok(()) => true,
-        Err(message) => {
-            runtime.push_binary_event(encode_error_event(&message));
-            false
-        }
-    }
+    ffi_call(
+        "ferrous_ffi_bridge_send_binary",
+        |_| false,
+        || {
+            // SAFETY: The caller guarantees that a non-null `handle` is live.
+            let Some(bridge) = (unsafe { bridge_ref(handle) }) else {
+                return false;
+            };
+            // SAFETY: The caller guarantees `cmd_len` readable bytes at `cmd_ptr`.
+            let Some(payload) = (unsafe { input_bytes(cmd_ptr, cmd_len) }) else {
+                return false;
+            };
+            // Parse before locking, so the UI's queues stay free meanwhile.
+            let parsed = parse_binary_command(payload);
+            let mut runtime = bridge.shared.lock_runtime();
+            #[cfg(test)]
+            test_hooks::checkpoint("send_binary:locked");
+            runtime.send_command(parsed)
+        },
+    )
 }
 
 #[no_mangle]
 /// # Safety
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
-pub unsafe extern "C" fn ferrous_ffi_bridge_poll(
-    handle: *mut FerrousFfiBridge,
-    max_events: u32,
-) -> bool {
-    let _ = max_events;
-    if handle.is_null() {
-        return false;
-    }
-    let bridge = &*handle;
-    let Ok(runtime) = bridge.shared.runtime.lock() else {
-        return false;
-    };
-    runtime.has_pending_queues()
-}
-
-#[no_mangle]
-/// # Safety
-///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`].
 pub unsafe extern "C" fn ferrous_ffi_bridge_wakeup_fd(handle: *mut FerrousFfiBridge) -> i32 {
-    if handle.is_null() {
-        return -1;
-    }
-    let bridge = &*handle;
-    let Ok(runtime) = bridge.shared.runtime.lock() else {
-        return -1;
-    };
-    runtime.wake_read_fd
+    ffi_call(
+        "ferrous_ffi_bridge_wakeup_fd",
+        |_| -1,
+        || {
+            // SAFETY: The caller guarantees that a non-null `handle` is live.
+            unsafe { bridge_ref(handle) }
+                .map_or(-1, |bridge| bridge.shared.lock_runtime().wake_read_fd)
+        },
+    )
 }
 
 #[no_mangle]
 /// # Safety
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`].
 pub unsafe extern "C" fn ferrous_ffi_bridge_ack_wakeup(handle: *mut FerrousFfiBridge) {
-    if handle.is_null() {
-        return;
-    }
-    let bridge = &*handle;
-    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
-        return;
-    };
-    runtime.ack_wakeup();
+    ffi_call(
+        "ferrous_ffi_bridge_ack_wakeup",
+        |_| (),
+        || {
+            // SAFETY: The caller guarantees that a non-null `handle` is live.
+            if let Some(bridge) = unsafe { bridge_ref(handle) } {
+                bridge.shared.lock_runtime().ack_wakeup();
+            }
+        },
+    );
 }
 
 #[no_mangle]
 /// # Safety
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`].
 /// If `len_out` is non-null, it must be writable for one `usize`.
 pub unsafe extern "C" fn ferrous_ffi_bridge_pop_binary_event(
     handle: *mut FerrousFfiBridge,
     len_out: *mut usize,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        *len_out = 0;
+    // SAFETY: The caller upholds `pop_buffer`'s contract, which is this one's.
+    unsafe {
+        pop_buffer(
+            "ferrous_ffi_bridge_pop_binary_event",
+            handle,
+            len_out,
+            |_, runtime| runtime.pop_binary_event(),
+        )
     }
-    if handle.is_null() {
-        return std::ptr::null_mut();
-    }
-    let bridge = &*handle;
-    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
-        return std::ptr::null_mut();
-    };
-    let Some(bytes) = runtime.pop_binary_event() else {
-        return std::ptr::null_mut();
-    };
-    let mut boxed = bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    let len = boxed.len();
-    std::mem::forget(boxed);
-    if !len_out.is_null() {
-        *len_out = len;
-    }
-    ptr
 }
 
 #[no_mangle]
@@ -899,42 +1152,34 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_binary_event(
 /// `ptr` and `len` must describe a buffer previously returned by
 /// [`ferrous_ffi_bridge_pop_binary_event`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_binary_event(ptr: *mut c_uchar, len: usize) {
-    if ptr.is_null() || len == 0 {
-        return;
-    }
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+    ffi_call(
+        "ferrous_ffi_bridge_free_binary_event",
+        |_| (),
+        || {
+            // SAFETY: The caller passes a buffer the pop function handed out.
+            unsafe { free_raw_buffer(ptr, len) };
+        },
+    );
 }
 
 #[no_mangle]
 /// # Safety
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`].
 /// If `len_out` is non-null, it must be writable for one `usize`.
 pub unsafe extern "C" fn ferrous_ffi_bridge_pop_analysis_frame(
     handle: *mut FerrousFfiBridge,
     len_out: *mut usize,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        *len_out = 0;
+    // SAFETY: The caller upholds `pop_buffer`'s contract, which is this one's.
+    unsafe {
+        pop_buffer(
+            "ferrous_ffi_bridge_pop_analysis_frame",
+            handle,
+            len_out,
+            |_, runtime| runtime.pop_analysis_frame(),
+        )
     }
-    if handle.is_null() {
-        return std::ptr::null_mut();
-    }
-    let bridge = &*handle;
-    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
-        return std::ptr::null_mut();
-    };
-    let Some(frame) = runtime.pop_analysis_frame() else {
-        return std::ptr::null_mut();
-    };
-    let mut boxed = frame.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    let len = boxed.len();
-    std::mem::forget(boxed);
-    if !len_out.is_null() {
-        *len_out = len;
-    }
-    ptr
 }
 
 #[no_mangle]
@@ -943,43 +1188,38 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_analysis_frame(
 /// `ptr` and `len` must describe a buffer previously returned by
 /// [`ferrous_ffi_bridge_pop_analysis_frame`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_analysis_frame(ptr: *mut c_uchar, len: usize) {
-    if ptr.is_null() || len == 0 {
-        return;
-    }
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+    ffi_call(
+        "ferrous_ffi_bridge_free_analysis_frame",
+        |_| (),
+        || {
+            // SAFETY: The caller passes a buffer the pop function handed out.
+            unsafe { free_raw_buffer(ptr, len) };
+        },
+    );
 }
 
 #[no_mangle]
 /// # Safety
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`].
 /// If `len_out` is non-null, it must be writable for one `usize`.
 pub unsafe extern "C" fn ferrous_ffi_bridge_pop_precomputed_spectrogram(
     handle: *mut FerrousFfiBridge,
     len_out: *mut usize,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        *len_out = 0;
+    // SAFETY: The caller upholds `pop_buffer`'s contract, which is this one's.
+    unsafe {
+        pop_buffer(
+            "ferrous_ffi_bridge_pop_precomputed_spectrogram",
+            handle,
+            len_out,
+            |shared, runtime| {
+                let frame = runtime.pop_precomputed_spectrogram()?;
+                shared.spectral_space.notify_one();
+                Some(frame)
+            },
+        )
     }
-    if handle.is_null() {
-        return std::ptr::null_mut();
-    }
-    let bridge = &*handle;
-    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
-        return std::ptr::null_mut();
-    };
-    let Some(frame) = runtime.pop_precomputed_spectrogram() else {
-        return std::ptr::null_mut();
-    };
-    bridge.shared.spectral_space.notify_one();
-    let mut boxed = frame.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    let len = boxed.len();
-    std::mem::forget(boxed);
-    if !len_out.is_null() {
-        *len_out = len;
-    }
-    ptr
 }
 
 #[no_mangle]
@@ -991,49 +1231,36 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_free_precomputed_spectrogram(
     ptr: *mut c_uchar,
     len: usize,
 ) {
-    if ptr.is_null() || len == 0 {
-        return;
-    }
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+    ffi_call(
+        "ferrous_ffi_bridge_free_precomputed_spectrogram",
+        |_| (),
+        || {
+            // SAFETY: The caller passes a buffer the pop function handed out.
+            unsafe { free_raw_buffer(ptr, len) };
+        },
+    );
 }
 
 #[no_mangle]
 /// # Safety
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`].
 /// If `len_out` or `version_out` are non-null, each must be writable for one value.
 pub unsafe extern "C" fn ferrous_ffi_bridge_pop_library_tree(
     handle: *mut FerrousFfiBridge,
     len_out: *mut usize,
     version_out: *mut u32,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        *len_out = 0;
-    }
-    if !version_out.is_null() {
-        *version_out = 0;
-    }
-    if handle.is_null() {
-        return std::ptr::null_mut();
-    }
-    let bridge = &*handle;
-    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
-        return std::ptr::null_mut();
+    // SAFETY: The caller guarantees that `version_out` is null or writable.
+    unsafe { write_out(version_out, 0) };
+    let pop = |_: &FfiShared, runtime: &mut FfiRuntime| {
+        let frame = runtime.pop_library_tree_frame()?;
+        // SAFETY: The caller guarantees that `version_out` is null or writable.
+        unsafe { write_out(version_out, frame.version) };
+        Some(frame.bytes)
     };
-    let Some(frame) = runtime.pop_library_tree_frame() else {
-        return std::ptr::null_mut();
-    };
-    let mut boxed = frame.bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    let len = boxed.len();
-    std::mem::forget(boxed);
-    if !len_out.is_null() {
-        *len_out = len;
-    }
-    if !version_out.is_null() {
-        *version_out = frame.version;
-    }
-    ptr
+    // SAFETY: The caller upholds `pop_buffer`'s contract, which is part of this one.
+    unsafe { pop_buffer("ferrous_ffi_bridge_pop_library_tree", handle, len_out, pop) }
 }
 
 #[no_mangle]
@@ -1042,49 +1269,43 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_library_tree(
 /// `ptr` and `len` must describe a buffer previously returned by
 /// [`ferrous_ffi_bridge_pop_library_tree`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_library_tree(ptr: *mut c_uchar, len: usize) {
-    if ptr.is_null() || len == 0 {
-        return;
-    }
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+    ffi_call(
+        "ferrous_ffi_bridge_free_library_tree",
+        |_| (),
+        || {
+            // SAFETY: The caller passes a buffer the pop function handed out.
+            unsafe { free_raw_buffer(ptr, len) };
+        },
+    );
 }
 
 #[no_mangle]
 /// # Safety
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`].
 /// If `len_out` or `seq_out` are non-null, each must be writable for one value.
 pub unsafe extern "C" fn ferrous_ffi_bridge_pop_search_results(
     handle: *mut FerrousFfiBridge,
     len_out: *mut usize,
     seq_out: *mut u32,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        *len_out = 0;
-    }
-    if !seq_out.is_null() {
-        *seq_out = 0;
-    }
-    if handle.is_null() {
-        return std::ptr::null_mut();
-    }
-    let bridge = &*handle;
-    let Ok(mut runtime) = bridge.shared.runtime.lock() else {
-        return std::ptr::null_mut();
+    // SAFETY: The caller guarantees that `seq_out` is null or writable.
+    unsafe { write_out(seq_out, 0) };
+    let pop = |_: &FfiShared, runtime: &mut FfiRuntime| {
+        let frame = runtime.pop_search_results_frame()?;
+        // SAFETY: The caller guarantees that `seq_out` is null or writable.
+        unsafe { write_out(seq_out, frame.seq) };
+        Some(frame.bytes)
     };
-    let Some(frame) = runtime.pop_search_results_frame() else {
-        return std::ptr::null_mut();
-    };
-    let mut boxed = frame.bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    let len = boxed.len();
-    std::mem::forget(boxed);
-    if !len_out.is_null() {
-        *len_out = len;
+    // SAFETY: The caller upholds `pop_buffer`'s contract, which is part of this one.
+    unsafe {
+        pop_buffer(
+            "ferrous_ffi_bridge_pop_search_results",
+            handle,
+            len_out,
+            pop,
+        )
     }
-    if !seq_out.is_null() {
-        *seq_out = frame.seq;
-    }
-    ptr
 }
 
 #[no_mangle]
@@ -1093,40 +1314,20 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_pop_search_results(
 /// `ptr` and `len` must describe a buffer previously returned by
 /// [`ferrous_ffi_bridge_pop_search_results`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_bridge_free_search_results(ptr: *mut c_uchar, len: usize) {
-    if ptr.is_null() || len == 0 {
-        return;
-    }
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+    ffi_call(
+        "ferrous_ffi_bridge_free_search_results",
+        |_| (),
+        || {
+            // SAFETY: The caller passes a buffer the pop function handed out.
+            unsafe { free_raw_buffer(ptr, len) };
+        },
+    );
 }
 
 #[no_mangle]
-/// # Safety
+/// Read the tags of the files a JSON request names. A file that cannot be
+/// read is reported in the response's failures.
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
-/// `paths_ptr` must point to `paths_len` readable bytes for the duration of this call.
-pub unsafe extern "C" fn ferrous_ffi_bridge_refresh_edited_paths(
-    handle: *mut FerrousFfiBridge,
-    paths_ptr: *const c_uchar,
-    paths_len: usize,
-) -> bool {
-    if handle.is_null() || paths_ptr.is_null() || paths_len == 0 {
-        return false;
-    }
-    let Ok(paths) = tag_editor::parse_paths_blob(std::slice::from_raw_parts(paths_ptr, paths_len))
-    else {
-        return false;
-    };
-    let bridge = &*handle;
-    let Ok(runtime) = bridge.shared.runtime.lock() else {
-        return false;
-    };
-    let _ = runtime.command_tx.send(BridgeCommand::Library(
-        BridgeLibraryCommand::RefreshEditedPaths(paths),
-    ));
-    true
-}
-
-#[no_mangle]
 /// # Safety
 ///
 /// `paths_ptr` must point to `paths_len` readable bytes for the duration of this call.
@@ -1136,21 +1337,15 @@ pub unsafe extern "C" fn ferrous_ffi_tag_editor_load(
     paths_len: usize,
     len_out: *mut usize,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        *len_out = 0;
-    }
-    if paths_ptr.is_null() || paths_len == 0 {
-        return std::ptr::null_mut();
-    }
-    let Ok(paths) = tag_editor::parse_paths_blob(std::slice::from_raw_parts(paths_ptr, paths_len))
-    else {
-        return std::ptr::null_mut();
+    let request = || {
+        // SAFETY: The caller guarantees `paths_len` readable bytes at `paths_ptr`.
+        let blob = unsafe { input_bytes(paths_ptr, paths_len) }?;
+        let paths = tag_editor::parse_paths_blob(blob).ok()?;
+        let response = tag_editor::load_rows_for_paths(&paths);
+        tag_editor::serialize_load_response(&response).ok()
     };
-    let response = tag_editor::load_rows_for_paths(&paths);
-    let Ok(bytes) = tag_editor::serialize_load_response(&response) else {
-        return std::ptr::null_mut();
-    };
-    into_raw_buffer(bytes, len_out)
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { tag_editor_call("ferrous_ffi_tag_editor_load", len_out, request) }
 }
 
 #[no_mangle]
@@ -1163,22 +1358,15 @@ pub unsafe extern "C" fn ferrous_ffi_tag_editor_save(
     save_len: usize,
     len_out: *mut usize,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        *len_out = 0;
-    }
-    if save_ptr.is_null() || save_len == 0 {
-        return std::ptr::null_mut();
-    }
-    let Ok(request) =
-        tag_editor::parse_save_request(std::slice::from_raw_parts(save_ptr, save_len))
-    else {
-        return std::ptr::null_mut();
+    let request = || {
+        // SAFETY: The caller guarantees `save_len` readable bytes at `save_ptr`.
+        let blob = unsafe { input_bytes(save_ptr, save_len) }?;
+        let request = tag_editor::parse_save_request(blob).ok()?;
+        let response = tag_editor::save_rows(request);
+        tag_editor::serialize_save_response(&response).ok()
     };
-    let response = tag_editor::save_rows(request);
-    let Ok(bytes) = tag_editor::serialize_save_response(&response) else {
-        return std::ptr::null_mut();
-    };
-    into_raw_buffer(bytes, len_out)
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { tag_editor_call("ferrous_ffi_tag_editor_save", len_out, request) }
 }
 
 #[no_mangle]
@@ -1191,25 +1379,15 @@ pub unsafe extern "C" fn ferrous_ffi_tag_editor_rename(
     len: usize,
     len_out: *mut usize,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        // SAFETY: The caller supplies a writable output length.
-        unsafe {
-            *len_out = 0;
-        }
-    }
-    if data.is_null() || len == 0 {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: The caller guarantees the input remains readable for this call.
-    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-    let Ok(request) = tag_editor::parse_rename_request(bytes) else {
-        return std::ptr::null_mut();
+    let request = || {
+        // SAFETY: The caller guarantees `len` readable bytes at `data`.
+        let blob = unsafe { input_bytes(data, len) }?;
+        let request = tag_editor::parse_rename_request(blob).ok()?;
+        let response = tag_editor::rename_rows(request);
+        tag_editor::serialize_rename_response(&response).ok()
     };
-    let response = tag_editor::rename_rows(request);
-    let Ok(bytes) = tag_editor::serialize_rename_response(&response) else {
-        return std::ptr::null_mut();
-    };
-    into_raw_buffer(bytes, len_out)
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { tag_editor_call("ferrous_ffi_tag_editor_rename", len_out, request) }
 }
 
 /// A reference to the bridge's import gate that a tag editor worker can own.
@@ -1233,14 +1411,19 @@ pub struct FerrousFfiRenameGate {
 pub unsafe extern "C" fn ferrous_ffi_bridge_rename_gate(
     handle: *mut FerrousFfiBridge,
 ) -> *mut FerrousFfiRenameGate {
-    if handle.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: The caller guarantees `handle` is a live bridge.
-    let bridge = unsafe { &*handle };
-    Box::into_raw(Box::new(FerrousFfiRenameGate {
-        gate: Arc::clone(&bridge.import_gate),
-    }))
+    ffi_call(
+        "ferrous_ffi_bridge_rename_gate",
+        |_| std::ptr::null_mut(),
+        || {
+            // SAFETY: The caller guarantees that a non-null `handle` is live.
+            let Some(bridge) = (unsafe { bridge_ref(handle) }) else {
+                return std::ptr::null_mut();
+            };
+            Box::into_raw(Box::new(FerrousFfiRenameGate {
+                gate: Arc::clone(&bridge.import_gate),
+            }))
+        },
+    )
 }
 
 #[no_mangle]
@@ -1249,10 +1432,16 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_rename_gate(
 /// `gate` must be null or a pointer returned by [`ferrous_ffi_bridge_rename_gate`]
 /// that is not used again after this call.
 pub unsafe extern "C" fn ferrous_ffi_rename_gate_free(gate: *mut FerrousFfiRenameGate) {
-    if !gate.is_null() {
-        // SAFETY: The caller transfers ownership of a pointer from `Box::into_raw`.
-        drop(unsafe { Box::from_raw(gate) });
-    }
+    ffi_call(
+        "ferrous_ffi_rename_gate_free",
+        |_| (),
+        || {
+            if !gate.is_null() {
+                // SAFETY: The caller transfers ownership of a pointer from `Box::into_raw`.
+                drop(unsafe { Box::from_raw(gate) });
+            }
+        },
+    );
 }
 
 #[no_mangle]
@@ -1263,7 +1452,7 @@ pub unsafe extern "C" fn ferrous_ffi_rename_gate_free(gate: *mut FerrousFfiRenam
 ///
 /// # Safety
 ///
-/// `gate` must be a valid pointer returned by [`ferrous_ffi_bridge_rename_gate`].
+/// `gate` must be null or a valid pointer returned by [`ferrous_ffi_bridge_rename_gate`].
 /// `data` must contain `len` readable bytes; `len_out` must be null or writable.
 pub unsafe extern "C" fn ferrous_ffi_rename_gate_rename(
     gate: *const FerrousFfiRenameGate,
@@ -1271,31 +1460,23 @@ pub unsafe extern "C" fn ferrous_ffi_rename_gate_rename(
     len: usize,
     len_out: *mut usize,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        // SAFETY: The caller supplies a writable output length.
-        unsafe {
-            *len_out = 0;
-        }
-    }
-    if gate.is_null() || data.is_null() || len == 0 {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: The caller guarantees the input remains readable for this call.
-    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-    let Ok(request) = tag_editor::parse_rename_request(bytes) else {
-        return std::ptr::null_mut();
+    let request = || {
+        // SAFETY: The caller guarantees that a non-null `gate` is live.
+        let gate = unsafe { gate.as_ref() }?;
+        // SAFETY: The caller guarantees `len` readable bytes at `data`.
+        let blob = unsafe { input_bytes(data, len) }?;
+        let request = tag_editor::parse_rename_request(blob).ok()?;
+        // A panic in the rename still finishes it in the gate, so imports
+        // waiting for it go on.
+        let response = gate.gate.rename(|| {
+            let response = tag_editor::rename_rows(request);
+            let renames = renamed_paths(&response);
+            (response, renames)
+        });
+        tag_editor::serialize_rename_response(&response).ok()
     };
-    // SAFETY: The caller guarantees `gate` is a live rename gate.
-    let gate = unsafe { &*gate };
-    let response = gate.gate.rename(|| {
-        let response = tag_editor::rename_rows(request);
-        let renames = renamed_paths(&response);
-        (response, renames)
-    });
-    let Ok(bytes) = tag_editor::serialize_rename_response(&response) else {
-        return std::ptr::null_mut();
-    };
-    into_raw_buffer(bytes, len_out)
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { tag_editor_call("ferrous_ffi_rename_gate_rename", len_out, request) }
 }
 
 /// The files `response` reports as moved to a new path.
@@ -1317,53 +1498,27 @@ fn renamed_paths(response: &tag_editor::RenameResponse) -> PathRenames {
 ///
 /// `ptr` and `len` must describe a buffer previously returned by one of the tag editor helpers.
 pub unsafe extern "C" fn ferrous_ffi_tag_editor_free_buffer(ptr: *mut c_uchar, len: usize) {
-    if ptr.is_null() || len == 0 {
-        return;
-    }
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+    ffi_call(
+        "ferrous_ffi_tag_editor_free_buffer",
+        |_| (),
+        || {
+            // SAFETY: The caller passes a buffer a tag editor function handed out.
+            unsafe { free_raw_buffer(ptr, len) };
+        },
+    );
 }
 
 #[no_mangle]
-/// Decode one waveform viewport at display resolution.
+/// Decode one waveform viewport at display resolution, with cooperative
+/// cancellation between decoder packets. Returns null if the file cannot be
+/// decoded or the decode was cancelled.
 ///
 /// # Safety
 ///
 /// `path_ptr` must point to `path_len` readable UTF-8 bytes for this call.
 /// If `len_out` is non-null it must be writable for one `usize`.
-pub unsafe extern "C" fn ferrous_ffi_waveform_window(
-    path_ptr: *const c_uchar,
-    path_len: usize,
-    start_seconds: f64,
-    end_seconds: f64,
-    max_points: u32,
-    len_out: *mut usize,
-) -> *mut c_uchar {
-    if !len_out.is_null() {
-        *len_out = 0;
-    }
-    if path_ptr.is_null() || path_len == 0 || max_points == 0 {
-        return std::ptr::null_mut();
-    }
-    let Ok(path_text) = std::str::from_utf8(std::slice::from_raw_parts(path_ptr, path_len)) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(window) = crate::analysis::decode_waveform_window(
-        &PathBuf::from(path_text),
-        start_seconds,
-        end_seconds,
-        usize::try_from(max_points).unwrap_or(usize::MAX),
-    ) else {
-        return std::ptr::null_mut();
-    };
-    into_raw_buffer(encode_waveform_window(&window), len_out)
-}
-
-#[no_mangle]
-/// Decode a viewport with cooperative cancellation between decoder packets.
-///
-/// # Safety
-/// Input and output pointers follow `ferrous_ffi_waveform_window`'s contract.
-/// The callback and context must remain valid until this call returns.
+/// `cancelled` must be safe to call with `context` from this thread until
+/// this call returns.
 pub unsafe extern "C" fn ferrous_ffi_waveform_window_cancellable(
     path_ptr: *const c_uchar,
     path_len: usize,
@@ -1374,46 +1529,57 @@ pub unsafe extern "C" fn ferrous_ffi_waveform_window_cancellable(
     cancelled: unsafe extern "C" fn(*const std::ffi::c_void) -> bool,
     context: *const std::ffi::c_void,
 ) -> *mut c_uchar {
-    if !len_out.is_null() {
-        // SAFETY: The caller guarantees a writable output length.
-        unsafe {
-            *len_out = 0;
-        }
-    }
-    if path_ptr.is_null() || path_len == 0 || max_points == 0 {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: The caller supplies a readable path for the duration of the call.
-    let bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len) };
-    let Ok(path) = std::str::from_utf8(bytes) else {
-        return std::ptr::null_mut();
-    };
-    let is_cancelled = || {
-        // SAFETY: The callback and context remain valid until this function returns.
-        unsafe { cancelled(context) }
-    };
-    let Ok(window) = crate::analysis::decode_waveform_window_cancellable(
-        &PathBuf::from(path),
-        start_seconds,
-        end_seconds,
-        usize::try_from(max_points).unwrap_or(usize::MAX),
-        &is_cancelled,
-    ) else {
-        return std::ptr::null_mut();
-    };
-    into_raw_buffer(encode_waveform_window(&window), len_out)
+    // Zeroed before anything can panic, so a failed call reports no buffer.
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { write_out(len_out, 0) };
+    ffi_call(
+        "ferrous_ffi_waveform_window_cancellable",
+        |_| std::ptr::null_mut(),
+        || {
+            if max_points == 0 {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: The caller supplies a readable path for the duration of the call.
+            let Some(bytes) = (unsafe { input_bytes(path_ptr, path_len) }) else {
+                return std::ptr::null_mut();
+            };
+            let Ok(path) = std::str::from_utf8(bytes) else {
+                return std::ptr::null_mut();
+            };
+            let is_cancelled = || {
+                // SAFETY: The caller guarantees the callback may be called with
+                // `context` until this function returns.
+                unsafe { cancelled(context) }
+            };
+            let Ok(window) = crate::analysis::decode_waveform_window_cancellable(
+                &PathBuf::from(path),
+                start_seconds,
+                end_seconds,
+                usize::try_from(max_points).unwrap_or(usize::MAX),
+                &is_cancelled,
+            ) else {
+                return std::ptr::null_mut();
+            };
+            // SAFETY: The caller guarantees that `len_out` is null or writable.
+            unsafe { into_raw_buffer(encode_waveform_window(&window), len_out) }
+        },
+    )
 }
 
 #[no_mangle]
 /// # Safety
 ///
 /// `ptr` and `len` must describe a buffer returned by
-/// [`ferrous_ffi_waveform_window`] and not yet freed.
+/// [`ferrous_ffi_waveform_window_cancellable`] and not yet freed.
 pub unsafe extern "C" fn ferrous_ffi_waveform_window_free(ptr: *mut c_uchar, len: usize) {
-    if ptr.is_null() || len == 0 {
-        return;
-    }
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+    ffi_call(
+        "ferrous_ffi_waveform_window_free",
+        |_| (),
+        || {
+            // SAFETY: The caller passes a buffer the waveform function handed out.
+            unsafe { free_raw_buffer(ptr, len) };
+        },
+    );
 }
 
 #[no_mangle]
@@ -1431,35 +1597,25 @@ pub unsafe extern "C" fn ferrous_ffi_fuzzy_match_score(
     wanted_artist_ptr: *const c_uchar,
     wanted_artist_len: usize,
 ) -> f64 {
-    let to_str = |ptr: *const c_uchar, len: usize| -> &str {
-        if ptr.is_null() || len == 0 {
-            return "";
-        }
-        std::str::from_utf8(std::slice::from_raw_parts(ptr, len)).unwrap_or("")
-    };
-    let candidate_album = to_str(candidate_album_ptr, candidate_album_len);
-    let candidate_artist = to_str(candidate_artist_ptr, candidate_artist_len);
-    let wanted_album = to_str(wanted_album_ptr, wanted_album_len);
-    let wanted_artist = to_str(wanted_artist_ptr, wanted_artist_len);
-    crate::fuzzy_match::itunes_relevance_score(
-        candidate_album,
-        candidate_artist,
-        wanted_album,
-        wanted_artist,
+    ffi_call(
+        "ferrous_ffi_fuzzy_match_score",
+        |_| 0.0,
+        || {
+            let to_str = |ptr: *const c_uchar, len: usize| -> &str {
+                // SAFETY: The caller guarantees `len` readable bytes at each
+                // non-null `ptr` for the duration of this call.
+                unsafe { input_bytes(ptr, len) }
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .unwrap_or("")
+            };
+            crate::fuzzy_match::itunes_relevance_score(
+                to_str(candidate_album_ptr, candidate_album_len),
+                to_str(candidate_artist_ptr, candidate_artist_len),
+                to_str(wanted_album_ptr, wanted_album_len),
+                to_str(wanted_artist_ptr, wanted_artist_len),
+            )
+        },
     )
-}
-
-fn into_raw_buffer(bytes: Vec<u8>, len_out: *mut usize) -> *mut c_uchar {
-    let mut boxed = bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    let len = boxed.len();
-    std::mem::forget(boxed);
-    if !len_out.is_null() {
-        unsafe {
-            *len_out = len;
-        }
-    }
-    ptr
 }
 
 fn encode_waveform_window(window: &crate::analysis::WaveformWindow) -> Vec<u8> {
@@ -1880,6 +2036,16 @@ fn encode_error_event(message: &str) -> Vec<u8> {
 
 fn encode_stopped_event() -> Vec<u8> {
     encode_packet(vec![(SECTION_STOPPED, Vec::new())])
+}
+
+/// A stop the UI did not ask for: the stopped section with the reason.
+fn encode_failure_event(message: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_u16_string(&mut payload, message);
+    encode_packet(vec![
+        (SECTION_ERROR, payload),
+        (SECTION_STOPPED, Vec::new()),
+    ])
 }
 
 fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
@@ -2588,7 +2754,24 @@ fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod error_packet_tests {
-    use super::encode_error_event;
+    use super::{encode_error_event, encode_failure_event};
+
+    #[test]
+    fn failure_packet_layout_matches_the_qt_decoder() {
+        // Mirrored by BridgeClientTest::backendFailurePacketShowsStoppedState.
+        let message = "The Ferrous backend stopped.";
+        let text = message.as_bytes();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&0xFE55_0001_u32.to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(22 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&((1_u16 << 6) | (1_u16 << 7)).to_le_bytes());
+        expected.extend_from_slice(&0_u16.to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(2 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u16::try_from(text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(text);
+        expected.extend_from_slice(&0_u32.to_le_bytes());
+        assert_eq!(encode_failure_event(message), expected);
+    }
 
     #[test]
     fn playback_error_packet_layout_matches_the_qt_decoder() {
@@ -2855,14 +3038,12 @@ mod tests {
                 .runtime
                 .try_lock()
                 .expect("UI can lock during encoding");
-            runtime
-                .send_binary_command(&encode_command(1, &[]))
-                .expect("send playback command");
+            assert!(runtime.send_command(parse_binary_command(&encode_command(1, &[]))));
             runtime.push_binary_event(encode_error_event("existing"));
             assert!(runtime.pop_binary_event().is_some());
             BridgeEvent::Snapshot(Box::new(sample_snapshot()))
         });
-        assert!(prepare_and_publish(&shared, &mut encoder, events));
+        prepare_and_publish(&shared, &mut encoder, events);
         assert!(command_rx.try_recv().is_ok());
         let mut runtime = shared.runtime.lock().expect("runtime");
         assert!(runtime.pop_binary_event().is_some());
@@ -3699,11 +3880,11 @@ mod tests {
         let relay_shared = Arc::clone(&shared);
         let relay = thread::spawn(move || run_spectral_relay(&relay_shared, &rx));
         let mut encoder = FfiEncoder::default();
-        assert!(prepare_and_publish(
+        prepare_and_publish(
             &shared,
             &mut encoder,
-            [BridgeEvent::Error("control remains responsive".into())]
-        ));
+            [BridgeEvent::Error("control remains responsive".into())],
+        );
         assert!(shared.runtime.lock().unwrap().pop_binary_event().is_some());
         shared.spectral_generation.store(2, Ordering::Relaxed);
         shared.spectral_space.notify_all();
@@ -3814,14 +3995,16 @@ mod tests {
     }
 
     fn ffi_send_binary(handle: *mut FerrousFfiBridge, cmd: &[u8]) -> bool {
+        // SAFETY: The tests pass a live bridge, and `cmd` is readable during the call.
         unsafe { ferrous_ffi_bridge_send_binary(handle, cmd.as_ptr(), cmd.len()) }
     }
 
     fn ffi_next_event(handle: *mut FerrousFfiBridge, timeout: Duration) -> Option<Vec<u8>> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
+            // SAFETY: The tests pass a live bridge; `len` is writable, and a
+            // returned buffer of `len` bytes is copied, then freed once.
             unsafe {
-                ferrous_ffi_bridge_poll(handle, 64);
                 let mut len = 0usize;
                 let ptr = ferrous_ffi_bridge_pop_binary_event(handle, &mut len as *mut usize);
                 if !ptr.is_null() && len > 0 {
@@ -3838,8 +4021,10 @@ mod tests {
     fn ffi_next_tree(handle: *mut FerrousFfiBridge, timeout: Duration) -> Option<(u32, Vec<u8>)> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
+            // SAFETY: The tests pass a live bridge; `len` and `version` are
+            // writable, and a returned buffer of `len` bytes is copied, then
+            // freed once.
             unsafe {
-                ferrous_ffi_bridge_poll(handle, 64);
                 let mut len = 0usize;
                 let mut version = 0u32;
                 let ptr = ferrous_ffi_bridge_pop_library_tree(
@@ -3896,6 +4081,7 @@ mod tests {
             revents: 0,
         };
         loop {
+            // SAFETY: `poll_fd` is one valid, writable `pollfd`.
             let rc = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
             if rc > 0 {
                 return (poll_fd.revents & libc::POLLIN) != 0;
@@ -3918,6 +4104,7 @@ mod tests {
         let mut total = 0usize;
         let mut buffer = [0u8; 64];
         loop {
+            // SAFETY: `buffer` is writable for its length.
             let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
             if read > 0 {
                 total += read as usize;
@@ -4064,6 +4251,7 @@ mod tests {
         assert!(ffi_send_binary(handle, &encode_command(34, &[])));
         let stopped = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
         assert!(stopped.is_some());
+        // SAFETY: `handle` came from `ferrous_ffi_bridge_create` and is not used again.
         unsafe { ferrous_ffi_bridge_destroy(handle) };
     }
 
@@ -4082,7 +4270,189 @@ mod tests {
 
         assert!(ffi_send_binary(handle, &encode_command(33, &[])));
         let _ = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
+        // SAFETY: `handle` came from `ferrous_ffi_bridge_create` and is not used again.
         unsafe { ferrous_ffi_bridge_destroy(handle) };
+    }
+
+    /// The reason in a packet that reports a stop the UI did not ask for.
+    fn failure_message(packet: &[u8]) -> Option<String> {
+        let (_, _, mask) = parse_packet_header(packet);
+        if mask != SECTION_ERROR | SECTION_STOPPED {
+            return None;
+        }
+        let mut offset = 12;
+        let _section_len = read_u32(packet, &mut offset);
+        Some(read_u16_string(packet, &mut offset))
+    }
+
+    fn relay_shared() -> Arc<FfiShared> {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        Arc::new(FfiShared::new(
+            FfiRuntime::new(command_tx, -1, -1),
+            Arc::new(AtomicU64::new(0)),
+        ))
+    }
+
+    #[test]
+    fn a_command_the_ended_bridge_cannot_take_fails_and_tells_the_ui_once() {
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        drop(command_rx);
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        let snapshot = encode_command(33, &[]);
+
+        assert!(!runtime.send_command(parse_binary_command(&snapshot)));
+        let packet = runtime.pop_binary_event().expect("failure event");
+        assert_eq!(
+            failure_message(&packet).as_deref(),
+            Some(BACKEND_STOPPED_MESSAGE)
+        );
+        assert!(!runtime.send_command(parse_binary_command(&snapshot)));
+        assert!(runtime.pop_binary_event().is_none());
+    }
+
+    #[test]
+    fn the_relay_reports_a_bridge_that_ends_without_stopping() {
+        let shared = relay_shared();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        event_tx
+            .send(BridgeEvent::Error("sent before".into()))
+            .unwrap();
+        drop(event_tx);
+
+        run_ffi_relay_loop(Arc::clone(&shared), event_rx);
+
+        let mut runtime = shared.lock_runtime();
+        let first = runtime.pop_binary_event().expect("the earlier error");
+        assert_eq!(parse_packet_header(&first).2, SECTION_ERROR);
+        let failure = runtime.pop_binary_event().expect("the failure");
+        assert_eq!(
+            failure_message(&failure).as_deref(),
+            Some(BACKEND_STOPPED_MESSAGE)
+        );
+        assert!(runtime.pop_binary_event().is_none());
+    }
+
+    #[test]
+    fn the_relay_does_not_report_a_bridge_that_stopped_normally() {
+        let shared = relay_shared();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        event_tx.send(BridgeEvent::Stopped).unwrap();
+        drop(event_tx);
+
+        run_ffi_relay_loop(Arc::clone(&shared), event_rx);
+
+        let mut runtime = shared.lock_runtime();
+        let stopped = runtime.pop_binary_event().expect("the stop");
+        assert_eq!(parse_packet_header(&stopped).2, SECTION_STOPPED);
+        assert!(runtime.pop_binary_event().is_none());
+    }
+
+    #[test]
+    fn a_bridge_failure_reaches_the_ui_as_a_stop_with_its_reason() {
+        let shared = relay_shared();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        event_tx.send(BridgeEvent::Failed("why".into())).unwrap();
+
+        run_ffi_relay_loop(Arc::clone(&shared), event_rx);
+
+        assert!(shared.stop_requested.load(Ordering::Relaxed));
+        let mut runtime = shared.lock_runtime();
+        let failure = runtime.pop_binary_event().expect("the failure");
+        assert_eq!(failure_message(&failure).as_deref(), Some("why"));
+        assert!(runtime.pop_binary_event().is_none());
+        drop(event_tx);
+    }
+
+    #[test]
+    fn a_panicking_ffi_call_returns_its_error_value_and_the_next_call_works() {
+        let handle = ferrous_ffi_bridge_create();
+        assert!(!handle.is_null());
+        let snapshot = encode_command(33, &[]);
+
+        test_hooks::panic_at("ferrous_ffi_bridge_send_binary");
+        assert!(!ffi_send_binary(handle, &snapshot));
+        assert!(ffi_send_binary(handle, &snapshot));
+
+        // A panic while the runtime is locked poisons its mutex, and the
+        // next call repairs it.
+        test_hooks::panic_at("send_binary:locked");
+        assert!(!ffi_send_binary(handle, &snapshot));
+        assert!(ffi_send_binary(handle, &snapshot));
+        // SAFETY: `handle` is live until it is destroyed below.
+        let bridge = unsafe { &*handle };
+        assert!(!bridge.shared.runtime.is_poisoned());
+        assert!(ffi_wait_for_mask(handle, SECTION_PLAYBACK, Duration::from_secs(4)).is_some());
+
+        test_hooks::panic_at("ferrous_ffi_bridge_pop_binary_event");
+        let mut len = 7_usize;
+        // SAFETY: `handle` is live and `len` is writable.
+        let ptr = unsafe { ferrous_ffi_bridge_pop_binary_event(handle, &raw mut len) };
+        assert!(ptr.is_null());
+        assert_eq!(len, 0);
+
+        assert!(ffi_send_binary(handle, &encode_command(34, &[])));
+        let _ = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
+        // SAFETY: `handle` came from `ferrous_ffi_bridge_create` and is not used again.
+        unsafe { ferrous_ffi_bridge_destroy(handle) };
+    }
+
+    fn ffi_tag_editor_load(request: &[u8]) -> Option<serde_json::Value> {
+        let mut len = 0_usize;
+        // SAFETY: `request` is readable and `len` writable during the call.
+        let ptr =
+            unsafe { ferrous_ffi_tag_editor_load(request.as_ptr(), request.len(), &raw mut len) };
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: The call handed out `len` bytes at `ptr`, which are freed
+        // once below.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+        // SAFETY: `ptr` and `len` came from the load and are not used again.
+        unsafe { ferrous_ffi_tag_editor_free_buffer(ptr, len) };
+        Some(serde_json::from_slice(&bytes).expect("JSON response"))
+    }
+
+    #[test]
+    fn a_file_that_panics_the_tag_reader_fails_alone_in_the_tag_editor() {
+        use crate::vorbis_comment_scan::fixtures::{comment_block, flac};
+
+        let dir = std::env::temp_dir().join(format!("ferrous-ffi-coverart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let broken = dir.join("broken.flac");
+        let good = dir.join("good.flac");
+        std::fs::write(&broken, panic_guard::fixtures::short_coverart_flac()).expect("write");
+        std::fs::write(&good, flac(&[&comment_block(&[b"TITLE=Fine"])])).expect("write");
+        let request = serde_json::to_vec(&[&broken, &good]).expect("request");
+
+        let response = ffi_tag_editor_load(&request).expect("a response");
+
+        let rows = response["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1, "{response}");
+        assert_eq!(rows[0]["title"], "Fine");
+        let failures = response["failures"].as_array().expect("failures");
+        assert_eq!(failures.len(), 1, "{response}");
+        assert_eq!(failures[0]["path"], broken.to_str().expect("UTF-8 path"));
+        let error = failures[0]["error"].as_str().expect("error");
+        assert!(error.contains("malformed tag data"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_panic_in_a_tag_editor_request_answers_with_an_error() {
+        test_hooks::panic_at("tag_editor_request");
+        let response = ffi_tag_editor_load(b"[]").expect("an error response");
+        let error = response["error"].as_str().expect("error");
+        assert!(
+            error.contains("test panic at tag_editor_request"),
+            "{error}"
+        );
+
+        test_hooks::panic_at("ferrous_ffi_tag_editor_load");
+        assert!(ffi_tag_editor_load(b"[]").is_none());
+
+        let response = ffi_tag_editor_load(b"[]").expect("a response");
+        assert!(response["error"].is_null(), "{response}");
     }
 
     struct DecodedSnapshotForTest {
