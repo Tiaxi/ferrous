@@ -3043,23 +3043,25 @@ void BridgeClient::appendAllLibraryTracks() {
 }
 
 void BridgeClient::replaceWithPaths(const QStringList &paths) {
-    QStringList sanitized;
-    sanitized.reserve(paths.size());
-    for (const QString &path : paths) {
-        const QString normalized = normalizeLocalPathArg(path);
-        if (!normalized.isEmpty()) {
-            sanitized.push_back(normalized);
-        }
-    }
-    if (sanitized.isEmpty()) {
-        return;
-    }
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
+    sendPathListCommand(
         BinaryBridgeCodec::CmdReplaceAlbum,
-        sanitized));
+        paths,
+        QStringLiteral("Couldn't open %1 files at once: the list is over the %2 MiB the "
+                       "backend takes in one command. The queue was not changed."));
 }
 
 void BridgeClient::appendPaths(const QStringList &paths) {
+    sendPathListCommand(
+        BinaryBridgeCodec::CmdAppendAlbum,
+        paths,
+        QStringLiteral("Couldn't add %1 files at once: the list is over the %2 MiB the "
+                       "backend takes in one command. The queue was not changed."));
+}
+
+void BridgeClient::sendPathListCommand(
+    quint16 cmdId,
+    const QStringList &paths,
+    const QString &tooLargeMessage) {
     QStringList sanitized;
     sanitized.reserve(paths.size());
     for (const QString &path : paths) {
@@ -3071,9 +3073,20 @@ void BridgeClient::appendPaths(const QStringList &paths) {
     if (sanitized.isEmpty()) {
         return;
     }
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
-        BinaryBridgeCodec::CmdAppendAlbum,
-        sanitized));
+    // One command keeps a replacement a single queue change, so the list is
+    // never split; one over the bound is refused whole.
+    const QByteArray command = BinaryBridgeCodec::encodeCommandStringList(cmdId, sanitized);
+    if (command.isEmpty()) {
+        logDiagnostic(
+            QStringLiteral("bridge"),
+            QStringLiteral("refuse path list command id=%1 paths=%2: over the command bound")
+                .arg(cmdId)
+                .arg(sanitized.size()));
+        emit bridgeError(tooLargeMessage.arg(sanitized.size())
+                             .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
+        return;
+    }
+    sendBinaryCommand(command);
 }
 
 QString BridgeClient::libraryAlbumCoverAt(int index) const {
@@ -3756,20 +3769,12 @@ void BridgeClient::openContainingFolder(const QString &path) {
 }
 
 void BridgeClient::refreshEditedPaths(const QStringList &paths) {
-    QStringList sanitized;
-    sanitized.reserve(paths.size());
-    for (const QString &path : paths) {
-        const QString normalized = normalizeLocalPathArg(path);
-        if (!normalized.isEmpty()) {
-            sanitized.push_back(normalized);
-        }
-    }
-    if (sanitized.isEmpty()) {
-        return;
-    }
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
+    sendPathListCommand(
         BinaryBridgeCodec::CmdRefreshEditedPaths,
-        sanitized));
+        paths,
+        QStringLiteral("The edits to %1 files were saved, but the list is over the %2 MiB "
+                       "the backend takes in one command, so the library does not show "
+                       "them yet. Rescan the library to update it."));
 }
 
 std::shared_ptr<FerrousFfiRenameGate> BridgeClient::renameGate() const {
@@ -4765,8 +4770,11 @@ bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFold
 
 bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
     if (payload.isEmpty()) {
-        logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop empty command payload"));
-        emit bridgeError(QStringLiteral("failed to encode binary bridge command"));
+        // Encoders return nothing for a command over the bound.
+        logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command over the bound"));
+        emit bridgeError(QStringLiteral("Command not sent: it is over the %1 MiB the backend "
+                                        "takes in one command.")
+                             .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
         return false;
     }
     if (m_sendCommandOverride) {

@@ -144,12 +144,9 @@ void appendLe(QByteArray &out, T value) {
     out.append(reinterpret_cast<const char *>(&little), static_cast<int>(sizeof(T)));
 }
 
-void appendUtf8U16(QByteArray &out, const QString &value) {
-    QByteArray utf8 = value.toUtf8();
-    if (utf8.size() > 65535) {
-        utf8.truncate(65535);
-    }
-    appendLe<quint16>(out, static_cast<quint16>(utf8.size()));
+void appendUtf8(QByteArray &out, const QString &value) {
+    const QByteArray utf8 = value.toUtf8();
+    appendLe<quint32>(out, static_cast<quint32>(utf8.size()));
     out.append(utf8);
 }
 
@@ -162,15 +159,15 @@ QByteArray encodeRows(const QVector<BinaryTreeRow> &rows) {
         appendLe<qint32>(out, row.sourceIndex);
         appendLe<quint16>(out, row.trackNumber);
         appendLe<quint16>(out, row.childCount);
-        appendUtf8U16(out, row.title);
-        appendUtf8U16(out, row.key);
-        appendUtf8U16(out, row.artist);
-        appendUtf8U16(out, row.path);
-        appendUtf8U16(out, row.coverPath);
-        appendUtf8U16(out, row.trackPath);
-        appendLe<quint16>(out, static_cast<quint16>(row.playPaths.size()));
+        appendUtf8(out, row.title);
+        appendUtf8(out, row.key);
+        appendUtf8(out, row.artist);
+        appendUtf8(out, row.path);
+        appendUtf8(out, row.coverPath);
+        appendUtf8(out, row.trackPath);
+        appendLe<quint32>(out, static_cast<quint32>(row.playPaths.size()));
         for (const QString &playPath : row.playPaths) {
-            appendUtf8U16(out, playPath);
+            appendUtf8(out, playPath);
         }
     }
     return out;

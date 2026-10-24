@@ -594,6 +594,7 @@ private:
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     // Returns whether the bridge took the command.
     bool sendBinaryCommand(const QByteArray &payload);
+    void sendPathListCommand(quint16 cmdId, const QStringList &paths, const QString &tooLargeMessage);
     void sendLibraryRootCommand(quint16 cmdId, const QString &path);
     void sendLibraryRootCommand(quint16 cmdId, const QString &path, const QString &name);
     static QString formatSeconds(double seconds);

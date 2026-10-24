@@ -13,6 +13,14 @@ namespace BinaryBridgeCodec {
 
 constexpr quint32 kSnapshotMagic = 0xFE550001u;
 
+// A command is a u16 id, a u32 payload length, and the payload. Strings in
+// it, and in every frame from Rust, are a u32 byte length and UTF-8; lists
+// of strings or indices start with a u32 count. The payload bound matches
+// MAX_COMMAND_PAYLOAD_BYTES in src/frontend_bridge/ffi.rs. An encoder
+// returns an empty array for a command over it.
+constexpr qsizetype kCommandHeaderBytes = 6;
+constexpr quint32 kMaxCommandPayloadBytes = 8u * 1024u * 1024u;
+
 enum SnapshotSection : quint16 {
     SectionPlayback = 1u << 0,
     SectionQueue = 1u << 1,

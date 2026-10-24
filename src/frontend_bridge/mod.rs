@@ -2568,6 +2568,57 @@ mod tests {
     }
 
     #[test]
+    fn opening_thousands_of_files_queues_them_all_in_order_and_plays_the_first() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _) = queue_order_runtime();
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-queue-order-open-many-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        // Reverse order, so a sort anywhere on the way would show.
+        let tracks: Vec<PathBuf> = (0..5_000)
+            .rev()
+            .map(|i| {
+                let track = dir.join(format!("{i:04} – Ärtist トラック.flac"));
+                std::fs::write(&track, b"stub").expect("fixture track");
+                std::fs::canonicalize(track).expect("canonical track")
+            })
+            .collect();
+
+        // The command as the UI encodes it: a u16 id, a u32 payload length,
+        // a u32 count, and u32-length strings.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::try_from(tracks.len()).unwrap().to_le_bytes());
+        for track in &tracks {
+            ffi::push_string(&mut payload, &track.to_string_lossy());
+        }
+        assert!(payload.len() > usize::from(u16::MAX));
+        let mut command = 15_u16.to_le_bytes().to_vec();
+        command.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+        command.extend_from_slice(&payload);
+        let parsed = ffi::parse_binary_command(&command)
+            .expect("parse")
+            .expect("command");
+
+        runtime.handle_command(parsed, &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        assert_eq!(runtime.state.queue, tracks);
+        assert_eq!(runtime.state.selected_queue_index, Some(0));
+        assert_eq!(
+            queue_ops(&engine_rx),
+            vec![
+                format!("load {tracks:?}"),
+                "play at 0".to_string(),
+                "play".to_string(),
+            ],
+            "one queue change, playing from the first file"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn add_track_then_append_album_keeps_their_order() {
         let _guard = test_guard();
         let (mut runtime, engine_rx, event_tx, album) = queue_order_runtime();
