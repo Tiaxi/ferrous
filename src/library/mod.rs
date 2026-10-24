@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 mod cover_cache;
-mod no_replace;
 mod scan;
 mod schema;
 

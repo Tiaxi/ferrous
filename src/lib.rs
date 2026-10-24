@@ -8,6 +8,7 @@ pub mod fuzzy_match;
 pub mod lastfm;
 pub mod library;
 pub mod metadata;
+mod no_replace;
 mod paths;
 pub mod playback;
 mod profile_logging;

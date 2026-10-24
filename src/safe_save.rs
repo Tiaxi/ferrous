@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::no_replace::rename_no_replace;
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Replace `path` with an edited copy of itself.
@@ -77,24 +79,46 @@ pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     temp.commit(&target, Some(permissions))
 }
 
-/// Create the file `path` holding `bytes`. Nothing that already exists at
-/// `path`, including a dangling link, is replaced.
+/// Create the file `path` holding `bytes`. Nothing that has the name
+/// `path`, including a dangling link, is replaced, even when it appears
+/// while the file is written. File systems without an atomic check, such
+/// as NFS, keep a short window; see [`crate::no_replace`].
 ///
 /// # Errors
 ///
 /// Returns a message when something exists at `path`, or when the file
 /// cannot be written, flushed, or moved into place.
 pub(crate) fn create_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    create_file_with(path, bytes, || {})
+}
+
+/// [`create_file`] that calls `before_rename` once the file is complete, so
+/// tests can create something at `path` right before it is moved there.
+fn create_file_with(path: &Path, bytes: &[u8], before_rename: impl FnOnce()) -> Result<(), String> {
     let mut temp = TempSibling::create(path)?;
     temp.write_all(bytes)?;
-    // The rename would replace an existing file, so check right before it.
-    // Something created in between is the only case this cannot catch.
-    match fs::symlink_metadata(path) {
-        Ok(_) => return Err(format!("{} already exists", path.display())),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(format!("failed to check {}: {err}", path.display())),
-    }
-    temp.commit(path, None)
+    temp.file
+        .sync_all()
+        .map_err(|err| format!("failed to flush {}: {err}", temp.path.display()))?;
+    before_rename();
+    rename_no_replace(&temp.path, path).map_err(|err| {
+        if err.kind() == io::ErrorKind::AlreadyExists {
+            format!("{} already exists", path.display())
+        } else {
+            format!(
+                "failed to create {} from {}: {err}",
+                path.display(),
+                temp.path.display()
+            )
+        }
+    })?;
+    temp.persisted = true;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("missing parent directory for {}", path.display()))?;
+    File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|err| format!("failed to flush directory {}: {err}", parent.display()))
 }
 
 /// Check, without changing anything, that [`rewrite_via_temp_copy`] could
@@ -382,6 +406,22 @@ mod tests {
 
         assert!(error.contains("already exists"), "{error}");
         assert_eq!(fs::read(&path).expect("read result"), b"first");
+        assert_eq!(dir_entries(&dir), vec!["cover.png".to_string()]);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn creating_a_file_keeps_what_appears_at_its_name_while_it_is_written() {
+        let dir = test_dir("create-race");
+        let path = dir.join("cover.png");
+
+        let error = create_file_with(&path, b"ferrous", || {
+            fs::write(&path, b"other program").expect("write competing file");
+        })
+        .expect_err("name was taken");
+
+        assert_eq!(error, format!("{} already exists", path.display()));
+        assert_eq!(fs::read(&path).expect("read result"), b"other program");
         assert_eq!(dir_entries(&dir), vec!["cover.png".to_string()]);
         fs::remove_dir_all(dir).expect("remove test dir");
     }

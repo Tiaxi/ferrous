@@ -24,7 +24,7 @@ use std::path::Path;
 ///
 /// On a case-insensitive filesystem a different spelling of `from` exists,
 /// so a case-only rename fails too; rename through a temporary name instead.
-pub(super) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     rename_no_replace_with(from, to, renameat2_no_replace)
 }
 

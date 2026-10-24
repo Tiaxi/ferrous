@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView, ImageFormat};
-use lofty::file::{FileType, TaggedFileExt};
+use lofty::file::{FileType, TaggedFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::Accessor;
 use lofty::tag::Tag;
@@ -17,6 +17,7 @@ use crate::folder_cover::{find_folder_cover, find_named_cover};
 use crate::raw_audio::{is_raw_surround_file, read_appended_apev2_text_metadata};
 use crate::safe_save::{check_rewritable, create_file, replace_file};
 use crate::tag_write::save_tag;
+use crate::vorbis_comment_scan::skipped_comments;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItunesAlbumArtworkUrls {
@@ -129,8 +130,9 @@ pub fn normalize_artwork_bytes(bytes: &[u8]) -> Result<NormalizedArtwork> {
 ///
 /// Returns an error when the artwork cannot be normalized, when the folder
 /// image cannot be written, or when any album track cannot take embedded
-/// artwork; in that case no track is changed. Tracks that fail while being
-/// written are listed in the outcome instead.
+/// artwork or any track in the folder cannot be read; in those cases no
+/// track is changed. Tracks that fail while being written are listed in the
+/// outcome instead.
 pub fn apply_artwork_to_track(
     track_path: &Path,
     artwork_path: &Path,
@@ -220,23 +222,45 @@ fn encode_for_path(artwork: &NormalizedArtwork, path: &Path) -> Result<Vec<u8>> 
 /// as a whole.
 ///
 /// Every track is checked first and nothing is written unless all of them
-/// can take the artwork. A track that still fails while being written is
-/// reported in the outcome, and the remaining tracks are written.
+/// can take the artwork, and unless the album of every track in the folder
+/// is known. A track that still fails while being written is reported in the
+/// outcome, and the remaining tracks are written.
 fn rewrite_embedded_artwork(
     current_track_path: &Path,
     artwork: &NormalizedArtwork,
 ) -> Result<ApplyArtworkOutcome> {
-    let album_key = normalize_match_key(&track_album(current_track_path));
+    let album_key = normalize_match_key(&track_album(current_track_path).map_err(|error| {
+        anyhow!(
+            "the tracks of the album of {} cannot be found: {error}",
+            file_label(current_track_path)
+        )
+    })?);
     if album_key.is_empty() {
         bail!(
             "{} has no album tag, so the tracks of its album cannot be found",
             file_label(current_track_path)
         );
     }
-    let members = sibling_supported_audio_files(current_track_path)?
-        .into_iter()
-        .filter(|candidate| normalize_match_key(&track_album(candidate)) == album_key)
-        .collect::<Vec<_>>();
+    let siblings = sibling_supported_audio_files(current_track_path)?;
+    let sibling_count = siblings.len();
+    let mut members = Vec::new();
+    let mut unreadable = Vec::new();
+    for candidate in siblings {
+        match track_album(&candidate) {
+            Ok(album) if normalize_match_key(&album) == album_key => members.push(candidate),
+            Ok(_) => {}
+            Err(error) => unreadable.push((candidate, error)),
+        }
+    }
+    if !unreadable.is_empty() {
+        bail!(
+            "{} of {} tracks in this folder cannot be read, so the album's tracks are \
+             unknown and none were changed: {}",
+            unreadable.len(),
+            sibling_count,
+            describe_track_errors(&unreadable)
+        );
+    }
 
     let unwritable = members
         .iter()
@@ -279,9 +303,14 @@ fn write_each_track(
     outcome
 }
 
-/// Check, without writing, that `path` can take embedded artwork now.
+/// Check, without writing, that `path` can take embedded artwork now:
+/// saving would not delete comments lofty cannot read, as [`save_tag`]
+/// refuses then, and the file can be replaced.
 fn check_embedded_artwork_writable(path: &Path, artwork: &NormalizedArtwork) -> Result<(), String> {
-    edited_artwork_tag(path, artwork)?;
+    let (file_type, _) = edited_artwork_tag(path, artwork)?;
+    if let Some(refusal) = skipped_comments(path, file_type)?.save_refusal() {
+        return Err(refusal);
+    }
     check_rewritable(path)
 }
 
@@ -298,18 +327,23 @@ fn rewrite_embedded_artwork_for_file(
 /// The front cover goes first, so readers that show a track's first
 /// picture, as Ferrous does, show the new artwork. Earlier front covers are
 /// replaced; other pictures are kept after it in their order.
+///
+/// A file without its primary tag, such as an MP3 with only `ID3v1`, gets
+/// one that starts from the tag readers show, as the tag editor does, so the
+/// new tag does not hide the title, artist, and album. The other tags stay.
 fn edited_artwork_tag(path: &Path, artwork: &NormalizedArtwork) -> Result<(FileType, Tag), String> {
-    let mut tagged = lofty::read_from_path(path)
+    let tagged = lofty::read_from_path(path)
         .map_err(|err| format!("failed to read tags from {}: {err}", path.display()))?;
     let file_type = tagged.file_type();
-    if tagged.primary_tag_mut().is_none() {
-        tagged.insert_tag(Tag::new(tagged.primary_tag_type()));
-    }
-    let mut tag = tagged
-        .primary_tag()
-        .or_else(|| tagged.first_tag())
-        .cloned()
-        .ok_or_else(|| format!("failed to resolve writable tag for {}", path.display()))?;
+    let primary_type = tagged.primary_tag_type();
+    let mut tag = tagged.primary_tag().cloned().unwrap_or_else(|| {
+        let mut seeded = tagged
+            .first_tag()
+            .cloned()
+            .unwrap_or_else(|| Tag::new(primary_type));
+        seeded.re_map(primary_type);
+        seeded
+    });
 
     let mut kept = Vec::new();
     while !tag.pictures().is_empty() {
@@ -347,22 +381,36 @@ fn sibling_supported_audio_files(track_path: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn track_album(path: &Path) -> String {
-    let mut album = lofty::read_from_path(path)
-        .ok()
-        .and_then(|tagged| {
-            tagged
-                .primary_tag()
-                .or_else(|| tagged.first_tag())
-                .and_then(|tag| tag.album().map(std::borrow::Cow::into_owned))
-        })
-        .unwrap_or_default();
-    if is_raw_surround_file(path) {
-        if let Some(value) = read_appended_apev2_text_metadata(path).and_then(|tags| tags.album) {
-            album = value;
-        }
+/// The album tag of `path`, empty when it has none.
+///
+/// # Errors
+///
+/// Returns a message when the tags of `path` cannot be read.
+fn track_album(path: &Path) -> Result<String, String> {
+    let read_error =
+        |err: &dyn std::fmt::Display| format!("failed to read tags from {}: {err}", path.display());
+    let tagged = lofty::read_from_path(path);
+    let album = |tagged: &TaggedFile| {
+        tagged
+            .primary_tag()
+            .or_else(|| tagged.first_tag())
+            .and_then(|tag| tag.album().map(std::borrow::Cow::into_owned))
+    };
+    if !is_raw_surround_file(path) {
+        return tagged
+            .map(|tagged| album(&tagged).unwrap_or_default())
+            .map_err(|err| read_error(&err));
     }
-    album
+    // lofty reads no raw surround streams, so its error only means the
+    // file has no tag lofty knows; the album is in an appended APE tag.
+    if let Some(value) = read_appended_apev2_text_metadata(path).and_then(|tags| tags.album) {
+        return Ok(value);
+    }
+    fs::File::open(path).map_err(|err| read_error(&err))?;
+    Ok(tagged
+        .ok()
+        .and_then(|tagged| album(&tagged))
+        .unwrap_or_default())
 }
 
 fn normalize_match_key(value: &str) -> String {
@@ -704,35 +752,128 @@ mod tests {
     }
 
     #[test]
-    fn tracks_whose_comments_would_be_deleted_are_reported_and_unchanged() {
+    fn embedded_artwork_changes_nothing_when_saving_would_delete_comments() {
         use crate::vorbis_comment_scan::fixtures;
 
         let root = test_dir("unreadable-comments");
         let album = root.join("Album");
         fs::create_dir(&album).expect("create album dir");
-        let track = album.join("01.flac");
+        let readable = album.join("01.flac");
+        write_test_flac(&readable, &[("ALBUM", "Album")]);
+        let refused = album.join("02.flac");
         let block = fixtures::comment_block(&[b"ALBUM=Album", b"no separator"]);
-        fs::write(&track, fixtures::flac(&[&block])).expect("write track");
-        let before = fs::read(&track).expect("read track");
+        fs::write(&refused, fixtures::flac(&[&block])).expect("write track");
+        let before = [&readable, &refused].map(|path| fs::read(path).expect("read track"));
         let (artwork, _) = artwork_file(&root, ImageFormat::Png);
+
+        let error = apply_artwork_to_track(&readable, &artwork).expect_err("comments are kept");
+
+        let message = error.to_string();
+        assert!(
+            message.starts_with("1 of 2 album tracks cannot be updated, so none were changed"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "02.flac (1 comment in this file can't be read safely (1 without \"=\"); \
+                 saving would delete it)"
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("01.flac"), "{message}");
+        let after = [&readable, &refused].map(|path| fs::read(path).expect("read track"));
+        assert_eq!(after, before);
+        assert_eq!(dir_entries(&album), ["01.flac", "02.flac"]);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_artwork_changes_nothing_when_a_track_in_the_folder_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_dir("unreadable-member");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let tracks = ["01.flac", "02.flac", "03.flac"].map(|name| {
+            let path = album.join(name);
+            write_test_flac(&path, &[("ALBUM", "Album")]);
+            path
+        });
+        let before = tracks
+            .iter()
+            .map(|path| fs::read(path).expect("read track"))
+            .collect::<Vec<_>>();
+        fs::set_permissions(&tracks[1], fs::Permissions::from_mode(0o000)).expect("chmod");
+        // Root ignores file permissions, so the check only holds for normal users.
+        if fs::File::open(&tracks[1]).is_ok() {
+            fs::remove_dir_all(root).expect("remove test dir");
+            return;
+        }
+        let (artwork, _) = artwork_file(&root, ImageFormat::Png);
+
+        let error = apply_artwork_to_track(&tracks[0], &artwork).expect_err("unreadable track");
+
+        let message = error.to_string();
+        assert!(
+            message.starts_with(
+                "1 of 3 tracks in this folder cannot be read, so the album's tracks are \
+                 unknown and none were changed: 02.flac (failed to read tags from"
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("01.flac"), "{message}");
+        assert!(!message.contains("03.flac"), "{message}");
+        fs::set_permissions(&tracks[1], fs::Permissions::from_mode(0o644)).expect("chmod");
+        let after = tracks
+            .iter()
+            .map(|path| fs::read(path).expect("read track"))
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        assert_eq!(dir_entries(&album), ["01.flac", "02.flac", "03.flac"]);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[test]
+    fn artwork_on_an_id3v1_only_mp3_keeps_its_tags_visible() {
+        use crate::tag_write::TEST_MP3;
+        use lofty::config::WriteOptions;
+        use lofty::tag::{ItemKey, TagExt, TagType};
+
+        let root = test_dir("id3v1-only");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let track = album.join("01.mp3");
+        fs::write(&track, TEST_MP3).expect("write MP3 fixture");
+        TagType::Id3v2
+            .remove_from_path(&track)
+            .expect("strip ID3v2 tag");
+        let mut id3v1 = Tag::new(TagType::Id3v1);
+        id3v1.insert_text(ItemKey::TrackTitle, "Title".to_string());
+        id3v1.insert_text(ItemKey::TrackArtist, "Artist".to_string());
+        id3v1.insert_text(ItemKey::AlbumTitle, "Album".to_string());
+        id3v1
+            .save_to_path(&track, WriteOptions::new())
+            .expect("write ID3v1 tag");
+        let (artwork, artwork_bytes) = artwork_file(&root, ImageFormat::Png);
 
         let outcome = apply_artwork_to_track(&track, &artwork).expect("apply artwork");
 
-        assert!(outcome.affected_track_paths.is_empty());
-        let summary = outcome.failure_summary().unwrap_or_default();
-        assert!(
-            summary
-                .starts_with("album art was applied to 0 of 1 album tracks; not updated: 01.flac"),
-            "{summary}"
-        );
-        assert!(
-            summary.contains(
-                "1 comment in this file can't be read safely (1 without \"=\"); \
-                 saving would delete it"
-            ),
-            "{summary}"
-        );
-        assert_eq!(fs::read(&track).expect("read track"), before);
+        assert_eq!(outcome.affected_track_paths, std::slice::from_ref(&track));
+        let tagged = lofty::read_from_path(&track).expect("read tags");
+        let shown = tagged.primary_tag().expect("ID3v2 tag");
+        assert_eq!(shown.tag_type(), TagType::Id3v2);
+        assert_eq!(shown.title().as_deref(), Some("Title"));
+        assert_eq!(shown.artist().as_deref(), Some("Artist"));
+        assert_eq!(shown.album().as_deref(), Some("Album"));
+        assert_eq!(front_cover(&track).as_ref(), Some(&artwork_bytes));
+        let kept = tagged.tag(TagType::Id3v1).expect("ID3v1 tag");
+        assert_eq!(kept.title().as_deref(), Some("Title"));
+        assert!(kept.pictures().is_empty());
+        let indexed = crate::library::read_track_info(&track);
+        assert_eq!(indexed.title, "Title");
+        assert_eq!(indexed.album, "Album");
+        assert_eq!(dir_entries(&album), ["01.mp3"]);
         fs::remove_dir_all(root).expect("remove test dir");
     }
 
