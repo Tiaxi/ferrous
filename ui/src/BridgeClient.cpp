@@ -2062,6 +2062,10 @@ QString BridgeClient::currentTrackAlbum() const {
     return m_currentTrackAlbum;
 }
 
+QString BridgeClient::currentTrackAlbumArtist() const {
+    return m_currentTrackAlbumArtist;
+}
+
 QString BridgeClient::currentTrackGenre() const {
     return m_currentTrackGenre;
 }
@@ -5186,6 +5190,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     QString nextTrackTitle = m_currentTrackTitle;
     QString nextTrackArtist = m_currentTrackArtist;
     QString nextTrackAlbum = m_currentTrackAlbum;
+    // Only the current track's file metadata carries the album artist.
+    QString nextTrackAlbumArtist = currentPath.isEmpty() || currentPathChanged
+        ? QString{} : m_currentTrackAlbumArtist;
     QString nextTrackGenre = m_currentTrackGenre;
     QVariant nextTrackYear = m_currentTrackYear;
     int nextTrackNumber = currentPath.isEmpty() ? 0 : m_currentTrackNumber;
@@ -5270,6 +5277,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         }
     }
     if (metadataMatchesCurrentPath) {
+        nextTrackAlbumArtist = snapshot.metadata.albumArtist;
         if (!metadataFormatLabel.trimmed().isEmpty()) {
             nextTrackFormatLabel = metadataFormatLabel;
         }
@@ -5291,6 +5299,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_currentTrackAlbum != nextTrackAlbum) {
         m_currentTrackAlbum = nextTrackAlbum;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
+    if (m_currentTrackAlbumArtist != nextTrackAlbumArtist) {
+        m_currentTrackAlbumArtist = nextTrackAlbumArtist;
         changed = true;
         trackMetadataSignalChanged = true;
     }

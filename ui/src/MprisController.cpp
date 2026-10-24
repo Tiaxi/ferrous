@@ -13,6 +13,7 @@
 #include <QCryptographicHash>
 #include <QDBusAbstractAdaptor>
 #include <QDBusConnection>
+#include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusObjectPath>
 #include <QFileInfo>
@@ -87,7 +88,7 @@ class MprisPlayerAdaptor final : public QDBusAbstractAdaptor {
     Q_CLASSINFO("D-Bus Interface", "org.mpris.MediaPlayer2.Player")
     Q_PROPERTY(QString PlaybackStatus READ playbackStatus)
     Q_PROPERTY(QString LoopStatus READ loopStatus WRITE setLoopStatus)
-    Q_PROPERTY(double Rate READ rate)
+    Q_PROPERTY(double Rate READ rate WRITE setRate)
     Q_PROPERTY(bool Shuffle READ shuffle WRITE setShuffle)
     Q_PROPERTY(QVariantMap Metadata READ metadata)
     Q_PROPERTY(double Volume READ volume WRITE setVolume)
@@ -110,6 +111,7 @@ public:
     QString loopStatus() const { return m_controller->loopStatus(); }
     void setLoopStatus(const QString &value) { m_controller->setLoopStatus(value); }
     double rate() const { return m_controller->rate(); }
+    void setRate(double value) { m_controller->setRate(value); }
     bool shuffle() const { return m_controller->shuffle(); }
     void setShuffle(bool value) { m_controller->setShuffle(value); }
     QVariantMap metadata() const { return m_controller->metadata(); }
@@ -136,6 +138,7 @@ public slots:
     void SetPosition(const QDBusObjectPath &trackId, qlonglong positionUs) {
         m_controller->setPosition(trackId.path(), positionUs);
     }
+    void OpenUri(const QString &uri) { m_controller->openUri(uri); }
 
 signals:
     void Seeked(qlonglong positionUs);
@@ -149,32 +152,23 @@ MprisController::MprisController(BridgeClient *bridge, QObject *parent)
     , m_bridge(bridge) {
     new MprisRootAdaptor(this);
     new MprisPlayerAdaptor(this);
+    rebuildMetadata();
     if (m_bridge != nullptr) {
         connect(m_bridge, &BridgeClient::playbackChanged, this, [this]() {
-            if (m_serviceRegistered) {
-                publishPlayerState();
-            }
+            handleBridgeChange(false);
         });
         connect(m_bridge, &BridgeClient::trackIdentityChanged, this, [this]() {
-            if (m_serviceRegistered) {
-                publishPlayerState();
-            }
+            handleBridgeChange(true);
         });
         connect(m_bridge, &BridgeClient::trackMetadataChanged, this, [this]() {
-            if (m_serviceRegistered) {
-                publishPlayerState();
-            }
+            handleBridgeChange(true);
         });
         connect(m_bridge, &BridgeClient::snapshotChanged, this, [this]() {
             setEnabled(m_bridge->systemMediaControlsEnabled());
-            if (m_serviceRegistered) {
-                publishPlayerState();
-            }
+            handleBridgeChange(false);
         });
         connect(m_bridge, &BridgeClient::connectedChanged, this, [this]() {
-            if (m_serviceRegistered) {
-                publishPlayerState();
-            }
+            handleBridgeChange(false);
         });
     }
 
@@ -266,6 +260,12 @@ double MprisController::rate() const {
     return 1.0;
 }
 
+void MprisController::setRate(double value) {
+    if (value == 0.0) {
+        pause();
+    }
+}
+
 double MprisController::minimumRate() const {
     return 1.0;
 }
@@ -275,7 +275,7 @@ double MprisController::maximumRate() const {
 }
 
 QVariantMap MprisController::metadata() const {
-    return buildMetadata();
+    return m_metadata;
 }
 
 qlonglong MprisController::positionUs() const {
@@ -415,6 +415,31 @@ void MprisController::seek(qlonglong offsetUs) {
         0.0,
         std::max(0.0, m_bridge->durationSeconds()));
     m_bridge->seek(nextSeconds);
+}
+
+QString MprisController::localPathForOpenUri(const QString &uri) {
+    const QUrl url(uri.trimmed(), QUrl::StrictMode);
+    if (!url.isValid() || !url.isLocalFile()) {
+        return {};
+    }
+    return url.toLocalFile();
+}
+
+bool MprisController::openUri(const QString &uri) {
+    const QString localPath = localPathForOpenUri(uri);
+    if (localPath.isEmpty()) {
+        if (calledFromDBus()) {
+            sendErrorReply(
+                QDBusError::NotSupported,
+                QStringLiteral("Ferrous opens only local file:// URIs"));
+        }
+        return false;
+    }
+    if (m_bridge == nullptr) {
+        return false;
+    }
+    m_bridge->replaceWithPaths(QStringList{localPath});
+    return true;
 }
 
 void MprisController::setPosition(const QString &trackIdPath, qlonglong positionUs) {
@@ -566,25 +591,45 @@ void MprisController::emitSeeked(qlonglong positionUs) const {
     QDBusConnection::sessionBus().send(message);
 }
 
-QString MprisController::currentTrackIdPath() const {
-    if (m_bridge == nullptr) {
-        return QString::fromUtf8(kNoTrackPath);
+void MprisController::handleBridgeChange(bool trackChanged) {
+    if (trackChanged || currentLengthUs() != m_metadataLengthUs) {
+        rebuildMetadata();
     }
-    const QString trackPath = m_bridge->currentTrackPath().trimmed();
+    if (m_serviceRegistered) {
+        publishPlayerState();
+    }
+}
+
+qlonglong MprisController::currentLengthUs() const {
+    if (m_bridge == nullptr || m_bridge->durationSeconds() <= 0.0) {
+        return 0;
+    }
+    return static_cast<qlonglong>(std::llround(m_bridge->durationSeconds() * 1000000.0));
+}
+
+void MprisController::rebuildMetadata() {
+    const QString trackPath = m_bridge != nullptr ? m_bridge->currentTrackPath().trimmed() : QString{};
     if (trackPath.isEmpty()) {
-        return QString::fromUtf8(kNoTrackPath);
+        m_trackIdPath = QString::fromUtf8(kNoTrackPath);
+    } else {
+        const QByteArray digest = QCryptographicHash::hash(
+            trackPath.toUtf8(),
+            QCryptographicHash::Sha1).toHex();
+        m_trackIdPath = QStringLiteral("/org/mpris/MediaPlayer2/Track/%1").arg(QString::fromLatin1(digest));
     }
-    const QByteArray digest = QCryptographicHash::hash(
-        trackPath.toUtf8(),
-        QCryptographicHash::Sha1).toHex();
-    return QStringLiteral("/org/mpris/MediaPlayer2/Track/%1").arg(QString::fromLatin1(digest));
+    m_metadataLengthUs = currentLengthUs();
+    m_metadata = buildMetadata();
+}
+
+QString MprisController::currentTrackIdPath() const {
+    return m_trackIdPath;
 }
 
 QVariantMap MprisController::buildMetadata() const {
     QVariantMap out;
     out.insert(
         QStringLiteral("mpris:trackid"),
-        QVariant::fromValue(QDBusObjectPath(currentTrackIdPath())));
+        QVariant::fromValue(QDBusObjectPath(m_trackIdPath)));
     if (m_bridge == nullptr) {
         return out;
     }
@@ -610,7 +655,10 @@ QVariantMap MprisController::buildMetadata() const {
     const QString artist = m_bridge->currentTrackArtist().trimmed();
     if (!artist.isEmpty()) {
         out.insert(QStringLiteral("xesam:artist"), QStringList{artist});
-        out.insert(QStringLiteral("xesam:albumArtist"), QStringList{artist});
+    }
+    const QString albumArtist = m_bridge->currentTrackAlbumArtist().trimmed();
+    if (!albumArtist.isEmpty()) {
+        out.insert(QStringLiteral("xesam:albumArtist"), QStringList{albumArtist});
     }
     const QString album = m_bridge->currentTrackAlbum().trimmed();
     if (!album.isEmpty()) {
@@ -639,10 +687,8 @@ QVariantMap MprisController::buildMetadata() const {
     if (!artUrl.isEmpty()) {
         out.insert(QStringLiteral("mpris:artUrl"), artUrl);
     }
-    if (m_bridge->durationSeconds() > 0.0) {
-        out.insert(
-            QStringLiteral("mpris:length"),
-            static_cast<qlonglong>(std::llround(m_bridge->durationSeconds() * 1000000.0)));
+    if (m_metadataLengthUs > 0) {
+        out.insert(QStringLiteral("mpris:length"), m_metadataLengthUs);
     }
     return out;
 }

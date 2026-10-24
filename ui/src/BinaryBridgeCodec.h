@@ -164,6 +164,7 @@ struct DecodedMetadata {
     QString title;
     QString artist;
     QString album;
+    QString albumArtist;
     QString genre;
     int year{std::numeric_limits<int>::min()};
     int sampleRateHz{0};
