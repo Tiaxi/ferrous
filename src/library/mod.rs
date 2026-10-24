@@ -8,6 +8,7 @@ mod schema;
 use std::path::PathBuf;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
+use rusqlite::Connection;
 
 use scan::{
     handle_add_root, handle_rescan_all, handle_rescan_root, remove_root_and_purge, rename_root,
@@ -155,6 +156,43 @@ fn emit_snapshot(event_tx: &Sender<LibraryEvent>, snapshot: &LibrarySnapshot) {
     let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
 }
 
+/// Runs one command on the library worker and publishes the resulting
+/// snapshot, with the command's failure, if any, in `last_error`.
+fn handle_command(
+    conn: &Connection,
+    cmd: LibraryCommand,
+    snapshot: &mut LibrarySnapshot,
+    event_tx: &Sender<LibraryEvent>,
+) {
+    snapshot.last_error = None;
+    let reload_search_data_on_success = matches!(
+        &cmd,
+        LibraryCommand::RenameRoot { .. } | LibraryCommand::RemoveRoot(_)
+    );
+    let result = match cmd {
+        LibraryCommand::ScanRoot(root) => handle_add_root(conn, &root, "", snapshot, event_tx),
+        LibraryCommand::AddRoot { path, name } => {
+            handle_add_root(conn, &path, &name, snapshot, event_tx)
+        }
+        LibraryCommand::RenameRoot { path, name } => rename_root(conn, &path, &name),
+        LibraryCommand::RemoveRoot(root) => remove_root_and_purge(conn, &root),
+        LibraryCommand::RescanRoot(root) => handle_rescan_root(conn, &root, snapshot, event_tx),
+        LibraryCommand::RescanAll => handle_rescan_all(conn, snapshot, event_tx),
+    };
+
+    if let Err(err) = &result {
+        snapshot.last_error = Some(err.clone());
+    }
+
+    load_snapshot(conn, snapshot);
+    if result.is_ok() && reload_search_data_on_success {
+        snapshot.bump_search_revision();
+    }
+    snapshot.scan_in_progress = false;
+    snapshot.scan_progress = None;
+    emit_snapshot(event_tx, snapshot);
+}
+
 impl LibraryService {
     #[must_use]
     pub fn new() -> (Self, Receiver<LibraryEvent>) {
@@ -211,43 +249,7 @@ impl LibraryService {
                         }
 
                         while let Ok(cmd) = cmd_rx.recv() {
-                            snapshot.last_error = None;
-                            let reload_search_data_on_success = matches!(
-                                &cmd,
-                                LibraryCommand::RenameRoot { .. } | LibraryCommand::RemoveRoot(_)
-                            );
-                            let result = match cmd {
-                                LibraryCommand::ScanRoot(root) => {
-                                    handle_add_root(&conn, &root, "", &mut snapshot, &event_tx)
-                                }
-                                LibraryCommand::AddRoot { path, name } => {
-                                    handle_add_root(&conn, &path, &name, &mut snapshot, &event_tx)
-                                }
-                                LibraryCommand::RenameRoot { path, name } => {
-                                    rename_root(&conn, &path, &name)
-                                }
-                                LibraryCommand::RemoveRoot(root) => {
-                                    remove_root_and_purge(&conn, &root)
-                                }
-                                LibraryCommand::RescanRoot(root) => {
-                                    handle_rescan_root(&conn, &root, &mut snapshot, &event_tx)
-                                }
-                                LibraryCommand::RescanAll => {
-                                    handle_rescan_all(&conn, &mut snapshot, &event_tx)
-                                }
-                            };
-
-                            if let Err(err) = &result {
-                                snapshot.last_error = Some(err.clone());
-                            }
-
-                            load_snapshot(&conn, &mut snapshot);
-                            if result.is_ok() && reload_search_data_on_success {
-                                snapshot.bump_search_revision();
-                            }
-                            snapshot.scan_in_progress = false;
-                            snapshot.scan_progress = None;
-                            emit_snapshot(&event_tx, &snapshot);
+                            handle_command(&conn, cmd, &mut snapshot, &event_tx);
                         }
                     }
                     Err(err) => {

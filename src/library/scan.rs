@@ -391,12 +391,14 @@ fn run_scans(
     let mut problems = Vec::new();
     for (idx, root) in roots.iter().enumerate() {
         let mut final_progress = RootScanProgress::default();
-        let mut root_track_indices: HashMap<String, usize> = HashMap::new();
-        for (track_index, track) in snapshot.tracks.iter().enumerate() {
-            if track.root_path == *root {
-                root_track_indices.insert(track.path.to_string_lossy().to_string(), track_index);
-            }
-        }
+        // Indexed across roots: a root can claim tracks that another root
+        // owned, and its entries must replace theirs.
+        let mut track_indices: HashMap<String, usize> = snapshot
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(track_index, track)| (track.path.to_string_lossy().to_string(), track_index))
+            .collect();
         let pending_upserts = std::cell::RefCell::new(Vec::<(MetadataTask, IndexedTrack)>::new());
         let revision_before_scan = snapshot.search_revision;
         let mut last_snapshot_emit = Instant::now()
@@ -409,12 +411,7 @@ fn run_scans(
                 .push((task.clone(), indexed.clone()));
         };
         let mut on_progress = |progress: RootScanProgress| {
-            apply_pending_upserts_for_root(
-                snapshot,
-                root,
-                &mut root_track_indices,
-                &pending_upserts,
-            );
+            apply_pending_upserts_for_root(snapshot, root, &mut track_indices, &pending_upserts);
             final_progress = progress.clone();
             snapshot.scan_in_progress = true;
             snapshot.scan_progress = Some(LibraryScanProgress {
@@ -445,7 +442,7 @@ fn run_scans(
                 apply_pending_upserts_for_root(
                     snapshot,
                     root,
-                    &mut root_track_indices,
+                    &mut track_indices,
                     &pending_upserts,
                 );
                 if !outcome.removed.is_empty() {
@@ -516,7 +513,7 @@ fn summarize_scan_problems(problems: &[String]) -> String {
 fn apply_pending_upserts_for_root(
     snapshot: &mut LibrarySnapshot,
     root: &Path,
-    root_track_indices: &mut HashMap<String, usize>,
+    track_indices: &mut HashMap<String, usize>,
     pending_upserts: &std::cell::RefCell<Vec<(MetadataTask, IndexedTrack)>>,
 ) {
     let mut updates = pending_upserts.borrow_mut();
@@ -539,7 +536,7 @@ fn apply_pending_upserts_for_root(
             duration_secs: indexed.duration_secs,
         };
 
-        if let Some(existing_index) = root_track_indices.get(&task.path_string).copied() {
+        if let Some(existing_index) = track_indices.get(&task.path_string).copied() {
             if let Some(existing) = snapshot.tracks.get_mut(existing_index) {
                 *existing = as_snapshot_track;
             }
@@ -548,7 +545,7 @@ fn apply_pending_upserts_for_root(
 
         let new_index = snapshot.tracks.len();
         snapshot.tracks.push(as_snapshot_track);
-        root_track_indices.insert(task.path_string, new_index);
+        track_indices.insert(task.path_string, new_index);
     }
 }
 
@@ -1454,7 +1451,8 @@ fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
                 unix_ts_i64(),
                 &mut |_, _| {},
                 MetadataResult { task, indexed },
-            );
+            )
+            .expect("index fixture");
         }
     }
     tx.commit().expect("commit indexed fixtures");
@@ -1544,12 +1542,39 @@ pub(super) fn remove_root_and_purge(conn: &Connection, root: &Path) -> Result<()
     };
     let root_str = root.to_string_lossy().to_string();
 
-    let tx = conn
-        .unchecked_transaction()
+    // Take the write lock up front, like the library's other write
+    // transactions, so a concurrent writer is waited for.
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| format!("failed to begin remove transaction: {e}"))?;
 
     tx.execute("DELETE FROM roots WHERE path=?1", params![root_str.clone()])
         .map_err(|e| format!("failed to remove root '{}': {e}", root.display()))?;
+
+    // A database from before nested roots were rejected can still have the
+    // removed root owning tracks inside a configured inner root. Hand those
+    // to the innermost such root instead of deleting them; its next scan
+    // keeps them in step with the folder.
+    let mut inner_roots = tx
+        .prepare("SELECT path FROM roots WHERE substr(path, 1, length(?1)) = ?1")
+        .and_then(|mut stmt| {
+            stmt.query_map(params![descendant_prefix(&root_str)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| format!("failed to read library roots: {e}"))?;
+    inner_roots.sort_by_key(|path| std::cmp::Reverse(path.len()));
+    for inner_str in inner_roots {
+        tx.execute(
+            r"
+            UPDATE tracks SET root_path = ?1
+            WHERE (path = ?1 OR substr(path, 1, length(?2)) = ?2)
+              AND NOT EXISTS (SELECT 1 FROM roots WHERE roots.path = tracks.root_path)
+            ",
+            params![inner_str, descendant_prefix(&inner_str)],
+        )
+        .map_err(|e| format!("failed to move tracks to library root '{inner_str}': {e}"))?;
+    }
 
     // Tracks under the root's path that another configured root owns stay;
     // path matching only collects legacy rows without a valid root.
@@ -1718,29 +1743,33 @@ fn apply_metadata_result<U>(
     now: i64,
     on_upsert: &mut U,
     result: MetadataResult,
-) where
+) -> Result<(), String>
+where
     U: FnMut(&MetadataTask, &IndexedTrack),
 {
     let task = result.task;
     let indexed = result.indexed;
-    let _ = upsert_stmt.execute(params![
-        task.path_string.as_str(),
-        root_str,
-        indexed.title.as_str(),
-        indexed.artist.as_str(),
-        indexed.album.as_str(),
-        indexed.cover_path.as_str(),
-        1_i64,
-        indexed.genre.as_str(),
-        indexed.year.map(i64::from),
-        indexed.track_no.map(i64::from),
-        indexed.duration_secs,
-        task.mtime_ns,
-        task.size_bytes,
-        now,
-        serde_json::to_string(&indexed.search_tags).ok(),
-    ]);
+    upsert_stmt
+        .execute(params![
+            task.path_string.as_str(),
+            root_str,
+            indexed.title.as_str(),
+            indexed.artist.as_str(),
+            indexed.album.as_str(),
+            indexed.cover_path.as_str(),
+            1_i64,
+            indexed.genre.as_str(),
+            indexed.year.map(i64::from),
+            indexed.track_no.map(i64::from),
+            indexed.duration_secs,
+            task.mtime_ns,
+            task.size_bytes,
+            now,
+            serde_json::to_string(&indexed.search_tags).ok(),
+        ])
+        .map_err(|e| format!("failed to index '{}': {e}", task.path.display()))?;
     on_upsert(&task, &indexed);
+    Ok(())
 }
 
 /// Identity of a file independent of the path that reached it.
@@ -1947,7 +1976,7 @@ struct RootScanOutcome {
     problem: Option<String>,
 }
 
-fn count_label(count: usize, singular: &str, plural: &str) -> String {
+pub(super) fn count_label(count: usize, singular: &str, plural: &str) -> String {
     if count == 1 {
         format!("1 {singular}")
     } else {
@@ -2030,7 +2059,7 @@ where
                     now,
                     on_upsert,
                     MetadataResult { task, indexed },
-                );
+                )?;
                 processed = processed.saturating_add(1);
                 progress.emit(false, discovered, processed);
             }
@@ -2040,19 +2069,19 @@ where
         }
 
         for result in workers.drain_ready()? {
-            apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result);
+            apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
             processed = processed.saturating_add(1);
             progress.emit(false, discovered, processed);
         }
         if let Some(result) = workers.wait_for_capacity()? {
-            apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result);
+            apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
             processed = processed.saturating_add(1);
             progress.emit(false, discovered, processed);
         }
     }
 
     for result in workers.finish()? {
-        apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result);
+        apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
         processed = processed.saturating_add(1);
         progress.emit(false, discovered, processed);
     }
@@ -2070,7 +2099,8 @@ where
             .collect()
     };
     for p in &stale {
-        let _ = tx.execute("DELETE FROM tracks WHERE path=?1", params![p]);
+        tx.execute("DELETE FROM tracks WHERE path=?1", params![p])
+            .map_err(|e| format!("failed to remove deleted track '{p}' from the index: {e}"))?;
     }
 
     tx.commit()
@@ -2234,7 +2264,7 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
     out
 }
 
-fn find_cover_path_for_track(path: &Path) -> String {
+pub(super) fn find_cover_path_for_track(path: &Path) -> String {
     path.parent()
         .and_then(find_folder_cover)
         .map(|cover| cover.to_string_lossy().into_owned())
@@ -2342,6 +2372,7 @@ pub(crate) fn read_library_snapshot_from_db() -> Result<LibrarySnapshot, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library::LibraryCommand;
     use crate::raw_audio::write_test_apev2_file;
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -3165,6 +3196,215 @@ mod tests {
         assert_eq!(indexed_paths(&conn), [inner.join("inner.mp3")]);
         let _ = fs::remove_dir_all(outer);
     }
+
+    fn root_of(conn: &Connection, path: &Path) -> String {
+        conn.query_row(
+            "SELECT root_path FROM tracks WHERE path=?1",
+            params![path.to_string_lossy()],
+            |row| row.get(0),
+        )
+        .expect("track row")
+    }
+
+    fn snapshot_paths(snapshot: &LibrarySnapshot) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = snapshot.tracks.iter().map(|t| t.path.clone()).collect();
+        paths.sort();
+        paths
+    }
+
+    /// The last snapshot the library worker published.
+    fn last_published(rx: &Receiver<LibraryEvent>) -> LibrarySnapshot {
+        let mut last = None;
+        while let Ok(LibraryEvent::Snapshot(snapshot)) = rx.try_recv() {
+            last = Some(snapshot);
+        }
+        last.expect("a published snapshot")
+    }
+
+    #[test]
+    fn removing_an_outer_root_hands_tracks_to_configured_inner_roots() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let outer = test_dir("remove-outer");
+        fs::create_dir_all(outer.join("inner/deepest")).expect("mkdir inner roots");
+        let outer = outer.canonicalize().expect("canonical outer");
+        let inner = outer.join("inner");
+        let deepest = inner.join("deepest");
+        write_stub(&outer.join("outer.mp3"), b"outer");
+        write_stub(&inner.join("inner.mp3"), b"inner");
+        write_stub(&deepest.join("deep.mp3"), b"deep");
+        // Before nested roots were rejected, the outer root claimed every
+        // track, and the inner roots were added without being rescanned.
+        scan(&conn, &outer);
+        insert_root(&conn, &inner, "").expect("legacy inner root");
+        insert_root(&conn, &deepest, "").expect("legacy innermost root");
+        insert_legacy_track(&conn, &inner.join("legacy.mp3"));
+
+        remove_root_and_purge(&conn, &outer).expect("remove outer");
+
+        assert_eq!(
+            indexed_paths(&conn),
+            [
+                deepest.join("deep.mp3"),
+                inner.join("inner.mp3"),
+                inner.join("legacy.mp3"),
+            ]
+        );
+        assert_eq!(
+            root_of(&conn, &inner.join("inner.mp3")),
+            inner.to_string_lossy()
+        );
+        assert_eq!(
+            root_of(&conn, &inner.join("legacy.mp3")),
+            inner.to_string_lossy()
+        );
+        assert_eq!(
+            root_of(&conn, &deepest.join("deep.mp3")),
+            deepest.to_string_lossy()
+        );
+        let roots: Vec<PathBuf> = load_roots(&conn).into_iter().map(|r| r.path).collect();
+        assert_eq!(roots, [inner.clone(), deepest]);
+
+        // The inner root's own scan keeps the tracks it was handed.
+        let outcome = scan(&conn, &inner);
+        assert_eq!(
+            outcome.removed,
+            [inner.join("legacy.mp3").to_string_lossy().to_string()]
+        );
+        assert_eq!(indexed_paths(&conn).len(), 2);
+        let _ = fs::remove_dir_all(outer);
+    }
+
+    #[test]
+    fn an_inner_root_claiming_tracks_replaces_their_snapshot_entries() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let outer = test_dir("claim-snapshot");
+        fs::create_dir_all(outer.join("inner")).expect("mkdir inner");
+        let outer = outer.canonicalize().expect("canonical outer");
+        let inner = outer.join("inner");
+        write_stub(&outer.join("outer.mp3"), b"outer");
+        write_stub(&inner.join("one.mp3"), b"one");
+        write_stub(&inner.join("two.mp3"), b"two");
+        scan(&conn, &outer);
+        insert_root(&conn, &inner, "").expect("legacy inner root");
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let (tx, _rx) = unbounded();
+
+        handle_rescan_root(&conn, &inner, &mut snapshot, &tx).expect("rescan inner");
+
+        let expected = [
+            inner.join("one.mp3"),
+            inner.join("two.mp3"),
+            outer.join("outer.mp3"),
+        ];
+        assert_eq!(indexed_paths(&conn), expected);
+        assert_eq!(snapshot_paths(&snapshot), expected);
+        for track in &snapshot.tracks {
+            assert_eq!(
+                track.root_path.to_string_lossy(),
+                root_of(&conn, &track.path),
+                "{}",
+                track.path.display()
+            );
+        }
+        let _ = fs::remove_dir_all(outer);
+    }
+
+    #[test]
+    fn a_failed_track_write_rolls_back_its_root_and_is_reported() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let failing = test_dir("write-fails-a");
+        let healthy = test_dir("write-fails-b");
+        fs::create_dir_all(&failing).expect("mkdir failing");
+        fs::create_dir_all(&healthy).expect("mkdir healthy");
+        let failing = failing.canonicalize().expect("canonical failing");
+        let healthy = healthy.canonicalize().expect("canonical healthy");
+        write_stub(&failing.join("changed.mp3"), b"old");
+        scan(&conn, &failing);
+        write_stub(&failing.join("changed.mp3"), b"changed");
+        for name in ["new-1.mp3", "rejected.mp3", "new-2.mp3"] {
+            write_stub(&failing.join(name), name.as_bytes());
+        }
+        write_stub(&healthy.join("healthy.mp3"), b"healthy");
+        insert_root(&conn, &healthy, "").expect("healthy root");
+        // Stands in for any statement failure, such as a locked database.
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER reject_track BEFORE INSERT ON tracks \
+             WHEN NEW.path LIKE '%/rejected.mp3' \
+             BEGIN SELECT RAISE(ABORT, 'injected write failure'); END",
+        )
+        .expect("inject failure");
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let (tx, rx) = unbounded();
+
+        super::super::handle_command(&conn, LibraryCommand::RescanAll, &mut snapshot, &tx);
+
+        let published = last_published(&rx);
+        let error = published.last_error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains(&format!("failed to scan '{}'", failing.display()))
+                && error.contains("injected write failure"),
+            "unexpected error: {error}"
+        );
+        let expected = [failing.join("changed.mp3"), healthy.join("healthy.mp3")];
+        assert_eq!(indexed_paths(&conn), expected);
+        assert_eq!(snapshot_paths(&published), expected);
+        let size: i64 = conn
+            .query_row(
+                "SELECT size_bytes FROM tracks WHERE path=?1",
+                params![failing.join("changed.mp3").to_string_lossy()],
+                |row| row.get(0),
+            )
+            .expect("changed track");
+        assert_eq!(size, 3, "the re-indexed track was rolled back");
+        let _ = fs::remove_dir_all(failing);
+        let _ = fs::remove_dir_all(healthy);
+    }
+
+    #[test]
+    fn a_failed_stale_track_removal_rolls_back_its_root_and_is_reported() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("stale-delete-fails");
+        fs::create_dir_all(&root).expect("mkdir root");
+        let root = root.canonicalize().expect("canonical root");
+        write_stub(&root.join("kept.mp3"), b"kept");
+        write_stub(&root.join("deleted.mp3"), b"deleted");
+        scan(&conn, &root);
+        fs::remove_file(root.join("deleted.mp3")).expect("delete track");
+        write_stub(&root.join("added.mp3"), b"added");
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER reject_delete BEFORE DELETE ON tracks \
+             BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END",
+        )
+        .expect("inject failure");
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let (tx, rx) = unbounded();
+
+        super::super::handle_command(
+            &conn,
+            LibraryCommand::RescanRoot(root.clone()),
+            &mut snapshot,
+            &tx,
+        );
+
+        let published = last_published(&rx);
+        let error = published.last_error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("injected delete failure"),
+            "unexpected error: {error}"
+        );
+        let expected = [root.join("deleted.mp3"), root.join("kept.mp3")];
+        assert_eq!(indexed_paths(&conn), expected);
+        assert_eq!(snapshot_paths(&published), expected);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn collects_all_repeated_and_credit_tags() {
         use lofty::tag::{ItemValue, Tag, TagItem, TagType};

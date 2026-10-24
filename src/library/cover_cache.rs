@@ -13,10 +13,24 @@ use rusqlite::{params, Connection};
 
 use crate::metadata::EmbeddedCoverCache;
 
-use super::scan::{read_track_info, scan_snapshot_emit_interval};
+use super::scan::{count_label, find_cover_path_for_track, scan_snapshot_emit_interval};
 use super::{emit_snapshot, LibraryEvent, LibraryScanProgress, LibrarySnapshot};
 
 const MIGRATION_BATCH_SIZE: usize = 256;
+
+/// The outcome of re-resolving the cover of a row that points at a legacy
+/// cache entry.
+#[derive(Debug)]
+enum ResolvedCover {
+    /// The cover a scan would store for the track now; empty when it has none.
+    Cover(String),
+    /// The track cannot be read now, such as one on an offline mount.
+    Unavailable,
+    /// The cover could not be resolved, for example because the new cache
+    /// entry could not be written. Rows keep their legacy cover, so the next
+    /// startup retries them and the legacy entry stays referenced.
+    Failed,
+}
 
 #[derive(Debug, Clone, Copy)]
 enum CoverTable {
@@ -157,12 +171,23 @@ fn migrate_and_remove_legacy_entries(
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<bool, String> {
     let mut last_emit = Instant::now();
+    let mut failures = 0;
+    let mut first_failure = None;
     let changed = migrate_legacy_entries(
         conn,
         cache,
         |path| {
-            fs::File::open(path).ok()?;
-            Some(read_track_info(path).cover_path)
+            if fs::File::open(path).is_err() {
+                return ResolvedCover::Unavailable;
+            }
+            match resolve_cover(cache, path) {
+                Ok(cover_path) => ResolvedCover::Cover(cover_path),
+                Err(error) => {
+                    failures += 1;
+                    first_failure.get_or_insert(error);
+                    ResolvedCover::Failed
+                }
+            }
         },
         |processed, total| {
             if last_emit.elapsed() >= scan_snapshot_emit_interval() {
@@ -181,15 +206,35 @@ fn migrate_and_remove_legacy_entries(
     if changed > 0 {
         remove_unreferenced_entries(conn, cache)?;
     }
-    Ok(changed > 0)
+    match first_failure {
+        Some(first_failure) => Err(format!(
+            "could not update the embedded covers of {}; kept their previous covers \
+             and will retry at the next start ({first_failure})",
+            count_label(failures, "track", "tracks")
+        )),
+        None => Ok(changed > 0),
+    }
 }
 
-/// `resolve_cover` returns `None` for a track that cannot be read. Returns
-/// how many rows changed.
+/// The cover a scan would store for `path`, with an embedded picture cached
+/// in `cache`. Fails, instead of returning no cover, when the track's tags
+/// cannot be read or its picture cannot be cached.
+fn resolve_cover(cache: &EmbeddedCoverCache, path: &Path) -> Result<String, String> {
+    let folder_cover = find_cover_path_for_track(path);
+    if !folder_cover.is_empty() {
+        return Ok(folder_cover);
+    }
+    Ok(cache
+        .try_store_track_cover(path)?
+        .map(|cover_path| cover_path.to_string_lossy().into_owned())
+        .unwrap_or_default())
+}
+
+/// Returns how many rows changed.
 fn migrate_legacy_entries(
     conn: &Connection,
     cache: &EmbeddedCoverCache,
-    mut resolve_cover: impl FnMut(&Path) -> Option<String>,
+    mut resolve_cover: impl FnMut(&Path) -> ResolvedCover,
     mut on_progress: impl FnMut(usize, usize),
 ) -> Result<usize, String> {
     let mut rows_by_path = BTreeMap::<String, Vec<(CoverTable, String)>>::new();
@@ -225,14 +270,15 @@ fn migrate_legacy_entries(
         for ((path, rows), cover_path) in batch.iter().zip(&resolved) {
             for (table, legacy_cover_path) in rows {
                 let result = match cover_path {
-                    Some(cover_path) => tx.execute(
+                    ResolvedCover::Cover(cover_path) => tx.execute(
                         table.update_cover_sql(),
                         params![path, legacy_cover_path, cover_path],
                     ),
-                    None => match table.unavailable_track_sql() {
+                    ResolvedCover::Unavailable => match table.unavailable_track_sql() {
                         Some(sql) => tx.execute(sql, params![path, legacy_cover_path]),
                         None => Ok(0),
                     },
+                    ResolvedCover::Failed => Ok(0),
                 };
                 changed += result.map_err(|error| {
                     format!("failed to migrate embedded cover for {path}: {error}")
@@ -248,7 +294,7 @@ fn migrate_legacy_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::scan::handle_add_root;
+    use crate::library::scan::{handle_add_root, read_track_info};
     use crate::library::schema::init_schema;
     use crate::metadata::{encoded_picture, test_cache, write_wav_with_picture};
     use image::ImageFormat;
@@ -383,8 +429,7 @@ mod tests {
         );
 
         assert_eq!(migrated, Ok(true));
-        let shared = EmbeddedCoverCache::shared().expect("test cache directory");
-        let entry = shared
+        let entry = cache
             .dir()
             .join(format!("{:x}.jpg", md5::compute(&picture)));
         assert_eq!(
@@ -449,9 +494,9 @@ mod tests {
             |path| {
                 resolved.push(path.to_path_buf());
                 if path.starts_with("/music/sidecar") {
-                    Some("/music/sidecar/cover.png".to_string())
+                    ResolvedCover::Cover("/music/sidecar/cover.png".to_string())
                 } else {
-                    Some(path_string(
+                    ResolvedCover::Cover(path_string(
                         &cache.store(&shared_cover).expect("store cover"),
                     ))
                 }
@@ -511,7 +556,9 @@ mod tests {
         insert_track(&conn, "/offline/01.flac", &path_string(&library_legacy));
         insert_external_track(&conn, "/offline/02.flac", &path_string(&external_legacy));
 
-        let migrated = migrate_legacy_entries(&conn, &cache, |_| None, |_, _| {}).expect("migrate");
+        let migrated =
+            migrate_legacy_entries(&conn, &cache, |_| ResolvedCover::Unavailable, |_, _| {})
+                .expect("migrate");
         let removed = remove_unreferenced_entries(&conn, &cache).expect("cleanup");
 
         assert_eq!(migrated, 1, "the library row is left unchanged");
@@ -531,6 +578,67 @@ mod tests {
     }
 
     #[test]
+    fn migration_keeps_legacy_covers_whose_new_entry_cannot_be_written() {
+        let conn = db();
+        let cache = test_cache("legacy-migration-unwritable");
+        let dir = fixture_dir("legacy-migration-unwritable");
+        let picture = encoded_picture(13, ImageFormat::Jpeg);
+        let track = dir.join("01.wav");
+        write_wav_with_picture(&track, &picture);
+        let legacy = write_entry(&cache, "00000000000000ee.png");
+        insert_track(&conn, &path_string(&track), &path_string(&legacy));
+        insert_external_track(&conn, &path_string(&track), &path_string(&legacy));
+        // A directory where the new entry belongs makes writing it fail.
+        let entry = cache
+            .dir()
+            .join(format!("{:x}.jpg", md5::compute(&picture)));
+        fs::create_dir(&entry).expect("block the new entry");
+        let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+
+        let error = migrate_and_remove_legacy_entries(
+            &conn,
+            &cache,
+            &mut LibrarySnapshot::default(),
+            &event_tx,
+        )
+        .expect_err("the failed migration is reported");
+
+        assert!(
+            error.contains("1 track") && error.contains("embedded cover cache"),
+            "unexpected error: {error}"
+        );
+        for table in ["tracks", "external_tracks"] {
+            assert_eq!(
+                cover_of(&conn, table, &path_string(&track)),
+                path_string(&legacy),
+                "{table} keeps the legacy cover"
+            );
+        }
+        assert!(legacy.is_file());
+
+        // The next start retries the row once the entry can be written.
+        fs::remove_dir(&entry).expect("unblock the new entry");
+        let migrated = migrate_and_remove_legacy_entries(
+            &conn,
+            &cache,
+            &mut LibrarySnapshot::default(),
+            &event_tx,
+        );
+
+        assert_eq!(migrated, Ok(true));
+        for table in ["tracks", "external_tracks"] {
+            assert_eq!(
+                cover_of(&conn, table, &path_string(&track)),
+                path_string(&entry)
+            );
+        }
+        assert!(entry.is_file());
+        assert!(!legacy.exists());
+        let _ = fs::remove_dir_all(cache.dir().parent().unwrap());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn migration_keeps_a_cover_that_changed_while_it_was_resolved() {
         let conn = db();
         let cache = test_cache("legacy-migration-race");
@@ -547,7 +655,7 @@ mod tests {
                     params![path_string(path)],
                 )
                 .expect("concurrent refresh");
-                Some("/music/stale.png".to_string())
+                ResolvedCover::Cover("/music/stale.png".to_string())
             },
             |_, _| {},
         )
