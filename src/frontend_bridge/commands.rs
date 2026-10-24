@@ -21,12 +21,14 @@ use crate::metadata::MetadataService;
 use crate::playback::{remap_path, PathRenames, PlaybackCommand, PlaybackEngine};
 
 use super::config::{load_settings_into, save_settings};
+use super::imports::QueueRequest;
 use super::queue::handle_queue_command;
 use super::search::derive_tree_path_context;
 use super::{
     library_tree, try_send_event, ApplyAlbumArtRequest, BridgeAnalysisCommand, BridgeCommand,
-    BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeSettingsCommand, BridgeState,
-    ExternalQueueDetailsRequest, LibrarySortMode, SearchWorkerQuery,
+    BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
+    BridgeSettingsCommand, BridgeState, ExternalQueueDetailsRequest, LibrarySortMode,
+    SearchWorkerQuery,
 };
 
 pub(super) struct BridgeCommandContext<'a> {
@@ -484,67 +486,6 @@ fn handle_library_collection_command(
     runtime: &LibraryCommandRuntime<'_>,
 ) -> Option<bool> {
     match cmd {
-        BridgeLibraryCommand::AddTrack(path) => Some(import_library_paths(
-            state,
-            runtime,
-            "append",
-            vec![path],
-            false,
-        )),
-        BridgeLibraryCommand::PlayTrack(path) => Some(import_library_paths(
-            state,
-            runtime,
-            "open",
-            vec![path],
-            true,
-        )),
-        BridgeLibraryCommand::ReplaceWithAlbum(paths) => {
-            Some(import_library_paths(state, runtime, "open", paths, true))
-        }
-        BridgeLibraryCommand::AppendAlbum(paths) => {
-            Some(import_library_paths(state, runtime, "append", paths, false))
-        }
-        BridgeLibraryCommand::ReplaceAlbumByKey { artist, album } => Some(queue_album_by_key(
-            state,
-            runtime,
-            &artist,
-            &album,
-            QueueMode::Replace,
-        )),
-        BridgeLibraryCommand::AppendAlbumByKey { artist, album } => Some(queue_album_by_key(
-            state,
-            runtime,
-            &artist,
-            &album,
-            QueueMode::Append,
-        )),
-        BridgeLibraryCommand::ReplaceArtistByKey { artist } => Some(queue_artist_by_key(
-            state,
-            runtime,
-            &artist,
-            QueueMode::Replace,
-        )),
-        BridgeLibraryCommand::AppendArtistByKey { artist } => Some(queue_artist_by_key(
-            state,
-            runtime,
-            &artist,
-            QueueMode::Append,
-        )),
-        BridgeLibraryCommand::ReplaceRootByPath { root } => Some(queue_root_by_path(
-            state,
-            runtime,
-            &root,
-            QueueMode::Replace,
-        )),
-        BridgeLibraryCommand::AppendRootByPath { root } => {
-            Some(queue_root_by_path(state, runtime, &root, QueueMode::Append))
-        }
-        BridgeLibraryCommand::ReplaceAllTracks => {
-            Some(queue_all_tracks(state, runtime, QueueMode::Replace))
-        }
-        BridgeLibraryCommand::AppendAllTracks => {
-            Some(queue_all_tracks(state, runtime, QueueMode::Append))
-        }
         BridgeLibraryCommand::RefreshEditedPaths(paths) => Some(refresh_edited_paths(
             state,
             &paths,
@@ -565,102 +506,70 @@ fn handle_library_collection_command(
 }
 
 // ---------------------------------------------------------------------------
-// Queue helpers
+// Queue content changes
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
-enum QueueMode {
-    Append,
-    Replace,
-}
-
-fn import_library_paths(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    action: &'static str,
-    paths: Vec<PathBuf>,
-    start_playback: bool,
-) -> bool {
-    handle_import_library_command(
-        state,
-        runtime.playback,
-        runtime.external_queue_details_tx,
-        runtime.event_tx,
-        action,
-        paths,
-        start_playback,
-    )
-}
-
-fn queue_album_by_key(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    artist: &str,
-    album: &str,
-    mode: QueueMode,
-) -> bool {
-    let paths = collect_album_paths_for_queue(&state.library, artist, album);
-    queue_paths(state, runtime, paths, mode)
-}
-
-fn queue_artist_by_key(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    artist: &str,
-    mode: QueueMode,
-) -> bool {
-    let paths =
-        collect_artist_paths_for_queue(&state.library, artist, state.settings.library_sort_mode);
-    queue_paths(state, runtime, paths, mode)
-}
-
-fn queue_root_by_path(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    root_path: &str,
-    mode: QueueMode,
-) -> bool {
-    let paths = library_tree::collect_root_paths_tree_order(
-        &state.library,
-        root_path,
-        state.settings.library_sort_mode,
-    );
-    queue_paths(state, runtime, paths, mode)
-}
-
-fn queue_all_tracks(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    mode: QueueMode,
-) -> bool {
-    let paths = library_tree::collect_all_paths_tree_order(
-        &state.library,
-        state.settings.library_sort_mode,
-    );
-    queue_paths(state, runtime, paths, mode)
-}
-
-fn queue_paths(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    paths: Vec<PathBuf>,
-    mode: QueueMode,
-) -> bool {
-    match mode {
-        QueueMode::Append => append_queue_paths(
-            state,
-            runtime.playback,
-            runtime.external_queue_details_tx,
-            paths,
-        ),
-        QueueMode::Replace => replace_queue_paths(
-            state,
-            runtime.playback,
-            runtime.external_queue_details_tx,
-            paths,
+/// The queue content change `cmd` requests, if any. Library selections are
+/// resolved here from the in-memory library; imports are expanded later on
+/// the import worker. Both are applied in arrival order by `ImportWorker`.
+pub(super) fn queue_request(cmd: &BridgeCommand, state: &BridgeState) -> Option<QueueRequest> {
+    let library = match cmd {
+        BridgeCommand::Queue(
+            command @ (BridgeQueueCommand::Replace { .. } | BridgeQueueCommand::Append(_)),
+        ) => return Some(QueueRequest::Command(command.clone())),
+        BridgeCommand::Library(library) => library,
+        _ => return None,
+    };
+    let sort_mode = state.settings.library_sort_mode;
+    let (tracks, replace) = match library {
+        BridgeLibraryCommand::AddTrack(path) | BridgeLibraryCommand::PlayTrack(path) => {
+            return Some(QueueRequest::Import {
+                paths: vec![path.clone()],
+                replace: matches!(library, BridgeLibraryCommand::PlayTrack(_)),
+            });
+        }
+        BridgeLibraryCommand::ReplaceWithAlbum(paths)
+        | BridgeLibraryCommand::AppendAlbum(paths) => {
+            return Some(QueueRequest::Import {
+                paths: paths.clone(),
+                replace: matches!(library, BridgeLibraryCommand::ReplaceWithAlbum(_)),
+            });
+        }
+        BridgeLibraryCommand::ReplaceAlbumByKey { artist, album } => (
+            collect_album_paths_for_queue(&state.library, artist, album),
             true,
         ),
-    }
+        BridgeLibraryCommand::AppendAlbumByKey { artist, album } => (
+            collect_album_paths_for_queue(&state.library, artist, album),
+            false,
+        ),
+        BridgeLibraryCommand::ReplaceArtistByKey { artist } => (
+            collect_artist_paths_for_queue(&state.library, artist, sort_mode),
+            true,
+        ),
+        BridgeLibraryCommand::AppendArtistByKey { artist } => (
+            collect_artist_paths_for_queue(&state.library, artist, sort_mode),
+            false,
+        ),
+        BridgeLibraryCommand::ReplaceRootByPath { root } => (
+            library_tree::collect_root_paths_tree_order(&state.library, root, sort_mode),
+            true,
+        ),
+        BridgeLibraryCommand::AppendRootByPath { root } => (
+            library_tree::collect_root_paths_tree_order(&state.library, root, sort_mode),
+            false,
+        ),
+        BridgeLibraryCommand::ReplaceAllTracks => (
+            library_tree::collect_all_paths_tree_order(&state.library, sort_mode),
+            true,
+        ),
+        BridgeLibraryCommand::AppendAllTracks => (
+            library_tree::collect_all_paths_tree_order(&state.library, sort_mode),
+            false,
+        ),
+        _ => return None,
+    };
+    Some(QueueRequest::Tracks { tracks, replace })
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +846,7 @@ fn append_import_path(
     outcome.push_unsupported();
 }
 
+#[cfg(test)]
 fn expand_import_paths(paths: Vec<PathBuf>) -> ImportExpandOutcome {
     expand_import_paths_cancellable(paths, &|| false)
 }
@@ -1122,74 +1032,6 @@ pub(super) fn validate_queue_details(
         }
     }
     changed
-}
-
-fn replace_queue_paths(
-    state: &mut BridgeState,
-    playback: &PlaybackEngine,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
-    paths: Vec<PathBuf>,
-    autoplay: bool,
-) -> bool {
-    if paths.is_empty() {
-        return false;
-    }
-    state.queue = paths;
-    state.selected_queue_index = Some(0);
-    let _ = sync_queue_details(state, external_queue_details_tx);
-    playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-    if autoplay {
-        playback.command(PlaybackCommand::PlayAt(0));
-        playback.command(PlaybackCommand::Play);
-    }
-    true
-}
-
-fn append_queue_paths(
-    state: &mut BridgeState,
-    playback: &PlaybackEngine,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
-    paths: Vec<PathBuf>,
-) -> bool {
-    if paths.is_empty() {
-        return false;
-    }
-    if state.queue.is_empty() {
-        state.queue.extend(paths);
-        let _ = sync_queue_details(state, external_queue_details_tx);
-        playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-    } else {
-        state.queue.extend(paths.clone());
-        let _ = sync_queue_details(state, external_queue_details_tx);
-        playback.command(PlaybackCommand::AddToQueue(paths));
-    }
-    true
-}
-
-fn handle_import_library_command(
-    state: &mut BridgeState,
-    playback: &PlaybackEngine,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
-    event_tx: &Sender<BridgeEvent>,
-    action: &str,
-    paths: Vec<PathBuf>,
-    replace: bool,
-) -> bool {
-    let outcome = expand_import_paths(paths);
-    if let Some(message) = format_import_warning(action, &outcome) {
-        let _ = try_send_event(event_tx, BridgeEvent::Error(message));
-    }
-    if replace {
-        replace_queue_paths(
-            state,
-            playback,
-            external_queue_details_tx,
-            outcome.tracks,
-            true,
-        )
-    } else {
-        append_queue_paths(state, playback, external_queue_details_tx, outcome.tracks)
-    }
 }
 
 // ---------------------------------------------------------------------------

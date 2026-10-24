@@ -1103,39 +1103,36 @@ impl BridgeLoopRuntime {
         result: imports::ImportResult,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
-        if !self.imports.is_current(&result) {
-            return SnapshotUrgency::None;
-        }
-        if let Some(warning) = commands::format_import_warning(
-            if result.replace { "open" } else { "append" },
-            &result.outcome,
-        ) {
-            let _ = try_send_event(event_tx, BridgeEvent::Error(warning));
-        }
-        if result.outcome.tracks.is_empty() {
-            return SnapshotUrgency::None;
-        }
-        let command = if result.replace {
-            BridgeQueueCommand::Replace {
-                tracks: result.outcome.tracks,
-                autoplay: true,
+        let changes = self.imports.complete(result);
+        self.apply_queue_changes(changes, event_tx)
+    }
+
+    fn apply_queue_changes(
+        &mut self,
+        changes: Vec<imports::QueueChange>,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
+        let mut urgency = SnapshotUrgency::None;
+        for change in changes {
+            if let Some(warning) = change.warning {
+                let _ = try_send_event(event_tx, BridgeEvent::Error(warning));
             }
-        } else {
-            BridgeQueueCommand::Append(result.outcome.tracks)
-        };
-        if queue::handle_queue_command(
-            command,
-            &mut self.state,
-            &self.playback,
-            &self.external_queue_details_tx,
-            event_tx,
-        ) {
-            self.flags.session_dirty = true;
-            self.snapshot_plan.include_queue_in_next_snapshot = true;
-            SnapshotUrgency::Immediate
-        } else {
-            SnapshotUrgency::None
+            let Some(command) = change.command else {
+                continue;
+            };
+            if queue::handle_queue_command(
+                command,
+                &mut self.state,
+                &self.playback,
+                &self.external_queue_details_tx,
+                event_tx,
+            ) {
+                self.flags.session_dirty = true;
+                self.snapshot_plan.include_queue_in_next_snapshot = true;
+                urgency = SnapshotUrgency::Immediate;
+            }
         }
+        urgency
     }
 
     fn request_tree(&self) {
@@ -1166,11 +1163,24 @@ impl BridgeLoopRuntime {
         cmd: BridgeCommand,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
-        if let Some(result) = self.imports.request(&cmd) {
-            if let Err(error) = result {
-                let _ = try_send_event(event_tx, BridgeEvent::Error(error));
+        if let Some(request) = commands::queue_request(&cmd, &self.state) {
+            return match self.imports.submit(request) {
+                Ok(changes) => self.apply_queue_changes(changes, event_tx),
+                Err(error) => {
+                    let _ = try_send_event(event_tx, BridgeEvent::Error(error));
+                    SnapshotUrgency::None
+                }
+            };
+        }
+        match &cmd {
+            BridgeCommand::Shutdown | BridgeCommand::Queue(BridgeQueueCommand::Clear) => {
+                self.imports.discard_pending();
             }
-            return SnapshotUrgency::None;
+            BridgeCommand::Library(BridgeLibraryCommand::RefreshRenamedPaths(renames)) => {
+                self.imports
+                    .remap_pending_paths(&renames.iter().cloned().collect());
+            }
+            _ => {}
         }
 
         let session_only = matches!(
@@ -1743,19 +1753,7 @@ pub(super) fn command_requires_queue_snapshot(cmd: &BridgeCommand) -> bool {
         ),
         BridgeCommand::Library(library_cmd) => matches!(
             library_cmd,
-            BridgeLibraryCommand::AddTrack(_)
-                | BridgeLibraryCommand::PlayTrack(_)
-                | BridgeLibraryCommand::ReplaceWithAlbum(_)
-                | BridgeLibraryCommand::AppendAlbum(_)
-                | BridgeLibraryCommand::ReplaceAlbumByKey { .. }
-                | BridgeLibraryCommand::AppendAlbumByKey { .. }
-                | BridgeLibraryCommand::ReplaceArtistByKey { .. }
-                | BridgeLibraryCommand::AppendArtistByKey { .. }
-                | BridgeLibraryCommand::ReplaceRootByPath { .. }
-                | BridgeLibraryCommand::AppendRootByPath { .. }
-                | BridgeLibraryCommand::ReplaceAllTracks
-                | BridgeLibraryCommand::AppendAllTracks
-                | BridgeLibraryCommand::RefreshEditedPaths(_)
+            BridgeLibraryCommand::RefreshEditedPaths(_)
                 | BridgeLibraryCommand::RefreshRenamedPaths(_)
         ),
         _ => false,
@@ -2053,6 +2051,198 @@ mod tests {
             vec!["now playing", "scrobble", "shutdown"]
         );
         assert!(matches!(event_rx.try_recv(), Ok(BridgeEvent::Stopped)));
+    }
+
+    /// A runtime whose playback commands the test receives instead of an
+    /// engine, with an album "Artist - Album" of two tracks in its library.
+    fn queue_order_runtime() -> (
+        BridgeLoopRuntime,
+        Receiver<PlaybackCommand>,
+        Sender<BridgeEvent>,
+        Vec<PathBuf>,
+    ) {
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let (engine_tx, engine_rx) = unbounded();
+        runtime.playback = PlaybackEngine::from_command_sender(engine_tx);
+        let album = vec![p("/library/Album/1.flac"), p("/library/Album/2.flac")];
+        let root = p("/library");
+        runtime.state.library = Arc::new(LibrarySnapshot {
+            tracks: album
+                .iter()
+                .map(|path| {
+                    library_track(
+                        &path.to_string_lossy(),
+                        &root,
+                        "Artist",
+                        "Album",
+                        None,
+                        None,
+                    )
+                })
+                .collect(),
+            ..LibrarySnapshot::default()
+        });
+        (runtime, engine_rx, event_tx, album)
+    }
+
+    fn append_album() -> BridgeCommand {
+        BridgeCommand::Library(BridgeLibraryCommand::AppendAlbumByKey {
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+        })
+    }
+
+    /// A track file for imports, which expand and canonicalize their paths.
+    fn import_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("ferrous-queue-order-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let track = dir.join("track.flac");
+        std::fs::write(&track, b"stub").expect("fixture track");
+        let track = std::fs::canonicalize(track).expect("canonical track");
+        (dir, track)
+    }
+
+    fn apply_next_import_result(runtime: &mut BridgeLoopRuntime, event_tx: &Sender<BridgeEvent>) {
+        let result = runtime
+            .imports
+            .results
+            .recv_timeout(Duration::from_secs(5))
+            .expect("import result");
+        runtime.handle_wake(BridgeLoopWake::Import(result), event_tx);
+    }
+
+    fn wait_for_import_result(runtime: &BridgeLoopRuntime) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.imports.results.is_empty() {
+            assert!(Instant::now() < deadline, "import result");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn queue_ops(engine_rx: &Receiver<PlaybackCommand>) -> Vec<String> {
+        engine_rx
+            .try_iter()
+            .map(|command| match command {
+                PlaybackCommand::LoadQueue(tracks) => format!("load {tracks:?}"),
+                PlaybackCommand::AddToQueue(tracks) => format!("add {tracks:?}"),
+                PlaybackCommand::PlayAt(index) => format!("play at {index}"),
+                PlaybackCommand::Play => "play".to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn play_track_then_append_album_keeps_both_in_order() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, album) = queue_order_runtime();
+        let (dir, track) = import_fixture("play-then-append");
+
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::PlayTrack(track.clone())),
+            &event_tx,
+        );
+        runtime.handle_command(append_album(), &event_tx);
+        assert!(
+            runtime.state.queue.is_empty(),
+            "the append waits for the track to import"
+        );
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        let expected = [vec![track.clone()], album.clone()].concat();
+        assert_eq!(runtime.state.queue, expected);
+        assert_eq!(runtime.state.selected_queue_index, Some(0));
+        assert_eq!(
+            queue_ops(&engine_rx),
+            vec![
+                format!("load {:?}", vec![track]),
+                "play at 0".to_string(),
+                "play".to_string(),
+                format!("add {album:?}"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_track_then_append_album_keeps_their_order() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, album) = queue_order_runtime();
+        let (dir, track) = import_fixture("add-then-append");
+        let existing = p("/library/existing.flac");
+        runtime.state.queue = vec![existing.clone()];
+
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::AddTrack(track.clone())),
+            &event_tx,
+        );
+        runtime.handle_command(append_album(), &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        assert_eq!(
+            runtime.state.queue,
+            [vec![existing, track.clone()], album.clone()].concat()
+        );
+        assert_eq!(
+            queue_ops(&engine_rx),
+            vec![format!("add {:?}", vec![track]), format!("add {album:?}")],
+            "appends do not start playback"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn replacement_discards_an_append_that_started_before_it() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, album) = queue_order_runtime();
+        let (dir, track) = import_fixture("replace-after-append");
+
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(vec![track])),
+            &event_tx,
+        );
+        wait_for_import_result(&runtime);
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceAlbumByKey {
+                artist: "Artist".to_string(),
+                album: "Album".to_string(),
+            }),
+            &event_tx,
+        );
+        assert_eq!(runtime.state.queue, album);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        assert_eq!(runtime.state.queue, album, "the append was discarded");
+        assert_eq!(
+            queue_ops(&engine_rx),
+            vec![
+                format!("load {album:?}"),
+                "play at 0".to_string(),
+                "play".to_string(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clearing_the_queue_discards_a_pending_import() {
+        let _guard = test_guard();
+        let (mut runtime, _engine_rx, event_tx, _album) = queue_order_runtime();
+        let (dir, track) = import_fixture("clear-after-add");
+
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::AddTrack(track)),
+            &event_tx,
+        );
+        wait_for_import_result(&runtime);
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        assert!(runtime.state.queue.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
