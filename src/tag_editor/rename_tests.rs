@@ -263,3 +263,89 @@ fn a_failed_database_update_puts_swapped_files_back() {
     assert_eq!(track_rows(&dir), before);
     fs::remove_dir_all(dir).expect("cleanup");
 }
+
+#[test]
+fn a_different_file_whose_name_differs_only_in_case_is_not_replaced() {
+    let dir = fixture_dir("case-collision");
+    let paths = indexed_fixtures(
+        &dir,
+        &[
+            ("01 - Song.flac", "song", "1"),
+            ("01 - song.flac", "Other", "2"),
+        ],
+    );
+    if file_names(&dir).len() != 2 {
+        eprintln!("skipping: {} is case-insensitive", dir.display());
+        fs::remove_dir_all(dir).expect("cleanup");
+        return;
+    }
+    let bytes = paths
+        .iter()
+        .map(|path| fs::read(path).expect("read"))
+        .collect::<Vec<_>>();
+    let before = track_rows(&dir);
+
+    // Renaming the first file to its tags' name would replace the second.
+    let response = rename_paths(&paths[..1]);
+
+    assert!(response.successful_paths.is_empty());
+    assert_eq!(response.results.len(), 1);
+    let result = &response.results[0];
+    assert!(!result.ok, "{result:?}");
+    assert_eq!(
+        result.error.as_deref(),
+        Some(format!("target already exists: {}", paths[1].to_string_lossy()).as_str())
+    );
+    assert_eq!(file_names(&dir), ["01 - Song.flac", "01 - song.flac"]);
+    for (path, original) in paths.iter().zip(&bytes) {
+        assert_eq!(&fs::read(path).expect("read"), original);
+    }
+    assert_eq!(track_rows(&dir), before);
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+fn a_case_only_rename_of_one_file_still_works() {
+    let dir = fixture_dir("case-only");
+    let paths = indexed_fixtures(&dir, &[("01 - song.flac", "Song", "1")]);
+    let bytes = fs::read(&paths[0]).expect("read");
+    let before = track_rows(&dir);
+    let renamed = dir.join("01 - Song.flac");
+
+    let response = rename_paths(&paths);
+
+    assert_renamed(&response, std::slice::from_ref(&renamed));
+    assert_eq!(file_names(&dir), ["01 - Song.flac"]);
+    assert_eq!(fs::read(&renamed).expect("read"), bytes);
+    assert_eq!(
+        track_rows(&dir),
+        [(
+            before[0].0,
+            renamed,
+            dir.clone(),
+            "Song".to_string(),
+            Some(1)
+        )]
+    );
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+fn a_dangling_symlink_at_the_target_is_not_replaced() {
+    let dir = fixture_dir("dangling-target");
+    let paths = indexed_fixtures(&dir, &[("01 - Old.flac", "New", "1")]);
+    let bytes = fs::read(&paths[0]).expect("read");
+    let target = dir.join("01 - New.flac");
+    std::os::unix::fs::symlink(dir.join("missing.flac"), &target).expect("symlink");
+
+    let response = rename_paths(&paths);
+
+    assert!(response.successful_paths.is_empty());
+    assert_eq!(
+        response.results[0].error.as_deref(),
+        Some(format!("target already exists: {}", target.to_string_lossy()).as_str())
+    );
+    assert_eq!(fs::read(&paths[0]).expect("read"), bytes);
+    assert!(fs::symlink_metadata(&target).expect("link").is_symlink());
+    fs::remove_dir_all(dir).expect("cleanup");
+}
