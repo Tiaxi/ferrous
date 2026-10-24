@@ -246,6 +246,11 @@ fn recent_seek_trace(
 
 struct GstPlaybackRuntime {
     playbin: gst::Element,
+    /// Shared with the about-to-finish callback, which hands a successor
+    /// to playbin while it holds this lock. Lock order: this lock, then
+    /// `stream_durations`. Apart from that handover, never call into
+    /// `GStreamer` while holding either lock: playbin can wait for a
+    /// streaming thread that waits for the lock.
     queue_state: Arc<Mutex<GaplessQueue>>,
     analysis_tx: Sender<AnalysisCommand>,
     /// Local counter for generating unique track tokens (waveform jobs,
@@ -1622,48 +1627,12 @@ fn run_gst_engine(
         let analysis_tx = analysis_tx.clone();
         // Runs on a streaming thread once the pipeline has read all of the
         // last stream it was given, usually about 2 s before that stream
-        // ends and at once for a short file. Only stage the successor here;
-        // the runtime commits it when its stream starts or at end of stream.
+        // ends and at once for a short file.
         playbin.connect("about-to-finish", false, move |values| {
-            // Do not call into playbin here except to hand over the URI: a
-            // query can deadlock with a state change on the engine thread.
-            let playbin_obj = values.first()?.get::<gst::Element>().ok()?;
-
-            let mut queue = match queue_state.lock() {
-                Ok(queue) => queue,
-                Err(e) => {
-                    eprintln!("[ferrous] about-to-finish: queue lock poisoned: {e}");
-                    return None;
-                }
-            };
-            // Same file extension → gapless (same decoder reused).
-            // Different extension → let EOS fire, handle in bus handler.
-            let staged = queue.stage_natural(|finishing, next| {
-                if same_audio_extension(finishing, next) && file_uri(next).is_some() {
-                    Handoff::Gapless
-                } else {
-                    Handoff::AtEos
-                }
-            })?;
-            if staged.staged_spectrogram {
-                // Send while holding the queue lock so that a cancellation
-                // cannot reach analysis before this request. The staging
-                // thread checks format compatibility itself.
-                let _ = analysis_tx.send(AnalysisCommand::PrepareGaplessContinuation {
-                    path: staged.path.clone(),
-                });
-            }
-            if staged.handoff == Handoff::Gapless {
-                if let Ok(mut durations) = stream_durations.lock() {
-                    durations.hand_over(staged.path.clone());
-                }
-            }
-            drop(queue);
-            if staged.handoff == Handoff::Gapless {
-                if let Some(uri) = file_uri(&staged.path) {
-                    playbin_obj.set_property("uri", uri);
-                }
-            }
+            let playbin = values.first()?.get::<gst::Element>().ok()?;
+            stage_successor(&queue_state, &stream_durations, &analysis_tx, |uri| {
+                playbin.set_property("uri", uri);
+            });
             None
         });
     }
@@ -1698,6 +1667,57 @@ fn run_gst_engine(
 
     let _ = runtime.playbin.set_state(gst::State::Null);
     Ok(())
+}
+
+/// Stage the natural successor when the pipeline asks for one, and give
+/// a gapless successor to the pipeline with `hand_over`, which receives
+/// its URI. Only stage it here; the runtime commits it when its stream
+/// starts or at end of stream.
+///
+/// The URI is handed over under the queue lock, so a rename reaches the
+/// queue either before the successor is staged or after the pipeline was
+/// given its URI. Do not call into playbin here otherwise: a query can
+/// deadlock with a state change on the engine thread.
+fn stage_successor(
+    queue_state: &Mutex<GaplessQueue>,
+    stream_durations: &Mutex<StreamDurations>,
+    analysis_tx: &Sender<AnalysisCommand>,
+    hand_over: impl FnOnce(&str),
+) {
+    let mut queue = match queue_state.lock() {
+        Ok(queue) => queue,
+        Err(e) => {
+            eprintln!("[ferrous] about-to-finish: queue lock poisoned: {e}");
+            return;
+        }
+    };
+    // Same file extension → gapless (same decoder reused).
+    // Different extension → let EOS fire, handle in bus handler.
+    let Some(staged) = queue.stage_natural(|finishing, next| {
+        if same_audio_extension(finishing, next) && file_uri(next).is_some() {
+            Handoff::Gapless
+        } else {
+            Handoff::AtEos
+        }
+    }) else {
+        return;
+    };
+    if staged.staged_spectrogram {
+        // Send while holding the queue lock so that a cancellation cannot
+        // reach analysis before this request. The staging thread checks
+        // format compatibility itself.
+        let _ = analysis_tx.send(AnalysisCommand::PrepareGaplessContinuation {
+            path: staged.path.clone(),
+        });
+    }
+    if staged.handoff == Handoff::Gapless {
+        if let Some(uri) = file_uri(&staged.path) {
+            if let Ok(mut durations) = stream_durations.lock() {
+                durations.hand_over(staged.path);
+            }
+            hand_over(&uri);
+        }
+    }
 }
 
 /// Engine wake-up interval while a fade or silence hold is running.
@@ -2126,6 +2146,8 @@ fn build_audio_output_bin(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::playback::PathRenames;
+    use std::sync::TryLockError;
 
     fn make_volume_test_runtime() -> (GstPlaybackRuntime, Receiver<PlaybackEvent>) {
         gst::init().unwrap();
@@ -2264,6 +2286,50 @@ mod tests {
         assert_gain(&runtime, 0.8);
         assert!(!runtime.startup_gain_ramp);
         assert_eq!(runtime.command_wait_timeout(), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn successor_uri_is_handed_over_under_the_queue_lock() {
+        let dir = std::env::temp_dir();
+        let (a, b, renamed) = (
+            dir.join("a.wav"),
+            dir.join("b.wav"),
+            dir.join("renamed b.wav"),
+        );
+        let queue = Mutex::new(GaplessQueue::new());
+        let _ = queue.lock().unwrap().set_queue(vec![a.clone(), b.clone()]);
+        let durations = Mutex::new(StreamDurations::default());
+        durations.lock().unwrap().start_run(a);
+        let (analysis_tx, analysis_rx) = unbounded();
+        let mut handed = None;
+        stage_successor(&queue, &durations, &analysis_tx, |uri| {
+            // A rename cannot reach the queue between staging and handover.
+            assert!(matches!(queue.try_lock(), Err(TryLockError::WouldBlock)));
+            handed = Some(uri.to_owned());
+        });
+        assert_eq!(handed, file_uri(&b));
+        assert!(matches!(
+            analysis_rx.try_recv(),
+            Ok(AnalysisCommand::PrepareGaplessContinuation { path }) if path == b
+        ));
+
+        // A rename after the handover leaves the stream on the file the
+        // pipeline reads.
+        queue
+            .lock()
+            .unwrap()
+            .remap_paths(&PathRenames::from([(b.clone(), renamed.clone())]));
+        durations
+            .lock()
+            .unwrap()
+            .record(&b, Duration::from_millis(1_200));
+        let committed = queue.lock().unwrap().commit_gapless();
+        assert_eq!(committed.map(|committed| committed.path), Some(renamed));
+        durations.lock().unwrap().commit();
+        assert_eq!(
+            durations.lock().unwrap().current(),
+            Some(Duration::from_millis(1_200))
+        );
     }
 
     #[test]
