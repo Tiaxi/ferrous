@@ -28,6 +28,7 @@
 
 #include "BinaryBridgeCodec.h"
 #include "GlobalSearchResultsModel.h"
+#include "PlaybackClock.h"
 
 struct FerrousFfiBridge;
 struct FerrousFfiRenameGate;
@@ -83,9 +84,9 @@ private:
 class BridgeClient : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString playbackState READ playbackState NOTIFY playbackChanged)
-    Q_PROPERTY(QString positionText READ positionText NOTIFY playbackChanged)
+    // Where playback is; see PlaybackClock.
+    Q_PROPERTY(PlaybackClock *playbackClock READ playbackClock CONSTANT)
     Q_PROPERTY(QString durationText READ durationText NOTIFY playbackChanged)
-    Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY playbackChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds NOTIFY playbackChanged)
     Q_PROPERTY(double volume READ volume NOTIFY snapshotChanged)
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
@@ -189,9 +190,8 @@ public:
     ~BridgeClient() override;
 
     QString playbackState() const;
-    QString positionText() const;
+    PlaybackClock *playbackClock() const { return m_playbackClock; }
     QString durationText() const;
-    double positionSeconds() const;
     // Changes on every track change, also when the same file plays again.
     quint64 currentTrackToken() const { return m_currentTrackToken; }
     double durationSeconds() const;
@@ -383,7 +383,6 @@ public:
     std::shared_ptr<FerrousFfiRenameGate> renameGate() const;
 
 signals:
-    void transportPositionDiscontinuity(double seconds);
     // A seek landed at `seconds`, and no newer seek waits.
     void seekLanded(double seconds);
     void playbackChanged();
@@ -586,7 +585,6 @@ private:
     void scheduleTrackMetadataChanged();
     void scheduleSnapshotChanged();
     void scheduleAnalysisChanged();
-    void reanchorCenteredSpectrogramsForExplicitPosition(double seconds);
     void shutdownBridgeGracefully();
     void setBackendFailure(const QString &message);
     static QString detectFileBrowserNameHeuristic();
@@ -605,9 +603,9 @@ private:
     QTimer m_bridgePollTimer;
     int m_bridgePollBudgetMs{5};
     QString m_playbackState{"Stopped"};
-    QString m_positionText{"00:00"};
+    // Fed the engine's position samples; a child of this client.
+    PlaybackClock *m_playbackClock{nullptr};
     QString m_durationText{"00:00"};
-    double m_positionSeconds{0.0};
     double m_durationSeconds{0.0};
     double m_volume{1.0};
     int m_queueLength{0};
@@ -748,7 +746,6 @@ private:
     bool m_loggedStartupQueueMissing{false};
     bool m_loggedStartupQueuePresent{false};
     bool m_playbackChangedPending{false};
-    bool m_transportPositionDiscontinuityPending{false};
     bool m_trackIdentityChangedPending{false};
     bool m_trackMetadataChangedPending{false};
     bool m_snapshotChangedPending{false};
@@ -757,11 +754,10 @@ private:
     bool m_pollTrackIdentityChanged{false};
     bool m_pollTrackMetadataChanged{false};
     bool m_pollSnapshotChanged{false};
-    qint64 m_pendingTrackRestartUntilMs{0};
-    // The playhead shows the target of the seek with serial
-    // m_pendingSeekSerial until the engine is done with that seek. The
-    // engine numbers seeks in the order it receives them, which is the
-    // order they are sent.
+    // The playback clock holds the target of the seek with serial
+    // m_pendingSeekSerial until the engine is done with that seek, and
+    // ignores the samples from before it. The engine numbers seeks in the
+    // order it receives them, which is the order they are sent.
     bool m_pendingSeek{false};
     double m_pendingSeekTargetSeconds{0.0};
     quint64 m_pendingSeekSerial{0};

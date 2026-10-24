@@ -2143,6 +2143,10 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u64(&mut out, snapshot.playback.track_token);
     push_u64(&mut out, snapshot.playback.seek_serial);
     push_u64(&mut out, snapshot.playback.seek_landed_serial);
+    // The position above was read at this CLOCK_MONOTONIC time, and
+    // advances from it in real time while the flag is set.
+    push_u64(&mut out, snapshot.playback.position_sampled_at.as_nanos());
+    push_u8(&mut out, u8::from(snapshot.playback.position_advancing));
     out
 }
 
@@ -2795,7 +2799,7 @@ mod tests {
     use super::*;
     use crate::analysis::AnalysisSnapshot;
     use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
-    use crate::playback::{PlaybackSnapshot, PlaybackState};
+    use crate::playback::{MonotonicTime, PlaybackSnapshot, PlaybackState};
     use std::sync::Arc;
     use std::thread;
     use std::time::Instant;
@@ -2824,6 +2828,8 @@ mod tests {
                 track_token: 7,
                 seek_serial: 3,
                 seek_landed_serial: 2,
+                position_sampled_at: MonotonicTime::from_nanos(1_000_000),
+                position_advancing: true,
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
@@ -4461,6 +4467,9 @@ mod tests {
         playback_track_token: u64,
         playback_seek_serial: u64,
         playback_seek_landed_serial: u64,
+        playback_position: f64,
+        playback_position_sampled_at_ns: u64,
+        playback_position_advancing: bool,
         settings_channel_buttons_visibility: u8,
     }
 
@@ -4471,6 +4480,9 @@ mod tests {
             playback_track_token: 0,
             playback_seek_serial: 0,
             playback_seek_landed_serial: 0,
+            playback_position: 0.0,
+            playback_position_sampled_at_ns: 0,
+            playback_position_advancing: false,
             settings_channel_buttons_visibility: 1,
         };
         // Skip 12-byte header (magic 4 + total_len 4 + section_mask 2 + reserved 2).
@@ -4484,6 +4496,7 @@ mod tests {
             let s = &data[offset..offset + section_len];
             let mut p = 0;
             p += 1; // u8   state
+            result.playback_position = f64::from_le_bytes(s[p..p + 8].try_into().unwrap());
             p += 8; // f64  position
             p += 8; // f64  duration
             p += 4; // f32  volume
@@ -4508,7 +4521,20 @@ mod tests {
             p += 8;
             result.playback_seek_landed_serial =
                 u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
-            assert_eq!(p + 8, section_len, "seek serials end the playback section");
+            p += 8;
+            result.playback_position_sampled_at_ns =
+                u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
+            p += 8;
+            result.playback_position_advancing = match s[p] {
+                0 => false,
+                1 => true,
+                other => panic!("advancing flag {other}"),
+            };
+            assert_eq!(
+                p + 1,
+                section_len,
+                "the position sample ends the playback section"
+            );
             offset += section_len;
         }
         // Skip remaining sections before settings.  Sections appear in
@@ -4588,6 +4614,22 @@ mod tests {
         assert_eq!(decoded.playback_track_token, 7);
         assert_eq!(decoded.playback_seek_serial, u64::MAX - 2);
         assert_eq!(decoded.playback_seek_landed_serial, u64::MAX - 3);
+    }
+
+    #[test]
+    fn snapshot_encodes_the_raw_position_with_its_sample_time() {
+        let mut snapshot = sample_snapshot();
+        snapshot.playback.position = Duration::from_micros(12_345_678);
+        snapshot.playback.position_sampled_at = MonotonicTime::from_nanos(u64::MAX - 4);
+        for advancing in [false, true] {
+            snapshot.playback.position_advancing = advancing;
+            let encoded = encode_binary_snapshot(&snapshot, None);
+            let decoded = decode_binary_snapshot_for_test(&encoded);
+            assert!((decoded.playback_position - 12.345_678).abs() < 1e-9);
+            assert_eq!(decoded.playback_position_sampled_at_ns, u64::MAX - 4);
+            assert_eq!(decoded.playback_position_advancing, advancing);
+            assert_eq!(decoded.playback_seek_landed_serial, 2);
+        }
     }
 
     #[test]

@@ -97,6 +97,8 @@ private:
     void publishPlayerState();
     void emitPropertiesChanged(const QString &interfaceName, const QVariantMap &changed) const;
     void emitSeeked(qlonglong positionUs) const;
+    // Requires a bridge.
+    double currentPositionSeconds() const;
     void sendSignal(const QDBusMessage &message) const;
     void handleBridgeChange(bool trackChanged);
     qlonglong currentLengthUs() const;

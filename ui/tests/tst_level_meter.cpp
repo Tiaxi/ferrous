@@ -73,6 +73,7 @@ private slots:
     void protocolPreservesNativePeaksAndRejectsMalformedData();
     void rustDecoderProvidesAllChannelsAndHonorsCancellation();
     void consumesOnlyAudibleBinsAndClearsDiscontinuities();
+    void followsThePlaybackClock();
     void lateDataDoesNotReplayOldPeaks();
     void requestsAreBoundedAndObsoleteResultsAreDiscarded();
     void destructionCancelsPendingDecode();
@@ -201,7 +202,9 @@ void LevelMeterTest::rustDecoderProvidesAllChannelsAndHonorsCancellation() {
 }
 
 void LevelMeterTest::consumesOnlyAudibleBinsAndClearsDiscontinuities() {
+    PlaybackClock clock;
     LevelMeterItem item;
+    item.setClock(&clock);
     item.m_playing = true;
     item.m_window = {0, 0.025, 0.01, 2, {-6, -12, -2, -20, -1, -30}};
     item.advance(0.005, 0.005);
@@ -217,7 +220,8 @@ void LevelMeterTest::consumesOnlyAudibleBinsAndClearsDiscontinuities() {
     item.advance(0.025, 0.5);
     QVERIFY(item.m_channels[0].level < -10);
     QCOMPARE(item.m_channels[0].peak, -1.0);
-    item.resetForSeek(0.02);
+    // A seek is a jump of the clock.
+    clock.holdAt(0.02);
     QCOMPARE(item.m_channels[0].peak, -60.0);
     QCOMPARE(item.m_window.channels, 0);
     item.m_channels[0].observe(-3, 0);
@@ -226,6 +230,33 @@ void LevelMeterTest::consumesOnlyAudibleBinsAndClearsDiscontinuities() {
     item.m_channels[0].observe(-3, 0);
     item.setSourcePath(QString());
     QCOMPARE(item.m_channels[0].peak, -60.0);
+    // Samples that continue playback keep the levels.
+    item.m_channels[0].observe(-3, 0);
+    PlaybackSample sample;
+    sample.positionSeconds = 0.02;
+    sample.sampledAtNs = clock.nowNs();
+    clock.applySample(sample, false);
+    QCOMPARE(item.m_channels[0].peak, -3.0);
+}
+
+void LevelMeterTest::followsThePlaybackClock() {
+    PlaybackClock clock;
+    LevelMeterItem item;
+    QCOMPARE(item.currentPosition(std::chrono::steady_clock::now()), 0.0);
+    item.setClock(&clock);
+    PlaybackSample sample;
+    sample.positionSeconds = 12.0;
+    sample.sampledAtNs = monotonicNs(std::chrono::steady_clock::now());
+    sample.advancing = true;
+    sample.durationSeconds = 20.0;
+    sample.trackToken = 1;
+    clock.applySample(sample, true);
+    const auto frame = std::chrono::steady_clock::time_point(
+        std::chrono::nanoseconds(sample.sampledAtNs + 250'000'000));
+    // The meter reads the clock at its own frame time.
+    QVERIFY(std::abs(item.currentPosition(frame) - 12.25) < 1e-9);
+    item.setDurationSeconds(12.1);
+    QCOMPARE(item.currentPosition(frame), 12.1);
 }
 
 void LevelMeterTest::lateDataDoesNotReplayOldPeaks() {
@@ -244,9 +275,11 @@ void LevelMeterTest::lateDataDoesNotReplayOldPeaks() {
 }
 
 void LevelMeterTest::requestsAreBoundedAndObsoleteResultsAreDiscarded() {
+    PlaybackClock clock;
     QQuickWindow view;
     view.resize(400, 40);
     LevelMeterItem item(view.contentItem());
+    item.setClock(&clock);
     item.setSize(QSizeF(400, 20));
     item.setDurationSeconds(10);
     auto gate = std::make_shared<QSemaphore>();
@@ -261,7 +294,8 @@ void LevelMeterTest::requestsAreBoundedAndObsoleteResultsAreDiscarded() {
     item.setSourcePath(QStringLiteral("first.wav"));
     QTRY_COMPARE(started->load(), 1);
     const auto cancelled = item.m_cancelled;
-    for (int i = 0; i < 20; ++i) item.resetForSeek(i * 0.01);
+    // Seeks in a row each restart the request.
+    for (int i = 0; i < 20; ++i) clock.holdAt(i * 0.01);
     QVERIFY(cancelled->load());
     QCOMPARE(started->load(), 1);
     QCOMPARE(item.findChildren<QFutureWatcherBase *>().size(), 1);

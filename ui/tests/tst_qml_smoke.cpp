@@ -57,6 +57,50 @@
 
 namespace {
 
+// The playback clock of an item under test, which the item owns.
+template <typename Item>
+PlaybackClock &testClock(Item &item) {
+    auto *clock = item.template findChild<PlaybackClock *>(
+        QStringLiteral("testPlaybackClock"), Qt::FindDirectChildrenOnly);
+    if (clock == nullptr) {
+        clock = new PlaybackClock(&item);
+        clock->setObjectName(QStringLiteral("testPlaybackClock"));
+        item.setClock(clock);
+    }
+    return *clock;
+}
+
+// Report to the item's clock that playback is at `seconds` now, as the
+// engine does: the position advances from there while the item plays. The
+// clock moves there directly rather than correcting towards it.
+template <typename Item>
+void setTestPosition(Item &item, double seconds, quint64 trackToken = 0) {
+    PlaybackClock &clock = testClock(item);
+    PlaybackSample sample;
+    sample.positionSeconds = seconds;
+    sample.sampledAtNs = monotonicNowNs();
+    sample.trackToken = trackToken != 0 ? trackToken : clock.state().trackToken;
+    clock.applySample(sample, false);
+    if (item.property("playing").toBool()) {
+        sample.advancing = true;
+        clock.applySample(sample, false);
+    }
+}
+
+// Report to the item's clock that playback was at `seconds` `agoSeconds`
+// ago and has advanced since.
+template <typename Item>
+void setTestPositionAgo(Item &item, double seconds, double agoSeconds) {
+    PlaybackClock &clock = testClock(item);
+    PlaybackSample sample;
+    sample.positionSeconds = seconds;
+    sample.sampledAtNs = monotonicNowNs() - static_cast<qint64>(agoSeconds * 1e9);
+    sample.trackToken = clock.state().trackToken;
+    clock.applySample(sample, false);
+    sample.advancing = true;
+    clock.applySample(sample, false);
+}
+
 class CompositionRecordingPaintEngine final : public QPaintEngine {
 public:
     CompositionRecordingPaintEngine()
@@ -435,6 +479,16 @@ QQuickItem *findQuickItemByObjectName(QQuickItem *root, const QString &objectNam
     return nullptr;
 }
 
+template <typename Item>
+void collectQuickItems(QQuickItem *root, QList<Item *> *out) {
+    if (auto *item = qobject_cast<Item *>(root)) {
+        out->append(item);
+    }
+    for (QQuickItem *child : root->childItems()) {
+        collectQuickItems(child, out);
+    }
+}
+
 QObject *createQmlObjectFromSource(
     QQmlEngine &engine,
     const QByteArray &qmlSource,
@@ -500,37 +554,23 @@ private slots:
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
     void testMutedChannelRendersGrayscale();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
-    void spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward();
-    void spectrogramCenteredSmallSeekSnapsWithoutServoSlide();
+    void spectrogramCenteredSmallSeekMovesAtOnce();
     void spectrogramCenteredSeekFollowsLocalVisualClock();
     void spectrogramEarlyCenteredSeekFollowsLocalVisualClockBeforePrecomputedReady();
+    void visualizationsDrawTheSharedPlaybackClock();
+    void spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds_data();
+    void spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
     void spectrogramRollingZoomResetAnchorsEpochToResetStart();
     void spectrogramSeekResetAnchorsPlaybackClockToChunkStart();
     void diagnosticsLogUsesLowercaseAppDir();
-    void playbackControllerSeekImmediatelyUpdatesSpectrogramPosition();
-    void playbackControllerDeterministicTimeHooksDriveInterpolation();
-    void playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock();
-    void playbackControllerPostSeekHeartbeatUsesBoundedPhaseCorrection();
-    void playbackControllerPostSeekBehindHeartbeatKeepsVisualClock();
-    void playbackControllerPostSeekHeldTargetKeepsVisualClock();
-    void playbackControllerPostSeekTargetEchoKeepsVisualClockActive();
-    void playbackControllerPlayAtCurrentTrackClearsPostSeekVisualClock();
-    void playbackControllerTrackChangeSnapsClock();
-    void playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst();
-    void playbackControllerModerateSteadyStateLagUsesTrimNotBleed();
-    void playbackControllerProfileLogsHeartbeatCorrectionAndBleed();
-    void playbackControllerProfileSkipsMinorFollowHeartbeatLogs();
-    void playbackControllerDelayedHeartbeatDoesNotJumpViewport();
-    void playbackControllerKeepsWallClockInterpolationAfterSubRealtimeHeartbeats();
-    void playbackControllerSteadyStateTrimReducesNoticeableLag();
-    void playbackControllerFollowsBoundedRecoveryCadenceWithoutBurst();
+    void playbackControllerReadsTheBridgeClock();
     void spectrogramSeekProfileFlagsStalledPostSeekWindow();
     void spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling();
     void spectrogramSmoothnessProfileFlagsGapHeavyWindow();
-    void spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSignals();
+    void spectrogramSmoothnessProfileTracksAdvanceFallbackSignals();
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
     void waveformEditorParsesSignedSampleWindow();
@@ -578,8 +618,8 @@ private slots:
     void waveformEditorPlaybackOverviewCacheHasForwardHeadroom();
     void waveformEditorCachedPaintClearsUncoveredPixels();
     void waveformEditorPausedDetailReplacesOverviewCache();
-    void waveformEditorPlaybackHeartbeatDoesNotMoveBackward();
-    void waveformEditorExplicitSeekBypassesHeartbeatSmoothing();
+    void waveformEditorFollowsThePlaybackClock();
+    void waveformEditorSeeksMoveAtOnce();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
     void waveformEditorCrosshairLabelsMatchSpectrogramMargins();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
@@ -605,7 +645,7 @@ private slots:
     void spectrogramFreshWidgetAcceptsDataWithImplicitReset();
     void spectrogramCenteredModeSeekPreservesRing();
     void spectrogramCenteredGaplessPreStagedFill();
-    void spectrogramCenteredGaplessSnapsAnchorToZero();
+    void spectrogramCenteredGaplessFollowsTheClock();
     void spectrogramCenteredSeekRestartRebuildsEarlierWindow();
     void spectrogramFullscreenRefillAfterSeekCoversLeftEdge();
     void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
@@ -629,8 +669,6 @@ private slots:
     void spectrogramTrackChangeCancelsPendingZoomDebounce();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
-    void playbackControllerInterpolationActivatesOnPlayback();
-    void playbackControllerInterpolationDeactivatesOnStop();
     void trackIdentityChangedSignalTriggersQmlHandler();
     void queueAutoCenterIsDeferredOffHandlerStack();
     void queueRemovalSendsOneBatch();
@@ -806,9 +844,8 @@ Item {
         id: bridge
         property bool connected: false
         property string playbackState: "Stopped"
-        property string positionText: "00:00"
+        property var playbackClock: null
         property string durationText: "00:00"
-        property real positionSeconds: 0
         property real durationSeconds: 0
         property real volume: 0.5
         property var queueRows: []
@@ -960,7 +997,6 @@ Item {
         id: playbackController
         uiBridge: bridge
         visualFeedsEnabled: true
-        seekPressed: false
     }
 
     Controllers.LibraryController {
@@ -1105,7 +1141,7 @@ Item {
         nextAction: nextAction
         themeIsDark: palette.themeIsDark
         volumeMuted: playbackController.volumeMuted
-        displayedPositionSeconds: playbackController.displayedPositionSeconds
+        displayedPositionSeconds: playbackController.positionSeconds
         toggleMutedVolume: playbackController.toggleMutedVolume
         setAppVolume: playbackController.setAppVolume
         normalizedVolumeValue: playbackController.normalizedVolumeValue
@@ -1623,7 +1659,6 @@ Item {
     QtObject {
         id: bridge
         objectName: "waveformBridge"
-        signal transportPositionDiscontinuity(double seconds)
         property string playbackState: "Stopped"
         property string currentTrackPath: ""
         property var waveformPeaksPacked: ""
@@ -1728,8 +1763,11 @@ Item {
     QTRY_VERIFY(waveform->overviewComplete());
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     QTRY_VERIFY(waveform->playing());
-    waveform->applyExplicitSeekPosition(5.0);
-    QVERIFY(QMetaObject::invokeMethod(bridge, "transportPositionDiscontinuity", Q_ARG(double, 4.5)));
+    // The surface passes its clock to the waveform, which follows it.
+    PlaybackClock clock;
+    surface->setProperty("clock", QVariant::fromValue(static_cast<QObject *>(&clock)));
+    QTRY_COMPARE(waveform->clock(), &clock);
+    clock.holdAt(4.5);
     QCOMPARE(waveform->positionSeconds(), 4.5);
 
     surface->setProperty("interactiveOverlaysVisible", false);
@@ -1891,8 +1929,29 @@ void QmlSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     QVERIFY(QMetaObject::invokeMethod(root, "channelStatusIconSource",
         Q_RETURN_ARG(QVariant, iconUrl), Q_ARG(QVariant, QStringLiteral("5.1"))));
     QVERIFY(iconUrl.toUrl().toString().endsWith(QStringLiteral("channel-5_1.svg")));
+    // Every consumer reads the bridge's one clock.
+    PlaybackClock clock;
+    bridge->setProperty("playbackClock", QVariant::fromValue(static_cast<QObject *>(&clock)));
+    QTRY_COMPARE(meter->clock(), &clock);
+    QList<SpectrogramItem *> spectrograms;
+    collectQuickItems(spectrogram, &spectrograms);
+    QVERIFY(!spectrograms.isEmpty());
+    for (SpectrogramItem *item : spectrograms) {
+        QCOMPARE(item->clock(), &clock);
+    }
+    auto *waveformEditor = root->findChild<WaveformEditorItem *>(QStringLiteral("waveformEditorItem"));
+    QVERIFY(waveformEditor);
+    QCOMPARE(waveformEditor->clock(), &clock);
+    auto *transportWaveform = root->findChild<WaveformItem *>();
+    QVERIFY(transportWaveform);
+    clock.holdAt(42.0);
+    QTRY_COMPARE(transportWaveform->positionSeconds(), 42.0);
+    for (SpectrogramItem *item : spectrograms) {
+        QCOMPARE(item->positionSeconds(), 42.0);
+    }
+    // A jump of the clock clears the meter's levels.
     meter->m_channels[0].observe(-3, 0);
-    QVERIFY(QMetaObject::invokeMethod(bridge, "transportPositionDiscontinuity", Q_ARG(double, 0.0)));
+    clock.holdAt(0.0);
     QCOMPARE(meter->m_channels[0].peak, -60.0);
     auto *checkBox = root->findChild<QObject *>(QStringLiteral("showLevelMeterCheckBox"));
     QVERIFY(checkBox);
@@ -2565,7 +2624,7 @@ Item {
     QTRY_VERIFY(view->property("contentY").toDouble() > 300.0);
 }
 
-void QmlSmokeTest::playbackControllerSeekImmediatelyUpdatesSpectrogramPosition() {
+void QmlSmokeTest::playbackControllerReadsTheBridgeClock() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -2579,7 +2638,7 @@ Item {
         id: bridge
         objectName: "bridge"
         property string playbackState: "Playing"
-        property real positionSeconds: 12.0
+        property var playbackClock: null
         property real durationSeconds: 180.0
         property string currentTrackPath: "/music/test.flac"
         property real volume: 1.0
@@ -2592,1211 +2651,39 @@ Item {
         objectName: "controller"
         uiBridge: bridge
         visualFeedsEnabled: true
-        seekPressed: false
     }
-
 }
 )QML"), baseUrl, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
 
     QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
     QVERIFY(controller != nullptr);
-
+    QVERIFY(bridge != nullptr);
     QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 12.0);
-    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 12.0);
+    QCOMPARE(controller->property("positionSeconds").toDouble(), 0.0);
+    QCOMPARE(controller->property("positionText").toString(), QStringLiteral("00:00"));
+
+    // The controller shows the bridge's clock rather than a value of its own.
+    PlaybackClock clock;
+    bridge->setProperty("playbackClock", QVariant::fromValue(static_cast<QObject *>(&clock)));
+    clock.holdAt(72.0);
+    QCOMPARE(controller->property("positionSeconds").toDouble(), 72.0);
+    QCOMPARE(controller->property("positionText").toString(), QStringLiteral("01:12"));
 
     QVERIFY(QMetaObject::invokeMethod(
         controller,
         "seekCommitted",
         Q_ARG(QVariant, QVariant::fromValue(48.0))));
+    QCOMPARE(bridge->property("seekCalls").toList().size(), 1);
 
-    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 48.0);
-    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 48.0);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "seekCommitted",
-        Q_ARG(QVariant, QVariant::fromValue(23.16))));
-
-    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 23.16);
-    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 23.16);
-
-    // A stopped track is not seekable: the playhead stays and no seek is sent.
-    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
-    QVERIFY(bridge != nullptr);
+    // A stopped track is not seekable: no seek is sent.
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QVERIFY(QMetaObject::invokeMethod(
         controller,
         "seekCommitted",
         Q_ARG(QVariant, QVariant::fromValue(90.0))));
-    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 23.16);
-    QCOMPARE(bridge->property("seekCalls").toList().size(), 2);
-}
-
-void QmlSmokeTest::playbackControllerDeterministicTimeHooksDriveInterpolation() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "initializeFromBridgeAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    bridge->setProperty("positionSeconds", 12.12);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1120.0)),
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const double displayedAfterHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY2(
-        std::abs(displayedAfterHeartbeat - 12.12) < 0.02,
-        qPrintable(QStringLiteral("displayed_after_heartbeat=%1")
-            .arg(displayedAfterHeartbeat, 0, 'f', 6)));
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "stepInterpolationTo",
-        Q_ARG(QVariant, QVariant::fromValue(1160.0))));
-
-    const double displayedAfterStep =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY2(
-        displayedAfterStep > 12.14,
-        qPrintable(QStringLiteral("displayed_after_step=%1")
-            .arg(displayedAfterStep, 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerPlaybackUpdateKeepsSpectrogramOnInterpolatedClock() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
-    const double displayedBeforeUpdate =
-        controller->property("displayedPositionSeconds").toDouble();
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    bridge->setProperty("positionSeconds", 12.12);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChanged",
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const double displayedAfterUpdate =
-        controller->property("displayedPositionSeconds").toDouble();
-    const double spectrogramPosition =
-        controller->property("spectrogramPositionSeconds").toDouble();
-    QVERIFY2(
-        displayedAfterUpdate >= displayedBeforeUpdate - 0.001
-            && displayedAfterUpdate <= displayedBeforeUpdate + 0.03,
-        qPrintable(
-            QStringLiteral("displayed=%1 displayed_before=%2")
-                .arg(displayedAfterUpdate, 0, 'f', 6)
-                .arg(displayedBeforeUpdate, 0, 'f', 6)));
-    QVERIFY2(
-        std::abs(spectrogramPosition - displayedAfterUpdate) < 0.001,
-        qPrintable(QStringLiteral("spectrogram=%1").arg(spectrogramPosition, 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerPostSeekHeartbeatUsesBoundedPhaseCorrection() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-        property var seekCalls: []
-        function seek(value) { seekCalls = seekCalls.concat([value]) }
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "seekCommitted",
-        Q_ARG(QVariant, QVariant::fromValue(48.0))));
-    const double displayedBeforeHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    bridge->setProperty("positionSeconds", 48.08);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChanged",
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const double displayedAfterHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    const double spectrogramAfterHeartbeat =
-        controller->property("spectrogramPositionSeconds").toDouble();
-    QVERIFY2(
-        displayedAfterHeartbeat >= displayedBeforeHeartbeat - 0.001
-            && displayedAfterHeartbeat <= displayedBeforeHeartbeat + 0.03,
-        qPrintable(QStringLiteral("displayed_before=%1 displayed_after=%2")
-            .arg(displayedBeforeHeartbeat, 0, 'f', 6)
-            .arg(displayedAfterHeartbeat, 0, 'f', 6)));
-    QVERIFY2(
-        std::abs(spectrogramAfterHeartbeat - displayedAfterHeartbeat) < 0.001,
-        qPrintable(QStringLiteral("spectrogram=%1").arg(spectrogramAfterHeartbeat, 0, 'f', 6)));
-    QVERIFY2(
-        controller->property("interpolationRate").toDouble() <= 1.1
-            && controller->property("interpolationRate").toDouble() > 1.0,
-        qPrintable(QStringLiteral("rate=%1")
-            .arg(controller->property("interpolationRate").toDouble(), 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerPostSeekBehindHeartbeatKeepsVisualClock() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-        property var seekCalls: []
-        function seek(value) { seekCalls = seekCalls.concat([value]) }
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "initializeFromBridgeAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "seekCommittedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(48.0)),
-        Q_ARG(QVariant, QVariant::fromValue(2000.0))));
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "stepInterpolationTo",
-        Q_ARG(QVariant, QVariant::fromValue(2240.0))));
-    const double displayedBeforeHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY(displayedBeforeHeartbeat > 48.20);
-
-    bridge->setProperty("positionSeconds", 48.08);
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(2240.0)),
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const double displayedOnHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY2(
-        displayedOnHeartbeat >= displayedBeforeHeartbeat - 0.001,
-        qPrintable(QStringLiteral("displayed_before=%1 displayed_on_heartbeat=%2")
-            .arg(displayedBeforeHeartbeat, 0, 'f', 6)
-            .arg(displayedOnHeartbeat, 0, 'f', 6)));
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "stepInterpolationTo",
-        Q_ARG(QVariant, QVariant::fromValue(2280.0))));
-
-    const double displayedAfterStep =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY2(
-        displayedAfterStep > displayedOnHeartbeat + 0.03,
-        qPrintable(QStringLiteral("displayed_on_heartbeat=%1 displayed_after=%2")
-            .arg(displayedOnHeartbeat, 0, 'f', 6)
-            .arg(displayedAfterStep, 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerPostSeekHeldTargetKeepsVisualClock() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-        property var seekCalls: []
-        function seek(value) { seekCalls = seekCalls.concat([value]) }
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "initializeFromBridgeAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "seekCommittedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(48.0)),
-        Q_ARG(QVariant, QVariant::fromValue(2000.0))));
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "stepInterpolationTo",
-        Q_ARG(QVariant, QVariant::fromValue(2100.0))));
-    const double displayedBeforeHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY(displayedBeforeHeartbeat > 48.09);
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    bridge->setProperty("positionSeconds", 48.0);
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(2100.0)),
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const double displayedOnHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY2(
-        displayedOnHeartbeat >= displayedBeforeHeartbeat - 0.001,
-        qPrintable(QStringLiteral("displayed_before=%1 displayed_on_heartbeat=%2")
-            .arg(displayedBeforeHeartbeat, 0, 'f', 6)
-            .arg(displayedOnHeartbeat, 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerPostSeekTargetEchoKeepsVisualClockActive() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-        property var seekCalls: []
-        function seek(value) { seekCalls = seekCalls.concat([value]) }
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "initializeFromBridgeAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "seekCommittedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(48.0)),
-        Q_ARG(QVariant, QVariant::fromValue(2000.0))));
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    bridge->setProperty("positionSeconds", 48.0);
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(2000.0)),
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "stepInterpolationTo",
-        Q_ARG(QVariant, QVariant::fromValue(2240.0))));
-    const double displayedBeforeBackendHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY(displayedBeforeBackendHeartbeat > 48.20);
-
-    bridge->setProperty("positionSeconds", 48.08);
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(2240.0)),
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const double displayedAfterBackendHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY2(
-        displayedAfterBackendHeartbeat >= displayedBeforeBackendHeartbeat - 0.001,
-        qPrintable(QStringLiteral("displayed_before=%1 displayed_after=%2")
-            .arg(displayedBeforeBackendHeartbeat, 0, 'f', 6)
-            .arg(displayedAfterBackendHeartbeat, 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerTrackChangeSnapsClock() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 480.0
-        property string currentTrackPath: "/music/test.flac"
-        property int playingQueueIndex: 0
-        property real volume: 1.0
-        property var playAtCalls: []
-        property var seekCalls: []
-        function seek(value) { seekCalls = seekCalls.concat([value]) }
-        function playAt(index) { playAtCalls = playAtCalls.concat([index]) }
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
-    QVERIFY(bridge != nullptr);
-
-    // Even a small difference must snap on identity change, rather than
-    // smoothing the new track against the previous track's visual clock.
-    bridge->setProperty("positionSeconds", 0.15);
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridgeAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
-    bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/new.wav"));
-    bridge->setProperty("positionSeconds", 0.05);
-    QVERIFY(QMetaObject::invokeMethod(controller, "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1010.0)),
-        Q_ARG(QVariant, QVariant()), Q_ARG(QVariant, QVariant())));
-    QVERIFY(std::abs(controller->property("displayedPositionSeconds").toDouble() - 0.05) < 0.0001);
-    QVERIFY(std::abs(controller->property("spectrogramPositionSeconds").toDouble() - 0.05) < 0.0001);
-    QVERIFY(QMetaObject::invokeMethod(controller, "stepInterpolationTo",
-        Q_ARG(QVariant, QVariant::fromValue(1110.0))));
-    QVERIFY(std::abs(controller->property("displayedPositionSeconds").toDouble() - 0.15) < 0.0001);
-
-    // A pending visual seek belongs to the old track as well.
-    QVERIFY(QMetaObject::invokeMethod(controller, "seekCommittedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(120.0)),
-        Q_ARG(QVariant, QVariant::fromValue(1200.0))));
-    bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/third.wav"));
-    bridge->setProperty("positionSeconds", 0.0);
-    QVERIFY(QMetaObject::invokeMethod(controller, "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1210.0)),
-        Q_ARG(QVariant, QVariant()), Q_ARG(QVariant, QVariant())));
-    QVERIFY(!controller->property("visualSeekClockActive").toBool());
-    QCOMPARE(controller->property("displayedPositionSeconds").toDouble(), 0.0);
-    QCOMPARE(controller->property("spectrogramPositionSeconds").toDouble(), 0.0);
-}
-
-void QmlSmokeTest::playbackControllerPlayAtCurrentTrackClearsPostSeekVisualClock() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 480.0
-        property string currentTrackPath: "/music/test.flac"
-        property int playingQueueIndex: 0
-        property real volume: 1.0
-        property var playAtCalls: []
-        property var seekCalls: []
-        function seek(value) { seekCalls = seekCalls.concat([value]) }
-        function playAt(index) { playAtCalls = playAtCalls.concat([index]) }
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
-    QVERIFY(bridge != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "initializeFromBridgeAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "seekCommittedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(410.0)),
-        Q_ARG(QVariant, QVariant::fromValue(2000.0))));
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "stepInterpolationTo",
-        Q_ARG(QVariant, QVariant::fromValue(2300.0))));
-    QVERIFY(controller->property("displayedPositionSeconds").toDouble() > 410.20);
-    QVERIFY(controller->property("visualSeekClockActive").toBool());
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "playAt",
-        Q_ARG(QVariant, QVariant::fromValue(0))));
-
-    QCOMPARE(bridge->property("playAtCalls").toList().size(), 1);
-    QCOMPARE(bridge->property("playAtCalls").toList().at(0).toInt(), 0);
-    QVERIFY(!controller->property("visualSeekClockActive").toBool());
-    QVERIFY2(
-        controller->property("displayedPositionSeconds").toDouble() < 0.02,
-        qPrintable(QStringLiteral("displayed=%1")
-            .arg(controller->property("displayedPositionSeconds").toDouble(), 0, 'f', 6)));
-    QVERIFY2(
-        controller->property("spectrogramPositionSeconds").toDouble() < 0.02,
-        qPrintable(QStringLiteral("spectrogram=%1")
-            .arg(controller->property("spectrogramPositionSeconds").toDouble(), 0, 'f', 6)));
-
-    bridge->setProperty("positionSeconds", 0.0);
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(2310.0)),
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    QVERIFY2(
-        controller->property("displayedPositionSeconds").toDouble() < 0.03,
-        qPrintable(QStringLiteral("displayed_after_heartbeat=%1")
-            .arg(controller->property("displayedPositionSeconds").toDouble(), 0, 'f', 6)));
-    QVERIFY2(
-        controller->property("spectrogramPositionSeconds").toDouble() < 0.03,
-        qPrintable(QStringLiteral("spectrogram_after_heartbeat=%1")
-            .arg(controller->property("spectrogramPositionSeconds").toDouble(), 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerHeartbeatCorrectionAvoidsOneFrameSpeedBurst() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
-    const double displayedBeforeHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.18);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChanged",
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const double displayedImmediately =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY2(
-        displayedImmediately >= displayedBeforeHeartbeat - 0.001
-            && displayedImmediately <= displayedBeforeHeartbeat + 0.03,
-        qPrintable(
-            QStringLiteral("displayed_immediately=%1 displayed_before=%2")
-                .arg(displayedImmediately, 0, 'f', 6)
-                .arg(displayedBeforeHeartbeat, 0, 'f', 6)));
-    QVERIFY2(
-        controller->property("interpolationRate").toDouble() > 1.0
-            && controller->property("interpolationRate").toDouble() <= 1.1,
-        qPrintable(QStringLiteral("rate=%1")
-            .arg(controller->property("interpolationRate").toDouble(), 0, 'f', 6)));
-
-    QTest::qWait(20);
-
-    const double displayedAfterOneFrame =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY2(
-        displayedAfterOneFrame >= (displayedImmediately - 0.001)
-            && displayedAfterOneFrame <= (displayedImmediately + 0.03),
-        qPrintable(
-            QStringLiteral("displayed_immediately=%1 displayed_after=%2")
-                .arg(displayedImmediately, 0, 'f', 6)
-                .arg(displayedAfterOneFrame, 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerModerateSteadyStateLagUsesTrimNotBleed() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-        property bool profileLogsEnabled: true
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
-
-    clearCapturedMessages();
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    const double displayedBeforeHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.078);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChanged",
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const QString warnings = takeCapturedMessagesText();
-    QVERIFY2(
-        !warnings.contains(QStringLiteral("[qml-playback-profile] heartbeat")),
-        qPrintable(warnings));
-    QVERIFY2(!warnings.contains(QStringLiteral("action=trim")), qPrintable(warnings));
-    QVERIFY2(!warnings.contains(QStringLiteral("action=bleed")), qPrintable(warnings));
-}
-
-void QmlSmokeTest::playbackControllerProfileLogsHeartbeatCorrectionAndBleed() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-        property bool profileLogsEnabled: true
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
-
-    clearCapturedMessages();
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    const double displayedBeforeHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.18);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChanged",
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const QString warnings = takeCapturedMessagesText();
-    QVERIFY2(
-        warnings.contains(QStringLiteral("[qml-playback-profile] heartbeat")),
-        qPrintable(warnings));
-    QVERIFY2(
-        warnings.contains(QStringLiteral("action=follow")),
-        qPrintable(warnings));
-    QVERIFY2(
-        !warnings.contains(QStringLiteral("[qml-playback-profile] bleed")),
-        qPrintable(warnings));
-}
-
-void QmlSmokeTest::playbackControllerProfileSkipsMinorFollowHeartbeatLogs() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-        property bool profileLogsEnabled: true
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
-
-    clearCapturedMessages();
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    const double displayedBeforeHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-    bridge->setProperty("positionSeconds", displayedBeforeHeartbeat + 0.006);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChanged",
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const QString warnings = takeCapturedMessagesText();
-    QVERIFY2(
-        !warnings.contains(QStringLiteral("[qml-playback-profile] heartbeat")),
-        qPrintable(warnings));
-}
-
-void QmlSmokeTest::playbackControllerDelayedHeartbeatDoesNotJumpViewport() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "initializeFromBridgeAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-
-    bridge->setProperty("positionSeconds", 12.04);
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1040.0)),
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-    const double displayedBeforeDelayedHeartbeat =
-        controller->property("displayedPositionSeconds").toDouble();
-
-    // One bridge update was delayed/coalesced: its position advances by
-    // 80 ms although only 40 ms of UI wall time has elapsed.
-    bridge->setProperty("positionSeconds", 12.12);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChangedAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1080.0)),
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-
-    const double displayedImmediately =
-        controller->property("displayedPositionSeconds").toDouble();
-    QVERIFY2(
-        std::abs(displayedImmediately - 12.08) < 0.001,
-        qPrintable(
-            QStringLiteral("displayed_immediately=%1 displayed_before=%2")
-                .arg(displayedImmediately, 0, 'f', 6)
-                .arg(displayedBeforeDelayedHeartbeat, 0, 'f', 6)));
-    QVERIFY2(
-        controller->property("interpolationRate").toDouble() > 1.0
-            && controller->property("interpolationRate").toDouble() < 1.1,
-        qPrintable(QStringLiteral("rate=%1")
-            .arg(controller->property("interpolationRate").toDouble(), 0, 'f', 6)));
-
-}
-
-void QmlSmokeTest::playbackControllerKeepsWallClockInterpolationAfterSubRealtimeHeartbeats() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "initializeFromBridgeAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(1000.0))));
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-
-    const std::array<double, 4> heartbeatTimes = {1130.0, 1260.0, 1390.0, 1520.0};
-    const std::array<double, 4> heartbeatPositions = {12.122, 12.244, 12.366, 12.488};
-
-    for (std::size_t i = 0; i < heartbeatTimes.size(); ++i) {
-        bridge->setProperty("positionSeconds", heartbeatPositions[i]);
-        QVERIFY(QMetaObject::invokeMethod(
-            controller,
-            "handlePlaybackChangedAtTime",
-            Q_ARG(QVariant, QVariant::fromValue(heartbeatTimes[i])),
-            Q_ARG(QVariant, QVariant()),
-            Q_ARG(QVariant, QVariant())));
-    }
-
-    const double displayedBeforeFreeRun =
-        controller->property("displayedPositionSeconds").toDouble();
-
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "stepInterpolationTo",
-        Q_ARG(QVariant, QVariant::fromValue(1920.0))));
-
-    const double displayedAfterFreeRun =
-        controller->property("displayedPositionSeconds").toDouble();
-    const double localAdvance = displayedAfterFreeRun - displayedBeforeFreeRun;
-    QVERIFY2(
-        localAdvance > 0.384,
-        qPrintable(
-            QStringLiteral("displayed_before=%1 displayed_after=%2 local_advance=%3")
-                .arg(displayedBeforeFreeRun, 0, 'f', 6)
-                .arg(displayedAfterFreeRun, 0, 'f', 6)
-                .arg(localAdvance, 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerSteadyStateTrimReducesNoticeableLag() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QTRY_VERIFY(controller->property("displayedPositionSeconds").toDouble() > 12.0);
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-
-    double incomingPosition =
-        controller->property("displayedPositionSeconds").toDouble() + 0.10;
-    for (int i = 0; i < 20; ++i) {
-        bridge->setProperty("positionSeconds", incomingPosition);
-        QVERIFY(QMetaObject::invokeMethod(
-            controller,
-            "handlePlaybackChanged",
-            Q_ARG(QVariant, QVariant()),
-            Q_ARG(QVariant, QVariant())));
-        QTest::qWait(40);
-        incomingPosition += 0.039;
-    }
-
-    const double displayedPosition = controller->property("displayedPositionSeconds").toDouble();
-    const double backendPosition = bridge->property("positionSeconds").toDouble();
-    QVERIFY2(
-        std::abs(displayedPosition - backendPosition) < 0.07,
-        qPrintable(
-            QStringLiteral("displayed=%1 backend=%2")
-                .arg(displayedPosition, 0, 'f', 6)
-                .arg(backendPosition, 0, 'f', 6)));
-}
-
-void QmlSmokeTest::playbackControllerFollowsBoundedRecoveryCadenceWithoutBurst() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 12.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        // Keep the live timer from racing the explicit timestamps below.
-        seekPressed: true
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    double nowMs = 1000.0;
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "initializeFromBridgeAtTime",
-        Q_ARG(QVariant, QVariant::fromValue(nowMs))));
-
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-
-    constexpr double heartbeatIntervalMs = 40.0;
-    constexpr double maximumRecoveryRate = 1.1;
-    const std::array<double, 6> positions = {12.039, 12.079, 12.122, 12.165, 12.208, 12.251};
-    double previousDisplayed = controller->property("displayedPositionSeconds").toDouble();
-    double maximumStep = 0.0;
-
-    for (double nextPosition : positions) {
-        nowMs += heartbeatIntervalMs;
-        bridge->setProperty("positionSeconds", nextPosition);
-        QVERIFY(QMetaObject::invokeMethod(
-            controller,
-            "handlePlaybackChangedAtTime",
-            Q_ARG(QVariant, QVariant::fromValue(nowMs)),
-            Q_ARG(QVariant, QVariant()),
-            Q_ARG(QVariant, QVariant())));
-        const double displayed = controller->property("displayedPositionSeconds").toDouble();
-        maximumStep = std::max(maximumStep, displayed - previousDisplayed);
-        previousDisplayed = displayed;
-    }
-
-    QVERIFY2(
-        maximumStep <= heartbeatIntervalMs / 1000.0 * maximumRecoveryRate + 0.000001,
-        qPrintable(QStringLiteral("maximum_step=%1").arg(maximumStep, 0, 'f', 6)));
-    const double displayedPosition = controller->property("displayedPositionSeconds").toDouble();
-    const double backendPosition = bridge->property("positionSeconds").toDouble();
-    QVERIFY2(
-        std::abs(displayedPosition - backendPosition) < 0.04,
-        qPrintable(
-            QStringLiteral("displayed=%1 backend=%2")
-                .arg(displayedPosition, 0, 'f', 6)
-                .arg(backendPosition, 0, 'f', 6)));
+    QCOMPARE(bridge->property("seekCalls").toList().size(), 1);
 }
 
 void QmlSmokeTest::spectrogramMetadataOnlyResetWaitsForDataChunk() {
@@ -3898,7 +2785,7 @@ void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
 
     const qint64 writeSeqBeforeSeek = item.m_ringWriteSeq;
     QCOMPARE(writeSeqBeforeSeek, 12);
-    item.setPositionSeconds((8.0 * 1024.0) / 48'000.0);
+    setTestPosition(item, (8.0 * 1024.0) / 48'000.0);
 
     item.feedPrecomputedChunk(
         QByteArray(),
@@ -3994,7 +2881,7 @@ void QmlSmokeTest::spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch() {
         (static_cast<double>(currentTrackCol) + 0.25)
         * static_cast<double>(hop)
         / static_cast<double>(sampleRate);
-    item.setPositionSeconds(positionSeconds);
+    setTestPosition(item, positionSeconds);
 
     QCOMPARE(item.m_rollingEpoch, static_cast<qint64>(0));
     QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(columns));
@@ -4033,10 +2920,13 @@ void QmlSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {
         false,
         true,
         11);
-    item.setPositionSeconds(1.0);
+    setTestPosition(item, 1.0);
     item.setPlaying(true);
 
-    item.setPositionSeconds(120.0);
+    // A seek far away: the rolling history keeps scrolling from where it
+    // was until the worker's data for the target arrives.
+    const double expectedSeconds = (512.0 * 1024.0) / 48000.0;
+    setTestPosition(item, expectedSeconds);
     QVERIFY(item.m_positionJumpHoldActive);
     QVERIFY(std::abs(item.m_positionSeconds - 1.0) < 0.0001);
 
@@ -4067,51 +2957,21 @@ void QmlSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {
         false,
         11);
 
-    const double expectedSeconds = (512.0 * 1024.0) / 48000.0;
     QVERIFY(!item.m_positionJumpHoldActive);
-    QVERIFY(std::abs(item.m_positionSeconds - expectedSeconds) < 0.0001);
+    // The playhead follows the clock again, which has advanced since.
+    QVERIFY(item.m_positionSeconds >= expectedSeconds);
+    QVERIFY(item.m_positionSeconds < expectedSeconds + 0.5);
 }
 
-void QmlSmokeTest::spectrogramPlaybackHeartbeatDoesNotMoveAnchorBackward() {
-    SpectrogramItem item;
-
-    item.setPositionSeconds(0.0);
-    item.setPlaying(true);
-
-    QTest::qWait(70);
-    item.setPositionSeconds(0.05);
-    const double anchoredPosition = item.positionSeconds();
-    QVERIFY2(
-        anchoredPosition >= 0.05,
-        qPrintable(QStringLiteral("expected anchor to move forward, got %1")
-            .arg(anchoredPosition, 0, 'f', 3)));
-
-    QTest::qWait(70);
-    item.setPositionSeconds(0.02);
-
-    QVERIFY2(
-        item.positionSeconds() >= anchoredPosition - 0.001,
-        qPrintable(QStringLiteral(
-            "lagging playback heartbeat moved anchor backward from %1 to %2")
-            .arg(anchoredPosition, 0, 'f', 3)
-            .arg(item.positionSeconds(), 0, 'f', 3)));
-}
-
-void QmlSmokeTest::spectrogramCenteredSmallSeekSnapsWithoutServoSlide() {
+void QmlSmokeTest::spectrogramCenteredSmallSeekMovesAtOnce() {
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
 
-    item.setPositionSeconds(10.0);
+    setTestPosition(item, 10.0);
     item.setPlaying(true);
 
-    QTest::qWait(30);
-    item.setPositionSeconds(10.08);
+    testClock(item).holdAt(10.08);
 
-    QVERIFY2(
-        std::abs(item.m_positionAnchorSeconds - 10.08) < 0.0001,
-        qPrintable(QStringLiteral(
-            "centered small seek should snap to target, got anchor %1")
-            .arg(item.m_positionAnchorSeconds, 0, 'f', 4)));
     QVERIFY2(
         std::abs(item.m_positionSeconds - 10.08) < 0.0001,
         qPrintable(QStringLiteral(
@@ -4124,12 +2984,12 @@ void QmlSmokeTest::spectrogramCenteredSeekFollowsLocalVisualClock() {
     item.setDisplayMode(1); // Centered
 
     item.m_precomputedReady = true;
-    item.setPositionSeconds(0.5);
+    setTestPosition(item, 0.5);
     item.setPlaying(true);
 
     constexpr double seekTarget = 134.577;
-    item.setPositionSeconds(seekTarget);
-    item.setPositionSeconds(seekTarget + 0.08);
+    setTestPosition(item, seekTarget);
+    setTestPosition(item, seekTarget + 0.08);
 
     const double displayed =
         item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
@@ -4145,12 +3005,12 @@ void QmlSmokeTest::spectrogramEarlyCenteredSeekFollowsLocalVisualClockBeforePrec
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
 
-    item.setPositionSeconds(0.6);
+    setTestPosition(item, 0.6);
     item.setPlaying(true);
 
     constexpr double seekTarget = 117.079;
-    item.setPositionSeconds(seekTarget);
-    item.setPositionSeconds(seekTarget + 0.08);
+    setTestPosition(item, seekTarget);
+    setTestPosition(item, seekTarget + 0.08);
 
     const double displayed =
         item.currentRenderPositionSecondsLocked(std::chrono::steady_clock::now());
@@ -4160,6 +3020,119 @@ void QmlSmokeTest::spectrogramEarlyCenteredSeekFollowsLocalVisualClockBeforePrec
             "early centered seek should follow the visual clock before precomputed ready, target=%1 displayed=%2")
             .arg(seekTarget, 0, 'f', 3)
             .arg(displayed, 0, 'f', 3)));
+}
+
+void QmlSmokeTest::visualizationsDrawTheSharedPlaybackClock() {
+    // Rolling and centered spectrograms and the waveform read one clock,
+    // each at its own frame time, instead of extrapolating on their own.
+    PlaybackClock clock;
+    SpectrogramItem rolling;
+    rolling.setDisplayMode(0);
+    SpectrogramItem centered;
+    centered.setDisplayMode(1);
+    WaveformEditorItem waveform;
+    waveform.setDurationSeconds(600.0);
+    for (SpectrogramItem *item : {&rolling, &centered}) {
+        item->setPlaying(true);
+        item->setClock(&clock);
+    }
+    waveform.setPlaying(true);
+    waveform.setClock(&clock);
+
+    PlaybackSample sample;
+    sample.positionSeconds = 20.0;
+    sample.sampledAtNs = monotonicNowNs() - 1'000'000'000;
+    sample.advancing = true;
+    sample.durationSeconds = 600.0;
+    sample.trackToken = 1;
+    clock.applySample(sample, true);
+
+    using std::chrono::nanoseconds;
+    using std::chrono::steady_clock;
+    for (const qint64 offset : {0LL, 16'666'667LL, 500'000'000LL}) {
+        const qint64 frameNs = monotonicNowNs() + offset;
+        const auto frame = steady_clock::time_point(nanoseconds(frameNs));
+        const double expected = clock.positionAt(frameNs);
+        QVERIFY(expected >= 21.0);
+        QCOMPARE(rolling.currentRenderPositionSecondsLocked(frame), expected);
+        QCOMPARE(centered.currentRenderPositionSecondsLocked(frame), expected);
+    }
+    const double before = clock.positionAt(monotonicNowNs());
+    const double drawn = waveform.displayedPositionSecondsLocked();
+    const double after = clock.positionAt(monotonicNowNs());
+    QVERIFY(drawn >= before && drawn <= after);
+
+    // A seek moves them together.
+    clock.holdAt(300.0);
+    QCOMPARE(rolling.positionSeconds(), 300.0);
+    QCOMPARE(centered.positionSeconds(), 300.0);
+    QCOMPARE(waveform.positionSeconds(), 300.0);
+}
+
+void QmlSmokeTest::spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds_data() {
+    QTest::addColumn<bool>("clockFirst");
+    QTest::newRow("clock-first") << true;
+    QTest::newRow("data-first") << false;
+}
+
+void QmlSmokeTest::spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds() {
+    // A gapless successor's columns follow the previous track's in the
+    // rolling history. The engine reports the successor before the end of
+    // the previous track has played, stamped with the time that track
+    // ends; the playhead goes on with the previous track until then, and
+    // shows the successor after it.
+    QFETCH(bool, clockFirst);
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(true);
+    constexpr int bins = 8;
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 1024, 48'000, 1'024, false, true, 1, true);
+    item.feedPrecomputedChunk(
+        QByteArray(64 * bins, '\x20'), bins, 0, 64, 0, 1024, 48'000, 1'024, false, false, 1);
+    item.m_precomputedReady = true;
+
+    PlaybackClock &clock = testClock(item);
+    const qint64 now = monotonicNowNs();
+    PlaybackSample previous;
+    previous.positionSeconds = 3.8;
+    previous.sampledAtNs = now;
+    previous.advancing = true;
+    previous.durationSeconds = 4.0;
+    previous.trackToken = 1;
+    clock.applySample(previous, true);
+    PlaybackSample successor = previous;
+    successor.positionSeconds = 0.0;
+    successor.sampledAtNs = now + 200'000'000;
+    successor.durationSeconds = 4.5;
+    successor.trackToken = 2;
+
+    const auto feedSuccessor = [&]() {
+        item.feedPrecomputedChunk(
+            QByteArray(8 * bins, '\x60'), bins, 0, 8, 0, 1024, 48'000, 1'024, false, false, 2);
+    };
+    if (clockFirst) {
+        clock.applySample(successor, false);
+        // The history still shows the previous track.
+        QVERIFY(item.m_positionJumpHoldActive);
+        feedSuccessor();
+    } else {
+        feedSuccessor();
+        QVERIFY(item.m_gaplessContinuationPending);
+        clock.applySample(successor, false);
+    }
+    QVERIFY(!item.m_gaplessContinuationPending);
+    QCOMPARE(item.m_gaplessPositionOffset, 4.0);
+    QCOMPARE(item.m_positionJumpHoldUntilNs, successor.sampledAtNs);
+
+    using std::chrono::nanoseconds;
+    using std::chrono::steady_clock;
+    const auto at = [](qint64 nanos) { return steady_clock::time_point(nanoseconds(nanos)); };
+    QVERIFY(std::abs(item.currentRenderPositionSecondsLocked(at(now + 100'000'000)) - 3.9) < 1e-6);
+    QVERIFY(std::abs(item.currentRenderPositionSecondsLocked(at(now + 199'000'000)) - 3.999) < 1e-6);
+    QVERIFY(std::abs(item.currentRenderPositionSecondsLocked(at(now + 300'000'000)) - 4.1) < 1e-6);
 }
 
 void QmlSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {
@@ -4396,6 +3369,10 @@ void QmlSmokeTest::spectrogramRollingZoomResetAnchorsEpochToResetStart() {
         trackToken,
         true);
 
+    // The worker restarts the zoom at the playhead.
+    setTestPosition(
+        item,
+        (static_cast<double>(resetStart) + 0.25) * newHop / static_cast<double>(sampleRate));
     item.feedPrecomputedChunk(
         QByteArray(),
         binsPerColumn,
@@ -4431,7 +3408,7 @@ void QmlSmokeTest::spectrogramRollingZoomResetAnchorsEpochToResetStart() {
     const double colsPerSecond =
         static_cast<double>(sampleRate) / static_cast<double>(newHop);
     const qint64 anchoredCol = static_cast<qint64>(std::floor(
-        item.m_positionAnchorSeconds * colsPerSecond));
+        item.m_positionSeconds * colsPerSecond));
     QCOMPARE(anchoredCol, static_cast<qint64>(resetStart));
     QCOMPARE(item.m_rollingEpoch + anchoredCol, static_cast<qint64>(0));
 }
@@ -4485,9 +3462,14 @@ void QmlSmokeTest::spectrogramSeekResetAnchorsPlaybackClockToChunkStart() {
         false,
         11);
 
+    // The clock does not show the seek yet: the playhead starts from the
+    // data and waits for the clock there.
     const double expectedSeconds = (256.0 * 1024.0) / 48000.0;
-    QVERIFY(std::abs(item.m_positionAnchorSeconds - expectedSeconds) < 0.0001);
+    QVERIFY(item.m_positionJumpHoldActive);
+    QVERIFY(std::abs(item.m_positionHoldTrajectory.anchorSeconds - expectedSeconds) < 0.0001);
     QVERIFY(std::abs(item.m_positionSeconds - expectedSeconds) < 0.0001);
+    setTestPosition(item, expectedSeconds + 0.01);
+    QVERIFY(!item.m_positionJumpHoldActive);
 }
 
 void QmlSmokeTest::diagnosticsLogUsesLowercaseAppDir() {
@@ -4633,7 +3615,7 @@ void QmlSmokeTest::spectrogramSmoothnessProfileFlagsGapHeavyWindow() {
 #endif
 }
 
-void QmlSmokeTest::spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSignals() {
+void QmlSmokeTest::spectrogramSmoothnessProfileTracksAdvanceFallbackSignals() {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     qputenv("FERROUS_PROFILE_UI", "1");
 
@@ -4650,14 +3632,7 @@ void QmlSmokeTest::spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSign
         item.m_smoothnessProfile.lastFrameAtMs = item.m_smoothnessProfile.startedAtMs;
         item.m_precomputedReady = true;
         item.m_playing = true;
-        item.m_positionAnchorInitialized = true;
-        item.m_positionSeconds = 10.0;
-        item.m_positionAnchorSeconds = 10.0;
-        item.m_positionAnchorUpdatedAt = std::chrono::steady_clock::now();
     }
-
-    item.setPositionSeconds(10.04);
-    item.setPositionSeconds(9.95);
 
     QVariantMap state;
     {
@@ -4675,9 +3650,6 @@ void QmlSmokeTest::spectrogramSmoothnessProfileTracksServoAndAdvanceFallbackSign
 
     qunsetenv("FERROUS_PROFILE_UI");
     QVERIFY(!state.isEmpty());
-    QCOMPARE(state.value("servoFrames").toInt(), 2);
-    QCOMPARE(state.value("servoRegressionDrops").toInt(), 1);
-    QVERIFY(state.value("maxServoErrorMs").toDouble() >= 20.0);
     QCOMPARE(state.value("advanceFallbackFrames").toInt(), 1);
     QCOMPARE(state.value("nonUnityAdvanceFallbackFrames").toInt(), 1);
     QVERIFY(state.value("maxAdvanceFallbackZoomDelta").toDouble() > 0.9);
@@ -4818,7 +3790,7 @@ void QmlSmokeTest::waveformEditorCachedDecoderPreservesOverlappingSamples() {
             WaveformEditorItem item;
             item.setWidth(width);
             item.setDurationSeconds(static_cast<double>(frames) / 48'000.0);
-            item.setPositionSeconds(0.3);
+            setTestPosition(item, 0.3);
             item.m_sampleRateHz = 48'000;
             item.setZoomLevel(zoom);
             const auto [start, end] = item.visibleRangeLocked();
@@ -4948,7 +3920,7 @@ void QmlSmokeTest::waveformEditorConnectsSamplesBeforeMarkers() {
     item.setWidth(400);
     item.setHeight(180);
     item.setDurationSeconds(1.0);
-    item.setPositionSeconds(0.5);
+    setTestPosition(item, 0.5);
     item.m_sampleRateHz = 1'000;
     item.m_detail.sampleRateHz = 1'000;
     item.m_detail.channelCount = 1;
@@ -5042,7 +4014,7 @@ void QmlSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
     item.m_detail.pointCount = 1'000;
     item.m_detail.framesPerPoint = 1;
     item.m_detail.extrema.assign(2'000, 0.0F);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setZoomLevel(2.0);
 
     QImage canvas(400, 180, QImage::Format_RGB32);
@@ -5053,7 +4025,7 @@ void QmlSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
     QCOMPARE(item.m_cacheStartSeconds, 0.0);
     QCOMPARE(item.m_cacheEndSeconds, 10.0);
 
-    item.setPositionSeconds(5.1);
+    setTestPosition(item, 5.1);
     QVERIFY(!item.m_cacheDirty);
 }
 
@@ -5092,7 +4064,7 @@ void QmlSmokeTest::waveformEditorPendingWindowSuppressesDuplicateRequest() {
     item.m_requestedMaxPoints = 1'200;
     item.m_requestedRenderWidth = 400;
 
-    item.setPositionSeconds(2.0);
+    setTestPosition(item, 2.0);
 
     QVERIFY(!item.m_requestTimer.isActive());
 }
@@ -5119,7 +4091,7 @@ void QmlSmokeTest::waveformEditorResizeRaisesDetailRequestDensity() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setDurationSeconds(100.0);
-    item.setPositionSeconds(50.0);
+    setTestPosition(item, 50.0);
     item.setZoomLevel(4.0);
     const auto [smallStart, smallEnd] = item.requestRangeLocked(37.5, 62.5);
     const int smallRequest = item.detailRequestPointCountLocked(smallStart, smallEnd);
@@ -5141,7 +4113,7 @@ void QmlSmokeTest::waveformEditorDeepZoomRequestPreservesViewportDensity() {
     WaveformEditorItem item;
     item.setWidth(3'440);
     item.setDurationSeconds(240.0);
-    item.setPositionSeconds(120.0);
+    setTestPosition(item, 120.0);
     item.setZoomLevel(8'301.0);
     const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
     const auto [requestStart, requestEnd] = item.requestRangeLocked(
@@ -5159,7 +4131,7 @@ void QmlSmokeTest::waveformEditorQuantizesRequestForRequiredBinDensity() {
     WaveformEditorItem item;
     item.setWidth(1'183);
     item.setDurationSeconds(257.133333);
-    item.setPositionSeconds(46.3);
+    setTestPosition(item, 46.3);
     item.m_sampleRateHz = 44'100;
     item.setZoomLevel(1'726.76);
     const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
@@ -5184,7 +4156,7 @@ void QmlSmokeTest::waveformEditorFullscreenRequestStaysInTargetBin() {
     WaveformEditorItem item;
     item.setWidth(3'440);
     item.setDurationSeconds(257.133333);
-    item.setPositionSeconds(72.0);
+    setTestPosition(item, 72.0);
     item.m_sampleRateHz = 44'100;
     item.setZoomLevel(475.06);
     const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
@@ -5210,7 +4182,7 @@ void QmlSmokeTest::waveformEditorFullscreenSampleCurveRequestsRawFramesEarly() {
     WaveformEditorItem item;
     item.setWidth(3'440);
     item.setDurationSeconds(257.133333);
-    item.setPositionSeconds(8.9);
+    setTestPosition(item, 8.9);
     item.m_sampleRateHz = 44'100;
     item.setZoomLevel(185.409);
     const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
@@ -5251,7 +4223,7 @@ void QmlSmokeTest::waveformEditorSampleViewPrefetchesUsefulSpan() {
     WaveformEditorItem item;
     item.setWidth(1'183);
     item.setDurationSeconds(257.133333);
-    item.setPositionSeconds(40.0);
+    setTestPosition(item, 40.0);
     item.m_sampleRateHz = 44'100;
     item.setZoomLevel(76'683.55);
     const auto [visibleStart, visibleEnd] = item.visibleRangeLocked();
@@ -5271,7 +4243,7 @@ void QmlSmokeTest::waveformEditorPrefetchesBeforeDetailBoundary() {
     item.setWidth(400);
     item.setDurationSeconds(10.0);
     item.setZoomLevel(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.m_requestTimer.stop();
     item.m_detail.sampleRateHz = 100;
     item.m_detail.channelCount = 1;
@@ -5281,7 +4253,7 @@ void QmlSmokeTest::waveformEditorPrefetchesBeforeDetailBoundary() {
     item.m_detail.pointCount = 300;
     item.m_detail.extrema.assign(600, 0.0F);
 
-    item.setPositionSeconds(5.5);
+    setTestPosition(item, 5.5);
 
     QVERIFY(item.visibleRangeLocked().second < item.m_detail.endSeconds);
     QVERIFY(item.m_requestTimer.isActive());
@@ -5292,7 +4264,7 @@ void QmlSmokeTest::waveformEditorFullscreenPrefetchDoesNotWaitPastCoverage() {
     item.setWidth(3440);
     item.setHeight(1440);
     item.setDurationSeconds(225.413333);
-    item.setPositionSeconds(70.0);
+    setTestPosition(item, 70.0);
     item.m_sampleRateHz = 44100;
     item.setZoomLevel(std::pow(1.25, 23));
     const auto [start, end] = item.visibleRangeLocked();
@@ -5305,8 +4277,7 @@ void QmlSmokeTest::waveformEditorFullscreenPrefetchDoesNotWaitPastCoverage() {
     item.m_detail.startSeconds = requestStart;
     item.m_detail.endSeconds = requestEnd;
     item.m_playing = true;
-    item.m_positionSeconds += margin * 0.4 + 0.001;
-    item.m_positionUpdatedAt = std::chrono::steady_clock::now();
+    item.m_clockState.anchorSeconds += margin * 0.4 + 0.001;
     item.handleWindowFrameSwapped();
     const auto [nextStart, nextEnd] = item.visibleRangeLocked();
     QVERIFY(item.detailCoversRangeLocked(nextStart, nextEnd));
@@ -5322,7 +4293,7 @@ void QmlSmokeTest::waveformEditorKeepsOverlappingDetailDuringHandoff() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setZoomLevel(2.0);
     item.m_requestTimer.stop();
     item.m_detail.sampleRateHz = 100;
@@ -5356,7 +4327,7 @@ void QmlSmokeTest::waveformEditorWideDetailCacheKeepsViewportDensity() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.m_detail.sampleRateHz = 48'000;
     item.m_detail.channelCount = 1;
     item.m_detail.startSeconds = 0.0;
@@ -5416,7 +4387,7 @@ void QmlSmokeTest::waveformEditorFullscreenWholeTrackRetainsCache() {
         // Playback reports nanoseconds, not the six decimals printed by ffprobe.
         constexpr double duration = 225.413333333;
         item.setDurationSeconds(duration);
-        item.setPositionSeconds(70.0);
+        setTestPosition(item, 70.0);
         item.setOverviewComplete(true);
         item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
         item.setCrosshairEnabled(true);
@@ -5474,7 +4445,7 @@ void QmlSmokeTest::waveformEditorZoomOutDefersOverviewUntilDetailReady() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setOverviewComplete(true);
     item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
     item.m_sampleRateHz = 100;
@@ -5513,7 +4484,7 @@ void QmlSmokeTest::waveformEditorDeferredZoomOutCommitsCompletedDetailCache() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.m_sampleRateHz = 100;
     item.m_detail.sampleRateHz = 100;
     item.m_detail.channelCount = 1;
@@ -5559,7 +4530,7 @@ void QmlSmokeTest::waveformEditorZoomOutKeepsReadyDetail() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.m_sampleRateHz = 640;
     item.m_detail.sampleRateHz = 640;
     item.m_detail.channelCount = 1;
@@ -5581,7 +4552,7 @@ void QmlSmokeTest::waveformEditorZoomInRetainsCoveredCacheWhileRefining() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setOverviewComplete(true);
     item.setOverviewData(QByteArray(1'024, static_cast<char>(128)));
 
@@ -5603,7 +4574,7 @@ void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoun
     item.setWidth(400);
     item.setHeight(180);
     item.setDurationSeconds(1.0);
-    item.setPositionSeconds(0.5);
+    setTestPosition(item, 0.5);
     item.m_sampleRateHz = 12'000;
     item.m_detail.sampleRateHz = 12'000;
     item.m_detail.channelCount = 1;
@@ -5655,7 +4626,7 @@ void QmlSmokeTest::waveformEditorSparseZoomDetailFallsBackUntilReady() {
     item.setWidth(400);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setZoomLevel(100.0);
     item.setOverviewComplete(true);
     item.setOverviewData(QByteArray(1'024, static_cast<char>(255)));
@@ -5783,7 +4754,7 @@ void QmlSmokeTest::waveformEditorCacheHandoffsKeepAbsolutePixelGrid() {
     item.m_detail.pointCount = 10'000;
     item.m_zoomLevel = 5.0;
     item.m_presentedZoomLevel = 5.0;
-    item.m_positionSeconds = 3.37;
+    item.m_clockState.anchorSeconds = 3.37;
     item.m_detail.extrema.reserve(20'000);
     for (int point = 0; point < item.m_detail.pointCount; ++point) {
         const float minimum = -static_cast<float>((point % 17) + 1) / 20.0F;
@@ -5897,7 +4868,7 @@ void QmlSmokeTest::waveformEditorBuildsPlaybackTilesWithinFrameBudget() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.m_positionSeconds = 5.0;
+    item.m_clockState.anchorSeconds = 5.0;
     item.m_zoomLevel = 4.0;
     item.m_presentedZoomLevel = 4.0;
     item.m_playing = true;
@@ -5959,7 +4930,7 @@ void QmlSmokeTest::waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.m_positionSeconds = 5.0;
+    setTestPosition(item, 5.0);
     item.m_zoomLevel = 4.0;
     item.m_presentedZoomLevel = 4.0;
     item.m_playing = true;
@@ -6001,7 +4972,7 @@ void QmlSmokeTest::waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs() {
     item.m_cacheEndSeconds = 1.0;
     item.m_detail = {};
     QVERIFY(item.playbackTilesEligibleLocked(visibleStart, visibleEnd));
-    item.setPositionSeconds(5.01);
+    setTestPosition(item, 5.01);
     QVERIFY(!item.m_cacheDirty);
     QVERIFY(!item.m_playbackTiles.empty());
 }
@@ -6012,7 +4983,7 @@ void QmlSmokeTest::waveformEditorLateDetailPreservesPartialPlaybackTiles() {
         item.setWidth(3440);
         item.setHeight(1440);
         item.setDurationSeconds(225.413333);
-        item.setPositionSeconds(70.0);
+        setTestPosition(item, 70.0);
         item.setViewMode(viewMode);
         item.m_sampleRateHz = 44100;
         item.m_channelCount = 2;
@@ -6036,8 +5007,7 @@ void QmlSmokeTest::waveformEditorLateDetailPreservesPartialPlaybackTiles() {
         item.m_cacheStartSeconds = requestStart;
         item.m_cacheEndSeconds = requestEnd;
         // A late result lets playback overtake both the detail and raster edge.
-        item.m_positionSeconds += 0.1;
-        item.m_positionUpdatedAt = std::chrono::steady_clock::now();
+        item.m_clockState.anchorSeconds += 0.1;
         const auto [nextStart, nextEnd] = item.visibleRangeLocked();
         QVERIFY(!item.detailCoversRangeLocked(nextStart, nextEnd));
         QVERIFY(!item.playbackTilesCoverLocked(nextStart, nextEnd));
@@ -6055,7 +5025,7 @@ void QmlSmokeTest::waveformEditorLateDetailPreservesPartialPlaybackTiles() {
         QVERIFY(rendered > 0 && rendered <= 8);
         QVERIFY(item.playbackTilesCoverLocked(nextStart, nextEnd));
         // A distant seek has no reusable overlap and must refresh its fallback.
-        item.applyExplicitSeekPosition(150.0);
+        testClock(item).holdAt(150.0);
         QVERIFY(item.m_cacheDirty);
         QVERIFY(item.m_playbackTiles.empty());
         // Track changes still discard all presentation resources and data.
@@ -6070,7 +5040,7 @@ void QmlSmokeTest::waveformEditorBuildsReplacementCacheIncrementally() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setOverviewComplete(true);
     item.setOverviewData(QByteArray(1'024, static_cast<char>(128)));
 
@@ -6156,7 +5126,7 @@ void QmlSmokeTest::waveformEditorZoomedPlaybackUsesScrollingCache() {
     item.setWidth(400);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setZoomLevel(10.0);
     item.m_detail.sampleRateHz = 48'000;
     item.m_detail.channelCount = 1;
@@ -6184,12 +5154,11 @@ void QmlSmokeTest::waveformEditorPlaybackOverviewCacheHasForwardHeadroom() {
     item.setWidth(400);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setZoomLevel(10.0);
     item.setOverviewComplete(true);
     item.setOverviewData(QByteArray(1'024, static_cast<char>(128)));
     item.m_playing = true;
-    item.m_positionUpdatedAt = std::chrono::steady_clock::now();
 
     QImage canvas(400, 180, QImage::Format_RGB32);
     QPainter painter(&canvas);
@@ -6200,7 +5169,7 @@ void QmlSmokeTest::waveformEditorPlaybackOverviewCacheHasForwardHeadroom() {
 
     QVERIFY(!item.m_cacheDirty);
     QVERIFY(item.m_cacheEndSeconds > visibleEnd + visibleSpan * 1.6);
-    item.setPositionSeconds(5.5);
+    setTestPosition(item, 5.5);
     QVERIFY(!item.m_cacheDirty);
 }
 
@@ -6256,39 +5225,39 @@ void QmlSmokeTest::waveformEditorPausedDetailReplacesOverviewCache() {
         false, false, false, false, 4, true));
 }
 
-void QmlSmokeTest::waveformEditorPlaybackHeartbeatDoesNotMoveBackward() {
+void QmlSmokeTest::waveformEditorFollowsThePlaybackClock() {
     WaveformEditorItem item;
     item.setDurationSeconds(30.0);
     item.m_requestTimer.stop();
-    item.m_playing = true;
-    item.m_positionSeconds = 10.0;
-    item.m_positionUpdatedAt = std::chrono::steady_clock::now()
-        - std::chrono::milliseconds(200);
-    const double before = item.displayedPositionSecondsLocked();
-
-    item.setPositionSeconds(before - 0.12);
-    const double after = item.displayedPositionSecondsLocked();
-
-    QVERIFY2(
-        after >= before - 0.01,
-        qPrintable(QStringLiteral("before=%1 after=%2")
-            .arg(before, 0, 'f', 6)
-            .arg(after, 0, 'f', 6)));
+    item.setPlaying(true);
+    PlaybackClock &clock = testClock(item);
+    setTestPositionAgo(item, 10.0, 0.2);
+    // The waveform shows the clock's position at the time it is drawn,
+    // without an estimate of its own.
+    const double before = clock.positionAt(monotonicNowNs());
+    const double displayed = item.displayedPositionSecondsLocked();
+    const double after = clock.positionAt(monotonicNowNs());
+    QVERIFY(before >= 10.2);
+    QVERIFY2(displayed >= before && displayed <= after,
+             qPrintable(QStringLiteral("displayed=%1 clock=[%2, %3]")
+                            .arg(displayed, 0, 'f', 6)
+                            .arg(before, 0, 'f', 6)
+                            .arg(after, 0, 'f', 6)));
+    QCOMPARE(item.positionSeconds() >= displayed, true);
 }
 
-void QmlSmokeTest::waveformEditorExplicitSeekBypassesHeartbeatSmoothing() {
+void QmlSmokeTest::waveformEditorSeeksMoveAtOnce() {
     WaveformEditorItem item;
     item.setDurationSeconds(30.0);
-    item.setPositionSeconds(10.0);
+    setTestPosition(item, 10.0);
     item.setPlaying(true);
     for (double target : {9.5, 9.4, 9.45, 0.0}) {
-        item.applyExplicitSeekPosition(target);
+        testClock(item).holdAt(target);
         QCOMPARE(item.positionSeconds(), target);
-        QVERIFY(item.displayedPositionSecondsLocked() < target + 0.02);
         QVERIFY(item.playing());
     }
     item.setPlaying(false);
-    item.applyExplicitSeekPosition(0.25);
+    testClock(item).holdAt(0.25);
     QCOMPARE(item.positionSeconds(), 0.25);
     QVERIFY(!item.playing());
 }
@@ -6355,7 +5324,7 @@ void QmlSmokeTest::waveformEditorSampleViewRepaintsCrosshairCleanly() {
     item.setWidth(400);
     item.setHeight(180);
     item.setDurationSeconds(1.0);
-    item.setPositionSeconds(0.5);
+    setTestPosition(item, 0.5);
     item.setCrosshairEnabled(true);
     item.m_sampleRateHz = 100;
     item.m_detail.sampleRateHz = 100;
@@ -6488,7 +5457,7 @@ void QmlSmokeTest::waveformEditorRulersRemainVisibleWhenZoomed() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.m_detail.sampleRateHz = 1'000;
     item.m_detail.channelCount = 1;
     item.m_detail.startSeconds = 0.0;
@@ -6522,7 +5491,7 @@ void QmlSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
     item.setWidth(320);
     item.setHeight(180);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
 
     QImage canvas(320, 180, QImage::Format_RGB32);
     canvas.fill(Qt::black);
@@ -6669,7 +5638,7 @@ void QmlSmokeTest::waveformSceneGraphReusesTextures() {
     item.setHeight(180);
     item.setGridEnabled(true);
     item.setDurationSeconds(60.0);
-    item.setPositionSeconds(30.0);
+    setTestPosition(item, 30.0);
     item.setOverviewComplete(true);
     item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
@@ -6677,7 +5646,7 @@ void QmlSmokeTest::waveformSceneGraphReusesTextures() {
     const auto initial = WaveformSceneGraph::statistics(node);
     QVERIFY(initial.uploadedBytes >= 3440 * 180 * 4);
     for (int frame = 0; frame < 20; ++frame) {
-        item.setPositionSeconds(30.0 + frame * 0.01);
+        setTestPosition(item, 30.0 + frame * 0.01);
         node = item.updatePaintNode(node, nullptr);
         QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, quint64{0});
     }
@@ -6748,7 +5717,7 @@ void QmlSmokeTest::waveformSceneGraphMatchesRaster() {
     item.setWidth(size.width());
     item.setHeight(size.height());
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setOverviewComplete(true);
     QByteArray overview(8192, Qt::Uninitialized);
     for (int i = 0; i < overview.size(); ++i) overview[i] = static_cast<char>(80 + 60 * std::sin(i * 0.03));
@@ -6820,7 +5789,7 @@ void QmlSmokeTest::waveformSceneGraphBenchmark() {
         for (const double zoom : {1.0, 8.0, 4000.0}) {
             WaveformEditorItem item;
             item.setWidth(size.width()); item.setHeight(size.height());
-            item.setDurationSeconds(60.0); item.setPositionSeconds(30.0);
+            item.setDurationSeconds(60.0); setTestPosition(item, 30.0);
             item.setOverviewComplete(true);
             item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
             item.m_sampleRateHz = 48000;
@@ -6841,7 +5810,7 @@ void QmlSmokeTest::waveformSceneGraphBenchmark() {
             constexpr int frames = 180;
             QElapsedTimer timer; timer.start();
             for (int i = 0; i < frames; ++i) {
-                item.m_positionSeconds = 30.0 + i * 0.00001;
+                item.m_clockState.anchorSeconds = 30.0 + i * 0.00001;
                 item.paint(&raster);
             }
             const double rasterMs = timer.nsecsElapsed() / 1.0e6 / frames;
@@ -6856,7 +5825,7 @@ void QmlSmokeTest::waveformSceneGraphBenchmark() {
             quint64 uploads = 0; quint64 bytes = 0;
             timer.restart();
             for (int i = 0; i < frames; ++i) {
-                item.m_positionSeconds = 30.0 + i * 0.00001; prepare();
+                item.m_clockState.anchorSeconds = 30.0 + i * 0.00001; prepare();
                 const auto stats = WaveformSceneGraph::statistics(node);
                 uploads += stats.textureUploads; bytes += stats.uploadedBytes;
             }
@@ -6873,16 +5842,17 @@ void QmlSmokeTest::waveformEditorUsesSceneGraphAndNativeFrameInterpolation() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setDurationSeconds(10.0);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setZoomLevel(2.0);
 
     QVERIFY(item.flags().testFlag(QQuickItem::ItemHasContents));
 
-    item.setPlaying(true);
+    // The view moves with the clock between its samples.
     const double before = item.visibleRangeLocked().first;
-    QTest::qWait(20);
+    item.setPlaying(true);
+    setTestPositionAgo(item, 5.0, 0.05);
     const double after = item.visibleRangeLocked().first;
-    QVERIFY(after > before + 0.01);
+    QVERIFY(after > before + 0.04);
 }
 
 void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {
@@ -7103,7 +6073,7 @@ void QmlSmokeTest::spectrogramCenteredModeSeekPreservesRing() {
     QCOMPARE(item.m_ringWriteSeq, 100);
 
     // Simulate a position change (seek) — ring must be preserved.
-    item.setPositionSeconds(50.0);
+    setTestPosition(item, 50.0);
     QCOMPARE(item.m_ringWriteSeq, 100);
 
     // Data at the new position must still be valid in the ring.
@@ -7204,7 +6174,7 @@ void QmlSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
             1024.0 / static_cast<double>(hop); // effectiveZoom == 1.0
     }
 
-    item.setPositionSeconds(3.554);
+    setTestPosition(item, 3.554);
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
 
@@ -7232,7 +6202,7 @@ void QmlSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() {
     // First playback, followed by a seek to 120 s at the default 1920 px
     // retention floor. This session never decoded the future fullscreen left.
     feed(0, 1000, true, 1);
-    item.applyExplicitSeekPosition(120.0);
+    testClock(item).holdAt(120.0);
     feed(4571, 2500, true, 2);
     QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
     QVERIFY(node);
@@ -7282,7 +6252,7 @@ void QmlSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
         item.rebuildPrecomputedCanvasLocked(320, 180, 0, 319, false);
     }
     QVERIFY(!item.m_canvas.isNull());
-    item.applyExplicitSeekPosition(3990.0 * 1024.0 / 44100.0);
+    testClock(item).holdAt(3990.0 * 1024.0 / 44100.0);
     item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0,
         false, true, token, true);
     QVERIFY(item.m_zoomFillActive);
@@ -7481,7 +6451,7 @@ void QmlSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
     // the EOF clamp must fire.  At 689 cols/s (hop=64, sr=44100),
     // pos=11.25 s -> col ~ 7750, which is maxCol - 250 (inside the
     // 600-col half-window trigger).
-    item.setPositionSeconds(11.25);
+    setTestPosition(item, 11.25);
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
@@ -7530,7 +6500,7 @@ void QmlSmokeTest::spectrogramCenteredEofDetachmentDisablesSubpixelScrolling() {
         item.m_renderZoomLevel = 8.0; // effectiveZoom = 0.5
     }
 
-    item.setPositionSeconds(11.25);
+    setTestPosition(item, 11.25);
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
@@ -7564,7 +6534,7 @@ void QmlSmokeTest::spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBefor
     item.feedPrecomputedChunk(
         data, bins, 0, decodedColumns, 0, totalEstimate,
         sampleRate, hop, false, false, 1);
-    item.setPositionSeconds(103.0);
+    setTestPosition(item, 103.0);
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
@@ -7618,7 +6588,7 @@ void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 1024.0 / static_cast<double>(hopZoomedOut);
     }
-    item.setPositionSeconds(0.0);
+    setTestPosition(item, 0.0);
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(!item.m_canvas.isNull());
@@ -7724,7 +6694,7 @@ void QmlSmokeTest::spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail() {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 1024.0 / static_cast<double>(hop);
     }
-    item.setPositionSeconds(280.0); // playhead near EOF, decode head lags
+    setTestPosition(item, 280.0); // playhead near EOF, decode head lags
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
@@ -8029,7 +6999,7 @@ void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
     item.feedPrecomputedChunk(
         oldData, bins, 0, 320, 0, total,
         48000, 1024, false, false, oldToken, false);
-    item.setPositionSeconds(72.0);
+    setTestPosition(item, 72.0);
 
     {
         QMutexLocker lock(&item.m_stateMutex);
@@ -8039,8 +7009,11 @@ void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
     QVERIFY(item.m_precomputedReady);
     QVERIFY(!item.m_canvas.isNull());
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(319));
-    QVERIFY(item.m_positionAnchorSeconds > 70.0);
+    QVERIFY(item.m_positionSeconds > 70.0);
 
+    // The clock reports the new track, then its metadata reset arrives.
+    setTestPosition(item, 0.0, newToken);
+    QVERIFY(item.m_positionSeconds < 0.01);
     item.feedPrecomputedChunk(
         QByteArray(), bins, 0, 0, 0, total,
         48000, 1024, false, true, newToken, true);
@@ -8052,7 +7025,7 @@ void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
     QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(-1));
     QCOMPARE(item.m_precomputedResetPending, false);
     QCOMPARE(item.m_zoomFillActive, false);
-    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.01);
+    QVERIFY(item.m_positionSeconds < 0.01);
 }
 
 void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {
@@ -8222,11 +7195,10 @@ void QmlSmokeTest::spectrogramTrackChangeCancelsPendingZoomDebounce() {
     QCOMPARE(backendZoomSpy.count(), 0);
 }
 
-void QmlSmokeTest::spectrogramCenteredGaplessSnapsAnchorToZero() {
-    // In centered mode, a gapless token change must immediately reset the
-    // position anchor to 0 so the display snaps to the beginning of the
-    // new track.  Without this, the anchor lingers at the old track's
-    // position (~428 s) for ~1 s, rendering at a wrong column.
+void QmlSmokeTest::spectrogramCenteredGaplessFollowsTheClock() {
+    // In centered mode, the playhead moves to the start of a gapless
+    // successor as soon as the clock reports it, and stays with the clock
+    // when the successor's data arrives.
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8238,36 +7210,28 @@ void QmlSmokeTest::spectrogramCenteredGaplessSnapsAnchorToZero() {
     constexpr quint64 oldToken = 5;
     constexpr quint64 newToken = 6;
 
-    // Set up old track: reset + some data, position deep into the track.
     item.feedPrecomputedChunk(
         QByteArray(), bins, 0, 0, 0, total, 48000, 1024, false, true, oldToken);
     QByteArray oldData(100 * bins, '\x10');
     item.feedPrecomputedChunk(
         oldData, bins, 0, 100, 0, total, 48000, 1024, false, false, oldToken);
-    item.setPositionSeconds(428.0);
-    QVERIFY(std::abs(item.m_positionAnchorSeconds - 428.0) < 1.0);
+    setTestPosition(item, 428.0, oldToken);
+    QVERIFY(std::abs(item.m_positionSeconds - 428.0) < 0.1);
 
-    // Simulate GStreamer position resetting to near 0 right before the
-    // gapless data arrives.  This should activate a jump hold.
-    item.setPositionSeconds(0.04);
-    QVERIFY(item.m_positionJumpHoldActive);
+    setTestPosition(item, 0.04, newToken);
+    QVERIFY(!item.m_positionJumpHoldActive);
+    QVERIFY(item.m_positionSeconds < 0.1);
 
-    // Gapless token change — first chunk with the new token.
     QByteArray newData(50 * bins, '\x40');
     item.feedPrecomputedChunk(
         newData, bins, 0, 50, 0, total, 48000, 1024, false, false, newToken);
     QCOMPARE(item.m_precomputedTrackToken, newToken);
-
-    // After the gapless transition, anchor must be at 0 and hold cleared.
-    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.01);
     QVERIFY(!item.m_positionJumpHoldActive);
+    QCOMPARE(item.m_gaplessPositionOffset, 0.0);
 
-    // Subsequent small position updates must be accepted normally
-    // (not held or snapped to the old position).
-    item.setPositionSeconds(0.08);
+    setTestPosition(item, 0.08, newToken);
     QVERIFY(!item.m_positionJumpHoldActive);
-    // Anchor should be near the incoming position, not 428.
-    QVERIFY(item.m_positionAnchorSeconds < 1.0);
+    QVERIFY(item.m_positionSeconds < 1.0);
 }
 
 void QmlSmokeTest::spectrogramForceFpsOverlayDoesNotOverrideQmlBinding() {
@@ -8344,105 +7308,6 @@ void QmlSmokeTest::spectrogramRenderLoopStopsWhenNotPlaying() {
     // With playing=false and no FPS overlay change, this is false.
     QVERIFY(item.m_precomputedReady);
     QVERIFY(!item.m_playing);
-}
-
-void QmlSmokeTest::playbackControllerInterpolationActivatesOnPlayback() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        property string playbackState: "Playing"
-        property real positionSeconds: 5.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QCOMPARE(controller->property("interpolationActive").toBool(), true);
-
-    // After a playback update, interpolation remains active.
-    QObject *bridge = qvariant_cast<QObject *>(controller->property("uiBridge"));
-    bridge->setProperty("positionSeconds", 5.12);
-    QVERIFY(QMetaObject::invokeMethod(
-        controller,
-        "handlePlaybackChanged",
-        Q_ARG(QVariant, QVariant()),
-        Q_ARG(QVariant, QVariant())));
-    QCOMPARE(controller->property("interpolationActive").toBool(), true);
-}
-
-void QmlSmokeTest::playbackControllerInterpolationDeactivatesOnStop() {
-    QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    // Embed JS no-op callbacks directly in the QML harness so
-    // handlePlaybackChanged can call haltSpectrogram without error.
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import "controllers" as Controllers
-
-Item {
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property string playbackState: "Playing"
-        property real positionSeconds: 10.0
-        property real durationSeconds: 180.0
-        property string currentTrackPath: "/music/test.flac"
-        property real volume: 1.0
-    }
-
-    Controllers.PlaybackController {
-        id: controller
-        objectName: "controller"
-        uiBridge: bridge
-        visualFeedsEnabled: true
-        seekPressed: false
-    }
-
-    function simulateStop() {
-        bridge.playbackState = "Stopped"
-        bridge.positionSeconds = 0.0
-        controller.handlePlaybackChanged(
-            function() { /* halt */ },
-            function() { /* reset */ })
-    }
-}
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("controller"));
-    QVERIFY(controller != nullptr);
-
-    QVERIFY(QMetaObject::invokeMethod(controller, "initializeFromBridge"));
-    QCOMPARE(controller->property("interpolationActive").toBool(), true);
-
-    // Simulate stop via the QML helper that provides proper JS callbacks.
-    QVERIFY(QMetaObject::invokeMethod(root.data(), "simulateStop"));
-    QCOMPARE(controller->property("interpolationActive").toBool(), false);
 }
 
 void QmlSmokeTest::trackIdentityChangedSignalTriggersQmlHandler() {
@@ -9236,7 +8101,7 @@ void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
     item.feedPrecomputedChunk(data, bins, 0, columns, 0, columns, 48000, 1024,
                                false, true, 1, false);
 
-    item.setPositionSeconds(1.0);
+    setTestPosition(item, 1.0);
     item.setPlaying(false);
 
     {
@@ -9261,7 +8126,7 @@ void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
         firstCrosshairDisplayLeft = item.m_crosshairCachedDisplayLeft;
     }
 
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
 
     QSGNode *node2 = item.updatePaintNode(node, nullptr);
     QVERIFY(node2 != nullptr);
@@ -9362,7 +8227,7 @@ void QmlSmokeTest::spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled() {
 
     // Set centered mode, position at 5 seconds, crosshair enabled.
     item.setDisplayMode(1);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setCrosshairEnabled(true);
 
     // Prime the crosshair cache by simulating a hover so cached
@@ -9414,7 +8279,7 @@ void QmlSmokeTest::spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIs
 
     item.setDisplayMode(1);
     item.setCrosshairEnabled(true);
-    item.setPositionSeconds(10.0);
+    setTestPosition(item, 10.0);
 
     {
         QMutexLocker lock(&item.m_stateMutex);
@@ -9423,7 +8288,7 @@ void QmlSmokeTest::spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIs
         item.m_crosshairCachedRollingMode = false;
     }
 
-    item.setPositionSeconds(100.0);
+    setTestPosition(item, 100.0);
 
     QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
     QMouseEvent pressEvent(
@@ -9469,7 +8334,7 @@ void QmlSmokeTest::spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode
 
     item.setDisplayMode(1);
     item.setCrosshairEnabled(true);
-    item.setPositionSeconds(103.0);
+    setTestPosition(item, 103.0);
 
     QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
     QMouseEvent pressEvent(
@@ -9502,7 +8367,7 @@ void QmlSmokeTest::spectrogramClickToSeekSuppressedWhenCrosshairDisabled() {
         48000, 1024, true, true, 42);
 
     item.setDisplayMode(1);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setCrosshairEnabled(false);  // Crosshair OFF
 
     QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
@@ -9529,7 +8394,7 @@ void QmlSmokeTest::spectrogramLeftClickDoesNotSeek() {
         48000, 1024, true, true, 42);
 
     item.setDisplayMode(1);
-    item.setPositionSeconds(5.0);
+    setTestPosition(item, 5.0);
     item.setCrosshairEnabled(true);  // Crosshair ON
 
     QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
@@ -9566,7 +8431,7 @@ void QmlSmokeTest::spectrogramClickToSeekDisabledInRollingMode() {
     // Seek is disabled in rolling mode because the write-order ring
     // buffer history does not realign to the new position.
     item.setDisplayMode(0);
-    item.setPositionSeconds(3.0);
+    setTestPosition(item, 3.0);
     item.setCrosshairEnabled(true);
 
     QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
@@ -9836,7 +8701,7 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
         initialChunk, binsPerColumn, 0, initialColumns,
         0, initialColumns, 48000, 1024, true,
         true, 1, false);
-    item.setPositionSeconds(10.0);
+    setTestPosition(item, 10.0);
 
     QSGNode *node = item.updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);
@@ -9901,7 +8766,7 @@ void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
     item->feedPrecomputedChunk(
         data, bins, 0, columns, 0, columns,
         48000, 1024, false, true, 1, false);
-    item->setPositionSeconds(1.0);
+    setTestPosition(*item, 1.0);
 
     QSGNode *node = item->updatePaintNode(nullptr, nullptr);
     QVERIFY(node != nullptr);

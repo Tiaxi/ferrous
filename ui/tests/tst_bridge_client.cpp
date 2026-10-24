@@ -134,7 +134,39 @@ QByteArray flacWithComments(const QStringList &comments) {
     return bytes + block;
 }
 
+// A snapshot of `path` playing at `seconds`, as the engine read it now.
+BinaryBridgeCodec::DecodedSnapshot playbackSnapshot(
+    const QString &path, double seconds, quint64 trackToken) {
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = path;
+    snapshot.playback.positionSeconds = seconds;
+    snapshot.playback.durationSeconds = 180.0;
+    snapshot.playback.trackToken = trackToken;
+    snapshot.playback.positionSampledAtNs = monotonicNowNs();
+    snapshot.playback.positionAdvancing = true;
+    return snapshot;
+}
+
+// Where the client's playback clock is now.
+double clockPosition(const BridgeClient &client) {
+    const PlaybackClock *clock = client.playbackClock();
+    return clock->positionAt(clock->nowNs());
+}
+
+// Show `item` the data of track `token` from its start, as the worker does.
+void feedTrackData(SpectrogramItem &item, quint64 token) {
+    constexpr int bins = 8;
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, 8192, 48000, 1024, false, true, token, true);
+    item.feedPrecomputedChunk(
+        QByteArray(64 * bins, '\x40'), bins, 0, 64, 0, 8192, 48000, 1024, false, false, token,
+        false);
+}
+
 } // namespace
+
 
 class BridgeClientTest : public QObject {
     Q_OBJECT
@@ -151,16 +183,12 @@ private slots:
     void tagEditorLoadReportsUnreadableFiles();
     void batchRemovalCodecPreservesIndices();
     void playAtDoesNotEmitImmediateSnapshotChanged();
-    void playAtClearsPendingSeekAndPublishesRestartPosition();
+    void playAtKeepsTheClockUntilTheEngineSwitches();
     void trackSwitchReanchorsBeforeSpectrogramData_data();
     void trackSwitchReanchorsBeforeSpectrogramData();
-    void sameTrackRestartRejectsQueuedOldPosition();
     void sameFileReplayReanchorsByTrackToken_data();
     void sameFileReplayReanchorsByTrackToken();
     void noOpNextPreservesPosition();
-    void trackResetSurvivesQueuedPlaybackNotification_data();
-    void trackResetSurvivesQueuedPlaybackNotification();
-    void queuedSeekNotificationPreservesAdvancedVisualClock();
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
     void inProcessBridgeInstallsWakeNotifier();
@@ -177,7 +205,6 @@ private slots:
     void seekLandingElsewhereReanchorsThePlayhead();
     void seekPublishesOptimisticPositionAndExtendsPendingWindow();
     void seekImmediatelyReanchorsRegisteredCenteredSpectrograms();
-    void playAtImmediatelyReanchorsRegisteredCenteredSpectrograms();
     void stopSnapshotReanchorsCenteredSpectrogramsToBeginning();
     void stopSnapshotLeavesRollingSpectrogramsParked();
     void stopSnapshotClearsPendingSeekWindow();
@@ -201,6 +228,7 @@ private slots:
     void mprisMetadataIsRebuiltOnlyForTrackChanges();
     void mprisAlbumArtistComesFromAlbumArtistTag();
     void albumArtistFollowsMatchingMetadataAcrossTracks();
+    void mprisPositionReadsThePlaybackClock();
     void mprisRateWritePausesOnlyForZero();
     void mprisOpenUriOpensOnlyLocalFiles();
     void mprisSeekedReportsEachSeekWhereItLanded();
@@ -609,26 +637,29 @@ void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
     QVERIFY(client.m_pendingQueueSelectionUntilMs > 0);
 }
 
-void BridgeClientTest::playAtClearsPendingSeekAndPublishesRestartPosition() {
+void BridgeClientTest::playAtKeepsTheClockUntilTheEngineSwitches() {
     BridgeClient client;
     isolateBridgeClient(client);
+    acceptCommands(client);
+    const QString path = QStringLiteral("/music/track.flac");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 120.0, 1)));
+    const quint64 epoch = client.playbackClock()->state().epoch;
 
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
-    client.m_positionSeconds = 410.0;
-    client.m_positionText = QStringLiteral("06:50");
-    client.m_pendingSeek = true;
-    client.m_pendingSeekTargetSeconds = 410.0;
-    client.m_pendingSeekSerial = 1;
-
+    // Playing the current track again: until the engine switches, its
+    // snapshots describe the run that still plays.
     QSignalSpy playbackSpy(&client, &BridgeClient::playbackChanged);
     client.playAt(0);
     QCoreApplication::processEvents();
+    QCOMPARE(playbackSpy.count(), 0);
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 120.1, 1)));
+    QVERIFY(std::abs(clockPosition(client) - 120.1) < 0.2);
+    QCOMPARE(client.playbackClock()->state().epoch, epoch);
 
-    QVERIFY(!client.m_pendingSeek);
-    QCOMPARE(client.m_positionSeconds, 0.0);
-    QCOMPARE(client.m_positionText, QStringLiteral("00:00"));
-    QCOMPARE(playbackSpy.count(), 1);
+    // The new run has a new track token, and starts over.
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 0.02, 2)));
+    QVERIFY(clockPosition(client) < 0.2);
+    QVERIFY(client.playbackClock()->state().epoch > epoch);
+    QCOMPARE(client.playbackClock()->state().trackToken, quint64{2});
 }
 
 void BridgeClientTest::trackSwitchReanchorsBeforeSpectrogramData_data() {
@@ -647,21 +678,20 @@ void BridgeClientTest::trackSwitchReanchorsBeforeSpectrogramData() {
     QFETCH(int, action);
     BridgeClient client;
     isolateBridgeClient(client);
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/fixture/old.wav");
-    client.m_positionSeconds = 120.0;
+    const QString oldPath = QStringLiteral("/fixture/old.wav");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(oldPath, 120.0, 1)));
     client.m_pendingSeek = true;
     client.m_pendingSeekTargetSeconds = 90.0;
     client.m_pendingSeekSerial = 1;
+    client.playbackClock()->holdAt(90.0);
 
     SpectrogramItem item;
     item.setDisplayMode(mode);
+    feedTrackData(item, 1);
     item.m_precomputedReady = true;
-    item.setPositionSeconds(120.0);
     item.setPlaying(true);
+    item.setClock(client.playbackClock());
     client.registerSpectrogramItem(&item, 0);
-    item.setPositionSeconds(0.0);
-    QVERIFY(item.m_positionJumpHoldActive);
 
     const QString newPath = QStringLiteral("/fixture/new.wav");
     switch (action) {
@@ -675,145 +705,26 @@ void BridgeClientTest::trackSwitchReanchorsBeforeSpectrogramData() {
     case 7: client.replaceAllLibraryTracks(); break;
     case 8: client.playAt(1); break;
     }
-    QSignalSpy discontinuity(&client, &BridgeClient::transportPositionDiscontinuity);
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
-    snapshot.playback.state = 1;
-    snapshot.playback.currentPath = newPath;
-    snapshot.playback.positionSeconds = 0.05;
-    snapshot.playback.durationSeconds = 180.0;
-    QVERIFY(client.processBinarySnapshot(snapshot));
+    // The pending seek still holds the clock until the engine switches.
+    QCOMPARE(clockPosition(client), 90.0);
+    const quint64 epoch = client.playbackClock()->state().epoch;
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(newPath, 0.05, 2)));
 
     QVERIFY(!client.m_pendingSeek);
-    QCOMPARE(client.m_pendingTrackRestartUntilMs, qint64{0});
-    QVERIFY(std::abs(client.m_positionSeconds - 0.05) < 0.0001);
-    QCOMPARE(discontinuity.count(), 1);
+    QVERIFY(clockPosition(client) < 0.3);
+    QVERIFY(client.playbackClock()->state().epoch > epoch);
     if (mode == 1) {
-        // No spectral reset/data has arrived to release the defensive hold.
+        // Centered views follow a new track before its data arrives.
         QVERIFY(!item.m_positionJumpHoldActive);
-        QVERIFY(std::abs(item.m_positionAnchorSeconds - 0.05) < 0.0001);
+        QVERIFY(item.m_positionSeconds < 0.3);
     } else {
         // Rolling history remains continuous until the worker resets it.
         QVERIFY(item.m_positionJumpHoldActive);
-        QVERIFY(std::abs(item.m_positionAnchorSeconds - 120.0) < 0.0001);
-    }
-}
-
-void BridgeClientTest::sameTrackRestartRejectsQueuedOldPosition() {
-    BridgeClient client;
-    isolateBridgeClient(client);
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/fixture/track.wav");
-    client.m_positionSeconds = 120.0;
-    client.playAt(0);
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
-    snapshot.playback.state = 1;
-    snapshot.playback.currentPath = client.m_currentTrackPath;
-    snapshot.playback.positionSeconds = 120.1;
-    snapshot.playback.durationSeconds = 180.0;
-    client.processBinarySnapshot(snapshot);
-    QCOMPARE(client.m_positionSeconds, 0.0);
-    QVERIFY(client.m_pendingTrackRestartUntilMs > 0);
-
-    snapshot.playback.positionSeconds = 0.05;
-    client.processBinarySnapshot(snapshot);
-    QVERIFY(std::abs(client.m_positionSeconds - 0.05) < 0.0001);
-    QCOMPARE(client.m_pendingTrackRestartUntilMs, qint64{0});
-
-    // A rejected/no-op command must not suppress real playback indefinitely.
-    client.playAt(99);
-    client.m_pendingTrackRestartUntilMs = QDateTime::currentMSecsSinceEpoch() - 1;
-    snapshot.playback.positionSeconds = 121.0;
-    client.processBinarySnapshot(snapshot);
-    QCOMPARE(client.m_positionSeconds, 121.0);
-    client.playAt(0);
-    acceptCommands(client);
-    client.seek(30.0);
-    QCOMPARE(client.m_pendingTrackRestartUntilMs, qint64{0});
-    QCOMPARE(client.m_positionSeconds, 30.0);
-}
-
-void BridgeClientTest::trackResetSurvivesQueuedPlaybackNotification_data() {
-    QTest::addColumn<int>("mode");
-    QTest::addColumn<bool>("registerAfterSnapshot");
-    QTest::newRow("centered-existing-item") << 1 << false;
-    QTest::newRow("centered-new-item") << 1 << true;
-    QTest::newRow("rolling-existing-item") << 0 << false;
-    QTest::newRow("rolling-new-item") << 0 << true;
-}
-
-void BridgeClientTest::trackResetSurvivesQueuedPlaybackNotification() {
-    QFETCH(int, mode);
-    QFETCH(bool, registerAfterSnapshot);
-    BridgeClient client;
-    isolateBridgeClient(client);
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/fixture/old.wav");
-    client.m_positionSeconds = 120.0;
-    SpectrogramItem item;
-    item.setDisplayMode(mode);
-    item.m_precomputedReady = true;
-    item.setPositionSeconds(120.0);
-    item.setPlaying(true);
-    if (!registerAfterSnapshot) {
-        client.registerSpectrogramItem(&item, 0);
-    }
-
-    // Global search activates a track through replaceWithPaths. Its reset
-    // snapshot is processed before the queued playbackChanged reaches QML.
-    client.replaceWithPaths({QStringLiteral("/fixture/new.wav")});
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
-    snapshot.playback.state = 1;
-    snapshot.playback.currentPath = QStringLiteral("/fixture/new.wav");
-    snapshot.playback.positionSeconds = 0.05;
-    snapshot.playback.durationSeconds = 180.0;
-    client.processBinarySnapshot(snapshot);
-    if (registerAfterSnapshot) {
-        client.registerSpectrogramItem(&item, 0);
-    }
-    // An animation tick still has the outgoing QML interpolation clock.
-    item.setPositionSeconds(120.1);
-    // Heartbeats can also coalesce before notification: use the latest one.
-    snapshot.playback.positionSeconds = 0.25;
-    client.processBinarySnapshot(snapshot);
-    connect(&client, &BridgeClient::playbackChanged, &item, [&]() {
-        // Models the QML binding updating when its playback clock resets.
-        item.setPositionSeconds(client.m_positionSeconds);
-    });
-    QSignalSpy playback(&client, &BridgeClient::playbackChanged);
-    client.schedulePlaybackChanged();
-    QCoreApplication::processEvents();
-    QCOMPARE(playback.count(), 1);
-    if (mode == 1) {
+        QVERIFY(item.m_positionSeconds >= 90.0);
+        feedTrackData(item, 2);
         QVERIFY(!item.m_positionJumpHoldActive);
-        QVERIFY(std::abs(item.m_positionAnchorSeconds - 0.25) < 0.0001);
-    } else {
-        // Rolling history still waits for its worker reset/continuation.
-        QVERIFY(item.m_positionAnchorSeconds >= 120.0);
+        QVERIFY(item.m_positionSeconds < 0.3);
     }
-}
-
-void BridgeClientTest::queuedSeekNotificationPreservesAdvancedVisualClock() {
-    BridgeClient client;
-    isolateBridgeClient(client);
-    SpectrogramItem item;
-    item.setDisplayMode(1);
-    item.m_precomputedReady = true;
-    item.setPositionSeconds(120.0);
-    item.setPlaying(true);
-    client.registerSpectrogramItem(&item, 0);
-    acceptCommands(client);
-    client.m_playbackState = QStringLiteral("Playing");
-    client.seek(30.0);
-    connect(&client, &BridgeClient::playbackChanged, &item, [&]() {
-        // Explicit seeking owns an optimistic QML clock which may have
-        // advanced before the queued notification is delivered.
-        item.setPositionSeconds(30.2);
-    });
-    QCoreApplication::processEvents();
-    QVERIFY(std::abs(item.m_positionAnchorSeconds - 30.2) < 0.0001);
 }
 
 void BridgeClientTest::sameFileReplayReanchorsByTrackToken_data() {
@@ -828,41 +739,36 @@ void BridgeClientTest::sameFileReplayReanchorsByTrackToken() {
     QFETCH(int, mode);
     BridgeClient client;
     isolateBridgeClient(client);
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
-    snapshot.playback.state = 1;
-    snapshot.playback.currentPath = QStringLiteral("/fixture/track.wav");
+    const QString path = QStringLiteral("/fixture/track.wav");
+    auto snapshot = playbackSnapshot(path, 179.9, 4);
     snapshot.playback.currentQueueIndex = 0;
-    snapshot.playback.positionSeconds = 179.9;
-    snapshot.playback.durationSeconds = 180.0;
-    snapshot.playback.trackToken = 4;
     QVERIFY(client.processBinarySnapshot(snapshot));
 
     SpectrogramItem item;
     item.setDisplayMode(mode);
+    feedTrackData(item, 4);
     item.m_precomputedReady = true;
-    item.setPositionSeconds(179.9);
     item.setPlaying(true);
+    item.setClock(client.playbackClock());
     client.registerSpectrogramItem(&item, 0);
-    item.setPositionSeconds(0.0);
-    QVERIFY(item.m_positionJumpHoldActive);
 
-    QSignalSpy discontinuity(&client, &BridgeClient::transportPositionDiscontinuity);
-    snapshot.playback.positionSeconds = 179.95;
+    const quint64 epoch = client.playbackClock()->state().epoch;
+    snapshot = playbackSnapshot(path, 179.95, 4);
+    snapshot.playback.currentQueueIndex = 0;
     QVERIFY(client.processBinarySnapshot(snapshot));
-    QCOMPARE(discontinuity.count(), 0);
+    QCOMPARE(client.playbackClock()->state().epoch, epoch);
+    QVERIFY(!item.m_positionJumpHoldActive);
 
-    snapshot.playback.positionSeconds = 0.05;
+    snapshot = playbackSnapshot(path, 0.05, 5);
     snapshot.playback.currentQueueIndex = 1;
-    snapshot.playback.trackToken = 5;
     QVERIFY(client.processBinarySnapshot(snapshot));
-    QCOMPARE(discontinuity.count(), 1);
+    QCOMPARE(client.playbackClock()->state().epoch, epoch + 1);
     QCOMPARE(client.m_currentTrackToken, quint64{5});
     QCOMPARE(client.m_playingQueueIndex, 1);
-    QVERIFY(std::abs(client.m_positionSeconds - 0.05) < 0.0001);
+    QVERIFY(clockPosition(client) < 0.3);
     if (mode == 1) {
         QVERIFY(!item.m_positionJumpHoldActive);
-        QVERIFY(std::abs(item.m_positionAnchorSeconds - 0.05) < 0.0001);
+        QVERIFY(item.m_positionSeconds < 0.3);
     } else {
         // Rolling history remains continuous until the worker resets it.
         QVERIFY(item.m_positionJumpHoldActive);
@@ -872,19 +778,13 @@ void BridgeClientTest::sameFileReplayReanchorsByTrackToken() {
 void BridgeClientTest::noOpNextPreservesPosition() {
     BridgeClient client;
     isolateBridgeClient(client);
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/fixture/last.wav");
-    client.m_positionSeconds = 120.0;
-    QSignalSpy discontinuity(&client, &BridgeClient::transportPositionDiscontinuity);
+    const QString path = QStringLiteral("/fixture/last.wav");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 120.0, 3)));
+    const quint64 epoch = client.playbackClock()->state().epoch;
     client.next();
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
-    snapshot.playback.state = 1;
-    snapshot.playback.currentPath = client.m_currentTrackPath;
-    snapshot.playback.positionSeconds = 120.1;
-    client.processBinarySnapshot(snapshot);
-    QVERIFY(std::abs(client.m_positionSeconds - 120.1) < 0.0001);
-    QCOMPARE(discontinuity.count(), 0);
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 120.1, 3)));
+    QVERIFY(std::abs(clockPosition(client) - 120.1) < 0.2);
+    QCOMPARE(client.playbackClock()->state().epoch, epoch);
 }
 
 void BridgeClientTest::queueSnapshotKeepsRawCoverPathsInRows() {
@@ -1188,87 +1088,71 @@ void BridgeClientTest::clearDiagnosticsDropsPendingDiskWrites() {
 void BridgeClientTest::pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives() {
     BridgeClient client;
     isolateBridgeClient(client);
-
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
-    client.m_positionSeconds = 60.0;
-    client.m_positionText = QStringLiteral("01:00");
-    client.m_durationSeconds = 180.0;
-    client.m_durationText = QStringLiteral("03:00");
-    client.m_pendingSeek = true;
-    client.m_pendingSeekTargetSeconds = 60.0;
-    client.m_pendingSeekSerial = 2;
-    client.m_seeksSent = 2;
-    client.m_seekLandedSerial = 0;
+    acceptCommands(client);
+    const QString path = QStringLiteral("/music/track.flac");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 10.0, 1)));
     QSignalSpy landed(&client, &BridgeClient::seekLanded);
-
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
-    snapshot.playback.state = 1;
-    snapshot.playback.currentPath = QStringLiteral("/music/track.flac");
-    snapshot.playback.positionSeconds = 12.0;
-    snapshot.playback.durationSeconds = 180.0;
+    client.seek(30.0);
+    client.seek(60.0);
+    QVERIFY(client.m_pendingSeek);
+    QCOMPARE(client.m_pendingSeekSerial, quint64{2});
+    QCOMPARE(clockPosition(client), 60.0);
+    QVERIFY(!client.playbackClock()->advancing());
 
     // Before the engine got the seek, however long it takes.
-    QVERIFY(client.processBinarySnapshot(snapshot));
+    auto snapshot = playbackSnapshot(path, 12.0, 1);
+    client.processBinarySnapshot(snapshot);
     QVERIFY(client.m_pendingSeek);
-    QCOMPARE(client.m_positionSeconds, 60.0);
-    QCOMPARE(client.m_positionText, QStringLiteral("01:00"));
-    QVERIFY(!client.m_pollPlaybackChanged);
+    QCOMPARE(clockPosition(client), 60.0);
 
     // An older seek landed: the newer one still waits, and the landing is
     // not reported.
+    snapshot = playbackSnapshot(path, 30.0, 1);
     snapshot.playback.seekSerial = 1;
     snapshot.playback.seekLandedSerial = 1;
-    snapshot.playback.positionSeconds = 30.0;
     client.processBinarySnapshot(snapshot);
     QVERIFY(client.m_pendingSeek);
-    QCOMPARE(client.m_positionSeconds, 60.0);
+    QCOMPARE(clockPosition(client), 60.0);
     QCOMPARE(landed.count(), 0);
 
-    // The pending seek landed.
+    // The pending seek landed; the pipeline has not resumed yet.
+    snapshot = playbackSnapshot(path, 60.0, 1);
+    snapshot.playback.positionAdvancing = false;
     snapshot.playback.seekSerial = 2;
     snapshot.playback.seekLandedSerial = 2;
-    snapshot.playback.positionSeconds = 60.0;
     client.processBinarySnapshot(snapshot);
     QVERIFY(!client.m_pendingSeek);
-    QCOMPARE(client.m_positionSeconds, 60.0);
+    QCOMPARE(clockPosition(client), 60.0);
     QCOMPARE(landed.count(), 1);
     QCOMPARE(landed.first().first().toDouble(), 60.0);
 
     // Later snapshots carry the same landing and report nothing more.
-    snapshot.playback.positionSeconds = 60.5;
+    snapshot = playbackSnapshot(path, 60.5, 1);
+    snapshot.playback.seekSerial = 2;
+    snapshot.playback.seekLandedSerial = 2;
     QVERIFY(client.processBinarySnapshot(snapshot));
-    QCOMPARE(client.m_positionSeconds, 60.5);
+    QVERIFY(std::abs(clockPosition(client) - 60.5) < 0.2);
+    QVERIFY(client.playbackClock()->advancing());
     QCOMPARE(landed.count(), 1);
 }
 
 void BridgeClientTest::seekThatDoesNotLandReleasesThePlayhead() {
     BridgeClient client;
     isolateBridgeClient(client);
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
-    client.m_positionSeconds = 90.0;
-    client.m_pendingSeek = true;
-    client.m_pendingSeekTargetSeconds = 90.0;
-    client.m_pendingSeekSerial = 3;
-    client.m_seeksSent = 3;
-    client.m_seekLandedSerial = 2;
+    acceptCommands(client);
+    const QString path = QStringLiteral("/music/track.flac");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 20.0, 1)));
     QSignalSpy landed(&client, &BridgeClient::seekLanded);
+    client.seek(90.0);
+    QCOMPARE(clockPosition(client), 90.0);
 
-    // The engine is done with seek 3 without applying it, such as after a
-    // failure; playback goes on where it was.
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
-    snapshot.playback.state = 1;
-    snapshot.playback.currentPath = QStringLiteral("/music/track.flac");
-    snapshot.playback.positionSeconds = 20.0;
-    snapshot.playback.durationSeconds = 180.0;
-    snapshot.playback.seekSerial = 3;
-    snapshot.playback.seekLandedSerial = 2;
+    // The engine is done with the seek without applying it, such as after
+    // a failure; playback goes on where it was.
+    auto snapshot = playbackSnapshot(path, 20.5, 1);
+    snapshot.playback.seekSerial = 1;
     client.processBinarySnapshot(snapshot);
     QVERIFY(!client.m_pendingSeek);
-    QCOMPARE(client.m_positionSeconds, 20.0);
+    QVERIFY(std::abs(clockPosition(client) - 20.5) < 0.2);
     QCOMPARE(landed.count(), 0);
 }
 
@@ -1280,37 +1164,31 @@ void BridgeClientTest::seekLandingElsewhereReanchorsThePlayhead() {
         sent.append(payload);
         return true;
     };
+    const QString path = QStringLiteral("/music/track.dts");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 10.0, 1)));
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
     item.m_precomputedReady = true;
-    item.setPositionSeconds(10.0);
     item.setPlaying(true);
+    item.setClock(client.playbackClock());
     client.registerSpectrogramItem(&item, 0);
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/music/track.dts");
-    client.m_positionSeconds = 10.0;
-    client.m_durationSeconds = 180.0;
 
     client.seek(60.0);
     QCOMPARE(sent.size(), 1);
-    QCOMPARE(client.m_positionSeconds, 60.0);
-    QSignalSpy discontinuity(&client, &BridgeClient::transportPositionDiscontinuity);
+    QCOMPARE(clockPosition(client), 60.0);
+    QCOMPARE(item.m_positionSeconds, 60.0);
+    const quint64 epoch = client.playbackClock()->state().epoch;
     QSignalSpy landed(&client, &BridgeClient::seekLanded);
 
     // The seek landed on the key frame before the target.
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
-    snapshot.playback.state = 1;
-    snapshot.playback.currentPath = QStringLiteral("/music/track.dts");
-    snapshot.playback.positionSeconds = 58.5;
-    snapshot.playback.durationSeconds = 180.0;
+    auto snapshot = playbackSnapshot(path, 58.5, 1);
+    snapshot.playback.positionAdvancing = false;
     snapshot.playback.seekSerial = 1;
     snapshot.playback.seekLandedSerial = 1;
     QVERIFY(client.processBinarySnapshot(snapshot));
-    QCOMPARE(client.m_positionSeconds, 58.5);
-    QCOMPARE(discontinuity.count(), 1);
-    QCOMPARE(discontinuity.first().first().toDouble(), 58.5);
-    QVERIFY(std::abs(item.m_positionAnchorSeconds - 58.5) < 0.0001);
+    QCOMPARE(clockPosition(client), 58.5);
+    QCOMPARE(client.playbackClock()->state().epoch, epoch + 1);
+    QCOMPARE(item.m_positionSeconds, 58.5);
     QCOMPARE(landed.count(), 1);
     QCOMPARE(landed.first().first().toDouble(), 58.5);
 }
@@ -1324,24 +1202,19 @@ void BridgeClientTest::seekPublishesOptimisticPositionAndExtendsPendingWindow() 
         sent.append(payload);
         return accept;
     };
+    const QString path = QStringLiteral("/music/track.flac");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 12.0, 1)));
 
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
-    client.m_positionSeconds = 12.0;
-    client.m_positionText = QStringLiteral("00:12");
-
-    QSignalSpy playbackSpy(&client, &BridgeClient::playbackChanged);
     client.seek(96.25);
-    QCoreApplication::processEvents();
-
     QCOMPARE(sent.size(), 1);
     QCOMPARE(sent.first(),
              BinaryBridgeCodec::encodeCommandF64(BinaryBridgeCodec::CmdSeek, 96.25));
-    QCOMPARE(client.m_positionSeconds, 96.25);
-    QCOMPARE(client.m_positionText, QStringLiteral("01:36"));
+    // The clock shows the target at once, and holds it.
+    QCOMPARE(clockPosition(client), 96.25);
+    QCOMPARE(client.playbackClock()->positionText(), QStringLiteral("01:36"));
+    QVERIFY(!client.playbackClock()->advancing());
     QVERIFY(client.m_pendingSeek);
     QCOMPARE(client.m_pendingSeekSerial, quint64(1));
-    QCOMPARE(playbackSpy.count(), 1);
 
     // Each seek sent gets the next serial, as the engine numbers them.
     client.seek(100.0);
@@ -1351,7 +1224,7 @@ void BridgeClientTest::seekPublishesOptimisticPositionAndExtendsPendingWindow() 
     accept = false;
     client.seek(120.0);
     QCOMPARE(sent.size(), 3);
-    QCOMPARE(client.m_positionSeconds, 100.0);
+    QCOMPARE(clockPosition(client), 100.0);
     QCOMPARE(client.m_pendingSeekSerial, quint64(2));
     QCOMPARE(client.m_seeksSent, quint64(2));
 
@@ -1359,184 +1232,123 @@ void BridgeClientTest::seekPublishesOptimisticPositionAndExtendsPendingWindow() 
     accept = true;
     client.m_pendingSeek = false;
     client.m_playbackState = QStringLiteral("Stopped");
-    client.m_positionSeconds = 0.0;
     client.seek(50.0);
     QCOMPARE(sent.size(), 3);
-    QCOMPARE(client.m_positionSeconds, 0.0);
+    QCOMPARE(clockPosition(client), 100.0);
     QVERIFY(!client.m_pendingSeek);
 }
 
 void BridgeClientTest::seekImmediatelyReanchorsRegisteredCenteredSpectrograms() {
     BridgeClient client;
     isolateBridgeClient(client);
-    QSignalSpy discontinuity(&client, &BridgeClient::transportPositionDiscontinuity);
+    QVERIFY(client.processBinarySnapshot(
+        playbackSnapshot(QStringLiteral("/music/track.flac"), 120.0, 1)));
 
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
+    feedTrackData(item, 1);
     item.m_precomputedReady = true;
-    item.setPositionSeconds(120.0);
     item.setPlaying(true);
+    item.setClock(client.playbackClock());
     client.registerSpectrogramItem(&item, 0);
+    QVERIFY(item.m_positionSeconds > 100.0);
 
-    // A position update near zero is ambiguous with a natural gapless
-    // handoff and therefore activates the defensive jump hold.
-    item.setPositionSeconds(0.0);
-    QVERIFY(item.m_positionJumpHoldActive);
-    QVERIFY(item.m_positionAnchorSeconds > 100.0);
-
-    // The explicit seek command disambiguates the update and must move both
-    // the centered viewport and playhead without waiting for reset data.
+    // A seek moves the centered viewport and playhead without waiting for
+    // reset data, even to the start, which a gapless switch also reports.
     acceptCommands(client);
-    client.m_playbackState = QStringLiteral("Playing");
     client.seek(0.0);
-    QCOMPARE(discontinuity.count(), 1);
-    QCOMPARE(discontinuity.takeFirst().at(0).toDouble(), 0.0);
-
     QVERIFY(!item.m_positionJumpHoldActive);
-    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.0001);
-    QVERIFY(std::abs(item.m_positionSeconds) < 0.0001);
-}
-
-void BridgeClientTest::playAtImmediatelyReanchorsRegisteredCenteredSpectrograms() {
-    BridgeClient client;
-    isolateBridgeClient(client);
-    QSignalSpy discontinuity(&client, &BridgeClient::transportPositionDiscontinuity);
-
-    SpectrogramItem item;
-    item.setDisplayMode(1); // Centered
-    item.m_precomputedReady = true;
-    item.setPositionSeconds(120.0);
-    item.setPlaying(true);
-    client.registerSpectrogramItem(&item, 0);
-
-    item.setPositionSeconds(0.0);
-    QVERIFY(item.m_positionJumpHoldActive);
-
-    client.playAt(2);
-    QCOMPARE(discontinuity.count(), 1);
-    QCOMPARE(discontinuity.takeFirst().at(0).toDouble(), 0.0);
-
-    QVERIFY(!item.m_positionJumpHoldActive);
-    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.0001);
-    QVERIFY(std::abs(item.m_positionSeconds) < 0.0001);
+    QCOMPARE(item.m_positionSeconds, 0.0);
 }
 
 void BridgeClientTest::stopSnapshotReanchorsCenteredSpectrogramsToBeginning() {
     BridgeClient client;
     isolateBridgeClient(client);
+    const QString path = QStringLiteral("/music/track.flac");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 120.0, 1)));
 
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
+    feedTrackData(item, 1);
     item.m_precomputedReady = true;
-    item.setPositionSeconds(120.0);
     item.setPlaying(true);
+    item.setClock(client.playbackClock());
     client.registerSpectrogramItem(&item, 0);
 
-    // Reproduce the reported sequence: the near-zero position arriving
-    // while still marked playing activates the defensive jump hold, and
-    // stopping parks the playhead mid-track instead of returning it to
-    // the beginning.
-    item.setPositionSeconds(0.0);
-    QVERIFY(item.m_positionJumpHoldActive);
-    item.setPlaying(false);
-    QVERIFY(std::abs(item.m_positionAnchorSeconds - 120.0) < 0.0001);
-
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
-    client.m_positionSeconds = 120.0;
-    client.m_positionText = QStringLiteral("02:00");
-
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
+    auto snapshot = playbackSnapshot(path, 0.0, 1);
     snapshot.playback.state = 0; // Stopped
-    snapshot.playback.currentPath = QStringLiteral("/music/track.flac");
-    snapshot.playback.positionSeconds = 0.0;
-    snapshot.playback.durationSeconds = 180.0;
-
+    snapshot.playback.positionAdvancing = false;
     QVERIFY(client.processBinarySnapshot(snapshot));
+    item.setPlaying(false);
 
     QCOMPARE(client.m_playbackState, QStringLiteral("Stopped"));
-    QCOMPARE(client.m_positionSeconds, 0.0);
+    QCOMPARE(clockPosition(client), 0.0);
     QVERIFY(!item.m_positionJumpHoldActive);
-    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.0001);
-    QVERIFY(std::abs(item.m_positionSeconds) < 0.0001);
+    QCOMPARE(item.m_positionSeconds, 0.0);
 
-    // Restarting playback must continue from the beginning — not crawl
-    // forward from the parked position until the hold times out.
+    // Playing again goes on from the beginning.
     item.setPlaying(true);
-    item.setPositionSeconds(0.0);
-    QTest::qWait(30);
-    item.setPositionSeconds(0.08);
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 0.08, 1)));
     QVERIFY(!item.m_positionJumpHoldActive);
-    QVERIFY2(
-        item.m_positionAnchorSeconds < 1.0,
-        qPrintable(QStringLiteral(
-            "restart after stop should play from the beginning, got anchor %1")
-            .arg(item.m_positionAnchorSeconds, 0, 'f', 3)));
+    QVERIFY(item.m_positionSeconds < 1.0);
 }
 
 void BridgeClientTest::stopSnapshotLeavesRollingSpectrogramsParked() {
     BridgeClient client;
     isolateBridgeClient(client);
+    const QString path = QStringLiteral("/music/track.flac");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 120.0, 1)));
 
     SpectrogramItem item;
     item.setDisplayMode(0); // Rolling
+    feedTrackData(item, 1);
     item.m_precomputedReady = true;
-    item.setPositionSeconds(120.0);
     item.setPlaying(true);
+    item.setClock(client.playbackClock());
     client.registerSpectrogramItem(&item, 0);
 
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
-    client.m_positionSeconds = 120.0;
-    client.m_positionText = QStringLiteral("02:00");
-
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
+    auto snapshot = playbackSnapshot(path, 0.0, 1);
     snapshot.playback.state = 0; // Stopped
-    snapshot.playback.currentPath = QStringLiteral("/music/track.flac");
-    snapshot.playback.positionSeconds = 0.0;
-
+    snapshot.playback.positionAdvancing = false;
     QVERIFY(client.processBinarySnapshot(snapshot));
+    item.setPlaying(false);
 
     // Rolling rings are write-order history; the decode worker restart on
-    // the next play re-anchors them, so the stop transition must not move
-    // the rolling anchor.
-    QVERIFY(std::abs(item.m_positionAnchorSeconds - 120.0) < 0.0001);
+    // the next play re-anchors them, so the playhead stays where it was.
+    QVERIFY(item.m_positionJumpHoldActive);
+    const double parked = item.m_positionSeconds;
+    QVERIFY(parked >= 120.0);
+    QCOMPARE(
+        item.currentRenderPositionSecondsLocked(
+            std::chrono::steady_clock::now() + std::chrono::seconds(5)),
+        parked);
 }
 
 void BridgeClientTest::stopSnapshotClearsPendingSeekWindow() {
     BridgeClient client;
     isolateBridgeClient(client);
+    acceptCommands(client);
+    const QString path = QStringLiteral("/music/track.flac");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 20.0, 1)));
 
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
     item.m_precomputedReady = true;
-    item.setPositionSeconds(96.0);
     item.setPlaying(true);
+    item.setClock(client.playbackClock());
     client.registerSpectrogramItem(&item, 0);
+    client.seek(96.0);
+    QCOMPARE(item.m_positionSeconds, 96.0);
 
-    client.m_playbackState = QStringLiteral("Playing");
-    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
-    client.m_positionSeconds = 96.0;
-    client.m_positionText = QStringLiteral("01:36");
-    client.m_pendingSeek = true;
-    client.m_pendingSeekTargetSeconds = 96.0;
-    client.m_pendingSeekSerial = 1;
-
-    BinaryBridgeCodec::DecodedSnapshot snapshot;
-    snapshot.playback.present = true;
+    auto snapshot = playbackSnapshot(path, 0.0, 1);
     snapshot.playback.state = 0; // Stopped
-    snapshot.playback.currentPath = QStringLiteral("/music/track.flac");
-    snapshot.playback.positionSeconds = 0.0;
-
+    snapshot.playback.positionAdvancing = false;
     QVERIFY(client.processBinarySnapshot(snapshot));
 
-    // The pending seek window must not suppress the stopped position,
-    // otherwise the stale seek target lingers until the window expires.
+    // The stop ends the pending seek, whose target no longer applies.
     QVERIFY(!client.m_pendingSeek);
-    QCOMPARE(client.m_positionSeconds, 0.0);
-    QVERIFY(std::abs(item.m_positionAnchorSeconds) < 0.0001);
+    QCOMPARE(clockPosition(client), 0.0);
+    QCOMPARE(item.m_positionSeconds, 0.0);
 }
 
 void BridgeClientTest::asyncImageFileDetailsRequestCachesAndSignals() {
@@ -2015,7 +1827,7 @@ void BridgeClientTest::mprisMetadataIsRebuiltOnlyForTrackChanges() {
 
     // Playback heartbeats reuse the cached map instead of rebuilding it.
     client.m_currentTrackTitle = QStringLiteral("Unannounced");
-    client.m_positionSeconds = 12.0;
+    client.playbackClock()->holdAt(12.0);
     emit client.playbackChanged();
     QCOMPARE(controller.metadata().value(QStringLiteral("xesam:title")).toString(),
              QStringLiteral("First"));
@@ -2119,6 +1931,29 @@ void BridgeClientTest::albumArtistFollowsMatchingMetadataAcrossTracks() {
     QCOMPARE(decoded.metadata.albumArtist, QStringLiteral("Album Artist"));
     QCOMPARE(decoded.metadata.genre, QStringLiteral("Genre"));
     QCOMPARE(decoded.metadata.year, 2001);
+}
+
+void BridgeClientTest::mprisPositionReadsThePlaybackClock() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    acceptCommands(client);
+    client.m_queueLength = 1;
+    // The engine read 10 s two seconds ago, and playback went on.
+    auto snapshot = playbackSnapshot(QStringLiteral("/music/track.flac"), 10.0, 1);
+    snapshot.playback.positionSampledAtNs = monotonicNowNs() - 2'000'000'000LL;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+
+    MprisController controller(&client);
+    const double position = static_cast<double>(controller.positionUs()) / 1e6;
+    QVERIFY2(position >= 12.0 && position < 12.5, qPrintable(QString::number(position)));
+
+    // A relative seek starts from there too.
+    controller.seek(5'000'000);
+    QVERIFY(client.m_pendingSeek);
+    QVERIFY(client.m_pendingSeekTargetSeconds >= 17.0);
+    QVERIFY(client.m_pendingSeekTargetSeconds < 17.5);
+    QCOMPARE(controller.positionUs(),
+             static_cast<qlonglong>(std::llround(client.m_pendingSeekTargetSeconds * 1e6)));
 }
 
 void BridgeClientTest::mprisRateWritePausesOnlyForZero() {
@@ -2230,7 +2065,7 @@ void BridgeClientTest::mprisSeekedReportsEachSeekWhereItLanded() {
     stale.playback.seekLandedSerial = 2;
     client.processBinarySnapshot(stale);
     QCOMPARE(seekedPositions(signalsSent).size(), 1);
-    QCOMPARE(client.positionSeconds(), 70.0);
+    QCOMPARE(clockPosition(client), 70.0);
     auto last = playingSnapshot(path, 70.0);
     last.playback.seekSerial = 3;
     last.playback.seekLandedSerial = 3;
@@ -2276,7 +2111,7 @@ void BridgeClientTest::mprisCannotSeekAStoppedTrack() {
     controller.seek(5000000);
     controller.setPosition(controller.currentTrackIdPath(), 5000000);
     QVERIFY(sent.isEmpty());
-    QCOMPARE(client.positionSeconds(), 0.0);
+    QCOMPARE(clockPosition(client), 0.0);
 
     // Playing, it can seek, and clients are told.
     signalsSent.clear();
@@ -2838,6 +2673,21 @@ void BridgeClientTest::testPlaybackTrackTokenDecoding()
     QCOMPARE(withSeeks.playback.seekSerial, quint64(0xFFFF'FFFF'0000'0009ULL));
     QCOMPARE(withSeeks.playback.seekLandedSerial, quint64(0xFFFF'FFFF'0000'0008ULL));
     QVERIFY(!decode(payload.left(payload.size() - 8), &truncated));
+    QCOMPARE(withSeeks.playback.positionSampledAtNs, qint64(0));
+    QVERIFY(!withSeeks.playback.positionAdvancing);
+
+    // The position sample's time stamp and whether it advances end the
+    // section, as the Rust encoder writes them.
+    appendLe(quint64(123'456'789'012ULL));
+    appendLe(quint8(1));
+    BinaryBridgeCodec::DecodedSnapshot withSample;
+    QVERIFY(decode(payload, &withSample));
+    QCOMPARE(withSample.playback.positionSeconds, 5.0);
+    QCOMPARE(withSample.playback.positionSampledAtNs, qint64(123'456'789'012LL));
+    QVERIFY(withSample.playback.positionAdvancing);
+    QVERIFY(!decode(payload.left(payload.size() - 1), &truncated));
+    payload[payload.size() - 1] = char(2);
+    QVERIFY(!decode(payload, &truncated));
 }
 
 void BridgeClientTest::testChannelButtonsVisibilityDecoding()

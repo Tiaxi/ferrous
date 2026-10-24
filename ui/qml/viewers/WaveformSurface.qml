@@ -8,7 +8,8 @@ Item {
     id: root
 
     required property var uiBridge
-    property double positionSeconds: 0
+    // Where playback is; see PlaybackClock.
+    property var clock: null
     property var seekCommitted: null
     property bool interactiveOverlaysVisible: true
     property var pointerActivity: null
@@ -32,7 +33,7 @@ Item {
         overviewData: root.uiBridge.waveformPeaksPacked
         overviewCoverageSeconds: root.uiBridge.waveformCoverageSeconds
         overviewComplete: root.uiBridge.waveformComplete
-        positionSeconds: root.positionSeconds
+        clock: root.clock
         durationSeconds: root.uiBridge.durationSeconds
         playing: (root.uiBridge.playbackState || "") === "Playing"
         zoomEnabled: root.uiBridge.spectrogramZoomEnabled
@@ -48,13 +49,6 @@ Item {
             if (root.seekCommitted) {
                 root.seekCommitted(seconds)
             }
-        }
-    }
-
-    Connections {
-        target: root.uiBridge
-        function onTransportPositionDiscontinuity(seconds) {
-            waveform.applyExplicitSeekPosition(seconds)
         }
     }
 

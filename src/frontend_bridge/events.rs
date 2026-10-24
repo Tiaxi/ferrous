@@ -155,10 +155,13 @@ pub(super) fn playback_snapshot_urgency(
         // done with that seek.
         || previous.seek_serial != next.seek_serial
         || previous.seek_landed_serial != next.seek_landed_serial
+        // The UI stops or starts moving its playhead.
+        || previous.position_advancing != next.position_advancing
     {
         return SnapshotUrgency::Immediate;
     }
     if previous.position != next.position
+        || previous.position_sampled_at != next.position_sampled_at
         || previous.current_bitrate_kbps != next.current_bitrate_kbps
     {
         return SnapshotUrgency::Heartbeat;
@@ -250,12 +253,13 @@ pub(super) fn process_playback_event(
             SnapshotUrgency::Immediate
         }
         PlaybackEvent::Seeked { position } => {
+            // The engine's next snapshot carries the landing position with
+            // the time it was read; the UI takes it from there.
             if state.analysis_track_token != 0 && state.playback.current.is_some() {
-                state.playback.position = position;
                 let pos_seconds = position.as_secs_f64();
                 analysis.command(AnalysisCommand::SeekPosition(pos_seconds));
             }
-            SnapshotUrgency::Heartbeat
+            SnapshotUrgency::None
         }
         PlaybackEvent::PathsRemapped => {
             state.unacknowledged_engine_renames.pop_front();
@@ -890,6 +894,7 @@ pub(super) fn pump_external_queue_detail_events(
 mod tests {
     use super::*;
     use crate::lastfm::{self, Command as LastFmCommand};
+    use crate::playback::MonotonicTime;
     use std::path::PathBuf;
     use std::time::Instant;
 
@@ -977,6 +982,38 @@ mod tests {
     }
 
     #[test]
+    fn position_samples_reach_the_ui_and_a_stopped_clock_without_delay() {
+        let previous = PlaybackSnapshot {
+            state: PlaybackState::Playing,
+            position: Duration::from_secs(10),
+            position_sampled_at: MonotonicTime::from_nanos(1_000),
+            position_advancing: true,
+            ..PlaybackSnapshot::default()
+        };
+        // A pipeline that stalls reports the same position at a later time.
+        let resampled = PlaybackSnapshot {
+            position_sampled_at: MonotonicTime::from_nanos(2_000),
+            ..previous.clone()
+        };
+        assert_eq!(
+            playback_snapshot_urgency(&previous, &resampled),
+            SnapshotUrgency::Heartbeat
+        );
+        let held = PlaybackSnapshot {
+            position_advancing: false,
+            ..resampled.clone()
+        };
+        assert_eq!(
+            playback_snapshot_urgency(&resampled, &held),
+            SnapshotUrgency::Immediate
+        );
+        assert_eq!(
+            playback_snapshot_urgency(&held, &resampled),
+            SnapshotUrgency::Immediate
+        );
+    }
+
+    #[test]
     fn seek_event_does_not_trigger_early_track_switch_side_effects() {
         let (analysis, _analysis_rx) = AnalysisEngine::new();
         let (metadata, _metadata_rx) = MetadataService::new();
@@ -996,7 +1033,9 @@ mod tests {
             .expect("send seeked event");
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
         assert!(!changed);
-        assert_eq!(state.playback.position, Duration::from_secs(42));
+        // The landing position arrives with the engine's next snapshot,
+        // which says when it was read.
+        assert_eq!(state.playback.position, Duration::ZERO);
         assert_eq!(state.analysis.waveform_peaks, vec![0.2, 0.4, 0.6]);
         assert_eq!(state.metadata.title, "Track A");
         assert_eq!(state.metadata.artist, "Artist A");

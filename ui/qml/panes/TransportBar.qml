@@ -20,6 +20,7 @@ ToolBar {
     required property bool themeIsDark
     required property bool volumeMuted
     required property real displayedPositionSeconds
+    property string positionText: "00:00"
     required property var toggleMutedVolume
     required property var setAppVolume
     required property var normalizedVolumeValue
@@ -172,7 +173,7 @@ ToolBar {
         }
 
         Label {
-            text: root.uiBridge.positionText + "/" + root.uiBridge.durationText
+            text: root.positionText + "/" + root.uiBridge.durationText
             horizontalAlignment: Text.AlignHCenter
             Layout.preferredWidth: 96
             Layout.alignment: Qt.AlignVCenter

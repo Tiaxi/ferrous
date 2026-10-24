@@ -15,6 +15,7 @@ ToolBar {
     required property var channelStatusIconSource
     required property bool themeIsDark
     property string transientError: ""
+    property string positionText: "00:00"
 
     implicitHeight: Math.max(contentItem.implicitHeight, 20) + topPadding + bottomPadding
     leftPadding: 14
@@ -101,7 +102,7 @@ ToolBar {
         }
         Label {
             visible: root.showTrackSections
-            text: (root.uiBridge.positionText || "00:00") + "/" + (root.uiBridge.durationText || "00:00")
+            text: root.positionText + "/" + (root.uiBridge.durationText || "00:00")
             color: root.uiPalette.uiTextColor
         }
 

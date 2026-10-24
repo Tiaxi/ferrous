@@ -4,7 +4,6 @@ These are open ideas, not a release schedule. Implemented features are described
 
 ## Playback
 
-- Consolidate playback position and post-seek synchronization around the backend clock; the UI still maintains local interpolation and a visual seek clock.
 - Add ReplayGain and preamp/volume dB options.
 - Add output device selection with persistence.
 - Add optional crossfade and buffer tuning controls.

@@ -9,6 +9,9 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::analysis::AnalysisCommand;
 
+pub mod clock;
+pub use clock::{monotonic_now, MonotonicTime};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PlaybackState {
     #[default]
@@ -46,7 +49,16 @@ pub fn volume_gain_to_level(gain: f32) -> f32 {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlaybackSnapshot {
     pub state: PlaybackState,
+    /// Where the pipeline was at `position_sampled_at`, as it reported it.
+    /// The engine does not smooth or extrapolate it; the UI does, once.
     pub position: Duration,
+    /// When the engine read `position`, on `CLOCK_MONOTONIC`.
+    pub position_sampled_at: MonotonicTime,
+    /// Whether `position` advances in real time from `position_sampled_at`:
+    /// the pipeline plays, and no seek or restart holds it. False while
+    /// playback starts, resumes, or waits for a seek, even though `state`
+    /// is already Playing.
+    pub position_advancing: bool,
     pub duration: Duration,
     pub current: Option<PathBuf>,
     pub current_queue_index: Option<usize>,
@@ -241,9 +253,11 @@ pub struct PlaybackEngine {
     failure: Arc<OnceLock<String>>,
 }
 
-fn stop_snapshot_at_terminal_eos(snapshot: &mut PlaybackSnapshot) {
+fn stop_snapshot_at_terminal_eos(snapshot: &mut PlaybackSnapshot, now: MonotonicTime) {
     snapshot.state = PlaybackState::Stopped;
     snapshot.position = Duration::ZERO;
+    snapshot.position_sampled_at = now;
+    snapshot.position_advancing = false;
     snapshot.current_bitrate_kbps = None;
 }
 
@@ -311,8 +325,8 @@ mod shared_tests {
 
     use super::{
         remove_queue_indices, stop_snapshot_at_terminal_eos, volume_gain_to_level,
-        volume_level_to_gain, PlaybackCommand, PlaybackEngine, PlaybackError, PlaybackErrorOutcome,
-        PlaybackEvent, PlaybackSnapshot, PlaybackState,
+        volume_level_to_gain, MonotonicTime, PlaybackCommand, PlaybackEngine, PlaybackError,
+        PlaybackErrorOutcome, PlaybackEvent, PlaybackSnapshot, PlaybackState,
     };
 
     #[test]
@@ -432,13 +446,17 @@ mod shared_tests {
             current_queue_index: Some(9),
             current_bitrate_kbps: Some(1056),
             volume: 1.0,
+            position_sampled_at: MonotonicTime::from_nanos(5),
+            position_advancing: true,
             ..PlaybackSnapshot::default()
         };
 
-        stop_snapshot_at_terminal_eos(&mut snapshot);
+        stop_snapshot_at_terminal_eos(&mut snapshot, MonotonicTime::from_nanos(9));
 
         assert_eq!(snapshot.state, PlaybackState::Stopped);
         assert_eq!(snapshot.position, Duration::ZERO);
+        assert_eq!(snapshot.position_sampled_at, MonotonicTime::from_nanos(9));
+        assert!(!snapshot.position_advancing);
         assert_eq!(snapshot.duration, Duration::from_secs(272));
         assert_eq!(snapshot.current.as_ref(), Some(&track));
         assert_eq!(snapshot.current_queue_index, Some(9));

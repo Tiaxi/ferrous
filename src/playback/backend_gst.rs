@@ -21,6 +21,7 @@ use crate::raw_audio::{
     is_raw_surround_file,
 };
 
+use super::clock::{self, MonotonicClock, MonotonicTime};
 use super::queue::{
     same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff, ManualMove,
 };
@@ -52,124 +53,6 @@ struct GstPositionTrace {
     jumped_backward: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlaybackClockMode {
-    Steady,
-    SeekHold,
-    SeekReacquire,
-    Discontinuity,
-}
-
-#[derive(Debug, Clone)]
-struct SmoothedPlaybackClock {
-    anchor_position: Duration,
-    anchor_instant: Instant,
-    rate: f64,
-    last_raw_position: Option<Duration>,
-    initialized: bool,
-    mode: PlaybackClockMode,
-}
-
-impl SmoothedPlaybackClock {
-    const SNAP_ERROR_SECONDS: f64 = 0.75;
-    const IGNORE_ERROR_SECONDS: f64 = 0.012;
-    const PHASE_RECOVERY_HORIZON_SECONDS: f64 = 0.75;
-    const PHASE_RATE_OFFSET_MAX: f64 = 0.10;
-    const RATE_CLAMP_MIN: f64 = 0.92;
-    const RATE_CLAMP_MAX: f64 = 1.10;
-
-    fn new(now: Instant) -> Self {
-        Self {
-            anchor_position: Duration::ZERO,
-            anchor_instant: now,
-            rate: 1.0,
-            last_raw_position: None,
-            initialized: false,
-            mode: PlaybackClockMode::Discontinuity,
-        }
-    }
-
-    fn current_position(&self, now: Instant) -> Duration {
-        if !self.initialized {
-            return self.anchor_position;
-        }
-        let elapsed_seconds = now
-            .checked_duration_since(self.anchor_instant)
-            .unwrap_or(Duration::ZERO)
-            .as_secs_f64();
-        add_signed_seconds(self.anchor_position, elapsed_seconds * self.rate)
-    }
-
-    fn reset(&mut self, position: Duration, now: Instant) {
-        self.reset_with_mode(position, now, PlaybackClockMode::Discontinuity);
-    }
-
-    fn reset_with_mode(&mut self, position: Duration, now: Instant, mode: PlaybackClockMode) {
-        self.anchor_position = position;
-        self.anchor_instant = now;
-        self.rate = 1.0;
-        self.last_raw_position = Some(position);
-        self.initialized = true;
-        self.mode = mode;
-    }
-
-    fn last_raw_position(&self) -> Option<Duration> {
-        self.last_raw_position
-    }
-
-    #[cfg(feature = "profiling-logs")]
-    fn mode(&self) -> PlaybackClockMode {
-        self.mode
-    }
-
-    fn enter_seek_hold(&mut self, target: Duration, now: Instant) {
-        self.reset_with_mode(target, now, PlaybackClockMode::SeekHold);
-        self.rate = 0.0;
-    }
-
-    fn enter_seek_reacquire(&mut self) {
-        self.mode = PlaybackClockMode::SeekReacquire;
-    }
-
-    fn update_playing_sample(&mut self, raw_position: Duration, now: Instant) -> Duration {
-        if !self.initialized {
-            self.reset_with_mode(raw_position, now, PlaybackClockMode::Steady);
-            return raw_position;
-        }
-
-        let predicted = self.current_position(now);
-        let error_seconds = raw_position.as_secs_f64() - predicted.as_secs_f64();
-        if error_seconds.abs() >= Self::SNAP_ERROR_SECONDS {
-            self.reset(raw_position, now);
-            return raw_position;
-        }
-
-        if matches!(self.mode, PlaybackClockMode::SeekReacquire) {
-            self.reset_with_mode(raw_position, now, PlaybackClockMode::Steady);
-            return raw_position;
-        }
-
-        let phase_rate_offset = if error_seconds.abs() <= Self::IGNORE_ERROR_SECONDS {
-            0.0
-        } else {
-            (error_seconds / Self::PHASE_RECOVERY_HORIZON_SECONDS)
-                .clamp(-Self::PHASE_RATE_OFFSET_MAX, Self::PHASE_RATE_OFFSET_MAX)
-        };
-        // Playback is fixed at the MPRIS/GStreamer nominal rate of 1.0.
-        // Do not infer a base rate from adjacent position queries: scheduling
-        // delays make individual query deltas irregular, and a delayed sample
-        // followed by a catch-up must not become a false playback rate. The
-        // bounded phase offset below corrects sustained clock error instead.
-        self.rate = (1.0 + phase_rate_offset).clamp(Self::RATE_CLAMP_MIN, Self::RATE_CLAMP_MAX);
-        let corrected = predicted;
-        self.anchor_position = corrected;
-        self.anchor_instant = now;
-        self.last_raw_position = Some(raw_position);
-        self.mode = PlaybackClockMode::Steady;
-        corrected
-    }
-}
-
 #[cfg(any(test, feature = "profiling-logs"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GstClockTrace {
@@ -191,26 +74,6 @@ struct RecentSeekTrace {
 #[cfg(any(test, feature = "profiling-logs"))]
 fn duration_ms_i128(value: Duration) -> i128 {
     i128::try_from(value.as_millis()).unwrap_or(i128::MAX)
-}
-
-fn add_signed_seconds(base: Duration, delta_seconds: f64) -> Duration {
-    if delta_seconds >= 0.0 {
-        base.saturating_add(Duration::from_secs_f64(delta_seconds))
-    } else {
-        let magnitude = Duration::from_secs_f64(-delta_seconds);
-        base.checked_sub(magnitude).unwrap_or(Duration::ZERO)
-    }
-}
-
-fn release_seek_hold_sample(
-    clock: &mut SmoothedPlaybackClock,
-    _target: Duration,
-    _released_at: Instant,
-    raw_position: Duration,
-    now: Instant,
-) -> Duration {
-    clock.enter_seek_reacquire();
-    clock.update_playing_sample(raw_position, now)
 }
 
 #[cfg(any(test, feature = "profiling-logs"))]
@@ -258,6 +121,62 @@ fn recent_seek_trace(
         target: target.map_or(-1, duration_ms_i128),
         since_issue: since_issue.map_or(-1, duration_ms_i128),
         since_release: since_release.map_or(-1, duration_ms_i128),
+    }
+}
+
+/// How closely a position read after a gapless switch must match the
+/// previous track's timeline to have come from its stream.
+const PREVIOUS_STREAM_TOLERANCE: Duration = Duration::from_millis(250);
+/// How long after the successor's start the pipeline may still answer
+/// position queries from the previous stream.
+const GAPLESS_HANDOVER_WINDOW: Duration = Duration::from_secs(1);
+
+/// The previous track's timeline at a gapless switch. Right after the
+/// successor's stream starts, the pipeline can still answer a position
+/// query from the previous stream, before the successor's segment applies;
+/// such a position would show the successor at the end of the previous
+/// track. The successor starts where the previous track ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GaplessHandover {
+    /// The previous track's last position sample.
+    previous_position: Duration,
+    previous_sampled_at: MonotonicTime,
+    /// When the previous track ends, which is when the successor starts.
+    successor_starts_at: MonotonicTime,
+}
+
+impl GaplessHandover {
+    /// The handover from the last sample of a track that advanced and
+    /// lasts `duration`, read at `now`.
+    fn after(
+        previous_position: Duration,
+        previous_sampled_at: MonotonicTime,
+        duration: Duration,
+        now: MonotonicTime,
+    ) -> Self {
+        let remaining = duration.saturating_sub(previous_position);
+        Self {
+            previous_position,
+            previous_sampled_at,
+            successor_starts_at: now.max(previous_sampled_at.saturating_add(remaining)),
+        }
+    }
+
+    /// Whether `position`, read at `now`, is the previous track's: where
+    /// its last sample says that track is now, rather than near the
+    /// successor's start.
+    fn is_previous_stream(&self, position: Duration, now: MonotonicTime) -> bool {
+        let previous_now =
+            self.previous_position + now.saturating_duration_since(self.previous_sampled_at);
+        position > PREVIOUS_STREAM_TOLERANCE
+            && position.abs_diff(previous_now) <= PREVIOUS_STREAM_TOLERANCE
+    }
+
+    /// Whether the pipeline has had long enough to report the successor.
+    fn is_over(&self, now: MonotonicTime) -> bool {
+        now > self
+            .successor_starts_at
+            .saturating_add(GAPLESS_HANDOVER_WINDOW)
     }
 }
 
@@ -320,7 +239,11 @@ struct GstPlaybackRuntime {
     last_seek_issued_at: Option<Instant>,
     last_seek_released_at: Option<Instant>,
     last_seek_target: Option<Duration>,
-    position_clock: SmoothedPlaybackClock,
+    /// Time stamps the position samples in the snapshot.
+    clock: MonotonicClock,
+    /// Set after a gapless switch while the pipeline may still report the
+    /// previous track's position.
+    gapless_handover: Option<GaplessHandover>,
     /// The next `stream-start` belongs to the track the pipeline was last
     /// started with, not to a staged successor.
     awaiting_run_stream_start: bool,
@@ -454,7 +377,8 @@ impl GstPlaybackRuntime {
             last_seek_issued_at: None,
             last_seek_released_at: None,
             last_seek_target: None,
-            position_clock: SmoothedPlaybackClock::new(Instant::now()),
+            clock: clock::system_clock(),
+            gapless_handover: None,
             awaiting_run_stream_start: true,
             last_stream_group: None,
             stream_durations,
@@ -497,6 +421,116 @@ impl GstPlaybackRuntime {
             self.restart,
             Some(RunRestart::Prerolling | RunRestart::Seeking)
         )
+    }
+
+    /// Whether the pipeline position advances in real time: playback plays,
+    /// the pipeline has reached Playing and is not leaving it, and no seek,
+    /// restart, or buffering holds it.
+    fn pipeline_advancing(&self) -> bool {
+        self.snapshot.state == PlaybackState::Playing
+            && !self.seek_pending()
+            && !self.restarting()
+            && !self.buffering_active
+            && self.playbin.current_state() == gst::State::Playing
+            && self.playbin.pending_state() == gst::State::VoidPending
+    }
+
+    /// Report that the pipeline is at `position` now, and whether it
+    /// advances from there. A position that stands still keeps its time
+    /// stamp. Returns whether the snapshot changed.
+    fn set_position_sample(&mut self, position: Duration, advancing: bool) -> bool {
+        let now = (self.clock)();
+        self.set_position_sample_at(position, now, advancing)
+    }
+
+    /// [`Self::set_position_sample`] for a position read at `sampled_at`.
+    fn set_position_sample_at(
+        &mut self,
+        position: Duration,
+        sampled_at: MonotonicTime,
+        advancing: bool,
+    ) -> bool {
+        if !advancing && !self.snapshot.position_advancing && self.snapshot.position == position {
+            return false;
+        }
+        // A stream that has not started keeps the time it starts at: the
+        // pipeline reports its start until then.
+        if advancing
+            && self.snapshot.position_advancing
+            && position.is_zero()
+            && self.snapshot.position.is_zero()
+            && sampled_at < self.snapshot.position_sampled_at
+        {
+            return false;
+        }
+        self.snapshot.position = position;
+        self.snapshot.position_sampled_at = sampled_at;
+        self.snapshot.position_advancing = advancing;
+        true
+    }
+
+    /// Read the pipeline position into the snapshot. A pipeline that cannot
+    /// tell where it is keeps the last position, which no longer advances.
+    /// Returns whether the snapshot changed.
+    fn sample_pipeline_position(&mut self) -> bool {
+        let Some(position) = self.playbin.query_position::<gst::ClockTime>() else {
+            return self.set_position_sample(self.snapshot.position, false);
+        };
+        let position = Duration::from_nanos(position.nseconds());
+        let now = (self.clock)();
+        let advancing = self.pipeline_advancing();
+        self.apply_position_read(position, now, advancing)
+    }
+
+    /// Report a pipeline position read at `now`, while the pipeline
+    /// `advancing` or not. Returns whether the snapshot changed.
+    ///
+    /// Right after a gapless switch, a reading on the previous track's
+    /// timeline is not the current track's position. A position query does
+    /// not tell which stream's segment answered it, so the reading's value
+    /// decides, which cannot tell the streams apart after a track shorter
+    /// than [`PREVIOUS_STREAM_TOLERANCE`]. Such a mistake stays harmless: a
+    /// rejected reading only stands in for the position the current sample
+    /// has reached, which is what the UI shows, and whether the position
+    /// advances is always taken from the pipeline. The handover ends as
+    /// soon as the pipeline reports the successor past its start, after
+    /// which the previous stream's segment no longer applies.
+    fn apply_position_read(
+        &mut self,
+        position: Duration,
+        now: MonotonicTime,
+        advancing: bool,
+    ) -> bool {
+        if let Some(handover) = self.gapless_handover {
+            if handover.is_over(now) {
+                self.gapless_handover = None;
+            } else if handover.is_previous_stream(position, now) {
+                // While the position advances, the sample from the switch
+                // still holds; otherwise it stops where that sample has
+                // reached.
+                if advancing && self.snapshot.position_advancing {
+                    return false;
+                }
+                let reached = self.sampled_position_at(now);
+                return self.set_position_sample_at(reached, now, advancing);
+            } else if !position.is_zero() {
+                self.gapless_handover = None;
+            }
+        }
+        self.set_position_sample_at(position, now, advancing)
+    }
+
+    /// Where the snapshot's position sample has reached at `now`.
+    fn sampled_position_at(&self, now: MonotonicTime) -> Duration {
+        let mut position = self.snapshot.position;
+        if self.snapshot.position_advancing {
+            position += now.saturating_duration_since(self.snapshot.position_sampled_at);
+        }
+        if self.snapshot.duration.is_zero() {
+            position
+        } else {
+            position.min(self.snapshot.duration)
+        }
     }
 
     #[cfg(feature = "profiling-logs")]
@@ -575,25 +609,20 @@ impl GstPlaybackRuntime {
     }
 
     #[cfg(feature = "profiling-logs")]
-    fn log_position_sample(
-        &self,
-        trace: GstPositionTrace,
-        mode: PlaybackClockMode,
-        accepted: Duration,
-    ) {
+    fn log_position_sample(&self, trace: GstPositionTrace) {
         if !heartbeat_trace_enabled() {
             return;
         }
         let seek_trace = self.recent_seek_trace();
         let clock_trace = self.clock_trace();
         eprintln!(
-            "[gst-pos] prev_ms={} next_ms={} delta_ms={} jumped_backward={} mode={:?} accepted_ms={} seek_locked=0 seek_target_ms={} since_seek_ms={} since_seek_release_ms={} current_state={:?} pending_state={:?} running_time_ms={} clock_time_ms={} base_time_ms={} successor_handed={} current={}",
+            "[gst-pos] prev_ms={} next_ms={} delta_ms={} jumped_backward={} advancing={} sampled_at_ns={} seek_target_ms={} since_seek_ms={} since_seek_release_ms={} current_state={:?} pending_state={:?} running_time_ms={} clock_time_ms={} base_time_ms={} successor_handed={} current={}",
             trace.previous,
             trace.current,
             trace.delta,
             i32::from(trace.jumped_backward),
-            mode,
-            duration_ms_i128(accepted),
+            i32::from(self.snapshot.position_advancing),
+            self.snapshot.position_sampled_at.as_nanos(),
             seek_trace.target,
             seek_trace.since_issue,
             seek_trace.since_release,
@@ -686,6 +715,8 @@ impl GstPlaybackRuntime {
     }
 
     fn stop_with_empty_queue(&mut self) {
+        // Positions from now on belong to another run or position.
+        self.gapless_handover = None;
         self.mute();
         let _ = self.set_pipeline_state(gst::State::Ready);
         self.begin_pipeline_run(false);
@@ -698,9 +729,8 @@ impl GstPlaybackRuntime {
         self.snapshot.current_bitrate_kbps = None;
         self.snapshot.track_token = 0;
         self.snapshot.state = PlaybackState::Stopped;
-        self.snapshot.position = Duration::ZERO;
+        self.set_position_sample(Duration::ZERO, false);
         self.snapshot.duration = Duration::ZERO;
-        self.position_clock.reset(Duration::ZERO, Instant::now());
     }
 
     fn load_queue(&mut self, paths: Vec<PathBuf>) {
@@ -913,15 +943,15 @@ impl GstPlaybackRuntime {
             return;
         }
         if self.set_pipeline_state(gst::State::Playing).is_ok() {
-            let now = Instant::now();
-            self.playing_state_requested_at = Some(now);
-            self.position_clock.reset(self.snapshot.position, now);
+            self.playing_state_requested_at = Some(Instant::now());
             if was_stopped {
                 // Re-assert mute after state transition to close the race
                 // window where new internal elements may not have volume=0.
                 self.playbin.set_property("volume", 0.0_f64);
             }
             self.snapshot.state = PlaybackState::Playing;
+            // The position advances once the pipeline has reached Playing.
+            self.sample_pipeline_position();
             if (self.target_volume - self.applied_volume).abs() > f32::EPSILON {
                 self.startup_gain_ramp = true;
             }
@@ -943,8 +973,8 @@ impl GstPlaybackRuntime {
         self.playing_state_requested_at = None;
         if self.set_pipeline_state(gst::State::Paused).is_ok() {
             self.snapshot.state = PlaybackState::Paused;
-            self.position_clock
-                .reset(self.snapshot.position, Instant::now());
+            // Where playback paused, rather than where it was last polled.
+            self.sample_pipeline_position();
             self.emit_snapshot();
         }
     }
@@ -962,6 +992,8 @@ impl GstPlaybackRuntime {
     /// Account for a pipeline that was stopped in Ready or Null: the current
     /// track stays current, and Play starts it from the beginning.
     fn enter_stopped(&mut self) {
+        // Positions from now on belong to another run or position.
+        self.gapless_handover = None;
         self.playing_state_requested_at = None;
         self.begin_pipeline_run(false);
         // The pipeline may have been given the successor. Play must
@@ -976,8 +1008,7 @@ impl GstPlaybackRuntime {
         self.buffering_active = false;
         self.clear_recent_seek_trace();
         self.snapshot.state = PlaybackState::Stopped;
-        self.snapshot.position = Duration::ZERO;
-        self.position_clock.reset(Duration::ZERO, Instant::now());
+        self.set_position_sample(Duration::ZERO, false);
         self.snapshot.current_queue_index = None;
         self.snapshot.current_bitrate_kbps = None;
     }
@@ -1006,12 +1037,21 @@ impl GstPlaybackRuntime {
 
     /// Queue `seek` for the pipeline, replacing a seek that waits.
     fn queue_seek(&mut self, seek: SeekTarget) {
-        if !self.seek_pending() {
-            // Positions are not sampled until the seek lands.
-            self.position_clock
-                .enter_seek_hold(self.snapshot.position, Instant::now());
-        }
+        // Positions from now on belong to another run or position.
+        self.gapless_handover = None;
         self.queued_seek = Some(seek);
+        // Positions are not sampled until the seek lands, and the position
+        // does not advance meanwhile.
+        if self.snapshot.position_advancing {
+            let position = self
+                .playbin
+                .query_position::<gst::ClockTime>()
+                .map_or(self.snapshot.position, |position| {
+                    Duration::from_nanos(position.nseconds())
+                });
+            self.set_position_sample(position, false);
+            self.emit_snapshot();
+        }
         self.issue_queued_seek();
     }
 
@@ -1116,15 +1156,12 @@ impl GstPlaybackRuntime {
         #[cfg(feature = "profiling-logs")]
         self.log_seek_hold_release(seek.position);
         if let Some(landing) = landing {
-            release_seek_hold_sample(&mut self.position_clock, seek.position, now, landing, now);
-            self.snapshot.position = landing;
+            let advancing = self.pipeline_advancing();
+            self.set_position_sample(landing, advancing);
         } else {
             // Playback goes on where the pipeline is, which is the start of
             // the track for a restarted run.
-            if let Some(position) = self.playbin.query_position::<gst::ClockTime>() {
-                self.snapshot.position = Duration::from_nanos(position.nseconds());
-            }
-            self.position_clock.reset(self.snapshot.position, now);
+            self.sample_pipeline_position();
         }
         if self.playing_state_requested_at.is_some() {
             // The pipeline goes on to Playing now that the seek is done.
@@ -1389,22 +1426,42 @@ impl GstPlaybackRuntime {
 
     fn commit_gapless_successor(&mut self, committed: CommittedAdvance) {
         let track_token = self.advance_track_token();
-        let position = self
+        let mut position = self
             .playbin
             .query_position::<gst::ClockTime>()
             .map_or(Duration::ZERO, |position| {
                 Duration::from_nanos(position.nseconds())
             });
+        let mut sampled_at = (self.clock)();
+        // The successor's stream starts while the end of the previous track
+        // is still to be heard, and its position stays at its start until
+        // then, if the pipeline does not still report the previous track's.
+        self.gapless_handover = self.snapshot.position_advancing.then(|| {
+            GaplessHandover::after(
+                self.snapshot.position,
+                self.snapshot.position_sampled_at,
+                self.snapshot.duration,
+                sampled_at,
+            )
+        });
+        if let Some(handover) = self.gapless_handover {
+            if handover.is_previous_stream(position, sampled_at) {
+                position = Duration::ZERO;
+            }
+            if position.is_zero() {
+                sampled_at = handover.successor_starts_at;
+            }
+        }
         // A seek for the previous track no longer applies.
         self.abandon_seeks();
         self.clear_recent_seek_trace();
         self.snapshot.current = Some(committed.path.clone());
         self.snapshot.current_queue_index = Some(committed.index);
         self.snapshot.track_token = track_token;
-        self.snapshot.position = position;
+        let advancing = self.pipeline_advancing();
+        self.set_position_sample_at(position, sampled_at, advancing);
         self.snapshot.duration = self.current_duration().unwrap_or(Duration::ZERO);
         self.snapshot.current_bitrate_kbps = None;
-        self.position_clock.reset(position, Instant::now());
         // A prepared spectrogram continuation is consumed by the gapless
         // `SetTrack` that the bridge sends for this event.
         self.emit_track_changed(
@@ -1550,33 +1607,12 @@ impl GstPlaybackRuntime {
 
         let mut snapshot_changed = false;
         if !self.seek_pending() && self.snapshot.state != PlaybackState::Stopped {
-            if let Some(pos) = self.playbin.query_position::<gst::ClockTime>() {
-                let now = Instant::now();
-                let previous_raw_pos = self
-                    .position_clock
-                    .last_raw_position()
-                    .unwrap_or(self.snapshot.position);
-                let raw_pos = Duration::from_nanos(pos.nseconds());
-                #[cfg(feature = "profiling-logs")]
-                let mode_before_sample = self.position_clock.mode();
-                let next_pos = if self.snapshot.state == PlaybackState::Playing {
-                    self.position_clock.update_playing_sample(raw_pos, now)
-                } else {
-                    self.position_clock.reset(raw_pos, now);
-                    raw_pos
-                };
-                if self.snapshot.position != next_pos {
-                    self.snapshot.position = next_pos;
-                    snapshot_changed = true;
-                }
-                if previous_raw_pos != raw_pos {
-                    #[cfg(feature = "profiling-logs")]
-                    self.log_position_sample(
-                        gst_position_trace(previous_raw_pos, raw_pos),
-                        mode_before_sample,
-                        next_pos,
-                    );
-                }
+            #[cfg(feature = "profiling-logs")]
+            let previous = self.snapshot.position;
+            snapshot_changed |= self.sample_pipeline_position();
+            #[cfg(feature = "profiling-logs")]
+            if previous != self.snapshot.position {
+                self.log_position_sample(gst_position_trace(previous, self.snapshot.position));
             }
         }
         if self.snapshot.state != PlaybackState::Stopped || self.snapshot.duration == Duration::ZERO
@@ -1874,13 +1910,12 @@ impl GstPlaybackRuntime {
                 // Normal EOS: end of queue
                 self.playing_state_requested_at = None;
                 self.buffering_active = false;
-                self.position_clock.reset(Duration::ZERO, Instant::now());
                 self.clear_recent_seek_trace();
                 self.startup_gain_ramp = false;
                 self.startup_ramp_hold_until = None;
                 let _ = self.set_pipeline_state(gst::State::Ready);
                 self.begin_pipeline_run(false);
-                super::stop_snapshot_at_terminal_eos(&mut self.snapshot);
+                super::stop_snapshot_at_terminal_eos(&mut self.snapshot, (self.clock)());
                 self.emit_snapshot();
             }
             gst::MessageView::StreamStart(stream_start) => {
@@ -1917,6 +1952,14 @@ impl GstPlaybackRuntime {
                     self.log_playbin_state_change(sc.old(), sc.current(), sc.pending());
                     if sc.current() == gst::State::Playing {
                         self.playing_state_requested_at = None;
+                    }
+                    // Whether the position advances follows the pipeline's
+                    // state; a seek reports its own position once it lands.
+                    if self.snapshot.state != PlaybackState::Stopped
+                        && !self.seek_pending()
+                        && self.sample_pipeline_position()
+                    {
+                        self.emit_snapshot();
                     }
                 }
             }
@@ -1973,6 +2016,8 @@ impl GstPlaybackRuntime {
     }
 
     fn switch_track(&mut self, path: &Path, uri: &str, force_play: bool) {
+        // Positions from now on belong to another run or position.
+        self.gapless_handover = None;
         let was_playing = self.snapshot.state == PlaybackState::Playing || force_play;
         self.mute();
         self.playing_state_requested_at = None;
@@ -2007,10 +2052,10 @@ impl GstPlaybackRuntime {
             self.startup_ramp_hold_until = None;
         }
         self.snapshot.current = Some(path.to_path_buf());
-        self.snapshot.position = Duration::ZERO;
+        // The new run starts at the beginning and advances once it plays.
+        self.set_position_sample(Duration::ZERO, false);
         self.snapshot.duration = Duration::ZERO;
         self.snapshot.current_bitrate_kbps = None;
-        self.position_clock.reset(Duration::ZERO, Instant::now());
         self.clear_recent_seek_trace();
     }
 }
@@ -3498,159 +3543,50 @@ mod tests {
         assert!(trace.jumped_backward);
     }
 
-    #[test]
-    fn smoothed_playback_clock_damps_large_forward_sample_jump() {
-        let base = Instant::now();
-        let mut clock = SmoothedPlaybackClock::new(base);
-        clock.reset(Duration::from_secs_f64(12.0), base);
-
-        let first = clock.update_playing_sample(
-            Duration::from_secs_f64(12.039),
-            base + Duration::from_millis(40),
-        );
-        let second = clock.update_playing_sample(
-            Duration::from_secs_f64(12.148),
-            base + Duration::from_millis(80),
-        );
-
-        let first_jump = first.as_secs_f64() - 12.0;
-        let second_jump = second.as_secs_f64() - first.as_secs_f64();
-        assert!(first_jump > 0.03);
-        assert!(
-            second_jump < 0.07,
-            "modeled jump should be damped, got {second_jump:.6}"
-        );
-        assert!(
-            (Duration::from_secs_f64(12.148).as_secs_f64() - second.as_secs_f64()) > 0.04,
-            "modeled position should not fully follow the raw jump immediately"
-        );
+    fn at(millis: u64) -> MonotonicTime {
+        MonotonicTime::from_nanos(1_000_000_000_000).saturating_add(Duration::from_millis(millis))
     }
 
     #[test]
-    fn smoothed_playback_clock_recovers_burst_via_bounded_cadence() {
-        let base = Instant::now();
-        let mut clock = SmoothedPlaybackClock::new(base);
-        clock.reset(Duration::from_secs_f64(12.0), base);
-
-        let first = clock.update_playing_sample(
-            Duration::from_secs_f64(12.039),
-            base + Duration::from_millis(40),
+    fn gapless_handover_starts_the_successor_where_the_previous_track_ends() {
+        // The previous track was at 3.8 s of 4 s at 0 ms; the switch is
+        // committed at 15 ms, and the successor starts at 200 ms.
+        let handover = GaplessHandover::after(
+            Duration::from_millis(3_800),
+            at(0),
+            Duration::from_secs(4),
+            at(15),
         );
-        let mut modeled = clock.update_playing_sample(
-            Duration::from_secs_f64(12.160),
-            base + Duration::from_millis(80),
+        assert_eq!(handover.successor_starts_at, at(200));
+        // A track that already ended starts its successor now.
+        let late = GaplessHandover::after(
+            Duration::from_millis(3_800),
+            at(0),
+            Duration::from_secs(4),
+            at(500),
         );
-        let mut previous_modeled = modeled;
-        let mut maximum_step = modeled.as_secs_f64() - first.as_secs_f64();
-
-        for tick in 3..=20 {
-            let raw_position = Duration::from_secs_f64(12.160 + (0.039 * f64::from(tick - 2)));
-            modeled = clock.update_playing_sample(
-                raw_position,
-                base + Duration::from_millis(40 * u64::from(tick as u32)),
-            );
-            let step = modeled.as_secs_f64() - previous_modeled.as_secs_f64();
-            maximum_step = maximum_step.max(step);
-            previous_modeled = modeled;
-        }
-
-        assert!(
-            maximum_step < 0.05,
-            "modeled recovery should stay near realtime cadence, got max step {maximum_step:.6}"
-        );
-        let final_raw = Duration::from_secs_f64(12.160 + (0.039 * 18.0));
-        let remaining_error = final_raw.as_secs_f64() - modeled.as_secs_f64();
-        assert!(
-            remaining_error.abs() < 0.03,
-            "modeled recovery should converge back near raw position, remaining error {remaining_error:.6}"
-        );
+        assert_eq!(late.successor_starts_at, at(500));
     }
 
     #[test]
-    fn smoothed_playback_clock_stays_synced_to_quantized_44k1_pcm_positions() {
-        let base = Instant::now();
-        let mut clock = SmoothedPlaybackClock::new(base);
-        clock.reset(Duration::ZERO, base);
-
-        const SAMPLE_RATE: u64 = 44_100;
-        const AUDIO_BUFFER_FRAMES: u64 = 1_024;
-        let mut modeled = Duration::ZERO;
-
-        // A 100 ms query cadence sees either four buffers (92.9 ms) or five
-        // buffers (116.1 ms). The media clock still advances at exactly 1x;
-        // only the reported position is quantized to the last buffer edge.
-        for tick in 1_u64..=200 {
-            let elapsed_nanos = tick * 100_000_000;
-            let elapsed_frames = elapsed_nanos * SAMPLE_RATE / 1_000_000_000;
-            let reported_frames = elapsed_frames / AUDIO_BUFFER_FRAMES * AUDIO_BUFFER_FRAMES;
-            let raw_position = Duration::from_nanos(reported_frames * 1_000_000_000 / SAMPLE_RATE);
-            modeled = clock
-                .update_playing_sample(raw_position, base + Duration::from_nanos(elapsed_nanos));
-        }
-
-        let ideal_position = Duration::from_secs(20);
-        let lag = ideal_position.saturating_sub(modeled).as_secs_f64();
-        assert!(
-            lag < 0.025,
-            "quantized 44.1 kHz positions must not bias the playback clock, lag={lag:.6}s"
+    fn gapless_handover_tells_the_previous_streams_position_from_the_successors() {
+        let handover = GaplessHandover::after(
+            Duration::from_millis(3_837),
+            at(0),
+            Duration::from_secs(4),
+            at(3),
         );
-    }
-
-    #[test]
-    fn seek_hold_does_not_run_ahead_before_backend_reacquires_position() {
-        let base = Instant::now();
-        let target = Duration::from_secs_f64(12.0);
-        let mut clock = SmoothedPlaybackClock::new(base);
-        clock.enter_seek_hold(target, base);
-
-        let visible = clock.current_position(base + Duration::from_millis(120));
-        assert_eq!(
-            visible, target,
-            "seek hold should keep the requested target stable until GStreamer confirms playback position"
-        );
-    }
-
-    #[test]
-    fn smoothed_playback_clock_resets_exactly_on_seek_target() {
-        let base = Instant::now();
-        let mut clock = SmoothedPlaybackClock::new(base);
-        clock.reset(Duration::from_secs_f64(48.0), base);
-
-        assert_eq!(clock.current_position(base), Duration::from_secs(48));
-
-        let post_release = clock.update_playing_sample(
-            Duration::from_secs_f64(48.24),
-            base + Duration::from_millis(240),
-        );
-        let visible_jump = post_release.as_secs_f64() - 48.0;
-        assert!(
-            visible_jump < 0.26,
-            "post-seek modeled jump should stay below the raw catch-up, got {visible_jump:.6}"
-        );
-    }
-
-    #[test]
-    fn post_seek_hold_release_preserves_first_catch_up_sample() {
-        let base = Instant::now();
-        let target = Duration::from_secs_f64(48.0);
-        let mut clock = SmoothedPlaybackClock::new(base);
-        clock.reset(target, base);
-        let raw = Duration::from_secs_f64(48.24);
-
-        let modeled = release_seek_hold_sample(
-            &mut clock,
-            target,
-            base + Duration::from_millis(220),
-            raw,
-            base + Duration::from_millis(240),
-        );
-
-        assert!(
-            (raw.as_secs_f64() - modeled.as_secs_f64()) < 0.05,
-            "post-seek release should stay close to the first raw sample, raw={:.6} modeled={:.6}",
-            raw.as_secs_f64(),
-            modeled.as_secs_f64()
-        );
+        // The pipeline still reports the previous pass of a Repeat-One
+        // replay, seen at its commit in #187.
+        assert!(handover.is_previous_stream(Duration::from_millis(3_840), at(3)));
+        assert!(handover.is_previous_stream(Duration::from_millis(3_900), at(60)));
+        // The successor's own positions near its start.
+        assert!(!handover.is_previous_stream(Duration::ZERO, at(3)));
+        assert!(!handover.is_previous_stream(Duration::from_millis(40), at(203)));
+        assert!(!handover.is_previous_stream(Duration::from_millis(200), at(400)));
+        // Until the pipeline has had long enough to report the successor.
+        assert!(!handover.is_over(at(1_163)));
+        assert!(handover.is_over(at(1_164)));
     }
 
     #[test]
@@ -3667,13 +3603,6 @@ mod tests {
         assert_eq!(trace.running, -1);
         assert_eq!(trace.clock, -1);
         assert_eq!(trace.base, -1);
-    }
-
-    #[test]
-    fn backend_clock_trace_reports_mode() {
-        let mode = PlaybackClockMode::SeekReacquire;
-        let text = format!("{mode:?}");
-        assert!(text.contains("SeekReacquire"));
     }
 
     #[test]
@@ -3885,6 +3814,96 @@ mod gst_integration_tests {
         fn current_uri(&self) -> Option<String> {
             self.runtime.playbin.property("current-uri")
         }
+    }
+
+    fn at(millis: u64) -> MonotonicTime {
+        MonotonicTime::from_nanos(1_000_000_000_000).saturating_add(Duration::from_millis(millis))
+    }
+
+    /// A runtime that just switched gaplessly from a 200 ms track, whose
+    /// last sample read 150 ms at 0 ms, to a successor that starts at 50 ms.
+    fn after_short_track_switch() -> TestEngine {
+        let mut engine = TestEngine::new();
+        let runtime = &mut engine.runtime;
+        runtime.gapless_handover = Some(GaplessHandover::after(
+            Duration::from_millis(150),
+            at(0),
+            Duration::from_millis(200),
+            at(20),
+        ));
+        runtime.snapshot.position = Duration::ZERO;
+        runtime.snapshot.position_sampled_at = at(50);
+        runtime.snapshot.position_advancing = true;
+        runtime.snapshot.duration = Duration::from_secs(4);
+        engine
+    }
+
+    #[test]
+    fn pause_after_a_short_track_stops_the_position_at_once() {
+        let mut engine = after_short_track_switch();
+        let runtime = &mut engine.runtime;
+        // The successor's own position at 400 ms is within the tolerance of
+        // the previous track's timeline, so it is taken for that track's.
+        let successor = Duration::from_millis(350);
+        assert!(runtime
+            .gapless_handover
+            .unwrap()
+            .is_previous_stream(successor, at(400)));
+        assert!(!runtime.apply_position_read(successor, at(400), true));
+        assert!(runtime.snapshot.position_advancing);
+
+        // Paused there: the position stops advancing at once, where the
+        // sample from the switch has reached.
+        assert!(runtime.apply_position_read(successor, at(400), false));
+        assert!(!runtime.snapshot.position_advancing);
+        assert_eq!(runtime.snapshot.position, successor);
+        assert_eq!(runtime.snapshot.position_sampled_at, at(400));
+
+        // And stays there, whether a reading is still taken for the
+        // previous track's or no longer.
+        for millis in [450, 600, 2_000] {
+            assert!(!runtime.apply_position_read(successor, at(millis), false));
+            assert!(!runtime.snapshot.position_advancing);
+            assert_eq!(runtime.snapshot.position, successor);
+        }
+        assert_eq!(runtime.gapless_handover, None);
+    }
+
+    #[test]
+    fn successor_reported_past_its_start_ends_the_gapless_handover() {
+        let mut engine = after_short_track_switch();
+        let runtime = &mut engine.runtime;
+        // Before its start the successor reports its start.
+        assert!(!runtime.apply_position_read(Duration::ZERO, at(30), true));
+        assert!(runtime.gapless_handover.is_some());
+        assert!(runtime.apply_position_read(Duration::from_millis(40), at(90), true));
+        assert_eq!(runtime.gapless_handover, None);
+        // Its later positions are taken as they are.
+        assert!(runtime.apply_position_read(Duration::from_millis(350), at(400), false));
+        assert_eq!(runtime.snapshot.position, Duration::from_millis(350));
+        assert!(!runtime.snapshot.position_advancing);
+    }
+
+    #[test]
+    fn previous_streams_reading_keeps_the_successors_sample_while_advancing() {
+        // The Repeat-One replay from #187: the pipeline still answers from
+        // the previous pass right after the switch.
+        let mut engine = TestEngine::new();
+        let runtime = &mut engine.runtime;
+        runtime.gapless_handover = Some(GaplessHandover::after(
+            Duration::from_millis(3_837),
+            at(0),
+            Duration::from_secs(4),
+            at(3),
+        ));
+        runtime.snapshot.position = Duration::ZERO;
+        runtime.snapshot.position_sampled_at = at(163);
+        runtime.snapshot.position_advancing = true;
+        runtime.snapshot.duration = Duration::from_secs(4);
+        assert!(!runtime.apply_position_read(Duration::from_millis(3_900), at(60), true));
+        assert_eq!(runtime.snapshot.position, Duration::ZERO);
+        assert_eq!(runtime.snapshot.position_sampled_at, at(163));
+        assert!(runtime.gapless_handover.is_some());
     }
 
     impl Drop for TestEngine {
@@ -4529,11 +4548,17 @@ mod engine_tests {
 
     impl Engine {
         fn start() -> Self {
+            Self::start_with_clock(clock::system_clock())
+        }
+
+        /// Start an engine that stamps its position samples with `clock`.
+        fn start_with_clock(clock: MonotonicClock) -> Self {
             gst::init().unwrap();
             let (analysis_tx, analysis) = unbounded();
             let (event_tx, events) = unbounded();
-            let (runtime, bus) =
+            let (mut runtime, bus) =
                 start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
+            runtime.clock = clock;
             let playbin = runtime.playbin.clone();
             let queue = Arc::clone(&runtime.queue_state);
             let trace = Trace::new(&runtime);
@@ -4613,6 +4638,10 @@ mod engine_tests {
         fn record(&mut self, event: PlaybackEvent) {
             match event {
                 PlaybackEvent::Snapshot(snapshot) => {
+                    assert!(
+                        snapshot.state == PlaybackState::Playing || !snapshot.position_advancing,
+                        "only playback that plays advances: {snapshot:?}"
+                    );
                     self.snapshots.push(snapshot.clone());
                     self.snapshot = snapshot;
                 }
@@ -5089,6 +5118,10 @@ mod engine_tests {
                 serial: 4
             })
         );
+        // The position stands where the first seek found it.
+        let held = engine.runtime.snapshot.clone();
+        assert!(!held.position_advancing, "{held:?}");
+        assert!(held.position >= before, "{held:?}");
         engine.wait_until("the seeks were not acknowledged", |runtime| {
             runtime.snapshot.seek_serial == 4
         });
@@ -5108,7 +5141,7 @@ mod engine_tests {
         for event in &events {
             if let PlaybackEvent::Snapshot(snapshot) = event {
                 assert!(
-                    snapshot.position == before || snapshot.position >= seeked[0],
+                    snapshot.position == held.position || snapshot.position >= seeked[0],
                     "{snapshot:?}"
                 );
                 assert!(snapshot.seek_landed_serial == 0 || snapshot.seek_landed_serial == 4);
@@ -5440,6 +5473,243 @@ mod engine_tests {
         assert_eq!(engine.changes.len(), 2, "one track change per play");
     }
 
+    /// How far ahead of `CLOCK_MONOTONIC` the test clock reads, so that a
+    /// time stamp tells which clock it came from.
+    const CLOCK_SHIFT: Duration = Duration::from_secs(1_000_000);
+
+    /// `CLOCK_MONOTONIC` shifted by [`CLOCK_SHIFT`]. It runs at the rate of
+    /// the pipeline clock, so samples stamped with it can be extrapolated.
+    fn shifted_clock() -> MonotonicClock {
+        Arc::new(|| clock::monotonic_now().saturating_add(CLOCK_SHIFT))
+    }
+
+    /// How much later than it was read a position may be stamped, or how
+    /// much later a sink may report it, when the scheduler delays the
+    /// engine or the pipeline under load.
+    const SAMPLE_SLACK: Duration = Duration::from_millis(150);
+    /// How far a position may fall behind real time between two samples
+    /// that both advance: a starved sink holds its position until it has
+    /// rendered the next buffer.
+    const STALL_SLACK: Duration = Duration::from_millis(300);
+
+    fn signed_millis(value: Duration) -> i128 {
+        i128::try_from(value.as_micros()).unwrap() / 1_000
+    }
+
+    /// Check that consecutive snapshots describe one playback clock that
+    /// the UI can extrapolate: time stamps come from `clock` and do not go
+    /// back; within a track and seek, the position neither runs ahead of
+    /// real time nor goes back, and keeps up with it while it advances;
+    /// a gapless switch goes on where the previous track ended.
+    #[track_caller]
+    fn assert_continuous(snapshots: &[PlaybackSnapshot], now: MonotonicTime) {
+        let shifted_epoch = MonotonicTime::default().saturating_add(CLOCK_SHIFT);
+        let violations: Vec<String> = snapshots
+            .windows(2)
+            .filter_map(|pair| {
+                let (previous, next) = (&pair[0], &pair[1]);
+                let elapsed = next
+                    .position_sampled_at
+                    .saturating_duration_since(previous.position_sampled_at);
+                let position = signed_millis(next.position);
+                let start = signed_millis(previous.position);
+                let elapsed_ms = signed_millis(elapsed);
+                let slack = signed_millis(SAMPLE_SLACK);
+                let went_back = previous
+                    .position_sampled_at
+                    .saturating_duration_since(next.position_sampled_at);
+                let problem = if went_back > SAMPLE_SLACK {
+                    // Only a predicted start of a gapless successor may be
+                    // later than the sample after it.
+                    Some("time stamp went back".to_string())
+                } else if next.position_advancing
+                    && !(shifted_epoch..=now).contains(&next.position_sampled_at)
+                {
+                    Some("time stamp is not from the injected clock".to_string())
+                } else if next.track_token != previous.track_token {
+                    // A gapless switch: the new track starts where the
+                    // previous one ended.
+                    let gapless = previous.position_advancing
+                        && next.position_advancing
+                        && !previous.duration.is_zero();
+                    let expected = start + elapsed_ms - signed_millis(previous.duration);
+                    (gapless && (position - expected).abs() > slack).then(|| {
+                        format!("a gapless switch landed at {position} ms, not {expected} ms")
+                    })
+                } else if next.seek_landed_serial != previous.seek_landed_serial {
+                    // A seek landed; its target is checked by the test.
+                    None
+                } else if position > start + elapsed_ms + slack {
+                    Some(format!("ran ahead of real time ({elapsed_ms} ms)"))
+                } else if position + slack < start {
+                    Some("went back".to_string())
+                } else if previous.position_advancing
+                    && next.position_advancing
+                    && position + signed_millis(STALL_SLACK) < start + elapsed_ms
+                {
+                    Some(format!("fell behind real time ({elapsed_ms} ms)"))
+                } else {
+                    None
+                };
+                problem.map(|problem| {
+                    format!(
+                        "{problem}: {:?} at {} -> {:?} at {} (token {} -> {}, advancing {} -> {})",
+                        previous.position,
+                        previous.position_sampled_at.as_nanos(),
+                        next.position,
+                        next.position_sampled_at.as_nanos(),
+                        previous.track_token,
+                        next.track_token,
+                        previous.position_advancing,
+                        next.position_advancing,
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            violations.is_empty(),
+            "{violations:#?}\nsnapshots (position, time stamp, advancing, token):\n{}",
+            snapshots
+                .iter()
+                .map(|snapshot| format!(
+                    "  {:?} {} {} {}",
+                    snapshot.position,
+                    snapshot.position_sampled_at.as_nanos(),
+                    snapshot.position_advancing,
+                    snapshot.track_token
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn position_samples_are_the_raw_pipeline_position_at_their_time_stamp() {
+        let fixtures = Fixtures::new("raw-position");
+        let a = fixtures.wav("a.wav", 6_000);
+        let clock = shifted_clock();
+        let mut engine = DirectEngine::start_with_clock(Arc::clone(&clock));
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.wait_until("the position did not advance from 0.3 s", |runtime| {
+            runtime.snapshot.position_advancing && runtime.snapshot.position >= millis(300)
+        });
+        for _ in 0..10 {
+            let before = clock();
+            engine.runtime.poll();
+            let after = clock();
+            let queried = engine
+                .runtime
+                .playbin
+                .query_position::<gst::ClockTime>()
+                .map(|position| Duration::from_nanos(position.nseconds()))
+                .unwrap();
+            let queried_at = clock();
+            let snapshot = &engine.runtime.snapshot;
+            assert!(snapshot.position_advancing, "{snapshot:?}");
+            assert!(
+                (before..=after).contains(&snapshot.position_sampled_at),
+                "{snapshot:?} was not stamped while it was polled"
+            );
+            // The pipeline advanced from the sample in real time, which an
+            // estimate that smooths or extrapolates the position would not
+            // match.
+            let advanced = queried.checked_sub(snapshot.position);
+            let window = queried_at.saturating_duration_since(before);
+            assert!(
+                advanced.is_some_and(|advanced| advanced <= window + millis(2)),
+                "the pipeline was at {queried:?} {window:?} after a sample of {:?}",
+                snapshot.position
+            );
+        }
+        let events: Vec<_> = engine.events.try_iter().collect();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, PlaybackEvent::Snapshot(_))));
+    }
+
+    #[test]
+    fn position_stays_continuous_across_a_seek_a_pause_and_a_gapless_switch() {
+        let fixtures = Fixtures::new("continuous");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let clock = shifted_clock();
+        let mut engine = Engine::start_with_clock(Arc::clone(&clock));
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not advance from 0.3 s", |engine| {
+            engine.snapshot.position_advancing && engine.snapshot.position >= millis(300)
+        });
+
+        engine.send(PlaybackCommand::Seek(millis(1_500)));
+        engine.wait_until("the seek did not land", |engine| {
+            engine.snapshot.seek_landed_serial == 1
+        });
+        let landed = engine
+            .snapshots
+            .iter()
+            .find(|snapshot| snapshot.seek_landed_serial == 1)
+            .unwrap()
+            .clone();
+        assert!(
+            landed.position.abs_diff(millis(1_500)) < millis(50),
+            "{landed:?}"
+        );
+        engine.wait_until("playback did not go on from the seek", |engine| {
+            engine.snapshot.position_advancing && engine.snapshot.position >= millis(1_800)
+        });
+
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("playback did not pause", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        let paused = engine.snapshot.clone();
+        assert!(!paused.position_advancing);
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("playback did not resume", |engine| {
+            engine.snapshot.position_advancing
+        });
+        let resumed = engine.snapshot.clone();
+        // Playback resumes where it paused, however long it was paused.
+        assert!(
+            resumed.position >= paused.position
+                && resumed.position
+                    <= paused.position
+                        + resumed
+                            .position_sampled_at
+                            .saturating_duration_since(clock())
+                        + SAMPLE_SLACK,
+            "paused at {paused:?}, resumed at {resumed:?}"
+        );
+
+        let change = engine.wait_for_changes(2);
+        assert_change(&change, &b, 1, Expect::Gapless);
+        engine.wait_until("the successor did not play 0.3 s", |engine| {
+            engine.snapshot.track_token == change.token
+                && engine.snapshot.position_advancing
+                && engine.snapshot.position >= millis(300)
+        });
+        assert_continuous(&engine.snapshots, clock());
+    }
+
+    #[test]
+    fn position_stays_continuous_across_a_repeat_one_replay() {
+        let fixtures = Fixtures::new("continuous-repeat");
+        let a = fixtures.wav("a.wav", 4_000);
+        let clock = shifted_clock();
+        let mut engine = Engine::start_with_clock(Arc::clone(&clock));
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Play);
+        let replay = engine.wait_for_changes(2);
+        assert_change(&replay, &a, 0, Expect::Gapless);
+        engine.wait_until("the replay did not play 0.3 s", |engine| {
+            engine.snapshot.track_token == replay.token
+                && engine.snapshot.position_advancing
+                && engine.snapshot.position >= millis(300)
+        });
+        assert_continuous(&engine.snapshots, clock());
+    }
+
     #[test]
     fn same_file_queued_twice_advances_to_the_second_row() {
         let fixtures = Fixtures::new("duplicate");
@@ -5608,11 +5878,17 @@ mod engine_tests {
 
     impl DirectEngine {
         fn start() -> Self {
+            Self::start_with_clock(clock::system_clock())
+        }
+
+        /// Start a runtime that stamps its position samples with `clock`.
+        fn start_with_clock(clock: MonotonicClock) -> Self {
             gst::init().unwrap();
             let (analysis_tx, analysis) = unbounded();
             let (event_tx, events) = unbounded();
-            let (runtime, bus) =
+            let (mut runtime, bus) =
                 start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
+            runtime.clock = clock;
             let trace = Trace::new(&runtime);
             Self {
                 runtime,
