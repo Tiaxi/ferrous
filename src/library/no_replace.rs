@@ -7,17 +7,16 @@
 //! process creates in between. The renames here fail atomically instead when
 //! the target name is taken, also by a dangling symbolic link.
 //!
-//! Linux does this with `renameat2(RENAME_NOREPLACE)`. NFS, and FUSE
-//! filesystems without rename2 support, reject the flag with `EINVAL`. On
-//! those a regular file is hard-linked to the target, which fails just as
-//! atomically when the name is taken, and its old name is then removed. A
-//! filesystem that supports neither gets an error rather than a rename that
-//! could replace a file.
+//! Linux does this with `renameat2(RENAME_NOREPLACE)`. NFS, and FUSE or
+//! network mounts without rename2 support (rclone, gvfs SMB), reject the flag
+//! with `EINVAL` or `ENOSYS`. On those the target is checked and then renamed
+//! with a plain rename, which is refused when anything has the target name.
+//! A file that another process creates at the target between the check and
+//! the rename can still be replaced there, as before Ferrous used the flag.
+//! The source is never deleted.
 
 use std::fs;
 use std::io;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 /// Renames `from` to `to`, failing with [`io::ErrorKind::AlreadyExists`]
@@ -37,7 +36,7 @@ fn rename_no_replace_with(
     rename: fn(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
     match rename(from, to) {
-        Err(error) if no_replace_unsupported(&error) => link_then_unlink(from, to),
+        Err(error) if no_replace_unsupported(&error) => check_then_rename(from, to),
         result => result,
     }
 }
@@ -45,7 +44,8 @@ fn rename_no_replace_with(
 /// Whether `error` means the filesystem or kernel cannot rename without
 /// replacing, rather than that this rename failed.
 fn no_replace_unsupported(error: &io::Error) -> bool {
-    error.raw_os_error() == Some(libc::EINVAL) || error.kind() == io::ErrorKind::Unsupported
+    matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS))
+        || error.kind() == io::ErrorKind::Unsupported
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -79,69 +79,18 @@ fn renameat2_no_replace(_from: &Path, _to: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// Moves the regular file `from` to `to` by hard-linking it to `to`, which
-/// fails if `to` exists, and then removing `from`.
-fn link_then_unlink(from: &Path, to: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(from)?;
-    if !metadata.is_file() {
-        return Err(unsupported(from, to, "it is not a regular file"));
+/// Renames `from` to `to` unless something already has the name `to`. Used
+/// where the filesystem cannot refuse atomically; see the module docs for the
+/// window between the check and the rename.
+fn check_then_rename(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(to) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", to.display()),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::rename(from, to),
+        Err(error) => Err(error),
     }
-    if let Err(error) = fs::hard_link(from, to) {
-        if error.kind() == io::ErrorKind::AlreadyExists {
-            return Err(error);
-        }
-        return Err(unsupported(
-            from,
-            to,
-            &format!("hard links failed too: {error}"),
-        ));
-    }
-    let Err(error) = fs::remove_file(from) else {
-        return Ok(());
-    };
-    // Take back the link so the file keeps only its old name, unless
-    // something else has taken the new name since.
-    let undone = fs::symlink_metadata(to).is_ok_and(|linked| same_inode(&linked, &metadata))
-        && fs::remove_file(to).is_ok();
-    let outcome = if undone {
-        format!("it keeps the name {}", from.display())
-    } else {
-        format!(
-            "it now has both names {} and {}",
-            from.display(),
-            to.display()
-        )
-    };
-    Err(io::Error::new(
-        error.kind(),
-        format!(
-            "linked {} to {} but could not remove the old name: {error}; {outcome}",
-            from.display(),
-            to.display()
-        ),
-    ))
-}
-
-#[cfg(unix)]
-fn same_inode(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn same_inode(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
-    false
-}
-
-fn unsupported(from: &Path, to: &Path, reason: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!(
-            "cannot rename {} to {} without risking replacing a file: the filesystem \
-             does not support renaming without replacing, and {reason}",
-            from.display(),
-            to.display()
-        ),
-    )
 }
 
 #[cfg(test)]
@@ -164,6 +113,10 @@ mod tests {
 
     fn flag_rejected(_from: &Path, _to: &Path) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(libc::EINVAL))
+    }
+
+    fn flag_missing(_from: &Path, _to: &Path) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
     #[test]
@@ -200,41 +153,58 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_a_hard_link_when_the_flag_is_unsupported() {
-        let dir = test_dir("fallback");
-        let (from, to, taken) = (dir.join("a"), dir.join("b"), dir.join("c"));
+    fn falls_back_to_a_checked_rename_when_the_flag_is_unsupported() {
+        for (rename, kind) in [
+            (
+                flag_rejected as fn(&Path, &Path) -> io::Result<()>,
+                "EINVAL",
+            ),
+            (flag_missing, "ENOSYS"),
+        ] {
+            let dir = test_dir("fallback");
+            let (from, to) = (dir.join("a"), dir.join("b"));
+            fs::write(&from, b"a").expect("write");
+
+            rename_no_replace_with(&from, &to, rename).expect(kind);
+
+            assert!(fs::symlink_metadata(&from).is_err(), "{kind}");
+            assert_eq!(fs::read(&to).expect("read"), b"a", "{kind}");
+            fs::remove_dir_all(dir).expect("cleanup");
+        }
+    }
+
+    #[test]
+    fn fallback_refuses_a_file_or_a_dangling_symlink_at_the_target() {
+        let dir = test_dir("fallback-taken");
+        let from = dir.join("a");
+        let (file, link) = (dir.join("file"), dir.join("link"));
         fs::write(&from, b"a").expect("write");
-        fs::write(&taken, b"c").expect("write");
+        fs::write(&file, b"file").expect("write");
+        std::os::unix::fs::symlink(dir.join("missing"), &link).expect("symlink");
 
-        let error = rename_no_replace_with(&from, &taken, flag_rejected).expect_err("taken");
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read(&taken).expect("read"), b"c");
+        for (target, kind) in [(&file, "file"), (&link, "symlink")] {
+            let error = rename_no_replace_with(&from, target, flag_rejected).expect_err(kind);
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{kind}");
+        }
 
-        rename_no_replace_with(&from, &to, flag_rejected).expect("rename");
-        assert!(!from.exists());
-        assert_eq!(fs::read(&to).expect("read"), b"a");
-        assert_eq!(fs::metadata(&to).expect("metadata").nlink(), 1);
+        assert_eq!(fs::read(&from).expect("read"), b"a");
+        assert_eq!(fs::read(&file).expect("read"), b"file");
+        let link_target = fs::read_link(&link).expect("link");
+        assert_eq!(link_target, dir.join("missing"));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
-    fn refuses_when_neither_the_flag_nor_a_hard_link_is_available() {
-        let dir = test_dir("unsupported");
-        // Only regular files can move by hard link.
-        let (from, to) = (dir.join("a"), dir.join("b"));
-        fs::create_dir(&from).expect("dir");
+    fn fallback_keeps_the_source_when_the_rename_fails() {
+        let dir = test_dir("fallback-error");
+        let from = dir.join("a");
+        fs::write(&from, b"a").expect("write");
 
-        let error = rename_no_replace_with(&from, &to, flag_rejected).expect_err("unsupported");
+        let error = rename_no_replace_with(&from, &dir.join("missing").join("b"), flag_rejected)
+            .expect_err("missing directory");
 
-        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert!(
-            error
-                .to_string()
-                .contains("does not support renaming without replacing"),
-            "{error}"
-        );
-        assert!(from.is_dir());
-        assert!(fs::symlink_metadata(&to).is_err());
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(fs::read(&from).expect("read"), b"a");
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

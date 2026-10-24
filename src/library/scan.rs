@@ -6,6 +6,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -930,7 +931,7 @@ impl DiskRenameJournal {
         old_path: &Path,
         new_path: &Path,
     ) -> Result<(), String> {
-        let temp_path = build_temp_rename_path(old_path, file);
+        let temp_path = build_temp_rename_path(old_path);
         self.rename(file, old_path, &temp_path)
             .map_err(|e| rename_failure("stage rename", old_path, &temp_path, &e))?;
         self.finalize(file, &temp_path, new_path, old_path)
@@ -1032,25 +1033,28 @@ fn rename_failure(action: &str, from: &Path, to: &Path, error: &std::io::Error) 
     )
 }
 
-fn build_temp_rename_path(path: &Path, salt: usize) -> PathBuf {
+/// Starts the names that renames stage files under.
+const TEMP_RENAME_PREFIX: &str = ".ferrous-rename-";
+
+/// Returns a free temporary name in the directory of `path`. Its length does
+/// not depend on the original name, so files whose names are near the
+/// 255-byte limit can be staged too, and the `.tmp` extension keeps library
+/// scans from indexing it.
+fn build_temp_rename_path(path: &Path) -> PathBuf {
+    static NEXT_TEMP_NAME: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path.file_name().map_or_else(
-        || String::from("track"),
-        |value| value.to_string_lossy().into_owned(),
-    );
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    for attempt in 0..1024usize {
-        let candidate = parent.join(format!(
-            ".ferrous-rename-{timestamp}-{salt}-{attempt}-{stem}"
-        ));
+    let pid = std::process::id();
+    let mut candidate = PathBuf::new();
+    for _ in 0..1024 {
+        let counter = NEXT_TEMP_NAME.fetch_add(1, Ordering::Relaxed);
+        candidate = parent.join(format!("{TEMP_RENAME_PREFIX}{pid}-{counter}.tmp"));
         if !path_entry_exists(&candidate) {
-            return candidate;
+            break;
         }
     }
-    parent.join(format!(".ferrous-rename-{timestamp}-{salt}-{stem}"))
+    // A name still taken after every attempt makes the no-replace rename
+    // fail with an error instead of replacing it.
+    candidate
 }
 
 fn exact_directory_entry_exists(path: &Path) -> Result<bool, String> {
@@ -1234,7 +1238,7 @@ fn apply_disk_renames(
                     new_path.to_string_lossy()
                 ));
             }
-            let temp_path = build_temp_rename_path(old_path, index);
+            let temp_path = build_temp_rename_path(old_path);
             journal
                 .rename(index, old_path, &temp_path)
                 .map_err(|e| rename_failure("stage rename", old_path, &temp_path, &e))?;
@@ -3784,6 +3788,70 @@ mod tests {
         );
         assert_eq!(file_names(&dir), ["01 - One.flac"]);
         assert_eq!(fs::read(&paths[0]).expect("read"), bytes);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// A 240-byte file name: valid, but too long to take a prefix that pushes
+    /// it past the 255-byte limit.
+    fn long_file_name(letter: char) -> String {
+        format!("{}.flac", letter.to_string().repeat(235))
+    }
+
+    #[test]
+    fn temporary_rename_names_are_short_hidden_and_not_audio() {
+        let dir = test_dir("rename-temp-name");
+        let path = dir.join(long_file_name('a'));
+
+        let first = build_temp_rename_path(&path);
+        let second = build_temp_rename_path(&path);
+
+        assert_ne!(first, second);
+        for temp in [&first, &second] {
+            assert_eq!(temp.parent(), Some(dir.as_path()));
+            let name = temp.file_name().expect("name").to_string_lossy();
+            assert!(name.starts_with(TEMP_RENAME_PREFIX), "{name}");
+            assert!(name.len() < 64, "{name}");
+            assert!(!is_supported_audio(temp), "{name}");
+        }
+    }
+
+    #[test]
+    fn rename_changes_the_case_of_a_240_byte_name_in_two_steps() {
+        let (dir, _) = rename_fixture("rename-long-case", &[]);
+        let (lower, upper) = (long_file_name('a'), long_file_name('A'));
+        let (old_path, new_path) = (dir.join(&lower), dir.join(&upper));
+        crate::tag_write::write_test_flac(&old_path, &[("TITLE", "One")]);
+        let bytes = fs::read(&old_path).expect("read");
+        let renames = [(old_path.clone(), new_path.clone())];
+        let mut journal = DiskRenameJournal::new(&renames);
+
+        journal
+            .rename_through_temp(0, &old_path, &new_path)
+            .expect("two-step rename");
+
+        assert_eq!(file_names(&dir), [upper]);
+        assert_eq!(fs::read(&new_path).expect("read"), bytes);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_swaps_tracks_with_240_byte_names() {
+        let mut conn = rename_conn();
+        let (dir, _) = rename_fixture("rename-long-swap", &[]);
+        let (one, two) = (dir.join(long_file_name('a')), dir.join(long_file_name('b')));
+        crate::tag_write::write_test_flac(&one, &[("TITLE", "One")]);
+        crate::tag_write::write_test_flac(&two, &[("TITLE", "Two")]);
+        insert_indexed_tracks(&mut conn, &dir, &[one.clone(), two.clone()]);
+
+        let refreshed = rename_indexed_metadata_paths_in_conn(
+            &mut conn,
+            &[(one.clone(), two.clone()), (two.clone(), one.clone())],
+        )
+        .expect("swap");
+
+        assert_eq!(refreshed[&one].title, "Two");
+        assert_eq!(refreshed[&two].title, "One");
+        assert_eq!(file_names(&dir), [long_file_name('a'), long_file_name('b')]);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
