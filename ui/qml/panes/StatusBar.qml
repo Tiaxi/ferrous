@@ -57,6 +57,7 @@ ToolBar {
         spacing: 6
 
         Label {
+            objectName: "statusBarErrorLabel"
             visible: root.hasError
             text: "Error: " + root.transientError
             color: ColorUtils.mixColor(

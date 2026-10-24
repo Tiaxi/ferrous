@@ -195,6 +195,7 @@ private slots:
     void albumArtistFollowsMatchingMetadataAcrossTracks();
     void mprisRateWritePausesOnlyForZero();
     void mprisOpenUriOpensOnlyLocalFiles();
+    void playbackErrorPacketReachesBridgeError();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
@@ -1969,6 +1970,37 @@ void BridgeClientTest::mprisOpenUriOpensOnlyLocalFiles() {
     QCOMPARE(sentCommands.count(), 0);
     QVERIFY(controller.openUri(QStringLiteral("file:///music/track.flac")));
     QCOMPARE(sentCommands.count(), 1);
+}
+
+void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QString message = QStringLiteral(
+        "Couldn't play \u201cbad.flac\u201d (Resource not found); skipped it.");
+    const QByteArray text = message.toUtf8();
+
+    // The packet the Rust bridge encodes for an error event: the header,
+    // then the error section with a u16-length UTF-8 string.
+    QByteArray payload;
+    QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+    payloadStream.setByteOrder(QDataStream::LittleEndian);
+    payloadStream << quint16(text.size());
+    payload.append(text);
+    QByteArray packet;
+    QDataStream header(&packet, QIODevice::WriteOnly);
+    header.setByteOrder(QDataStream::LittleEndian);
+    header << quint32(0xFE550001u) << quint32(16 + payload.size())
+           << quint16(BinaryBridgeCodec::SectionError) << quint16(0)
+           << quint32(payload.size());
+    packet.append(payload);
+
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error), qPrintable(error));
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    QVERIFY(!client.processBinarySnapshot(decoded));
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(errors.at(0).at(0).toString(), message);
 }
 
 void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {

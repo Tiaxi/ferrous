@@ -190,6 +190,7 @@ pub(super) fn process_playback_event(
     event: PlaybackEvent,
     analysis: &AnalysisEngine,
     metadata: &MetadataService,
+    event_tx: &Sender<BridgeEvent>,
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     match event {
@@ -254,6 +255,13 @@ pub(super) fn process_playback_event(
         }
         PlaybackEvent::PathsRemapped => {
             state.unacknowledged_engine_renames.pop_front();
+            SnapshotUrgency::None
+        }
+        PlaybackEvent::Error(mut error) => {
+            if let Some(path) = error.path.as_mut() {
+                remap_unacknowledged_engine_path(state, path);
+            }
+            let _ = try_send_event(event_tx, BridgeEvent::Error(error.message()));
             SnapshotUrgency::None
         }
     }
@@ -393,6 +401,7 @@ pub(super) fn drain_playback_events(
     playback_rx: &Receiver<PlaybackEvent>,
     analysis: &AnalysisEngine,
     metadata: &MetadataService,
+    event_tx: &Sender<BridgeEvent>,
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     let mut urgency = SnapshotUrgency::None;
@@ -400,7 +409,9 @@ pub(super) fn drain_playback_events(
         let Ok(event) = playback_rx.try_recv() else {
             break;
         };
-        urgency = urgency.max(process_playback_event(event, analysis, metadata, state));
+        urgency = urgency.max(process_playback_event(
+            event, analysis, metadata, event_tx, state,
+        ));
     }
     urgency
 }
@@ -414,12 +425,13 @@ pub(super) fn pump_playback_events(
     state: &mut BridgeState,
 ) -> bool {
     let mut changed = false;
+    let (event_tx, _event_rx) = bounded(16);
     for _ in 0..192 {
         let Ok(event) = playback_rx.try_recv() else {
             break;
         };
         let event_changed = !matches!(event, PlaybackEvent::Seeked { .. });
-        let _ = process_playback_event(event, analysis, metadata, state);
+        let _ = process_playback_event(event, analysis, metadata, &event_tx, state);
         changed |= event_changed;
     }
     changed
