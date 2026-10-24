@@ -512,10 +512,14 @@ struct GstPlaybackRuntime {
     track_token_counter: u64,
     event_tx: Sender<PlaybackEvent>,
     snapshot: PlaybackSnapshot,
+    /// Linear gain for the requested volume level (`snapshot.volume`).
     target_volume: f32,
+    /// Linear gain currently set on playbin.
     applied_volume: f32,
     startup_gain_ramp: bool,
     startup_ramp_hold_until: Option<Instant>,
+    /// Time of the previous fade step; `None` while no fade is running.
+    volume_ramp_tick_at: Option<Instant>,
     buffering_active: bool,
     seek_hold: Option<(Instant, Duration)>,
     last_seek_issued_at: Option<Instant>,
@@ -564,7 +568,9 @@ pub fn spawn_engine(
 
 impl GstPlaybackRuntime {
     fn command_wait_timeout(&self) -> Duration {
-        if self.snapshot.state == PlaybackState::Playing
+        if self.volume_ramp_pending() {
+            VOLUME_RAMP_TICK
+        } else if self.snapshot.state == PlaybackState::Playing
             || self.buffering_active
             || self.seek_hold.is_some()
             || self.startup_gain_ramp
@@ -602,6 +608,7 @@ impl GstPlaybackRuntime {
             applied_volume: 1.0,
             startup_gain_ramp: false,
             startup_ramp_hold_until: None,
+            volume_ramp_tick_at: None,
             buffering_active: false,
             seek_hold: None,
             last_seek_issued_at: None,
@@ -1231,9 +1238,9 @@ impl GstPlaybackRuntime {
         }
     }
 
-    fn set_volume(&mut self, volume: f32) {
-        self.target_volume = volume.clamp(0.0, 1.0);
-        self.snapshot.volume = self.target_volume;
+    fn set_volume(&mut self, level: f32) {
+        self.snapshot.volume = level.clamp(0.0, 1.0);
+        self.target_volume = super::volume_level_to_gain(self.snapshot.volume);
         self.emit_snapshot();
     }
 
@@ -1259,43 +1266,63 @@ impl GstPlaybackRuntime {
         self.emit_snapshot();
     }
 
-    /// Drive the startup volume ramp, respecting the optional silence hold
-    /// for AC3/DTS decoder stabilisation.  Returns `true` when the
-    /// snapshot volume changed and needs to be emitted.
-    fn poll_volume_ramp(&mut self) -> bool {
+    /// Whether the engine loop must wake on [`VOLUME_RAMP_TICK`] to drive a
+    /// silence hold or fade.
+    fn volume_ramp_pending(&self) -> bool {
+        self.startup_ramp_hold_until.is_some()
+            || ((self.target_volume - self.applied_volume).abs() > f32::EPSILON
+                && (self.snapshot.state == PlaybackState::Playing || self.startup_gain_ramp))
+    }
+
+    /// Advance the volume fade to `now`, respecting the optional silence hold
+    /// for AC3/DTS decoder stabilisation.  The engine loop calls this after
+    /// every wake-up, so fade speed depends on elapsed time, not on how often
+    /// commands or bridge polls arrive.  Fades run on the volume-level scale,
+    /// so they sound even.
+    fn poll_volume_ramp(&mut self, now: Instant) {
         // Startup silence hold: keep volume at zero until the decoder has
         // had time to stabilise (prevents AC3/DTS garbage frames from
         // reaching the speakers).
         if let Some(hold_until) = self.startup_ramp_hold_until {
-            if Instant::now() < hold_until {
+            if now < hold_until {
                 if self.applied_volume != 0.0 {
                     self.applied_volume = 0.0;
                     self.playbin.set_property("volume", 0.0_f64);
                 }
-                return false;
+                self.volume_ramp_tick_at = None;
+                return;
             }
             self.startup_ramp_hold_until = None;
         }
 
-        let delta = self.target_volume - self.applied_volume;
-        if delta.abs() > f32::EPSILON
-            && (self.snapshot.state == PlaybackState::Playing || self.startup_gain_ramp)
-        {
-            let step = if self.startup_gain_ramp { 0.45 } else { 0.18 };
-            if delta.abs() <= step {
-                self.applied_volume = self.target_volume;
-                self.startup_gain_ramp = false;
-            } else {
-                self.applied_volume += delta.signum() * step;
-            }
-            self.playbin
-                .set_property("volume", f64::from(self.applied_volume));
+        if !self.volume_ramp_pending() {
+            self.startup_gain_ramp = false;
+            self.volume_ramp_tick_at = None;
+            return;
         }
-        if (self.snapshot.volume - self.applied_volume).abs() > f32::EPSILON {
-            self.snapshot.volume = self.applied_volume;
-            return true;
+        // The first step of a fade only starts its clock.
+        let Some(previous_tick) = self.volume_ramp_tick_at.replace(now) else {
+            return;
+        };
+        let full_scale = if self.startup_gain_ramp {
+            STARTUP_FADE_FULL_SCALE
+        } else {
+            VOLUME_FADE_FULL_SCALE
+        };
+        if let Some(level) = step_volume_level(
+            super::volume_gain_to_level(self.applied_volume),
+            super::volume_gain_to_level(self.target_volume),
+            now.saturating_duration_since(previous_tick),
+            full_scale,
+        ) {
+            self.applied_volume = super::volume_level_to_gain(level);
+        } else {
+            self.applied_volume = self.target_volume;
+            self.startup_gain_ramp = false;
+            self.volume_ramp_tick_at = None;
         }
-        false
+        self.playbin
+            .set_property("volume", f64::from(self.applied_volume));
     }
 
     fn poll(&mut self) {
@@ -1307,9 +1334,8 @@ impl GstPlaybackRuntime {
             return;
         }
 
-        let mut snapshot_changed = self.poll_volume_ramp();
         let (position_locked, seek_hold_changed, released_seek_sample) = self.poll_seek_hold();
-        snapshot_changed |= seek_hold_changed;
+        let mut snapshot_changed = seek_hold_changed;
         if !position_locked && self.snapshot.state != PlaybackState::Stopped {
             if let Some(pos) = self.playbin.query_position::<gst::ClockTime>() {
                 let now = Instant::now();
@@ -1765,10 +1791,35 @@ fn run_gst_engine(
         while let Some(msg) = bus.pop() {
             runtime.handle_bus_message(&msg);
         }
+        runtime.poll_volume_ramp(Instant::now());
     }
 
     let _ = runtime.playbin.set_state(gst::State::Null);
     Ok(())
+}
+
+/// Engine wake-up interval while a fade or silence hold is running.
+const VOLUME_RAMP_TICK: Duration = Duration::from_millis(5);
+/// Time a volume change takes to cross the whole level scale.
+const VOLUME_FADE_FULL_SCALE: Duration = Duration::from_millis(220);
+/// Time the fade-in after a start or track switch takes to reach full level.
+const STARTUP_FADE_FULL_SCALE: Duration = Duration::from_millis(90);
+
+/// Remaining level distance that counts as arrived; it absorbs rounding from
+/// stepping in small increments (about 0.003 dB at full level).
+const VOLUME_LEVEL_SNAP: f32 = 1e-4;
+
+/// Move `level` toward `target` by the distance a full-scale fade covers in
+/// `elapsed`.  Returns `None` once the target is reached.
+fn step_volume_level(
+    level: f32,
+    target: f32,
+    elapsed: Duration,
+    full_scale: Duration,
+) -> Option<f32> {
+    let max_step = elapsed.as_secs_f32() / full_scale.as_secs_f32();
+    let delta = target - level;
+    (delta.abs() > max_step + VOLUME_LEVEL_SNAP).then(|| level + delta.signum() * max_step)
 }
 
 /// Install a `source-setup` handler on playbin that attaches a pad
@@ -2216,6 +2267,146 @@ mod tests {
         }
         assert_eq!(queue.remove_many(&[0, 1, 2]), None);
         assert_eq!(queue.current_index(), None);
+    }
+
+    fn make_volume_test_runtime() -> (GstPlaybackRuntime, Receiver<PlaybackEvent>) {
+        gst::init().unwrap();
+        let playbin = gst::ElementFactory::make("playbin3")
+            .build()
+            .expect("playbin3");
+        let (analysis_tx, _) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        let runtime = GstPlaybackRuntime::new(
+            playbin,
+            Arc::new(Mutex::new(GaplessQueue::new())),
+            analysis_tx,
+            event_tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        runtime.playbin.set_property("volume", 1.0_f64);
+        (runtime, event_rx)
+    }
+
+    fn playbin_gain(runtime: &GstPlaybackRuntime) -> f64 {
+        runtime.playbin.property::<f64>("volume")
+    }
+
+    fn assert_gain(runtime: &GstPlaybackRuntime, expected_level: f64) {
+        let expected = expected_level.powi(3);
+        let actual = playbin_gain(runtime);
+        assert!(
+            (actual - expected).abs() < 1e-4,
+            "gain {actual}, expected {expected} for level {expected_level}"
+        );
+    }
+
+    #[test]
+    fn volume_fade_depends_on_elapsed_time_not_tick_rate() {
+        let full_scale = Duration::from_millis(200);
+        for tick_ms in [1_u64, 5, 40] {
+            let tick = Duration::from_millis(tick_ms);
+            let mut level = 0.0_f32;
+            for _ in 0..(120 / tick_ms) {
+                let next = step_volume_level(level, 1.0, tick, full_scale).expect("fade running");
+                assert!(next - level <= tick.as_secs_f32() / full_scale.as_secs_f32() + 1e-6);
+                level = next;
+            }
+            assert!(
+                (level - 0.6).abs() < 1e-4,
+                "{tick_ms} ms ticks reached {level}"
+            );
+            assert_eq!(
+                step_volume_level(level, 1.0, Duration::from_millis(80), full_scale),
+                None
+            );
+        }
+        assert_eq!(
+            step_volume_level(0.8, 0.2, Duration::from_millis(60), full_scale),
+            Some(0.5)
+        );
+    }
+
+    #[test]
+    fn engine_ticks_fade_volume_change_on_cubic_gain_without_snapshots() {
+        let (mut runtime, events) = make_volume_test_runtime();
+        runtime.snapshot.state = PlaybackState::Playing;
+
+        runtime.set_volume(0.5);
+        match events.try_recv() {
+            Ok(PlaybackEvent::Snapshot(snapshot)) => {
+                assert!((snapshot.volume - 0.5).abs() < f32::EPSILON);
+            }
+            other => panic!("expected volume snapshot, got {other:?}"),
+        }
+        assert_eq!(runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+
+        let start = Instant::now();
+        runtime.poll_volume_ramp(start);
+        assert_gain(&runtime, 1.0);
+        for tick in 1..=11 {
+            runtime.poll_volume_ramp(start + VOLUME_RAMP_TICK * tick);
+        }
+        // 55 ms of a 220 ms full-scale fade: a quarter of the way down.
+        assert_gain(&runtime, 0.75);
+
+        runtime.poll_volume_ramp(start + Duration::from_millis(200));
+        assert_gain(&runtime, 0.5);
+        assert!((runtime.snapshot.volume - 0.5).abs() < f32::EPSILON);
+        assert_eq!(runtime.command_wait_timeout(), Duration::from_millis(20));
+        assert!(
+            events.try_recv().is_err(),
+            "fade steps must not emit snapshots"
+        );
+    }
+
+    #[test]
+    fn paused_fade_restarts_its_clock_on_resume() {
+        let (mut runtime, _events) = make_volume_test_runtime();
+        runtime.snapshot.state = PlaybackState::Playing;
+        runtime.set_volume(0.0);
+        let start = Instant::now();
+        runtime.poll_volume_ramp(start);
+        runtime.poll_volume_ramp(start + Duration::from_millis(55));
+        assert_gain(&runtime, 0.75);
+
+        runtime.snapshot.state = PlaybackState::Paused;
+        runtime.poll_volume_ramp(start + Duration::from_millis(60));
+        assert_gain(&runtime, 0.75);
+        assert_ne!(runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+
+        runtime.snapshot.state = PlaybackState::Playing;
+        let resumed = start + Duration::from_secs(5);
+        runtime.poll_volume_ramp(resumed);
+        assert_gain(&runtime, 0.75);
+        runtime.poll_volume_ramp(resumed + Duration::from_millis(55));
+        assert_gain(&runtime, 0.5);
+    }
+
+    #[test]
+    fn startup_fade_waits_for_silence_hold_then_reaches_level() {
+        let (mut runtime, _events) = make_volume_test_runtime();
+        runtime.set_volume(0.8);
+        let start = Instant::now();
+        runtime.snapshot.state = PlaybackState::Playing;
+        runtime.applied_volume = 0.0;
+        runtime.playbin.set_property("volume", 0.0_f64);
+        runtime.startup_gain_ramp = true;
+        runtime.startup_ramp_hold_until = Some(start + Duration::from_millis(80));
+
+        runtime.poll_volume_ramp(start + Duration::from_millis(40));
+        assert_gain(&runtime, 0.0);
+        assert_eq!(runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+        let hold_end = start + Duration::from_millis(80);
+        runtime.poll_volume_ramp(hold_end);
+        assert_gain(&runtime, 0.0);
+        runtime.poll_volume_ramp(hold_end + Duration::from_millis(45));
+        assert_gain(&runtime, 0.5);
+        runtime.poll_volume_ramp(hold_end + Duration::from_millis(90));
+        assert_gain(&runtime, 0.8);
+        assert!(!runtime.startup_gain_ramp);
+        assert_eq!(runtime.command_wait_timeout(), Duration::from_millis(20));
     }
 
     #[test]

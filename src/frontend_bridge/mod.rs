@@ -411,6 +411,7 @@ pub struct BridgeIntegrationSettings {
 
 #[derive(Debug, Clone)]
 pub struct BridgeSettings {
+    /// Volume level on the cubic scale; see [`crate::playback::volume_level_to_gain`].
     pub volume: f32,
     pub fft_size: usize,
     pub spectrogram_view_mode: SpectrogramViewMode,
