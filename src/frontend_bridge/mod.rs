@@ -714,7 +714,7 @@ impl FrontendBridgeHandle {
             AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
                 Some(BridgeEvent::PrecomputedSpectrogramChunk(chunk))
             }
-            AnalysisEvent::Snapshot(_) => None,
+            AnalysisEvent::Snapshot(_) | AnalysisEvent::WorkerFailed(_) => None,
         }
     }
 
@@ -1454,6 +1454,10 @@ impl BridgeLoopRuntime {
                     self.flags.session_dirty = true;
                 }
                 urgency
+            }
+            AnalysisEvent::WorkerFailed(message) => {
+                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+                SnapshotUrgency::None
             }
         }
     }
@@ -3086,6 +3090,34 @@ mod tests {
         assert_eq!(snapshot.playback.state, PlaybackState::Stopped);
         assert_eq!(snapshot.playback.current.as_ref(), Some(&track));
         assert_eq!(snapshot.metadata.title, "ferrous_reactive_stopped_metadata");
+    }
+
+    #[test]
+    fn analysis_worker_failures_reach_the_ui_as_errors() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
+        runtime.analysis_rx = analysis_rx;
+
+        // One failure wakes the loop; the next is found by the drain path.
+        analysis_tx
+            .send(AnalysisEvent::WorkerFailed("drained".to_string()))
+            .expect("queue drained failure");
+        runtime.handle_wake(
+            BridgeLoopWake::Analysis(AnalysisEvent::WorkerFailed("woken".to_string())),
+            &event_tx,
+        );
+
+        let errors: Vec<String> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors, ["woken", "drained"]);
     }
 
     #[test]

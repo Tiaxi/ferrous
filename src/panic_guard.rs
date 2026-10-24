@@ -47,18 +47,32 @@ pub(crate) fn read_tags(path: &Path) -> lofty::error::Result<TaggedFile> {
     guard_tag_read(path, || lofty::read_from_path(path))
 }
 
+/// Read the tags of `path`, keeping a panic in the tag reader apart from an
+/// ordinary read error: the outer error is the panic's message.
+///
+/// A panic means the reader failed on data it should have handled, not that
+/// the file has no tags it understands.
+pub(crate) fn read_tags_catching_panic(
+    path: &Path,
+) -> Result<lofty::error::Result<TaggedFile>, String> {
+    catch_tag_read(path, || lofty::read_from_path(path))
+}
+
 /// Run a lofty read of `path`, reporting a panic in it as an error.
 pub(crate) fn guard_tag_read<T>(
     path: &Path,
     read: impl FnOnce() -> lofty::error::Result<T>,
 ) -> lofty::error::Result<T> {
-    let what = format!("the tag reader for '{}'", path.display());
-    catch(&what, read).unwrap_or_else(|_| {
+    catch_tag_read(path, read).unwrap_or_else(|_| {
         Err(LoftyError::from(io::Error::new(
             io::ErrorKind::InvalidData,
             "the tag reader failed on malformed tag data",
         )))
     })
+}
+
+fn catch_tag_read<T>(path: &Path, read: impl FnOnce() -> T) -> Result<T, String> {
+    catch(&format!("the tag reader for '{}'", path.display()), read)
 }
 
 /// Panics on demand at named points, to test what catches them.

@@ -479,6 +479,9 @@ pub(super) fn drain_analysis_events(
                 note_precomputed_spectrogram_chunk(state, &chunk);
                 let _ = event_tx.send(BridgeEvent::PrecomputedSpectrogramChunk(chunk));
             }
+            AnalysisEvent::WorkerFailed(message) => {
+                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+            }
         }
     }
     urgency
