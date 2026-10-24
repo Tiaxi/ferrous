@@ -8,11 +8,11 @@ use std::path::PathBuf;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
-#[cfg(test)]
-pub(crate) use scan::load_external_track_caches;
 use scan::{
     handle_add_root, handle_rescan_all, handle_rescan_root, remove_root_and_purge, rename_root,
 };
+#[cfg(test)]
+pub(crate) use scan::{index_tracks_for_test, load_external_track_caches};
 pub(crate) use scan::{
     is_supported_audio, load_external_track_cache, read_track_info, refresh_cover_paths_for_tracks,
     refresh_cover_paths_for_tracks_with_override, refresh_indexed_metadata_for_paths,
