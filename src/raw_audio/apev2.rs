@@ -1,112 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+//! `APEv2` tags appended to raw AC3/DTS files: reading the text items the
+//! library shows and rewriting the fields the tag editor changes.
+
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-#[cfg(feature = "gst")]
-use gstreamer as gst;
-#[cfg(feature = "gst")]
-use gstreamer_pbutils as gst_pbutils;
-
-#[cfg(feature = "gst")]
-use std::sync::Once;
-
-/// Disable `GStreamer`'s APE tag handling so that raw surround files with
-/// appended `APEv2` tags are not misidentified as `application/x-apetag`.
-///
-/// We handle `APEv2` tags ourselves via [`read_appended_apev2_text_metadata`].
-/// The `GStreamer` APE typefinder + `apedemux` combo causes crashes and decode
-/// failures for AC3/DTS files because `apedemux` strips the tag but cannot
-/// identify the remaining audio content.
-///
-/// We also register backup typefinders for AC3/DTS that check the audio sync
-/// words at byte 0, ensuring correct type detection even if the built-in
-/// typefinders are not installed.
-#[cfg(feature = "gst")]
-pub(crate) fn register_raw_surround_typefinders() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // Disable the APE tag typefinder so files are never identified as
-        // application/x-apetag.
-        {
-            use gst::prelude::PluginFeatureExtManual;
-
-            // Disable typefinders whose caps mention APE tags so raw
-            // surround files (AC3/DTS) with appended APEv2 tags are never
-            // mis-typed as application/x-apetag.  The source-setup byte-
-            // level probe already strips APE tags before the typefinder
-            // runs, but disabling the typefinder is a defence-in-depth
-            // measure.
-            //
-            // NOTE: `apedemux` itself is left at its default rank.  Other
-            // formats (notably MP3) legitimately embed APE tags alongside
-            // ID3, and `parsebin` needs `apedemux` to strip them.  For
-            // AC3/DTS the source probe handles removal at the byte level.
-            for factory in gst::TypeFindFactory::factories() {
-                let dominated_by_ape = factory.caps().is_some_and(|c| {
-                    c.to_string().contains("apetag") || c.to_string().contains("x-ape")
-                });
-                if dominated_by_ape {
-                    factory.set_rank(gst::Rank::NONE);
-                }
-            }
-
-            // Demote liba52's a52dec in favour of avdec_ac3 (FFmpeg).
-            // a52dec occasionally misparses exponent/scale-factor data in
-            // AC3 frames, producing a brief full-bandwidth noise burst
-            // (peak values millions of times above full-scale).
-            if let Some(factory) = gst::ElementFactory::find("a52dec") {
-                factory.set_rank(gst::Rank::NONE);
-            }
-        }
-
-        // Register AC3/DTS typefinders.  AC3 files ripped from DVDs often
-        // start with a partial frame (leftover bytes from the previous
-        // track's last frame), so we scan up to 2 kB for the sync word.
-        let ac3_caps = gst::Caps::builder("audio/x-ac3").build();
-        let _ = gst::TypeFind::register(
-            None,
-            "ferrous-ac3-typefind",
-            gst::Rank::PRIMARY + 256,
-            None,
-            Some(&ac3_caps),
-            |tf| {
-                // AC3 frame size is at most 3840 bytes; scan 2 kB which
-                // covers any partial leading frame.
-                let scan_len: u32 = 2048;
-                if let Some(data) = tf.peek(0, scan_len) {
-                    if find_ac3_sync(data).is_some() {
-                        tf.suggest(
-                            gst::TypeFindProbability::Maximum,
-                            &gst::Caps::builder("audio/x-ac3").build(),
-                        );
-                    }
-                }
-            },
-        );
-
-        let dts_caps = gst::Caps::builder("audio/x-dts").build();
-        let _ = gst::TypeFind::register(
-            None,
-            "ferrous-dts-typefind",
-            gst::Rank::PRIMARY + 256,
-            None,
-            Some(&dts_caps),
-            |tf| {
-                let scan_len: u32 = 8192; // DTS frames can be large
-                if let Some(data) = tf.peek(0, scan_len) {
-                    if find_dts_sync(data).is_some() {
-                        tf.suggest(
-                            gst::TypeFindProbability::Maximum,
-                            &gst::Caps::builder("audio/x-dts").build(),
-                        );
-                    }
-                }
-            },
-        );
-    });
-}
+use super::is_raw_surround_file;
 
 const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
 const APE_TAG_HEADER_BYTES: usize = 32;
@@ -144,113 +45,10 @@ impl RawAudioTagMetadata {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct RawAudioTechnicalDetails {
-    pub(crate) duration_secs: Option<f32>,
-    pub(crate) sample_rate_hz: Option<u32>,
-    pub(crate) bitrate_kbps: Option<u32>,
-    pub(crate) channels: Option<u8>,
-    pub(crate) bit_depth: Option<u8>,
-    pub(crate) current_bitrate_kbps: Option<u32>,
-    pub(crate) format_label: String,
-}
-
 #[derive(Debug, Clone, Copy)]
-struct Apev2Footer {
-    item_count: u32,
-    tag_size: u32,
-}
-
-pub(crate) fn is_raw_surround_file(path: &Path) -> bool {
-    matches!(raw_surround_extension(path).as_deref(), Some("ac3" | "dts"))
-}
-
-#[cfg(any(feature = "gst", test))]
-pub(crate) fn is_dts_file(path: &Path) -> bool {
-    matches!(raw_surround_extension(path).as_deref(), Some("dts"))
-}
-
-#[cfg(any(feature = "gst", test))]
-pub(crate) fn same_surround_extension(a: &Path, b: &Path) -> bool {
-    is_raw_surround_file(a)
-        && is_raw_surround_file(b)
-        && raw_surround_extension(a) == raw_surround_extension(b)
-}
-
-fn raw_surround_extension(path: &Path) -> Option<String> {
-    let ext = path.extension().and_then(|value| value.to_str())?;
-    Some(ext.to_ascii_lowercase())
-}
-
-#[cfg(feature = "gst")]
-fn round_f64_to_u32(value: f64) -> Option<u32> {
-    if !value.is_finite() || value < 0.0 {
-        return None;
-    }
-    value
-        .round()
-        .clamp(0.0, f64::from(u32::MAX))
-        .to_string()
-        .parse::<u32>()
-        .ok()
-}
-
-pub(crate) fn raw_surround_format_label(path: &Path) -> String {
-    match raw_surround_extension(path).as_deref().unwrap_or_default() {
-        "ac3" => "AC3".to_string(),
-        "dts" => "DTS".to_string(),
-        _ => String::new(),
-    }
-}
-
-/// Byte range of clean audio within a raw surround file: first sync word
-/// through end of audio (before `APEv2` tag).  Returns `None` for non-raw
-/// surround files or when there is nothing to strip.
-#[cfg(any(feature = "gst", test))]
-pub(crate) fn audio_byte_range(path: &Path) -> Option<(u64, u64)> {
-    if !is_raw_surround_file(path) {
-        return None;
-    }
-    let mut file = File::open(path).ok()?;
-    let file_len = file.seek(SeekFrom::End(0)).ok()?;
-
-    // --- audio end: subtract APEv2 tag if present ---
-    let audio_end = match read_apev2_footer(&mut file, file_len) {
-        Some(footer) => {
-            let tag_size = u64::from(footer.tag_size);
-            let with_header = tag_size.saturating_add(APE_TAG_HEADER_BYTES_U64);
-            let total = if file_len
-                .checked_sub(with_header)
-                .is_some_and(|hs| has_ape_preamble(&mut file, hs))
-            {
-                with_header
-            } else {
-                tag_size
-            };
-            file_len.saturating_sub(total)
-        }
-        None => file_len,
-    };
-
-    // --- audio start: first sync word (skip partial leading frame) ---
-    file.seek(SeekFrom::Start(0)).ok()?;
-    let scan_len = usize::try_from(audio_end.min(8192)).unwrap_or(8192);
-    let mut buf = vec![0u8; scan_len];
-    file.read_exact(&mut buf).ok()?;
-    let sync_offset = if is_dts_file(path) {
-        find_dts_sync(&buf).unwrap_or(0)
-    } else {
-        find_ac3_sync(&buf).unwrap_or(0)
-    };
-    let audio_start = sync_offset as u64;
-
-    if audio_start == 0 && audio_end == file_len {
-        return None; // nothing to strip
-    }
-    if audio_start >= audio_end {
-        return None;
-    }
-    Some((audio_start, audio_end))
+pub(super) struct Apev2Footer {
+    pub(super) item_count: u32,
+    pub(super) tag_size: u32,
 }
 
 pub(crate) fn read_appended_apev2_text_metadata(path: &Path) -> Option<RawAudioTagMetadata> {
@@ -268,207 +66,6 @@ pub(crate) fn read_appended_apev2_text_metadata(path: &Path) -> Option<RawAudioT
     }
 
     parse_apev2_text_items(&mut file, items_start, items_end, footer.item_count)
-}
-
-#[cfg(feature = "gst")]
-pub(crate) fn probe_raw_surround_technical_details(
-    path: &Path,
-) -> Option<RawAudioTechnicalDetails> {
-    if !is_raw_surround_file(path) {
-        return None;
-    }
-
-    gst::init().ok()?;
-    register_raw_surround_typefinders();
-
-    let uri = url::Url::from_file_path(path).ok()?.to_string();
-    let timeout = gst::ClockTime::from_seconds(10);
-    let discoverer = gst_pbutils::Discoverer::new(timeout).ok()?;
-    match discoverer.discover_uri(&uri) {
-        Ok(info) => {
-            let audio_info = info.audio_streams().into_iter().next()?;
-
-            let bitrate_kbps = kbps_from_bits_per_second(audio_info.bitrate())
-                .or_else(|| kbps_from_bits_per_second(audio_info.max_bitrate()));
-
-            let mut details = RawAudioTechnicalDetails {
-                duration_secs: info
-                    .duration()
-                    .map(gst::ClockTime::nseconds)
-                    .map(std::time::Duration::from_nanos)
-                    .map(|duration| duration.as_secs_f32())
-                    .filter(|value| *value > 0.0),
-                sample_rate_hz: Some(audio_info.sample_rate()).filter(|value| *value > 0),
-                bitrate_kbps,
-                channels: u8::try_from(audio_info.channels())
-                    .ok()
-                    .filter(|value| *value > 0),
-                bit_depth: u8::try_from(audio_info.depth())
-                    .ok()
-                    .filter(|value| *value > 0),
-                current_bitrate_kbps: bitrate_kbps,
-                format_label: raw_surround_format_label(path),
-            };
-
-            if details.duration_secs.is_none() {
-                eprintln!(
-                    "[ferrous] GStreamer Discoverer returned no duration for {}, \
-                     trying bitstream header fallback",
-                    path.display()
-                );
-                details.duration_secs = estimate_duration_from_bitstream(path);
-            }
-
-            Some(details)
-        }
-        Err(err) => {
-            eprintln!(
-                "[ferrous] GStreamer Discoverer failed for {}: {} — \
-                 this may be caused by an appended APEv2 tag confusing the demuxer; \
-                 trying bitstream header fallback",
-                path.display(),
-                err
-            );
-            let duration_secs = estimate_duration_from_bitstream(path);
-            Some(RawAudioTechnicalDetails {
-                duration_secs,
-                format_label: raw_surround_format_label(path),
-                ..RawAudioTechnicalDetails::default()
-            })
-        }
-    }
-}
-
-/// Estimate duration from the bitstream frame header bitrate and file size,
-/// subtracting the `APEv2` tag if present.  Works for AC3 (A/52) and DTS files.
-// Duration estimate from byte count — f64 precision loss is negligible.
-#[allow(clippy::cast_precision_loss)]
-#[cfg(any(feature = "gst", test))]
-fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
-    let mut file = File::open(path).ok()?;
-    let file_len = file.seek(SeekFrom::End(0)).ok()?;
-
-    // Determine audio-only size by subtracting the APEv2 tag.
-    let apev2_size = read_apev2_footer(&mut file, file_len).map_or(0, |footer| {
-        let tag_size = u64::from(footer.tag_size);
-        // tag_size covers items + footer; check for a separate header.
-        let with_header = tag_size.saturating_add(APE_TAG_HEADER_BYTES_U64);
-        if let Some(header_start) = file_len.checked_sub(with_header) {
-            if has_ape_preamble(&mut file, header_start) {
-                return with_header;
-            }
-        }
-        tag_size
-    });
-    let audio_bytes = file_len.saturating_sub(apev2_size);
-    if audio_bytes == 0 {
-        return None;
-    }
-
-    // Read enough bytes to scan for the first valid frame header.
-    // AC3 files ripped from DVDs may start with a partial frame
-    // (up to ~1792 bytes of leftover data from the previous track).
-    file.seek(SeekFrom::Start(0)).ok()?;
-    let scan_len = usize::try_from(2048u64.min(audio_bytes)).unwrap_or(2048);
-    let mut buf = vec![0u8; scan_len];
-    file.read_exact(&mut buf).ok()?;
-
-    let bitrate_bps = if is_dts_file(path) {
-        let offset = find_dts_sync(&buf)?;
-        parse_dts_bitrate(&buf[offset..])?
-    } else {
-        let offset = find_ac3_sync(&buf)?;
-        parse_ac3_bitrate(&buf[offset..])?
-    };
-
-    if bitrate_bps == 0 {
-        return None;
-    }
-
-    let duration = (audio_bytes as f64 * 8.0) / f64::from(bitrate_bps);
-    // f64 → f32 for duration display — intentional.
-    #[allow(clippy::cast_possible_truncation)]
-    let duration = duration as f32;
-    (duration > 0.0).then_some(duration)
-}
-
-/// AC3 bitrate lookup indexed by `frmsizecod / 2` (kbps) — A/52 Table 5.18.
-#[cfg(any(feature = "gst", test))]
-const AC3_BITRATES_KBPS: [u32; 19] = [
-    32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640,
-];
-
-/// DTS sample rate table indexed by SFREQ code.
-#[cfg(any(feature = "gst", test))]
-const DTS_SAMPLE_RATES: [u32; 16] = [
-    0, 8000, 16000, 32000, 0, 0, 11025, 22050, 44100, 0, 0, 12000, 24000, 48000, 0, 0,
-];
-
-/// Find the byte offset of the first AC3 sync word (`0x0B77`) in `data`.
-#[cfg(any(feature = "gst", test))]
-fn find_ac3_sync(data: &[u8]) -> Option<usize> {
-    data.windows(2).position(|w| w == [0x0B, 0x77])
-}
-
-/// Parse the bitrate from an AC3 (A/52) sync frame header.
-///
-/// Layout of the first 5 bytes:
-///   `[0..2]` sync word `0x0B77`
-///   `[2..4]` CRC1
-///   `[4]`    fscod (2 bits) | frmsizecod (6 bits)
-#[cfg(any(feature = "gst", test))]
-fn parse_ac3_bitrate(header: &[u8]) -> Option<u32> {
-    if header.len() < 5 || header[0] != 0x0B || header[1] != 0x77 {
-        return None;
-    }
-    let frmsizcod = usize::from(header[4] & 0x3F);
-    let kbps = *AC3_BITRATES_KBPS.get(frmsizcod / 2)?;
-    Some(kbps * 1000)
-}
-
-/// Find the byte offset of the first DTS sync word (`0x7FFE8001`) in `data`.
-#[cfg(any(feature = "gst", test))]
-fn find_dts_sync(data: &[u8]) -> Option<usize> {
-    data.windows(4).position(|w| w == [0x7F, 0xFE, 0x80, 0x01])
-}
-
-/// Parse the bitrate from a DTS frame header.
-///
-/// Sync word: `0x7FFE8001` (bytes `[0..4]`).
-/// Frame size and sample rate are extracted from the header to compute
-/// the bitrate as `frame_bytes * 8 * sample_rate / 512` (512 PCM samples
-/// per DTS frame).
-#[cfg(any(feature = "gst", test))]
-fn parse_dts_bitrate(header: &[u8]) -> Option<u32> {
-    if header.len() < 12 {
-        return None;
-    }
-    if header[0] != 0x7F || header[1] != 0xFE || header[2] != 0x80 || header[3] != 0x01 {
-        return None;
-    }
-
-    // FSIZE is in bits 47..61 (14 bits), big-endian packed.
-    let fsize_raw = (u16::from(header[5] & 0x03) << 12)
-        | (u16::from(header[6]) << 4)
-        | (u16::from(header[7]) >> 4);
-    let frame_bytes = u32::from(fsize_raw) + 1;
-
-    // SFREQ is at bits 67..71.
-    let sfreq_code = usize::from((header[8] >> 2) & 0x0F);
-    let sample_rate = *DTS_SAMPLE_RATES.get(sfreq_code)?;
-    if sample_rate == 0 || frame_bytes == 0 {
-        return None;
-    }
-
-    let bitrate = u64::from(frame_bytes) * 8 * u64::from(sample_rate) / 512;
-    u32::try_from(bitrate).ok()
-}
-
-#[cfg(not(feature = "gst"))]
-pub(crate) fn probe_raw_surround_technical_details(
-    _path: &Path,
-) -> Option<RawAudioTechnicalDetails> {
-    None
 }
 
 fn read_apev2_footer(file: &mut File, file_len: u64) -> Option<Apev2Footer> {
@@ -501,6 +98,26 @@ fn read_apev2_footer(file: &mut File, file_len: u64) -> Option<Apev2Footer> {
         item_count,
         tag_size,
     })
+}
+
+/// Length of the `APEv2` tag at the end of a file, including its optional
+/// header; 0 when the file has no tag.
+#[cfg(any(feature = "gst", test))]
+pub(super) fn appended_tag_len(file: &mut File, file_len: u64) -> u64 {
+    let Some(footer) = read_apev2_footer(file, file_len) else {
+        return 0;
+    };
+    // The tag size covers the items and the footer, not the header.
+    let tag_size = u64::from(footer.tag_size);
+    let with_header = tag_size.saturating_add(APE_TAG_HEADER_BYTES_U64);
+    if file_len
+        .checked_sub(with_header)
+        .is_some_and(|header_start| has_ape_preamble(file, header_start))
+    {
+        with_header
+    } else {
+        tag_size
+    }
 }
 
 fn locate_apev2_items_start(file: &mut File, file_len: u64, tag_size: u32) -> Option<u64> {
@@ -874,13 +491,6 @@ fn build_apev2_tag(items: &[ApeItem]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-#[cfg(feature = "gst")]
-fn kbps_from_bits_per_second(bits_per_second: u32) -> Option<u32> {
-    (bits_per_second > 0)
-        .then(|| round_f64_to_u32(f64::from(bits_per_second) / 1000.0))
-        .flatten()
-}
-
 #[cfg(test)]
 pub(crate) fn write_test_apev2_file(path: &Path, items: &[(&str, &str)], header: bool) {
     let mut bytes = b"stub".to_vec();
@@ -939,25 +549,12 @@ fn build_ape_block(size_field: u32, item_count: u32, flag_byte: u8) -> [u8; 32] 
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_byte_range, build_test_apev2_tag, edit_appended_apev2_text_items,
-        parse_ape_number_pair, parse_ape_track_number, parse_ape_year, raw_surround_format_label,
-        read_appended_apev2_text_metadata, write_test_apev2_file, ApeTextField,
+        build_test_apev2_tag, edit_appended_apev2_text_items, parse_ape_number_pair,
+        parse_ape_track_number, parse_ape_year, read_appended_apev2_text_metadata,
+        write_test_apev2_file, ApeTextField,
     };
-    use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn test_path(name: &str, ext: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|value| value.as_nanos())
-            .unwrap_or(0);
-        path.push(format!(
-            "ferrous-raw-audio-{name}-{}-{nanos}.{ext}",
-            std::process::id()
-        ));
-        path
-    }
+    use crate::raw_audio::test_path;
+    use std::path::Path;
 
     #[test]
     fn parse_ape_track_supports_number_pairs() {
@@ -1038,12 +635,6 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn raw_surround_format_labels_match_extensions() {
-        assert_eq!(raw_surround_format_label(Path::new("a.ac3")), "AC3");
-        assert_eq!(raw_surround_format_label(Path::new("a.dts")), "DTS");
-    }
-
     fn ape_items(path: &Path) -> Vec<(String, Vec<u8>)> {
         let mut file = std::fs::File::open(path).expect("open tagged file");
         let file_len = std::io::Seek::seek(&mut file, std::io::SeekFrom::End(0)).expect("seek");
@@ -1113,7 +704,10 @@ mod tests {
             .filter(|window| *window == super::APE_PREAMBLE)
             .count();
         assert_eq!(ape_count, 2, "one header and one footer");
-        assert_eq!(super::audio_byte_range(&path), Some((0, 4)));
+        assert_eq!(
+            crate::raw_audio::byte_filter::audio_byte_range(&path),
+            Some((0, 4))
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -1180,187 +774,5 @@ mod tests {
         assert!(error.contains("malformed"), "{error}");
         assert_eq!(std::fs::read(&path).expect("read file"), bytes);
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn ac3_bitrate_parses_standard_header() {
-        // AC3 sync word 0x0B77, CRC1 placeholder, fscod=00 (48kHz), frmsizecod=12 → index 6 → 96 kbps
-        let header = [0x0B, 0x77, 0x00, 0x00, 0b00_001100, 0, 0, 0, 0, 0, 0, 0];
-        assert_eq!(super::parse_ac3_bitrate(&header), Some(96_000));
-    }
-
-    #[test]
-    fn ac3_bitrate_parses_640kbps() {
-        // frmsizecod=36 → index 18 → 640 kbps
-        let header = [0x0B, 0x77, 0x00, 0x00, 0b00_100100, 0, 0, 0, 0, 0, 0, 0];
-        assert_eq!(super::parse_ac3_bitrate(&header), Some(640_000));
-    }
-
-    #[test]
-    fn ac3_bitrate_rejects_bad_sync() {
-        let header = [0x00, 0x00, 0x00, 0x00, 0x00];
-        assert_eq!(super::parse_ac3_bitrate(&header), None);
-    }
-
-    #[test]
-    fn dts_bitrate_parses_standard_header() {
-        // DTS sync: 7F FE 80 01
-        // Build a header with known FSIZE and SFREQ.
-        // FSIZE = 2047 (frame_bytes = 2048) at bits 47..61
-        // SFREQ = 13 (48000 Hz) at bits 67..71
-        //
-        // Byte layout:
-        //   [0..4] = 7F FE 80 01  (sync)
-        //   [4]    = don't care (FTYPE, SHORT, CPF, NBLKS upper)
-        //   [5]    = NBLKS lower 2 bits | FSIZE upper 2 bits
-        //           FSIZE=2047 → 0b_0111_1111_1111 (11 bits in 14-bit field → upper 2 = 0b01)
-        //           → byte5 lower 2 bits = 0b11 (FSIZE bits 12..13)
-        //           Wait, FSIZE is 14 bits. 2047 = 0x7FF = 0b0000_0111_1111_1111
-        //           byte5[1:0] = bits 13..12 = 0b00
-        //   Actually let me just compute the exact bytes.
-        //
-        // FSIZE = 2047 → 14 bits → 0b00_0111_1111_1111
-        // Packed into bytes 5..7:
-        //   byte5 & 0x03 = upper 2 bits of 14 = 0b00
-        //   byte6 = next 8 bits = 0b0111_1111 = 0x7F
-        //   byte7 upper 4 bits = lower 4 bits = 0b1111 → 0xF0
-        //
-        // SFREQ = 13 → 4 bits → 0b1101
-        // Packed into byte 8: bits [5..2] = (byte8 >> 2) & 0x0F
-        //   byte8 = 0b00_1101_00 = 0x34
-        let mut header = [0u8; 12];
-        header[0] = 0x7F;
-        header[1] = 0xFE;
-        header[2] = 0x80;
-        header[3] = 0x01;
-        header[5] = 0x00; // FSIZE upper 2 = 0
-        header[6] = 0x7F; // FSIZE mid 8
-        header[7] = 0xF0; // FSIZE lower 4 in upper nibble
-        header[8] = 0x34; // SFREQ=13 at bits 5..2
-
-        // frame_bytes = 2047 + 1 = 2048
-        // sample_rate = 48000
-        // bitrate = 2048 * 8 * 48000 / 512 = 1_536_000
-        assert_eq!(super::parse_dts_bitrate(&header), Some(1_536_000));
-    }
-
-    #[test]
-    fn dts_bitrate_rejects_bad_sync() {
-        let header = [0u8; 12];
-        assert_eq!(super::parse_dts_bitrate(&header), None);
-    }
-
-    #[test]
-    fn estimate_duration_from_ac3_with_apev2() {
-        // Build a fake AC3 file: valid header + padding + APEv2 tag
-        let path = test_path("ac3-duration", "ac3");
-
-        // AC3 header: 0x0B77, CRC, fscod=00 frmsizecod=26 → index 13 → 320 kbps
-        let ac3_header = [0x0B, 0x77, 0x00, 0x00, 0b00_011010];
-        let audio_size: usize = 320_000; // 320 kB of audio → 8 seconds at 320 kbps
-        let mut data = Vec::with_capacity(audio_size + 200);
-        data.extend_from_slice(&ac3_header);
-        data.resize(audio_size, 0x00);
-        let tag = build_test_apev2_tag(&[("Title", "Test")], true);
-        data.extend_from_slice(&tag);
-
-        std::fs::write(&path, &data).expect("write test file");
-
-        let duration = super::estimate_duration_from_bitstream(&path);
-        assert!(duration.is_some(), "should estimate duration");
-        let d = duration.unwrap();
-        // audio_size = 320000 bytes, bitrate = 320000 bps → duration = 320000*8/320000 = 8.0s
-        assert!((d - 8.0).abs() < 0.1, "expected ~8.0s, got {d}");
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn audio_byte_range_strips_leading_garbage_and_apev2_tag() {
-        let path = test_path("audio-byte-range", "ac3");
-
-        // 16 bytes of leading garbage, then AC3 sync word + audio, then tag.
-        let leading_garbage = [0xFFu8; 16];
-        let ac3_header = [0x0B, 0x77, 0x00, 0x00, 0b00_011010];
-        let audio_payload_size: usize = 4096;
-        let mut data = Vec::new();
-        data.extend_from_slice(&leading_garbage);
-        data.extend_from_slice(&ac3_header);
-        data.resize(leading_garbage.len() + audio_payload_size, 0x00);
-        let tag = build_test_apev2_tag(&[("Title", "Test")], true);
-        data.extend_from_slice(&tag);
-
-        std::fs::write(&path, &data).expect("write test file");
-
-        let range = audio_byte_range(&path);
-        let (start, end) = range.expect("should return a range");
-        assert_eq!(start, leading_garbage.len() as u64);
-        assert_eq!(end, (leading_garbage.len() + audio_payload_size) as u64);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn audio_byte_range_returns_none_for_non_surround_file() {
-        assert!(audio_byte_range(Path::new("/tmp/test.flac")).is_none());
-    }
-
-    #[test]
-    fn audio_byte_range_returns_none_when_nothing_to_strip() {
-        // AC3 file with sync word at byte 0 and no APEv2 tag → nothing to strip.
-        let path = test_path("audio-byte-range-clean", "ac3");
-        let ac3_header = [0x0B, 0x77, 0x00, 0x00, 0b00_011010];
-        let mut data = vec![0u8; 4096];
-        data[..ac3_header.len()].copy_from_slice(&ac3_header);
-        std::fs::write(&path, &data).expect("write test file");
-
-        assert!(audio_byte_range(&path).is_none());
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn same_surround_extension_matches_identical_formats() {
-        use super::same_surround_extension;
-
-        assert!(same_surround_extension(
-            Path::new("/a/track.ac3"),
-            Path::new("/b/other.ac3")
-        ));
-        assert!(same_surround_extension(
-            Path::new("/a/track.dts"),
-            Path::new("/b/other.dts")
-        ));
-    }
-
-    #[test]
-    fn same_surround_extension_rejects_different_surround_formats() {
-        use super::same_surround_extension;
-
-        assert!(!same_surround_extension(
-            Path::new("/a/track.ac3"),
-            Path::new("/b/other.dts")
-        ));
-    }
-
-    #[test]
-    fn same_surround_extension_rejects_surround_vs_non_surround() {
-        use super::same_surround_extension;
-
-        assert!(!same_surround_extension(
-            Path::new("/a/track.ac3"),
-            Path::new("/b/other.flac")
-        ));
-    }
-
-    #[test]
-    fn same_surround_extension_rejects_non_surround_pair() {
-        use super::same_surround_extension;
-
-        // Neither file is a raw surround file.
-        assert!(!same_surround_extension(
-            Path::new("/a/track.flac"),
-            Path::new("/b/other.flac")
-        ));
     }
 }

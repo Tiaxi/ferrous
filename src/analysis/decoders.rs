@@ -20,7 +20,7 @@ use gstreamer as gst;
 #[cfg(feature = "gst")]
 use crate::raw_audio::is_raw_surround_file;
 #[cfg(feature = "gst")]
-use crate::raw_audio::{is_dts_file, register_raw_surround_typefinders};
+use crate::raw_audio::{configure_raw_surround_decoding, filter_raw_surround_source, is_dts_file};
 #[cfg(feature = "gst")]
 use gstreamer_app as gst_app;
 
@@ -493,7 +493,7 @@ fn spectrogram_seek_flags_for_path(path: &Path) -> gst::SeekFlags {
 #[cfg(feature = "gst")]
 fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
     gst::init().ok()?;
-    register_raw_surround_typefinders();
+    configure_raw_surround_decoding();
 
     open_gstreamer_pipeline(path, gst::Pipeline::new())
 }
@@ -506,6 +506,7 @@ fn open_gstreamer_pipeline(
     let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     let src = gst::ElementFactory::make("filesrc").build().ok()?;
     src.set_property("location", path.to_string_lossy().to_string());
+    filter_raw_surround_source(&src);
 
     let decodebin = gst::ElementFactory::make("decodebin").build().ok()?;
     let conv = gst::ElementFactory::make("audioconvert").build().ok()?;
@@ -988,6 +989,41 @@ mod tests {
         let _ = gst::init();
         let result = open_gstreamer_file(Path::new("/nonexistent/path/to/file.ac3"));
         assert!(result.is_none());
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn ripped_surround_files_decode_completely_for_analysis() {
+        use crate::raw_audio::{ripped_surround_bytes, TEST_AC3, TEST_DTS};
+        use std::time::{Duration, Instant};
+
+        // A leading partial frame and an appended APEv2 tag; upper case
+        // gives the typefinders no extension hint.
+        for (stream, ext, expected_frames) in
+            [(TEST_AC3, "AC3", 32 * 1536), (TEST_DTS, "dts", 47 * 512)]
+        {
+            let path = std::env::temp_dir().join(format!(
+                "ferrous-analysis-ripped-{}.{ext}",
+                std::process::id()
+            ));
+            std::fs::write(&path, ripped_surround_bytes(stream).0).expect("write fixture");
+            let (mut source, rate, channels, _) =
+                open_audio_file(&path).unwrap_or_else(|| panic!("open {ext}"));
+            assert_eq!((rate, channels), (48_000, 1), "{ext}");
+
+            let mut decoded = 0;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match source.next_frames().expect("decode") {
+                    AudioRead::Frames(frames) => decoded += frames.frames,
+                    AudioRead::Pending => assert!(Instant::now() < deadline, "{ext} stalled"),
+                    AudioRead::Eof => break,
+                }
+            }
+            drop(source);
+            std::fs::remove_file(&path).expect("remove fixture");
+            assert_eq!(decoded, expected_frames, "{ext}");
+        }
     }
 
     #[test]

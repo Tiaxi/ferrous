@@ -8,6 +8,7 @@ use gstreamer as gst;
 
 use super::cache::usize_to_u64;
 use super::fft::reduce_waveform_peaks;
+use crate::raw_audio::{configure_raw_surround_decoding, filter_raw_surround_source};
 
 pub(super) struct GstWaveformAccumulator {
     observed_span_ns: u64,
@@ -88,6 +89,7 @@ pub(super) fn build_waveform_gst_pipeline(
         .build()
         .map_err(|_| anyhow::anyhow!("missing filesrc element"))?;
     src.set_property("location", path.to_string_lossy().to_string());
+    filter_raw_surround_source(&src);
 
     let decodebin = gst::ElementFactory::make("decodebin")
         .build()
@@ -190,6 +192,7 @@ where
     }
 
     gst::init()?;
+    configure_raw_surround_decoding();
     let (pipeline, bus, level) = build_waveform_gst_pipeline(path)?;
     let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     let duration_ns = configure_waveform_gst_pipeline(&pipeline, &level, max_points)?;
@@ -388,6 +391,43 @@ mod tests {
             assert!(configure_waveform_gst_pipeline(&pipeline, &level, 100).is_err());
         }
         assert_eq!(pipeline.current_state(), gst::State::Null);
+    }
+
+    #[test]
+    fn ripped_surround_files_produce_complete_waveforms() {
+        use crate::raw_audio::{ripped_surround_bytes, TEST_AC3, TEST_DTS};
+
+        // A leading partial frame and an appended APEv2 tag.
+        for (stream, ext, length) in [(TEST_AC3, "AC3", 1.024), (TEST_DTS, "dts", 0.501)] {
+            let path = std::env::temp_dir().join(format!(
+                "ferrous-waveform-ripped-{}.{ext}",
+                std::process::id()
+            ));
+            std::fs::write(&path, ripped_surround_bytes(stream).0).expect("write fixture");
+            let mut finished = None;
+            let result = decode_waveform_peaks_stream_gst(
+                &path,
+                64,
+                |peaks, coverage, done| {
+                    if done {
+                        finished = Some((peaks, coverage));
+                    }
+                    true
+                },
+                || false,
+            );
+            std::fs::remove_file(&path).expect("remove fixture");
+            result.unwrap_or_else(|err| panic!("{ext}: {err}"));
+
+            let (peaks, coverage) = finished.expect("finished waveform");
+            assert!(
+                (coverage - length).abs() < 0.05,
+                "{ext}: covers {coverage} s"
+            );
+            // The fixture tone peaks at 1/8 of full scale.
+            let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+            assert!((0.1..0.2).contains(&loudest), "{ext}: peak {loudest}");
+        }
     }
 
     #[test]
