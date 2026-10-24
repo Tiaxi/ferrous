@@ -54,15 +54,49 @@ impl EmbeddedCoverCache {
 
     /// Caches the first picture of the track's primary tag.
     pub(crate) fn store_track_cover(&self, track_path: &Path) -> Option<PathBuf> {
-        let tagged = lofty::read_from_path(track_path).ok()?;
-        let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
-        self.store(tag.pictures().first()?.data())
+        self.try_store_track_cover(track_path).ok().flatten()
+    }
+
+    /// Like [`Self::store_track_cover`], but tells a track without a picture
+    /// that can be cached (`Ok(None)`) apart from one whose tags could not be
+    /// read or whose entry could not be written.
+    pub(crate) fn try_store_track_cover(
+        &self,
+        track_path: &Path,
+    ) -> Result<Option<PathBuf>, String> {
+        let tagged = lofty::read_from_path(track_path).map_err(|error| {
+            format!(
+                "could not read the tags of '{}': {error}",
+                track_path.display()
+            )
+        })?;
+        let Some(picture) = tagged
+            .primary_tag()
+            .or_else(|| tagged.first_tag())
+            .and_then(|tag| tag.pictures().first())
+        else {
+            return Ok(None);
+        };
+        self.try_store(picture.data()).map_err(|error| {
+            format!(
+                "could not write to the embedded cover cache {}: {error}",
+                self.dir.display()
+            )
+        })
     }
 
     /// Returns the entry for an encoded PNG or JPEG picture, writing it only
     /// when it is missing or incomplete.
     pub(crate) fn store(&self, encoded: &[u8]) -> Option<PathBuf> {
-        let extension = picture_extension(encoded)?;
+        self.try_store(encoded).ok().flatten()
+    }
+
+    /// Like [`Self::store`], but returns `Ok(None)` for a picture that is not
+    /// cached and an error when the entry could not be written.
+    fn try_store(&self, encoded: &[u8]) -> io::Result<Option<PathBuf>> {
+        let Some(extension) = picture_extension(encoded) else {
+            return Ok(None);
+        };
         let name = format!("{:x}.{extension}", md5::compute(encoded));
         let path = self.dir.join(&name);
         // Mark the entry before checking for it: cleanup has either removed it
@@ -72,9 +106,9 @@ impl EmbeddedCoverCache {
             metadata.is_file() && u64::try_from(encoded.len()) == Ok(metadata.len())
         });
         if !complete {
-            write_atomically(&self.dir, &name, encoded).ok()?;
+            write_atomically(&self.dir, &name, encoded)?;
         }
-        Some(path)
+        Ok(Some(path))
     }
 
     /// The entry name of `path` if it names a current or legacy entry of this
