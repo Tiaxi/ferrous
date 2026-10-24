@@ -67,6 +67,13 @@ impl MockPlaybackRuntime {
             PlaybackCommand::AddToQueue(paths) => {
                 self.queue.extend(paths);
             }
+            PlaybackCommand::RemapPaths(renames) => {
+                for path in self.queue.iter_mut().chain(self.snapshot.current.as_mut()) {
+                    super::remap_path(path, &renames);
+                }
+                // The loop sends the remapped snapshot after this.
+                let _ = self.event_tx.send(PlaybackEvent::PathsRemapped);
+            }
             PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
             PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
             PlaybackCommand::MoveQueue { from, to } => self.move_queue(from, to),

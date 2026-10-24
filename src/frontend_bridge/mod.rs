@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::analysis::SpectrogramOutputRoute;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{atomic::AtomicU64, Arc};
 use std::time::{Duration, Instant};
@@ -21,7 +21,8 @@ use crate::library::{
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
-    PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
+    PathRenames, PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState,
+    RepeatMode,
 };
 
 mod commands;
@@ -486,6 +487,9 @@ pub(super) struct BridgeState {
     /// reset stall on the Qt side for large playlists.
     skip_queue_for_gapless: bool,
     last_track_change: TrackChangeMarker,
+    /// Renames sent to the playback engine that it has not acknowledged.
+    /// Events it sent before the acknowledgement still carry the old paths.
+    unacknowledged_engine_renames: VecDeque<Arc<PathRenames>>,
 }
 
 /// The most recent `TrackChanged` event. The generation advances on every
@@ -2049,6 +2053,58 @@ mod tests {
             vec!["now playing", "scrobble", "shutdown"]
         );
         assert!(matches!(event_rx.try_recv(), Ok(BridgeEvent::Stopped)));
+    }
+
+    #[test]
+    fn renamed_current_track_survives_engine_events() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let (old_path, new_path) = (p("/music/old name.flac"), p("/music/new name.flac"));
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                tracks: vec![old_path.clone(), p("/music/next.flac")],
+                autoplay: false,
+            }),
+            &event_tx,
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.state.playback.current.as_ref() != Some(&old_path) {
+            assert!(Instant::now() < deadline, "engine reports the loaded track");
+            let _ = runtime.drain_pending_updates(&event_tx);
+            while event_rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::RefreshRenamedPaths(vec![(
+                old_path,
+                new_path.clone(),
+            )])),
+            &event_tx,
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert_eq!(runtime.state.playback.current.as_ref(), Some(&new_path));
+            if runtime.state.unacknowledged_engine_renames.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "engine acknowledges the rename");
+            let _ = runtime.drain_pending_updates(&event_tx);
+            while event_rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        runtime.playback.command(PlaybackCommand::Poll);
+        runtime.playback.command(PlaybackCommand::SetVolume(0.5));
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            let _ = runtime.drain_pending_updates(&event_tx);
+            while event_rx.try_recv().is_ok() {}
+            assert_eq!(runtime.state.playback.current.as_ref(), Some(&new_path));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(runtime.state.queue[0], new_path);
     }
 
     #[test]

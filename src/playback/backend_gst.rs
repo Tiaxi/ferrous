@@ -18,7 +18,8 @@ use crate::raw_audio::{
 };
 
 use super::{
-    PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode, TrackChangeKind,
+    PathRenames, PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode,
+    TrackChangeKind,
 };
 
 struct GaplessQueue {
@@ -56,6 +57,13 @@ impl GaplessQueue {
     fn add_to_queue(&mut self, items: Vec<PathBuf>) {
         self.queue.extend(items);
         self.rebuild_shuffle_pool();
+    }
+
+    /// Rename entries in place; indices and shuffle history stay valid.
+    fn remap_paths(&mut self, renames: &PathRenames) {
+        for path in &mut self.queue {
+            super::remap_path(path, renames);
+        }
     }
 
     fn clear(&mut self) {
@@ -1036,8 +1044,19 @@ impl GstPlaybackRuntime {
 
     fn play(&mut self) {
         let was_stopped = self.snapshot.state == PlaybackState::Stopped;
+        let mut restart_path = None;
         if let Ok(state) = self.queue_state.lock() {
             self.snapshot.current_queue_index = state.current_index();
+            if was_stopped && state.current() == self.snapshot.current {
+                restart_path.clone_from(&self.snapshot.current);
+            }
+        }
+        // A stopped pipeline reopens its URI, which is stale if the current
+        // file was renamed. A playing stream keeps reading the renamed file,
+        // but playbin3 takes a URI set during playback as the next gapless
+        // track, so the URI is only replaced once the pipeline has stopped.
+        if let Some(uri) = restart_path.as_deref().and_then(file_uri) {
+            self.playbin.set_property("uri", uri);
         }
         if was_stopped {
             self.applied_volume = 0.0;
@@ -1467,6 +1486,21 @@ impl GstPlaybackRuntime {
         match cmd {
             PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
             PlaybackCommand::AddToQueue(paths) => self.add_to_queue(paths),
+            PlaybackCommand::RemapPaths(renames) => {
+                if let Ok(mut state) = self.queue_state.lock() {
+                    state.remap_paths(&renames);
+                }
+                let renamed_current = self
+                    .snapshot
+                    .current
+                    .as_mut()
+                    .is_some_and(|current| super::remap_path(current, &renames));
+                // Acknowledge before the first snapshot with the new paths.
+                let _ = self.event_tx.send(PlaybackEvent::PathsRemapped);
+                if renamed_current {
+                    self.emit_snapshot();
+                }
+            }
             PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
             PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
             PlaybackCommand::MoveQueue { from, to } => self.move_queue_item(from, to),
@@ -2219,6 +2253,42 @@ mod tests {
     }
 
     #[test]
+    fn remapped_queue_keeps_position_shuffle_and_repeat_one_track() {
+        let paths: Vec<_> = (0..4)
+            .map(|index| PathBuf::from(format!("/fixture/{index}.flac")))
+            .collect();
+        let renamed_current = PathBuf::from("/fixture/renamed-1.flac");
+        let renamed_next = PathBuf::from("/fixture/renamed-2.flac");
+        let mut queue = GaplessQueue::new();
+        queue.set_queue(paths.clone());
+        queue.set_current(1);
+        queue.set_shuffle_enabled(true);
+        let shuffle_pool = queue.shuffle_pool.clone();
+
+        queue.remap_paths(&PathRenames::from([
+            (paths[1].clone(), renamed_current.clone()),
+            (paths[2].clone(), renamed_next.clone()),
+        ]));
+
+        assert_eq!(
+            queue.queue,
+            vec![
+                paths[0].clone(),
+                renamed_current.clone(),
+                renamed_next.clone(),
+                paths[3].clone()
+            ]
+        );
+        assert_eq!(queue.current_index(), Some(1));
+        assert_eq!(queue.shuffle_pool, shuffle_pool);
+        queue.set_shuffle_enabled(false);
+        queue.repeat_mode = RepeatMode::One;
+        assert_eq!(queue.next_natural(), Some(renamed_current));
+        queue.repeat_mode = RepeatMode::Off;
+        assert_eq!(queue.next_natural(), Some(renamed_next));
+    }
+
+    #[test]
     fn natural_handoff_emits_track_changed_near_track_start() {
         let first = PathBuf::from("/tmp/gst_handoff_a.flac");
         let second = PathBuf::from("/tmp/gst_handoff_b.flac");
@@ -2769,6 +2839,184 @@ mod gst_integration_tests {
             );
             assert!(analysis_rx.try_recv().is_err());
         }
+    }
+
+    /// The engine runtime on a playbin3 that plays into a clocked fakesink.
+    struct TestEngine {
+        runtime: GstPlaybackRuntime,
+        bus: gst::Bus,
+        events: Receiver<PlaybackEvent>,
+        _analysis: Receiver<AnalysisCommand>,
+    }
+
+    impl TestEngine {
+        fn new() -> Self {
+            gst::init().unwrap();
+            let playbin = gst::ElementFactory::make("playbin3")
+                .build()
+                .expect("playbin3");
+            let sink = gst::ElementFactory::make("fakesink")
+                .property("sync", true)
+                .build()
+                .unwrap();
+            playbin.set_property("audio-sink", &sink);
+            let bus = playbin.bus().expect("bus");
+            let (analysis_tx, analysis) = unbounded();
+            let (event_tx, events) = unbounded();
+            let runtime = GstPlaybackRuntime::new(
+                playbin,
+                Arc::new(Mutex::new(GaplessQueue::new())),
+                analysis_tx,
+                event_tx,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicU64::new(0)),
+            );
+            Self {
+                runtime,
+                bus,
+                events,
+                _analysis: analysis,
+            }
+        }
+
+        /// Pass bus messages to the runtime until the playbin plays or fails.
+        fn wait_until_playing(&mut self) -> Result<(), String> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                let Some(msg) = self.bus.timed_pop(gst::ClockTime::from_mseconds(20)) else {
+                    continue;
+                };
+                let error = match msg.view() {
+                    gst::MessageView::Error(err) => Some(err.error().to_string()),
+                    _ => None,
+                };
+                let playing = matches!(msg.view(), gst::MessageView::StateChanged(changed)
+                    if changed.src().is_some_and(|src| src == &self.runtime.playbin)
+                        && changed.current() == gst::State::Playing);
+                self.runtime.handle_bus_message(&msg);
+                if let Some(error) = error {
+                    return Err(error);
+                }
+                if playing {
+                    return Ok(());
+                }
+            }
+            Err("timeout waiting for Playing state".into())
+        }
+
+        fn current_uri(&self) -> Option<String> {
+            self.runtime.playbin.property("current-uri")
+        }
+    }
+
+    impl Drop for TestEngine {
+        fn drop(&mut self) {
+            let _ = self.runtime.playbin.set_state(gst::State::Null);
+        }
+    }
+
+    fn tone_fixtures(test: &str, names: &[&str]) -> (PathBuf, Vec<PathBuf>) {
+        let dir = std::env::temp_dir().join(format!("ferrous-{test}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = names
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                std::fs::write(&path, include_bytes!("../analysis/fixtures/seek-tone.mp3"))
+                    .unwrap();
+                path
+            })
+            .collect();
+        (dir, paths)
+    }
+
+    #[test]
+    fn renamed_next_track_plays_from_its_new_path() {
+        let (dir, paths) = tone_fixtures("rename-next", &["a.mp3", "b.mp3"]);
+        let renamed = dir.join("renamed b.mp3");
+        let mut engine = TestEngine::new();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(paths.clone()));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_until_playing().expect("first track plays");
+
+        std::fs::rename(&paths[1], &renamed).unwrap();
+        while engine.events.try_recv().is_ok() {}
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
+                (paths[1].clone(), renamed.clone()),
+            ]))));
+        assert!(matches!(
+            engine.events.try_recv(),
+            Ok(PlaybackEvent::PathsRemapped)
+        ));
+        assert_eq!(engine.runtime.snapshot.current.as_ref(), Some(&paths[0]));
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+
+        engine.runtime.apply_command(PlaybackCommand::Next);
+        engine.wait_until_playing().expect("renamed track plays");
+        engine.runtime.apply_command(PlaybackCommand::Poll);
+
+        assert_eq!(engine.runtime.snapshot.current.as_ref(), Some(&renamed));
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(1));
+        assert_eq!(engine.current_uri(), file_uri(&renamed));
+        for event in engine.events.try_iter() {
+            match event {
+                PlaybackEvent::Snapshot(snapshot) => {
+                    assert_ne!(snapshot.current.as_ref(), Some(&paths[1]));
+                }
+                PlaybackEvent::TrackChanged { path, .. } => assert_eq!(path, renamed),
+                _ => {}
+            }
+        }
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn renamed_current_track_replays_after_stop() {
+        let (dir, paths) = tone_fixtures("rename-current", &["current.mp3"]);
+        let renamed = dir.join("renamed current.mp3");
+        let mut engine = TestEngine::new();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(paths.clone()));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_until_playing().expect("track plays");
+
+        std::fs::rename(&paths[0], &renamed).unwrap();
+        while engine.events.try_recv().is_ok() {}
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
+                (paths[0].clone(), renamed.clone()),
+            ]))));
+        assert!(matches!(
+            engine.events.try_recv(),
+            Ok(PlaybackEvent::PathsRemapped)
+        ));
+        assert!(matches!(
+            engine.events.try_recv(),
+            Ok(PlaybackEvent::Snapshot(snapshot))
+                if snapshot.current.as_ref() == Some(&renamed)
+                    && snapshot.state == PlaybackState::Playing
+        ));
+        assert_eq!(
+            engine.runtime.playbin.current_state(),
+            gst::State::Playing,
+            "the rename does not interrupt the open stream"
+        );
+
+        engine.runtime.apply_command(PlaybackCommand::Stop);
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_until_playing().expect("renamed track replays");
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+        assert_eq!(engine.current_uri(), file_uri(&renamed));
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn make_full_analysis_sink() -> gst::Bin {
