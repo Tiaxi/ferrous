@@ -1975,6 +1975,8 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         snapshot.playback.soloed_channel.map_or(0xFF, |ch| ch),
     );
     push_u64(&mut out, snapshot.playback.track_token);
+    push_u64(&mut out, snapshot.playback.seek_serial);
+    push_u64(&mut out, snapshot.playback.seek_landed_serial);
     out
 }
 
@@ -2637,6 +2639,8 @@ mod tests {
                 muted_channels_mask: 0,
                 soloed_channel: None,
                 track_token: 7,
+                seek_serial: 3,
+                seek_landed_serial: 2,
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
@@ -4085,6 +4089,8 @@ mod tests {
         playback_muted_channels_mask: u64,
         playback_soloed_channel: Option<u8>,
         playback_track_token: u64,
+        playback_seek_serial: u64,
+        playback_seek_landed_serial: u64,
         settings_channel_buttons_visibility: u8,
     }
 
@@ -4093,6 +4099,8 @@ mod tests {
             playback_muted_channels_mask: 0,
             playback_soloed_channel: None,
             playback_track_token: 0,
+            playback_seek_serial: 0,
+            playback_seek_landed_serial: 0,
             settings_channel_buttons_visibility: 1,
         };
         // Skip 12-byte header (magic 4 + total_len 4 + section_mask 2 + reserved 2).
@@ -4125,7 +4133,12 @@ mod tests {
             };
             p += 1;
             result.playback_track_token = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
-            assert_eq!(p + 8, section_len, "track token ends the playback section");
+            p += 8;
+            result.playback_seek_serial = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
+            p += 8;
+            result.playback_seek_landed_serial =
+                u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
+            assert_eq!(p + 8, section_len, "seek serials end the playback section");
             offset += section_len;
         }
         // Skip remaining sections before settings.  Sections appear in
@@ -4193,6 +4206,18 @@ mod tests {
         let decoded = decode_binary_snapshot_for_test(&encoded);
         assert_eq!(decoded.playback_track_token, u64::MAX - 1);
         assert_eq!(decoded.playback_soloed_channel, None);
+    }
+
+    #[test]
+    fn snapshot_encodes_seek_serials() {
+        let mut snapshot = sample_snapshot();
+        snapshot.playback.seek_serial = u64::MAX - 2;
+        snapshot.playback.seek_landed_serial = u64::MAX - 3;
+        let encoded = encode_binary_snapshot(&snapshot, None);
+        let decoded = decode_binary_snapshot_for_test(&encoded);
+        assert_eq!(decoded.playback_track_token, 7);
+        assert_eq!(decoded.playback_seek_serial, u64::MAX - 2);
+        assert_eq!(decoded.playback_seek_landed_serial, u64::MAX - 3);
     }
 
     #[test]

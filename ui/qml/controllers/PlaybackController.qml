@@ -225,6 +225,11 @@ QtObject {
     }
 
     function seekCommittedAtTime(value, nowMs) {
+        // Play starts a stopped track from its beginning, so a stopped
+        // track is not seekable.
+        if ((root.uiBridge.playbackState || "") === "Stopped") {
+            return
+        }
         root.clearVisualSeekClock()
         root.interpolationActive = (root.uiBridge.playbackState || "") === "Playing"
         root.interpolationRate = 1.0

@@ -264,7 +264,7 @@ impl CancelledAdvance {
         })
     }
 
-    fn merge(first: Option<Self>, second: Option<Self>) -> Option<Self> {
+    pub(crate) fn merge(first: Option<Self>, second: Option<Self>) -> Option<Self> {
         match (first, second) {
             (Some(first), Some(second)) => Some(Self {
                 handed_to_pipeline: first.handed_to_pipeline || second.handed_to_pipeline,
