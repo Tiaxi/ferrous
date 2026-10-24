@@ -328,10 +328,15 @@ struct GstPlaybackRuntime {
     last_stream_group: Option<gst::GroupId>,
     /// Shared with the about-to-finish callback and the parser probes.
     stream_durations: Arc<Mutex<StreamDurations>>,
-    /// Set when `set_state(Playing)` is called in `switch_track`.
+    /// Set when the pipeline is set playing, or a restarted run prerolls.
     /// Cleared when the bus handler sees `StateChanged(_, Playing)` for
     /// the playbin.  Used by `poll()` to detect stuck state transitions.
+    /// A seek in flight holds the pipeline back from Playing, so the wait
+    /// starts over once the seek has landed.
     playing_state_requested_at: Option<Instant>,
+    /// How long the pipeline may take to reach Playing:
+    /// `PLAYING_STATE_TIMEOUT`, which tests shorten.
+    playing_state_timeout: Duration,
     channel_mute_mask: Arc<AtomicU64>,
     solo_pre_mask: Option<u64>,
     soloed_channel: Option<u8>,
@@ -448,6 +453,7 @@ impl GstPlaybackRuntime {
             last_stream_group: None,
             stream_durations,
             playing_state_requested_at: None,
+            playing_state_timeout: Self::PLAYING_STATE_TIMEOUT,
             channel_mute_mask,
             solo_pre_mask: None,
             soloed_channel: None,
@@ -1111,6 +1117,10 @@ impl GstPlaybackRuntime {
             }
             self.position_clock.reset(self.snapshot.position, now);
         }
+        if self.playing_state_requested_at.is_some() {
+            // The pipeline goes on to Playing now that the seek is done.
+            self.playing_state_requested_at = Some(now);
+        }
         if seek.serial != 0 {
             self.snapshot.seek_serial = self.snapshot.seek_serial.max(seek.serial);
             if let Some(landing) = landing {
@@ -1220,6 +1230,7 @@ impl GstPlaybackRuntime {
         self.set_run_uri(&path, &uri);
         self.restart = Some(RunRestart::Prerolling);
         // A run that never prerolls is reported like one that never plays.
+        // The seek it then takes is not timed.
         self.playing_state_requested_at = Some(Instant::now());
         // A failure posts an error, which ends the restart.
         if matches!(
@@ -1573,7 +1584,10 @@ impl GstPlaybackRuntime {
         let Some(requested_at) = self.playing_state_requested_at else {
             return false;
         };
-        if requested_at.elapsed() < Self::PLAYING_STATE_TIMEOUT {
+        // A seek can take long, such as an accurate seek in a long file
+        // without an index, and the pipeline plays only once it has landed.
+        // A seek that fails posts an error.
+        if self.seek_in_flight.is_some() || requested_at.elapsed() < self.playing_state_timeout {
             return false;
         }
         let current_path = self.snapshot.current.as_ref().map_or("?", |p| {
@@ -1581,7 +1595,7 @@ impl GstPlaybackRuntime {
         });
         eprintln!(
             "[ferrous] pipeline stuck: Playing state not confirmed within {}s for {current_path}, advancing",
-            Self::PLAYING_STATE_TIMEOUT.as_secs(),
+            self.playing_state_timeout.as_secs(),
         );
         let (file, detail) = match self.missing_plugin.take() {
             Some(missing) => (missing.file, missing_plugin_detail(&missing.description)),
@@ -1589,7 +1603,7 @@ impl GstPlaybackRuntime {
                 None,
                 format!(
                     "playback did not start within {} s",
-                    Self::PLAYING_STATE_TIMEOUT.as_secs()
+                    self.playing_state_timeout.as_secs()
                 ),
             ),
         };
@@ -3665,10 +3679,8 @@ mod engine_tests {
         frames[1..].concat()
     }
 
-    /// Record the stream time at which the output first carries sound
-    /// louder than a tenth of full scale.
-    fn listen_for_sound(playbin: &gst::Element) -> Arc<Mutex<Option<Duration>>> {
-        let heard = Arc::new(Mutex::new(None));
+    /// The sink pad of the fake output that `playbin` plays to.
+    fn output_sink_pad(playbin: &gst::Element) -> gst::Pad {
         let output = playbin
             .property::<gst::Element>("audio-sink")
             .downcast::<gst::Bin>()
@@ -3683,7 +3695,45 @@ mod engine_tests {
                     .is_some_and(|factory| factory.name() == "fakesink")
             })
             .expect("fake output");
-        let pad = sink.static_pad("sink").unwrap();
+        sink.static_pad("sink").unwrap()
+    }
+
+    /// Holds every buffer before the output until it is released, so the
+    /// pipeline can neither preroll nor land a seek it is given.
+    struct OutputHold {
+        pad: gst::Pad,
+        probe: Option<gst::PadProbeId>,
+    }
+
+    impl OutputHold {
+        fn new(playbin: &gst::Element) -> Self {
+            let pad = output_sink_pad(playbin);
+            let probe = pad.add_probe(
+                gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+                |_, _| gst::PadProbeReturn::Ok,
+            );
+            assert!(probe.is_some());
+            Self { pad, probe }
+        }
+
+        fn release(&mut self) {
+            if let Some(probe) = self.probe.take() {
+                self.pad.remove_probe(probe);
+            }
+        }
+    }
+
+    impl Drop for OutputHold {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    /// Record the stream time at which the output first carries sound
+    /// louder than a tenth of full scale.
+    fn listen_for_sound(playbin: &gst::Element) -> Arc<Mutex<Option<Duration>>> {
+        let heard = Arc::new(Mutex::new(None));
+        let pad = output_sink_pad(playbin);
         let recorded = Arc::clone(&heard);
         pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
             let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data else {
@@ -4328,6 +4378,8 @@ mod engine_tests {
         let fixtures = Fixtures::new("seek-preroll");
         let a = fixtures.wav("a.wav", 6_000);
         let mut engine = DirectEngine::start();
+        // The pipeline cannot preroll until the seek waits for it.
+        let mut hold = OutputHold::new(&engine.runtime.playbin);
         engine
             .runtime
             .apply_command(PlaybackCommand::LoadQueue(vec![a]));
@@ -4337,6 +4389,8 @@ mod engine_tests {
             .apply_command(PlaybackCommand::Seek(millis(3_000)));
         assert!(engine.runtime.queued_seek.is_some());
         assert!(engine.runtime.seek_in_flight.is_none());
+        assert!(engine.runtime.playbin.current_state() < gst::State::Paused);
+        hold.release();
         assert!(engine.run_until(|runtime| runtime.snapshot.seek_landed_serial == 1));
         assert!(
             engine.runtime.snapshot.position.abs_diff(millis(3_000)) < millis(50),
@@ -4380,6 +4434,71 @@ mod engine_tests {
         assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(700)));
         assert_eq!(engine.runtime.playbin.current_state(), gst::State::Playing);
         assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
+    }
+
+    #[test]
+    fn seek_that_takes_longer_than_playback_may_take_to_start_lands_and_plays() {
+        let fixtures = Fixtures::new("slow-seek");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = DirectEngine::start();
+        let mut hold = engine.hold_seek_of_a_restart(vec![a, b]);
+        // However long the seek takes, the track has not failed to start.
+        engine.runtime.playing_state_timeout = Duration::ZERO;
+        for _ in 0..3 {
+            engine.handle_posted_messages();
+        }
+        assert!(engine.errors().is_empty());
+        assert!(engine.runtime.seek_in_flight.is_some());
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+
+        // Playback then has the usual time to start.
+        engine.runtime.playing_state_timeout = GstPlaybackRuntime::PLAYING_STATE_TIMEOUT;
+        hold.release();
+        assert!(engine.run_until(|runtime| runtime.snapshot.seek_landed_serial == 1));
+        assert!(
+            engine.runtime.snapshot.position.abs_diff(millis(500)) < millis(50),
+            "{:?}",
+            engine.runtime.snapshot
+        );
+        assert!(engine.run_until(|runtime| runtime.snapshot.position >= millis(700)));
+        assert_eq!(engine.runtime.playbin.current_state(), gst::State::Playing);
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
+        assert!(engine.errors().is_empty());
+    }
+
+    #[test]
+    fn seek_that_fails_in_flight_is_reported_and_skipped() {
+        let fixtures = Fixtures::new("failed-seek");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = DirectEngine::start();
+        let mut hold = engine.hold_seek_of_a_restart(vec![a.clone(), b]);
+        engine.runtime.playing_state_timeout = Duration::ZERO;
+        engine.handle_posted_messages();
+        assert!(engine.errors().is_empty());
+        engine.runtime.playing_state_timeout = GstPlaybackRuntime::PLAYING_STATE_TIMEOUT;
+
+        let source = engine.file_source();
+        engine.fail_reading(&source);
+        let errors = engine.errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path.as_deref(), Some(a.as_path()));
+        assert_eq!(errors[0].detail, "injected read failure");
+        assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Skipped);
+        assert!(!engine.runtime.seek_pending());
+        assert_eq!(engine.runtime.restart, None);
+        assert_eq!(engine.runtime.snapshot.seek_serial, 1);
+        assert_eq!(engine.runtime.snapshot.seek_landed_serial, 0);
+
+        hold.release();
+        assert!(engine.run_until(|runtime| {
+            runtime.snapshot.current_queue_index == Some(1)
+                && runtime.snapshot.position >= millis(200)
+        }));
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+        assert!(engine.errors().is_empty());
     }
 
     #[test]
@@ -4792,8 +4911,14 @@ mod engine_tests {
                 matches!(message.view(), gst::MessageView::StreamStart(_))
             });
             self.runtime.handle_bus_message(&stream_start);
-            let source = self
-                .runtime
+            let source = self.file_source();
+            assert_eq!(input_file(Some(source.upcast_ref())), Some(first));
+            source
+        }
+
+        /// The file source of the pipeline's run.
+        fn file_source(&self) -> gst::Element {
+            self.runtime
                 .playbin
                 .clone()
                 .downcast::<gst::Bin>()
@@ -4806,9 +4931,44 @@ mod engine_tests {
                         .factory()
                         .is_some_and(|factory| factory.name() == "filesrc")
                 })
-                .expect("file source");
-            assert_eq!(input_file(Some(source.upcast_ref())), Some(first));
-            source
+                .expect("file source")
+        }
+
+        /// Play `queue`, of two tracks, and seek to 0.5 s after the pipeline
+        /// was given the second, so that the first restarts. Returns once
+        /// the restarted run was given the seek, which `OutputHold` keeps
+        /// from landing.
+        fn hold_seek_of_a_restart(&mut self, queue: Vec<PathBuf>) -> OutputHold {
+            self.play_until_opened(queue, RepeatMode::Off);
+            assert!(self.run_until(|runtime| {
+                runtime
+                    .queue_state
+                    .lock()
+                    .unwrap()
+                    .successor_handed_to_pipeline()
+                    && runtime.snapshot.position >= millis(3_000)
+            }));
+            self.runtime
+                .apply_command(PlaybackCommand::Seek(millis(500)));
+            assert_eq!(self.runtime.restart, Some(RunRestart::Prerolling));
+            let playbin = self.runtime.playbin.clone();
+            let prerolled = self.handle_messages_until(|message| {
+                matches!(message.view(), gst::MessageView::AsyncDone(_))
+                    && message.src().is_some_and(|src| src == &playbin)
+            });
+            let hold = OutputHold::new(&playbin);
+            self.runtime.handle_bus_message(&prerolled);
+            assert_eq!(self.runtime.restart, Some(RunRestart::Seeking));
+            assert!(self.runtime.seek_in_flight.is_some());
+            hold
+        }
+
+        /// Handle the bus messages posted so far, and poll.
+        fn handle_posted_messages(&mut self) {
+            while let Some(message) = self.bus.pop() {
+                self.runtime.handle_bus_message(&message);
+            }
+            self.runtime.poll();
         }
 
         /// Fail reading from `source`, as a disk error would, and handle
