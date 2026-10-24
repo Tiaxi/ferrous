@@ -617,6 +617,32 @@ fn read_native_tag(
 }
 
 /// Read `path` as the concrete file type `T` and take what `take` needs from it.
+/// A new tag of `tag_type` for a file that has none, holding what `shown`,
+/// the tag readers show, holds.
+///
+/// A tag written with only some items would otherwise hide the rest of
+/// `shown`, such as the title of an MP3 with only `ID3v1`. Items `tag_type`
+/// cannot store are dropped, except a `Year`, which `ID3v1` holds and
+/// `ID3v2` cannot: it becomes the recording date, which `ID3v2.4` writes as
+/// `TDRC` and `ID3v2.3` as `TYER`.
+pub(crate) fn seeded_tag(shown: Option<&Tag>, tag_type: TagType) -> Tag {
+    let Some(shown) = shown else {
+        return Tag::new(tag_type);
+    };
+    let mut seeded = shown.clone();
+    if ItemKey::Year.map_key(tag_type).is_none()
+        && ItemKey::RecordingDate.map_key(tag_type).is_some()
+        && seeded.get(ItemKey::RecordingDate).is_none()
+    {
+        if let Some(year) = seeded.get_string(ItemKey::Year).map(str::to_string) {
+            seeded.remove_key(ItemKey::Year);
+            seeded.insert_text(ItemKey::RecordingDate, year);
+        }
+    }
+    seeded.re_map(tag_type);
+    seeded
+}
+
 fn read<T: AudioFile, R>(
     path: &Path,
     options: ParseOptions,
@@ -665,6 +691,25 @@ pub(crate) fn write_test_mp3_with_id3v23(path: &Path) {
     tag.save_to_path(path, WriteOptions::new().use_id3v23(true))
         .expect("write ID3v2.3 tag");
     assert_eq!(&std::fs::read(path).expect("read fixture")[..4], b"ID3\x03");
+}
+
+/// Write an MP3 whose only tag is an `ID3v1` tag holding `items`.
+#[cfg(test)]
+pub(crate) fn write_test_mp3_with_only_id3v1(path: &Path, items: &[(ItemKey, &str)]) {
+    use lofty::file::TaggedFileExt;
+
+    std::fs::write(path, TEST_MP3).expect("write MP3 fixture");
+    TagType::Id3v2
+        .remove_from_path(path)
+        .expect("strip ID3v2 tag");
+    let mut tag = Tag::new(TagType::Id3v1);
+    for (key, value) in items {
+        tag.insert_text(*key, (*value).to_string());
+    }
+    tag.save_to_path(path, WriteOptions::new())
+        .expect("write ID3v1 tag");
+    let tagged = lofty::read_from_path(path).expect("read fixture");
+    assert!(tagged.tag(TagType::Id3v2).is_none());
 }
 
 /// Write an MP4 (ALAC) file holding `ilst`.

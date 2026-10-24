@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -16,7 +16,7 @@ use url::Url;
 use crate::folder_cover::{find_folder_cover, find_named_cover};
 use crate::raw_audio::{is_raw_surround_file, read_appended_apev2_text_metadata};
 use crate::safe_save::{check_rewritable, create_file, replace_file};
-use crate::tag_write::save_tag;
+use crate::tag_write::{save_tag, seeded_tag};
 use crate::vorbis_comment_scan::skipped_comments;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,14 +336,10 @@ fn edited_artwork_tag(path: &Path, artwork: &NormalizedArtwork) -> Result<(FileT
         .map_err(|err| format!("failed to read tags from {}: {err}", path.display()))?;
     let file_type = tagged.file_type();
     let primary_type = tagged.primary_tag_type();
-    let mut tag = tagged.primary_tag().cloned().unwrap_or_else(|| {
-        let mut seeded = tagged
-            .first_tag()
-            .cloned()
-            .unwrap_or_else(|| Tag::new(primary_type));
-        seeded.re_map(primary_type);
-        seeded
-    });
+    let mut tag = tagged
+        .primary_tag()
+        .cloned()
+        .unwrap_or_else(|| seeded_tag(tagged.first_tag(), primary_type));
 
     let mut kept = Vec::new();
     while !tag.pictures().is_empty() {
@@ -373,12 +369,35 @@ fn sibling_supported_audio_files(track_path: &Path) -> Result<Vec<PathBuf>> {
         .with_context(|| format!("failed to read directory {}", dir.to_string_lossy()))?
     {
         let path = entry?.path();
-        if path.is_file() && crate::library::is_supported_audio(&path) {
+        if path.is_file()
+            && crate::library::is_supported_audio(&path)
+            && !is_apple_double_sidecar(&path)
+        {
             out.push(path);
         }
     }
     out.sort();
     Ok(out)
+}
+
+/// Whether `path` is an `AppleDouble` file, which macOS writes as `._<name>`
+/// next to `<name>` to keep its metadata on file systems that cannot. It
+/// holds no audio, though it has the audio file's extension.
+///
+/// Only files with such a name are read, to check for the `AppleDouble` magic
+/// number, so a track that merely starts with `._` is still a track.
+fn is_apple_double_sidecar(path: &Path) -> bool {
+    const APPLE_DOUBLE_MAGIC: [u8; 4] = 0x0005_1607_u32.to_be_bytes();
+    let has_sidecar_name = path
+        .file_name()
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"._"));
+    if !has_sidecar_name {
+        return false;
+    }
+    let mut magic = [0; 4];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok_and(|()| magic == APPLE_DOUBLE_MAGIC)
 }
 
 /// The album tag of `path`, empty when it has none.
@@ -836,25 +855,22 @@ mod tests {
 
     #[test]
     fn artwork_on_an_id3v1_only_mp3_keeps_its_tags_visible() {
-        use crate::tag_write::TEST_MP3;
-        use lofty::config::WriteOptions;
-        use lofty::tag::{ItemKey, TagExt, TagType};
+        use crate::tag_write::write_test_mp3_with_only_id3v1;
+        use lofty::tag::{ItemKey, TagType};
 
         let root = test_dir("id3v1-only");
         let album = root.join("Album");
         fs::create_dir(&album).expect("create album dir");
         let track = album.join("01.mp3");
-        fs::write(&track, TEST_MP3).expect("write MP3 fixture");
-        TagType::Id3v2
-            .remove_from_path(&track)
-            .expect("strip ID3v2 tag");
-        let mut id3v1 = Tag::new(TagType::Id3v1);
-        id3v1.insert_text(ItemKey::TrackTitle, "Title".to_string());
-        id3v1.insert_text(ItemKey::TrackArtist, "Artist".to_string());
-        id3v1.insert_text(ItemKey::AlbumTitle, "Album".to_string());
-        id3v1
-            .save_to_path(&track, WriteOptions::new())
-            .expect("write ID3v1 tag");
+        write_test_mp3_with_only_id3v1(
+            &track,
+            &[
+                (ItemKey::TrackTitle, "Title"),
+                (ItemKey::TrackArtist, "Artist"),
+                (ItemKey::AlbumTitle, "Album"),
+                (ItemKey::Year, "1997"),
+            ],
+        );
         let (artwork, artwork_bytes) = artwork_file(&root, ImageFormat::Png);
 
         let outcome = apply_artwork_to_track(&track, &artwork).expect("apply artwork");
@@ -866,14 +882,86 @@ mod tests {
         assert_eq!(shown.title().as_deref(), Some("Title"));
         assert_eq!(shown.artist().as_deref(), Some("Artist"));
         assert_eq!(shown.album().as_deref(), Some("Album"));
+        assert_eq!(shown.get_string(ItemKey::RecordingDate), Some("1997"));
         assert_eq!(front_cover(&track).as_ref(), Some(&artwork_bytes));
         let kept = tagged.tag(TagType::Id3v1).expect("ID3v1 tag");
         assert_eq!(kept.title().as_deref(), Some("Title"));
+        assert_eq!(kept.get_string(ItemKey::Year), Some("1997"));
         assert!(kept.pictures().is_empty());
         let indexed = crate::library::read_track_info(&track);
         assert_eq!(indexed.title, "Title");
         assert_eq!(indexed.album, "Album");
+        assert_eq!(indexed.year, Some(1997));
         assert_eq!(dir_entries(&album), ["01.mp3"]);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    /// An `AppleDouble` file as macOS writes one next to a file it copies:
+    /// the header and no entries.
+    fn write_apple_double(path: &Path) {
+        let mut bytes = vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00];
+        bytes.extend_from_slice(b"Mac OS X        ");
+        bytes.extend_from_slice(&[0, 0]);
+        fs::write(path, bytes).expect("write AppleDouble file");
+    }
+
+    #[test]
+    fn embedded_artwork_skips_apple_double_files_next_to_the_tracks() {
+        use crate::tag_write::write_test_mp3_with_id3v23;
+
+        let root = test_dir("apple-double");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let tracks = ["01.mp3", "02.mp3"].map(|name| {
+            let path = album.join(name);
+            write_test_mp3_with_id3v23(&path);
+            path
+        });
+        let sidecars = ["._01.mp3", "._02.mp3"].map(|name| {
+            let path = album.join(name);
+            write_apple_double(&path);
+            (
+                path.clone(),
+                fs::read(&path).expect("read AppleDouble file"),
+            )
+        });
+        let (artwork, artwork_bytes) = artwork_file(&root, ImageFormat::Png);
+
+        let outcome = apply_artwork_to_track(&tracks[0], &artwork).expect("apply artwork");
+
+        assert_eq!(outcome.affected_track_paths, tracks);
+        assert_eq!(outcome.failure_summary(), None);
+        for track in &tracks {
+            assert_eq!(
+                front_cover(track).as_ref(),
+                Some(&artwork_bytes),
+                "{track:?}"
+            );
+        }
+        for (path, bytes) in &sidecars {
+            assert_eq!(&fs::read(path).expect("read AppleDouble file"), bytes);
+        }
+        assert_eq!(
+            dir_entries(&album),
+            ["._01.mp3", "._02.mp3", "01.mp3", "02.mp3"]
+        );
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[test]
+    fn only_a_dot_underscore_file_with_the_apple_double_header_is_a_sidecar() {
+        let root = test_dir("apple-double-name");
+        let sidecar = root.join("._01.mp3");
+        write_apple_double(&sidecar);
+        let header_without_name = root.join("01.mp3");
+        write_apple_double(&header_without_name);
+        let track_with_name = root.join("._live.mp3");
+        fs::write(&track_with_name, crate::tag_write::TEST_MP3).expect("write MP3 fixture");
+
+        assert!(is_apple_double_sidecar(&sidecar));
+        assert!(!is_apple_double_sidecar(&header_without_name));
+        assert!(!is_apple_double_sidecar(&track_with_name));
+        assert!(!is_apple_double_sidecar(&root.join("._missing.mp3")));
         fs::remove_dir_all(root).expect("remove test dir");
     }
 

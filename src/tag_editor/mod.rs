@@ -20,7 +20,7 @@ use crate::raw_audio::{
     edit_appended_apev2_text_items, format_ape_number_pair, is_raw_surround_file,
     read_appended_apev2_text_metadata, ApeTextField,
 };
-use crate::tag_write::save_tag;
+use crate::tag_write::{save_tag, seeded_tag};
 
 #[cfg(test)]
 mod rename_tests;
@@ -751,12 +751,10 @@ fn apply_standard_row_to_tag(
     if tagged.tag(writable_type).is_none() {
         // Start from the tag the editor displayed, so a new tag written with
         // only the changed fields does not hide the others.
-        let mut seeded = tagged
-            .primary_tag()
-            .or_else(|| tagged.first_tag())
-            .cloned()
-            .unwrap_or_else(|| Tag::new(writable_type));
-        seeded.re_map(writable_type);
+        let seeded = seeded_tag(
+            tagged.primary_tag().or_else(|| tagged.first_tag()),
+            writable_type,
+        );
         tagged.insert_tag(seeded);
     }
     let Some(tag) = tagged.tag_mut(writable_type) else {
@@ -1046,7 +1044,7 @@ mod tests {
     use lofty::config::{ParseOptions, WriteOptions};
     use lofty::file::AudioFile;
     use lofty::flac::FlacFile;
-    use lofty::tag::{TagExt, TagType};
+    use lofty::tag::TagType;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1060,7 +1058,7 @@ mod tests {
 
     use crate::tag_write::{
         write_test_flac as write_flac, write_test_monkeys_audio, write_test_mp3_with_id3v23,
-        write_test_mp4, write_test_opus, write_test_wavpack, TEST_MP3,
+        write_test_mp3_with_only_id3v1, write_test_mp4, write_test_opus, write_test_wavpack,
     };
 
     fn test_dir(name: &str) -> PathBuf {
@@ -1260,20 +1258,19 @@ mod tests {
     fn new_tag_starts_from_the_displayed_tag() {
         let dir = test_dir("id3v1-seed");
         let path = dir.join("song.mp3");
-        fs::write(&path, TEST_MP3).expect("write MP3 fixture");
-        TagType::Id3v2
-            .remove_from_path(&path)
-            .expect("strip ID3v2 tag");
-        let mut id3v1 = Tag::new(TagType::Id3v1);
-        id3v1.insert_text(ItemKey::TrackTitle, "Old".to_string());
-        id3v1.insert_text(ItemKey::TrackArtist, "Artist".to_string());
-        id3v1.insert_text(ItemKey::AlbumTitle, "Album".to_string());
-        id3v1
-            .save_to_path(&path, WriteOptions::new())
-            .expect("write ID3v1 tag");
+        write_test_mp3_with_only_id3v1(
+            &path,
+            &[
+                (ItemKey::TrackTitle, "Old"),
+                (ItemKey::TrackArtist, "Artist"),
+                (ItemKey::AlbumTitle, "Album"),
+                (ItemKey::Year, "1997"),
+            ],
+        );
 
         let mut row = load_one(&path);
         assert_eq!(row.artist, "Artist");
+        assert_eq!(row.year, "1997");
         row.title = "New".to_string();
         assert_saved(&save_json(&[edited(&row, &["title"])]));
 
@@ -1281,6 +1278,18 @@ mod tests {
         assert_eq!(reloaded.title, "New");
         assert_eq!(reloaded.artist, "Artist");
         assert_eq!(reloaded.album, "Album");
+        assert_eq!(reloaded.year, "1997");
+        let tagged = lofty::read_from_path(&path).expect("read tags");
+        let primary = tagged.primary_tag().expect("ID3v2 tag");
+        assert_eq!(primary.tag_type(), TagType::Id3v2);
+        assert_eq!(primary.get_string(ItemKey::RecordingDate), Some("1997"));
+        assert_eq!(
+            tagged
+                .tag(TagType::Id3v1)
+                .expect("ID3v1 tag")
+                .get_string(ItemKey::Year),
+            Some("1997")
+        );
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 
