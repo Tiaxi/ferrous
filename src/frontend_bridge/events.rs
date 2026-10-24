@@ -627,11 +627,12 @@ pub(super) fn tick_lastfm_playback_at(
         return;
     }
 
-    if tracker.duration_seconds.is_none() {
-        tracker.duration_seconds = match u32::try_from(state.playback.duration.as_secs()) {
-            Ok(value) if value > 0 => Some(value),
-            _ => None,
-        };
+    // Playback may correct the duration during the play. Follow it until the
+    // play qualifies, so the threshold matches the track.
+    if !tracker.scrobble_queued {
+        if let Ok(value @ 1..) = u32::try_from(state.playback.duration.as_secs()) {
+            tracker.duration_seconds = Some(value);
+        }
     }
     if tracker.track_number.is_none() {
         tracker.track_number = current_track_number(state);
@@ -1420,5 +1421,43 @@ mod tests {
         let queued = queued_scrobbles(&commands.try_iter().collect::<Vec<_>>());
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].timestamp_utc, 1_700_000_000);
+    }
+
+    #[test]
+    fn lastfm_threshold_follows_duration_corrections_until_the_play_qualifies() {
+        let (lastfm_handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/music/corrected.flac");
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+
+        // 600 s corrected to 120 s: the threshold drops from 240 s to 60 s.
+        let mut state = lastfm_playing_state(&track_path);
+        state.playback.duration = Duration::from_secs(600);
+        let mut tracker = LastFmPlaybackTracker::default();
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, at(0), 1_700_000_000);
+        state.playback.duration = Duration::from_secs(120);
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, at(30), 1_700_000_030);
+        assert!(queued_scrobbles(&commands.try_iter().collect::<Vec<_>>()).is_empty());
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, at(60), 1_700_000_060);
+        let queued = queued_scrobbles(&commands.try_iter().collect::<Vec<_>>());
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].duration_seconds, Some(120));
+
+        // 120 s corrected to 600 s: 60 s of listening no longer qualifies.
+        let mut state = lastfm_playing_state(&track_path);
+        state.playback.duration = Duration::from_secs(120);
+        let mut tracker = LastFmPlaybackTracker::default();
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, at(0), 1_700_001_000);
+        state.playback.duration = Duration::from_secs(600);
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, at(30), 1_700_001_030);
+        // A moment without a known duration keeps the last one.
+        state.playback.duration = Duration::ZERO;
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, at(60), 1_700_001_060);
+        assert!(queued_scrobbles(&commands.try_iter().collect::<Vec<_>>()).is_empty());
+        state.playback.duration = Duration::from_secs(600);
+        tick_lastfm_playback_at(&state, &lastfm_handle, &mut tracker, at(240), 1_700_001_240);
+        let queued = queued_scrobbles(&commands.try_iter().collect::<Vec<_>>());
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].duration_seconds, Some(600));
     }
 }
