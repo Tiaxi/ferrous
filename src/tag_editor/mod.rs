@@ -1357,6 +1357,34 @@ mod tests {
     }
 
     #[test]
+    fn saves_that_would_delete_unreadable_comments_report_why() {
+        use crate::vorbis_comment_scan::fixtures;
+
+        let dir = test_dir("unreadable-comments");
+        let path = dir.join("song.opus");
+        let comments: [&[u8]; 3] = [b"TITLE=Old", b"ARTIST=\xff not UTF-8", b"ALBUM=Album"];
+        fs::write(&path, fixtures::opus(&comments)).expect("write Opus");
+        let before = fs::read(&path).expect("read fixture");
+        let mut row = load_one(&path);
+        row.title = "New".to_string();
+
+        let response = save_json(&[edited(&row, &["title"])]);
+
+        assert!(response.successful_paths.is_empty());
+        assert!(!response.results[0].ok);
+        let error = response.results[0].error.as_deref().unwrap_or_default();
+        assert!(
+            error.ends_with(
+                "1 comment in this file can't be read safely (1 with a value that is not \
+                 UTF-8); saving would delete it"
+            ),
+            "{error}"
+        );
+        assert_eq!(fs::read(&path).expect("read file"), before);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
     fn save_request_parses_changed_fields() {
         let row = TagEditorRow {
             path: "/music/song.flac".to_string(),

@@ -12,8 +12,8 @@ ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5 -ac 1 \
   -c:a dca -strict -2 -b:a 192k -f dts -bitexact raw-tone.dts
 ```
 
-`tag-tone.m4a`, `tag-tone.opus`, and `tag-tone.wv` are 0.1 s mono 440 Hz
-tones in ALAC (MP4), Opus, and WavPack. Tag writing tests replace the tags
+`tag-tone.m4a`, `tag-tone.ogg`, `tag-tone.opus`, and `tag-tone.wv` are 0.1 s
+mono 440 Hz tones in ALAC (MP4), Ogg Vorbis, Opus, and WavPack. Tag writing tests replace the tags
 of copies of them. They were made with FFmpeg 8.1, whose `-bitexact`
 output is reproducible:
 
@@ -24,6 +24,9 @@ ffmpeg -f lavfi -i sine=frequency=440:sample_rate=8000:duration=0.1 -ac 1 \
 ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.1 -ac 1 \
   -c:a libopus -b:a 16k -map_metadata -1 -fflags +bitexact \
   -flags:a +bitexact tag-tone.opus
+ffmpeg -f lavfi -i sine=frequency=440:sample_rate=8000:duration=0.1 -ac 1 \
+  -c:a libvorbis -b:a 32k -map_metadata -1 -fflags +bitexact \
+  -flags:a +bitexact tag-tone.ogg
 ffmpeg -f lavfi -i sine=frequency=440:sample_rate=8000:duration=0.1 -ac 1 \
   -c:a wavpack -map_metadata -1 -fflags +bitexact -flags:a +bitexact \
   tag-tone.wv
