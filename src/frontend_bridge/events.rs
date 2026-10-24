@@ -18,7 +18,9 @@ use crate::lastfm::{
 };
 use crate::library::{is_supported_audio, track_file_fingerprint, IndexedTrack, LibraryEvent};
 use crate::metadata::{MetadataEvent, MetadataService};
-use crate::playback::{PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
+use crate::playback::{
+    remap_path, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind,
+};
 use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
@@ -191,15 +193,19 @@ pub(super) fn process_playback_event(
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     match event {
-        PlaybackEvent::Snapshot(snapshot) => {
+        PlaybackEvent::Snapshot(mut snapshot) => {
+            if let Some(current) = snapshot.current.as_mut() {
+                remap_unacknowledged_engine_path(state, current);
+            }
             process_playback_snapshot_event(snapshot, analysis, state)
         }
         PlaybackEvent::TrackChanged {
-            path,
+            mut path,
             queue_index,
             kind,
             track_token,
         } => {
+            remap_unacknowledged_engine_path(state, &mut path);
             state.playback.current_queue_index = Some(queue_index);
             state.analysis.waveform_peaks.clear();
             state.analysis.waveform_coverage_seconds = 0.0;
@@ -246,6 +252,18 @@ pub(super) fn process_playback_event(
             }
             SnapshotUrgency::Heartbeat
         }
+        PlaybackEvent::PathsRemapped => {
+            state.unacknowledged_engine_renames.pop_front();
+            SnapshotUrgency::None
+        }
+    }
+}
+
+/// Give a path from an engine event the name the bridge already uses, so an
+/// event sent before the engine applied a rename cannot restore the old path.
+fn remap_unacknowledged_engine_path(state: &BridgeState, path: &mut PathBuf) {
+    for renames in &state.unacknowledged_engine_renames {
+        remap_path(path, renames);
     }
 }
 

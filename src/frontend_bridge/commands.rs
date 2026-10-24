@@ -18,15 +18,17 @@ use crate::library::{
     LibraryCommand, LibraryService, LibraryTrack, TrackFileFingerprint,
 };
 use crate::metadata::MetadataService;
-use crate::playback::{PlaybackCommand, PlaybackEngine};
+use crate::playback::{remap_path, PathRenames, PlaybackCommand, PlaybackEngine};
 
 use super::config::{load_settings_into, save_settings};
+use super::imports::QueueRequest;
 use super::queue::handle_queue_command;
 use super::search::derive_tree_path_context;
 use super::{
     library_tree, try_send_event, ApplyAlbumArtRequest, BridgeAnalysisCommand, BridgeCommand,
-    BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeSettingsCommand, BridgeState,
-    ExternalQueueDetailsRequest, LibrarySortMode, SearchWorkerQuery,
+    BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
+    BridgeSettingsCommand, BridgeState, ExternalQueueDetailsRequest, LibrarySortMode,
+    SearchWorkerQuery,
 };
 
 pub(super) struct BridgeCommandContext<'a> {
@@ -484,67 +486,6 @@ fn handle_library_collection_command(
     runtime: &LibraryCommandRuntime<'_>,
 ) -> Option<bool> {
     match cmd {
-        BridgeLibraryCommand::AddTrack(path) => Some(import_library_paths(
-            state,
-            runtime,
-            "append",
-            vec![path],
-            false,
-        )),
-        BridgeLibraryCommand::PlayTrack(path) => Some(import_library_paths(
-            state,
-            runtime,
-            "open",
-            vec![path],
-            true,
-        )),
-        BridgeLibraryCommand::ReplaceWithAlbum(paths) => {
-            Some(import_library_paths(state, runtime, "open", paths, true))
-        }
-        BridgeLibraryCommand::AppendAlbum(paths) => {
-            Some(import_library_paths(state, runtime, "append", paths, false))
-        }
-        BridgeLibraryCommand::ReplaceAlbumByKey { artist, album } => Some(queue_album_by_key(
-            state,
-            runtime,
-            &artist,
-            &album,
-            QueueMode::Replace,
-        )),
-        BridgeLibraryCommand::AppendAlbumByKey { artist, album } => Some(queue_album_by_key(
-            state,
-            runtime,
-            &artist,
-            &album,
-            QueueMode::Append,
-        )),
-        BridgeLibraryCommand::ReplaceArtistByKey { artist } => Some(queue_artist_by_key(
-            state,
-            runtime,
-            &artist,
-            QueueMode::Replace,
-        )),
-        BridgeLibraryCommand::AppendArtistByKey { artist } => Some(queue_artist_by_key(
-            state,
-            runtime,
-            &artist,
-            QueueMode::Append,
-        )),
-        BridgeLibraryCommand::ReplaceRootByPath { root } => Some(queue_root_by_path(
-            state,
-            runtime,
-            &root,
-            QueueMode::Replace,
-        )),
-        BridgeLibraryCommand::AppendRootByPath { root } => {
-            Some(queue_root_by_path(state, runtime, &root, QueueMode::Append))
-        }
-        BridgeLibraryCommand::ReplaceAllTracks => {
-            Some(queue_all_tracks(state, runtime, QueueMode::Replace))
-        }
-        BridgeLibraryCommand::AppendAllTracks => {
-            Some(queue_all_tracks(state, runtime, QueueMode::Append))
-        }
         BridgeLibraryCommand::RefreshEditedPaths(paths) => Some(refresh_edited_paths(
             state,
             &paths,
@@ -555,6 +496,7 @@ fn handle_library_collection_command(
         BridgeLibraryCommand::RefreshRenamedPaths(renames) => Some(refresh_renamed_paths(
             state,
             &renames,
+            runtime.playback,
             runtime.metadata,
             runtime.external_queue_details_tx,
             runtime.event_tx,
@@ -564,102 +506,70 @@ fn handle_library_collection_command(
 }
 
 // ---------------------------------------------------------------------------
-// Queue helpers
+// Queue content changes
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
-enum QueueMode {
-    Append,
-    Replace,
-}
-
-fn import_library_paths(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    action: &'static str,
-    paths: Vec<PathBuf>,
-    start_playback: bool,
-) -> bool {
-    handle_import_library_command(
-        state,
-        runtime.playback,
-        runtime.external_queue_details_tx,
-        runtime.event_tx,
-        action,
-        paths,
-        start_playback,
-    )
-}
-
-fn queue_album_by_key(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    artist: &str,
-    album: &str,
-    mode: QueueMode,
-) -> bool {
-    let paths = collect_album_paths_for_queue(&state.library, artist, album);
-    queue_paths(state, runtime, paths, mode)
-}
-
-fn queue_artist_by_key(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    artist: &str,
-    mode: QueueMode,
-) -> bool {
-    let paths =
-        collect_artist_paths_for_queue(&state.library, artist, state.settings.library_sort_mode);
-    queue_paths(state, runtime, paths, mode)
-}
-
-fn queue_root_by_path(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    root_path: &str,
-    mode: QueueMode,
-) -> bool {
-    let paths = library_tree::collect_root_paths_tree_order(
-        &state.library,
-        root_path,
-        state.settings.library_sort_mode,
-    );
-    queue_paths(state, runtime, paths, mode)
-}
-
-fn queue_all_tracks(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    mode: QueueMode,
-) -> bool {
-    let paths = library_tree::collect_all_paths_tree_order(
-        &state.library,
-        state.settings.library_sort_mode,
-    );
-    queue_paths(state, runtime, paths, mode)
-}
-
-fn queue_paths(
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-    paths: Vec<PathBuf>,
-    mode: QueueMode,
-) -> bool {
-    match mode {
-        QueueMode::Append => append_queue_paths(
-            state,
-            runtime.playback,
-            runtime.external_queue_details_tx,
-            paths,
-        ),
-        QueueMode::Replace => replace_queue_paths(
-            state,
-            runtime.playback,
-            runtime.external_queue_details_tx,
-            paths,
+/// The queue content change `cmd` requests, if any. Library selections are
+/// resolved here from the in-memory library; imports are expanded later on
+/// the import worker. Both are applied in arrival order by `ImportWorker`.
+pub(super) fn queue_request(cmd: &BridgeCommand, state: &BridgeState) -> Option<QueueRequest> {
+    let library = match cmd {
+        BridgeCommand::Queue(
+            command @ (BridgeQueueCommand::Replace { .. } | BridgeQueueCommand::Append(_)),
+        ) => return Some(QueueRequest::Command(command.clone())),
+        BridgeCommand::Library(library) => library,
+        _ => return None,
+    };
+    let sort_mode = state.settings.library_sort_mode;
+    let (tracks, replace) = match library {
+        BridgeLibraryCommand::AddTrack(path) | BridgeLibraryCommand::PlayTrack(path) => {
+            return Some(QueueRequest::Import {
+                paths: vec![path.clone()],
+                replace: matches!(library, BridgeLibraryCommand::PlayTrack(_)),
+            });
+        }
+        BridgeLibraryCommand::ReplaceWithAlbum(paths)
+        | BridgeLibraryCommand::AppendAlbum(paths) => {
+            return Some(QueueRequest::Import {
+                paths: paths.clone(),
+                replace: matches!(library, BridgeLibraryCommand::ReplaceWithAlbum(_)),
+            });
+        }
+        BridgeLibraryCommand::ReplaceAlbumByKey { artist, album } => (
+            collect_album_paths_for_queue(&state.library, artist, album),
             true,
         ),
-    }
+        BridgeLibraryCommand::AppendAlbumByKey { artist, album } => (
+            collect_album_paths_for_queue(&state.library, artist, album),
+            false,
+        ),
+        BridgeLibraryCommand::ReplaceArtistByKey { artist } => (
+            collect_artist_paths_for_queue(&state.library, artist, sort_mode),
+            true,
+        ),
+        BridgeLibraryCommand::AppendArtistByKey { artist } => (
+            collect_artist_paths_for_queue(&state.library, artist, sort_mode),
+            false,
+        ),
+        BridgeLibraryCommand::ReplaceRootByPath { root } => (
+            library_tree::collect_root_paths_tree_order(&state.library, root, sort_mode),
+            true,
+        ),
+        BridgeLibraryCommand::AppendRootByPath { root } => (
+            library_tree::collect_root_paths_tree_order(&state.library, root, sort_mode),
+            false,
+        ),
+        BridgeLibraryCommand::ReplaceAllTracks => (
+            library_tree::collect_all_paths_tree_order(&state.library, sort_mode),
+            true,
+        ),
+        BridgeLibraryCommand::AppendAllTracks => (
+            library_tree::collect_all_paths_tree_order(&state.library, sort_mode),
+            false,
+        ),
+        _ => return None,
+    };
+    Some(QueueRequest::Tracks { tracks, replace })
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +846,7 @@ fn append_import_path(
     outcome.push_unsupported();
 }
 
+#[cfg(test)]
 fn expand_import_paths(paths: Vec<PathBuf>) -> ImportExpandOutcome {
     expand_import_paths_cancellable(paths, &|| false)
 }
@@ -1123,74 +1034,6 @@ pub(super) fn validate_queue_details(
     changed
 }
 
-fn replace_queue_paths(
-    state: &mut BridgeState,
-    playback: &PlaybackEngine,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
-    paths: Vec<PathBuf>,
-    autoplay: bool,
-) -> bool {
-    if paths.is_empty() {
-        return false;
-    }
-    state.queue = paths;
-    state.selected_queue_index = Some(0);
-    let _ = sync_queue_details(state, external_queue_details_tx);
-    playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-    if autoplay {
-        playback.command(PlaybackCommand::PlayAt(0));
-        playback.command(PlaybackCommand::Play);
-    }
-    true
-}
-
-fn append_queue_paths(
-    state: &mut BridgeState,
-    playback: &PlaybackEngine,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
-    paths: Vec<PathBuf>,
-) -> bool {
-    if paths.is_empty() {
-        return false;
-    }
-    if state.queue.is_empty() {
-        state.queue.extend(paths);
-        let _ = sync_queue_details(state, external_queue_details_tx);
-        playback.command(PlaybackCommand::LoadQueue(state.queue.clone()));
-    } else {
-        state.queue.extend(paths.clone());
-        let _ = sync_queue_details(state, external_queue_details_tx);
-        playback.command(PlaybackCommand::AddToQueue(paths));
-    }
-    true
-}
-
-fn handle_import_library_command(
-    state: &mut BridgeState,
-    playback: &PlaybackEngine,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
-    event_tx: &Sender<BridgeEvent>,
-    action: &str,
-    paths: Vec<PathBuf>,
-    replace: bool,
-) -> bool {
-    let outcome = expand_import_paths(paths);
-    if let Some(message) = format_import_warning(action, &outcome) {
-        let _ = try_send_event(event_tx, BridgeEvent::Error(message));
-    }
-    if replace {
-        replace_queue_paths(
-            state,
-            playback,
-            external_queue_details_tx,
-            outcome.tracks,
-            true,
-        )
-    } else {
-        append_queue_paths(state, playback, external_queue_details_tx, outcome.tracks)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Track updates
 // ---------------------------------------------------------------------------
@@ -1326,6 +1169,7 @@ fn refresh_edited_paths(
 fn refresh_renamed_paths(
     state: &mut BridgeState,
     renames: &[(PathBuf, PathBuf)],
+    playback: &PlaybackEngine,
     metadata: &MetadataService,
     external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     event_tx: &Sender<BridgeEvent>,
@@ -1334,7 +1178,7 @@ fn refresh_renamed_paths(
         return false;
     }
 
-    let rename_map: HashMap<PathBuf, PathBuf> = renames.iter().cloned().collect();
+    let rename_map: PathRenames = renames.iter().cloned().collect();
     let new_paths = renames
         .iter()
         .map(|(_, new_path)| new_path.clone())
@@ -1352,12 +1196,19 @@ fn refresh_renamed_paths(
     changed |= apply_renamed_queue_paths(state, renames, &rename_map, &indexed_by_path, metadata);
     changed |= update_queue_track_details(state, &indexed_by_path);
     changed |= sync_queue_details(state, external_queue_details_tx);
+    // The engine plays from its own copy of the queue. Until it acknowledges
+    // the renames, its events are remapped so they cannot restore old paths.
+    let rename_map = Arc::new(rename_map);
+    state
+        .unacknowledged_engine_renames
+        .push_back(Arc::clone(&rename_map));
+    playback.command(PlaybackCommand::RemapPaths(rename_map));
     changed
 }
 
 fn apply_renamed_library_paths(
     state: &mut BridgeState,
-    rename_map: &HashMap<PathBuf, PathBuf>,
+    rename_map: &PathRenames,
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
 ) -> bool {
     let mut changed = false;
@@ -1419,28 +1270,27 @@ fn apply_renamed_library_paths(
 fn apply_renamed_queue_paths(
     state: &mut BridgeState,
     renames: &[(PathBuf, PathBuf)],
-    rename_map: &HashMap<PathBuf, PathBuf>,
+    rename_map: &PathRenames,
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
     metadata: &MetadataService,
 ) -> bool {
     let mut changed = false;
     for path in &mut state.queue {
-        if let Some(new_path) = rename_map.get(path) {
-            if path != new_path {
-                *path = new_path.clone();
-                changed = true;
-            }
-        }
+        changed |= remap_path(path, rename_map);
     }
 
     if let Some(current_path) = state.playback.current.as_mut() {
-        if let Some(new_path) = rename_map.get(current_path) {
-            if current_path != new_path {
-                *current_path = new_path.clone();
-                metadata.request(new_path.clone());
-                changed = true;
-            }
+        if remap_path(current_path, rename_map) {
+            metadata.request(current_path.clone());
+            changed = true;
         }
+    }
+    // A rename keeps the current track's identity.
+    if let Some(path) = state.last_track_change.path.as_mut() {
+        remap_path(path, rename_map);
+    }
+    if let Some(pending) = state.pending_waveform_track.as_mut() {
+        remap_path(&mut pending.path, rename_map);
     }
     for (old_path, new_path) in renames {
         if let Some(details) = Arc::make_mut(&mut state.queue_details).remove(old_path) {
@@ -1486,8 +1336,8 @@ mod tests {
     use std::time::Duration;
 
     use super::super::events::{
-        pump_external_queue_detail_events, pump_library_events, pump_metadata_events,
-        pump_playback_events,
+        process_playback_event, pump_external_queue_detail_events, pump_library_events,
+        pump_metadata_events, pump_playback_events,
     };
     use super::super::ExternalQueueDetailsEvent;
 
@@ -2395,6 +2245,103 @@ mod tests {
         assert_eq!(state.metadata.artist, "New Artist");
         assert_eq!(state.metadata.album, "New Album");
     }
+    #[test]
+    fn renames_reach_the_engine_and_its_stale_events_keep_the_new_paths() {
+        use crate::analysis::AnalysisEngine;
+        use crate::playback::{PlaybackEvent, PlaybackState};
+
+        let (analysis, _analysis_rx) = AnalysisEngine::new();
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (engine_tx, engine_rx) = crossbeam_channel::unbounded();
+        let playback = PlaybackEngine::from_command_sender(engine_tx);
+        let (details_tx, _details_rx) = crossbeam_channel::unbounded();
+        let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        let (old_current, new_current) = (p("/music/old current.flac"), p("/music/current.flac"));
+        let (old_next, new_next) = (p("/music/old next.flac"), p("/music/next.flac"));
+        let mut state = BridgeState {
+            queue: vec![
+                p("/music/first.flac"),
+                old_current.clone(),
+                old_next.clone(),
+            ],
+            playback: crate::playback::PlaybackSnapshot {
+                state: PlaybackState::Playing,
+                current: Some(old_current.clone()),
+                current_queue_index: Some(1),
+                ..crate::playback::PlaybackSnapshot::default()
+            },
+            ..BridgeState::default()
+        };
+        state.last_track_change.path = Some(old_current.clone());
+        let stale = state.playback.clone();
+
+        let renames = vec![
+            (old_current.clone(), new_current.clone()),
+            (old_next.clone(), new_next.clone()),
+        ];
+        assert!(refresh_renamed_paths(
+            &mut state,
+            &renames,
+            &playback,
+            &metadata,
+            &details_tx,
+            &event_tx,
+        ));
+        assert_eq!(
+            state.queue,
+            vec![
+                p("/music/first.flac"),
+                new_current.clone(),
+                new_next.clone()
+            ]
+        );
+        assert_eq!(state.playback.current.as_ref(), Some(&new_current));
+        assert_eq!(state.last_track_change.path.as_ref(), Some(&new_current));
+        match engine_rx.try_recv() {
+            Ok(PlaybackCommand::RemapPaths(sent)) => {
+                assert_eq!(*sent, renames.iter().cloned().collect::<PathRenames>());
+            }
+            other => panic!("expected a path remap for the engine, got {other:?}"),
+        }
+
+        // Events the engine sent before applying the renames carry old paths.
+        let _ = process_playback_event(
+            PlaybackEvent::Snapshot(stale.clone()),
+            &analysis,
+            &metadata,
+            &mut state,
+        );
+        assert_eq!(state.playback.current.as_ref(), Some(&new_current));
+        let _ = process_playback_event(
+            PlaybackEvent::TrackChanged {
+                path: old_next,
+                queue_index: 2,
+                kind: TrackChangeKind::Gapless,
+                track_token: 3,
+            },
+            &analysis,
+            &metadata,
+            &mut state,
+        );
+        assert_eq!(state.last_track_change.path.as_ref(), Some(&new_next));
+
+        // After the acknowledgement, engine paths are taken as reported.
+        let _ = process_playback_event(
+            PlaybackEvent::PathsRemapped,
+            &analysis,
+            &metadata,
+            &mut state,
+        );
+        assert!(state.unacknowledged_engine_renames.is_empty());
+        let _ = process_playback_event(
+            PlaybackEvent::Snapshot(stale),
+            &analysis,
+            &metadata,
+            &mut state,
+        );
+        assert_eq!(state.playback.current.as_ref(), Some(&old_current));
+    }
+
     #[test]
     fn metadata_only_tag_edits_invalidate_search_snapshot() {
         let path = p("/music/Artist/Album/song.flac");

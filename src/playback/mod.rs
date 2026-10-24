@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -38,13 +40,24 @@ pub struct PlaybackSnapshot {
     pub soloed_channel: Option<u8>,
 }
 
+/// New paths of renamed files, keyed by their old paths.
+pub type PathRenames = HashMap<PathBuf, PathBuf>;
+
 #[derive(Debug, Clone)]
 pub enum PlaybackCommand {
     LoadQueue(Vec<PathBuf>),
     AddToQueue(Vec<PathBuf>),
+    /// Replace the paths of renamed files in place. The queue order, current
+    /// track, position, and playback state stay the same, and the current
+    /// track keeps playing from the file it has open. The engine answers with
+    /// [`PlaybackEvent::PathsRemapped`].
+    RemapPaths(Arc<PathRenames>),
     RemoveAt(usize),
     RemoveMany(Vec<usize>),
-    MoveQueue { from: usize, to: usize },
+    MoveQueue {
+        from: usize,
+        to: usize,
+    },
     ClearQueue,
     PlayAt(usize),
     Next,
@@ -82,6 +95,20 @@ pub enum PlaybackEvent {
     Seeked {
         position: Duration,
     },
+    /// The engine applied a [`PlaybackCommand::RemapPaths`]. Events sent
+    /// before this one may still carry the old paths; later ones do not.
+    PathsRemapped,
+}
+
+/// Rename `path` if `renames` lists it. Returns whether it changed.
+pub(crate) fn remap_path(path: &mut PathBuf, renames: &PathRenames) -> bool {
+    match renames.get(path) {
+        Some(new_path) if new_path != path => {
+            path.clone_from(new_path);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Remove a batch in one retain pass and remap the current/selected index.
@@ -135,6 +162,12 @@ impl PlaybackEngine {
 
     pub fn command(&self, cmd: PlaybackCommand) {
         let _ = self.tx.send(cmd);
+    }
+
+    /// An engine whose commands go to `tx` instead of a backend.
+    #[cfg(test)]
+    pub(crate) fn from_command_sender(tx: Sender<PlaybackCommand>) -> Self {
+        Self { tx }
     }
 }
 
@@ -259,6 +292,54 @@ mod tests {
         assert_eq!(snapshot.current, Some(paths[1].clone()));
         assert_eq!(snapshot.current_queue_index, Some(0));
         assert_eq!(snapshot.position, Duration::ZERO);
+    }
+
+    #[test]
+    fn remapped_paths_keep_playback_and_are_used_for_later_tracks() {
+        let (engine, rx) = make_test_engine();
+        let paths: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|name| PathBuf::from(format!("/fixture/{name}.flac")))
+            .collect();
+        let renamed_b = PathBuf::from("/fixture/renamed-b.flac");
+        let renamed_c = PathBuf::from("/fixture/renamed-c.flac");
+        engine.command(PlaybackCommand::LoadQueue(paths.clone()));
+        engine.command(PlaybackCommand::PlayAt(1));
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(42)));
+        let _ = recv_snapshot(&rx, Duration::from_millis(100)).expect("playing b");
+
+        engine.command(PlaybackCommand::RemapPaths(std::sync::Arc::new(
+            super::PathRenames::from([
+                (paths[1].clone(), renamed_b.clone()),
+                (paths[2].clone(), renamed_c.clone()),
+            ]),
+        )));
+        let mut acknowledged = false;
+        let mut remapped = None;
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while remapped.is_none() && Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(PlaybackEvent::PathsRemapped) => acknowledged = true,
+                Ok(PlaybackEvent::Snapshot(snapshot)) if acknowledged => remapped = Some(snapshot),
+                Ok(PlaybackEvent::TrackChanged { .. }) => panic!("a rename is not a track change"),
+                _ => {}
+            }
+        }
+        let snapshot = remapped.expect("snapshot after the acknowledgement");
+        assert_eq!(snapshot.current.as_ref(), Some(&renamed_b));
+        assert_eq!(snapshot.current_queue_index, Some(1));
+        assert_eq!(snapshot.state, PlaybackState::Playing);
+        assert!(snapshot.position >= Duration::from_secs(42));
+
+        engine.command(PlaybackCommand::Next);
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("next track");
+        assert_eq!(snapshot.current.as_ref(), Some(&renamed_c));
+        engine.command(PlaybackCommand::Stop);
+        engine.command(PlaybackCommand::Play);
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("replayed");
+        assert_eq!(snapshot.current.as_ref(), Some(&renamed_c));
+        assert_eq!(snapshot.state, PlaybackState::Playing);
     }
 
     #[test]
