@@ -21,12 +21,19 @@ public:
     void cancel() override;
     void run() override;
 
+    // True once finished() has been emitted, so callers that connect late can
+    // still observe completion.
+    bool isFinished() const;
+
 private:
     QString m_filePath;
     QSize m_requestedSize;
     QImage m_image;
     QString m_errorString;
     QAtomicInt m_cancelled;
+    QAtomicInt m_finished;
+
+    void finish();
 };
 
 class CoverImageProvider : public QQuickAsyncImageProvider {
@@ -37,6 +44,9 @@ public:
         const QString &id, const QSize &requestedSize) override;
 
     static QString urlForPath(const QString &filePath);
+
+    // Blocks until every started response has finished.
+    void waitForDone();
 
 private:
     QThreadPool m_pool;
