@@ -275,12 +275,13 @@ fn a_mixed_selection_saves_each_file_that_can_store_the_year() {
 fn refused_numbers_leave_every_format_unchanged() {
     for format in &FORMATS {
         for (field, value) in [
-            ("trackNo", "abc"),
+            ("trackNo", "1.5"),
             ("trackNo", "3/12"),
             ("trackNo", "0"),
             ("trackNo", "-1"),
             ("discNo", "1/2"),
             ("totalTracks", "x"),
+            ("totalTracks", "B"),
             ("totalDiscs", "0"),
         ] {
             let error = assert_refused(format, field, |row| match field {
@@ -332,4 +333,76 @@ fn an_empty_number_clears_it() {
         assert_eq!(load_one(&path).track_no, "", "{}", format.file_name);
         fs::remove_dir_all(path.parent().expect("test dir")).expect("remove test dir");
     }
+}
+
+/// The formats whose tag keeps a track label such as `A1` exactly.
+const KEEPS_LABELS: [Format; 2] = [FLAC, OPUS];
+/// The formats whose tag would drop a label: lofty reads no number back.
+const DROPS_LABELS: [Format; 6] = [ID3V23, ID3V24, MP4, WAVPACK, MONKEYS_AUDIO, RAW_AC3];
+
+#[test]
+fn track_and_disc_labels_read_back_exactly_in_vorbis_comments() {
+    for format in &KEEPS_LABELS {
+        for label in ["A1", "B2"] {
+            let row = saved(format, "trackNo", |row| row.track_no = label.to_string());
+            assert_eq!(row.track_no, label, "{}", format.file_name);
+        }
+        let row = saved(format, "discNo", |row| row.disc_no = "A".to_string());
+        assert_eq!(row.disc_no, "A", "{}", format.file_name);
+    }
+}
+
+#[test]
+fn labels_are_refused_where_the_tag_drops_them() {
+    for format in &DROPS_LABELS {
+        for label in ["A1", "B2"] {
+            let error = assert_refused(format, "trackNo", |row| row.track_no = label.to_string());
+            assert!(
+                error.starts_with(&format!(
+                    "invalid Track '{label}' for {}: it stores only whole numbers, so use one from 1 to ",
+                    format.tag_name
+                )),
+                "{error}"
+            );
+        }
+        let error = assert_refused(format, "discNo", |row| row.disc_no = "A".to_string());
+        assert!(error.contains("stores only whole numbers"), "{error}");
+    }
+}
+
+#[test]
+fn a_mixed_selection_saves_a_label_only_where_the_tag_keeps_it() {
+    let dir = test_dir("mixed-label");
+    let mut rows = Vec::new();
+    let mut files = Vec::new();
+    let formats = KEEPS_LABELS
+        .iter()
+        .map(|format| (format, true))
+        .chain(DROPS_LABELS.iter().map(|format| (format, false)));
+    for (index, (format, keeps)) in formats.enumerate() {
+        let path = dir.join(format!("{index}-{}", format.file_name));
+        (format.write)(&path);
+        let mut row = load_one(&path);
+        row.track_no = "A1".to_string();
+        rows.push(edited(&row, &["trackNo"]));
+        let bytes = fs::read(&path).expect("read fixture");
+        files.push((path, keeps, bytes));
+    }
+
+    let response = save_json(&rows);
+
+    assert_eq!(response.results.len(), files.len());
+    for ((path, keeps, before), result) in files.iter().zip(&response.results) {
+        assert_eq!(result.path, path.to_string_lossy());
+        assert_eq!(result.ok, *keeps, "{result:?}");
+        if *keeps {
+            assert_eq!(load_one(path).track_no, "A1", "{}", path.display());
+        } else {
+            let error = result.error.as_deref().unwrap_or_default();
+            assert!(error.contains("stores only whole numbers"), "{error}");
+            assert_eq!(&fs::read(path).expect("read result"), before, "{error}");
+        }
+    }
+    assert_eq!(response.successful_paths.len(), KEEPS_LABELS.len());
+    fs::remove_dir_all(dir).expect("remove test dir");
 }

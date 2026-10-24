@@ -787,15 +787,9 @@ fn apply_raw_row(
     let target = TagTarget::RAW_APEV2;
     let year = validated_changes(row, changed, target)?;
     // A number and its total share one item, so the unchanged one is written
-    // back as the file holds it.
-    let number = |field| {
-        let value = number_value(row, field);
-        if changed.contains(&field) {
-            target.validated_number(field, value)
-        } else {
-            Ok(value.trim().parse::<u32>().ok())
-        }
-    };
+    // back as the file holds it. `validated_changes` has checked the changed
+    // ones, and this tag keeps no labels, so each is empty or a number.
+    let number = |field| number_value(row, field).trim().parse::<u32>().ok();
     let mut edits = Vec::new();
     for (field, ape_field, value) in [
         (TagField::Title, ApeTextField::Title, &row.title),
@@ -820,13 +814,13 @@ fn apply_raw_row(
     if changed.contains(&TagField::TrackNo) || changed.contains(&TagField::TotalTracks) {
         edits.push((
             ApeTextField::Track,
-            format_ape_number_pair(number(TagField::TrackNo)?, number(TagField::TotalTracks)?),
+            format_ape_number_pair(number(TagField::TrackNo), number(TagField::TotalTracks)),
         ));
     }
     if changed.contains(&TagField::DiscNo) || changed.contains(&TagField::TotalDiscs) {
         edits.push((
             ApeTextField::Disc,
-            format_ape_number_pair(number(TagField::DiscNo)?, number(TagField::TotalDiscs)?),
+            format_ape_number_pair(number(TagField::DiscNo), number(TagField::TotalDiscs)),
         ));
     }
     if edits.is_empty() {
