@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
-use lofty::file::TaggedFileExt;
+use lofty::file::{TaggedFile, TaggedFileExt};
 use parking_lot::Mutex;
 
 const DIR_NAME: &str = "embedded_covers";
@@ -52,14 +52,9 @@ impl EmbeddedCoverCache {
         &self.dir
     }
 
-    /// Caches the first picture of the track's primary tag.
-    pub(crate) fn store_track_cover(&self, track_path: &Path) -> Option<PathBuf> {
-        self.try_store_track_cover(track_path).ok().flatten()
-    }
-
-    /// Like [`Self::store_track_cover`], but tells a track without a picture
-    /// that can be cached (`Ok(None)`) apart from one whose tags could not be
-    /// read or whose entry could not be written.
+    /// Caches the first picture of the track's primary tag. Tells a track
+    /// without a picture that can be cached (`Ok(None)`) apart from one whose
+    /// tags could not be read or whose entry could not be written.
     pub(crate) fn try_store_track_cover(
         &self,
         track_path: &Path,
@@ -70,6 +65,16 @@ impl EmbeddedCoverCache {
                 track_path.display()
             )
         })?;
+        self.try_store_tagged_cover(&tagged)
+    }
+
+    /// Caches the first picture of the primary tag of `tagged`, read already.
+    /// Returns `Ok(None)` when it has no picture that can be cached and an
+    /// error when the entry could not be written.
+    pub(crate) fn try_store_tagged_cover(
+        &self,
+        tagged: &TaggedFile,
+    ) -> Result<Option<PathBuf>, String> {
         let Some(picture) = tagged
             .primary_tag()
             .or_else(|| tagged.first_tag())

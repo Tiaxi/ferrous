@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use walkdir::WalkDir;
 
 use crate::file_edit_lock;
@@ -1482,7 +1482,7 @@ pub(crate) fn index_tracks_for_test(root: &Path, paths: &[PathBuf]) {
 fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) {
     let tx = conn.transaction().expect("index transaction");
     {
-        let mut upsert_stmt = prepare_track_upsert_statement(&tx).expect("upsert statement");
+        let mut writer = TrackWriter::new(&tx).expect("track statements");
         for path in paths {
             let fingerprint = track_file_fingerprint(path).expect("fixture fingerprint");
             let task = MetadataTask {
@@ -1494,7 +1494,7 @@ fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
             };
             let indexed = read_track_info(path);
             apply_metadata_result(
-                &mut upsert_stmt,
+                &mut writer,
                 &root.to_string_lossy(),
                 unix_ts_i64(),
                 &mut |_, _| {},
@@ -1502,6 +1502,7 @@ fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
                     task,
                     indexed,
                     failure: None,
+                    cover_failure: None,
                 },
             )
             .expect("index fixture");
@@ -1665,6 +1666,9 @@ struct MetadataResult {
     /// abnormally; a file the index already has keeps its row then, and a
     /// new one is indexed by its name.
     failure: Option<String>,
+    /// Why the file's embedded picture could not be cached; the row keeps
+    /// the cover it had and is left due for the next scan to retry.
+    cover_failure: Option<String>,
 }
 
 /// Read the file of `task` for the index.
@@ -1677,41 +1681,71 @@ fn read_scan_task(task: MetadataTask, covers: Option<&EmbeddedCoverCache>) -> Me
         scan_test_hooks::before_read(&task.path);
         read_track_info_with_cover_cache(&task.path, covers)
     });
-    let (indexed, failure) =
-        read.unwrap_or_else(|failure| (untagged_track(&task.path), Some(failure)));
+    let read = read.unwrap_or_else(|failure| TrackRead {
+        indexed: untagged_track(&task.path),
+        failure: Some(failure),
+        cover_failure: None,
+    });
     MetadataResult {
         task,
-        indexed,
-        failure,
+        indexed: read.indexed,
+        failure: read.failure,
+        cover_failure: read.cover_failure,
     }
 }
 
-/// The files of a scan whose tags could not be read.
+/// How many files of a scan failed one way, and the first of them.
 #[derive(Default)]
-struct UnreadableTracks {
+struct FileFailures {
     count: usize,
     first: Option<(PathBuf, String)>,
 }
 
-impl UnreadableTracks {
-    fn note(&mut self, result: &MetadataResult) {
-        let Some(failure) = &result.failure else {
+impl FileFailures {
+    fn note(&mut self, path: &Path, failure: Option<&String>) {
+        let Some(failure) = failure else {
             return;
         };
         self.count += 1;
         self.first
-            .get_or_insert_with(|| (result.task.path.clone(), failure.clone()));
+            .get_or_insert_with(|| (path.to_path_buf(), failure.clone()));
+    }
+}
+
+/// The files of a scan that could not be read fully.
+#[derive(Default)]
+struct ReadFailures {
+    tags: FileFailures,
+    covers: FileFailures,
+}
+
+impl ReadFailures {
+    fn note(&mut self, result: &MetadataResult) {
+        self.tags.note(&result.task.path, result.failure.as_ref());
+        self.covers
+            .note(&result.task.path, result.cover_failure.as_ref());
     }
 
-    fn problem(&self, root: &Path) -> Option<String> {
-        let (path, failure) = self.first.as_ref()?;
-        Some(format!(
-            "could not read the tags of {} in '{}'; kept the tags indexed before, \
-             or indexed new files by file name (first: '{}': {failure})",
-            count_label(self.count, "file", "files"),
-            root.display(),
-            path.display()
-        ))
+    fn problems(&self, root: &Path) -> impl Iterator<Item = String> {
+        let tags = self.tags.first.as_ref().map(|(path, failure)| {
+            format!(
+                "could not read the tags of {} in '{}'; kept the tags indexed before, \
+                 or indexed new files by file name (first: '{}': {failure})",
+                count_label(self.tags.count, "file", "files"),
+                root.display(),
+                path.display()
+            )
+        });
+        let covers = self.covers.first.as_ref().map(|(path, failure)| {
+            format!(
+                "could not cache the embedded covers of {} in '{}'; kept their previous \
+                 covers and will retry at the next scan (first: '{}': {failure})",
+                count_label(self.covers.count, "file", "files"),
+                root.display(),
+                path.display()
+            )
+        });
+        tags.into_iter().chain(covers)
     }
 }
 
@@ -1869,8 +1903,34 @@ fn prepare_track_upsert_statement<'conn>(
     .map_err(|e| format!("failed to prepare track upsert statement: {e}"))
 }
 
+/// The statements a scan writes track rows with.
+struct TrackWriter<'conn> {
+    upsert: rusqlite::CachedStatement<'conn>,
+    previous_cover: rusqlite::CachedStatement<'conn>,
+}
+
+impl<'conn> TrackWriter<'conn> {
+    fn new(tx: &'conn rusqlite::Transaction<'conn>) -> Result<Self, String> {
+        Ok(Self {
+            upsert: prepare_track_upsert_statement(tx)?,
+            previous_cover: tx
+                .prepare_cached("SELECT cover_path FROM tracks WHERE path = ?1")
+                .map_err(|e| format!("failed to prepare track cover statement: {e}"))?,
+        })
+    }
+
+    /// The cover that the row of `task` stores now, if it has one.
+    fn previous_cover(&mut self, task: &MetadataTask) -> Result<String, String> {
+        self.previous_cover
+            .query_row(params![task.path_string.as_str()], |row| row.get(0))
+            .optional()
+            .map(Option::unwrap_or_default)
+            .map_err(|e| format!("failed to read the cover of '{}': {e}", task.path.display()))
+    }
+}
+
 fn apply_metadata_result<U>(
-    upsert_stmt: &mut rusqlite::CachedStatement<'_>,
+    writer: &mut TrackWriter<'_>,
     root_str: &str,
     now: i64,
     on_upsert: &mut U,
@@ -1886,8 +1946,16 @@ where
         return Ok(());
     }
     let task = result.task;
-    let indexed = result.indexed;
-    upsert_stmt
+    let mut indexed = result.indexed;
+    // A picture that could not be cached is not "no cover": the row keeps
+    // the cover it had, which also keeps that cache entry from the cleanup,
+    // and stays unchecked so the next scan reads the file again.
+    let cover_checked = result.cover_failure.is_none();
+    if !cover_checked && task.indexed_before {
+        indexed.cover_path = writer.previous_cover(&task)?;
+    }
+    writer
+        .upsert
         .execute(params![
             task.path_string.as_str(),
             root_str,
@@ -1895,7 +1963,7 @@ where
             indexed.artist.as_str(),
             indexed.album.as_str(),
             indexed.cover_path.as_str(),
-            1_i64,
+            i64::from(cover_checked),
             indexed.genre.as_str(),
             indexed.year.map(i64::from),
             indexed.track_no.map(i64::from),
@@ -2151,7 +2219,7 @@ where
         Ok(tx) => tx,
         Err(e) => return Err(format!("failed to begin transaction: {e}")),
     };
-    let mut upsert_stmt = prepare_track_upsert_statement(&tx)?;
+    let mut writer = TrackWriter::new(&tx)?;
 
     let mut discovered = 0usize;
     let mut processed = 0usize;
@@ -2161,7 +2229,7 @@ where
     let now = unix_ts_i64();
     let mut workers = MetadataWorkerPool::new(scan_worker_count(), covers);
     let mut walk = LibraryWalk::new(&root, nested_roots);
-    let mut unreadable = UnreadableTracks::default();
+    let mut read_failures = ReadFailures::default();
 
     for ScanCandidate {
         path,
@@ -2192,8 +2260,8 @@ where
             };
             if let Err(task) = workers.submit(task) {
                 let result = read_scan_task(task, covers);
-                unreadable.note(&result);
-                apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
+                read_failures.note(&result);
+                apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
                 processed = processed.saturating_add(1);
                 progress.emit(false, discovered, processed);
             }
@@ -2203,26 +2271,26 @@ where
         }
 
         for result in workers.drain_ready()? {
-            unreadable.note(&result);
-            apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
+            read_failures.note(&result);
+            apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
             processed = processed.saturating_add(1);
             progress.emit(false, discovered, processed);
         }
         if let Some(result) = workers.wait_for_capacity()? {
-            unreadable.note(&result);
-            apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
+            read_failures.note(&result);
+            apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
             processed = processed.saturating_add(1);
             progress.emit(false, discovered, processed);
         }
     }
 
     for result in workers.finish()? {
-        unreadable.note(&result);
-        apply_metadata_result(&mut upsert_stmt, &root_str, now, on_upsert, result)?;
+        read_failures.note(&result);
+        apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
         processed = processed.saturating_add(1);
         progress.emit(false, discovered, processed);
     }
-    drop(upsert_stmt);
+    drop(writer);
 
     // A root that previously had tracks but now has no audio files at all is
     // most likely an unmounted or offline folder, not an emptied library.
@@ -2261,7 +2329,7 @@ where
     };
     let problems: Vec<String> = walk_problem
         .into_iter()
-        .chain(unreadable.problem(&root))
+        .chain(read_failures.problems(&root))
         .collect();
     Ok(RootScanOutcome {
         removed: stale,
@@ -2318,26 +2386,34 @@ fn collect_search_tags(tag: &lofty::tag::Tag, tags: &mut super::SearchTags) {
 }
 
 pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
-    read_track_info_with_cover_cache(path, EmbeddedCoverCache::shared()).0
+    read_track_info_with_cover_cache(path, EmbeddedCoverCache::shared()).indexed
+}
+
+/// A file read for the index by [`read_track_info_with_cover_cache`].
+struct TrackRead {
+    indexed: IndexedTrack,
+    /// Why the tags could not be read, if the tag reader panicked.
+    failure: Option<String>,
+    /// Why the embedded picture could not be cached; `indexed` has no cover
+    /// then, though the file has one.
+    cover_failure: Option<String>,
 }
 
 /// Like [`read_track_info`], but caches an embedded picture in `covers`, and
-/// also returns why the tags could not be read if the tag reader panicked.
+/// also returns why the tags could not be read if the tag reader panicked,
+/// and why the picture could not be cached.
 ///
 /// A file whose tags lofty cannot read, or that has none, is indexed by its
 /// name with no failure: raw surround files, for one, are read that way and
 /// get their tags from an appended `APEv2` tag.
-fn read_track_info_with_cover_cache(
-    path: &Path,
-    covers: Option<&EmbeddedCoverCache>,
-) -> (IndexedTrack, Option<String>) {
+fn read_track_info_with_cover_cache(path: &Path, covers: Option<&EmbeddedCoverCache>) -> TrackRead {
     let mut out = untagged_track(path);
 
     let (tagged, failure) = match crate::panic_guard::read_tags_catching_panic(path) {
         Ok(read) => (read.ok(), None),
         Err(failure) => (None, Some(failure)),
     };
-    if let Some(tagged) = tagged {
+    if let Some(tagged) = &tagged {
         for tag in tagged.tags() {
             collect_search_tags(tag, &mut out.search_tags);
         }
@@ -2402,14 +2478,23 @@ fn read_track_info_with_cover_cache(
     }
 
     out.cover_path = find_cover_path_for_track(path);
-    // The embedded picture would come from the reader that just panicked.
-    if out.cover_path.is_empty() && failure.is_none() {
-        out.cover_path = covers
-            .and_then(|cache| cache.store_track_cover(path))
-            .map(|cover_path| cover_path.to_string_lossy().into_owned())
-            .unwrap_or_default();
+    let mut cover_failure = None;
+    // A reader that panicked read no picture.
+    if let (true, Some(cache), Some(tagged)) = (out.cover_path.is_empty(), covers, &tagged) {
+        match cache.try_store_tagged_cover(tagged) {
+            Ok(cover_path) => {
+                out.cover_path = cover_path
+                    .map(|cover_path| cover_path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+            }
+            Err(error) => cover_failure = Some(error),
+        }
     }
-    (out, failure)
+    TrackRead {
+        indexed: out,
+        failure,
+        cover_failure,
+    }
 }
 
 /// The index entry of a file without readable tags: its name as the title.
@@ -3135,6 +3220,168 @@ mod tests {
             problem.contains("could not read the tags of 1 file"),
             "{problem}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A private cover cache: concurrent tests clean the shared one after
+    /// their scans. Scan workers borrow it, so it lives until the process
+    /// exits.
+    fn private_cover_cache(name: &str) -> &'static EmbeddedCoverCache {
+        Box::leak(Box::new(crate::metadata::test_cache(name)))
+    }
+
+    /// The row's `(cover_path, cover_checked)`.
+    fn cover_row(conn: &Connection, path: &Path) -> (String, bool) {
+        conn.query_row(
+            "SELECT cover_path, cover_checked FROM tracks WHERE path = ?1",
+            params![path.to_string_lossy()],
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+        )
+        .expect("track row")
+    }
+
+    fn snapshot_cover(snapshot: &LibrarySnapshot, path: &Path) -> String {
+        snapshot
+            .tracks
+            .iter()
+            .find(|track| track.path == path)
+            .map(|track| track.cover_path.clone())
+            .expect("snapshot track")
+    }
+
+    fn scan_with_cache(
+        conn: &Connection,
+        root: &Path,
+        cache: &'static EmbeddedCoverCache,
+        snapshot: &mut LibrarySnapshot,
+    ) -> Result<(), String> {
+        let (event_tx, _event_rx) = unbounded();
+        run_scans(
+            conn,
+            &[root.to_path_buf()],
+            Some(cache),
+            snapshot,
+            &event_tx,
+        )
+    }
+
+    #[test]
+    fn a_cover_that_cannot_be_cached_is_reported_once_and_retried_by_the_next_scan() {
+        use crate::metadata::{encoded_picture, write_wav_with_picture};
+
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let cache = private_cover_cache("scan-blocked-entry");
+        let root = test_dir("scan-blocked-cover");
+        fs::create_dir_all(&root).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let picture = encoded_picture(21, image::ImageFormat::Png);
+        let tracks = [root.join("01.wav"), root.join("02.wav")];
+        for track in &tracks {
+            write_wav_with_picture(track, &picture);
+        }
+        let without_picture = root.join("03.mp3");
+        write_stub(&without_picture, b"not-real-mp3");
+        // A directory where the entry belongs makes writing it fail.
+        let entry = cache
+            .dir()
+            .join(format!("{:x}.png", md5::compute(&picture)));
+        fs::create_dir_all(&entry).expect("block the entry");
+        let mut snapshot = LibrarySnapshot::default();
+
+        let error = scan_with_cache(&conn, &root, cache, &mut snapshot)
+            .expect_err("the uncached covers are reported");
+
+        assert!(
+            error.contains("could not cache the embedded covers of 2 files")
+                && error.contains("embedded cover cache"),
+            "{error}"
+        );
+        assert_eq!(error.matches("could not cache").count(), 1, "{error}");
+        for track in &tracks {
+            assert_eq!(
+                cover_row(&conn, track),
+                (String::new(), false),
+                "left due for a retry"
+            );
+        }
+        assert_eq!(
+            cover_row(&conn, &without_picture),
+            (String::new(), true),
+            "a file without a picture is checked"
+        );
+
+        // The files are unchanged; the next scan retries their covers.
+        fs::remove_dir(&entry).expect("unblock the entry");
+        scan_with_cache(&conn, &root, cache, &mut snapshot).expect("scan caches the covers");
+
+        let entry_string = entry.to_string_lossy().into_owned();
+        for track in &tracks {
+            assert_eq!(cover_row(&conn, track), (entry_string.clone(), true));
+            assert_eq!(snapshot_cover(&snapshot, track), entry_string);
+        }
+        assert_eq!(fs::read(&entry).expect("read entry"), picture);
+        let _ = fs::remove_dir_all(cache.dir().parent().expect("cache root"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_scan_that_cannot_cache_a_changed_cover_keeps_the_legacy_entry_of_the_row() {
+        use crate::metadata::{encoded_picture, write_wav_with_picture};
+
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let cache = private_cover_cache("scan-legacy-entry");
+        let root = test_dir("scan-legacy-cover");
+        fs::create_dir_all(&root).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let picture = encoded_picture(22, image::ImageFormat::Jpeg);
+        let track = root.join("01.wav");
+        write_wav_with_picture(&track, &picture);
+        // The startup migration kept this per-track PNG because the new entry
+        // could not be written; the file has changed since it was indexed.
+        fs::create_dir_all(cache.dir()).expect("create cache dir");
+        let legacy = cache.dir().join("0123456789abcdef.png");
+        fs::write(&legacy, b"legacy png").expect("write legacy entry");
+        let legacy_string = legacy.to_string_lossy().into_owned();
+        conn.execute(
+            "INSERT INTO tracks(path, root_path, title, artist, album, cover_path, cover_checked, \
+                                mtime_ns, size_bytes, indexed_at) \
+             VALUES (?1, ?2, 'Old', '', '', ?3, 1, 1, 1, 1)",
+            params![
+                track.to_string_lossy(),
+                root.to_string_lossy(),
+                legacy_string
+            ],
+        )
+        .expect("indexed row");
+        let entry = cache
+            .dir()
+            .join(format!("{:x}.jpg", md5::compute(&picture)));
+        fs::create_dir(&entry).expect("block the new entry");
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+
+        let error = scan_with_cache(&conn, &root, cache, &mut snapshot)
+            .expect_err("the uncached cover is reported");
+
+        assert!(
+            error.contains("could not cache the embedded covers of 1 file"),
+            "{error}"
+        );
+        assert_eq!(cover_row(&conn, &track), (legacy_string.clone(), false));
+        assert_eq!(snapshot_cover(&snapshot, &track), legacy_string);
+        assert!(legacy.is_file(), "the cleanup keeps the entry the row uses");
+
+        fs::remove_dir(&entry).expect("unblock the new entry");
+        scan_with_cache(&conn, &root, cache, &mut snapshot).expect("scan caches the cover");
+
+        let entry_string = entry.to_string_lossy().into_owned();
+        assert_eq!(cover_row(&conn, &track), (entry_string.clone(), true));
+        assert_eq!(snapshot_cover(&snapshot, &track), entry_string);
+        assert!(entry.is_file());
+        assert!(!legacy.exists(), "the unreferenced legacy entry is removed");
+        let _ = fs::remove_dir_all(cache.dir().parent().expect("cache root"));
         let _ = fs::remove_dir_all(root);
     }
 
