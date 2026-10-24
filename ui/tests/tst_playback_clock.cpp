@@ -51,6 +51,8 @@ private slots:
     void seekLandingElsewhereStartsOverFromTheLanding();
     void trackChangeStartsOverWithoutSmoothing();
     void gaplessSuccessorWaitsForItsStart();
+    void repeatedSamplesKeepTheGaplessSuccessorsStart();
+    void sampleBeforeAScheduledStartStillChangesState();
     void jitterNeverMovesThePositionBackwards();
     void quantizedSinkPositionsDoNotBiasTheClock();
     void stallOfThePipelineStartsOverFromItsSample();
@@ -204,6 +206,64 @@ void PlaybackClockTest::gaplessSuccessorWaitsForItsStart() {
     clock.applySample(sample(0.045, startsAt + 45 * kMs, true, 2, 4.5), false);
     QVERIFY(std::abs(clock.positionAt(m_now) - 0.05) < 1e-9);
     QCOMPARE(clock.state().rate, 1.0);
+}
+
+void PlaybackClockTest::repeatedSamplesKeepTheGaplessSuccessorsStart() {
+    // Metadata or analysis can send the snapshot again before the
+    // successor starts; the position must still wait for the start.
+    PlaybackClock clock;
+    attach(clock);
+    clock.applySample(sample(3.8, kStart, true, 1, 4.0), true);
+    m_now = kStart + 20 * kMs;
+    const qint64 startsAt = kStart + 200 * kMs;
+    clock.applySample(sample(0.0, startsAt, true, 2, 4.5), false);
+    const quint64 epoch = clock.state().epoch;
+    for (const qint64 at : {60 * kMs, 61 * kMs, 150 * kMs, 199 * kMs}) {
+        m_now = kStart + at;
+        clock.applySample(sample(0.0, startsAt, true, 2, 4.5), false);
+        QCOMPARE(clock.positionAt(m_now), 0.0);
+        QCOMPARE(clock.positionSeconds(), 0.0);
+    }
+    // A read of the successor at its start, before it starts, is no news.
+    clock.applySample(sample(0.0, m_now, true, 2, 4.5), false);
+    QCOMPARE(clock.state().epoch, epoch);
+    QCOMPARE(clock.positionAt(startsAt), 0.0);
+    m_now = startsAt + 100 * kMs;
+    QVERIFY(std::abs(clock.positionAt(m_now) - 0.1) < 1e-9);
+    QCOMPARE(clock.state().rate, 1.0);
+}
+
+void PlaybackClockTest::sampleBeforeAScheduledStartStillChangesState() {
+    PlaybackClock clock;
+    attach(clock);
+    clock.applySample(sample(3.8, kStart, true, 1, 4.0), true);
+    m_now = kStart + 20 * kMs;
+    const qint64 startsAt = kStart + 200 * kMs;
+    clock.applySample(sample(0.0, startsAt, true, 2, 4.5), false);
+
+    // A pause before the start holds where the sample says.
+    m_now = kStart + 60 * kMs;
+    clock.applySample(sample(0.0, m_now, false, 2, 4.5), false);
+    QVERIFY(!clock.advancing());
+    m_now = startsAt + 100 * kMs;
+    QCOMPARE(clock.positionAt(m_now), 0.0);
+
+    // A successor that turns out to play earlier is followed.
+    clock.applySample(sample(0.0, startsAt, true, 2, 4.5), false);
+    m_now = kStart + 100 * kMs;
+    clock.applySample(sample(0.02, m_now, true, 2, 4.5), false);
+    QVERIFY(clock.positionAt(m_now + 10 * kMs) > 0.0);
+
+    // A seek before the start lands where it lands.
+    clock.applySample(sample(0.0, startsAt, true, 2, 4.5), true);
+    m_now = kStart + 120 * kMs;
+    clock.applySample(sample(2.0, m_now, true, 2, 4.5), true);
+    QCOMPARE(clock.positionAt(m_now), 2.0);
+
+    // Another track starts over.
+    clock.applySample(sample(0.0, startsAt, true, 3, 4.5), false);
+    QCOMPARE(clock.state().trackToken, quint64{3});
+    QCOMPARE(clock.positionAt(m_now), 0.0);
 }
 
 void PlaybackClockTest::jitterNeverMovesThePositionBackwards() {

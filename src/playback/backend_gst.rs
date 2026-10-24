@@ -474,17 +474,59 @@ impl GstPlaybackRuntime {
         };
         let position = Duration::from_nanos(position.nseconds());
         let now = (self.clock)();
+        let advancing = self.pipeline_advancing();
+        self.apply_position_read(position, now, advancing)
+    }
+
+    /// Report a pipeline position read at `now`, while the pipeline
+    /// `advancing` or not. Returns whether the snapshot changed.
+    ///
+    /// Right after a gapless switch, a reading on the previous track's
+    /// timeline is not the current track's position. A position query does
+    /// not tell which stream's segment answered it, so the reading's value
+    /// decides, which cannot tell the streams apart after a track shorter
+    /// than [`PREVIOUS_STREAM_TOLERANCE`]. Such a mistake stays harmless: a
+    /// rejected reading only stands in for the position the current sample
+    /// has reached, which is what the UI shows, and whether the position
+    /// advances is always taken from the pipeline. The handover ends as
+    /// soon as the pipeline reports the successor past its start, after
+    /// which the previous stream's segment no longer applies.
+    fn apply_position_read(
+        &mut self,
+        position: Duration,
+        now: MonotonicTime,
+        advancing: bool,
+    ) -> bool {
         if let Some(handover) = self.gapless_handover {
             if handover.is_over(now) {
                 self.gapless_handover = None;
             } else if handover.is_previous_stream(position, now) {
-                // Not the current track's position; the sample from the
-                // switch still holds.
-                return false;
+                // While the position advances, the sample from the switch
+                // still holds; otherwise it stops where that sample has
+                // reached.
+                if advancing && self.snapshot.position_advancing {
+                    return false;
+                }
+                let reached = self.sampled_position_at(now);
+                return self.set_position_sample_at(reached, now, advancing);
+            } else if !position.is_zero() {
+                self.gapless_handover = None;
             }
         }
-        let advancing = self.pipeline_advancing();
         self.set_position_sample_at(position, now, advancing)
+    }
+
+    /// Where the snapshot's position sample has reached at `now`.
+    fn sampled_position_at(&self, now: MonotonicTime) -> Duration {
+        let mut position = self.snapshot.position;
+        if self.snapshot.position_advancing {
+            position += now.saturating_duration_since(self.snapshot.position_sampled_at);
+        }
+        if self.snapshot.duration.is_zero() {
+            position
+        } else {
+            position.min(self.snapshot.duration)
+        }
     }
 
     #[cfg(feature = "profiling-logs")]
@@ -3337,6 +3379,96 @@ mod gst_integration_tests {
         fn current_uri(&self) -> Option<String> {
             self.runtime.playbin.property("current-uri")
         }
+    }
+
+    fn at(millis: u64) -> MonotonicTime {
+        MonotonicTime::from_nanos(1_000_000_000_000).saturating_add(Duration::from_millis(millis))
+    }
+
+    /// A runtime that just switched gaplessly from a 200 ms track, whose
+    /// last sample read 150 ms at 0 ms, to a successor that starts at 50 ms.
+    fn after_short_track_switch() -> TestEngine {
+        let mut engine = TestEngine::new();
+        let runtime = &mut engine.runtime;
+        runtime.gapless_handover = Some(GaplessHandover::after(
+            Duration::from_millis(150),
+            at(0),
+            Duration::from_millis(200),
+            at(20),
+        ));
+        runtime.snapshot.position = Duration::ZERO;
+        runtime.snapshot.position_sampled_at = at(50);
+        runtime.snapshot.position_advancing = true;
+        runtime.snapshot.duration = Duration::from_secs(4);
+        engine
+    }
+
+    #[test]
+    fn pause_after_a_short_track_stops_the_position_at_once() {
+        let mut engine = after_short_track_switch();
+        let runtime = &mut engine.runtime;
+        // The successor's own position at 400 ms is within the tolerance of
+        // the previous track's timeline, so it is taken for that track's.
+        let successor = Duration::from_millis(350);
+        assert!(runtime
+            .gapless_handover
+            .unwrap()
+            .is_previous_stream(successor, at(400)));
+        assert!(!runtime.apply_position_read(successor, at(400), true));
+        assert!(runtime.snapshot.position_advancing);
+
+        // Paused there: the position stops advancing at once, where the
+        // sample from the switch has reached.
+        assert!(runtime.apply_position_read(successor, at(400), false));
+        assert!(!runtime.snapshot.position_advancing);
+        assert_eq!(runtime.snapshot.position, successor);
+        assert_eq!(runtime.snapshot.position_sampled_at, at(400));
+
+        // And stays there, whether a reading is still taken for the
+        // previous track's or no longer.
+        for millis in [450, 600, 2_000] {
+            assert!(!runtime.apply_position_read(successor, at(millis), false));
+            assert!(!runtime.snapshot.position_advancing);
+            assert_eq!(runtime.snapshot.position, successor);
+        }
+        assert_eq!(runtime.gapless_handover, None);
+    }
+
+    #[test]
+    fn successor_reported_past_its_start_ends_the_gapless_handover() {
+        let mut engine = after_short_track_switch();
+        let runtime = &mut engine.runtime;
+        // Before its start the successor reports its start.
+        assert!(!runtime.apply_position_read(Duration::ZERO, at(30), true));
+        assert!(runtime.gapless_handover.is_some());
+        assert!(runtime.apply_position_read(Duration::from_millis(40), at(90), true));
+        assert_eq!(runtime.gapless_handover, None);
+        // Its later positions are taken as they are.
+        assert!(runtime.apply_position_read(Duration::from_millis(350), at(400), false));
+        assert_eq!(runtime.snapshot.position, Duration::from_millis(350));
+        assert!(!runtime.snapshot.position_advancing);
+    }
+
+    #[test]
+    fn previous_streams_reading_keeps_the_successors_sample_while_advancing() {
+        // The Repeat-One replay from #187: the pipeline still answers from
+        // the previous pass right after the switch.
+        let mut engine = TestEngine::new();
+        let runtime = &mut engine.runtime;
+        runtime.gapless_handover = Some(GaplessHandover::after(
+            Duration::from_millis(3_837),
+            at(0),
+            Duration::from_secs(4),
+            at(3),
+        ));
+        runtime.snapshot.position = Duration::ZERO;
+        runtime.snapshot.position_sampled_at = at(163);
+        runtime.snapshot.position_advancing = true;
+        runtime.snapshot.duration = Duration::from_secs(4);
+        assert!(!runtime.apply_position_read(Duration::from_millis(3_900), at(60), true));
+        assert_eq!(runtime.snapshot.position, Duration::ZERO);
+        assert_eq!(runtime.snapshot.position_sampled_at, at(163));
+        assert!(runtime.gapless_handover.is_some());
     }
 
     impl Drop for TestEngine {

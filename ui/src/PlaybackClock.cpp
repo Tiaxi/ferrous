@@ -71,6 +71,17 @@ void PlaybackClock::applySample(const PlaybackSample &sample, bool jump) {
     const double displayed = m_state.positionAt(now);
     const double error = sampled.positionAt(now) - displayed;
     if (!jump && !trackChanged && sample.advancing && m_state.advancing()
+        && m_state.anchorNs > now && error <= 0.0) {
+        // The position waits for a start that has not come, such as a
+        // gapless successor's, and the sample does not show playback past
+        // that start yet, such as a repeat of the first sample. Starting to
+        // advance now would run ahead of the audio.
+        PlaybackClockState scheduled = m_state;
+        scheduled.durationSeconds = sampled.durationSeconds;
+        setState(scheduled);
+        return;
+    }
+    if (!jump && !trackChanged && sample.advancing && m_state.advancing()
         && std::abs(error) <= kMaxSlewErrorSeconds) {
         // Make the difference up by the next samples, from where the
         // position is shown now, so that it neither steps nor goes back.
