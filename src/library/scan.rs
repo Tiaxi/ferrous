@@ -846,13 +846,100 @@ pub(crate) fn refresh_indexed_metadata_for_paths(
     Ok(refreshed)
 }
 
-#[derive(Debug, Clone)]
-struct PlannedRename {
-    old_path: PathBuf,
-    temp_path: Option<PathBuf>,
-    new_path: PathBuf,
-    finalized: bool,
-    already_moved: bool,
+/// The renames made on disk for one request, in order, so that a failure
+/// can put every file back. Files are identified by their index in the
+/// request.
+struct DiskRenameJournal {
+    originals: Vec<PathBuf>,
+    locations: Vec<PathBuf>,
+    moves: Vec<DiskMove>,
+}
+
+struct DiskMove {
+    file: usize,
+    from: PathBuf,
+    to: PathBuf,
+}
+
+impl DiskRenameJournal {
+    fn new(renames: &[(PathBuf, PathBuf)]) -> Self {
+        let originals = renames
+            .iter()
+            .map(|(old_path, _)| old_path.clone())
+            .collect::<Vec<_>>();
+        Self {
+            locations: originals.clone(),
+            originals,
+            moves: Vec::new(),
+        }
+    }
+
+    fn rename(&mut self, file: usize, from: &Path, to: &Path) -> std::io::Result<()> {
+        fs::rename(from, to)?;
+        self.record(file, from, to);
+        Ok(())
+    }
+
+    fn record(&mut self, file: usize, from: &Path, to: &Path) {
+        self.locations[file] = to.to_path_buf();
+        self.moves.push(DiskMove {
+            file,
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+        });
+    }
+
+    /// Undoes the recorded renames, newest first, and adds the outcome to
+    /// `error`. A file whose earlier name is taken again stays where it is
+    /// rather than replacing the file that now has that name.
+    fn restore(mut self, error: String) -> String {
+        if self.moves.is_empty() {
+            return error;
+        }
+        let mut failures = Vec::new();
+        while let Some(DiskMove { file, from, to }) = self.moves.pop() {
+            if self.locations[file] != to {
+                // Undoing a later rename of this file failed.
+                continue;
+            }
+            let restored = if from.exists() && !paths_refer_to_same_file(&from, &to) {
+                Err(format!("{} already exists", from.to_string_lossy()))
+            } else {
+                fs::rename(&to, &from).map_err(|e| {
+                    format!(
+                        "failed to rename {} to {}: {e}",
+                        to.to_string_lossy(),
+                        from.to_string_lossy()
+                    )
+                })
+            };
+            match restored {
+                Ok(()) => self.locations[file] = from,
+                Err(failure) => failures.push(failure),
+            }
+        }
+        if failures.is_empty() {
+            return format!("{error}; the files keep their original names");
+        }
+        let stranded = self
+            .originals
+            .iter()
+            .zip(&self.locations)
+            .filter(|(original, location)| original != location)
+            .map(|(original, location)| {
+                format!(
+                    "{} is now at {}",
+                    original.to_string_lossy(),
+                    location.to_string_lossy()
+                )
+            })
+            .collect::<Vec<_>>();
+        format!(
+            "{error}; restoring the original file names failed ({}); {}",
+            failures.join("; "),
+            stranded.join("; ")
+        )
+    }
 }
 
 fn build_temp_rename_path(path: &Path, salt: usize) -> PathBuf {
@@ -874,21 +961,6 @@ fn build_temp_rename_path(path: &Path, salt: usize) -> PathBuf {
         }
     }
     parent.join(format!(".ferrous-rename-{timestamp}-{salt}-{stem}"))
-}
-
-fn rollback_planned_renames(plans: &[PlannedRename]) {
-    for plan in plans.iter().rev() {
-        if plan.already_moved {
-            continue;
-        }
-        if plan.finalized {
-            let _ = fs::rename(&plan.new_path, &plan.old_path);
-        } else if let Some(temp_path) = &plan.temp_path {
-            if temp_path.exists() {
-                let _ = fs::rename(temp_path, &plan.old_path);
-            }
-        }
-    }
 }
 
 fn exact_directory_entry_exists(path: &Path) -> Result<bool, String> {
@@ -991,18 +1063,48 @@ fn is_case_only_rename(current: &Path, target: &Path) -> bool {
     current.to_string_lossy().to_lowercase() == target.to_string_lossy().to_lowercase()
 }
 
-// Single DB transaction with multi-table updates — splitting would break atomicity.
-#[allow(clippy::too_many_lines)]
+/// Renames the files on disk and moves their library rows to the new paths.
+///
+/// Either everything succeeds or the database is unchanged and the files are
+/// put back under their original names; the error says if that failed.
 pub(crate) fn rename_indexed_metadata_paths(
     renames: &[(PathBuf, PathBuf)],
 ) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
     let mut conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
     init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
+    rename_indexed_metadata_paths_in_conn(&mut conn, renames)
+}
+
+fn rename_indexed_metadata_paths_in_conn(
+    conn: &mut Connection,
+    renames: &[(PathBuf, PathBuf)],
+) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
     let tx = conn
         .transaction()
         .map_err(|e| format!("failed to start rename transaction: {e}"))?;
-    let now = unix_ts_i64();
-    let mut refreshed = HashMap::with_capacity(renames.len());
+    let mut journal = DiskRenameJournal::new(renames);
+    let updated = apply_disk_renames(renames, &mut journal)
+        .and_then(|()| update_renamed_track_rows(&tx, renames));
+    let committed = match updated {
+        Ok(refreshed) => tx
+            .commit()
+            .map(|()| refreshed)
+            .map_err(|e| format!("failed to finalize rename transaction: {e}")),
+        Err(error) => {
+            drop(tx);
+            Err(error)
+        }
+    };
+    // A failed transaction has rolled back by now; put the files back to match its rows.
+    committed.map_err(|error| journal.restore(error))
+}
+
+/// Renames the files on disk, recording each rename in `journal`. Renames
+/// whose targets are other files' sources go through temporary names.
+fn apply_disk_renames(
+    renames: &[(PathBuf, PathBuf)],
+    journal: &mut DiskRenameJournal,
+) -> Result<(), String> {
     let source_paths = renames
         .iter()
         .map(|(old_path, _)| old_path.clone())
@@ -1013,11 +1115,9 @@ pub(crate) fn rename_indexed_metadata_paths(
     });
 
     if requires_staged_rename {
-        let mut planned = Vec::<PlannedRename>::new();
+        let mut staged = Vec::<(usize, PathBuf)>::new();
         for (index, (old_path, new_path)) in renames.iter().enumerate() {
             if old_path == new_path {
-                let indexed = read_track_info(new_path);
-                refreshed.insert(new_path.clone(), indexed);
                 continue;
             }
             if !claimed_targets.insert(new_path.clone()) {
@@ -1027,13 +1127,6 @@ pub(crate) fn rename_indexed_metadata_paths(
                 ));
             }
             if !old_path.exists() && new_path.exists() {
-                planned.push(PlannedRename {
-                    old_path: old_path.clone(),
-                    temp_path: None,
-                    new_path: new_path.clone(),
-                    finalized: true,
-                    already_moved: true,
-                });
                 continue;
             }
             if new_path.exists()
@@ -1046,56 +1139,39 @@ pub(crate) fn rename_indexed_metadata_paths(
                 ));
             }
             let temp_path = build_temp_rename_path(old_path, index);
-            if let Err(e) = fs::rename(old_path, &temp_path) {
-                rollback_planned_renames(&planned);
-                return Err(format!(
+            journal.rename(index, old_path, &temp_path).map_err(|e| {
+                format!(
                     "failed to stage rename {} to {}: {e}",
                     old_path.to_string_lossy(),
                     temp_path.to_string_lossy()
-                ));
-            }
-            planned.push(PlannedRename {
-                old_path: old_path.clone(),
-                temp_path: Some(temp_path),
-                new_path: new_path.clone(),
-                finalized: false,
-                already_moved: false,
-            });
+                )
+            })?;
+            staged.push((index, temp_path));
         }
 
-        for index in 0..planned.len() {
-            if planned[index].already_moved {
-                continue;
-            }
-            if planned[index].new_path.exists()
-                && !path_matches_any_source(&source_paths, &planned[index].new_path)
-                && !is_case_only_rename(&planned[index].old_path, &planned[index].new_path)
+        for (index, temp_path) in staged {
+            let (old_path, new_path) = &renames[index];
+            if new_path.exists()
+                && !path_matches_any_source(&source_paths, new_path)
+                && !is_case_only_rename(old_path, new_path)
             {
-                rollback_planned_renames(&planned);
                 return Err(format!(
                     "refusing to overwrite existing file {}",
-                    planned[index].new_path.to_string_lossy()
+                    new_path.to_string_lossy()
                 ));
             }
-            let Some(temp_path) = planned[index].temp_path.as_ref() else {
-                continue;
-            };
-            if let Err(e) = finalize_staged_rename(
-                temp_path,
-                &planned[index].new_path,
-                &planned[index].old_path,
-            ) {
-                rollback_planned_renames(&planned);
+            if let Err(e) = finalize_staged_rename(&temp_path, new_path, old_path) {
+                // The rename can land even when it is not seen to finish.
+                if !temp_path.exists() && new_path.exists() {
+                    journal.record(index, &temp_path, new_path);
+                }
                 return Err(e);
             }
-            planned[index].finalized = true;
+            journal.record(index, &temp_path, new_path);
         }
     } else {
-        let mut completed = Vec::<(PathBuf, PathBuf)>::new();
-        for (old_path, new_path) in renames {
+        for (index, (old_path, new_path)) in renames.iter().enumerate() {
             if old_path == new_path {
-                let indexed = read_track_info(new_path);
-                refreshed.insert(new_path.clone(), indexed);
                 continue;
             }
             if !claimed_targets.insert(new_path.clone()) {
@@ -1116,31 +1192,110 @@ pub(crate) fn rename_indexed_metadata_paths(
                     new_path.to_string_lossy()
                 ));
             }
-            if let Err(e) = fs::rename(old_path, new_path) {
-                for (moved_old, moved_new) in completed.iter().rev() {
-                    let _ = fs::rename(moved_new, moved_old);
-                }
-                return Err(format!(
+            journal.rename(index, old_path, new_path).map_err(|e| {
+                format!(
                     "failed to rename {} to {}: {e}",
                     old_path.to_string_lossy(),
                     new_path.to_string_lossy()
-                ));
-            }
-            completed.push((old_path.clone(), new_path.clone()));
+                )
+            })?;
         }
     }
+    Ok(())
+}
 
+struct RenamedTrackRow<'a> {
+    new_path: &'a Path,
+    old_key: String,
+    new_key: String,
+    indexed: IndexedTrack,
+    fingerprint: TrackFileFingerprint,
+    in_external_cache: bool,
+}
+
+/// Reads the renamed files, filling `refreshed` for files that keep their
+/// path, and notes which rows the external cache holds before any change.
+fn read_renamed_track_rows<'a>(
+    tx: &Connection,
+    renames: &'a [(PathBuf, PathBuf)],
+    refreshed: &mut HashMap<PathBuf, IndexedTrack>,
+) -> Result<Vec<RenamedTrackRow<'a>>, String> {
+    let mut rows = Vec::with_capacity(renames.len());
     for (old_path, new_path) in renames {
+        let indexed = read_track_info(new_path);
         if old_path == new_path {
+            refreshed.insert(new_path.clone(), indexed);
             continue;
         }
-
-        let indexed = read_track_info(new_path);
         let fingerprint = track_file_fingerprint(new_path)
             .ok_or_else(|| format!("failed to fingerprint {}", new_path.to_string_lossy()))?;
-        let old_path_string = old_path.to_string_lossy().to_string();
-        let new_path_string = new_path.to_string_lossy().to_string();
+        let old_key = old_path.to_string_lossy().to_string();
+        let in_external_cache = tx
+            .query_row(
+                "SELECT 1 FROM external_tracks WHERE path = ?1 LIMIT 1",
+                params![old_key],
+                |_row| Ok(()),
+            )
+            .is_ok();
+        rows.push(RenamedTrackRow {
+            new_path,
+            old_key,
+            new_key: new_path.to_string_lossy().to_string(),
+            indexed,
+            fingerprint,
+            in_external_cache,
+        });
+    }
+    Ok(rows)
+}
 
+/// Moves the `tracks` and `external_tracks` rows of renamed files to their
+/// new paths. Rows keep their rowid and the columns a rename does not
+/// change. Swaps, renumbering chains and cycles reuse paths that other rows
+/// still hold, so those rows move to a placeholder path first.
+fn update_renamed_track_rows(
+    tx: &Connection,
+    renames: &[(PathBuf, PathBuf)],
+) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
+    let now = unix_ts_i64();
+    let mut refreshed = HashMap::with_capacity(renames.len());
+    let rows = read_renamed_track_rows(tx, renames, &mut refreshed)?;
+    let new_keys = rows
+        .iter()
+        .map(|row| row.new_key.clone())
+        .collect::<HashSet<_>>();
+    let mut current_keys = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        if !new_keys.contains(&row.old_key) {
+            current_keys.push(row.old_key.clone());
+            continue;
+        }
+        // Library paths are absolute, so a relative placeholder cannot collide.
+        let placeholder = format!("ferrous-rename-pending/{index}/{}", row.old_key);
+        tx.execute(
+            "UPDATE tracks SET path = ?2 WHERE path = ?1",
+            params![row.old_key, placeholder],
+        )
+        .map_err(|e| format!("failed to move renamed track row aside: {e}"))?;
+        current_keys.push(placeholder);
+    }
+    for row in rows.iter().filter(|row| row.in_external_cache) {
+        tx.execute(
+            "DELETE FROM external_tracks WHERE path = ?1",
+            params![row.old_key],
+        )
+        .map_err(|e| format!("failed to delete renamed external track row: {e}"))?;
+    }
+
+    for (row, current_key) in rows.into_iter().zip(current_keys) {
+        let RenamedTrackRow {
+            new_path,
+            new_key,
+            indexed,
+            fingerprint,
+            in_external_cache,
+            ..
+        } = row;
         tx.execute(
             r"
             UPDATE tracks
@@ -1161,8 +1316,8 @@ pub(crate) fn rename_indexed_metadata_paths(
             WHERE path = ?1
             ",
             params![
-                old_path_string,
-                new_path_string,
+                current_key,
+                new_key,
                 indexed.title.as_str(),
                 indexed.artist.as_str(),
                 indexed.album.as_str(),
@@ -1178,29 +1333,47 @@ pub(crate) fn rename_indexed_metadata_paths(
             ],
         )
         .map_err(|e| format!("failed to update renamed track row: {e}"))?;
-
-        let existed_in_external = tx
-            .query_row(
-                "SELECT 1 FROM external_tracks WHERE path = ?1 LIMIT 1",
-                params![old_path.to_string_lossy().to_string()],
-                |_row| Ok(()),
-            )
-            .is_ok();
-        if existed_in_external {
-            tx.execute(
-                "DELETE FROM external_tracks WHERE path = ?1",
-                params![old_path.to_string_lossy().to_string()],
-            )
-            .map_err(|e| format!("failed to delete renamed external track row: {e}"))?;
-            store_external_track_cache_in_conn(&tx, new_path, fingerprint, &indexed)?;
+        if in_external_cache {
+            store_external_track_cache_in_conn(tx, new_path, fingerprint, &indexed)?;
         }
-
-        refreshed.insert(new_path.clone(), indexed);
+        refreshed.insert(new_path.to_path_buf(), indexed);
     }
-
-    tx.commit()
-        .map_err(|e| format!("failed to finalize rename transaction: {e}"))?;
     Ok(refreshed)
+}
+
+/// Adds `paths` to the test process's library database the way a scan of
+/// `root` would, without registering `root` for rescans.
+#[cfg(test)]
+pub(crate) fn index_tracks_for_test(root: &Path, paths: &[PathBuf]) {
+    let mut conn = open_library_db().expect("test library db");
+    init_schema(&conn).expect("test library schema");
+    insert_indexed_tracks(&mut conn, root, paths);
+}
+
+#[cfg(test)]
+fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) {
+    let tx = conn.transaction().expect("index transaction");
+    {
+        let mut upsert_stmt = prepare_track_upsert_statement(&tx).expect("upsert statement");
+        for path in paths {
+            let fingerprint = track_file_fingerprint(path).expect("fixture fingerprint");
+            let task = MetadataTask {
+                path: path.clone(),
+                path_string: path.to_string_lossy().to_string(),
+                mtime_ns: fingerprint.mtime_ns,
+                size_bytes: fingerprint.size_bytes,
+            };
+            let indexed = read_track_info(path);
+            apply_metadata_result(
+                &mut upsert_stmt,
+                &root.to_string_lossy(),
+                unix_ts_i64(),
+                &mut |_, _| {},
+                MetadataResult { task, indexed },
+            );
+        }
+    }
+    tx.commit().expect("commit indexed fixtures");
 }
 
 /// Resolves a root to its canonical directory path. Errors omit the path;
@@ -3060,5 +3233,289 @@ mod tests {
         drop(other);
         drop(conn);
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    fn rename_fixture(name: &str, titles: &[&str]) -> (PathBuf, Vec<PathBuf>) {
+        let dir = test_dir(name);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let dir = dir.canonicalize().expect("canonical test dir");
+        let paths = titles
+            .iter()
+            .enumerate()
+            .map(|(index, title)| {
+                let path = dir.join(format!("{:02} - {title}.flac", index + 1));
+                crate::tag_write::write_test_flac(&path, &[("TITLE", title)]);
+                path
+            })
+            .collect();
+        (dir, paths)
+    }
+
+    /// `(rowid, path, root_path, title)` for every library row, by path.
+    fn track_rows(conn: &Connection) -> Vec<(i64, PathBuf, PathBuf, String)> {
+        let mut stmt = conn
+            .prepare("SELECT rowid, path, root_path, title FROM tracks ORDER BY path")
+            .expect("prepare");
+        stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+                PathBuf::from(row.get::<_, String>(2)?),
+                row.get(3)?,
+            ))
+        })
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows")
+    }
+
+    fn fts_paths(conn: &Connection, term: &str) -> Vec<PathBuf> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.path FROM tracks_fts JOIN tracks t ON t.rowid = tracks_fts.rowid \
+                 WHERE tracks_fts MATCH ?1",
+            )
+            .expect("prepare");
+        stmt.query_map(params![term], |row| row.get::<_, String>(0))
+            .expect("query")
+            .map(|path| PathBuf::from(path.expect("path")))
+            .collect()
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn rename_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        conn
+    }
+
+    #[test]
+    fn rename_swaps_indexed_tracks_and_keeps_their_rows() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-swap", &["One", "Two"]);
+        let (one, two) = (paths[0].clone(), paths[1].clone());
+        insert_indexed_tracks(&mut conn, &dir, &paths);
+        let before = track_rows(&conn);
+
+        let refreshed = rename_indexed_metadata_paths_in_conn(
+            &mut conn,
+            &[(one.clone(), two.clone()), (two.clone(), one.clone())],
+        )
+        .expect("swap");
+
+        assert_eq!(refreshed[&one].title, "Two");
+        assert_eq!(refreshed[&two].title, "One");
+        // Each row follows its file: same rowid and root, new path.
+        assert_eq!(
+            track_rows(&conn),
+            [
+                (before[1].0, one.clone(), dir.clone(), "Two".to_string()),
+                (before[0].0, two.clone(), dir.clone(), "One".to_string()),
+            ]
+        );
+        assert_eq!(fts_paths(&conn, "One"), [two]);
+        assert_eq!(fts_paths(&conn, "Two"), [one]);
+        assert_eq!(file_names(&dir), ["01 - One.flac", "02 - Two.flac"]);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_rotates_a_cycle_of_indexed_tracks() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-cycle", &["One", "Two", "Three"]);
+        insert_indexed_tracks(&mut conn, &dir, &paths);
+        let before = track_rows(&conn);
+        let renames = (0..3)
+            .map(|index| (paths[index].clone(), paths[(index + 1) % 3].clone()))
+            .collect::<Vec<_>>();
+
+        rename_indexed_metadata_paths_in_conn(&mut conn, &renames).expect("rotate");
+
+        assert_eq!(
+            track_rows(&conn),
+            [
+                (
+                    before[2].0,
+                    paths[0].clone(),
+                    dir.clone(),
+                    "Three".to_string()
+                ),
+                (
+                    before[0].0,
+                    paths[1].clone(),
+                    dir.clone(),
+                    "One".to_string()
+                ),
+                (
+                    before[1].0,
+                    paths[2].clone(),
+                    dir.clone(),
+                    "Two".to_string()
+                ),
+            ]
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_swaps_external_track_cache_rows() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-external", &["One", "Two"]);
+        let (one, two) = (paths[0].clone(), paths[1].clone());
+        for path in &paths {
+            let fingerprint = track_file_fingerprint(path).expect("fingerprint");
+            store_external_track_cache_in_conn(&conn, path, fingerprint, &read_track_info(path))
+                .expect("cache row");
+        }
+
+        rename_indexed_metadata_paths_in_conn(
+            &mut conn,
+            &[(one.clone(), two.clone()), (two.clone(), one.clone())],
+        )
+        .expect("swap");
+
+        let mut stmt = conn
+            .prepare("SELECT path, title FROM external_tracks ORDER BY path")
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            [
+                (one.to_string_lossy().into_owned(), "Two".to_string()),
+                (two.to_string_lossy().into_owned(), "One".to_string()),
+            ]
+        );
+        drop(stmt);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_restores_files_when_a_database_update_fails() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-db-failure", &["One", "Two"]);
+        let (one, two) = (paths[0].clone(), paths[1].clone());
+        insert_indexed_tracks(&mut conn, &dir, &paths);
+        conn.execute(
+            &format!(
+                "CREATE TRIGGER fail_rename BEFORE UPDATE OF path ON tracks \
+                 WHEN new.path = '{}' BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+                two.to_string_lossy()
+            ),
+            [],
+        )
+        .expect("failure trigger");
+        let before = track_rows(&conn);
+        let bytes = paths
+            .iter()
+            .map(|path| fs::read(path).expect("read"))
+            .collect::<Vec<_>>();
+
+        let error = rename_indexed_metadata_paths_in_conn(
+            &mut conn,
+            &[(one.clone(), two.clone()), (two.clone(), one.clone())],
+        )
+        .expect_err("injected failure");
+
+        assert!(error.contains("injected failure"), "{error}");
+        assert!(
+            error.ends_with("the files keep their original names"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&one).expect("read"), bytes[0]);
+        assert_eq!(fs::read(&two).expect("read"), bytes[1]);
+        assert_eq!(file_names(&dir), ["01 - One.flac", "02 - Two.flac"]);
+        assert_eq!(track_rows(&conn), before);
+        assert_eq!(fts_paths(&conn, "One"), [one]);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_restores_staged_files_when_a_later_target_is_taken() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-staged-conflict", &["One", "Two", "Three"]);
+        let taken = dir.join("taken.flac");
+        write_stub(&taken, b"unrelated");
+        let bytes = paths
+            .iter()
+            .map(|path| fs::read(path).expect("read"))
+            .collect::<Vec<_>>();
+
+        let error = rename_indexed_metadata_paths_in_conn(
+            &mut conn,
+            &[
+                (paths[0].clone(), paths[1].clone()),
+                (paths[1].clone(), paths[0].clone()),
+                (paths[2].clone(), taken.clone()),
+            ],
+        )
+        .expect_err("taken target");
+
+        assert!(
+            error.starts_with("refusing to overwrite existing file"),
+            "{error}"
+        );
+        for (path, original) in paths.iter().zip(&bytes) {
+            assert_eq!(&fs::read(path).expect("read"), original);
+        }
+        assert_eq!(fs::read(&taken).expect("read"), b"unrelated");
+        assert_eq!(
+            file_names(&dir),
+            [
+                "01 - One.flac",
+                "02 - Two.flac",
+                "03 - Three.flac",
+                "taken.flac"
+            ]
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_restore_reports_files_it_cannot_put_back() {
+        let (dir, paths) = rename_fixture("rename-restore-failure", &["One"]);
+        let moved = dir.join("02 - Moved.flac");
+        let original = fs::read(&paths[0]).expect("read");
+        let renames = [(paths[0].clone(), moved.clone())];
+        let mut journal = DiskRenameJournal::new(&renames);
+        journal.rename(0, &paths[0], &moved).expect("rename");
+        write_stub(&paths[0], b"newcomer");
+
+        let error = journal.restore("injected failure".to_string());
+
+        assert!(
+            error.starts_with("injected failure; restoring the original file names failed ("),
+            "{error}"
+        );
+        assert!(
+            error.ends_with(&format!(
+                "{} is now at {}",
+                paths[0].to_string_lossy(),
+                moved.to_string_lossy()
+            )),
+            "{error}"
+        );
+        assert_eq!(fs::read(&paths[0]).expect("read"), b"newcomer");
+        assert_eq!(fs::read(&moved).expect("read"), original);
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 }

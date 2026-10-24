@@ -22,6 +22,9 @@ use crate::raw_audio::{
 };
 use crate::tag_write::save_tag;
 
+#[cfg(test)]
+mod rename_tests;
+
 fn lofty_file_type_label(file_type: lofty::file::FileType) -> &'static str {
     match file_type {
         lofty::file::FileType::Aac => "AAC",
