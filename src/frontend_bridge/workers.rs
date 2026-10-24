@@ -87,6 +87,7 @@ fn run_apply_album_art_worker(
     while let Ok(request) = req_rx.recv() {
         let event = match apply_artwork_to_track(&request.track_path, &request.artwork_path) {
             Ok(outcome) => {
+                let failure_summary = outcome.failure_summary();
                 let mut affected_paths = outcome.affected_track_paths;
                 affected_paths.sort();
                 affected_paths.dedup();
@@ -128,11 +129,16 @@ fn run_apply_album_art_worker(
                     (refresh_error, indexed_by_path)
                 };
 
+                let refresh_error =
+                    refresh_error.map(|error| format!("failed to refresh cover paths: {error}"));
+                let error = match (failure_summary, refresh_error) {
+                    (Some(failures), Some(refresh)) => Some(format!("{failures}; {refresh}")),
+                    (failures, refresh) => failures.or(refresh),
+                };
                 ApplyAlbumArtEvent {
                     track_path: request.track_path,
                     indexed_by_path,
-                    error: refresh_error
-                        .map(|error| format!("failed to refresh cover paths: {error}")),
+                    error,
                 }
             }
             Err(error) => ApplyAlbumArtEvent {

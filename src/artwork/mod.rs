@@ -3,18 +3,19 @@
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView, ImageFormat};
-use lofty::file::TaggedFileExt;
+use lofty::file::{FileType, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::Accessor;
 use lofty::tag::Tag;
 use url::Url;
 
+use crate::folder_cover::{find_folder_cover, find_named_cover};
 use crate::raw_audio::{is_raw_surround_file, read_appended_apev2_text_metadata};
+use crate::safe_save::{check_rewritable, create_file, replace_file};
 use crate::tag_write::save_tag;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,20 +33,30 @@ pub struct NormalizedArtwork {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyArtworkOutcome {
+    /// Tracks whose cover changed.
     pub affected_track_paths: Vec<PathBuf>,
+    /// The folder image that now holds the cover of the affected tracks,
+    /// when the artwork went to a folder image rather than into the tracks.
     pub cover_path_override: Option<PathBuf>,
+    /// Album tracks that could not be updated, with the reason for each.
+    pub failed_tracks: Vec<(PathBuf, String)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ArtworkSource {
-    Sidecar(PathBuf),
-    Embedded,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TrackIdentity {
-    artist: String,
-    album: String,
+impl ApplyArtworkOutcome {
+    /// A message for the user that names the album tracks that were not
+    /// updated, if there are any.
+    #[must_use]
+    pub fn failure_summary(&self) -> Option<String> {
+        if self.failed_tracks.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "album art was applied to {} of {} album tracks; not updated: {}",
+            self.affected_track_paths.len(),
+            self.affected_track_paths.len() + self.failed_tracks.len(),
+            describe_track_errors(&self.failed_tracks)
+        ))
+    }
 }
 
 #[must_use]
@@ -109,31 +120,35 @@ pub fn normalize_artwork_bytes(bytes: &[u8]) -> Result<NormalizedArtwork> {
 
 /// Apply the provided artwork file to the current track context.
 ///
+/// When the track's folder shows an image as its cover, the artwork goes
+/// to a folder image: the one with a recognised cover name, or a new
+/// `cover.<ext>` next to the folder's other images. Otherwise it is
+/// embedded into every track in the folder that has the track's album tag.
+///
 /// # Errors
 ///
-/// Returns an error when the artwork cannot be normalized or written to the
-/// active sidecar or embedded artwork targets.
+/// Returns an error when the artwork cannot be normalized, when the folder
+/// image cannot be written, or when any album track cannot take embedded
+/// artwork; in that case no track is changed. Tracks that fail while being
+/// written are listed in the outcome instead.
 pub fn apply_artwork_to_track(
     track_path: &Path,
     artwork_path: &Path,
 ) -> Result<ApplyArtworkOutcome> {
     let normalized = normalize_artwork_file(artwork_path)?;
-    match classify_artwork_source(track_path) {
-        ArtworkSource::Sidecar(sidecar_path) => {
-            let cover_path = write_sidecar_replacement(&sidecar_path, &normalized)?;
-            Ok(ApplyArtworkOutcome {
-                affected_track_paths: sibling_supported_audio_files(track_path)?,
-                cover_path_override: Some(cover_path),
-            })
-        }
-        ArtworkSource::Embedded => {
-            let affected = rewrite_embedded_artwork(track_path, &normalized)?;
-            Ok(ApplyArtworkOutcome {
-                affected_track_paths: affected,
-                cover_path_override: None,
-            })
-        }
+    let dir = track_path
+        .parent()
+        .ok_or_else(|| anyhow!("track path has no parent directory"))?;
+    if find_folder_cover(dir).is_none() {
+        return rewrite_embedded_artwork(track_path, &normalized);
     }
+    let affected_track_paths = sibling_supported_audio_files(track_path)?;
+    let cover_path = write_folder_cover(dir, &normalized)?;
+    Ok(ApplyArtworkOutcome {
+        affected_track_paths,
+        cover_path_override: Some(cover_path),
+        failed_tracks: Vec::new(),
+    })
 }
 
 fn center_crop_to_square(image: &DynamicImage) -> DynamicImage {
@@ -169,94 +184,150 @@ fn encode_dynamic_image(image: &DynamicImage, format: ImageFormat) -> Result<Vec
     }
 }
 
-fn classify_artwork_source(track_path: &Path) -> ArtworkSource {
-    match find_sidecar_for_track(track_path) {
-        Some(sidecar) => ArtworkSource::Sidecar(sidecar),
-        None => ArtworkSource::Embedded,
+/// Write `artwork` as the cover image of `dir` and return its path.
+///
+/// Only an image with a recognised cover name is replaced, in its own
+/// format, so no file is renamed or removed. Without one, a new
+/// `cover.<ext>` is created; other images, such as `back.jpg`, stay as they
+/// are and rank below it.
+fn write_folder_cover(dir: &Path, artwork: &NormalizedArtwork) -> Result<PathBuf> {
+    if let Some(existing) = find_named_cover(dir) {
+        let bytes = encode_for_path(artwork, &existing)?;
+        replace_file(&existing, &bytes).map_err(anyhow::Error::msg)?;
+        return Ok(existing);
     }
+    let path = dir.join(format!("cover.{}", artwork.extension));
+    create_file(&path, &artwork.bytes).map_err(anyhow::Error::msg)?;
+    Ok(path)
 }
 
-fn write_sidecar_replacement(
-    current_sidecar_path: &Path,
-    artwork: &NormalizedArtwork,
-) -> Result<PathBuf> {
-    let target_path = if current_sidecar_path
+/// `artwork` in the image format that `path`'s extension names.
+fn encode_for_path(artwork: &NormalizedArtwork, path: &Path) -> Result<Vec<u8>> {
+    let format = path
         .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case(artwork.extension))
-    {
-        current_sidecar_path.to_path_buf()
-    } else {
-        current_sidecar_path.with_extension(artwork.extension)
-    };
-
-    write_bytes_atomically(&target_path, &artwork.bytes)?;
-    if target_path != current_sidecar_path && current_sidecar_path.is_file() {
-        fs::remove_file(current_sidecar_path).with_context(|| {
-            format!(
-                "failed to remove previous sidecar artwork {}",
-                current_sidecar_path.to_string_lossy()
-            )
-        })?;
+        .and_then(ImageFormat::from_extension)
+        .ok_or_else(|| anyhow!("unsupported cover image {}", path.display()))?;
+    if ImageFormat::from_extension(artwork.extension) == Some(format) {
+        return Ok(artwork.bytes.clone());
     }
-    Ok(target_path)
+    let decoded =
+        image::load_from_memory(&artwork.bytes).context("failed to decode artwork image")?;
+    encode_dynamic_image(&decoded, format)
 }
 
+/// Embed `artwork` into every track in the current track's folder that has
+/// its album tag, whatever each track's artist, so compilations are updated
+/// as a whole.
+///
+/// Every track is checked first and nothing is written unless all of them
+/// can take the artwork. A track that still fails while being written is
+/// reported in the outcome, and the remaining tracks are written.
 fn rewrite_embedded_artwork(
     current_track_path: &Path,
     artwork: &NormalizedArtwork,
-) -> Result<Vec<PathBuf>> {
-    let current_identity = track_identity(current_track_path);
-    let current_album_key = normalize_match_key(&current_identity.album);
-    let current_artist_key = normalize_match_key(&current_identity.artist);
-    if current_album_key.is_empty() || current_artist_key.is_empty() {
-        bail!("current track album/artist metadata is missing");
+) -> Result<ApplyArtworkOutcome> {
+    let album_key = normalize_match_key(&track_album(current_track_path));
+    if album_key.is_empty() {
+        bail!(
+            "{} has no album tag, so the tracks of its album cannot be found",
+            file_label(current_track_path)
+        );
+    }
+    let members = sibling_supported_audio_files(current_track_path)?
+        .into_iter()
+        .filter(|candidate| normalize_match_key(&track_album(candidate)) == album_key)
+        .collect::<Vec<_>>();
+
+    let unwritable = members
+        .iter()
+        .filter_map(|path| {
+            check_embedded_artwork_writable(path, artwork)
+                .err()
+                .map(|error| (path.clone(), error))
+        })
+        .collect::<Vec<_>>();
+    if !unwritable.is_empty() {
+        bail!(
+            "{} of {} album tracks cannot be updated, so none were changed: {}",
+            unwritable.len(),
+            members.len(),
+            describe_track_errors(&unwritable)
+        );
     }
 
-    let mut affected = Vec::new();
-    for candidate in sibling_supported_audio_files(current_track_path)? {
-        let identity = track_identity(&candidate);
-        if normalize_match_key(&identity.album) != current_album_key
-            || normalize_match_key(&identity.artist) != current_artist_key
-        {
-            continue;
-        }
-        rewrite_embedded_artwork_for_file(&candidate, artwork)?;
-        affected.push(candidate);
-    }
-
-    if affected.is_empty() {
-        bail!("no matching sibling audio files were updated");
-    }
-    Ok(affected)
+    Ok(write_each_track(members, |path| {
+        rewrite_embedded_artwork_for_file(path, artwork)
+    }))
 }
 
-fn rewrite_embedded_artwork_for_file(path: &Path, artwork: &NormalizedArtwork) -> Result<()> {
+/// Write every track with `write`, continuing past failures.
+fn write_each_track(
+    tracks: Vec<PathBuf>,
+    write: impl Fn(&Path) -> Result<(), String>,
+) -> ApplyArtworkOutcome {
+    let mut outcome = ApplyArtworkOutcome {
+        affected_track_paths: Vec::new(),
+        cover_path_override: None,
+        failed_tracks: Vec::new(),
+    };
+    for path in tracks {
+        match write(&path) {
+            Ok(()) => outcome.affected_track_paths.push(path),
+            Err(error) => outcome.failed_tracks.push((path, error)),
+        }
+    }
+    outcome
+}
+
+/// Check, without writing, that `path` can take embedded artwork now.
+fn check_embedded_artwork_writable(path: &Path, artwork: &NormalizedArtwork) -> Result<(), String> {
+    edited_artwork_tag(path, artwork)?;
+    check_rewritable(path)
+}
+
+fn rewrite_embedded_artwork_for_file(
+    path: &Path,
+    artwork: &NormalizedArtwork,
+) -> Result<(), String> {
+    let (file_type, tag) = edited_artwork_tag(path, artwork)?;
+    save_tag(path, file_type, &tag).map_err(|err| format!("failed to update artwork: {err}"))
+}
+
+/// The tag of `path` with `artwork` as its front cover.
+///
+/// The front cover goes first, so readers that show a track's first
+/// picture, as Ferrous does, show the new artwork. Earlier front covers are
+/// replaced; other pictures are kept after it in their order.
+fn edited_artwork_tag(path: &Path, artwork: &NormalizedArtwork) -> Result<(FileType, Tag), String> {
     let mut tagged = lofty::read_from_path(path)
-        .with_context(|| format!("failed to read tags from {}", path.to_string_lossy()))?;
+        .map_err(|err| format!("failed to read tags from {}: {err}", path.display()))?;
     let file_type = tagged.file_type();
     if tagged.primary_tag_mut().is_none() {
         tagged.insert_tag(Tag::new(tagged.primary_tag_type()));
     }
-    let tag = if let Some(tag) = tagged.primary_tag_mut() {
-        tag
-    } else if let Some(tag) = tagged.first_tag_mut() {
-        tag
-    } else {
-        return Err(anyhow!(
-            "failed to resolve writable tag for {}",
-            path.to_string_lossy()
-        ));
-    };
+    let mut tag = tagged
+        .primary_tag()
+        .or_else(|| tagged.first_tag())
+        .cloned()
+        .ok_or_else(|| format!("failed to resolve writable tag for {}", path.display()))?;
 
-    tag.remove_picture_type(PictureType::CoverFront);
+    let mut kept = Vec::new();
+    while !tag.pictures().is_empty() {
+        let picture = tag.remove_picture(0);
+        if picture.pic_type() != PictureType::CoverFront {
+            kept.push(picture);
+        }
+    }
     tag.push_picture(
         Picture::unchecked(artwork.bytes.clone())
             .mime_type(artwork.mime_type.clone())
             .pic_type(PictureType::CoverFront)
             .build(),
     );
-    save_tag(path, file_type, tag).map_err(|err| anyhow!("failed to update artwork: {err}"))
+    for picture in kept {
+        tag.push_picture(picture);
+    }
+    Ok((file_type, tag))
 }
 
 fn sibling_supported_audio_files(track_path: &Path) -> Result<Vec<PathBuf>> {
@@ -276,33 +347,22 @@ fn sibling_supported_audio_files(track_path: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn track_identity(path: &Path) -> TrackIdentity {
-    let mut artist = String::new();
-    let mut album = String::new();
-
-    if let Ok(tagged) = lofty::read_from_path(path) {
-        if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
-            if let Some(value) = tag.artist() {
-                artist = value.into_owned();
-            }
-            if let Some(value) = tag.album() {
-                album = value.into_owned();
-            }
-        }
-    }
-
+fn track_album(path: &Path) -> String {
+    let mut album = lofty::read_from_path(path)
+        .ok()
+        .and_then(|tagged| {
+            tagged
+                .primary_tag()
+                .or_else(|| tagged.first_tag())
+                .and_then(|tag| tag.album().map(std::borrow::Cow::into_owned))
+        })
+        .unwrap_or_default();
     if is_raw_surround_file(path) {
-        if let Some(tagged) = read_appended_apev2_text_metadata(path) {
-            if let Some(value) = tagged.artist {
-                artist = value;
-            }
-            if let Some(value) = tagged.album {
-                album = value;
-            }
+        if let Some(value) = read_appended_apev2_text_metadata(path).and_then(|tags| tags.album) {
+            album = value;
         }
     }
-
-    TrackIdentity { artist, album }
+    album
 }
 
 fn normalize_match_key(value: &str) -> String {
@@ -314,86 +374,79 @@ fn normalize_match_key(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn find_sidecar_for_track(path: &Path) -> Option<PathBuf> {
-    let dir = path.parent()?;
-    let mut candidates = vec![
-        "cover.jpg",
-        "cover.jpeg",
-        "cover.png",
-        "folder.jpg",
-        "folder.jpeg",
-        "folder.png",
-        "front.jpg",
-        "front.png",
-    ]
-    .into_iter()
-    .map(|name| dir.join(name))
-    .collect::<Vec<_>>();
-
-    if let Ok(read_dir) = fs::read_dir(dir) {
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
-                continue;
-            };
-            let ext = ext.to_ascii_lowercase();
-            if (ext == "jpg" || ext == "jpeg" || ext == "png")
-                && !candidates.iter().any(|candidate| candidate == &path)
-            {
-                candidates.push(path);
-            }
-        }
-    }
-
-    candidates.into_iter().find(|candidate| candidate.is_file())
+/// `name (reason)` for each track, for messages to the user.
+fn describe_track_errors(errors: &[(PathBuf, String)]) -> String {
+    errors
+        .iter()
+        .map(|(path, error)| format!("{} ({error})", file_label(path)))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
-fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("path has no parent directory"))?;
-    let temp_path = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("artwork"),
-        unique_suffix()
-    ));
-    fs::write(&temp_path, bytes).with_context(|| {
-        format!(
-            "failed to write temporary artwork {}",
-            temp_path.to_string_lossy()
-        )
-    })?;
-    fs::rename(&temp_path, path).with_context(|| {
-        format!(
-            "failed to move temporary artwork {} into place at {}",
-            temp_path.to_string_lossy(),
-            path.to_string_lossy()
-        )
-    })
-}
-
-fn unique_suffix() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
+fn file_label(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tag_write::write_test_flac;
     use image::{ImageBuffer, Rgb, Rgba};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn test_dir(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("ferrous-artwork-{name}-{}", unique_suffix()));
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-artwork-{name}-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir_all(&path).expect("create test dir");
         path
+    }
+
+    fn encoded_image(color: [u8; 3], format: ImageFormat) -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(ImageBuffer::from_pixel(4, 4, Rgb(color)))
+            .write_to(&mut cursor, format)
+            .expect("encode image");
+        cursor.into_inner()
+    }
+
+    /// An artwork file outside the album folder, as the iTunes download is.
+    fn artwork_file(root: &Path, format: ImageFormat) -> (PathBuf, Vec<u8>) {
+        let bytes = encoded_image([0, 0, 255], format);
+        let path = root.join(match format {
+            ImageFormat::Png => "artwork.png",
+            _ => "artwork.jpg",
+        });
+        fs::write(&path, &bytes).expect("write artwork");
+        (path, bytes)
+    }
+
+    fn dir_entries(dir: &Path) -> Vec<String> {
+        let mut entries = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    fn front_cover(path: &Path) -> Option<Vec<u8>> {
+        let tagged = lofty::read_from_path(path).expect("read tags");
+        let tag = tagged.primary_tag().expect("primary tag");
+        tag.get_picture_type(PictureType::CoverFront)
+            .map(|picture| picture.data().to_vec())
     }
 
     #[test]
@@ -428,27 +481,312 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_replacement_with_extension_change_preserves_stem_and_deletes_old_file() {
-        let dir = test_dir("sidecar-extension-change");
-        let sidecar_path = dir.join("cover.jpg");
-        fs::write(&sidecar_path, b"old").expect("write old sidecar");
+    fn folder_with_only_other_images_keeps_them_and_gets_a_new_cover() {
+        let root = test_dir("other-images");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let track = album.join("01.flac");
+        write_test_flac(&track, &[("ALBUM", "Album")]);
+        let track_bytes = fs::read(&track).expect("read track");
+        fs::write(album.join("back.jpg"), b"back scan").expect("write back scan");
+        fs::write(album.join("booklet01.jpg"), b"booklet").expect("write booklet");
+        let (artwork, artwork_bytes) = artwork_file(&root, ImageFormat::Png);
 
-        let png = ImageBuffer::from_pixel(4, 4, Rgb([0, 0, 255]));
-        let mut cursor = Cursor::new(Vec::new());
-        DynamicImage::ImageRgb8(png)
-            .write_to(&mut cursor, ImageFormat::Png)
-            .expect("encode png");
-        let normalized = normalize_artwork_bytes(&cursor.into_inner()).expect("normalize");
+        let outcome = apply_artwork_to_track(&track, &artwork).expect("apply artwork");
 
-        write_sidecar_replacement(&sidecar_path, &normalized).expect("replace sidecar");
+        let cover = album.join("cover.png");
+        assert_eq!(outcome.cover_path_override.as_ref(), Some(&cover));
+        assert_eq!(outcome.affected_track_paths, std::slice::from_ref(&track));
+        assert_eq!(outcome.failure_summary(), None);
+        assert_eq!(fs::read(&cover).expect("read cover"), artwork_bytes);
+        assert_eq!(
+            fs::read(album.join("back.jpg")).expect("read back"),
+            b"back scan"
+        );
+        assert_eq!(
+            fs::read(album.join("booklet01.jpg")).expect("read booklet"),
+            b"booklet"
+        );
+        assert_eq!(fs::read(&track).expect("read track"), track_bytes);
+        assert_eq!(
+            dir_entries(&album),
+            ["01.flac", "back.jpg", "booklet01.jpg", "cover.png"]
+        );
+        // The library shows the new cover rather than the scans.
+        assert_eq!(find_folder_cover(&album), Some(cover));
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
 
-        assert!(!sidecar_path.exists());
-        assert!(dir.join("cover.png").exists());
+    #[test]
+    fn recognised_cover_is_replaced_in_its_own_format_and_nothing_is_removed() {
+        let root = test_dir("recognised-cover");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let track = album.join("01.flac");
+        write_test_flac(&track, &[("ALBUM", "Album")]);
+        let cover = album.join("Cover.JPG");
+        fs::write(&cover, encoded_image([255, 0, 0], ImageFormat::Jpeg)).expect("write cover");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&cover, fs::Permissions::from_mode(0o640)).expect("chmod");
+        }
+        fs::write(album.join("back.jpg"), b"back scan").expect("write back scan");
+        let (artwork, _) = artwork_file(&root, ImageFormat::Png);
+
+        let outcome = apply_artwork_to_track(&track, &artwork).expect("apply artwork");
+
+        assert_eq!(outcome.cover_path_override.as_ref(), Some(&cover));
+        let written = fs::read(&cover).expect("read cover");
+        assert_eq!(image::guess_format(&written).ok(), Some(ImageFormat::Jpeg));
+        let decoded = image::load_from_memory(&written).expect("decode cover");
+        assert_eq!(decoded.dimensions(), (4, 4));
+        let pixel = decoded.get_pixel(1, 1);
+        assert!(pixel[0] < 16 && pixel[2] > 239, "{pixel:?}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&cover).expect("metadata").permissions().mode();
+            assert_eq!(mode & 0o777, 0o640);
+        }
+        assert_eq!(
+            fs::read(album.join("back.jpg")).expect("read back"),
+            b"back scan"
+        );
+        assert_eq!(dir_entries(&album), ["01.flac", "Cover.JPG", "back.jpg"]);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[test]
+    fn jpeg_artwork_keeps_a_cover_jpeg_name() {
+        let root = test_dir("cover-jpeg");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let track = album.join("01.flac");
+        write_test_flac(&track, &[("ALBUM", "Album")]);
+        let cover = album.join("cover.jpeg");
+        fs::write(&cover, b"old cover").expect("write cover");
+        let (artwork, artwork_bytes) = artwork_file(&root, ImageFormat::Jpeg);
+
+        let outcome = apply_artwork_to_track(&track, &artwork).expect("apply artwork");
+
+        assert_eq!(outcome.cover_path_override.as_ref(), Some(&cover));
+        assert_eq!(fs::read(&cover).expect("read cover"), artwork_bytes);
+        assert_eq!(dir_entries(&album), ["01.flac", "cover.jpeg"]);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[test]
+    fn a_new_cover_does_not_replace_what_already_has_its_name() {
+        let root = test_dir("name-taken");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let track = album.join("01.flac");
+        write_test_flac(&track, &[("ALBUM", "Album")]);
+        fs::write(album.join("back.jpg"), b"back scan").expect("write back scan");
+        fs::create_dir(album.join("cover.png")).expect("create directory");
+        let (artwork, _) = artwork_file(&root, ImageFormat::Png);
+
+        let error = apply_artwork_to_track(&track, &artwork).expect_err("name is taken");
+
+        assert!(error.to_string().contains("already exists"), "{error}");
+        assert!(album.join("cover.png").is_dir());
+        assert_eq!(dir_entries(&album), ["01.flac", "back.jpg", "cover.png"]);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[test]
+    fn embedded_artwork_updates_every_track_of_a_compilation() {
+        let root = test_dir("compilation");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let tracks = [
+            ("01.flac", "First Artist", "Hits Collection"),
+            ("02.flac", "Second Artist", "Hits Collection"),
+            ("03.flac", "Third Artist", "  hits   COLLECTION "),
+        ]
+        .map(|(name, artist, album_title)| {
+            let path = album.join(name);
+            write_test_flac(&path, &[("ARTIST", artist), ("ALBUM", album_title)]);
+            path
+        });
+        let other = album.join("04.flac");
+        write_test_flac(
+            &other,
+            &[("ARTIST", "First Artist"), ("ALBUM", "Other Album")],
+        );
+        let other_bytes = fs::read(&other).expect("read other album");
+        let (artwork, artwork_bytes) = artwork_file(&root, ImageFormat::Png);
+
+        let outcome = apply_artwork_to_track(&tracks[1], &artwork).expect("apply artwork");
+
+        assert_eq!(outcome.affected_track_paths, tracks);
+        assert_eq!(outcome.cover_path_override, None);
+        assert_eq!(outcome.failure_summary(), None);
+        for track in &tracks {
+            assert_eq!(
+                front_cover(track).as_ref(),
+                Some(&artwork_bytes),
+                "{track:?}"
+            );
+        }
+        assert_eq!(fs::read(&other).expect("read other album"), other_bytes);
+        assert_eq!(
+            dir_entries(&album),
+            ["01.flac", "02.flac", "03.flac", "04.flac"]
+        );
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[test]
+    fn embedded_artwork_changes_nothing_when_an_album_track_cannot_take_it() {
+        let root = test_dir("unwritable-member");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let flac = album.join("01.flac");
+        write_test_flac(&flac, &[("ARTIST", "Artist"), ("ALBUM", "Album")]);
+        // Raw DTS has an appended APE tag for its text but cannot hold pictures.
+        let dts = album.join("02.dts");
+        crate::raw_audio::write_test_apev2_file(&dts, &[("Album", "Album")], true);
+        let before = [&flac, &dts].map(|path| fs::read(path).expect("read track"));
+        let (artwork, _) = artwork_file(&root, ImageFormat::Png);
+
+        let error = apply_artwork_to_track(&flac, &artwork).expect_err("DTS cannot be updated");
+
+        let message = error.to_string();
+        assert!(message.contains("1 of 2 album tracks"), "{message}");
+        assert!(message.contains("none were changed"), "{message}");
+        assert!(message.contains("02.dts ("), "{message}");
+        assert!(!message.contains("01.flac"), "{message}");
+        let after = [&flac, &dts].map(|path| fs::read(path).expect("read track"));
+        assert_eq!(after, before);
+        assert_eq!(dir_entries(&album), ["01.flac", "02.dts"]);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_artwork_changes_nothing_when_an_album_track_is_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_dir("read-only-member");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let tracks = ["01.flac", "02.flac", "03.flac"].map(|name| {
+            let path = album.join(name);
+            write_test_flac(&path, &[("ALBUM", "Album")]);
+            path
+        });
+        fs::set_permissions(&tracks[2], fs::Permissions::from_mode(0o444)).expect("chmod");
+        // Root ignores file permissions, so the check only holds for normal users.
+        if fs::OpenOptions::new().write(true).open(&tracks[2]).is_ok() {
+            fs::remove_dir_all(root).expect("remove test dir");
+            return;
+        }
+        let before = tracks
+            .iter()
+            .map(|path| fs::read(path).expect("read track"))
+            .collect::<Vec<_>>();
+        let (artwork, _) = artwork_file(&root, ImageFormat::Png);
+
+        let error = apply_artwork_to_track(&tracks[0], &artwork).expect_err("read-only track");
+
+        let message = error.to_string();
+        assert!(message.contains("03.flac ("), "{message}");
+        assert!(message.contains("for writing"), "{message}");
+        let after = tracks
+            .iter()
+            .map(|path| fs::read(path).expect("read track"))
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        assert_eq!(dir_entries(&album), ["01.flac", "02.flac", "03.flac"]);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[test]
+    fn tracks_that_fail_while_written_are_reported_and_the_rest_are_written() {
+        let tracks = ["01.flac", "02.flac", "03.flac"].map(|name| Path::new("/music").join(name));
+
+        let outcome = write_each_track(tracks.to_vec(), |path| {
+            if path.ends_with("02.flac") {
+                Err("disk full".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(
+            outcome.affected_track_paths,
+            [tracks[0].clone(), tracks[2].clone()]
+        );
+        assert_eq!(
+            outcome.failed_tracks,
+            [(tracks[1].clone(), "disk full".to_string())]
+        );
+        assert_eq!(
+            outcome.failure_summary().as_deref(),
+            Some("album art was applied to 2 of 3 album tracks; not updated: 02.flac (disk full)")
+        );
+    }
+
+    #[test]
+    fn applied_front_cover_comes_first_and_becomes_the_library_cover() {
+        use lofty::config::WriteOptions;
+        use lofty::file::AudioFile;
+
+        let root = test_dir("front-first");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let track = album.join("01.flac");
+        write_test_flac(&track, &[("ALBUM", "Album")]);
+        // Covers tagged as "other" are common; readers show the first picture.
+        let old_cover = encoded_image([255, 0, 0], ImageFormat::Jpeg);
+        let old_front = encoded_image([0, 255, 0], ImageFormat::Jpeg);
+        let mut tagged = lofty::read_from_path(&track).expect("read fixture");
+        let tag = tagged.primary_tag_mut().expect("Vorbis comments");
+        for (bytes, kind) in [
+            (&old_cover, PictureType::Other),
+            (&old_front, PictureType::CoverFront),
+        ] {
+            tag.push_picture(
+                Picture::unchecked(bytes.clone())
+                    .mime_type(MimeType::Jpeg)
+                    .pic_type(kind)
+                    .build(),
+            );
+        }
+        tagged
+            .save_to_path(&track, WriteOptions::default())
+            .expect("save fixture pictures");
+        let previous_cover = crate::library::read_track_info(&track).cover_path;
+        assert!(previous_cover.ends_with(&format!("{:x}.jpg", md5::compute(&old_cover))));
+        let (artwork, artwork_bytes) = artwork_file(&root, ImageFormat::Png);
+
+        apply_artwork_to_track(&track, &artwork).expect("apply artwork");
+
+        let tagged = lofty::read_from_path(&track).expect("read tags");
+        let pictures = tagged.primary_tag().expect("primary tag").pictures();
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(pictures[0].pic_type(), PictureType::CoverFront);
+        assert_eq!(pictures[0].data(), artwork_bytes);
+        assert_eq!(pictures[1].pic_type(), PictureType::Other);
+        assert_eq!(pictures[1].data(), old_cover);
+        // The library row moves to the new content-addressed entry; the old
+        // entry stays for the cleanup after the next scan.
+        let cover = crate::library::read_track_info(&track).cover_path;
+        assert!(
+            cover.ends_with(&format!("{:x}.png", md5::compute(&artwork_bytes))),
+            "{cover}"
+        );
+        assert_eq!(fs::read(&cover).expect("read new entry"), artwork_bytes);
+        assert!(Path::new(&previous_cover).is_file());
+        assert_eq!(dir_entries(&album), ["01.flac"]);
+        fs::remove_dir_all(root).expect("remove test dir");
     }
 
     #[test]
     fn embedded_artwork_write_keeps_other_tag_data() {
-        use crate::tag_write::{write_test_flac, write_test_mp3_with_id3v23};
+        use crate::tag_write::write_test_mp3_with_id3v23;
         use lofty::config::ParseOptions;
         use lofty::file::AudioFile;
         use lofty::ogg::OggPictureStorage;
@@ -491,12 +829,7 @@ mod tests {
         assert_eq!(tag.pictures().len(), 1);
         assert_eq!(tag.get_string(ItemKey::RecordingDate), Some("1997-05-12"));
 
-        let mut entries = fs::read_dir(&dir)
-            .expect("read dir")
-            .map(|entry| entry.expect("entry").file_name())
-            .collect::<Vec<_>>();
-        entries.sort();
-        assert_eq!(entries, ["01.flac", "02.mp3"]);
+        assert_eq!(dir_entries(&dir), ["01.flac", "02.mp3"]);
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 }

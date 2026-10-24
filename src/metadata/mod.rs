@@ -29,6 +29,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::TimeBase;
 
+use crate::folder_cover::{cover_candidates, find_folder_cover};
 use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, raw_surround_format_label,
     read_appended_apev2_text_metadata,
@@ -559,9 +560,9 @@ fn codec_label(codec: CodecType) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bytes_to_kbps, encoded_picture, format_label_from_extension, load_metadata_for_path,
-        needs_stream_details_probe, write_wav_with_picture, EmbeddedCoverCache, MetadataEvent,
-        MetadataService, TrackMetadata,
+        bytes_to_kbps, encoded_picture, format_label_from_extension, load_folder_cover_art,
+        load_metadata_for_path, needs_stream_details_probe, write_wav_with_picture,
+        EmbeddedCoverCache, MetadataEvent, MetadataService, TrackMetadata,
     };
     use crate::raw_audio::write_test_apev2_file;
     use std::path::PathBuf;
@@ -676,6 +677,27 @@ mod tests {
     }
 
     #[test]
+    fn folder_cover_uses_the_library_cover_choice() {
+        let dir = metadata_test_path("folder-cover", "d");
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let track = dir.join("01.flac");
+        std::fs::write(&track, b"not audio").expect("write track fixture");
+        let back = encoded_picture(30, image::ImageFormat::Jpeg);
+        let front = encoded_picture(31, image::ImageFormat::Png);
+        std::fs::write(dir.join("back.jpg"), &back).expect("write back scan");
+        std::fs::write(dir.join("Front.PNG"), &front).expect("write front cover");
+
+        let metadata = load_metadata_for_path(&track);
+
+        let expected = dir.join("Front.PNG");
+        assert_eq!(metadata.cover_art_path.as_deref(), expected.to_str());
+        let (_, _, rgba) = load_folder_cover_art(&track).expect("decoded cover");
+        assert_eq!(rgba[0], 31);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn embedded_cover_is_cached_with_its_original_bytes_and_decoded_for_display() {
         let dir = metadata_test_path("embedded-cover", "d");
         std::fs::create_dir_all(&dir).expect("create fixture dir");
@@ -721,55 +743,16 @@ mod tests {
     }
 }
 
-fn folder_cover_candidates(track_path: &Path) -> Vec<PathBuf> {
-    let Some(dir) = track_path.parent() else {
-        return Vec::new();
-    };
-    let mut candidates = vec![
-        "cover.jpg",
-        "cover.jpeg",
-        "cover.png",
-        "folder.jpg",
-        "folder.jpeg",
-        "folder.png",
-        "front.jpg",
-        "front.png",
-    ]
-    .into_iter()
-    .map(|n| dir.join(n))
-    .collect::<Vec<_>>();
-
-    if let Ok(read_dir) = std::fs::read_dir(dir) {
-        for ent in read_dir.flatten() {
-            let p = ent.path();
-            if !p.is_file() {
-                continue;
-            }
-            let Some(ext) = p.extension().and_then(|e| e.to_str()) else {
-                continue;
-            };
-            let ext = ext.to_ascii_lowercase();
-            if (ext == "jpg" || ext == "jpeg" || ext == "png")
-                && !candidates.iter().any(|c| c == &p)
-            {
-                candidates.push(p);
-            }
-        }
-    }
-
-    candidates
-}
-
 fn find_folder_cover_path(track_path: &Path) -> Option<PathBuf> {
-    folder_cover_candidates(track_path)
-        .into_iter()
-        .find(|path| path.is_file())
+    track_path.parent().and_then(find_folder_cover)
 }
 
 fn load_folder_cover_art(track_path: &Path) -> Option<(usize, usize, Vec<u8>)> {
-    folder_cover_candidates(track_path)
+    track_path
+        .parent()
+        .map(cover_candidates)
+        .unwrap_or_default()
         .into_iter()
-        .filter(|path| path.is_file())
         .find_map(|path| decode_cover_rgba(&std::fs::read(path).ok()?))
 }
 

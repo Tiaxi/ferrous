@@ -15,6 +15,7 @@ use lofty::prelude::{Accessor, ItemKey};
 use rusqlite::{params, Connection};
 use walkdir::WalkDir;
 
+use crate::folder_cover::find_folder_cover;
 use crate::metadata::cached_embedded_cover_path;
 use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, read_appended_apev2_text_metadata,
@@ -1977,53 +1978,10 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
 }
 
 fn find_cover_path_for_track(path: &Path) -> String {
-    let Some(dir) = path.parent() else {
-        return String::new();
-    };
-    find_image_in_dir(dir).unwrap_or_default()
-}
-
-fn find_image_in_dir(dir: &Path) -> Option<String> {
-    let mut candidates = vec![
-        "cover.jpg",
-        "cover.jpeg",
-        "cover.png",
-        "folder.jpg",
-        "folder.jpeg",
-        "folder.png",
-        "front.jpg",
-        "front.png",
-    ]
-    .into_iter()
-    .map(|name| dir.join(name))
-    .collect::<Vec<_>>();
-
-    let Ok(read_dir) = fs::read_dir(dir) else {
-        return None;
-    };
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        let ext = ext.to_ascii_lowercase();
-        if (ext == "jpg" || ext == "jpeg" || ext == "png")
-            && !candidates.iter().any(|candidate| candidate == &path)
-        {
-            candidates.push(path);
-        }
-    }
-
-    candidates.into_iter().find_map(|candidate| {
-        if candidate.is_file() {
-            Some(candidate.to_string_lossy().to_string())
-        } else {
-            None
-        }
-    })
+    path.parent()
+        .and_then(find_folder_cover)
+        .map(|cover| cover.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn unix_ts_i64() -> i64 {
@@ -2395,6 +2353,34 @@ mod tests {
         let mp3 = root.join("song.mp3");
         let cover = root.join("cover.jpg");
         write_stub(&mp3, b"not-real-mp3");
+        write_stub(&cover, b"not-real-jpg");
+
+        let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("scan");
+
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert_eq!(
+            snapshot.tracks[0].cover_path,
+            cover.to_string_lossy().to_string()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_picks_a_recognised_cover_name_in_any_case_over_other_images() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+
+        let root = test_dir("cover-case");
+        fs::create_dir_all(&root).expect("mkdir");
+        let mp3 = root.join("song.mp3");
+        let cover = root.join("Cover.JPG");
+        write_stub(&mp3, b"not-real-mp3");
+        for image in ["a.jpg", "back.jpg", "booklet01.png"] {
+            write_stub(&root.join(image), b"not-real-jpg");
+        }
         write_stub(&cover, b"not-real-jpg");
 
         let _ = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("scan");

@@ -2,6 +2,7 @@
 
 pub mod analysis;
 pub mod artwork;
+mod folder_cover;
 pub mod frontend_bridge;
 pub mod fuzzy_match;
 pub mod lastfm;

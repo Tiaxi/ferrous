@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
+use crate::folder_cover::find_folder_cover;
 use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
 
 use super::LibrarySortMode;
@@ -934,29 +935,7 @@ fn resolve_album_cover(all_tracks: &[TrackLeaf]) -> Option<String> {
 }
 
 fn find_image_in_dir(dir: &Path) -> Option<String> {
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return None;
-    };
-
-    let mut candidates = Vec::new();
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        let ext = ext.to_ascii_lowercase();
-        if ext == "jpg" || ext == "jpeg" || ext == "png" {
-            candidates.push(path.to_string_lossy().to_string());
-        }
-    }
-    if candidates.is_empty() {
-        return None;
-    }
-    candidates.sort_by(|a, b| natural_cmp(a, b));
-    candidates.into_iter().next()
+    find_folder_cover(dir).map(|cover| cover.to_string_lossy().into_owned())
 }
 
 fn order_tracks(tracks: &[TrackLeaf]) -> Vec<OrderedTrack> {
@@ -1894,6 +1873,34 @@ mod tests {
                 "disc section should not have independent year"
             );
         }
+    }
+
+    #[test]
+    fn album_folder_cover_prefers_front_over_an_alphabetically_earlier_back_scan() {
+        let dir =
+            std::env::temp_dir().join(format!("ferrous-tree-front-cover-{}", std::process::id()));
+        let album_dir = dir.join("Artist/Album");
+        std::fs::create_dir_all(&album_dir).expect("fixture directory");
+        for image in ["back.jpg", "front.jpg"] {
+            std::fs::write(album_dir.join(image), b"fixture").expect("image fixture");
+        }
+        let album = AlbumNodeBuilder {
+            folder_name: "Album".to_string(),
+            folder_path: album_dir.clone(),
+            root_tracks: vec![leaf(
+                &album_dir.join("01.flac").to_string_lossy(),
+                "Album",
+                Some(2020),
+                Some(1),
+            )],
+            sections: BTreeMap::new(),
+        };
+
+        let resolved = resolve_album(&album);
+
+        let front = album_dir.join("front.jpg");
+        assert_eq!(resolved.cover_path.as_deref(), front.to_str());
+        std::fs::remove_dir_all(dir).expect("remove fixture directory");
     }
 
     #[test]
