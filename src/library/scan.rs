@@ -16,6 +16,7 @@ use lofty::prelude::{Accessor, ItemKey};
 use rusqlite::{params, Connection, TransactionBehavior};
 use walkdir::WalkDir;
 
+use crate::file_edit_lock;
 use crate::folder_cover::find_folder_cover;
 use crate::metadata::EmbeddedCoverCache;
 use crate::no_replace::rename_no_replace;
@@ -913,7 +914,7 @@ impl DiskRenameJournal {
     fn rename(&mut self, file: usize, from: &Path, to: &Path) -> std::io::Result<()> {
         #[cfg(test)]
         self.run_before_move(from, to);
-        rename_no_replace(from, to)?;
+        rename_between_edits(from, to)?;
         self.record(file, from, to);
         Ok(())
     }
@@ -982,7 +983,7 @@ impl DiskRenameJournal {
             } else {
                 #[cfg(test)]
                 self.run_before_move(&to, &from);
-                rename_no_replace(&to, &from).map_err(|e| {
+                rename_between_edits(&to, &from).map_err(|e| {
                     if e.kind() == std::io::ErrorKind::AlreadyExists {
                         format!("{} already exists", from.to_string_lossy())
                     } else {
@@ -1027,6 +1028,14 @@ impl DiskRenameJournal {
         }
         message
     }
+}
+
+/// Renames `from` to `to` without replacing anything, while no tag save is
+/// editing `from`. A save that waited for the rename then finds no file,
+/// instead of writing the old file back under the old name.
+fn rename_between_edits(from: &Path, to: &Path) -> std::io::Result<()> {
+    let _edit = file_edit_lock::lock(from);
+    rename_no_replace(from, to)
 }
 
 /// Whether `path` names a directory entry, also a dangling symbolic link,

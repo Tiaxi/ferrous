@@ -13,6 +13,7 @@ use lofty::prelude::Accessor;
 use lofty::tag::Tag;
 use url::Url;
 
+use crate::file_edit_lock;
 use crate::folder_cover::{find_folder_cover, find_named_cover};
 use crate::raw_audio::{is_raw_surround_file, read_appended_apev2_text_metadata};
 use crate::safe_save::{check_rewritable, create_file, replace_file};
@@ -318,8 +319,14 @@ fn rewrite_embedded_artwork_for_file(
     path: &Path,
     artwork: &NormalizedArtwork,
 ) -> Result<(), String> {
+    let edit = file_edit_lock::lock(path);
     let (file_type, tag) = edited_artwork_tag(path, artwork)?;
-    save_tag(path, file_type, &tag).map_err(|err| format!("failed to update artwork: {err}"))
+    #[cfg(test)]
+    edit.checkpoint();
+    let saved =
+        save_tag(path, file_type, &tag).map_err(|err| format!("failed to update artwork: {err}"));
+    drop(edit);
+    saved
 }
 
 /// The tag of `path` with `artwork` as its front cover.

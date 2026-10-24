@@ -23,6 +23,8 @@ pub(crate) struct RawAudioTagMetadata {
     pub(crate) album_artist: Option<String>,
     pub(crate) genre: Option<String>,
     pub(crate) year: Option<i32>,
+    /// The `Year` item as written, such as a full date.
+    pub(crate) year_text: Option<String>,
     pub(crate) track_no: Option<u32>,
     pub(crate) track_total: Option<u32>,
     pub(crate) disc_no: Option<u32>,
@@ -38,6 +40,7 @@ impl RawAudioTagMetadata {
             && self.album_artist.is_none()
             && self.genre.is_none()
             && self.year.is_none()
+            && self.year_text.is_none()
             && self.track_no.is_none()
             && self.track_total.is_none()
             && self.disc_no.is_none()
@@ -247,6 +250,8 @@ fn apply_ape_text_item(metadata: &mut RawAudioTagMetadata, key: &str, value: &st
         metadata.genre = Some(value.to_string());
     } else if key.eq_ignore_ascii_case("year") {
         metadata.year = parse_ape_year(value);
+        let text = value.trim();
+        metadata.year_text = (!text.is_empty()).then(|| text.to_string());
     } else if key.eq_ignore_ascii_case("track") {
         let (track_no, track_total) = parse_ape_number_pair(value);
         metadata.track_no = track_no;
@@ -701,6 +706,7 @@ mod tests {
         assert_eq!(metadata.title.as_deref(), Some("New"));
         assert_eq!(metadata.artist, None);
         assert_eq!(metadata.year, Some(1997));
+        assert_eq!(metadata.year_text.as_deref(), Some("1997-05-12"));
         assert_eq!(metadata.track_no, Some(1));
         assert_eq!(metadata.track_total, Some(9));
 

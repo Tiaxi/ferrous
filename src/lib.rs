@@ -2,6 +2,7 @@
 
 pub mod analysis;
 pub mod artwork;
+mod file_edit_lock;
 mod folder_cover;
 pub mod frontend_bridge;
 pub mod fuzzy_match;
