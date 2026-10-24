@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex, OnceLock,
+    Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError,
 };
 use std::time::{Duration, Instant};
 
@@ -346,6 +346,9 @@ struct GstPlaybackRuntime {
     consecutive_failures: u32,
     /// The first missing plugin reported in the current pipeline run.
     missing_plugin: Option<MissingPlugin>,
+    /// Shared with the about-to-finish callback and the probes on the
+    /// outputs of the pipeline's sources; see `InputSwitches`.
+    input_switches: Arc<InputSwitches>,
     #[cfg(test)]
     about_to_finish: Arc<AboutToFinishCalls>,
 }
@@ -462,6 +465,7 @@ impl GstPlaybackRuntime {
             soloed_channel: None,
             consecutive_failures: 0,
             missing_plugin: None,
+            input_switches: Arc::default(),
             #[cfg(test)]
             about_to_finish: Arc::default(),
         }
@@ -1292,12 +1296,18 @@ impl GstPlaybackRuntime {
     }
 
     /// Change the state of the pipeline, which activates the sources of a
-    /// new run; see `activate_sources`.
+    /// new run (see `activate_sources`), or ends the run at Ready or Null
+    /// (see `InputSwitches::end_run`).
     fn set_pipeline_state(
         &self,
         state: gst::State,
     ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
-        activate_sources(|| self.playbin.set_state(state))
+        let change = || activate_sources(|| self.playbin.set_state(state));
+        if state <= gst::State::Ready {
+            self.input_switches.end_run(change)
+        } else {
+            change()
+        }
     }
 
     /// Give the stopped pipeline the current track at `path`, which starts
@@ -2048,6 +2058,7 @@ fn start_gst_engine(
         stream_ends,
     );
     connect_type_finding_hold(&runtime.playbin);
+    runtime.input_switches.connect(&runtime.playbin);
     connect_about_to_finish(&runtime);
     runtime
         .playbin
@@ -2060,6 +2071,7 @@ fn connect_about_to_finish(runtime: &GstPlaybackRuntime) {
     let queue_state = Arc::clone(&runtime.queue_state);
     let stream_durations = Arc::clone(&runtime.stream_durations);
     let analysis_tx = runtime.analysis_tx.clone();
+    let input_switches = Arc::clone(&runtime.input_switches);
     #[cfg(test)]
     let calls = Arc::clone(&runtime.about_to_finish);
     // Runs on a streaming thread once the pipeline has read all of the
@@ -2074,9 +2086,12 @@ fn connect_about_to_finish(runtime: &GstPlaybackRuntime) {
                 .first()
                 .and_then(|value| value.get::<gst::Element>().ok())
             {
-                stage_successor(&queue_state, &stream_durations, &analysis_tx, |uri| {
-                    // Activates the successor's source.
-                    activate_sources(|| playbin.set_property("uri", uri));
+                // Not while the run ends, which drops the successor anyway.
+                input_switches.hand_over(|| {
+                    stage_successor(&queue_state, &stream_durations, &analysis_tx, |uri| {
+                        // Activates the successor's source.
+                        activate_sources(|| playbin.set_property("uri", uri));
+                    });
                 });
             }
             #[cfg(test)]
@@ -2130,7 +2145,7 @@ fn run_gst_engine(
     }
 
     bus.unset_sync_handler();
-    let _ = runtime.playbin.set_state(gst::State::Null);
+    let _ = runtime.set_pipeline_state(gst::State::Null);
 }
 
 /// A step of the engine: a command, or a burst of commands merged into one.
@@ -2377,6 +2392,426 @@ fn connect_type_finding_hold(playbin: &gst::Element) {
         });
         None
     });
+}
+
+/// Orders the state changes that end a pipeline run, to Ready or Null,
+/// against what uridecodebin3 does at a gapless switch under its state lock
+/// on streaming threads: it activates the successor's source when
+/// about-to-finish hands it over, and it switches its input to the
+/// successor once the input has drained.
+///
+/// A run ends with uridecodebin3 going from Paused to Ready. Holding its
+/// state lock, it marks itself as shutting down, which wakes a successor
+/// that waits for the input to drain, and then deactivates the outputs of
+/// its sources, which waits for their streaming threads. A streaming thread
+/// that meanwhile hands over a successor waits for that state lock, and so
+/// does one that brings a successor's first buffer to uridecodebin3 once
+/// the input has drained (`uri_src_block_probe` switches the input, and
+/// `free_source_handler` takes the lock). One that brings it before the
+/// input has drained waits for the drain, which the shutdown no longer
+/// announces. Each holds a lock that the state change goes on to wait for,
+/// the play items lock or a stream lock, so the engine thread and the
+/// streaming thread deadlock. The code involved is the same in `GStreamer`
+/// 1.24 and 1.28; see `GStreamer` issues 3490, 4137, 4310, and 4644.
+///
+/// So the end of a run waits for a handover or a switch in progress, and
+/// neither starts until the run has ended:
+///
+/// - about-to-finish hands over a successor only while the run does not
+///   end, as the end drops the successor anyway;
+/// - the first data of a successor's source is held at the source's output,
+///   in a block that the deactivation of the output flushes, until the input
+///   has drained and the run does not end. uridecodebin3 then switches to the
+///   successor at once, and the switch ends when the data has passed it.
+///
+/// The changes of state between Paused and Playing take neither the play
+/// items lock of uridecodebin3 nor stream locks, so a switch only waits for
+/// them; they are not ordered.
+#[derive(Default)]
+struct InputSwitches {
+    state: Mutex<InputSwitchState>,
+    /// Signalled when a handover or a switch has finished.
+    settled: Condvar,
+}
+
+#[derive(Default)]
+struct InputSwitchState {
+    /// The engine ends the run: it changes the pipeline's state to Ready or
+    /// Null.
+    ending: bool,
+    /// About-to-finish callbacks that hand over a successor.
+    handovers: usize,
+    /// The sources of the run, the `urisourcebin` of each input, in the
+    /// order of their activation.
+    sources: Vec<RunSource>,
+}
+
+struct RunSource {
+    bin: gst::glib::WeakRef<gst::Element>,
+    phase: SourcePhase,
+    outputs: Vec<SourceOutput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourcePhase {
+    /// uridecodebin3 has not taken data from the source yet. Its first data
+    /// waits at its outputs.
+    Waiting,
+    /// The first data was let through to uridecodebin3, which switches its
+    /// input to the source unless it is the input already.
+    Switching,
+    /// uridecodebin3 takes the data of the source: it is the input, or was.
+    Input,
+}
+
+struct SourceOutput {
+    /// The source's output pad, a ghost pad.
+    pad: gst::glib::WeakRef<gst::Pad>,
+    /// End of stream has passed uridecodebin3 at this output.
+    drained: bool,
+    /// The block of the output's first data, on the internal pad of the
+    /// output, until the source may be switched to.
+    hold: Option<(gst::glib::WeakRef<gst::Pad>, gst::PadProbeId)>,
+    /// The first data waits in the block.
+    held: bool,
+}
+
+/// Blocks to remove, outside the lock of `InputSwitches`.
+type Holds = Vec<(gst::glib::WeakRef<gst::Pad>, gst::PadProbeId)>;
+
+fn remove_holds(holds: Holds) {
+    for (pad, probe) in holds {
+        if let Some(pad) = pad.upgrade() {
+            pad.remove_probe(probe);
+        }
+    }
+}
+
+impl InputSwitchState {
+    fn source_of(&mut self, output: &gst::Pad) -> Option<&mut RunSource> {
+        self.sources.iter_mut().find(|source| {
+            source
+                .outputs
+                .iter()
+                .any(|known| known.pad.upgrade().as_ref() == Some(output))
+        })
+    }
+
+    fn output(&mut self, pad: &gst::Pad) -> Option<&mut SourceOutput> {
+        self.sources
+            .iter_mut()
+            .flat_map(|source| source.outputs.iter_mut())
+            .find(|known| known.pad.upgrade().as_ref() == Some(pad))
+    }
+
+    /// Whether uridecodebin3 may switch its input to a waiting source now:
+    /// the run does not end, no switch is in progress, and the input has
+    /// drained, so that the switch happens at once.
+    fn may_switch(&self) -> bool {
+        !self.ending
+            && self
+                .sources
+                .iter()
+                .all(|source| source.phase != SourcePhase::Switching)
+            && self
+                .sources
+                .iter()
+                .filter(|source| source.phase == SourcePhase::Input)
+                .flat_map(|source| source.outputs.iter())
+                .filter(|output| output.pad.upgrade().is_some())
+                .all(|output| output.drained)
+    }
+
+    /// Let the first waiting source whose data waits be switched to, if it
+    /// may be. Returns the blocks to remove.
+    fn release_next(&mut self) -> Holds {
+        if !self.may_switch() {
+            return Vec::new();
+        }
+        let Some(source) = self.sources.iter_mut().find(|source| {
+            source.phase == SourcePhase::Waiting && source.outputs.iter().any(|output| output.held)
+        }) else {
+            return Vec::new();
+        };
+        source.phase = SourcePhase::Switching;
+        source.take_holds()
+    }
+}
+
+impl RunSource {
+    fn take_holds(&mut self) -> Holds {
+        self.outputs
+            .iter_mut()
+            .filter_map(|output| {
+                output.held = false;
+                output.hold.take()
+            })
+            .collect()
+    }
+}
+
+impl InputSwitches {
+    fn lock(&self) -> MutexGuard<'_, InputSwitchState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run `end`, which changes the pipeline's state to Ready or Null, once
+    /// no handover or switch is in progress, and keep new ones from starting
+    /// until it has returned. Both take moments: a switch is let through
+    /// only once the input has drained, so uridecodebin3 does not wait for
+    /// the input.
+    fn end_run<R>(&self, end: impl FnOnce() -> R) -> R {
+        let mut state = self.lock();
+        state.ending = true;
+        while state.handovers > 0
+            || state
+                .sources
+                .iter()
+                .any(|source| source.phase == SourcePhase::Switching)
+        {
+            state = self
+                .settled
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(state);
+        let result = end();
+        let holds = {
+            let mut state = self.lock();
+            state.ending = false;
+            // The sources removed their outputs, which flushed the data that
+            // waited. A source that the next run reuses adds new ones.
+            state
+                .sources
+                .drain(..)
+                .flat_map(|mut source| source.take_holds())
+                .collect()
+        };
+        remove_holds(holds);
+        result
+    }
+
+    /// Run `hand_over`, which hands a successor to the pipeline, unless the
+    /// run ends.
+    fn hand_over(&self, hand_over: impl FnOnce()) {
+        {
+            let mut state = self.lock();
+            if state.ending {
+                return;
+            }
+            state.handovers += 1;
+        }
+        hand_over();
+        self.lock().handovers -= 1;
+        self.settled.notify_all();
+    }
+
+    /// Watch the outputs of every source that uridecodebin3 in `playbin`
+    /// adds.
+    fn connect(self: &Arc<Self>, playbin: &gst::Element) {
+        let switches = Arc::clone(self);
+        playbin.connect("deep-element-added", false, move |values| {
+            let element = values.get(2)?.get::<gst::Element>().ok()?;
+            if element
+                .factory()
+                .is_some_and(|factory| factory.name() == "urisourcebin")
+            {
+                let switches = Arc::clone(&switches);
+                // Connected after uridecodebin3's own handler, which blocks
+                // the outputs of a successor in a probe, so the probes added
+                // here on the same pad come after uridecodebin3's.
+                element.connect_pad_added(move |bin, pad| switches.watch_output(bin, pad));
+            }
+            None
+        });
+    }
+
+    fn watch_output(self: &Arc<Self>, bin: &gst::Element, pad: &gst::Pad) {
+        let Some(internal) = pad
+            .downcast_ref::<gst::GhostPad>()
+            .and_then(gst::prelude::ProxyPadExt::internal)
+        else {
+            return;
+        };
+        if pad.direction() != gst::PadDirection::Src {
+            return;
+        }
+        let mut state = self.lock();
+        let known = state
+            .sources
+            .iter()
+            .position(|source| source.bin.upgrade().as_ref() == Some(bin));
+        let index = known.unwrap_or_else(|| {
+            state.sources.push(RunSource {
+                bin: bin.downgrade(),
+                phase: SourcePhase::Waiting,
+                outputs: Vec::new(),
+            });
+            state.sources.len() - 1
+        });
+        let switches = Arc::clone(self);
+        let output = pad.downgrade();
+        // Added under the lock, so the block is known before data arrives.
+        let hold = internal.add_probe(
+            gst::PadProbeType::BLOCK
+                | gst::PadProbeType::BUFFER
+                | gst::PadProbeType::BUFFER_LIST
+                | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                if is_event_but_gap(info) {
+                    return gst::PadProbeReturn::Pass;
+                }
+                output
+                    .upgrade()
+                    .map_or(gst::PadProbeReturn::Remove, |output| {
+                        switches.first_data(&output)
+                    })
+            },
+        );
+        state.sources[index].outputs.push(SourceOutput {
+            pad: pad.downgrade(),
+            drained: false,
+            hold: hold.map(|probe| (internal.upcast_ref::<gst::Pad>().downgrade(), probe)),
+            held: false,
+        });
+        drop(state);
+
+        let switches = Arc::clone(self);
+        let output = pad.downgrade();
+        internal.add_probe(
+            gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |internal, info| {
+                if let (Some(output), Some(gst::PadProbeData::Event(event))) =
+                    (output.upgrade(), &info.data)
+                {
+                    switches.watch_drain(internal.upcast_ref(), &output, event);
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+
+        // Runs after uridecodebin3's block of a successor's output, so the
+        // first data that passes it has passed the switch.
+        let switches = Arc::clone(self);
+        pad.add_probe(
+            gst::PadProbeType::BUFFER
+                | gst::PadProbeType::BUFFER_LIST
+                | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |output, info| {
+                if is_event_but_gap(info) {
+                    return gst::PadProbeReturn::Ok;
+                }
+                switches.switched(output);
+                gst::PadProbeReturn::Remove
+            },
+        );
+    }
+
+    /// The first data of `output` arrived at its internal pad, before
+    /// uridecodebin3. Let it through if its source may take part in the
+    /// input, and hold it otherwise.
+    fn first_data(&self, output: &gst::Pad) -> gst::PadProbeReturn {
+        let mut state = self.lock();
+        let may_switch = state.may_switch();
+        let Some(source) = state.source_of(output) else {
+            // A source of a run that has ended.
+            return gst::PadProbeReturn::Remove;
+        };
+        let holds = match source.phase {
+            SourcePhase::Input | SourcePhase::Switching => Vec::new(),
+            SourcePhase::Waiting if may_switch => {
+                source.phase = SourcePhase::Switching;
+                source.take_holds()
+            }
+            SourcePhase::Waiting => {
+                if let Some(own) = state.output(output) {
+                    own.held = true;
+                }
+                return gst::PadProbeReturn::Ok;
+            }
+        };
+        if let Some(own) = state.output(output) {
+            own.hold = None;
+        }
+        drop(state);
+        // The other outputs of the source; this one's block goes with the
+        // returned value.
+        let own = output
+            .downcast_ref::<gst::GhostPad>()
+            .and_then(gst::prelude::ProxyPadExt::internal)
+            .map(Cast::upcast::<gst::Pad>);
+        remove_holds(
+            holds
+                .into_iter()
+                .filter(|(pad, _)| pad.upgrade() != own)
+                .collect(),
+        );
+        gst::PadProbeReturn::Remove
+    }
+
+    /// Data of `output` passed uridecodebin3, which has switched its input
+    /// to the output's source if it was not the input yet.
+    fn switched(&self, output: &gst::Pad) {
+        let mut state = self.lock();
+        if let Some(source) = state.source_of(output) {
+            source.phase = SourcePhase::Input;
+        }
+        drop(state);
+        self.settled.notify_all();
+    }
+
+    /// Track whether `output` has drained, from the `event` at its
+    /// `internal` pad.
+    fn watch_drain(self: &Arc<Self>, internal: &gst::Pad, output: &gst::Pad, event: &gst::Event) {
+        match event.type_() {
+            gst::EventType::Eos => {
+                let switches = Arc::clone(self);
+                let output = output.downgrade();
+                let drained = move || {
+                    if let Some(output) = output.upgrade() {
+                        switches.drained(&output);
+                    }
+                };
+                // The end of stream drains the input once uridecodebin3 has
+                // taken it, which is when the push that brings it returns.
+                match internal.peer() {
+                    Some(peer) => {
+                        peer.add_probe(gst::PadProbeType::IDLE, move |_, _| {
+                            drained();
+                            gst::PadProbeReturn::Remove
+                        });
+                    }
+                    None => drained(),
+                }
+            }
+            gst::EventType::StreamStart | gst::EventType::Segment => {
+                if let Some(output) = self.lock().output(output) {
+                    output.drained = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn drained(&self, output: &gst::Pad) {
+        let holds = {
+            let mut state = self.lock();
+            if let Some(output) = state.output(output) {
+                output.drained = true;
+            }
+            state.release_next()
+        };
+        remove_holds(holds);
+    }
+}
+
+/// Whether the probe `info` carries an event other than a gap, which
+/// uridecodebin3 lets through to a successor that it has not switched to.
+fn is_event_but_gap(info: &gst::PadProbeInfo) -> bool {
+    matches!(
+        &info.data,
+        Some(gst::PadProbeData::Event(event)) if event.type_() != gst::EventType::Gap
+    )
 }
 
 /// While a seek is prepared, holds back the end of every stream that the
@@ -5528,6 +5963,525 @@ mod engine_tests {
             *second.lock().unwrap(),
             Some(ActivationRace::TypeFindingHeld)
         );
+    }
+
+    /// How long a `SwitchHold` holds the state change it released the
+    /// successor in, to see what uridecodebin3 does with it.
+    const SWITCH_RACE_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// How uridecodebin3's switch of its input to a successor met the state
+    /// change of the engine that a `SwitchHold` released the successor in.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SwitchRace {
+        /// The engine held the successor back until its state change had
+        /// returned.
+        HeldBack,
+        /// uridecodebin3 switched to the successor during the state change,
+        /// which can deadlock.
+        Switched,
+        /// Neither happened within `TIMEOUT`.
+        Neither,
+    }
+
+    /// Where in its state change the engine releases a held successor.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ReleaseIn {
+        /// While it deactivates the output of uridecodebin3, on the way
+        /// down to Ready.
+        Deactivation,
+        /// Once decodebin3 inside uridecodebin3 has reached Playing.
+        Playing,
+    }
+
+    #[derive(Default)]
+    struct SwitchHoldState {
+        /// The block of the successor's first buffer, before it reaches the
+        /// output of its `urisourcebin`.
+        block: Option<(gst::Pad, gst::PadProbeId)>,
+        /// The block was set up. Later runs that read the file are not held.
+        blocked: bool,
+        /// The first buffer reached the block.
+        reached: bool,
+        /// The output pad of the successor's `urisourcebin`.
+        output: Option<gst::Pad>,
+        /// uridecodebin3 linked the output: it switches to the successor.
+        switching: bool,
+        release_in: Option<ReleaseIn>,
+        race: Option<SwitchRace>,
+    }
+
+    /// Holds the first buffer of the successor that reads a file before
+    /// uridecodebin3 sees it, so the input switch to the successor waits,
+    /// and releases it inside the engine's next state change of
+    /// uridecodebin3, once armed.
+    #[derive(Default)]
+    struct SwitchHold {
+        state: Mutex<SwitchHoldState>,
+    }
+
+    impl SwitchHold {
+        /// Hold the successor that reads `file` in the pipeline `playbin`.
+        fn new(playbin: &gst::Element, file: &Path) -> Arc<Self> {
+            let hold = Arc::new(Self::default());
+            let reads_file = {
+                let file = file.to_path_buf();
+                move |bin: &gst::Element| {
+                    bin.factory()
+                        .is_some_and(|factory| factory.name() == "urisourcebin")
+                        && input_file(Some(bin.upcast_ref())).as_ref() == Some(&file)
+                }
+            };
+            let state = Arc::downgrade(&hold);
+            playbin.connect("deep-element-added", false, move |values| {
+                let element = values.get(2)?.get::<gst::Element>().ok()?;
+                let hold = state.upgrade()?;
+                if reads_file(&element) {
+                    element.connect_pad_added(move |_, pad| hold.watch_output(pad));
+                }
+                None
+            });
+            hold
+        }
+
+        fn watch_output(self: &Arc<Self>, pad: &gst::Pad) {
+            // The pad that feeds the output, the source pad of the
+            // multiqueue of `urisourcebin`, which carries no other blocks.
+            if let Some(feed) = pad
+                .downcast_ref::<gst::GhostPad>()
+                .and_then(gst::prelude::ProxyPadExt::internal)
+                .and_then(|internal| internal.peer())
+            {
+                self.block(&feed);
+            }
+            self.state.lock().unwrap().output = Some(pad.clone());
+            let hold = Arc::downgrade(self);
+            // uridecodebin3 links the output inside its switch, holding its
+            // play items lock and before it takes its state lock.
+            pad.connect_linked(move |_, _| {
+                if let Some(hold) = hold.upgrade() {
+                    hold.state.lock().unwrap().switching = true;
+                }
+            });
+        }
+
+        fn block(self: &Arc<Self>, pad: &gst::Pad) {
+            let mut state = self.state.lock().unwrap();
+            if std::mem::replace(&mut state.blocked, true) {
+                return;
+            }
+            let hold = Arc::downgrade(self);
+            let probe = pad
+                .add_probe(
+                    gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+                    move |_, _| {
+                        if let Some(hold) = hold.upgrade() {
+                            hold.state.lock().unwrap().reached = true;
+                        }
+                        gst::PadProbeReturn::Ok
+                    },
+                )
+                .unwrap();
+            state.block = Some((pad.clone(), probe));
+        }
+
+        fn reached(&self) -> bool {
+            self.state.lock().unwrap().reached
+        }
+
+        fn race(&self) -> Option<SwitchRace> {
+            self.state.lock().unwrap().race
+        }
+
+        /// Release the successor inside the next state change of the
+        /// uridecodebin3 of `playbin`, in `release_in`.
+        fn arm(self: &Arc<Self>, playbin: &gst::Element, release_in: ReleaseIn) {
+            self.state.lock().unwrap().release_in = Some(release_in);
+            let hold = Arc::downgrade(self);
+            match release_in {
+                ReleaseIn::Deactivation => on_output_deactivation(playbin, move || {
+                    if let Some(hold) = hold.upgrade() {
+                        hold.release_in(ReleaseIn::Deactivation);
+                    }
+                }),
+                ReleaseIn::Playing => {
+                    let bus = playbin.bus().unwrap();
+                    bus.enable_sync_message_emission();
+                    bus.connect_sync_message(None, move |_, message| {
+                        let gst::MessageView::StateChanged(change) = message.view() else {
+                            return;
+                        };
+                        let decodebin = message
+                            .src()
+                            .and_then(|src| src.downcast_ref::<gst::Element>())
+                            .and_then(gst::Element::factory)
+                            .is_some_and(|factory| factory.name() == "decodebin3");
+                        if decodebin && change.current() == gst::State::Playing {
+                            if let Some(hold) = hold.upgrade() {
+                                hold.release_in(ReleaseIn::Playing);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        /// On the thread that changes the state, inside the state change:
+        /// release the successor, and wait until uridecodebin3 switches to
+        /// it or the engine holds it back.
+        fn release_in(&self, point: ReleaseIn) {
+            let (block, output) = {
+                let mut state = self.state.lock().unwrap();
+                if state.release_in != Some(point) {
+                    return;
+                }
+                state.release_in = None;
+                (state.block.take(), state.output.clone())
+            };
+            let internal = output
+                .and_then(|output| output.downcast::<gst::GhostPad>().ok())
+                .and_then(|output| output.internal());
+            // Runs in a callback of GStreamer, so it records instead of
+            // panicking.
+            let (Some((pad, probe)), Some(internal)) = (block, internal) else {
+                self.state.lock().unwrap().race = Some(SwitchRace::Neither);
+                return;
+            };
+            pad.remove_probe(probe);
+            let deadline = Instant::now() + SWITCH_RACE_TIMEOUT;
+            let race = loop {
+                if self.state.lock().unwrap().switching {
+                    break SwitchRace::Switched;
+                }
+                if internal.is_blocking() {
+                    break SwitchRace::HeldBack;
+                }
+                if Instant::now() >= deadline {
+                    break SwitchRace::Neither;
+                }
+                std::thread::sleep(millis(1));
+            };
+            self.state.lock().unwrap().race = Some(race);
+        }
+    }
+
+    /// Call `deactivating` on the thread that deactivates the outputs of the
+    /// uridecodebin3 of `playbin`, inside the state change of uridecodebin3
+    /// to Ready. A deactivated pad drops its caps. A bin deactivates its
+    /// outputs first: after uridecodebin3 has marked itself as shutting
+    /// down, and before its children change state.
+    fn on_output_deactivation(
+        playbin: &gst::Element,
+        deactivating: impl Fn() + Clone + Send + Sync + 'static,
+    ) {
+        let uridecodebin = playbin
+            .clone()
+            .downcast::<gst::Bin>()
+            .unwrap()
+            .iterate_recurse()
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|element| {
+                element
+                    .factory()
+                    .is_some_and(|factory| factory.name() == "uridecodebin3")
+            })
+            .expect("uridecodebin3");
+        for pad in uridecodebin.src_pads() {
+            let deactivating = deactivating.clone();
+            pad.connect_notify(Some("caps"), move |pad, _| {
+                if pad.current_caps().is_none() {
+                    deactivating();
+                }
+            });
+        }
+    }
+
+    /// Whether the end of the stream of every output of the source that
+    /// reads `file` in `playbin` has passed the output, so uridecodebin3
+    /// can switch to the successor at once.
+    fn source_drained(playbin: &gst::Element, file: &Path) -> bool {
+        playbin
+            .clone()
+            .downcast::<gst::Bin>()
+            .unwrap()
+            .iterate_recurse()
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|element| {
+                element
+                    .factory()
+                    .is_some_and(|factory| factory.name() == "urisourcebin")
+                    && input_file(Some(element.upcast_ref())).as_deref() == Some(file)
+            })
+            .is_some_and(|source| {
+                let outputs = source.src_pads();
+                !outputs.is_empty()
+                    && outputs
+                        .iter()
+                        .all(|output| output.sticky_event::<gst::event::Eos>(0).is_some())
+            })
+    }
+
+    impl Engine {
+        /// Play `queue` until `hold` holds the successor of the first track,
+        /// and the first track has drained, so that uridecodebin3 switches
+        /// to the successor as soon as it gets the successor's data.
+        #[track_caller]
+        fn play_until_switch_held(&mut self, queue: Vec<PathBuf>, hold: &SwitchHold) {
+            let first = queue[0].clone();
+            self.play_until_successor_held(queue, hold);
+            let playbin = self.playbin.clone();
+            self.wait_until("the first track did not drain", |_| {
+                source_drained(&playbin, &first)
+            });
+        }
+
+        /// Play `queue` until `hold` holds the successor of the first track.
+        #[track_caller]
+        fn play_until_successor_held(&mut self, queue: Vec<PathBuf>, hold: &SwitchHold) {
+            self.send(PlaybackCommand::LoadQueue(queue));
+            self.send(PlaybackCommand::Play);
+            self.wait_until("the successor was not held", |_| hold.reached());
+        }
+    }
+
+    /// Holds the end of the stream of the first source that reads a file,
+    /// before the source announces that it is about to finish, and
+    /// releases it inside the engine's next state change to Ready, once
+    /// armed.
+    #[derive(Default)]
+    struct EndOfStreamHold {
+        /// The block of the end of stream and whether it was reached.
+        block: Mutex<(Option<(gst::Pad, gst::PadProbeId)>, bool)>,
+        /// What the about-to-finish callback did with the released end.
+        handover: Mutex<Option<Handover>>,
+    }
+
+    /// What the engine's about-to-finish callback did when the end of the
+    /// stream that an `EndOfStreamHold` held was released inside a state
+    /// change to Ready.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Handover {
+        /// The callback returned during the state change.
+        Returned,
+        /// The callback did not return within `SWITCH_RACE_TIMEOUT`: it
+        /// waits for the state change.
+        Waiting,
+    }
+
+    impl EndOfStreamHold {
+        fn new(playbin: &gst::Element, file: &Path) -> Arc<Self> {
+            let hold = Arc::new(Self::default());
+            let file = file.to_path_buf();
+            let state = Arc::downgrade(&hold);
+            playbin.connect("deep-element-added", false, move |values| {
+                let bin = values.get(1)?.get::<gst::Element>().ok()?;
+                let element = values.get(2)?.get::<gst::Element>().ok()?;
+                let parses_file = element
+                    .factory()
+                    .is_some_and(|factory| factory.name() == "parsebin")
+                    && input_file(Some(bin.upcast_ref())).as_ref() == Some(&file);
+                if parses_file {
+                    let hold = state.upgrade()?;
+                    // Connected before urisourcebin's own handler, whose probe
+                    // announces about-to-finish at the end of the stream.
+                    element.connect_pad_added(move |_, pad| hold.block(pad));
+                }
+                None
+            });
+            hold
+        }
+
+        fn block(self: &Arc<Self>, pad: &gst::Pad) {
+            let mut block = self.block.lock().unwrap();
+            if block.0.is_some() || block.1 {
+                return;
+            }
+            let hold = Arc::downgrade(self);
+            let probe = pad
+                .add_probe(
+                    gst::PadProbeType::BLOCK | gst::PadProbeType::EVENT_DOWNSTREAM,
+                    move |_, info| match &info.data {
+                        Some(gst::PadProbeData::Event(event))
+                            if event.type_() == gst::EventType::Eos =>
+                        {
+                            if let Some(hold) = hold.upgrade() {
+                                hold.block.lock().unwrap().1 = true;
+                            }
+                            gst::PadProbeReturn::Ok
+                        }
+                        _ => gst::PadProbeReturn::Pass,
+                    },
+                )
+                .unwrap();
+            block.0 = Some((pad.clone(), probe));
+        }
+
+        fn reached(&self) -> bool {
+            self.block.lock().unwrap().1
+        }
+
+        fn handover(&self) -> Option<Handover> {
+            *self.handover.lock().unwrap()
+        }
+
+        /// Release the end of stream inside the engine's next state change
+        /// of `playbin` to Ready, and see whether the about-to-finish
+        /// callback, which `calls` counts, returns during it.
+        fn arm(self: &Arc<Self>, playbin: &gst::Element, calls: &Arc<AboutToFinishCalls>) {
+            let hold = Arc::downgrade(self);
+            let calls = Arc::clone(calls);
+            on_output_deactivation(playbin, move || {
+                let Some(hold) = hold.upgrade() else {
+                    return;
+                };
+                let Some((pad, probe)) = hold.block.lock().unwrap().0.take() else {
+                    return;
+                };
+                let emitted = calls.emitted.load(Ordering::SeqCst);
+                pad.remove_probe(probe);
+                let deadline = Instant::now() + SWITCH_RACE_TIMEOUT;
+                let handover = loop {
+                    if calls.emitted.load(Ordering::SeqCst) > emitted
+                        && calls.returned.load(Ordering::SeqCst)
+                            == calls.emitted.load(Ordering::SeqCst)
+                    {
+                        break Handover::Returned;
+                    }
+                    if Instant::now() >= deadline {
+                        break Handover::Waiting;
+                    }
+                    std::thread::sleep(millis(1));
+                };
+                *hold.handover.lock().unwrap() = Some(handover);
+            });
+        }
+    }
+
+    #[test]
+    fn stop_while_uridecodebin3_switches_to_the_successor_stops() {
+        let fixtures = Fixtures::new("switch-stop");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = SwitchHold::new(&engine.playbin, &b);
+        engine.play_until_switch_held(vec![a.clone(), b.clone()], &hold);
+        hold.arm(&engine.playbin, ReleaseIn::Deactivation);
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        assert_eq!(hold.race(), Some(SwitchRace::HeldBack));
+
+        // Play starts the stopped track again, and its successor follows.
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_000));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+    }
+
+    #[test]
+    fn stop_while_the_successor_waits_for_the_input_to_drain_stops() {
+        // The successor reaches uridecodebin3 before the current track has
+        // drained, so uridecodebin3 would wait for the drain, which the stop
+        // does not announce once it has begun.
+        let fixtures = Fixtures::new("switch-stop-undrained");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = SwitchHold::new(&engine.playbin, &b);
+        engine.play_until_successor_held(vec![a.clone(), b.clone()], &hold);
+        assert!(!source_drained(&engine.playbin, &a));
+        hold.arm(&engine.playbin, ReleaseIn::Deactivation);
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        assert_eq!(hold.race(), Some(SwitchRace::HeldBack));
+
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_000));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+    }
+
+    #[test]
+    fn stop_while_about_to_finish_hands_over_the_successor_stops() {
+        // The handover activates the successor's source, which needs the
+        // state lock of uridecodebin3 that the stop holds.
+        let fixtures = Fixtures::new("handover-stop");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = EndOfStreamHold::new(&engine.playbin, &a);
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the end of A was not held", |_| hold.reached());
+        hold.arm(&engine.playbin, &engine.trace.about_to_finish);
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        assert_eq!(hold.handover(), Some(Handover::Returned));
+        assert!(engine.prepared.is_empty(), "{:?}", engine.prepared);
+
+        // The replayed track hands over its successor.
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_000));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+    }
+
+    #[test]
+    fn next_while_uridecodebin3_switches_to_the_successor_plays_the_next_track() {
+        let fixtures = Fixtures::new("switch-next");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let c = fixtures.wav("c.wav", 5_000);
+        let mut engine = Engine::start();
+        let hold = SwitchHold::new(&engine.playbin, &b);
+        engine.play_until_switch_held(vec![a, b.clone(), c.clone()], &hold);
+        hold.arm(&engine.playbin, ReleaseIn::Deactivation);
+        engine.send(PlaybackCommand::Next);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Manual);
+        engine.wait_for_playing(1, millis(4_500));
+        assert_eq!(hold.race(), Some(SwitchRace::HeldBack));
+        assert_change(&engine.wait_for_changes(3), &c, 2, Expect::Gapless);
+    }
+
+    #[test]
+    fn seek_while_uridecodebin3_switches_to_the_successor_lands_and_plays_on() {
+        let fixtures = Fixtures::new("switch-seek");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = SwitchHold::new(&engine.playbin, &b);
+        engine.play_until_switch_held(vec![a, b.clone()], &hold);
+        hold.arm(&engine.playbin, ReleaseIn::Deactivation);
+        // The pipeline was given B, so the seek restarts A.
+        engine.send(PlaybackCommand::Seek(millis(500)));
+        engine.wait_until("the seek did not land", |engine| !engine.seeked.is_empty());
+        assert_eq!(hold.race(), Some(SwitchRace::HeldBack));
+        assert!(engine.seeked[0].abs_diff(millis(500)) < millis(100));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+    }
+
+    #[test]
+    fn play_while_uridecodebin3_switches_to_the_successor_plays_it_gaplessly() {
+        let fixtures = Fixtures::new("switch-play");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = SwitchHold::new(&engine.playbin, &b);
+        engine.play_until_switch_held(vec![a, b.clone()], &hold);
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("playback did not pause", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        hold.arm(&engine.playbin, ReleaseIn::Playing);
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the successor was not released", |_| hold.race().is_some());
+        // Going to Playing takes neither lock that the switch holds, so the
+        // switch only waits for the state change to return.
+        assert_eq!(hold.race(), Some(SwitchRace::Switched));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
     }
 
     #[test]
