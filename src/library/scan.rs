@@ -1950,8 +1950,10 @@ where
     // A picture that could not be cached is not "no cover": the row keeps
     // the cover it had, which also keeps that cache entry from the cleanup,
     // and stays unchecked so the next scan reads the file again.
+    // The row may belong to another root that this one reclaims, so the
+    // previous cover is looked up by path, whichever root indexed it.
     let cover_checked = result.cover_failure.is_none();
-    if !cover_checked && task.indexed_before {
+    if !cover_checked {
         indexed.cover_path = writer.previous_cover(&task)?;
     }
     writer
@@ -3383,6 +3385,69 @@ mod tests {
         assert!(!legacy.exists(), "the unreferenced legacy entry is removed");
         let _ = fs::remove_dir_all(cache.dir().parent().expect("cache root"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_root_reclaiming_a_track_keeps_its_cover_when_the_picture_cannot_be_cached() {
+        use crate::metadata::{encoded_picture, write_wav_with_picture};
+
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let cache = private_cover_cache("scan-reclaimed-entry");
+        let outer = test_dir("scan-reclaimed-cover");
+        fs::create_dir_all(outer.join("inner")).expect("mkdir inner");
+        let outer = outer.canonicalize().expect("canonical outer");
+        let inner = outer.join("inner");
+        let picture = encoded_picture(23, image::ImageFormat::Jpeg);
+        let track = inner.join("01.wav");
+        write_wav_with_picture(&track, &picture);
+        // A database from before nested roots were rejected: the outer root
+        // still owns the inner folder's track, whose legacy entry the startup
+        // migration kept, and the inner root was added without a rescan.
+        fs::create_dir_all(cache.dir()).expect("create cache dir");
+        let legacy = cache.dir().join("fedcba9876543210.png");
+        fs::write(&legacy, b"legacy png").expect("write legacy entry");
+        let legacy_string = legacy.to_string_lossy().into_owned();
+        insert_root(&conn, &outer, "").expect("outer root");
+        insert_root(&conn, &inner, "").expect("legacy inner root");
+        conn.execute(
+            "INSERT INTO tracks(path, root_path, title, artist, album, cover_path, cover_checked, \
+                                mtime_ns, size_bytes, indexed_at) \
+             VALUES (?1, ?2, 'Old', '', '', ?3, 1, 1, 1, 1)",
+            params![
+                track.to_string_lossy(),
+                outer.to_string_lossy(),
+                legacy_string
+            ],
+        )
+        .expect("row owned by the outer root");
+        let entry = cache
+            .dir()
+            .join(format!("{:x}.jpg", md5::compute(&picture)));
+        fs::create_dir(&entry).expect("block the new entry");
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+
+        let error = scan_with_cache(&conn, &inner, cache, &mut snapshot)
+            .expect_err("the uncached cover is reported");
+
+        assert!(
+            error.contains("could not cache the embedded covers of 1 file"),
+            "{error}"
+        );
+        assert_eq!(cover_row(&conn, &track), (legacy_string.clone(), false));
+        assert_eq!(snapshot_cover(&snapshot, &track), legacy_string);
+        assert!(legacy.is_file(), "the cleanup keeps the entry the row uses");
+
+        fs::remove_dir(&entry).expect("unblock the new entry");
+        scan_with_cache(&conn, &inner, cache, &mut snapshot).expect("scan caches the cover");
+
+        let entry_string = entry.to_string_lossy().into_owned();
+        assert_eq!(cover_row(&conn, &track), (entry_string.clone(), true));
+        assert!(entry.is_file());
+        assert!(!legacy.exists(), "the unreferenced legacy entry is removed");
+        let _ = fs::remove_dir_all(cache.dir().parent().expect("cache root"));
+        let _ = fs::remove_dir_all(outer);
     }
 
     fn insert_legacy_track(conn: &Connection, path: &Path) {
