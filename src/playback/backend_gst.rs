@@ -1385,7 +1385,7 @@ impl GstPlaybackRuntime {
                 ),
             ),
         };
-        self.fail_track(file, detail);
+        self.fail_track(file, detail, false);
         true
     }
 
@@ -1406,27 +1406,42 @@ impl GstPlaybackRuntime {
         }));
     }
 
-    /// Handle a track that cannot be played. `file` is the input that the
-    /// failure came from, when known, and `detail` describes the failure.
+    /// Handle a track that cannot be played. `file` is the path that the
+    /// pipeline was given for the input the failure came from, when known,
+    /// and `detail` describes the failure. `not_found` tells that the
+    /// pipeline found no file at that path.
     ///
     /// A failed successor is dropped and the current track plays on from
     /// where it is. A failed current track is skipped. Either way the failed
-    /// file is not tried again until the failures end, unless it is renamed;
+    /// track is not tried again at its current path until the failures end;
     /// after `MAX_CONSECUTIVE_FAILURES` failures in a row, playback stops.
-    fn fail_track(&mut self, file: Option<PathBuf>, detail: String) {
+    fn fail_track(&mut self, file: Option<PathBuf>, detail: String, not_found: bool) {
         self.playing_state_requested_at = None;
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        let successor_failed = file.as_deref().is_some_and(|file| {
-            self.stream_durations
-                .lock()
-                .ok()
-                .and_then(|streams| streams.position(file))
-                .is_some_and(|position| position > 0)
-        });
-        let failed = file.or_else(|| self.snapshot.current.clone());
-        if let (Some(path), Ok(mut queue)) = (failed.as_ref(), self.queue_state.lock()) {
-            queue.mark_failed(path.clone());
-        }
+        // The input's place in the run identifies the track, because a
+        // rename since the pipeline was given `file` can have moved that
+        // path to another track. An unknown input is the committed track's.
+        let position = file
+            .as_deref()
+            .and_then(|file| self.stream_durations.lock().ok()?.position(file))
+            .unwrap_or(0);
+        let successor_failed = position > 0;
+        let failed = self
+            .queue_state
+            .lock()
+            .ok()
+            .and_then(|mut queue| {
+                let path = queue.path_in_pipeline(position)?;
+                // The pipeline was given an old path of a renamed file and
+                // found nothing there, so the file is tried again at its
+                // new path.
+                let stale_path = not_found && file.as_ref().is_some_and(|file| *file != path);
+                if !stale_path {
+                    queue.mark_failed(path.clone());
+                }
+                Some(path)
+            })
+            .or(file);
 
         if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
             self.stop_after_failure();
@@ -1657,6 +1672,7 @@ impl GstPlaybackRuntime {
         );
         let error = err.error();
         let file = input_file(err.src());
+        let not_found = error.matches(gst::ResourceError::NotFound);
         let (file, detail) = match self.missing_plugin.take() {
             Some(missing)
                 if error.matches(gst::CoreError::MissingPlugin)
@@ -1670,7 +1686,7 @@ impl GstPlaybackRuntime {
             _ => (file, error.to_string()),
         };
         // Every later message of the faulted run is discarded.
-        self.fail_track(file, detail);
+        self.fail_track(file, detail, not_found);
     }
 
     /// Remember a missing plugin, to name it in the error that follows.
@@ -1917,8 +1933,8 @@ fn step_volume_level(
 /// the audible track's stream, then each successor handed to the pipeline,
 /// with the duration its parser last reported. A stream is identified by
 /// its place in this list. Its file, the path the pipeline was given, only
-/// matches parser reports to it and does not change when the track is
-/// renamed.
+/// matches parser reports and errors to it and does not change when the
+/// track is renamed.
 #[derive(Debug, Default)]
 struct StreamDurations {
     streams: VecDeque<RunStream>,
@@ -3264,6 +3280,8 @@ mod engine_tests {
         analysis: Receiver<AnalysisCommand>,
         /// The engine's pipeline, to post messages on its bus.
         playbin: gst::Element,
+        /// The engine's queue, to seed its shuffle.
+        queue: Arc<Mutex<GaplessQueue>>,
         snapshot: PlaybackSnapshot,
         snapshots: Vec<PlaybackSnapshot>,
         changes: Vec<Change>,
@@ -3280,6 +3298,7 @@ mod engine_tests {
             let (runtime, bus) =
                 start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
             let playbin = runtime.playbin.clone();
+            let queue = Arc::clone(&runtime.queue_state);
             let (commands, command_rx) = unbounded();
             std::thread::spawn(move || run_gst_engine(runtime, &bus, &command_rx));
             Self {
@@ -3287,6 +3306,7 @@ mod engine_tests {
                 events,
                 analysis,
                 playbin,
+                queue,
                 snapshot: PlaybackSnapshot::default(),
                 snapshots: Vec::new(),
                 changes: Vec::new(),
@@ -3904,6 +3924,78 @@ mod engine_tests {
             }
             panic!("no matching bus message");
         }
+
+        /// Handle bus messages and poll until `done` holds. Returns `false`
+        /// on timeout.
+        fn run_until(&mut self, mut done: impl FnMut(&GstPlaybackRuntime) -> bool) -> bool {
+            let deadline = Instant::now() + TIMEOUT;
+            while !done(&self.runtime) {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                if let Some(message) = self.bus.timed_pop(gst::ClockTime::from_mseconds(20)) {
+                    self.runtime.handle_bus_message(&message);
+                }
+                self.runtime.poll();
+            }
+            true
+        }
+
+        /// Play `queue` until the pipeline has opened the first track, and
+        /// return the file source that reads it.
+        fn play_until_opened(&mut self, queue: Vec<PathBuf>, mode: RepeatMode) -> gst::Element {
+            let first = queue[0].clone();
+            self.runtime
+                .apply_command(PlaybackCommand::SetRepeatMode(mode));
+            self.runtime
+                .apply_command(PlaybackCommand::LoadQueue(queue));
+            self.runtime.apply_command(PlaybackCommand::Play);
+            let stream_start = self.handle_messages_until(|message| {
+                matches!(message.view(), gst::MessageView::StreamStart(_))
+            });
+            self.runtime.handle_bus_message(&stream_start);
+            let source = self
+                .runtime
+                .playbin
+                .clone()
+                .downcast::<gst::Bin>()
+                .unwrap()
+                .iterate_recurse()
+                .into_iter()
+                .filter_map(Result::ok)
+                .find(|element| {
+                    element
+                        .factory()
+                        .is_some_and(|factory| factory.name() == "filesrc")
+                })
+                .expect("file source");
+            assert_eq!(input_file(Some(source.upcast_ref())), Some(first));
+            source
+        }
+
+        /// Fail reading from `source`, as a disk error would, and handle
+        /// the error.
+        fn fail_reading(&mut self, source: &gst::Element) {
+            let error =
+                gst::message::Error::builder(gst::ResourceError::Read, "injected read failure")
+                    .src(source)
+                    .build();
+            self.bus.post(error).unwrap();
+            let error = self.handle_messages_until(|message| {
+                matches!(message.view(), gst::MessageView::Error(_))
+            });
+            self.runtime.handle_bus_message(&error);
+        }
+
+        fn errors(&self) -> Vec<PlaybackError> {
+            self.events
+                .try_iter()
+                .filter_map(|event| match event {
+                    PlaybackEvent::Error(error) => Some(error),
+                    _ => None,
+                })
+                .collect()
+        }
     }
 
     impl Drop for DirectEngine {
@@ -3945,7 +4037,7 @@ mod engine_tests {
             })
             .collect();
         assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].path.as_deref(), Some(b.as_path()));
+        assert_eq!(errors[0].path.as_deref(), Some(renamed.as_path()));
         assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Skipped);
         assert_eq!(
             engine.runtime.snapshot.current.as_deref(),
@@ -3969,6 +4061,149 @@ mod engine_tests {
             }
         };
         assert_eq!(change, Some((renamed, 1)));
+    }
+
+    #[test]
+    fn current_track_failing_after_a_swap_with_its_successor_plays_the_successor() {
+        // A and B swap names after the pipeline opened A, so the path the
+        // pipeline was given for A now names B.
+        let fixtures = Fixtures::new("swap-then-fail");
+        let a = fixtures.wav("a.wav", 8_000);
+        let b = fixtures.wav("b.wav", 9_000);
+        let mut engine = DirectEngine::start();
+        let source = engine.play_until_opened(vec![a.clone(), b.clone()], RepeatMode::Off);
+        let swap = fixtures.dir.join("swap.wav");
+        std::fs::rename(&a, &swap).unwrap();
+        std::fs::rename(&b, &a).unwrap();
+        std::fs::rename(&swap, &b).unwrap();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
+                (a.clone(), b.clone()),
+                (b.clone(), a.clone()),
+            ]))));
+        engine.fail_reading(&source);
+
+        let errors = engine.errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path.as_deref(), Some(b.as_path()), "A's new name");
+        assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Skipped);
+        // B plays under its new name, which was A's.
+        assert!(
+            engine.run_until(|runtime| runtime.snapshot.current_queue_index == Some(1)
+                && runtime.snapshot.duration.abs_diff(millis(9_000)) < millis(100)),
+            "{:?}",
+            engine.runtime.snapshot
+        );
+        assert_eq!(
+            engine.runtime.snapshot.current.as_deref(),
+            Some(a.as_path())
+        );
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+        assert!(engine.errors().is_empty());
+    }
+
+    #[test]
+    fn renamed_current_track_failing_with_repeat_one_stops() {
+        let fixtures = Fixtures::new("rename-then-fail-repeat-one");
+        let a = fixtures.wav("a.wav", 8_000);
+        let renamed = fixtures.dir.join("renamed a.wav");
+        let mut engine = DirectEngine::start();
+        let source = engine.play_until_opened(vec![a.clone()], RepeatMode::One);
+        std::fs::rename(&a, &renamed).unwrap();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
+                (a, renamed.clone()),
+            ]))));
+        engine.fail_reading(&source);
+
+        let errors = engine.errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path.as_deref(), Some(renamed.as_path()));
+        assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Stopped);
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Stopped);
+        assert_eq!(
+            engine.runtime.snapshot.current.as_deref(),
+            Some(renamed.as_path())
+        );
+    }
+
+    #[test]
+    fn renamed_current_track_failing_is_reported_under_its_new_name() {
+        let fixtures = Fixtures::new("rename-then-fail");
+        let a = fixtures.wav("a.wav", 8_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let renamed = fixtures.dir.join("renamed a.wav");
+        let mut engine = DirectEngine::start();
+        let source = engine.play_until_opened(vec![a.clone(), b.clone()], RepeatMode::Off);
+        std::fs::rename(&a, &renamed).unwrap();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
+                (a, renamed.clone()),
+            ]))));
+        engine.fail_reading(&source);
+
+        let errors = engine.errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path.as_deref(), Some(renamed.as_path()));
+        assert!(
+            errors[0].message().contains("renamed a.wav"),
+            "{}",
+            errors[0].message()
+        );
+        assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Skipped);
+        assert!(
+            engine.run_until(|runtime| runtime.snapshot.current_queue_index == Some(1)
+                && runtime.snapshot.duration.abs_diff(millis(4_500)) < millis(100)),
+            "{:?}",
+            engine.runtime.snapshot
+        );
+        assert_eq!(
+            engine.runtime.snapshot.current.as_deref(),
+            Some(b.as_path())
+        );
+    }
+
+    #[test]
+    fn shuffle_with_repeat_all_replays_the_track_left_after_its_successors_fail() {
+        // With this seed, the successor search refreshes the shuffle pool
+        // and picks a failed track again before it reaches A.
+        let fixtures = Fixtures::new("shuffle-failed-successors");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.corrupt("b.wav");
+        let c = fixtures.corrupt("c.wav");
+        let mut engine = Engine::start();
+        engine.queue.lock().unwrap().seed_shuffle(2);
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::All));
+        engine.send(PlaybackCommand::SetShuffle(true));
+        engine.send(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            b.clone(),
+            c.clone(),
+        ]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_errors(2);
+        assert_change(&engine.wait_for_changes(2), &a, 0, Expect::Automatic);
+        engine.wait_for_playing(0, millis(4_000));
+        assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+
+        assert!(
+            engine
+                .errors
+                .iter()
+                .all(|error| error.outcome == PlaybackErrorOutcome::Skipped),
+            "{:?}",
+            engine.errors
+        );
+        let mut failed: Vec<_> = engine
+            .errors
+            .iter()
+            .map(|error| error.path.clone())
+            .collect();
+        failed.sort();
+        assert_eq!(failed, vec![Some(b), Some(c)]);
     }
 
     #[test]

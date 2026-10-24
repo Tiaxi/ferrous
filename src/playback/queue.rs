@@ -324,6 +324,12 @@ impl GaplessQueue {
         }
     }
 
+    /// Seed the shuffle's random picks, so a test can repeat them.
+    #[cfg(test)]
+    pub(crate) fn seed_shuffle(&mut self, seed: u64) {
+        self.cursor.rng_state = seed;
+    }
+
     fn rules(&self) -> Rules {
         Rules {
             repeat_mode: self.repeat_mode,
@@ -355,6 +361,21 @@ impl GaplessQueue {
         self.pending
             .iter()
             .any(|pending| pending.handoff == Handoff::Gapless)
+    }
+
+    /// Current path of the track at `position` in the pipeline's play
+    /// order: 0 for the committed track, then each successor handed to the
+    /// pipeline. A rename since the pipeline was given the track shows here.
+    #[cfg(any(test, feature = "gst"))]
+    pub(crate) fn path_in_pipeline(&self, position: usize) -> Option<PathBuf> {
+        let Some(successor) = position.checked_sub(1) else {
+            return self.current();
+        };
+        self.pending
+            .iter()
+            .filter(|pending| pending.handoff == Handoff::Gapless)
+            .nth(successor)
+            .map(|pending| pending.path.clone())
     }
 
     /// Until `release_handoffs`, stage successors for end of stream rather
@@ -566,23 +587,52 @@ impl GaplessQueue {
     }
 
     /// The cursor of the natural successor of `from` that has not failed.
+    ///
+    /// The search ends once no row that a natural advance can still reach
+    /// is left unfailed. A shuffled advance can revisit a failed row when
+    /// it refreshes its pool, so a fixed number of advances is no bound.
     fn natural_successor(&self, from: &Cursor) -> Option<Cursor> {
         let len = self.queue.len();
         let rules = self.rules();
         let mut cursor = from.clone();
-        // A sequential advance visits every row within `len` steps.
-        for _ in 0..len {
-            if !cursor.advance(len, rules, Advance::Natural) {
+        // While a reachable row has not failed, this many advances reach
+        // one: the shuffle navigation and pool of `from`, then at most two
+        // refreshed pools, which leave out only the row they start from. A
+        // sequential advance needs at most `len`.
+        let steps = from.shuffle_forward.len() + from.shuffle_pool.len() + 2 * len;
+        for _ in 0..steps {
+            if !self.reachable_row_not_failed(&cursor)
+                || !cursor.advance(len, rules, Advance::Natural)
+            {
                 return None;
             }
-            if !self.failed.contains(self.queue.get(cursor.index)?) {
+            if !self.row_failed(cursor.index) {
                 return Some(cursor);
-            }
-            if rules.repeat_mode == RepeatMode::One {
-                return None;
             }
         }
         None
+    }
+
+    fn row_failed(&self, index: usize) -> bool {
+        self.queue
+            .get(index)
+            .is_none_or(|path| self.failed.contains(path))
+    }
+
+    /// Whether natural advances from `cursor` can reach a row that has
+    /// not failed.
+    fn reachable_row_not_failed(&self, cursor: &Cursor) -> bool {
+        let not_failed = |index: &usize| !self.row_failed(*index);
+        match self.repeat_mode {
+            RepeatMode::One => not_failed(&cursor.index),
+            RepeatMode::All => (0..self.queue.len()).any(|index| not_failed(&index)),
+            RepeatMode::Off if self.shuffle_enabled => cursor
+                .shuffle_forward
+                .iter()
+                .chain(&cursor.shuffle_pool)
+                .any(not_failed),
+            RepeatMode::Off => (cursor.index + 1..self.queue.len()).any(|index| not_failed(&index)),
+        }
     }
 
     /// Stage the natural successor of the track the pipeline is fed last.
@@ -727,7 +777,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        same_audio_extension, CancelledAdvance, GaplessQueue, Handoff, PathRenames, RepeatMode,
+        same_audio_extension, Advance, CancelledAdvance, GaplessQueue, Handoff, PathRenames,
+        RepeatMode,
     };
 
     fn paths(count: usize) -> Vec<PathBuf> {
@@ -1119,6 +1170,129 @@ mod tests {
         assert_eq!(queue.skip_failed_current(), None);
         queue.set_repeat_mode(RepeatMode::All);
         assert_eq!(queue.skip_failed_current().unwrap().index, 1);
+    }
+
+    #[test]
+    fn pipeline_positions_name_the_tracks_by_their_current_paths() {
+        let (mut queue, paths) = queue_of(4);
+        queue.stage_natural(gapless);
+        queue.stage_natural(gapless);
+        // A successor staged for end of stream is not in the pipeline.
+        queue.stage_natural(|_, _| Handoff::AtEos);
+        let renamed = PathBuf::from("/fixture/renamed-1.flac");
+        queue.remap_paths(&PathRenames::from([
+            (paths[0].clone(), paths[1].clone()),
+            (paths[1].clone(), renamed.clone()),
+        ]));
+        assert_eq!(queue.path_in_pipeline(0), Some(paths[1].clone()));
+        assert_eq!(queue.path_in_pipeline(1), Some(renamed));
+        assert_eq!(queue.path_in_pipeline(2), Some(paths[2].clone()));
+        assert_eq!(queue.path_in_pipeline(3), None);
+    }
+
+    #[test]
+    fn shuffle_repeat_all_finds_the_only_track_left_through_refreshed_pools() {
+        // Some picks revisit a failed track after the pool is refreshed,
+        // before they reach the current track again.
+        for seed in 1..100 {
+            let (mut queue, paths) = queue_of(3);
+            queue.set_repeat_mode(RepeatMode::All);
+            queue.set_shuffle_enabled(true);
+            queue.seed_shuffle(seed);
+            queue.mark_failed(paths[1].clone());
+            queue.mark_failed(paths[2].clone());
+            assert_eq!(
+                queue
+                    .clone()
+                    .stage_natural(gapless)
+                    .map(|staged| staged.path),
+                Some(paths[0].clone()),
+                "seed {seed}"
+            );
+            assert_eq!(
+                queue.take_eos_successor().map(|next| next.index),
+                Some(0),
+                "seed {seed}"
+            );
+        }
+    }
+
+    /// Every queue of up to four rows, with every set of failed rows, from
+    /// every row and with partly used shuffle navigation: the natural
+    /// successor is the first row not failed that natural advances reach,
+    /// and there is none exactly when every reachable row has failed.
+    #[test]
+    fn skipping_failed_rows_stops_exactly_when_every_reachable_row_failed() {
+        for len in 1..=4_usize {
+            for failed_rows in 0..1_u32 << len {
+                for mode in [RepeatMode::Off, RepeatMode::All, RepeatMode::One] {
+                    for shuffle in [false, true] {
+                        for seed in 1..=8 {
+                            for start in 0..len {
+                                for moves in 0..3 {
+                                    check_skip_search(
+                                        len,
+                                        failed_rows,
+                                        (mode, shuffle),
+                                        (seed, start, moves),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_skip_search(
+        len: usize,
+        failed_rows: u32,
+        (mode, shuffle): (RepeatMode, bool),
+        (seed, start, moves): (u64, usize, usize),
+    ) {
+        let (mut queue, paths) = queue_of(len);
+        queue.set_shuffle_enabled(shuffle);
+        queue.seed_shuffle(seed);
+        queue.set_current(start);
+        // Navigate first, so that the shuffle has history, forward steps,
+        // and a partly used pool.
+        for step in 0..moves {
+            if step % 2 == 0 {
+                queue.next_manual();
+            } else {
+                queue.previous_manual();
+            }
+        }
+        queue.set_repeat_mode(mode);
+        let failed = |index: usize| failed_rows & (1 << index) != 0;
+        for (index, path) in paths.iter().enumerate() {
+            if failed(index) {
+                queue.mark_failed(path.clone());
+            }
+        }
+        let case = format!(
+            "len {len} failed {failed_rows:b} {mode:?} shuffle {shuffle} seed {seed} \
+             start {start} moves {moves}"
+        );
+
+        // The rows that natural advances reach, ignoring failures, until
+        // they end or have gone around the queue more than often enough.
+        let mut cursor = queue.cursor.clone();
+        let mut reached = Vec::new();
+        while reached.len() < 8 * len && cursor.advance(len, queue.rules(), Advance::Natural) {
+            reached.push(cursor.index);
+        }
+        let expected = reached.into_iter().find(|index| !failed(*index));
+        let reachable_not_failed = match mode {
+            RepeatMode::One => !failed(queue.cursor.index),
+            RepeatMode::All => (0..len).any(|index| !failed(index)),
+            RepeatMode::Off => expected.is_some(),
+        };
+        assert_eq!(expected.is_some(), reachable_not_failed, "{case}");
+
+        let found = queue.natural_successor(&queue.cursor);
+        assert_eq!(found.map(|cursor| cursor.index), expected, "{case}");
     }
 
     #[test]
