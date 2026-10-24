@@ -4912,8 +4912,14 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     bool snapshotSignalChanged = false;
     const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
     const bool currentPathChanged = m_currentTrackPath != currentPath;
-    const bool playbackTrackChanged = snapshot.playback.present && currentPathChanged
+    const bool trackTokenChanged = snapshot.playback.present
+        && snapshot.playback.trackToken != m_currentTrackToken;
+    const bool playbackTrackChanged = snapshot.playback.present
+        && (currentPathChanged || trackTokenChanged)
         && !currentPath.isEmpty();
+    if (snapshot.playback.present) {
+        m_currentTrackToken = snapshot.playback.trackToken;
+    }
     const QString previousPlaybackState = m_playbackState;
     const QString previousTrackPath = m_currentTrackPath;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS

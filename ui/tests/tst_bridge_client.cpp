@@ -147,6 +147,8 @@ private slots:
     void trackSwitchReanchorsBeforeSpectrogramData_data();
     void trackSwitchReanchorsBeforeSpectrogramData();
     void sameTrackRestartRejectsQueuedOldPosition();
+    void sameFileReplayReanchorsByTrackToken_data();
+    void sameFileReplayReanchorsByTrackToken();
     void noOpNextPreservesPosition();
     void trackResetSurvivesQueuedPlaybackNotification_data();
     void trackResetSurvivesQueuedPlaybackNotification();
@@ -196,6 +198,7 @@ private slots:
     void testSoloChannelCommandEncoding();
     void testSoloedChannelDecoding();
     void testSoloedChannelDecodingNone();
+    void testPlaybackTrackTokenDecoding();
     void testChannelButtonsVisibilityDecoding();
     void libraryViewStateAvailabilityFollowsSnapshot();
     void searchExtendedMatchDetailsDecodeAndHighlight();
@@ -673,6 +676,59 @@ void BridgeClientTest::queuedSeekNotificationPreservesAdvancedVisualClock() {
     });
     QCoreApplication::processEvents();
     QVERIFY(std::abs(item.m_positionAnchorSeconds - 30.2) < 0.0001);
+}
+
+void BridgeClientTest::sameFileReplayReanchorsByTrackToken_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("rolling") << 0;
+    QTest::newRow("centered") << 1;
+}
+
+void BridgeClientTest::sameFileReplayReanchorsByTrackToken() {
+    // Repeat-one and a file queued twice start the same path again without
+    // a user command. Only the track token tells the new play apart.
+    QFETCH(int, mode);
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/fixture/track.wav");
+    snapshot.playback.currentQueueIndex = 0;
+    snapshot.playback.positionSeconds = 179.9;
+    snapshot.playback.durationSeconds = 180.0;
+    snapshot.playback.trackToken = 4;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+
+    SpectrogramItem item;
+    item.setDisplayMode(mode);
+    item.m_precomputedReady = true;
+    item.setPositionSeconds(179.9);
+    item.setPlaying(true);
+    client.registerSpectrogramItem(&item, 0);
+    item.setPositionSeconds(0.0);
+    QVERIFY(item.m_positionJumpHoldActive);
+
+    QSignalSpy discontinuity(&client, &BridgeClient::transportPositionDiscontinuity);
+    snapshot.playback.positionSeconds = 179.95;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(discontinuity.count(), 0);
+
+    snapshot.playback.positionSeconds = 0.05;
+    snapshot.playback.currentQueueIndex = 1;
+    snapshot.playback.trackToken = 5;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(discontinuity.count(), 1);
+    QCOMPARE(client.m_currentTrackToken, quint64{5});
+    QCOMPARE(client.m_playingQueueIndex, 1);
+    QVERIFY(std::abs(client.m_positionSeconds - 0.05) < 0.0001);
+    if (mode == 1) {
+        QVERIFY(!item.m_positionJumpHoldActive);
+        QVERIFY(std::abs(item.m_positionAnchorSeconds - 0.05) < 0.0001);
+    } else {
+        // Rolling history remains continuous until the worker resets it.
+        QVERIFY(item.m_positionJumpHoldActive);
+    }
 }
 
 void BridgeClientTest::noOpNextPreservesPosition() {
@@ -2172,6 +2228,51 @@ void BridgeClientTest::testSoloedChannelDecodingNone()
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
              qPrintable(error));
     QCOMPARE(decoded.playback.soloedChannel, -1);
+}
+
+void BridgeClientTest::testPlaybackTrackTokenDecoding()
+{
+    QByteArray payload;
+    auto appendLe = [&payload](auto value) {
+        const auto le = qToLittleEndian(value);
+        payload.append(reinterpret_cast<const char *>(&le), sizeof(le));
+    };
+
+    appendLe(quint8(1));
+    appendLe(double(5.0));
+    appendLe(double(100.0));
+    appendLe(float(0.8f));
+    appendLe(quint8(1));
+    appendLe(quint8(0));
+    appendLe(qint32(0));
+    QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
+    appendLe(quint16(pathUtf8.size()));
+    payload.append(pathUtf8);
+    appendLe(quint64(0));
+    payload.append(static_cast<char>(0xFF));
+    appendLe(quint64(0xFFFF'FFFF'0000'0007ULL)); // trackToken
+
+    auto decode = [](const QByteArray &body, BinaryBridgeCodec::DecodedSnapshot *decoded) {
+        QByteArray packet;
+        QDataStream ps(&packet, QIODevice::WriteOnly);
+        ps.setByteOrder(QDataStream::LittleEndian);
+        ps << quint32(0xFE550001u);
+        ps << quint32(12 + 4 + body.size());
+        ps << quint16(BinaryBridgeCodec::SectionPlayback);
+        ps << quint16(0);
+        ps << quint32(body.size());
+        packet.append(body);
+        QString error;
+        return BinaryBridgeCodec::decodeSnapshotPacket(packet, decoded, &error);
+    };
+
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QVERIFY(decode(payload, &decoded));
+    QCOMPARE(decoded.playback.trackToken, quint64(0xFFFF'FFFF'0000'0007ULL));
+    QCOMPARE(decoded.playback.soloedChannel, -1);
+
+    BinaryBridgeCodec::DecodedSnapshot truncated;
+    QVERIFY(!decode(payload.left(payload.size() - 3), &truncated));
 }
 
 void BridgeClientTest::testChannelButtonsVisibilityDecoding()

@@ -1288,8 +1288,8 @@ mod tests {
         let start = Instant::now();
 
         // Playing the file, its gapless repeat, and playing it again by hand.
-        // The mock backend reports every token as 0, so tokens cannot be
-        // what tells the plays apart.
+        // Every token is 0 here, so only the track change itself can tell
+        // the plays apart.
         for (offset, started_utc, kind) in [
             (0, 1_700_000_000, TrackChangeKind::Manual),
             (240, 1_700_000_240, TrackChangeKind::Gapless),

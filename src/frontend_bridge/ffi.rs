@@ -1932,6 +1932,7 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         snapshot.playback.soloed_channel.map_or(0xFF, |ch| ch),
     );
+    push_u64(&mut out, snapshot.playback.track_token);
     out
 }
 
@@ -2572,6 +2573,7 @@ mod tests {
                 shuffle_enabled: false,
                 muted_channels_mask: 0,
                 soloed_channel: None,
+                track_token: 7,
             },
             analysis: AnalysisSnapshot {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
@@ -4021,6 +4023,7 @@ mod tests {
     struct DecodedSnapshotForTest {
         playback_muted_channels_mask: u64,
         playback_soloed_channel: Option<u8>,
+        playback_track_token: u64,
         settings_channel_buttons_visibility: u8,
     }
 
@@ -4028,6 +4031,7 @@ mod tests {
         let mut result = DecodedSnapshotForTest {
             playback_muted_channels_mask: 0,
             playback_soloed_channel: None,
+            playback_track_token: 0,
             settings_channel_buttons_visibility: 1,
         };
         // Skip 12-byte header (magic 4 + total_len 4 + section_mask 2 + reserved 2).
@@ -4058,6 +4062,9 @@ mod tests {
             } else {
                 Some(soloed_raw)
             };
+            p += 1;
+            result.playback_track_token = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
+            assert_eq!(p + 8, section_len, "track token ends the playback section");
             offset += section_len;
         }
         // Skip remaining sections before settings.  Sections appear in
@@ -4114,6 +4121,16 @@ mod tests {
         snapshot.playback.soloed_channel = None;
         let encoded = encode_binary_snapshot(&snapshot, None);
         let decoded = decode_binary_snapshot_for_test(&encoded);
+        assert_eq!(decoded.playback_soloed_channel, None);
+    }
+
+    #[test]
+    fn snapshot_encodes_track_token() {
+        let mut snapshot = sample_snapshot();
+        snapshot.playback.track_token = u64::MAX - 1;
+        let encoded = encode_binary_snapshot(&snapshot, None);
+        let decoded = decode_binary_snapshot_for_test(&encoded);
+        assert_eq!(decoded.playback_track_token, u64::MAX - 1);
         assert_eq!(decoded.playback_soloed_channel, None);
     }
 

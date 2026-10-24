@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use super::queue::{same_audio_extension, CancelledAdvance, GaplessQueue, Handoff};
 use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
 use crate::analysis::AnalysisCommand;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+/// Length of every simulated track.
+const TRACK_DURATION: Duration = Duration::from_secs(180);
+
+/// How long before the end of a track the simulation stages its successor,
+/// as playbin3 does when it emits `about-to-finish`.
+const ABOUT_TO_FINISH_LEAD: Duration = Duration::from_secs(2);
 
 pub fn spawn_engine(
     analysis_tx: Sender<AnalysisCommand>,
@@ -19,8 +27,9 @@ pub fn spawn_engine(
                     volume: 1.0,
                     ..PlaybackSnapshot::default()
                 },
-                queue: Vec::new(),
-                queue_idx: 0,
+                queue: GaplessQueue::new(),
+                about_to_finish_fired: false,
+                track_token_counter: 0,
                 solo_pre_mask: None,
                 soloed_channel: None,
                 event_tx,
@@ -44,10 +53,16 @@ pub fn spawn_engine(
     (cmd_tx, event_rx)
 }
 
+/// Simulated playback. Time advances between commands, and `Poll` plays
+/// the role of the `GStreamer` bus: it stages the successor shortly before
+/// the end of a track and commits it at the boundary.
 struct MockPlaybackRuntime {
     snapshot: PlaybackSnapshot,
-    queue: Vec<PathBuf>,
-    queue_idx: usize,
+    queue: GaplessQueue,
+    /// The simulated pipeline asked for the successor of the current
+    /// stream. It asks again only for a restarted or new stream.
+    about_to_finish_fired: bool,
+    track_token_counter: u64,
     solo_pre_mask: Option<u64>,
     soloed_channel: Option<u8>,
     event_tx: Sender<PlaybackEvent>,
@@ -65,26 +80,39 @@ impl MockPlaybackRuntime {
         match cmd {
             PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
             PlaybackCommand::AddToQueue(paths) => {
-                self.queue.extend(paths);
+                let cancelled = self.queue.add_to_queue(paths);
+                self.continue_after_cancelled_advance(cancelled);
             }
             PlaybackCommand::RemapPaths(renames) => {
-                for path in self.queue.iter_mut().chain(self.snapshot.current.as_mut()) {
-                    super::remap_path(path, &renames);
+                self.queue.remap_paths(&renames);
+                if let Some(current) = self.snapshot.current.as_mut() {
+                    super::remap_path(current, &renames);
                 }
                 // The loop sends the remapped snapshot after this.
                 let _ = self.event_tx.send(PlaybackEvent::PathsRemapped);
             }
             PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
-            PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
-            PlaybackCommand::MoveQueue { from, to } => self.move_queue(from, to),
-            PlaybackCommand::ClearQueue => self.clear_queue(),
-            PlaybackCommand::PlayAt(idx) => self.play_at(idx),
-            PlaybackCommand::Next => self.next(),
-            PlaybackCommand::Previous => self.previous(),
+            PlaybackCommand::RemoveAt(idx) => self.remove_many(&[idx]),
+            PlaybackCommand::MoveQueue { from, to } => {
+                let cancelled = self.queue.move_item(from, to);
+                self.continue_after_cancelled_advance(cancelled);
+                self.snapshot.current_queue_index = self.queue.current_index();
+            }
+            PlaybackCommand::ClearQueue => {
+                let _ = self.queue.clear();
+                self.stop_with_empty_queue();
+            }
+            PlaybackCommand::PlayAt(idx) => {
+                if let Some(target) = self.queue.set_current(idx) {
+                    self.switch_manually(target.path, target.index);
+                }
+            }
+            PlaybackCommand::Next => self.advance_manually(true),
+            PlaybackCommand::Previous => self.advance_manually(false),
             PlaybackCommand::Play => {
                 self.snapshot.state = PlaybackState::Playing;
                 self.snapshot.current_queue_index = if self.snapshot.current.is_some() {
-                    Some(self.queue_idx)
+                    self.queue.current_index()
                 } else {
                     None
                 };
@@ -95,12 +123,20 @@ impl MockPlaybackRuntime {
                 }
             }
             PlaybackCommand::Stop => {
+                let _ = self.queue.cancel_pending();
+                self.about_to_finish_fired = false;
                 self.reset_mute();
                 self.snapshot.state = PlaybackState::Stopped;
                 self.snapshot.position = Duration::ZERO;
                 self.snapshot.current_queue_index = None;
             }
             PlaybackCommand::Seek(pos) => {
+                // Like the GStreamer backend, keep the seek away from a
+                // successor the pipeline was given.
+                self.queue.hold_handoffs();
+                let _ = self.queue.cancel_pending();
+                self.queue.release_handoffs();
+                self.about_to_finish_fired = false;
                 self.snapshot.position = pos.min(self.snapshot.duration);
                 let _ = self.event_tx.send(PlaybackEvent::Seeked {
                     position: self.snapshot.position,
@@ -110,180 +146,92 @@ impl MockPlaybackRuntime {
                 self.snapshot.volume = vol.clamp(0.0, 1.0);
             }
             PlaybackCommand::SetRepeatMode(mode) => {
-                self.snapshot.repeat_mode = mode;
+                let cancelled = self.queue.set_repeat_mode(mode);
+                self.continue_after_cancelled_advance(cancelled);
+                self.snapshot.repeat_mode = self.queue.repeat_mode();
             }
             PlaybackCommand::SetShuffle(enabled) => {
-                self.snapshot.shuffle_enabled = enabled;
+                let cancelled = self.queue.set_shuffle_enabled(enabled);
+                self.continue_after_cancelled_advance(cancelled);
+                self.snapshot.shuffle_enabled = self.queue.shuffle_enabled();
             }
             PlaybackCommand::ToggleChannelMute(ch) => self.toggle_channel_mute(ch),
             PlaybackCommand::SoloChannel(ch) => self.solo_channel(ch),
             PlaybackCommand::Poll => self.poll(),
         }
     }
-    fn load_queue(&mut self, paths: Vec<PathBuf>) {
-        self.queue = paths;
-        self.queue_idx = 0;
+    /// The `GStreamer` backend restarts the current track when it drops a
+    /// successor the pipeline was given, which asks for a successor again.
+    fn continue_after_cancelled_advance(&mut self, cancelled: Option<CancelledAdvance>) {
+        if cancelled.is_some_and(|cancelled| cancelled.handed_to_pipeline) {
+            self.about_to_finish_fired = false;
+        }
+    }
+    fn change_track(&mut self, path: PathBuf, queue_index: usize, kind: TrackChangeKind) {
+        self.about_to_finish_fired = false;
+        self.track_token_counter += 1;
+        let track_token = self.track_token_counter;
+        self.snapshot.current = Some(path.clone());
+        self.snapshot.current_queue_index = Some(queue_index);
+        self.snapshot.duration = TRACK_DURATION;
+        self.snapshot.track_token = track_token;
+        let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
+            path,
+            queue_index,
+            kind,
+            track_token,
+        });
+    }
+    fn switch_manually(&mut self, path: PathBuf, queue_index: usize) {
         self.reset_mute();
         self.snapshot.position = Duration::ZERO;
-        self.snapshot.duration = Duration::from_secs(180);
-        self.snapshot.current = self.queue.first().cloned();
-        self.snapshot.current_queue_index = if self.snapshot.current.is_some() {
-            Some(self.queue_idx)
-        } else {
-            None
-        };
-        if let Some(path) = self.snapshot.current.clone() {
-            let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
-                path,
-                queue_index: self.queue_idx,
-                kind: TrackChangeKind::Manual,
-                track_token: 0,
-            });
+        self.change_track(path, queue_index, TrackChangeKind::Manual);
+    }
+    fn load_queue(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let _ = self.queue.set_queue(paths);
+        if let (Some(path), Some(index)) = (self.queue.current(), self.queue.current_index()) {
+            self.switch_manually(path, index);
             let _ = self
                 .analysis_tx
                 .send(AnalysisCommand::SetSampleRate(48_000));
         }
     }
     fn remove_many(&mut self, indices: &[usize]) {
-        let old_current = self.snapshot.current.clone();
-        let next = super::remove_queue_indices(&mut self.queue, Some(self.queue_idx), indices);
-        self.queue_idx = next.unwrap_or(0);
-        self.snapshot.current_queue_index = next;
-        self.snapshot.current = next.and_then(|index| self.queue.get(index).cloned());
-        if self.snapshot.current != old_current {
-            self.reset_mute();
-            self.snapshot.position = Duration::ZERO;
-            if let Some(path) = self.snapshot.current.clone() {
-                self.snapshot.duration = Duration::from_secs(180);
-                let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
-                    path,
-                    queue_index: self.queue_idx,
-                    kind: TrackChangeKind::Manual,
-                    track_token: 0,
-                });
-            } else {
-                self.snapshot.state = PlaybackState::Stopped;
-                self.snapshot.duration = Duration::ZERO;
+        let removal = self.queue.remove_many(indices);
+        match (self.queue.current(), self.queue.current_index()) {
+            (Some(path), Some(index)) if removal.current_removed => {
+                self.switch_manually(path, index);
             }
+            (Some(_), index) => {
+                self.continue_after_cancelled_advance(removal.cancelled);
+                self.snapshot.current_queue_index = index;
+            }
+            _ => self.stop_with_empty_queue(),
         }
     }
-    fn remove_at(&mut self, idx: usize) {
-        if idx < self.queue.len() {
-            self.queue.remove(idx);
-            self.reset_mute();
-            if self.queue.is_empty() {
-                self.queue_idx = 0;
-                self.snapshot.current = None;
-                self.snapshot.current_queue_index = None;
-                self.snapshot.state = PlaybackState::Stopped;
-                self.snapshot.position = Duration::ZERO;
-                self.snapshot.duration = Duration::ZERO;
-            } else {
-                if idx < self.queue_idx {
-                    self.queue_idx = self.queue_idx.saturating_sub(1);
-                } else if idx == self.queue_idx && self.queue_idx >= self.queue.len() {
-                    self.queue_idx = self.queue.len().saturating_sub(1);
-                }
-                self.snapshot.current = self.queue.get(self.queue_idx).cloned();
-                self.snapshot.current_queue_index = Some(self.queue_idx);
-                self.snapshot.position = Duration::ZERO;
-                self.snapshot.duration = Duration::from_secs(180);
-                if let Some(path) = self.snapshot.current.clone() {
-                    let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
-                        path,
-                        queue_index: self.queue_idx,
-                        kind: TrackChangeKind::Manual,
-                        track_token: 0,
-                    });
-                }
-            }
-        }
-    }
-    fn move_queue(&mut self, from: usize, to: usize) {
-        if from < self.queue.len() && to < self.queue.len() && from != to {
-            let item = self.queue.remove(from);
-            self.queue.insert(to, item);
-            if self.queue_idx == from {
-                self.queue_idx = to;
-            } else if from < self.queue_idx && to >= self.queue_idx {
-                self.queue_idx = self.queue_idx.saturating_sub(1);
-            } else if from > self.queue_idx && to <= self.queue_idx {
-                self.queue_idx += 1;
-            }
-            self.snapshot.current = self.queue.get(self.queue_idx).cloned();
-            self.snapshot.current_queue_index = if self.snapshot.current.is_some() {
-                Some(self.queue_idx)
-            } else {
-                None
-            };
-        }
-    }
-    fn clear_queue(&mut self) {
-        self.queue.clear();
-        self.queue_idx = 0;
+    fn stop_with_empty_queue(&mut self) {
         self.reset_mute();
         self.snapshot.current = None;
         self.snapshot.current_queue_index = None;
         self.snapshot.state = PlaybackState::Stopped;
         self.snapshot.position = Duration::ZERO;
         self.snapshot.duration = Duration::ZERO;
+        self.snapshot.track_token = 0;
     }
-    fn play_at(&mut self, idx: usize) {
-        if let Some(path) = self.queue.get(idx).cloned() {
-            self.queue_idx = idx;
-            self.reset_mute();
-            self.snapshot.current = Some(path.clone());
-            self.snapshot.current_queue_index = Some(self.queue_idx);
-            self.snapshot.position = Duration::ZERO;
-            self.snapshot.duration = Duration::from_secs(180);
-            let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
-                path,
-                queue_index: self.queue_idx,
-                kind: TrackChangeKind::Manual,
-                track_token: 0,
-            });
-        }
-    }
-    fn next(&mut self) {
-        if self.queue_idx + 1 < self.queue.len() {
-            self.queue_idx += 1;
-            self.reset_mute();
-            if let Some(next) = self.queue.get(self.queue_idx).cloned() {
-                self.snapshot.current = Some(next.clone());
-                self.snapshot.current_queue_index = Some(self.queue_idx);
-                self.snapshot.position = Duration::ZERO;
-                self.snapshot.duration = Duration::from_secs(180);
-                if self.snapshot.state == PlaybackState::Paused {
-                    self.snapshot.state = PlaybackState::Playing;
-                }
-                let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
-                    path: next,
-                    queue_index: self.queue_idx,
-                    kind: TrackChangeKind::Manual,
-                    track_token: 0,
-                });
+    fn advance_manually(&mut self, next: bool) {
+        let target = if next {
+            self.queue.next_manual()
+        } else {
+            self.queue.previous_manual()
+        };
+        if let Some(target) = target {
+            if self.snapshot.state == PlaybackState::Paused {
+                self.snapshot.state = PlaybackState::Playing;
             }
-        }
-    }
-    fn previous(&mut self) {
-        if self.queue_idx > 0 {
-            self.queue_idx -= 1;
-            self.reset_mute();
-            if let Some(prev) = self.queue.get(self.queue_idx).cloned() {
-                self.snapshot.current = Some(prev.clone());
-                self.snapshot.current_queue_index = Some(self.queue_idx);
-                self.snapshot.position = Duration::ZERO;
-                self.snapshot.duration = Duration::from_secs(180);
-                if self.snapshot.state == PlaybackState::Paused {
-                    self.snapshot.state = PlaybackState::Playing;
-                }
-                let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
-                    path: prev,
-                    queue_index: self.queue_idx,
-                    kind: TrackChangeKind::Manual,
-                    track_token: 0,
-                });
-            }
+            self.switch_manually(target.path, target.index);
         }
     }
     fn toggle_channel_mute(&mut self, ch: u8) {
@@ -318,25 +266,39 @@ impl MockPlaybackRuntime {
         self.snapshot.soloed_channel = self.soloed_channel;
     }
     fn poll(&mut self) {
-        if self.snapshot.state == PlaybackState::Playing
-            && self.snapshot.position >= self.snapshot.duration
-        {
-            let next_queue_idx = self.queue_idx + 1;
-            if let Some(next) = self.queue.get(next_queue_idx).cloned() {
-                self.queue_idx = next_queue_idx;
-                self.snapshot.current = Some(next.clone());
-                self.snapshot.current_queue_index = Some(self.queue_idx);
-                self.snapshot.position = Duration::ZERO;
-                self.snapshot.duration = Duration::from_secs(180);
-                let _ = self.event_tx.send(PlaybackEvent::TrackChanged {
-                    path: next,
-                    queue_index: self.queue_idx,
-                    kind: TrackChangeKind::Gapless,
-                    track_token: 0,
-                });
-            } else {
-                super::stop_snapshot_at_terminal_eos(&mut self.snapshot);
-            }
+        if self.snapshot.state != PlaybackState::Playing {
+            return;
+        }
+        let remaining = self
+            .snapshot
+            .duration
+            .saturating_sub(self.snapshot.position);
+        if remaining <= ABOUT_TO_FINISH_LEAD && !self.about_to_finish_fired {
+            self.about_to_finish_fired = true;
+            let _ = self.queue.stage_natural(|finishing, next| {
+                if same_audio_extension(finishing, next) {
+                    Handoff::Gapless
+                } else {
+                    Handoff::AtEos
+                }
+            });
+        }
+        if remaining > Duration::ZERO {
+            return;
+        }
+        if let Some(committed) = self.queue.commit_gapless() {
+            self.snapshot.position = self
+                .snapshot
+                .position
+                .saturating_sub(self.snapshot.duration);
+            self.change_track(committed.path, committed.index, TrackChangeKind::Gapless);
+        } else if let Some(successor) = self.queue.take_eos_successor() {
+            // A cross-format successor, or one appended after staging found
+            // none, starts after end of stream.
+            self.snapshot.position = Duration::ZERO;
+            self.change_track(successor.path, successor.index, TrackChangeKind::Natural);
+        } else {
+            super::stop_snapshot_at_terminal_eos(&mut self.snapshot);
         }
     }
 }

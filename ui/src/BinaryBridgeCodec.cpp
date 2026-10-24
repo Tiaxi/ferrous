@@ -185,6 +185,10 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     if (!reader.atEnd() && !reader.readU8(&soloedRaw)) {
         return false;
     }
+    quint64 trackToken = 0;
+    if (!reader.atEnd() && !reader.readU64(&trackToken)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -196,6 +200,7 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     out->currentPath = currentPath;
     out->mutedChannelsMask = mutedMask;
     out->soloedChannel = (soloedRaw == 0xFF) ? -1 : static_cast<int>(soloedRaw);
+    out->trackToken = trackToken;
     return true;
 }
 

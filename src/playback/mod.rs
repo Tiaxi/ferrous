@@ -57,6 +57,10 @@ pub struct PlaybackSnapshot {
     pub shuffle_enabled: bool,
     pub muted_channels_mask: u64,
     pub soloed_channel: Option<u8>,
+    /// `track_token` of the `TrackChanged` event that made `current`
+    /// current, or 0 before any. It changes on every track change, also
+    /// when the same file plays again.
+    pub track_token: u64,
 }
 
 /// New paths of renamed files, keyed by their old paths.
@@ -685,6 +689,167 @@ mod tests {
         assert_eq!(snap.position, Duration::ZERO);
     }
 
+    /// Collect events until `timeout` passes without one.
+    fn recv_events(
+        rx: &crossbeam_channel::Receiver<PlaybackEvent>,
+        timeout: Duration,
+    ) -> Vec<PlaybackEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.recv_timeout(timeout) {
+            events.push(event);
+        }
+        events
+    }
+
+    fn track_changes(events: &[PlaybackEvent]) -> Vec<(PathBuf, usize, &'static str, u64)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PlaybackEvent::TrackChanged {
+                    path,
+                    queue_index,
+                    kind,
+                    track_token,
+                } => Some((
+                    path.clone(),
+                    *queue_index,
+                    match kind {
+                        TrackChangeKind::Manual => "manual",
+                        TrackChangeKind::Gapless => "gapless",
+                        TrackChangeKind::Natural => "natural",
+                    },
+                    *track_token,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn last_snapshot(events: &[PlaybackEvent]) -> super::PlaybackSnapshot {
+        events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                PlaybackEvent::Snapshot(snapshot) => Some(snapshot.clone()),
+                _ => None,
+            })
+            .expect("snapshot")
+    }
+
+    /// Start playing `paths` and enter the about-to-finish window of the
+    /// first track: the successor is staged but not audible yet.
+    fn play_into_window(
+        paths: &[PathBuf],
+    ) -> (PlaybackEngine, crossbeam_channel::Receiver<PlaybackEvent>) {
+        let (engine, rx) = make_test_engine();
+        engine.command(PlaybackCommand::LoadQueue(paths.to_vec()));
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Seek(Duration::from_millis(179_900)));
+        engine.command(PlaybackCommand::Poll);
+        let events = recv_events(&rx, Duration::from_millis(50));
+        let snapshot = last_snapshot(&events);
+        assert_eq!(snapshot.current.as_ref(), Some(&paths[0]));
+        assert_eq!(snapshot.current_queue_index, Some(0));
+        (engine, rx)
+    }
+
+    #[test]
+    fn navigation_inside_the_window_starts_from_the_audible_track() {
+        let paths: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|name| PathBuf::from(format!("/fixture/{name}.flac")))
+            .collect();
+        let (engine, rx) = play_into_window(&paths);
+        engine.command(PlaybackCommand::Next);
+        let events = recv_events(&rx, Duration::from_millis(50));
+        assert_eq!(
+            track_changes(&events),
+            vec![(paths[1].clone(), 1, "manual", 2)]
+        );
+
+        let (engine, rx) = play_into_window(&paths);
+        engine.command(PlaybackCommand::Stop);
+        engine.command(PlaybackCommand::Play);
+        engine.command(PlaybackCommand::Poll);
+        let events = recv_events(&rx, Duration::from_millis(50));
+        assert!(track_changes(&events).is_empty());
+        let snapshot = last_snapshot(&events);
+        assert_eq!(snapshot.current.as_ref(), Some(&paths[0]));
+        assert_eq!(snapshot.current_queue_index, Some(0));
+        assert!(snapshot.position < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn staged_successor_commits_at_the_boundary_after_queue_edits() {
+        let paths: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|name| PathBuf::from(format!("/fixture/{name}.flac")))
+            .collect();
+        let (engine, rx) = play_into_window(&paths);
+        engine.command(PlaybackCommand::RemoveAt(2));
+        engine.command(PlaybackCommand::Poll);
+        let events = recv_events(&rx, Duration::from_millis(150));
+        assert!(track_changes(&events).is_empty(), "{events:?}");
+        engine.command(PlaybackCommand::Poll);
+        let events = recv_events(&rx, Duration::from_millis(50));
+        assert_eq!(
+            track_changes(&events),
+            vec![(paths[1].clone(), 1, "gapless", 2)]
+        );
+        let snapshot = last_snapshot(&events);
+        assert_eq!(snapshot.current_queue_index, Some(1));
+        assert_eq!(snapshot.track_token, 2);
+    }
+
+    #[test]
+    fn repeat_one_and_duplicate_rows_report_every_play() {
+        let a = PathBuf::from("/fixture/a.flac");
+        let (engine, rx) = make_test_engine();
+        engine.command(PlaybackCommand::SetRepeatMode(super::RepeatMode::One));
+        engine.command(PlaybackCommand::LoadQueue(vec![a.clone(), a.clone()]));
+        engine.command(PlaybackCommand::Play);
+        for _ in 0..2 {
+            engine.command(PlaybackCommand::Seek(Duration::from_secs(180)));
+            engine.command(PlaybackCommand::Poll);
+        }
+        engine.command(PlaybackCommand::SetRepeatMode(super::RepeatMode::Off));
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(180)));
+        engine.command(PlaybackCommand::Poll);
+        let events = recv_events(&rx, Duration::from_millis(50));
+        assert_eq!(
+            track_changes(&events),
+            vec![
+                (a.clone(), 0, "manual", 1),
+                (a.clone(), 0, "gapless", 2),
+                (a.clone(), 0, "gapless", 3),
+                (a.clone(), 1, "gapless", 4),
+            ]
+        );
+        assert_eq!(last_snapshot(&events).track_token, 4);
+    }
+
+    #[test]
+    fn end_of_stream_starts_cross_format_and_late_successors() {
+        let a = PathBuf::from("/fixture/a.flac");
+        let b = PathBuf::from("/fixture/b.mp3");
+        let c = PathBuf::from("/fixture/c.flac");
+        let (engine, rx) = play_into_window(&[a, b.clone()]);
+        engine.command(PlaybackCommand::AddToQueue(vec![c.clone()]));
+        std::thread::sleep(Duration::from_millis(150));
+        engine.command(PlaybackCommand::Poll);
+        let events = recv_events(&rx, Duration::from_millis(50));
+        assert_eq!(track_changes(&events), vec![(b, 1, "natural", 2)]);
+
+        engine.command(PlaybackCommand::Seek(Duration::from_millis(179_900)));
+        engine.command(PlaybackCommand::Poll);
+        engine.command(PlaybackCommand::RemoveAt(2));
+        engine.command(PlaybackCommand::AddToQueue(vec![c.clone()]));
+        std::thread::sleep(Duration::from_millis(150));
+        engine.command(PlaybackCommand::Poll);
+        let events = recv_events(&rx, Duration::from_millis(50));
+        assert_eq!(track_changes(&events), vec![(c, 2, "natural", 3)]);
+    }
+
     #[test]
     fn solo_channel_mutes_all_others() {
         let (engine, rx) = make_test_engine();
@@ -834,6 +999,8 @@ mod tests {
         assert_ne!(snap.muted_channels_mask, 0);
     }
 }
+
+mod queue;
 
 #[cfg(not(feature = "gst"))]
 #[path = "backend_mock.rs"]

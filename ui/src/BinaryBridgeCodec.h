@@ -105,6 +105,8 @@ struct DecodedPlayback {
     QString currentPath;
     quint64 mutedChannelsMask{0};
     int soloedChannel{-1};
+    // Changes on every track change, also when the same file plays again.
+    quint64 trackToken{0};
 };
 
 struct DecodedQueueTrack {

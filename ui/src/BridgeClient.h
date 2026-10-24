@@ -606,6 +606,9 @@ private:
     int m_selectedQueueIndex{-1};
     int m_playingQueueIndex{-1};
     QString m_currentTrackPath;
+    // Backend track token of the current track; it also changes when the
+    // same file starts again, as with repeat-one.
+    quint64 m_currentTrackToken{0};
     QString m_currentTrackCoverPath;
     QString m_currentTrackTitle;
     QString m_currentTrackArtist;
