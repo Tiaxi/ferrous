@@ -45,7 +45,7 @@ bool ferrous_ffi_bridge_refresh_edited_paths(
     std::size_t paths_len);
 FerrousFfiRenameGate *ferrous_ffi_bridge_rename_gate(FerrousFfiBridge *handle);
 void ferrous_ffi_rename_gate_free(FerrousFfiRenameGate *gate);
-// Blocks while an import reads the filesystem: call it from a worker thread.
+// Renames files on disk and waits for another rename: call it from a worker thread.
 std::uint8_t *ferrous_ffi_rename_gate_rename(
     const FerrousFfiRenameGate *gate,
     const std::uint8_t *data,

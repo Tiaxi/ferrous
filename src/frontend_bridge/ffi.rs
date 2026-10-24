@@ -1257,9 +1257,9 @@ pub unsafe extern "C" fn ferrous_ffi_rename_gate_free(gate: *mut FerrousFfiRenam
 
 #[no_mangle]
 /// Rename files like [`ferrous_ffi_tag_editor_rename`] and tell the bridge
-/// about the successful renames as one change. Blocks while an import is
-/// reading the filesystem, so call it from a worker thread, never from the UI
-/// thread.
+/// about the successful renames as one change. It renames files on disk and
+/// waits while another rename is in progress, so call it from a worker
+/// thread, never from the UI thread.
 ///
 /// # Safety
 ///

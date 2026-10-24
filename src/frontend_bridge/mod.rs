@@ -2356,7 +2356,8 @@ mod tests {
             let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
             let (dir, _) = rename_fixture(&format!("after-{name}"), &files);
             let gate = runtime.imports.gate();
-            // The worker cannot read the folder until the rename is sent.
+            // The worker waits for the rename in progress before it reads the
+            // folder.
             let renames = gate.rename(|| {
                 runtime.handle_command(
                     BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(vec![dir.clone()])),
@@ -2427,6 +2428,60 @@ mod tests {
             assert!(runtime.imports.results.is_empty());
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn a_rename_does_not_wait_for_an_import_blocked_on_a_read() {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+
+        fn playlist_lines(tracks: &[PathBuf]) -> String {
+            tracks
+                .iter()
+                .map(|track| format!("{}\n", track.display()))
+                .collect()
+        }
+
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let (dir, before) = rename_fixture("blocked-read", &["01.flac", "02.flac"]);
+        let playlist = dir.join("blocked.m3u");
+        let fifo = std::ffi::CString::new(playlist.as_os_str().as_bytes()).expect("fifo path");
+        // SAFETY: `fifo` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::AddTrack(playlist.clone())),
+            &event_tx,
+        );
+        // Opening the FIFO to write waits for the worker to open it to read,
+        // and the worker's read cannot end before the writer closes it.
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&playlist)
+            .expect("open fifo");
+
+        // A rename that waited for the read would never return here.
+        let pairs = [("01.flac", "02.flac"), ("02.flac", "03.flac")];
+        runtime
+            .imports
+            .gate()
+            .rename(|| ((), rename_files(&dir, &pairs)));
+        let after: Vec<_> = pairs.iter().map(|(_, new)| dir.join(new)).collect();
+        let staged = dir.join("playlist.tmp");
+        std::fs::write(&staged, playlist_lines(&after)).expect("playlist");
+        std::fs::rename(&staged, &playlist).expect("replace playlist");
+        // The blocked read gets the playlist as it was before the rename.
+        writer
+            .write_all(playlist_lines(&before).as_bytes())
+            .expect("write fifo");
+        drop(writer);
+        apply_next_import_result(&mut runtime, &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        assert_eq!(runtime.state.queue, after, "the overlapped read was redone");
+        assert_eq!(queued_tracks(&engine_rx), vec![after]);
+        assert!(runtime.imports.results.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
