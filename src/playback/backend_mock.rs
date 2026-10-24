@@ -3,8 +3,9 @@
 use super::queue::{same_audio_extension, CancelledAdvance, GaplessQueue, Handoff};
 use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
 use crate::analysis::AnalysisCommand;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, Sender};
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Length of every simulated track.
@@ -14,11 +15,14 @@ const TRACK_DURATION: Duration = Duration::from_secs(180);
 /// as playbin3 does when it emits `about-to-finish`.
 const ABOUT_TO_FINISH_LEAD: Duration = Duration::from_secs(2);
 
+/// Spawn the simulation. It cannot fail to start, so it leaves `_failure`
+/// unset.
 pub fn spawn_engine(
     analysis_tx: Sender<AnalysisCommand>,
-) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
+    event_tx: Sender<PlaybackEvent>,
+    _failure: &Arc<OnceLock<String>>,
+) -> Sender<PlaybackCommand> {
     let (cmd_tx, cmd_rx) = unbounded();
-    let (event_tx, event_rx) = unbounded();
     let _ = std::thread::Builder::new()
         .name("ferrous-playback-sim".to_string())
         .spawn(move || {
@@ -50,7 +54,7 @@ pub fn spawn_engine(
                     .send(PlaybackEvent::Snapshot(runtime.snapshot.clone()));
             }
         });
-    (cmd_tx, event_rx)
+    cmd_tx
 }
 
 /// Simulated playback. Time advances between commands, and `Poll` plays

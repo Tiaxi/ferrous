@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,7 @@ use anyhow::{anyhow, Context};
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use gst::prelude::*;
 use gstreamer as gst;
+use gstreamer_pbutils as gst_pbutils;
 
 use crate::analysis::AnalysisCommand;
 #[cfg(feature = "profiling-logs")]
@@ -23,8 +24,23 @@ use super::queue::{
     same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff,
 };
 use super::{
-    PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode, TrackChangeKind,
+    PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent, PlaybackSnapshot,
+    PlaybackState, RepeatMode, TrackChangeKind,
 };
+
+/// Tracks that may fail in a row before playback stops. A track that plays
+/// to its end, or a command that starts or navigates playback, ends a run
+/// of failures.
+const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
+/// A plugin that the pipeline reported missing in the current run.
+#[derive(Debug, Clone)]
+struct MissingPlugin {
+    /// The file whose input needs the plugin, when the message tells.
+    file: Option<PathBuf>,
+    /// Description such as "FLAC decoder".
+    description: String,
+}
 
 #[cfg(any(test, feature = "profiling-logs"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,32 +303,61 @@ struct GstPlaybackRuntime {
     channel_mute_mask: Arc<AtomicU64>,
     solo_pre_mask: Option<u64>,
     soloed_channel: Option<u8>,
+    /// Tracks that failed since a track last played to its end or a
+    /// command started or navigated playback.
+    consecutive_failures: u32,
+    /// The first missing plugin reported in the current pipeline run.
+    missing_plugin: Option<MissingPlugin>,
 }
 
 pub fn spawn_engine(
     analysis_tx: Sender<AnalysisCommand>,
-) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
-    spawn_engine_with_output(analysis_tx, build_output_sink)
+    event_tx: Sender<PlaybackEvent>,
+    failure: &Arc<OnceLock<String>>,
+) -> Sender<PlaybackCommand> {
+    spawn_engine_with_output(analysis_tx, event_tx, failure, build_output_sink)
 }
 
 /// Spawn the engine with the audio output that `build_output` creates
-/// after `GStreamer` is initialized.
+/// after `GStreamer` is initialized. When the engine cannot start, the
+/// thread records why in `failure`, reports it, and exits, so that later
+/// commands fail.
 fn spawn_engine_with_output(
     analysis_tx: Sender<AnalysisCommand>,
+    event_tx: Sender<PlaybackEvent>,
+    failure: &Arc<OnceLock<String>>,
     build_output: fn() -> anyhow::Result<gst::Element>,
-) -> (Sender<PlaybackCommand>, Receiver<PlaybackEvent>) {
+) -> Sender<PlaybackCommand> {
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
-    let (event_tx, event_rx) = unbounded::<PlaybackEvent>();
+    let failure = Arc::clone(failure);
 
-    let _ = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("ferrous-playback-gst".to_string())
         .spawn(move || {
-            if let Err(err) = run_gst_engine(&cmd_rx, event_tx.clone(), analysis_tx, build_output) {
-                eprintln!("[ferrous] gstreamer playback engine failed: {err:#}");
+            match start_gst_engine(event_tx.clone(), analysis_tx, build_output) {
+                Ok((runtime, bus)) => run_gst_engine(runtime, &bus, &cmd_rx),
+                Err(err) => {
+                    // Commands fail from now on, before the failure is
+                    // reported.
+                    drop(cmd_rx);
+                    let detail = format!("{err:#}");
+                    eprintln!("[ferrous] gstreamer playback engine failed: {detail}");
+                    let _ = failure.set(detail.clone());
+                    let _ = event_tx.send(PlaybackEvent::Error(PlaybackError {
+                        path: None,
+                        detail,
+                        outcome: PlaybackErrorOutcome::EngineUnavailable,
+                    }));
+                }
             }
         });
+    if let Err(err) = spawned {
+        // The command receiver was dropped with the closure, so commands
+        // report the engine as unavailable.
+        eprintln!("[ferrous] failed to start the playback thread: {err}");
+    }
 
-    (cmd_tx, event_rx)
+    cmd_tx
 }
 
 impl GstPlaybackRuntime {
@@ -370,6 +415,8 @@ impl GstPlaybackRuntime {
             channel_mute_mask,
             solo_pre_mask: None,
             soloed_channel: None,
+            consecutive_failures: 0,
+            missing_plugin: None,
         }
     }
 
@@ -849,27 +896,34 @@ impl GstPlaybackRuntime {
         self.soft_mute();
         self.playing_state_requested_at = None;
         if self.playbin.set_state(gst::State::Ready).is_ok() {
-            self.begin_pipeline_run(false);
-            // The pipeline may have been given the successor. Play must
-            // start the stopped track again.
-            if let Some(path) = self.snapshot.current.as_deref() {
-                if let Some(uri) = file_uri(path) {
-                    self.set_run_uri(path, &uri);
-                }
-            }
-            self.startup_gain_ramp = false;
-            self.startup_ramp_hold_until = None;
-            self.buffering_active = false;
-            self.seek_hold = None;
-            self.clear_recent_seek_trace();
             self.reset_channel_mute_state();
-            self.snapshot.state = PlaybackState::Stopped;
-            self.snapshot.position = Duration::ZERO;
-            self.position_clock.reset(Duration::ZERO, Instant::now());
-            self.snapshot.current_queue_index = None;
-            self.snapshot.current_bitrate_kbps = None;
+            self.enter_stopped();
             self.emit_snapshot();
         }
+    }
+
+    /// Account for a pipeline that was stopped in Ready or Null: the current
+    /// track stays current, and Play starts it from the beginning.
+    fn enter_stopped(&mut self) {
+        self.playing_state_requested_at = None;
+        self.begin_pipeline_run(false);
+        // The pipeline may have been given the successor. Play must
+        // start the stopped track again.
+        if let Some(path) = self.snapshot.current.as_deref() {
+            if let Some(uri) = file_uri(path) {
+                self.set_run_uri(path, &uri);
+            }
+        }
+        self.startup_gain_ramp = false;
+        self.startup_ramp_hold_until = None;
+        self.buffering_active = false;
+        self.seek_hold = None;
+        self.clear_recent_seek_trace();
+        self.snapshot.state = PlaybackState::Stopped;
+        self.snapshot.position = Duration::ZERO;
+        self.position_clock.reset(Duration::ZERO, Instant::now());
+        self.snapshot.current_queue_index = None;
+        self.snapshot.current_bitrate_kbps = None;
     }
 
     fn seek(&mut self, pos: Duration) {
@@ -927,9 +981,14 @@ impl GstPlaybackRuntime {
     /// staged successors.
     fn continue_after_cancelled_advance(&mut self, cancelled: Option<CancelledAdvance>) {
         self.release_staged_spectrogram(cancelled, true);
-        if !cancelled.is_some_and(|cancelled| cancelled.handed_to_pipeline) {
-            return;
+        if cancelled.is_some_and(|cancelled| cancelled.handed_to_pipeline) {
+            self.restart_at_current_position();
         }
+    }
+
+    /// Restart the committed track where it plays now, in a new pipeline
+    /// run without staged successors.
+    fn restart_at_current_position(&mut self) {
         let position = self
             .playbin
             .query_position::<gst::ClockTime>()
@@ -1015,6 +1074,7 @@ impl GstPlaybackRuntime {
         }
         self.awaiting_run_stream_start = true;
         self.last_stream_group = None;
+        self.missing_plugin = None;
         if let Ok(mut durations) = self.stream_durations.lock() {
             durations.clear();
         }
@@ -1063,6 +1123,8 @@ impl GstPlaybackRuntime {
         });
         if let Some(committed) = committed {
             self.commit_gapless_successor(committed);
+            // The previous track played to its end.
+            self.reset_failures();
         }
     }
 
@@ -1313,39 +1375,113 @@ impl GstPlaybackRuntime {
             "[ferrous] pipeline stuck: Playing state not confirmed within {}s for {current_path}, advancing",
             Self::PLAYING_STATE_TIMEOUT.as_secs(),
         );
-        self.playing_state_requested_at = None;
-        // Force the pipeline to a clean state.
-        let _ = self.playbin.set_state(gst::State::Null);
-        self.begin_pipeline_run(false);
-        self.advance_after_stuck_pipeline();
+        let (file, detail) = match self.missing_plugin.take() {
+            Some(missing) => (missing.file, missing_plugin_detail(&missing.description)),
+            None => (
+                None,
+                format!(
+                    "playback did not start within {} s",
+                    Self::PLAYING_STATE_TIMEOUT.as_secs()
+                ),
+            ),
+        };
+        self.fail_track(file, detail);
         true
     }
 
-    /// After detecting a stuck pipeline, try the next track in the queue.
-    /// If no next track exists, stop playback.
-    fn advance_after_stuck_pipeline(&mut self) {
-        let Ok(mut state) = self.queue_state.lock() else {
-            self.snapshot.state = PlaybackState::Stopped;
+    /// Forget earlier failures: a track played to its end, or a command
+    /// started or navigated playback.
+    fn reset_failures(&mut self) {
+        self.consecutive_failures = 0;
+        if let Ok(mut queue) = self.queue_state.lock() {
+            queue.clear_failed();
+        }
+    }
+
+    fn report_failure(&self, path: Option<PathBuf>, detail: String, outcome: PlaybackErrorOutcome) {
+        let _ = self.event_tx.send(PlaybackEvent::Error(PlaybackError {
+            path,
+            detail,
+            outcome,
+        }));
+    }
+
+    /// Handle a track that cannot be played. `file` is the input that the
+    /// failure came from, when known, and `detail` describes the failure.
+    ///
+    /// A failed successor is dropped and the current track plays on from
+    /// where it is. A failed current track is skipped. Either way the failed
+    /// file is not tried again until the failures end, unless it is renamed;
+    /// after `MAX_CONSECUTIVE_FAILURES` failures in a row, playback stops.
+    fn fail_track(&mut self, file: Option<PathBuf>, detail: String) {
+        self.playing_state_requested_at = None;
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let successor_failed = file.as_deref().is_some_and(|file| {
+            self.stream_durations
+                .lock()
+                .ok()
+                .and_then(|streams| streams.position(file))
+                .is_some_and(|position| position > 0)
+        });
+        let failed = file.or_else(|| self.snapshot.current.clone());
+        if let (Some(path), Ok(mut queue)) = (failed.as_ref(), self.queue_state.lock()) {
+            queue.mark_failed(path.clone());
+        }
+
+        if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            self.stop_after_failure();
+            let outcome = PlaybackErrorOutcome::StoppedAfterFailures(self.consecutive_failures);
+            self.report_failure(failed, detail, outcome);
             self.emit_snapshot();
             return;
-        };
-        let repeat_mode = state.repeat_mode();
-        let shuffle_enabled = state.shuffle_enabled();
-        let next = state.next_manual();
-        drop(state);
-        self.set_queue_flags(repeat_mode, shuffle_enabled);
+        }
+        if successor_failed {
+            // The pipeline stops at the end of the current track when its
+            // successor fails, so restart the current track without it.
+            let _ = self.cancel_pending_advance(true);
+            self.restart_at_current_position();
+            self.report_failure(failed, detail, PlaybackErrorOutcome::Skipped);
+            self.emit_snapshot();
+            return;
+        }
+        let next = self
+            .queue_state
+            .lock()
+            .ok()
+            .and_then(|mut queue| queue.skip_failed_current());
         if let Some(next) = next {
+            self.report_failure(failed, detail, PlaybackErrorOutcome::Skipped);
             self.release_staged_spectrogram(next.cancelled, false);
-            self.switch_to_path(next.path, next.index, TrackChangeKind::Manual, true);
+            // Keeps a paused player paused.
+            self.switch_to_path(next.path, next.index, TrackChangeKind::Natural, false);
         } else {
-            self.snapshot.state = PlaybackState::Stopped;
-            self.snapshot.position = Duration::ZERO;
-            self.snapshot.duration = Duration::ZERO;
+            self.stop_after_failure();
+            self.report_failure(failed, detail, PlaybackErrorOutcome::Stopped);
             self.emit_snapshot();
         }
     }
 
+    /// Tear down the faulted pipeline and stop on the current track.
+    fn stop_after_failure(&mut self) {
+        self.soft_mute();
+        let _ = self.playbin.set_state(gst::State::Null);
+        let _ = self.playbin.set_state(gst::State::Ready);
+        self.enter_stopped();
+    }
+
     fn apply_command(&mut self, cmd: PlaybackCommand) {
+        if matches!(
+            cmd,
+            PlaybackCommand::LoadQueue(_)
+                | PlaybackCommand::ClearQueue
+                | PlaybackCommand::PlayAt(_)
+                | PlaybackCommand::Next
+                | PlaybackCommand::Previous
+                | PlaybackCommand::Play
+                | PlaybackCommand::Stop
+        ) {
+            self.reset_failures();
+        }
         match cmd {
             PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
             PlaybackCommand::AddToQueue(paths) => self.add_to_queue(paths),
@@ -1451,6 +1587,8 @@ impl GstPlaybackRuntime {
                     .lock()
                     .ok()
                     .and_then(|mut queue| queue.take_eos_successor());
+                // The track played to its end.
+                self.reset_failures();
                 if let Some(successor) = successor {
                     self.release_staged_spectrogram(successor.released, false);
                     self.switch_to_path(
@@ -1482,24 +1620,11 @@ impl GstPlaybackRuntime {
                     self.emit_snapshot();
                 }
             }
-            gst::MessageView::Error(err) => {
-                eprintln!(
-                    "[ferrous] gstreamer error from {:?}: {} ({:?})",
-                    err.src().map(gstreamer::prelude::GstObjectExt::path_string),
-                    err.error(),
-                    err.debug()
-                );
-                self.playing_state_requested_at = None;
-                self.buffering_active = false;
-                self.position_clock
-                    .reset(self.snapshot.position, Instant::now());
-                self.snapshot.state = PlaybackState::Stopped;
-                // Tear down the faulted pipeline fully so subsequent
-                // tracks can start from a clean state.
-                let _ = self.playbin.set_state(gst::State::Null);
-                let _ = self.playbin.set_state(gst::State::Ready);
-                self.begin_pipeline_run(false);
-                self.emit_snapshot();
+            gst::MessageView::Error(err) => self.handle_error_message(err),
+            gst::MessageView::Element(_) => {
+                if let Ok(missing) = gst_pbutils::MissingPluginMessage::parse(msg) {
+                    self.note_missing_plugin(&missing);
+                }
             }
             gst::MessageView::Warning(warn) => {
                 eprintln!(
@@ -1520,6 +1645,44 @@ impl GstPlaybackRuntime {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn handle_error_message(&mut self, err: &gst::message::Error) {
+        eprintln!(
+            "[ferrous] gstreamer error from {:?}: {} ({:?})",
+            err.src().map(gstreamer::prelude::GstObjectExt::path_string),
+            err.error(),
+            err.debug()
+        );
+        let error = err.error();
+        let file = input_file(err.src());
+        let (file, detail) = match self.missing_plugin.take() {
+            Some(missing)
+                if error.matches(gst::CoreError::MissingPlugin)
+                    || error.matches(gst::StreamError::CodecNotFound) =>
+            {
+                (
+                    file.or(missing.file),
+                    missing_plugin_detail(&missing.description),
+                )
+            }
+            _ => (file, error.to_string()),
+        };
+        // Every later message of the faulted run is discarded.
+        self.fail_track(file, detail);
+    }
+
+    /// Remember a missing plugin, to name it in the error that follows.
+    fn note_missing_plugin(&mut self, missing: &gst_pbutils::MissingPluginMessage<'_>) {
+        let description = missing.description().to_string();
+        eprintln!("[ferrous] missing GStreamer plugin: {description}");
+        // The first report names the input; later ones repeat it.
+        if self.missing_plugin.is_none() {
+            self.missing_plugin = Some(MissingPlugin {
+                file: input_file(missing.msg.src()),
+                description,
+            });
         }
     }
 
@@ -1590,18 +1753,18 @@ impl GstPlaybackRuntime {
     }
 }
 
-fn run_gst_engine(
-    cmd_rx: &Receiver<PlaybackCommand>,
+/// Create the pipeline and the runtime that drives it.
+fn start_gst_engine(
     event_tx: Sender<PlaybackEvent>,
     analysis_tx: Sender<AnalysisCommand>,
     build_output: fn() -> anyhow::Result<gst::Element>,
-) -> anyhow::Result<()> {
-    gst::init().context("gst::init failed")?;
+) -> anyhow::Result<(GstPlaybackRuntime, gst::Bus)> {
+    gst::init().context("GStreamer could not be initialized")?;
     configure_raw_surround_decoding();
 
-    let playbin = gst::ElementFactory::make("playbin3")
-        .build()
-        .map_err(|_| anyhow!("failed to create playbin3"))?;
+    let playbin = gst::ElementFactory::make("playbin3").build().map_err(|_| {
+        anyhow!("GStreamer's playbin3 element is missing; install the GStreamer base plugins")
+    })?;
     configure_playbin_buffering(&playbin);
 
     let channel_mute_mask = Arc::new(AtomicU64::new(0));
@@ -1638,7 +1801,7 @@ fn run_gst_engine(
     }
 
     let bus = playbin.bus().context("playbin has no bus")?;
-    let mut runtime = GstPlaybackRuntime::new(
+    let runtime = GstPlaybackRuntime::new(
         playbin,
         queue_state,
         analysis_tx,
@@ -1649,24 +1812,30 @@ fn run_gst_engine(
     runtime
         .playbin
         .set_property("volume", f64::from(runtime.applied_volume));
+    Ok((runtime, bus))
+}
 
+fn run_gst_engine(
+    mut runtime: GstPlaybackRuntime,
+    bus: &gst::Bus,
+    cmd_rx: &Receiver<PlaybackCommand>,
+) {
     loop {
         match cmd_rx.recv_timeout(runtime.command_wait_timeout()) {
             Ok(cmd) => {
                 // Act on the pipeline's latest state, such as a successor
                 // that has just started.
-                runtime.drain_bus(&bus);
+                runtime.drain_bus(bus);
                 runtime.apply_command(cmd);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        runtime.drain_bus(&bus);
+        runtime.drain_bus(bus);
         runtime.poll_volume_ramp(Instant::now());
     }
 
     let _ = runtime.playbin.set_state(gst::State::Null);
-    Ok(())
 }
 
 /// Stage the natural successor when the pipeline asks for one, and give
@@ -1790,6 +1959,12 @@ impl StreamDurations {
         }
     }
 
+    /// Place in play order of the first stream reading `file`: 0 for the
+    /// audible stream, then the successors handed to the pipeline.
+    fn position(&self, file: &Path) -> Option<usize> {
+        self.streams.iter().position(|stream| stream.file == file)
+    }
+
     /// Duration of the audible stream.
     fn current(&self) -> Option<Duration> {
         self.streams.front()?.duration
@@ -1856,6 +2031,37 @@ fn install_stream_duration_probe(pad: &gst::Pad, durations: Arc<Mutex<StreamDura
             gst::PadProbeReturn::Ok
         },
     );
+}
+
+fn missing_plugin_detail(description: &str) -> String {
+    format!("missing GStreamer plugin: {description}")
+}
+
+/// File of the pipeline input that `src` belongs to: a file source, or an
+/// element of the `urisourcebin` that reads one input, which also parses
+/// it. Elements that the inputs share, such as decoders, belong to none.
+fn input_file(src: Option<&gst::Object>) -> Option<PathBuf> {
+    let mut element = src?.clone().downcast::<gst::Element>().ok()?;
+    loop {
+        let factory = element.factory().map(|factory| factory.name().to_string());
+        let uri = match factory.as_deref() {
+            Some("urisourcebin") => element
+                .property_value("uri")
+                .get::<Option<String>>()
+                .ok()
+                .flatten(),
+            Some("decodebin3" | "uridecodebin3" | "playbin3") => return None,
+            _ => element
+                .dynamic_cast_ref::<gst::URIHandler>()
+                .filter(|handler| handler.uri_type() == gst::URIType::Src)
+                .and_then(gst::prelude::URIHandlerExt::uri)
+                .map(String::from),
+        };
+        if let Some(uri) = uri {
+            return url::Url::parse(&uri).ok()?.to_file_path().ok();
+        }
+        element = element.parent()?.downcast::<gst::Element>().ok()?;
+    }
 }
 
 /// File that the source upstream of `pad` reads.
@@ -2065,7 +2271,9 @@ fn build_output_sink() -> anyhow::Result<gst::Element> {
             );
             gst::ElementFactory::make("autoaudiosink").build()
         })
-        .map_err(|_| anyhow!("missing output sink element"))
+        .map_err(|_| {
+            anyhow!("no audio output is available; install the GStreamer good plugins (autoaudiosink)")
+        })
 }
 
 fn build_raw_audio_caps() -> gst::Caps {
@@ -2983,6 +3191,20 @@ mod engine_tests {
             path
         }
 
+        /// A file of noise that no element can parse.
+        fn corrupt(&self, name: &str) -> PathBuf {
+            let mut state = 0x2545_f491_u32;
+            let bytes: Vec<u8> = (0..32_768)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    state.to_be_bytes()[0]
+                })
+                .collect();
+            let path = self.dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+
         /// MPEG-1 Layer III without a Xing header: 2 s of 32 kbit/s frames,
         /// then 3 s of 320 kbit/s frames. The parser first estimates the
         /// duration from the low bitrate and refines it while reading.
@@ -3040,9 +3262,12 @@ mod engine_tests {
         commands: Sender<PlaybackCommand>,
         events: Receiver<PlaybackEvent>,
         analysis: Receiver<AnalysisCommand>,
+        /// The engine's pipeline, to post messages on its bus.
+        playbin: gst::Element,
         snapshot: PlaybackSnapshot,
         snapshots: Vec<PlaybackSnapshot>,
         changes: Vec<Change>,
+        errors: Vec<PlaybackError>,
         prepared: Vec<PathBuf>,
         cancelled_staging: usize,
     }
@@ -3051,14 +3276,21 @@ mod engine_tests {
         fn start() -> Self {
             gst::init().unwrap();
             let (analysis_tx, analysis) = unbounded();
-            let (commands, events) = spawn_engine_with_output(analysis_tx, fake_output);
+            let (event_tx, events) = unbounded();
+            let (runtime, bus) =
+                start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
+            let playbin = runtime.playbin.clone();
+            let (commands, command_rx) = unbounded();
+            std::thread::spawn(move || run_gst_engine(runtime, &bus, &command_rx));
             Self {
                 commands,
                 events,
                 analysis,
+                playbin,
                 snapshot: PlaybackSnapshot::default(),
                 snapshots: Vec::new(),
                 changes: Vec::new(),
+                errors: Vec::new(),
                 prepared: Vec::new(),
                 cancelled_staging: 0,
             }
@@ -3111,6 +3343,7 @@ mod engine_tests {
                     kind,
                     token: track_token,
                 }),
+                PlaybackEvent::Error(error) => self.errors.push(error),
                 PlaybackEvent::Seeked { .. } | PlaybackEvent::PathsRemapped => {}
             }
         }
@@ -3140,6 +3373,30 @@ mod engine_tests {
             assert_eq!(
                 self.snapshot.current_queue_index, row,
                 "the successor is not audible yet"
+            );
+        }
+
+        fn wait_for_errors(&mut self, count: usize) -> PlaybackError {
+            assert!(
+                self.run_until(TIMEOUT, |engine| engine.errors.len() >= count),
+                "expected {count} errors, got {:?}",
+                self.errors
+            );
+            self.errors[count - 1].clone()
+        }
+
+        /// Post `message` on the pipeline's bus.
+        fn post(&self, message: gst::Message) {
+            self.playbin.bus().unwrap().post(message).unwrap();
+        }
+
+        /// Post an error from an element that every input shares, such as
+        /// a decoder, so the error names no file.
+        fn post_shared_error(&self, error: impl gst::MessageErrorDomain, text: &str) {
+            self.post(
+                gst::message::Error::builder(error, text)
+                    .src(&self.playbin)
+                    .build(),
             );
         }
 
@@ -3521,5 +3778,361 @@ mod engine_tests {
             vbr_duration()
         );
         engine.wait_for_playing(1, refined);
+    }
+
+    #[test]
+    fn corrupt_current_track_is_reported_and_skipped() {
+        let fixtures = Fixtures::new("corrupt-current");
+        let bad = fixtures.corrupt("bad.wav");
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![bad.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        let error = engine.wait_for_errors(1);
+        assert_eq!(error.path.as_deref(), Some(bad.as_path()));
+        assert_eq!(error.outcome, PlaybackErrorOutcome::Skipped);
+        assert!(!error.detail.is_empty());
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
+        engine.wait_for_playing(1, millis(4_500));
+        assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+    }
+
+    #[test]
+    fn corrupt_track_in_the_middle_is_skipped_after_the_track_before_it() {
+        // The corrupt track is handed to the pipeline as the successor of
+        // A and fails to open while A plays.
+        let fixtures = Fixtures::new("corrupt-successor");
+        let a = fixtures.wav("a.wav", 4_000);
+        let bad = fixtures.corrupt("bad.wav");
+        let c = fixtures.wav("c.wav", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a, bad.clone(), c.clone()]));
+        engine.send(PlaybackCommand::Play);
+        let started = Instant::now();
+        let error = engine.wait_for_errors(1);
+        assert_eq!(error.path.as_deref(), Some(bad.as_path()));
+        assert_eq!(error.outcome, PlaybackErrorOutcome::Skipped);
+
+        let change = engine.wait_for_changes(2);
+        assert_change(&change, &c, 2, Expect::Automatic);
+        assert!(
+            started.elapsed() >= millis(3_500),
+            "A was cut short: C started {:?} after A",
+            started.elapsed()
+        );
+        engine.wait_for_playing(2, millis(4_500));
+        assert_eq!(engine.errors.len(), 1);
+        assert!(engine
+            .snapshots
+            .iter()
+            .all(|snapshot| snapshot.current_queue_index != Some(1)));
+    }
+
+    #[test]
+    fn successor_renamed_before_its_remap_is_reported_and_skipped() {
+        // The rename reaches the engine only after the pipeline failed to
+        // open the old path.
+        let fixtures = Fixtures::new("rename-before-remap");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let c = fixtures.wav("c.wav", 5_000);
+        let renamed = fixtures.dir.join("renamed b.wav");
+        std::fs::rename(&b, &renamed).unwrap();
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone(), c.clone()]));
+        engine.send(PlaybackCommand::Play);
+        let started = Instant::now();
+        let error = engine.wait_for_errors(1);
+        assert_eq!(error.path.as_deref(), Some(b.as_path()));
+        assert_eq!(error.outcome, PlaybackErrorOutcome::Skipped);
+        assert_change(&engine.wait_for_changes(2), &c, 2, Expect::Automatic);
+        assert!(
+            started.elapsed() >= millis(3_500),
+            "A was cut short: C started {:?} after A",
+            started.elapsed()
+        );
+
+        // Once the rename arrives, the track plays from its new path.
+        engine.send(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
+            (b, renamed.clone()),
+        ]))));
+        engine.send(PlaybackCommand::PlayAt(1));
+        assert_change(&engine.wait_for_changes(3), &renamed, 1, Expect::Manual);
+        engine.wait_for_playing(1, millis(4_500));
+        assert_eq!(engine.errors.len(), 1);
+    }
+
+    /// The runtime without its thread, so a test decides when it handles
+    /// each bus message.
+    struct DirectEngine {
+        runtime: GstPlaybackRuntime,
+        bus: gst::Bus,
+        events: Receiver<PlaybackEvent>,
+        _analysis: Receiver<AnalysisCommand>,
+    }
+
+    impl DirectEngine {
+        fn start() -> Self {
+            gst::init().unwrap();
+            let (analysis_tx, analysis) = unbounded();
+            let (event_tx, events) = unbounded();
+            let (runtime, bus) =
+                start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
+            Self {
+                runtime,
+                bus,
+                events,
+                _analysis: analysis,
+            }
+        }
+
+        /// Handle bus messages until one matches `stop`, which is returned
+        /// unhandled.
+        fn handle_messages_until(
+            &mut self,
+            mut stop: impl FnMut(&gst::Message) -> bool,
+        ) -> gst::Message {
+            let deadline = Instant::now() + TIMEOUT;
+            while Instant::now() < deadline {
+                let Some(message) = self.bus.timed_pop(gst::ClockTime::from_mseconds(20)) else {
+                    continue;
+                };
+                if stop(&message) {
+                    return message;
+                }
+                self.runtime.handle_bus_message(&message);
+            }
+            panic!("no matching bus message");
+        }
+    }
+
+    impl Drop for DirectEngine {
+        fn drop(&mut self) {
+            let _ = self.runtime.playbin.set_state(gst::State::Null);
+        }
+    }
+
+    #[test]
+    fn successor_renamed_before_its_remap_plays_from_the_new_path_once_remapped() {
+        // The rename reaches the engine after the pipeline failed to open
+        // the old path, but before the engine handles the failure.
+        let fixtures = Fixtures::new("rename-remapped");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let c = fixtures.wav("c.wav", 5_000);
+        let renamed = fixtures.dir.join("renamed b.wav");
+        std::fs::rename(&b, &renamed).unwrap();
+        let mut engine = DirectEngine::start();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone(), c]));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        let failure = engine
+            .handle_messages_until(|message| matches!(message.view(), gst::MessageView::Error(_)));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
+                (b.clone(), renamed.clone()),
+            ]))));
+        engine.runtime.handle_bus_message(&failure);
+
+        let errors: Vec<_> = engine
+            .events
+            .try_iter()
+            .filter_map(|event| match event {
+                PlaybackEvent::Error(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path.as_deref(), Some(b.as_path()));
+        assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Skipped);
+        assert_eq!(
+            engine.runtime.snapshot.current.as_deref(),
+            Some(a.as_path())
+        );
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
+
+        let deadline = Instant::now() + TIMEOUT;
+        let change = loop {
+            let change = engine.events.try_iter().find_map(|event| match event {
+                PlaybackEvent::TrackChanged {
+                    path, queue_index, ..
+                } => Some((path, queue_index)),
+                _ => None,
+            });
+            if change.is_some() || Instant::now() >= deadline {
+                break change;
+            }
+            if let Some(message) = engine.bus.timed_pop(gst::ClockTime::from_mseconds(20)) {
+                engine.runtime.handle_bus_message(&message);
+            }
+        };
+        assert_eq!(change, Some((renamed, 1)));
+    }
+
+    #[test]
+    fn tracks_failing_in_a_row_stop_playback_with_a_message() {
+        let fixtures = Fixtures::new("failures-in-a-row");
+        let mut queue: Vec<_> = (0..6)
+            .map(|index| fixtures.corrupt(&format!("bad {index}.wav")))
+            .collect();
+        queue.push(fixtures.wav("good.wav", 4_000));
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(queue.clone()));
+        engine.send(PlaybackCommand::Play);
+        let last = engine.wait_for_errors(5);
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.state
+            == PlaybackState::Stopped));
+
+        for (index, error) in engine.errors.iter().enumerate().take(4) {
+            assert_eq!(error.path.as_deref(), Some(queue[index].as_path()));
+            assert_eq!(error.outcome, PlaybackErrorOutcome::Skipped);
+        }
+        assert_eq!(last.path.as_deref(), Some(queue[4].as_path()));
+        assert_eq!(last.outcome, PlaybackErrorOutcome::StoppedAfterFailures(5));
+        assert!(
+            last.message().contains("5 tracks in a row"),
+            "{}",
+            last.message()
+        );
+        assert_eq!(engine.snapshot.current.as_deref(), Some(queue[4].as_path()));
+        assert_eq!(engine.errors.len(), 5);
+        let rows: Vec<_> = engine.changes.iter().map(|change| change.index).collect();
+        assert_eq!(rows, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn queue_where_every_track_fails_stops_with_repeat_all_and_repeat_one() {
+        let fixtures = Fixtures::new("all-fail");
+        let queue = vec![fixtures.corrupt("bad 0.wav"), fixtures.corrupt("bad 1.wav")];
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::All));
+        engine.send(PlaybackCommand::LoadQueue(queue.clone()));
+        engine.send(PlaybackCommand::Play);
+        let stopped = engine.wait_for_errors(2);
+        assert_eq!(engine.errors[0].outcome, PlaybackErrorOutcome::Skipped);
+        assert_eq!(stopped.path.as_deref(), Some(queue[1].as_path()));
+        assert_eq!(stopped.outcome, PlaybackErrorOutcome::Stopped);
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.state
+            == PlaybackState::Stopped));
+
+        // Repeat-one plays only the failed track, so it stops at once.
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+        engine.send(PlaybackCommand::Play);
+        let stopped = engine.wait_for_errors(3);
+        assert_eq!(stopped.path.as_deref(), Some(queue[1].as_path()));
+        assert_eq!(stopped.outcome, PlaybackErrorOutcome::Stopped);
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.state
+            == PlaybackState::Stopped));
+        assert_eq!(engine.errors.len(), 3);
+        assert_eq!(engine.changes.len(), 2, "{:?}", engine.changes);
+    }
+
+    #[test]
+    fn failure_with_a_successor_staged_for_end_of_stream_leaves_no_stale_advance() {
+        // B has another extension, so it is staged to start at the end of
+        // A rather than handed to the pipeline.
+        let fixtures = Fixtures::new("fail-staged");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wave", 4_500);
+        let c = fixtures.wav("c.wav", 5_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![
+            a.clone(),
+            b.clone(),
+            c.clone(),
+        ]));
+        engine.send(PlaybackCommand::Play);
+        // The pipeline read all of A, so it asked for the successor.
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(3_000)));
+        assert_eq!(engine.snapshot.current_queue_index, Some(0));
+
+        engine.post_shared_error(gst::StreamError::Decode, "injected decoder failure");
+        let error = engine.wait_for_errors(1);
+        assert_eq!(error.path.as_deref(), Some(a.as_path()));
+        assert_eq!(error.outcome, PlaybackErrorOutcome::Skipped);
+        assert_eq!(error.detail, "injected decoder failure");
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
+        engine.wait_for_playing(1, millis(4_500));
+
+        // Stop and Play replay B, and C follows it.
+        engine.send(PlaybackCommand::Stop);
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(1, millis(4_500));
+        assert_change(&engine.wait_for_changes(3), &c, 2, Expect::Automatic);
+        engine.wait_for_playing(2, millis(5_000));
+        assert_eq!(engine.changes.len(), 3, "{:?}", engine.changes);
+    }
+
+    #[test]
+    fn missing_plugin_is_named_in_the_error() {
+        let fixtures = Fixtures::new("missing-plugin");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_000));
+
+        let caps = gst::Caps::builder("audio/x-flac").build();
+        let missing = gst_pbutils::MissingPluginMessage::builder_for_decoder(&caps)
+            .src(&engine.playbin)
+            .build();
+        let description = gst_pbutils::MissingPluginMessage::parse(&missing)
+            .unwrap()
+            .description()
+            .to_string();
+        assert!(!description.is_empty());
+        engine.post(missing);
+        engine.post_shared_error(
+            gst::CoreError::MissingPlugin,
+            "Your GStreamer installation is missing a plug-in.",
+        );
+        let error = engine.wait_for_errors(1);
+        assert_eq!(error.path.as_deref(), Some(a.as_path()));
+        assert_eq!(
+            error.detail,
+            format!("missing GStreamer plugin: {description}")
+        );
+        assert!(
+            error.message().contains(&description),
+            "{}",
+            error.message()
+        );
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
+    }
+
+    #[test]
+    fn engine_that_cannot_start_reports_why_and_fails_commands() {
+        fn no_output() -> anyhow::Result<gst::Element> {
+            Err(anyhow!("no audio output in this test"))
+        }
+        let (analysis_tx, _analysis) = unbounded();
+        let (engine, events) = crate::playback::PlaybackEngine::spawn(|event_tx, failure| {
+            spawn_engine_with_output(analysis_tx, event_tx, failure, no_output)
+        });
+        let unavailable = |event: Option<PlaybackEvent>| match event {
+            Some(PlaybackEvent::Error(error)) => {
+                assert_eq!(error.outcome, PlaybackErrorOutcome::EngineUnavailable);
+                assert_eq!(error.path, None);
+                assert!(
+                    error.detail.contains("no audio output in this test"),
+                    "{error:?}"
+                );
+            }
+            other => panic!("expected the engine failure, got {other:?}"),
+        };
+        unavailable(events.recv_timeout(TIMEOUT).ok());
+
+        engine.command(PlaybackCommand::Play);
+        unavailable(events.try_recv().ok());
+        engine.command(PlaybackCommand::Poll);
+        // The bridge's polls are not reported, and the event channel stays
+        // open, so the bridge does not spin on a closed channel.
+        assert!(matches!(
+            events.recv_timeout(millis(100)),
+            Err(RecvTimeoutError::Timeout)
+        ));
     }
 }

@@ -6,8 +6,11 @@
 //! successors staged before the committed track ends. A staged successor
 //! changes nothing until the backend commits it when its audio starts; a
 //! cancelled successor leaves the queue as if it had never been staged.
+//!
+//! Files that failed to play are skipped by natural advances until the
+//! backend clears them, so a failure cannot repeat in a loop.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use super::{PathRenames, RepeatMode};
@@ -303,6 +306,9 @@ pub(crate) struct GaplessQueue {
     /// Successors are staged for end of stream instead of being handed to
     /// the pipeline, because a seek in progress would reach them.
     handoffs_held: bool,
+    /// Files that failed to play. Natural advances skip rows with these
+    /// paths; a renamed row has a new path and is tried again.
+    failed: HashSet<PathBuf>,
 }
 
 impl GaplessQueue {
@@ -314,6 +320,7 @@ impl GaplessQueue {
             shuffle_enabled: false,
             pending: VecDeque::new(),
             handoffs_held: false,
+            failed: HashSet::new(),
         }
     }
 
@@ -359,6 +366,37 @@ impl GaplessQueue {
 
     pub(crate) fn release_handoffs(&mut self) {
         self.handoffs_held = false;
+    }
+
+    // The simulated backend has no failures.
+    #[cfg(any(test, feature = "gst"))]
+    /// Skip `path` in natural advances until `clear_failed`.
+    pub(crate) fn mark_failed(&mut self, path: PathBuf) {
+        self.failed.insert(path);
+    }
+
+    // The simulated backend has no failures.
+    #[cfg(any(test, feature = "gst"))]
+    pub(crate) fn clear_failed(&mut self) {
+        self.failed.clear();
+    }
+
+    // The simulated backend has no failures.
+    #[cfg(any(test, feature = "gst"))]
+    /// Move from the committed track, which failed, to its natural
+    /// successor that has not failed, dropping staged successors. Returns
+    /// `None` and stays when no such track is left; with repeat-one, the
+    /// failed track is the only natural successor.
+    pub(crate) fn skip_failed_current(&mut self) -> Option<ManualMove> {
+        let cursor = self.natural_successor(&self.cursor)?;
+        let path = self.queue.get(cursor.index)?.clone();
+        let cancelled = self.cancel_pending();
+        self.cursor = cursor;
+        Some(ManualMove {
+            path,
+            index: self.cursor.index,
+            cancelled,
+        })
     }
 
     /// Drop every staged successor so the committed track stays current.
@@ -527,6 +565,26 @@ impl GaplessQueue {
             .map_or(&self.cursor, |pending| &pending.cursor)
     }
 
+    /// The cursor of the natural successor of `from` that has not failed.
+    fn natural_successor(&self, from: &Cursor) -> Option<Cursor> {
+        let len = self.queue.len();
+        let rules = self.rules();
+        let mut cursor = from.clone();
+        // A sequential advance visits every row within `len` steps.
+        for _ in 0..len {
+            if !cursor.advance(len, rules, Advance::Natural) {
+                return None;
+            }
+            if !self.failed.contains(self.queue.get(cursor.index)?) {
+                return Some(cursor);
+            }
+            if rules.repeat_mode == RepeatMode::One {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Stage the natural successor of the track the pipeline is fed last.
     /// `handoff` receives the finishing and successor paths.
     pub(crate) fn stage_natural(
@@ -536,10 +594,7 @@ impl GaplessQueue {
         let rules = self.rules();
         let feeding = self.feeding();
         let finishing = self.queue.get(feeding.index)?.clone();
-        let mut cursor = feeding.clone();
-        if !cursor.advance(self.queue.len(), rules, Advance::Natural) {
-            return None;
-        }
+        let cursor = self.natural_successor(feeding)?;
         let path = self.queue.get(cursor.index)?.clone();
         let handoff = if self.handoffs_held {
             Handoff::AtEos
@@ -591,10 +646,7 @@ impl GaplessQueue {
                 released,
             });
         }
-        let mut cursor = self.cursor.clone();
-        if !cursor.advance(self.queue.len(), self.rules(), Advance::Natural) {
-            return None;
-        }
+        let cursor = self.natural_successor(&self.cursor)?;
         let path = self.queue.get(cursor.index)?.clone();
         self.cursor = cursor;
         Some(EosSuccessor {
@@ -642,19 +694,31 @@ impl GaplessQueue {
         cancelled
     }
 
+    /// The row that a sequential natural advance from `index` reaches,
+    /// skipping failed files like `natural_successor`.
     fn sequential_successor(&self, index: usize) -> Option<usize> {
         let len = self.queue.len();
-        if index >= len {
-            None
-        } else if self.repeat_mode == RepeatMode::One {
-            Some(index)
-        } else if index + 1 < len {
-            Some(index + 1)
-        } else if self.repeat_mode == RepeatMode::All {
-            Some(0)
-        } else {
-            None
+        let mut index = index;
+        for _ in 0..len {
+            index = if index >= len {
+                return None;
+            } else if self.repeat_mode == RepeatMode::One {
+                index
+            } else if index + 1 < len {
+                index + 1
+            } else if self.repeat_mode == RepeatMode::All {
+                0
+            } else {
+                return None;
+            };
+            if !self.failed.contains(&self.queue[index]) {
+                return Some(index);
+            }
+            if self.repeat_mode == RepeatMode::One {
+                return None;
+            }
         }
+        None
     }
 }
 
@@ -998,6 +1062,63 @@ mod tests {
         assert_eq!(queue.add_to_queue(Vec::new()), None, "still the successor");
         let committed = queue.commit_gapless().expect("commit");
         assert_eq!((committed.path, committed.index), (renamed_again, 2));
+    }
+
+    #[test]
+    fn natural_advances_skip_failed_files_until_cleared() {
+        let (mut queue, paths) = queue_of(4);
+        queue.mark_failed(paths[1].clone());
+        let staged = queue.stage_natural(gapless).expect("successor");
+        assert_eq!(staged.path, paths[2]);
+        assert_eq!(queue.add_to_queue(Vec::new()), None, "still the successor");
+        assert_eq!(committed_index(&mut queue), Some(2));
+
+        queue.set_current(0);
+        assert_eq!(queue.clone().take_eos_successor().unwrap().index, 2);
+        let skipped = queue.skip_failed_current().expect("next playable track");
+        assert_eq!((skipped.path, skipped.index), (paths[2].clone(), 2));
+
+        queue.clear_failed();
+        queue.set_current(0);
+        assert_eq!(queue.stage_natural(gapless).unwrap().path, paths[1]);
+    }
+
+    #[test]
+    fn failed_file_renamed_later_is_tried_at_its_new_path() {
+        let (mut queue, paths) = queue_of(3);
+        let renamed = PathBuf::from("/fixture/renamed-1.flac");
+        queue.mark_failed(paths[1].clone());
+        queue.remap_paths(&PathRenames::from([(paths[1].clone(), renamed.clone())]));
+        assert_eq!(queue.stage_natural(gapless).unwrap().path, renamed);
+    }
+
+    #[test]
+    fn queue_of_failed_files_has_no_successor_in_any_repeat_mode() {
+        let (mut queue, paths) = queue_of(2);
+        queue.mark_failed(paths[0].clone());
+        queue.mark_failed(paths[1].clone());
+        for mode in [RepeatMode::Off, RepeatMode::All, RepeatMode::One] {
+            queue.set_repeat_mode(mode);
+            for shuffle in [false, true] {
+                queue.set_shuffle_enabled(shuffle);
+                assert_eq!(queue.stage_natural(gapless), None, "{mode:?} {shuffle}");
+                assert_eq!(
+                    queue.clone().take_eos_successor(),
+                    None,
+                    "{mode:?} {shuffle}"
+                );
+                assert_eq!(queue.skip_failed_current(), None, "{mode:?} {shuffle}");
+            }
+        }
+        assert_eq!(queue.current_index(), Some(0));
+
+        // Repeat-one replays only the current track; it does not move on.
+        let (mut queue, paths) = queue_of(2);
+        queue.set_repeat_mode(RepeatMode::One);
+        queue.mark_failed(paths[0].clone());
+        assert_eq!(queue.skip_failed_current(), None);
+        queue.set_repeat_mode(RepeatMode::All);
+        assert_eq!(queue.skip_failed_current().unwrap().index, 1);
     }
 
     #[test]
