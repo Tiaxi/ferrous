@@ -14,7 +14,8 @@ use crate::analysis::AnalysisCommand;
 #[cfg(feature = "profiling-logs")]
 use crate::profile_logging::heartbeat_trace_enabled;
 use crate::raw_audio::{
-    audio_byte_range, is_dts_file, is_raw_surround_file, register_raw_surround_typefinders,
+    install_raw_surround_source_probe, is_dts_file, is_raw_surround_file,
+    register_raw_surround_typefinders,
 };
 
 use super::{
@@ -1854,72 +1855,6 @@ fn step_volume_level(
     let max_step = elapsed.as_secs_f32() / full_scale.as_secs_f32();
     let delta = target - level;
     (delta.abs() > max_step + VOLUME_LEVEL_SNAP).then(|| level + delta.signum() * max_step)
-}
-
-/// Install a `source-setup` handler on playbin that attaches a pad
-/// probe to each source element feeding a raw surround file.  The
-/// probe strips leading partial-frame bytes (before the first sync
-/// word) and trailing `APEv2` tag bytes, so the parser only receives
-/// clean, sync-aligned audio data.
-fn install_raw_surround_source_probe(playbin: &gst::Element) {
-    playbin.connect("source-setup", false, |values| {
-        let source = values.get(1)?.get::<gst::Element>().ok()?;
-        if !source.has_property("location") {
-            return None;
-        }
-        let location = source.property_value("location").get::<String>().ok()?;
-        let path = PathBuf::from(&location);
-        let (audio_start, audio_end) = audio_byte_range(&path)?;
-
-        let src_pad = source.static_pad("src")?;
-        let bytes_seen = AtomicU64::new(0);
-        src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
-            let buf_size = match info.buffer() {
-                Some(buf) => buf.size() as u64,
-                None => return gst::PadProbeReturn::Ok,
-            };
-            let offset = bytes_seen.fetch_add(buf_size, Ordering::Relaxed);
-            let buf_end = offset + buf_size;
-
-            // Entirely outside the audio region → drop.
-            if buf_end <= audio_start || offset >= audio_end {
-                return gst::PadProbeReturn::Drop;
-            }
-
-            // Buffer spans the front boundary (leading partial frame).
-            if offset < audio_start {
-                let skip = usize::try_from(audio_start - offset).unwrap_or(0);
-                let tail = usize::try_from(buf_end.min(audio_end) - audio_start).unwrap_or(0);
-                if tail == 0 {
-                    return gst::PadProbeReturn::Drop;
-                }
-                if let Some(buf) = info.buffer_mut() {
-                    // Replace with a sub-region copy that skips the
-                    // leading bytes — can't just set_size here because
-                    // the unwanted bytes are at the front.
-                    if let Ok(sub) = buf.copy_region(gst::BufferCopyFlags::all(), skip..skip + tail)
-                    {
-                        *buf = sub;
-                    }
-                }
-                return gst::PadProbeReturn::Ok;
-            }
-
-            // Buffer spans the back boundary (APEv2 tag region).
-            if buf_end > audio_end {
-                let keep = usize::try_from(audio_end - offset).unwrap_or(0);
-                if keep == 0 {
-                    return gst::PadProbeReturn::Drop;
-                }
-                if let Some(buf) = info.buffer_mut() {
-                    buf.make_mut().set_size(keep);
-                }
-            }
-
-            gst::PadProbeReturn::Ok
-        });
-        None
-    });
 }
 
 fn configure_playbin_buffering(playbin: &gst::Element) {
