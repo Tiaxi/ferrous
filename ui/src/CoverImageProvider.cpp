@@ -28,9 +28,18 @@ void CoverImageResponse::cancel() {
     m_cancelled.storeRelaxed(1);
 }
 
+bool CoverImageResponse::isFinished() const {
+    return m_finished.loadAcquire() != 0;
+}
+
+void CoverImageResponse::finish() {
+    m_finished.storeRelease(1);
+    emit finished();
+}
+
 void CoverImageResponse::run() {
     if (m_cancelled.loadRelaxed()) {
-        emit finished();
+        finish();
         return;
     }
 
@@ -46,7 +55,7 @@ void CoverImageResponse::run() {
         m_errorString = reader.errorString();
     }
 
-    emit finished();
+    finish();
 }
 
 // --- CoverImageProvider ---
@@ -61,6 +70,10 @@ QQuickImageResponse *CoverImageProvider::requestImageResponse(
     auto *response = new CoverImageResponse(id, requestedSize);
     m_pool.start(response);
     return response;
+}
+
+void CoverImageProvider::waitForDone() {
+    m_pool.waitForDone();
 }
 
 QString CoverImageProvider::urlForPath(const QString &filePath) {

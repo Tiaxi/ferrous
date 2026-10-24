@@ -2763,8 +2763,8 @@ void BridgeClientTest::coverImageProviderLoadsValidImage() {
     QQuickImageResponse *response = provider.requestImageResponse(imagePath, QSize());
     QVERIFY(response != nullptr);
 
-    QSignalSpy finishedSpy(response, &QQuickImageResponse::finished);
-    QTRY_VERIFY_WITH_TIMEOUT(!finishedSpy.isEmpty(), 5000);
+    provider.waitForDone();
+    QVERIFY(static_cast<CoverImageResponse *>(response)->isFinished());
 
     QQuickTextureFactory *factory = response->textureFactory();
     QVERIFY(factory != nullptr);
@@ -2789,8 +2789,8 @@ void BridgeClientTest::coverImageProviderRespectsRequestedSize() {
     QQuickImageResponse *response = provider.requestImageResponse(imagePath, QSize(100, 100));
     QVERIFY(response != nullptr);
 
-    QSignalSpy finishedSpy(response, &QQuickImageResponse::finished);
-    QTRY_VERIFY_WITH_TIMEOUT(!finishedSpy.isEmpty(), 5000);
+    provider.waitForDone();
+    QVERIFY(static_cast<CoverImageResponse *>(response)->isFinished());
 
     QQuickTextureFactory *factory = response->textureFactory();
     QVERIFY(factory != nullptr);
@@ -2810,8 +2810,8 @@ void BridgeClientTest::coverImageProviderHandlesMissingFile() {
         QStringLiteral("/nonexistent/path/cover.jpg"), QSize());
     QVERIFY(response != nullptr);
 
-    QSignalSpy finishedSpy(response, &QQuickImageResponse::finished);
-    QTRY_VERIFY_WITH_TIMEOUT(!finishedSpy.isEmpty(), 5000);
+    provider.waitForDone();
+    QVERIFY(static_cast<CoverImageResponse *>(response)->isFinished());
 
     QQuickTextureFactory *factory = response->textureFactory();
     QVERIFY(factory == nullptr);
@@ -2829,17 +2829,27 @@ void BridgeClientTest::coverImageProviderCancelDoesNotCrash() {
     source.fill(Qt::green);
     QVERIFY(source.save(imagePath, "PNG"));
 
+    // Cancelling before the worker runs still emits finished().
+    {
+        CoverImageResponse response(imagePath, QSize());
+        QSignalSpy finishedSpy(&response, &QQuickImageResponse::finished);
+        response.cancel();
+        response.run();
+        QCOMPARE(finishedSpy.count(), 1);
+        QVERIFY(response.isFinished());
+        QVERIFY(response.textureFactory() == nullptr);
+    }
+
+    // finished() may be emitted before anyone connects; wait for the worker so
+    // that always happens here, and check that completion is still observable.
     CoverImageProvider provider;
     QQuickImageResponse *response = provider.requestImageResponse(imagePath, QSize());
     QVERIFY(response != nullptr);
-
     response->cancel();
-
-    QSignalSpy finishedSpy(response, &QQuickImageResponse::finished);
-    QTRY_VERIFY_WITH_TIMEOUT(!finishedSpy.isEmpty(), 5000);
+    provider.waitForDone();
+    QVERIFY(static_cast<CoverImageResponse *>(response)->isFinished());
 
     // After cancel, textureFactory may be null or valid — either is acceptable.
-    // The key invariant is no crash and finished() is emitted.
     delete response->textureFactory();
     delete response;
 }
