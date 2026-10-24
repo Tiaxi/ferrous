@@ -303,7 +303,7 @@ mod tests {
 #[cfg(all(test, feature = "gst"))]
 mod gst_tests {
     use super::install_raw_surround_source_probe;
-    use crate::raw_audio::{register_raw_surround_typefinders, ripped_surround_bytes, test_path};
+    use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes, test_path};
     use crate::raw_audio::{TEST_AC3, TEST_DTS};
     use gst::prelude::*;
     use gstreamer as gst;
@@ -385,7 +385,7 @@ mod gst_tests {
     impl Player {
         fn new() -> Self {
             gst::init().expect("gst init");
-            register_raw_surround_typefinders();
+            configure_raw_surround_decoding();
             let playbin = gst::ElementFactory::make("playbin3")
                 .build()
                 .expect("playbin3");

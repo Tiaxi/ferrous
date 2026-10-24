@@ -15,7 +15,10 @@ use super::bitstream::{parse_ac3_bitrate, parse_dts_bitrate, Codec};
 #[cfg(any(feature = "gst", test))]
 use super::byte_filter::read_audio_layout;
 #[cfg(feature = "gst")]
-use super::{is_raw_surround_file, raw_surround_format_label, register_raw_surround_typefinders};
+use super::{
+    configure_raw_surround_decoding, filter_raw_surround_source, is_raw_surround_file,
+    raw_surround_format_label,
+};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RawAudioTechnicalDetails {
@@ -50,11 +53,12 @@ pub(crate) fn probe_raw_surround_technical_details(
     }
 
     gst::init().ok()?;
-    register_raw_surround_typefinders();
+    configure_raw_surround_decoding();
 
     let uri = url::Url::from_file_path(path).ok()?.to_string();
     let timeout = gst::ClockTime::from_seconds(10);
     let discoverer = gst_pbutils::Discoverer::new(timeout).ok()?;
+    discoverer.connect_source_setup(|_, source| filter_raw_surround_source(source));
     match discoverer.discover_uri(&uri) {
         Ok(info) => {
             let audio_info = info.audio_streams().into_iter().next()?;
@@ -95,7 +99,6 @@ pub(crate) fn probe_raw_surround_technical_details(
         Err(err) => {
             eprintln!(
                 "[ferrous] GStreamer Discoverer failed for {}: {} — \
-                 this may be caused by an appended APEv2 tag confusing the demuxer; \
                  trying bitstream header fallback",
                 path.display(),
                 err
@@ -168,6 +171,26 @@ mod tests {
                 "{ext}: expected {expected} s, got {duration} s"
             );
             let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn discoverer_reads_ripped_files() {
+        use super::probe_raw_surround_technical_details;
+
+        // Upper case gives the typefinders no extension hint.
+        for (stream, ext, length) in [(TEST_AC3, "AC3", 1.024), (TEST_DTS, "DTS", 0.501)] {
+            let path = test_path("discover", ext);
+            let (bytes, _) = ripped_surround_bytes(stream);
+            std::fs::write(&path, bytes).expect("write test file");
+
+            let details = probe_raw_surround_technical_details(&path).expect("details");
+            let _ = std::fs::remove_file(path);
+            assert_eq!(details.sample_rate_hz, Some(48_000), "{ext}: {details:?}");
+            assert_eq!(details.channels, Some(1), "{ext}: {details:?}");
+            let duration = details.duration_secs.expect("duration");
+            assert!((duration - length).abs() < 0.005, "{ext}: {details:?}");
         }
     }
 }

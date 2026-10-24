@@ -14,8 +14,8 @@ use crate::analysis::AnalysisCommand;
 #[cfg(feature = "profiling-logs")]
 use crate::profile_logging::heartbeat_trace_enabled;
 use crate::raw_audio::{
-    install_raw_surround_source_probe, is_dts_file, is_raw_surround_file,
-    register_raw_surround_typefinders,
+    configure_raw_surround_decoding, install_raw_surround_source_probe, is_dts_file,
+    is_raw_surround_file,
 };
 
 use super::{
@@ -1737,7 +1737,7 @@ fn run_gst_engine(
     analysis_tx: Sender<AnalysisCommand>,
 ) -> anyhow::Result<()> {
     gst::init().context("gst::init failed")?;
-    register_raw_surround_typefinders();
+    configure_raw_surround_decoding();
 
     let playbin = gst::ElementFactory::make("playbin3")
         .build()
@@ -3184,7 +3184,7 @@ mod gst_integration_tests {
         std::fs::write(test_path, bytes).unwrap();
 
         gst::init().unwrap();
-        register_raw_surround_typefinders();
+        configure_raw_surround_decoding();
 
         let playbin = gst::ElementFactory::make("playbin3")
             .build()

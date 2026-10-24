@@ -8,9 +8,9 @@ mod apev2;
 mod bitstream;
 #[cfg(any(feature = "gst", test))]
 mod byte_filter;
-#[cfg(feature = "gst")]
-mod detect;
 mod discover;
+#[cfg(feature = "gst")]
+mod gst_setup;
 
 use std::path::Path;
 
@@ -21,10 +21,10 @@ pub(crate) use apev2::{
     ApeTextField,
 };
 #[cfg(feature = "gst")]
-pub(crate) use byte_filter::install_raw_surround_source_probe;
-#[cfg(feature = "gst")]
-pub(crate) use detect::register_raw_surround_typefinders;
+pub(crate) use byte_filter::{filter_raw_surround_source, install_raw_surround_source_probe};
 pub(crate) use discover::probe_raw_surround_technical_details;
+#[cfg(feature = "gst")]
+pub(crate) use gst_setup::configure_raw_surround_decoding;
 
 pub(crate) fn is_raw_surround_file(path: &Path) -> bool {
     matches!(raw_surround_extension(path).as_deref(), Some("ac3" | "dts"))

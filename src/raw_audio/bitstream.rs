@@ -49,18 +49,6 @@ impl Codec {
     }
 }
 
-/// Find the byte offset of the first AC3 sync word (`0x0B77`) in `data`.
-#[cfg(feature = "gst")]
-pub(super) fn find_ac3_sync(data: &[u8]) -> Option<usize> {
-    data.windows(2).position(|w| w == AC3_SYNC)
-}
-
-/// Find the byte offset of the first DTS sync word (`0x7FFE8001`) in `data`.
-#[cfg(feature = "gst")]
-pub(super) fn find_dts_sync(data: &[u8]) -> Option<usize> {
-    data.windows(4).position(|w| w == DTS_SYNC)
-}
-
 /// Offset of the first frame in `data`, the start of a raw surround file.
 ///
 /// Files ripped from discs often start with the end of the previous
