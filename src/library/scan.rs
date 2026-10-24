@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use walkdir::WalkDir;
 
 use crate::folder_cover::find_folder_cover;
@@ -778,8 +778,10 @@ pub(crate) fn refresh_indexed_metadata_for_paths(
 ) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
     let mut conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
     init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
+    // Writes lock as they start, so the busy timeout covers another writer;
+    // see `rename_indexed_metadata_paths_in_conn`.
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("failed to start metadata refresh transaction: {e}"))?;
     let now = unix_ts_i64();
     let mut refreshed = HashMap::with_capacity(paths.len());
@@ -1079,8 +1081,11 @@ fn rename_indexed_metadata_paths_in_conn(
     conn: &mut Connection,
     renames: &[(PathBuf, PathBuf)],
 ) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
+    // Take the write lock before any file moves. A deferred transaction that
+    // reads first cannot wait for the lock when it then writes: SQLite fails
+    // it at once with "database is locked" if another writer holds the lock.
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("failed to start rename transaction: {e}"))?;
     let mut journal = DiskRenameJournal::new(renames);
     let updated = apply_disk_renames(renames, &mut journal)
@@ -2260,6 +2265,7 @@ mod tests {
     use super::*;
     use crate::raw_audio::write_test_apev2_file;
     use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn test_dir(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
@@ -3301,6 +3307,59 @@ mod tests {
         let conn = Connection::open_in_memory().expect("db");
         init_schema(&conn).expect("schema");
         conn
+    }
+
+    /// Set by the busy handler of `rename_waits_for_another_writer`.
+    static RENAME_WAITED_FOR_LOCK: AtomicBool = AtomicBool::new(false);
+
+    fn note_rename_lock_wait(_attempt: i32) -> bool {
+        RENAME_WAITED_FOR_LOCK.store(true, Ordering::SeqCst);
+        std::thread::yield_now();
+        true
+    }
+
+    #[test]
+    fn rename_waits_for_another_writer_instead_of_failing() {
+        let (dir, paths) = rename_fixture("rename-busy", &["One", "Two"]);
+        let db = dir.join("library.sqlite3");
+        let mut conn = Connection::open(&db).expect("db");
+        init_schema(&conn).expect("schema");
+        insert_indexed_tracks(&mut conn, &dir, &paths);
+        RENAME_WAITED_FOR_LOCK.store(false, Ordering::SeqCst);
+        conn.busy_handler(Some(note_rename_lock_wait))
+            .expect("busy handler");
+        // Another writer, such as a library scan, holds the write lock until
+        // the rename waits for it.
+        let writer = Connection::open(&db).expect("writer");
+        writer.execute_batch("BEGIN IMMEDIATE").expect("write lock");
+        let holder = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !RENAME_WAITED_FOR_LOCK.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            writer
+                .execute_batch("ROLLBACK")
+                .expect("release write lock");
+        });
+
+        let renamed = dir.join("03 - Renamed.flac");
+        let result = rename_indexed_metadata_paths_in_conn(
+            &mut conn,
+            &[(paths[0].clone(), renamed.clone())],
+        );
+        holder.join().expect("lock holder");
+
+        // A transaction that reads before it writes cannot wait for the lock,
+        // and fails with "database is locked".
+        let refreshed = result.expect("rename waits for the write lock");
+        assert!(RENAME_WAITED_FOR_LOCK.load(Ordering::SeqCst));
+        assert_eq!(refreshed[&renamed].title, "One");
+        assert_eq!(
+            file_names(&dir)[..2],
+            ["02 - Two.flac", "03 - Renamed.flac"]
+        );
+        drop(conn);
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
