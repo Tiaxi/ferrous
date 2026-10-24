@@ -195,7 +195,6 @@ pub enum BridgeLibraryCommand {
         query: String,
     },
     RefreshEditedPaths(Vec<PathBuf>),
-    RefreshRenamedPaths(Vec<(PathBuf, PathBuf)>),
 }
 
 #[derive(Debug, Clone)]
@@ -620,6 +619,7 @@ pub struct FrontendBridgeHandle {
     rx: Receiver<BridgeEvent>,
     spectral_rx: Receiver<AnalysisEvent>,
     spectral_generation: Arc<AtomicU64>,
+    import_gate: Arc<imports::ImportGate>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -662,14 +662,17 @@ impl FrontendBridgeHandle {
             generation: Arc::clone(&spectral_generation),
         };
 
+        let imports = imports::ImportWorker::new();
+        let import_gate = imports.gate();
         let _ = std::thread::Builder::new()
             .name("ferrous-bridge".to_string())
-            .spawn(move || run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route));
+            .spawn(move || run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route, imports));
         Self {
             tx: cmd_tx,
             rx: event_rx,
             spectral_rx,
             spectral_generation,
+            import_gate,
         }
     }
 
@@ -703,6 +706,11 @@ impl FrontendBridgeHandle {
             }
             AnalysisEvent::Snapshot(_) => None,
         }
+    }
+
+    /// The gate that file renames go through to reach this bridge in order.
+    pub(crate) fn import_gate(&self) -> Arc<imports::ImportGate> {
+        Arc::clone(&self.import_gate)
     }
 
     pub(crate) fn into_parts(
@@ -801,7 +809,7 @@ impl SnapshotUrgency {
 }
 
 enum BridgeLoopWake {
-    Import(imports::ImportResult),
+    Import(imports::ImportMessage),
     Tree(tree_worker::TreeResult),
     QueueValidated(queue_validation::ValidationResult),
     Command(BridgeCommand),
@@ -827,7 +835,16 @@ fn env_duration_ms(var: &str, default: u64, min: u64, max: u64) -> Duration {
 }
 
 impl BridgeLoopRuntime {
+    #[cfg(test)]
     fn new(options: BridgeRuntimeOptions, spectral_tx: Option<SpectrogramOutputRoute>) -> Self {
+        Self::with_imports(options, spectral_tx, imports::ImportWorker::new())
+    }
+
+    fn with_imports(
+        options: BridgeRuntimeOptions,
+        spectral_tx: Option<SpectrogramOutputRoute>,
+        imports: imports::ImportWorker,
+    ) -> Self {
         let (analysis, analysis_rx) = AnalysisEngine::new_with_spectrogram_output(spectral_tx);
         let (playback, playback_rx) = PlaybackEngine::new(analysis.sender());
         let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
@@ -863,7 +880,7 @@ impl BridgeLoopRuntime {
         let paused_snapshot_interval =
             env_duration_ms("FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS", 333, 125, 1000);
         Self {
-            imports: imports::ImportWorker::new(),
+            imports,
             tree_worker: tree_worker::TreeWorker::new(),
             queue_validator: queue_validation::QueueValidationWorker::new(),
             analysis,
@@ -1065,7 +1082,12 @@ impl BridgeLoopRuntime {
 
     fn handle_wake(&mut self, wake: BridgeLoopWake, event_tx: &Sender<BridgeEvent>) {
         let mut urgency = match wake {
-            BridgeLoopWake::Import(result) => self.apply_import_result(result, event_tx),
+            BridgeLoopWake::Import(imports::ImportMessage::Finished(result)) => {
+                self.apply_import_result(result, event_tx)
+            }
+            BridgeLoopWake::Import(imports::ImportMessage::Renamed { number, renames }) => {
+                self.apply_renamed_paths(number, renames, event_tx)
+            }
             BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
             BridgeLoopWake::QueueValidated(result) => {
                 if self.queue_validator.apply(result, &mut self.state) {
@@ -1107,6 +1129,31 @@ impl BridgeLoopRuntime {
     ) -> SnapshotUrgency {
         let changes = self.imports.complete(result);
         self.apply_queue_changes(changes, event_tx)
+    }
+
+    /// Apply the files renamed on disk by rename `number`. Imports that have
+    /// no result yet read the files after the renames, so they are left
+    /// alone; see [`imports::ImportGate`].
+    fn apply_renamed_paths(
+        &mut self,
+        number: u64,
+        renames: Arc<PathRenames>,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
+        self.imports.remap_pending_paths(number, &renames);
+        if commands::refresh_renamed_paths(
+            &mut self.state,
+            renames,
+            &self.playback,
+            &self.metadata,
+            &self.external_queue_details_tx,
+            event_tx,
+        ) {
+            self.flags.session_dirty = true;
+            self.snapshot_plan.include_queue_in_next_snapshot = true;
+        }
+        self.request_tree();
+        SnapshotUrgency::Immediate
     }
 
     fn apply_queue_changes(
@@ -1177,10 +1224,6 @@ impl BridgeLoopRuntime {
         match &cmd {
             BridgeCommand::Shutdown | BridgeCommand::Queue(BridgeQueueCommand::Clear) => {
                 self.imports.discard_pending();
-            }
-            BridgeCommand::Library(BridgeLibraryCommand::RefreshRenamedPaths(renames)) => {
-                self.imports
-                    .remap_pending_paths(&renames.iter().cloned().collect());
             }
             _ => {}
         }
@@ -1658,8 +1701,9 @@ fn run_bridge_loop(
     event_tx: &Sender<BridgeEvent>,
     options: BridgeRuntimeOptions,
     spectral_tx: SpectrogramOutputRoute,
+    imports: imports::ImportWorker,
 ) {
-    let mut runtime = BridgeLoopRuntime::new(options, Some(spectral_tx));
+    let mut runtime = BridgeLoopRuntime::with_imports(options, Some(spectral_tx), imports);
     runtime.run(cmd_rx, event_tx);
 }
 
@@ -1731,8 +1775,7 @@ fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: Library
         | BridgeCommand::Library(
             BridgeLibraryCommand::SetNodeExpanded { .. }
             | BridgeLibraryCommand::ShowTrackInLibrary(_)
-            | BridgeLibraryCommand::RefreshEditedPaths(_)
-            | BridgeLibraryCommand::RefreshRenamedPaths(_),
+            | BridgeLibraryCommand::RefreshEditedPaths(_),
         ) => true,
         _ => false,
     }
@@ -1753,11 +1796,7 @@ pub(super) fn command_requires_queue_snapshot(cmd: &BridgeCommand) -> bool {
             queue_cmd,
             BridgeQueueCommand::Select(_) | BridgeQueueCommand::PlayAt(_)
         ),
-        BridgeCommand::Library(library_cmd) => matches!(
-            library_cmd,
-            BridgeLibraryCommand::RefreshEditedPaths(_)
-                | BridgeLibraryCommand::RefreshRenamedPaths(_)
-        ),
+        BridgeCommand::Library(BridgeLibraryCommand::RefreshEditedPaths(_)) => true,
         _ => false,
     }
 }
@@ -1799,6 +1838,7 @@ where
 mod tests {
     use super::*;
     use crate::library::{LibraryRoot, LibraryTrack};
+    use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
 
@@ -2247,6 +2287,346 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A folder of stub tracks, canonicalized like import results.
+    fn rename_fixture(name: &str, files: &[&str]) -> (PathBuf, Vec<PathBuf>) {
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-import-rename-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let dir = std::fs::canonicalize(dir).expect("canonical dir");
+        let paths = files
+            .iter()
+            .map(|file| {
+                let path = dir.join(file);
+                std::fs::write(&path, file.as_bytes()).expect("fixture track");
+                path
+            })
+            .collect();
+        (dir, paths)
+    }
+
+    /// Rename files on disk through temporary names, as the tag editor does
+    /// when a target is another file's source, and return the rename map.
+    fn rename_files(dir: &Path, pairs: &[(&str, &str)]) -> PathRenames {
+        let pairs: Vec<_> = pairs
+            .iter()
+            .map(|(old, new)| (dir.join(old), dir.join(new)))
+            .collect();
+        for (old, _) in &pairs {
+            std::fs::rename(old, old.with_extension("staged")).expect("stage rename");
+        }
+        for (old, new) in &pairs {
+            std::fs::rename(old.with_extension("staged"), new).expect("finish rename");
+        }
+        pairs.into_iter().collect()
+    }
+
+    /// Renumbering `01 -> 02, 02 -> 03` and swapping `a <-> b` both rename a
+    /// file to another selected file's old name.
+    const OVERLAPPING_RENAMES: [(&str, [&str; 2], [(&str, &str); 2]); 2] = [
+        (
+            "renumber",
+            ["01.flac", "02.flac"],
+            [("01.flac", "02.flac"), ("02.flac", "03.flac")],
+        ),
+        (
+            "swap",
+            ["a.flac", "b.flac"],
+            [("a.flac", "b.flac"), ("b.flac", "a.flac")],
+        ),
+    ];
+
+    fn queued_tracks(engine_rx: &Receiver<PlaybackCommand>) -> Vec<Vec<PathBuf>> {
+        engine_rx
+            .try_iter()
+            .filter_map(|command| match command {
+                PlaybackCommand::LoadQueue(tracks) | PlaybackCommand::AddToQueue(tracks) => {
+                    Some(tracks)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_import_that_reads_after_overlapping_renames_keeps_its_paths() {
+        let _guard = test_guard();
+        for (name, files, pairs) in OVERLAPPING_RENAMES {
+            let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+            let (dir, _) = rename_fixture(&format!("after-{name}"), &files);
+            let gate = runtime.imports.gate();
+            // The worker waits for the rename in progress before it reads the
+            // folder.
+            let renames = gate.rename(|| {
+                runtime.handle_command(
+                    BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(vec![dir.clone()])),
+                    &event_tx,
+                );
+                let renames = rename_files(&dir, &pairs);
+                (renames.clone(), renames)
+            });
+            apply_next_import_result(&mut runtime, &event_tx);
+            apply_next_import_result(&mut runtime, &event_tx);
+
+            let mut after: Vec<_> = pairs.iter().map(|(_, new)| dir.join(new)).collect();
+            after.sort();
+            let mut renamed_twice = after.clone();
+            for path in &mut renamed_twice {
+                crate::playback::remap_path(path, &renames);
+            }
+            assert_ne!(
+                after, renamed_twice,
+                "{name}: the case must tell them apart"
+            );
+            assert_eq!(runtime.state.queue, after, "{name}");
+            assert_eq!(queued_tracks(&engine_rx), vec![after], "{name}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn queue_entries_imported_before_overlapping_renames_are_renamed_once() {
+        let _guard = test_guard();
+        for (name, files, pairs) in OVERLAPPING_RENAMES {
+            let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+            let (dir, before) = rename_fixture(&format!("before-{name}"), &files);
+            runtime.handle_command(
+                BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(vec![dir.clone()])),
+                &event_tx,
+            );
+            let finished = runtime
+                .imports
+                .results
+                .recv_timeout(Duration::from_secs(5))
+                .expect("import result");
+            let renames = runtime.imports.gate().rename(|| {
+                let renames = rename_files(&dir, &pairs);
+                (renames.clone(), renames)
+            });
+            runtime.handle_wake(BridgeLoopWake::Import(finished), &event_tx);
+            assert_eq!(
+                runtime.state.queue, before,
+                "{name}: added before the rename"
+            );
+            apply_next_import_result(&mut runtime, &event_tx);
+
+            let after: Vec<_> = pairs.iter().map(|(_, new)| dir.join(new)).collect();
+            assert_eq!(runtime.state.queue, after, "{name}");
+            let commands: Vec<_> = engine_rx.try_iter().collect();
+            assert!(
+                matches!(
+                    commands.as_slice(),
+                    [
+                        PlaybackCommand::LoadQueue(added) | PlaybackCommand::AddToQueue(added),
+                        PlaybackCommand::RemapPaths(sent),
+                    ]
+                        if *added == before && **sent == renames
+                ),
+                "{name}: {commands:?}"
+            );
+            assert!(runtime.imports.results.is_empty());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// Create `playlist` as a FIFO, which blocks the import reading it.
+    fn make_fifo(playlist: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+
+        let fifo = std::ffi::CString::new(playlist.as_os_str().as_bytes()).expect("fifo path");
+        // SAFETY: `fifo` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+    }
+
+    /// Open the FIFO `playlist` to write. This waits for the worker to open
+    /// it to read, and the worker's read cannot end before the writer closes.
+    fn playlist_writer(playlist: &Path) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(playlist)
+            .expect("open fifo")
+    }
+
+    fn playlist_lines(tracks: &[PathBuf]) -> String {
+        tracks
+            .iter()
+            .map(|track| format!("{}\n", track.display()))
+            .collect()
+    }
+
+    /// Replace `playlist` with a regular file listing `tracks`, so a read
+    /// that starts after this does not block.
+    fn replace_playlist(playlist: &Path, tracks: &[PathBuf]) {
+        let staged = playlist.with_extension("tmp");
+        std::fs::write(&staged, playlist_lines(tracks)).expect("playlist");
+        std::fs::rename(&staged, playlist).expect("replace playlist");
+    }
+
+    /// Rename `pairs` in `dir` while `writer` keeps an import blocked reading
+    /// a FIFO, and return the writer. A rename that waited for that read would
+    /// wait for the writer this thread holds. So the rename runs on another
+    /// thread, and after a generous deadline the test releases the read and
+    /// fails instead of hanging.
+    fn rename_during_blocked_read(
+        gate: Arc<imports::ImportGate>,
+        dir: &Path,
+        pairs: &[(&'static str, &'static str)],
+        writer: std::fs::File,
+    ) -> std::fs::File {
+        let (renamed_tx, renamed) = unbounded();
+        let renamer = {
+            let dir = dir.to_path_buf();
+            let pairs = pairs.to_vec();
+            std::thread::spawn(move || {
+                gate.rename(|| ((), rename_files(&dir, &pairs)));
+                let _ = renamed_tx.send(());
+            })
+        };
+        if renamed.recv_timeout(Duration::from_secs(10)).is_err() {
+            drop(writer);
+            renamer.join().expect("rename thread");
+            panic!("the rename waited for the blocked read");
+        }
+        renamer.join().expect("rename thread");
+        writer
+    }
+
+    #[test]
+    fn a_rename_does_not_wait_for_an_import_blocked_on_a_read() {
+        use std::io::Write;
+
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let (dir, before) = rename_fixture("blocked-read", &["01.flac", "02.flac"]);
+        let playlist = dir.join("blocked.m3u");
+        make_fifo(&playlist);
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::AddTrack(playlist.clone())),
+            &event_tx,
+        );
+        let pairs = [("01.flac", "02.flac"), ("02.flac", "03.flac")];
+        let mut writer = rename_during_blocked_read(
+            runtime.imports.gate(),
+            &dir,
+            &pairs,
+            playlist_writer(&playlist),
+        );
+        let after: Vec<_> = pairs.iter().map(|(_, new)| dir.join(new)).collect();
+        replace_playlist(&playlist, &after);
+        // The blocked read gets the playlist as it was before the rename.
+        writer
+            .write_all(playlist_lines(&before).as_bytes())
+            .expect("write fifo");
+        drop(writer);
+        apply_next_import_result(&mut runtime, &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        assert_eq!(runtime.state.queue, after, "the overlapped read was redone");
+        assert_eq!(queued_tracks(&engine_rx), vec![after]);
+        assert!(runtime.imports.results.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_renamed_during_its_import_is_queued_under_its_new_name() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let (dir, files) = rename_fixture("renamed-during-read", &["old.flac"]);
+        let playlist = dir.join("blocked.m3u");
+        make_fifo(&playlist);
+        // The worker finds `old.flac`, then blocks reading the playlist.
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::AppendAlbum(vec![
+                files[0].clone(),
+                playlist.clone(),
+            ])),
+            &event_tx,
+        );
+        let writer = rename_during_blocked_read(
+            runtime.imports.gate(),
+            &dir,
+            &[("old.flac", "new.flac")],
+            playlist_writer(&playlist),
+        );
+        replace_playlist(&playlist, &[]);
+        drop(writer);
+        apply_next_import_result(&mut runtime, &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        let after = vec![dir.join("new.flac")];
+        assert_eq!(runtime.state.queue, after, "read again under its new name");
+        assert_eq!(queued_tracks(&engine_rx), vec![after]);
+        assert!(runtime.imports.results.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_renamed_while_its_import_waits_is_queued_under_its_new_name() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let (dir, files) = rename_fixture("renamed-while-waiting", &["old.flac"]);
+        let playlist = dir.join("blocked.m3u");
+        make_fifo(&playlist);
+        for path in [playlist.clone(), files[0].clone()] {
+            runtime.handle_command(
+                BridgeCommand::Library(BridgeLibraryCommand::AddTrack(path)),
+                &event_tx,
+            );
+        }
+        // The worker blocks on the playlist, so `old.flac` waits behind it.
+        let writer = rename_during_blocked_read(
+            runtime.imports.gate(),
+            &dir,
+            &[("old.flac", "new.flac")],
+            playlist_writer(&playlist),
+        );
+        replace_playlist(&playlist, &[]);
+        drop(writer);
+        for _ in 0..3 {
+            apply_next_import_result(&mut runtime, &event_tx);
+        }
+
+        let after = vec![dir.join("new.flac")];
+        assert_eq!(runtime.state.queue, after, "read under its new name");
+        assert_eq!(queued_tracks(&engine_rx), vec![after]);
+        assert!(runtime.imports.results.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_large_rename_map_applies_at_once() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let (a, b) = (p("/music/large/a.flac"), p("/music/large/b.flac"));
+        runtime.state.queue = vec![a.clone(), b.clone()];
+        // Far more than one UI command could carry.
+        let mut renames: PathRenames = (0..2000)
+            .map(|index| {
+                (
+                    p(&format!("/music/large/track {index:04}.flac")),
+                    p(&format!("/music/large/renamed {index:04}.flac")),
+                )
+            })
+            .collect();
+        renames.extend([(a.clone(), b.clone()), (b.clone(), a.clone())]);
+        runtime.imports.gate().rename(|| ((), renames.clone()));
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        assert!(runtime.imports.results.is_empty(), "one message");
+        assert_eq!(runtime.state.queue, vec![b, a]);
+        let remaps: Vec<_> = engine_rx
+            .try_iter()
+            .filter_map(|command| match command {
+                PlaybackCommand::RemapPaths(sent) => Some(sent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(remaps.len(), 1);
+        assert_eq!(*remaps[0], renames);
+    }
+
     #[test]
     fn renamed_current_track_survives_engine_events() {
         let _guard = test_guard();
@@ -2269,13 +2649,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        runtime.handle_command(
-            BridgeCommand::Library(BridgeLibraryCommand::RefreshRenamedPaths(vec![(
-                old_path,
-                new_path.clone(),
-            )])),
-            &event_tx,
-        );
+        runtime
+            .imports
+            .gate()
+            .rename(|| ((), PathRenames::from([(old_path, new_path.clone())])));
+        apply_next_import_result(&mut runtime, &event_tx);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             assert_eq!(runtime.state.playback.current.as_ref(), Some(&new_path));

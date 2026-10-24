@@ -138,6 +138,8 @@ private slots:
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
+    void tagEditorRenamesThroughTheBridgeGate();
+    void tagEditorRenameReachesTheBridgeQueue();
     void tagEditorSaveSendsOnlyChangedFields();
     void tagEditorSavesFullDateRowAndKeepsOtherTags();
     void tagEditorLoadReportsUnreadableFiles();
@@ -272,7 +274,8 @@ void BridgeClientTest::tagJobsKeepUiResponsiveAndDiscardClosedLoads() {
     TagEditorController editor(nullptr);
     auto gate = std::make_shared<QSemaphore>();
     auto started = std::make_shared<QSemaphore>();
-    editor.m_executeOperation = [gate, started](TagEditorController::Operation, const QByteArray &) {
+    editor.m_executeOperation = [gate, started](TagEditorController::Operation, const QByteArray &,
+                                                const TagEditorController::RenameGate &) {
         started->release();
         gate->tryAcquire(1, 5000);
         return QByteArray(R"({"resolvedPaths":["/fixture/song.ac3"],"rows":[]})");
@@ -340,11 +343,77 @@ void BridgeClientTest::tagEditorAsyncFileRoundTrip() {
     QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Renamed"));
 }
 
+void BridgeClientTest::tagEditorRenamesThroughTheBridgeGate() {
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    TagEditorController editor(&bridge);
+    // Each operation finishes before the next starts, so the worker's writes are visible here.
+    auto gated = std::make_shared<QList<bool>>();
+    editor.m_executeOperation = [gated](TagEditorController::Operation, const QByteArray &,
+                                        const TagEditorController::RenameGate &renameGate) {
+        gated->push_back(renameGate != nullptr);
+        return QByteArray(R"({"results":[]})");
+    };
+    const auto run = [&editor](TagEditorController::Operation operation) {
+        bool completed = false;
+        editor.runOperation(operation, {}, [&](const QByteArray &) { completed = true; });
+        return QTest::qWaitFor([&]() { return completed; }, 5000);
+    };
+    QVERIFY(run(TagEditorController::Operation::Load));
+    QVERIFY(run(TagEditorController::Operation::Save));
+    QVERIFY(run(TagEditorController::Operation::Rename));
+    QCOMPARE(*gated, (QList<bool>{false, false, true}));
+
+    // Without a bridge, renames fall back to the plain rename.
+    isolateBridgeClient(bridge);
+    QVERIFY(run(TagEditorController::Operation::Rename));
+    QCOMPARE(gated->size(), 4);
+    QVERIFY(!gated->last());
+}
+
+void BridgeClientTest::tagEditorRenameReachesTheBridgeQueue() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = QFileInfo(dir.path()).canonicalFilePath() + QStringLiteral("/original.ac3");
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write(QByteArray(128, '\0')), qint64(128));
+    file.close();
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    bridge.appendPaths({path});
+    QTRY_COMPARE(bridge.queueLength(), 1);
+    QCOMPARE(bridge.queuePathAt(0), path);
+
+    TagEditorController editor(&bridge);
+    QVERIFY(editor.openForPaths({path}));
+    QTRY_VERIFY(!editor.loading());
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("Renamed"));
+    editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("1"));
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QVERIFY(saved.first().first().toBool());
+    editor.setSelectedRows({0});
+    QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+    QVERIFY(editor.renameSelectedFiles());
+    QTRY_COMPARE(renamed.size(), 1);
+    const QString renamedPath = editor.loadedPaths().first();
+    QVERIFY2(renamedPath != path, qPrintable(editor.statusText() + " " + editor.statusDetails()));
+    QVERIFY(QFile::exists(renamedPath));
+
+    // The bridge learned of the rename without a command from the UI.
+    QTRY_COMPARE(bridge.queuePathAt(0), renamedPath);
+    QCOMPARE(bridge.queueLength(), 1);
+    isolateBridgeClient(bridge);
+}
+
 void BridgeClientTest::tagEditorSaveSendsOnlyChangedFields() {
     TagEditorController editor(nullptr);
     QByteArray savePayload;
     editor.m_executeOperation = [&savePayload](TagEditorController::Operation operation,
-                                               const QByteArray &payload) {
+                                               const QByteArray &payload,
+                                               const TagEditorController::RenameGate &) {
         if (operation == TagEditorController::Operation::Save) {
             savePayload = payload;
             return QByteArray(R"({"results":[{"path":"/fixture/song.flac","ok":true}],)"

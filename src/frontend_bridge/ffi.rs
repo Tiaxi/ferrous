@@ -12,6 +12,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::fd::RawFd;
 
+use super::imports::ImportGate;
 use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
     BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand,
@@ -21,7 +22,7 @@ use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
 };
 use crate::library::{IndexedTrack, LibraryTrack};
-use crate::playback::{PlaybackState, RepeatMode};
+use crate::playback::{PathRenames, PlaybackState, RepeatMode};
 use crate::tag_editor;
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
@@ -688,6 +689,7 @@ impl FfiShared {
 #[repr(C)]
 pub struct FerrousFfiBridge {
     shared: Arc<FfiShared>,
+    import_gate: Arc<ImportGate>,
     relay_thread: Mutex<Option<JoinHandle<()>>>,
     spectral_relay_thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -719,6 +721,7 @@ pub extern "C" fn ferrous_ffi_spectrogram_ring_capacity(
 #[no_mangle]
 pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
     let bridge = FrontendBridgeHandle::spawn();
+    let import_gate = bridge.import_gate();
     let (command_tx, event_rx, spectral_rx, spectral_generation) = bridge.into_parts();
     let (wake_read_fd, wake_write_fd) = create_nonblocking_pipe().unwrap_or((-1, -1));
     let shared = Arc::new(FfiShared::new(
@@ -743,6 +746,7 @@ pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
 
     Box::into_raw(Box::new(FerrousFfiBridge {
         shared,
+        import_gate,
         relay_thread: Mutex::new(relay_thread),
         spectral_relay_thread: Mutex::new(spectral_relay_thread),
     }))
@@ -1208,54 +1212,104 @@ pub unsafe extern "C" fn ferrous_ffi_tag_editor_rename(
     into_raw_buffer(bytes, len_out)
 }
 
+/// A reference to the bridge's import gate that a tag editor worker can own.
+///
+/// File renames go through it so the bridge learns about them in order with
+/// the import results that read the same files; see [`ImportGate`]. It stays
+/// valid after the bridge is destroyed, when renames still happen on disk but
+/// nothing is told about them.
+pub struct FerrousFfiRenameGate {
+    gate: Arc<ImportGate>,
+}
+
+#[no_mangle]
+/// Take a reference to the bridge's import gate. It does not lock the gate,
+/// so the UI thread may call it. Release it with
+/// [`ferrous_ffi_rename_gate_free`].
+///
+/// # Safety
+///
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`].
+pub unsafe extern "C" fn ferrous_ffi_bridge_rename_gate(
+    handle: *mut FerrousFfiBridge,
+) -> *mut FerrousFfiRenameGate {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: The caller guarantees `handle` is a live bridge.
+    let bridge = unsafe { &*handle };
+    Box::into_raw(Box::new(FerrousFfiRenameGate {
+        gate: Arc::clone(&bridge.import_gate),
+    }))
+}
+
 #[no_mangle]
 /// # Safety
 ///
-/// `handle` must be a valid pointer returned by [`ferrous_ffi_bridge_create`].
-/// `rename_ptr` must point to `rename_len` readable bytes for the duration of this call.
-/// If `len_out` is non-null it must be writable for one `usize`.
-pub unsafe extern "C" fn ferrous_ffi_bridge_rename_edited_files(
-    handle: *mut FerrousFfiBridge,
-    rename_ptr: *const c_uchar,
-    rename_len: usize,
+/// `gate` must be null or a pointer returned by [`ferrous_ffi_bridge_rename_gate`]
+/// that is not used again after this call.
+pub unsafe extern "C" fn ferrous_ffi_rename_gate_free(gate: *mut FerrousFfiRenameGate) {
+    if !gate.is_null() {
+        // SAFETY: The caller transfers ownership of a pointer from `Box::into_raw`.
+        drop(unsafe { Box::from_raw(gate) });
+    }
+}
+
+#[no_mangle]
+/// Rename files like [`ferrous_ffi_tag_editor_rename`] and tell the bridge
+/// about the successful renames as one change. It renames files on disk and
+/// waits while another rename is in progress, so call it from a worker
+/// thread, never from the UI thread.
+///
+/// # Safety
+///
+/// `gate` must be a valid pointer returned by [`ferrous_ffi_bridge_rename_gate`].
+/// `data` must contain `len` readable bytes; `len_out` must be null or writable.
+pub unsafe extern "C" fn ferrous_ffi_rename_gate_rename(
+    gate: *const FerrousFfiRenameGate,
+    data: *const c_uchar,
+    len: usize,
     len_out: *mut usize,
 ) -> *mut c_uchar {
     if !len_out.is_null() {
-        *len_out = 0;
-    }
-    if handle.is_null() || rename_ptr.is_null() || rename_len == 0 {
-        return std::ptr::null_mut();
-    }
-    let Ok(request) =
-        tag_editor::parse_rename_request(std::slice::from_raw_parts(rename_ptr, rename_len))
-    else {
-        return std::ptr::null_mut();
-    };
-    let response = tag_editor::rename_rows(request);
-    let rename_pairs = response
-        .results
-        .iter()
-        .filter_map(|result| {
-            if !result.ok {
-                return None;
-            }
-            let new_path = result.new_path.as_deref()?;
-            Some((PathBuf::from(&result.path), PathBuf::from(new_path)))
-        })
-        .filter(|(old_path, new_path)| old_path != new_path)
-        .collect::<Vec<_>>();
-    if !rename_pairs.is_empty() {
-        let bridge = &*handle;
-        if let Ok(runtime) = bridge.shared.runtime.lock() {
-            let _ = runtime.command_tx.send(BridgeCommand::Library(
-                BridgeLibraryCommand::RefreshRenamedPaths(rename_pairs),
-            ));
+        // SAFETY: The caller supplies a writable output length.
+        unsafe {
+            *len_out = 0;
         }
     }
+    if gate.is_null() || data.is_null() || len == 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: The caller guarantees the input remains readable for this call.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    let Ok(request) = tag_editor::parse_rename_request(bytes) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: The caller guarantees `gate` is a live rename gate.
+    let gate = unsafe { &*gate };
+    let response = gate.gate.rename(|| {
+        let response = tag_editor::rename_rows(request);
+        let renames = renamed_paths(&response);
+        (response, renames)
+    });
     let Ok(bytes) = tag_editor::serialize_rename_response(&response) else {
         return std::ptr::null_mut();
     };
     into_raw_buffer(bytes, len_out)
+}
+
+/// The files `response` reports as moved to a new path.
+fn renamed_paths(response: &tag_editor::RenameResponse) -> PathRenames {
+    response
+        .results
+        .iter()
+        .filter(|result| result.ok)
+        .filter_map(|result| {
+            let new_path = result.new_path.as_deref()?;
+            (result.path != new_path)
+                .then(|| (PathBuf::from(&result.path), PathBuf::from(new_path)))
+        })
+        .collect()
 }
 
 #[no_mangle]
@@ -1580,18 +1634,6 @@ fn parse_library_collection_command(
         20 => BridgeLibraryCommand::AppendArtistByKey {
             artist: reader.read_u16_string()?,
         },
-        62 => {
-            let paths = read_path_vec(reader)?;
-            if paths.len() % 2 != 0 {
-                return Err("rename paths must be pairs".into());
-            }
-            BridgeLibraryCommand::RefreshRenamedPaths(
-                paths
-                    .chunks_exact(2)
-                    .map(|pair| (pair[0].clone(), pair[1].clone()))
-                    .collect(),
-            )
-        }
         37 => BridgeLibraryCommand::ReplaceAllTracks,
         38 => BridgeLibraryCommand::AppendAllTracks,
         48 => BridgeLibraryCommand::ReplaceRootByPath {
@@ -2803,19 +2845,17 @@ mod tests {
     }
 
     #[test]
-    fn renamed_paths_command_preserves_pairs_and_rejects_incomplete_pairs() {
+    fn renames_are_not_a_ui_command() {
+        // Renames reach the bridge through the import gate, in order with
+        // import results, never as a command the UI sends afterwards.
         let mut payload = Vec::new();
         push_u16(&mut payload, 2);
         push_u16_string(&mut payload, "/fixture/old.ac3");
         push_u16_string(&mut payload, "/fixture/new.ac3");
-        let parsed = parse_binary_command(&encode_command(62, &payload)).expect("valid pairs");
-        assert!(matches!(parsed, Some(BridgeCommand::Library(
-            BridgeLibraryCommand::RefreshRenamedPaths(pairs))) if pairs == vec![
-                (PathBuf::from("/fixture/old.ac3"), PathBuf::from("/fixture/new.ac3"))]));
-        let mut incomplete = Vec::new();
-        push_u16(&mut incomplete, 1);
-        push_u16_string(&mut incomplete, "/fixture/old.ac3");
-        assert!(parse_binary_command(&encode_command(62, &incomplete)).is_err());
+        assert_eq!(
+            parse_binary_command(&encode_command(62, &payload)).err(),
+            Some("unknown binary command id 62".to_string())
+        );
     }
 
     #[test]

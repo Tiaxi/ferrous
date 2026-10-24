@@ -3754,40 +3754,13 @@ void BridgeClient::refreshEditedPaths(const QStringList &paths) {
         sanitized));
 }
 
-void BridgeClient::refreshRenamedPaths(const QStringList &pairs) {
-    QStringList batch;
-    qsizetype bytes = 2;
-    for (qsizetype index = 0; index + 1 < pairs.size(); index += 2) {
-        const qsizetype pairBytes = pairs[index].toUtf8().size() + pairs[index + 1].toUtf8().size() + 4;
-        if (!batch.isEmpty() && bytes + pairBytes > 48'000) {
-            sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
-                BinaryBridgeCodec::CmdRefreshRenamedPaths, batch));
-            batch.clear();
-            bytes = 2;
-        }
-        batch << pairs[index] << pairs[index + 1];
-        bytes += pairBytes;
-    }
-    if (!batch.isEmpty()) sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringList(
-        BinaryBridgeCodec::CmdRefreshRenamedPaths, batch));
-}
-
-QByteArray BridgeClient::renameEditedFiles(const QByteArray &payload) {
-    if (m_ffiBridge == nullptr || payload.isEmpty()) {
+std::shared_ptr<FerrousFfiRenameGate> BridgeClient::renameGate() const {
+    if (m_ffiBridge == nullptr) {
         return {};
     }
-    std::size_t len = 0;
-    std::uint8_t *raw = ferrous_ffi_bridge_rename_edited_files(
-        m_ffiBridge,
-        reinterpret_cast<const std::uint8_t *>(payload.constData()),
-        static_cast<std::size_t>(payload.size()),
-        &len);
-    QByteArray response;
-    if (raw != nullptr && len > 0) {
-        response = QByteArray(reinterpret_cast<const char *>(raw), static_cast<int>(len));
-        ferrous_ffi_tag_editor_free_buffer(raw, len);
-    }
-    return response;
+    // Taking the reference does not lock the gate, so the UI thread may do it.
+    return std::shared_ptr<FerrousFfiRenameGate>(
+        ferrous_ffi_bridge_rename_gate(m_ffiBridge), ferrous_ffi_rename_gate_free);
 }
 
 QVariantMap BridgeClient::imageFileDetails(const QString &path) const {

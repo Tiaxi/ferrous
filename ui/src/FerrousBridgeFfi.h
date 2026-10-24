@@ -7,6 +7,7 @@
 
 extern "C" {
 struct FerrousFfiBridge;
+struct FerrousFfiRenameGate;
 
 std::uint64_t ferrous_ffi_spectrogram_ring_capacity(
     std::uint32_t width, std::uint32_t sampleRate, std::uint32_t hop,
@@ -42,10 +43,13 @@ bool ferrous_ffi_bridge_refresh_edited_paths(
     FerrousFfiBridge *handle,
     const std::uint8_t *paths_ptr,
     std::size_t paths_len);
-std::uint8_t *ferrous_ffi_bridge_rename_edited_files(
-    FerrousFfiBridge *handle,
-    const std::uint8_t *rename_ptr,
-    std::size_t rename_len,
+FerrousFfiRenameGate *ferrous_ffi_bridge_rename_gate(FerrousFfiBridge *handle);
+void ferrous_ffi_rename_gate_free(FerrousFfiRenameGate *gate);
+// Renames files on disk and waits for another rename: call it from a worker thread.
+std::uint8_t *ferrous_ffi_rename_gate_rename(
+    const FerrousFfiRenameGate *gate,
+    const std::uint8_t *data,
+    std::size_t size,
     std::size_t *len_out);
 std::uint8_t *ferrous_ffi_tag_editor_load(
     const std::uint8_t *paths_ptr,

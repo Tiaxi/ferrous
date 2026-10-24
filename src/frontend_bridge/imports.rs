@@ -9,6 +9,11 @@
 //! waiting, because it would overwrite them. Commands that address queue rows
 //! by index (play, remove, move, select) are not queued here: they refer to
 //! the queue the user can see, so they apply immediately.
+//!
+//! File renames reach the bridge through the same channel as import results,
+//! ordered by [`ImportGate`]: a result that precedes a rename read the
+//! filesystem before it, and a result that follows read it after. An import's
+//! input paths follow the renames that finish before it reads them.
 
 use super::commands::{
     expand_import_paths_cancellable, format_import_warning, ImportExpandOutcome,
@@ -17,10 +22,11 @@ use super::BridgeQueueCommand;
 use crate::playback::{remap_path, PathRenames};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::collections::VecDeque;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Condvar, Mutex, MutexGuard, PoisonError,
 };
 
 /// A change to the queue's contents.
@@ -49,10 +55,12 @@ struct PendingChange {
 }
 
 struct ImportJob {
+    /// The inputs as the filesystem was after rename `base`.
     paths: Vec<PathBuf>,
     replace: bool,
     id: u64,
     generation: u64,
+    base: u64,
 }
 
 pub(super) struct ImportResult {
@@ -62,9 +70,255 @@ pub(super) struct ImportResult {
     generation: u64,
 }
 
+/// What the import worker's results channel delivers to the bridge.
+pub(super) enum ImportMessage {
+    Finished(ImportResult),
+    /// Files renamed on disk by rename `number`, as one map.
+    Renamed {
+        number: u64,
+        renames: Arc<PathRenames>,
+    },
+}
+
+/// Orders file renames against the import worker's reads of the filesystem,
+/// without making either wait for the other's I/O.
+///
+/// Renames are numbered and run one at a time. A read records the number of
+/// the last rename, waiting first for a rename in progress to finish. It then
+/// reads without holding anything, and sends its result only if no rename
+/// started in the meantime. The check and the send happen under the same lock
+/// a rename takes to start, and a rename sends its map under that lock before
+/// it counts as finished. So a result that was sent had every earlier rename's
+/// map ahead of it in the channel, overlapped no rename, and comes before the
+/// maps of later renames: the results channel lists every rename after the
+/// results that read the files before it, and before the results that read
+/// them after it. A read that a rename overlapped is read again.
+///
+/// An import's input paths follow renames the same way its results do. The
+/// bridge submits them as it knows the filesystem, after the last rename whose
+/// map it has applied, and the job records that rename's number as its base.
+/// The gate keeps the maps of finished renames in a log, and before each read
+/// the import renames its inputs by every map logged since its base or its
+/// previous read, in order and once each. So a file the import was given, or
+/// found during a read that a rename then overlapped, is read again under its
+/// new name. Bases never decrease and the worker imports in order, so the log
+/// drops maps up to a job's base when the job starts, and maps the bridge has
+/// applied while no import is pending.
+///
+/// Two inputs do not follow renames:
+/// - A playlist's entries are text the app does not rewrite. An entry naming
+///   a file renamed before the playlist is read no longer exists, and is
+///   reported as missing like any other missing entry.
+/// - Paths from outside the bridge, such as an external drag and drop,
+///   describe the filesystem when they were sent, not after the bridge's last
+///   rename. One sent after a rename whose map the bridge has not yet applied
+///   gets that map again; one sent from a UI that has not yet shown a rename
+///   misses it. Both windows last only while a message is in transit, and
+///   are accepted.
+///
+/// The mutex guards only this bookkeeping and the send on the unbounded
+/// channel, never filesystem I/O. An import waits while a rename is in
+/// progress, which is bounded by that rename; a rename never waits for an
+/// import. The bridge thread only takes the mutex briefly, to wake an import
+/// whose request it discarded and to drop maps from the log; the UI thread
+/// never takes it.
+pub(crate) struct ImportGate {
+    sequence: Mutex<RenameSequence>,
+    /// Signalled when a rename finishes or imports are discarded.
+    changed: Condvar,
+    messages: Sender<ImportMessage>,
+}
+
+#[derive(Default)]
+struct RenameSequence {
+    /// The number of renames started so far.
+    started: u64,
+    /// The number of the last rename that finished. A rename is in progress
+    /// while it differs from `started`.
+    finished: u64,
+    /// The maps of finished renames that changed something, by number, that
+    /// a pending import may not have applied to its inputs yet.
+    log: VecDeque<(u64, Arc<PathRenames>)>,
+}
+
+impl RenameSequence {
+    fn renaming(&self) -> bool {
+        self.started != self.finished
+    }
+}
+
+/// A read of the filesystem that began once rename `after` had finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Read {
+    after: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReadEnd {
+    Sent,
+    /// A rename started during the read, so its result was not sent.
+    Overlapped,
+    /// The bridge has shut down.
+    Closed,
+}
+
+/// A rename in progress. It finishes when dropped, also if the rename
+/// unwinds, so imports never wait for it forever.
+struct Renaming<'a> {
+    gate: &'a ImportGate,
+    number: u64,
+    renames: Option<PathRenames>,
+}
+
+impl Renaming<'_> {
+    /// Send `renames` to the bridge and finish.
+    fn finish(mut self, renames: PathRenames) {
+        self.renames = Some(renames);
+    }
+}
+
+impl Drop for Renaming<'_> {
+    fn drop(&mut self) {
+        let mut sequence = self.gate.lock();
+        if let Some(renames) = self.renames.take().filter(|renames| !renames.is_empty()) {
+            let renames = Arc::new(renames);
+            let sent = self.gate.messages.send(ImportMessage::Renamed {
+                number: self.number,
+                renames: Arc::clone(&renames),
+            });
+            // The bridge has shut down if this fails; the renames on disk
+            // stand, and no import is left to follow them.
+            if sent.is_ok() {
+                sequence.log.push_back((self.number, renames));
+            }
+        }
+        sequence.finished = self.number;
+        drop(sequence);
+        self.gate.changed.notify_all();
+    }
+}
+
+impl ImportGate {
+    fn new(messages: Sender<ImportMessage>) -> Self {
+        Self {
+            sequence: Mutex::new(RenameSequence::default()),
+            changed: Condvar::new(),
+            messages,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, RenameSequence> {
+        // No update can be left half done by a panic, so a panic elsewhere
+        // cannot leave the sequence inconsistent.
+        self.sequence.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run `rename`, then send the paths it renamed to the bridge as one
+    /// message. Imports that read the filesystem meanwhile read it again.
+    /// Waits while another rename is in progress, and runs the rename itself
+    /// on the calling thread, so it must not run on the UI or bridge thread.
+    pub(crate) fn rename<R>(&self, rename: impl FnOnce() -> (R, PathRenames)) -> R {
+        let renaming = self.begin_rename();
+        let (result, renames) = rename();
+        renaming.finish(renames);
+        result
+    }
+
+    fn begin_rename(&self) -> Renaming<'_> {
+        let mut sequence = self
+            .changed
+            .wait_while(self.lock(), |sequence| sequence.renaming())
+            .unwrap_or_else(PoisonError::into_inner);
+        sequence.started = sequence.started.wrapping_add(1);
+        Renaming {
+            gate: self,
+            number: sequence.started,
+            renames: None,
+        }
+    }
+
+    /// Wait until no rename is in progress and begin a read, or return
+    /// `None` once the read is cancelled. Also returns, in order, the maps of
+    /// the renames that finished after rename `cursor`, which the read must
+    /// apply to its inputs.
+    fn begin_read(
+        &self,
+        cursor: u64,
+        cancelled: &impl Fn() -> bool,
+    ) -> Option<(Read, Vec<Arc<PathRenames>>)> {
+        let sequence = self
+            .changed
+            .wait_while(self.lock(), |sequence| sequence.renaming() && !cancelled())
+            .unwrap_or_else(PoisonError::into_inner);
+        if cancelled() {
+            return None;
+        }
+        // Every logged rename has finished, so none is after `started`.
+        let renames = sequence
+            .log
+            .iter()
+            .filter(|(number, _)| *number > cursor)
+            .map(|(_, renames)| Arc::clone(renames))
+            .collect();
+        Some((
+            Read {
+                after: sequence.started,
+            },
+            renames,
+        ))
+    }
+
+    /// Begin a read unless a rename is in progress.
+    #[cfg(test)]
+    fn try_begin_read(&self) -> Option<Read> {
+        let sequence = self.lock();
+        (!sequence.renaming()).then_some(Read {
+            after: sequence.started,
+        })
+    }
+
+    /// Send the result of `read` unless a rename started during it.
+    fn finish_read(&self, read: Read, result: ImportResult) -> ReadEnd {
+        let sequence = self.lock();
+        if sequence.started != read.after {
+            return ReadEnd::Overlapped;
+        }
+        let sent = self.messages.send(ImportMessage::Finished(result));
+        drop(sequence);
+        if sent.is_ok() {
+            ReadEnd::Sent
+        } else {
+            ReadEnd::Closed
+        }
+    }
+
+    /// Drop the maps of renames up to `number`, which no pending import needs.
+    fn forget_renames_through(&self, number: u64) {
+        let mut sequence = self.lock();
+        while sequence
+            .log
+            .front()
+            .is_some_and(|(renamed, _)| *renamed <= number)
+        {
+            sequence.log.pop_front();
+        }
+    }
+
+    /// Wake imports waiting for a rename so they notice they were cancelled.
+    fn wake_readers(&self) {
+        // Taking the lock orders this after a waiting import checked for
+        // cancellation, so the notification cannot slip in before it waits.
+        drop(self.lock());
+        self.changed.notify_all();
+    }
+}
+
 pub(super) struct ImportWorker {
     tx: Sender<ImportJob>,
-    pub(super) results: Receiver<ImportResult>,
+    pub(super) results: Receiver<ImportMessage>,
+    gate: Arc<ImportGate>,
+    /// The number of the last rename whose map was applied here.
+    renamed: u64,
     /// Advanced when pending changes are discarded, so the worker stops
     /// expanding them and their results are ignored.
     generation: Arc<AtomicU64>,
@@ -76,46 +330,45 @@ impl ImportWorker {
     pub(super) fn new() -> Self {
         let (tx, rx) = unbounded::<ImportJob>();
         let (result_tx, results) = unbounded();
+        let gate = Arc::new(ImportGate::new(result_tx));
         let generation = Arc::new(AtomicU64::new(0));
         let active = Arc::clone(&generation);
+        let reader = Arc::clone(&gate);
         let _ = std::thread::Builder::new()
             .name("ferrous-import".into())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
-                    let cancelled = || active.load(Ordering::Relaxed) != job.generation;
-                    if cancelled() {
-                        continue;
-                    }
-                    let outcome = expand_import_paths_cancellable(job.paths, &cancelled);
-                    if !cancelled()
-                        && result_tx
-                            .send(ImportResult {
-                                outcome,
-                                replace: job.replace,
-                                id: job.id,
-                                generation: job.generation,
-                            })
-                            .is_err()
-                    {
-                        break;
+                    let expand = |paths, cancelled: &dyn Fn() -> bool| {
+                        expand_import_paths_cancellable(paths, &cancelled)
+                    };
+                    if run_import(&reader, job, &active, expand).is_break() {
+                        return;
                     }
                 }
             });
-        Self::with_channels(tx, results, generation)
+        Self::with_channels(tx, results, gate, generation)
     }
 
     fn with_channels(
         tx: Sender<ImportJob>,
-        results: Receiver<ImportResult>,
+        results: Receiver<ImportMessage>,
+        gate: Arc<ImportGate>,
         generation: Arc<AtomicU64>,
     ) -> Self {
         Self {
             tx,
             results,
+            gate,
+            renamed: 0,
             generation,
             next_id: 0,
             pending: VecDeque::new(),
         }
+    }
+
+    /// The gate that orders file renames against this worker's reads.
+    pub(super) fn gate(&self) -> Arc<ImportGate> {
+        Arc::clone(&self.gate)
     }
 
     /// Queue `request` behind earlier changes and return the changes that can
@@ -139,6 +392,7 @@ impl ImportWorker {
                         replace,
                         id,
                         generation: self.generation.load(Ordering::Relaxed),
+                        base: self.renamed,
                     })
                     .map_err(|_| "import worker unavailable".to_string())?;
                 None
@@ -176,30 +430,46 @@ impl ImportWorker {
             command: tracks_command(result.outcome.tracks, result.replace),
             warning,
         });
-        self.take_ready()
+        let ready = self.take_ready();
+        self.forget_renames_if_idle();
+        ready
     }
 
     /// Drop every change that has not been applied yet.
     pub(super) fn discard_pending(&mut self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
+        self.gate.wake_readers();
         self.pending.clear();
+        self.forget_renames_if_idle();
     }
 
-    /// Rename tracks in changes that are waiting to apply. Imports still
-    /// expanding are left alone: their paths may already have the new names.
-    pub(super) fn remap_pending_paths(&mut self, renames: &PathRenames) {
-        let commands = self
-            .pending
-            .iter_mut()
-            .filter_map(|pending| pending.change.as_mut()?.command.as_mut());
-        for command in commands {
-            if let BridgeQueueCommand::Replace { tracks, .. } | BridgeQueueCommand::Append(tracks) =
-                command
+    /// Rename tracks in changes that are waiting to apply, for rename
+    /// `number`. Call it when `results` delivers the renames: imports without
+    /// a result by then send it later, so they read the files after the
+    /// renames and are left alone.
+    pub(super) fn remap_pending_paths(&mut self, number: u64, renames: &PathRenames) {
+        self.renamed = number;
+        self.forget_renames_if_idle();
+        for pending in &mut self.pending {
+            let Some(change) = pending.change.as_mut() else {
+                continue;
+            };
+            if let Some(
+                BridgeQueueCommand::Replace { tracks, .. } | BridgeQueueCommand::Append(tracks),
+            ) = change.command.as_mut()
             {
                 for path in tracks {
                     remap_path(path, renames);
                 }
             }
+        }
+    }
+
+    /// With no import pending, every later import starts after the last
+    /// rename applied here, so the gate's log no longer needs its maps.
+    fn forget_renames_if_idle(&mut self) {
+        if self.pending.is_empty() {
+            self.gate.forget_renames_through(self.renamed);
         }
     }
 
@@ -219,6 +489,57 @@ impl ImportWorker {
     }
 }
 
+/// Expand `job` with `expand` and send its result. Before each read, the
+/// job's inputs follow the renames that finished since its base or its
+/// previous read. Breaks once the bridge has shut down.
+fn run_import(
+    gate: &ImportGate,
+    job: ImportJob,
+    active: &AtomicU64,
+    mut expand: impl FnMut(Vec<PathBuf>, &dyn Fn() -> bool) -> ImportExpandOutcome,
+) -> ControlFlow<()> {
+    let ImportJob {
+        mut paths,
+        replace,
+        id,
+        generation,
+        base,
+    } = job;
+    let cancelled = || active.load(Ordering::Relaxed) != generation;
+    // Later jobs start from this base or a later one.
+    gate.forget_renames_through(base);
+    let mut cursor = base;
+    // A rename that started during the read may have moved files the read
+    // already saw, or not yet saw, so the result is not sent and the paths
+    // are read again under their new names. This is an optimistic
+    // concurrency check on input that changed while it was read, not a
+    // retry of a failure.
+    while let Some((read, renames)) = gate.begin_read(cursor, &cancelled) {
+        for renames in &renames {
+            for path in &mut paths {
+                remap_path(path, renames);
+            }
+        }
+        cursor = read.after;
+        let outcome = expand(paths.clone(), &cancelled);
+        if cancelled() {
+            break;
+        }
+        let result = ImportResult {
+            outcome,
+            replace,
+            id,
+            generation,
+        };
+        match gate.finish_read(read, result) {
+            ReadEnd::Sent => break,
+            ReadEnd::Overlapped => {}
+            ReadEnd::Closed => return ControlFlow::Break(()),
+        }
+    }
+    ControlFlow::Continue(())
+}
+
 /// Replace the queue and start playback, or append; nothing without tracks.
 fn tracks_command(tracks: Vec<PathBuf>, replace: bool) -> Option<BridgeQueueCommand> {
     if tracks.is_empty() {
@@ -236,12 +557,16 @@ fn tracks_command(tracks: Vec<PathBuf>, replace: bool) -> Option<BridgeQueueComm
 impl Drop for ImportWorker {
     fn drop(&mut self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
+        self.gate.wake_readers();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::time::Duration;
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
@@ -250,9 +575,14 @@ mod tests {
     /// A pipeline whose jobs the test completes by hand.
     fn manual_worker() -> (ImportWorker, Receiver<ImportJob>) {
         let (tx, jobs) = unbounded();
-        let (_, results) = unbounded();
+        let (result_tx, results) = unbounded();
         (
-            ImportWorker::with_channels(tx, results, Arc::new(AtomicU64::new(0))),
+            ImportWorker::with_channels(
+                tx,
+                results,
+                Arc::new(ImportGate::new(result_tx)),
+                Arc::new(AtomicU64::new(0)),
+            ),
             jobs,
         )
     }
@@ -266,6 +596,37 @@ mod tests {
             id: job.id,
             generation: job.generation,
         }
+    }
+
+    /// Expand `job` as the worker does, finding `tracks` on disk.
+    fn read(worker: &ImportWorker, job: &ImportJob, tracks: Vec<PathBuf>) {
+        let gate = worker.gate();
+        let read = gate.try_begin_read().expect("no rename in progress");
+        assert_eq!(gate.finish_read(read, finish(job, tracks)), ReadEnd::Sent);
+    }
+
+    fn renames(pairs: &[(&str, &str)]) -> PathRenames {
+        pairs.iter().map(|(old, new)| (p(old), p(new))).collect()
+    }
+
+    /// Rename files as the tag editor does.
+    fn rename_on_disk(worker: &ImportWorker, pairs: &[(&str, &str)]) {
+        worker.gate().rename(|| ((), renames(pairs)));
+    }
+
+    /// Handle the results channel as the bridge does, returning the changes
+    /// that reach the queue.
+    fn deliver(worker: &mut ImportWorker) -> Vec<QueueChange> {
+        let mut applied = Vec::new();
+        while let Ok(message) = worker.results.try_recv() {
+            match message {
+                ImportMessage::Finished(result) => applied.extend(worker.complete(result)),
+                ImportMessage::Renamed { number, renames } => {
+                    worker.remap_pending_paths(number, &renames);
+                }
+            }
+        }
+        applied
     }
 
     fn commands(changes: Vec<QueueChange>) -> Vec<BridgeQueueCommand> {
@@ -480,10 +841,8 @@ mod tests {
                 replace: false,
             })
             .expect("queued");
-        worker.remap_pending_paths(&PathRenames::from([(
-            p("/album/old.flac"),
-            p("/album/new.flac"),
-        )]));
+        rename_on_disk(&worker, &[("/album/old.flac", "/album/new.flac")]);
+        assert!(deliver(&mut worker).is_empty(), "waits for the slow import");
         let waiting = worker
             .pending
             .back()
@@ -493,5 +852,467 @@ mod tests {
             Some(BridgeQueueCommand::Append(tracks))
                 if tracks == vec![p("/album/new.flac"), p("/album/other.flac")]
         ));
+    }
+
+    /// Renumbering `01 -> 02, 02 -> 03` and swapping `a <-> b` both rename a
+    /// file to another selected file's old name.
+    const OVERLAPPING: [&[(&str, &str)]; 2] = [
+        &[
+            ("/album/01.flac", "/album/02.flac"),
+            ("/album/02.flac", "/album/03.flac"),
+        ],
+        &[
+            ("/album/a.flac", "/album/b.flac"),
+            ("/album/b.flac", "/album/a.flac"),
+        ],
+    ];
+
+    #[test]
+    fn an_import_that_reads_after_overlapping_renames_keeps_its_paths() {
+        for pairs in OVERLAPPING {
+            let (mut worker, jobs) = manual_worker();
+            worker
+                .submit(QueueRequest::Import {
+                    paths: vec![p("/album")],
+                    replace: false,
+                })
+                .expect("queued");
+            rename_on_disk(&worker, pairs);
+            let after: Vec<_> = pairs.iter().map(|(_, new)| p(new)).collect();
+            read(&worker, &jobs.try_recv().expect("job"), after.clone());
+            let applied = commands(deliver(&mut worker));
+            assert_eq!(
+                applied.iter().map(tracks_of).collect::<Vec<_>>(),
+                vec![("append", after)],
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_import_waiting_behind_another_is_renamed_once() {
+        for pairs in OVERLAPPING {
+            let (mut worker, jobs) = manual_worker();
+            for path in ["/slow.m3u", "/album"] {
+                worker
+                    .submit(QueueRequest::Import {
+                        paths: vec![p(path)],
+                        replace: false,
+                    })
+                    .expect("queued");
+            }
+            let slow = jobs.try_recv().expect("slow job");
+            let album = jobs.try_recv().expect("album job");
+            let before: Vec<_> = pairs.iter().map(|(old, _)| p(old)).collect();
+            read(&worker, &album, before);
+            rename_on_disk(&worker, pairs);
+            assert!(deliver(&mut worker).is_empty(), "waits for the slow import");
+            read(&worker, &slow, vec![p("/slow.flac")]);
+            let applied = commands(deliver(&mut worker));
+            let after: Vec<_> = pairs.iter().map(|(_, new)| p(new)).collect();
+            assert_eq!(
+                applied.iter().map(tracks_of).collect::<Vec<_>>(),
+                vec![("append", vec![p("/slow.flac")]), ("append", after)],
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn renames_skip_an_import_submitted_after_them() {
+        let (mut worker, jobs) = manual_worker();
+        rename_on_disk(&worker, &[("/music/a.flac", "/music/b.flac")]);
+        // A new file now has the old name.
+        worker
+            .submit(QueueRequest::Import {
+                paths: vec![p("/music/a.flac")],
+                replace: false,
+            })
+            .expect("queued");
+        read(
+            &worker,
+            &jobs.try_recv().expect("job"),
+            vec![p("/music/a.flac")],
+        );
+        let applied = commands(deliver(&mut worker));
+        assert_eq!(
+            applied.iter().map(tracks_of).collect::<Vec<_>>(),
+            vec![("append", vec![p("/music/a.flac")])]
+        );
+    }
+
+    fn message_kinds(worker: &ImportWorker) -> Vec<&'static str> {
+        worker
+            .results
+            .try_iter()
+            .map(|message| match message {
+                ImportMessage::Finished(_) => "finished",
+                ImportMessage::Renamed { .. } => "renamed",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_rename_during_a_read_finishes_and_the_import_reads_again() {
+        for pairs in OVERLAPPING {
+            let (mut worker, jobs) = manual_worker();
+            worker
+                .submit(QueueRequest::Import {
+                    paths: vec![p("/album")],
+                    replace: false,
+                })
+                .expect("queued");
+            let job = jobs.try_recv().expect("job");
+            let gate = worker.gate();
+            let read = gate.try_begin_read().expect("no rename in progress");
+            // On the reading thread itself: the rename does not wait for it.
+            rename_on_disk(&worker, pairs);
+            let before: Vec<_> = pairs.iter().map(|(old, _)| p(old)).collect();
+            assert_eq!(
+                gate.finish_read(read, finish(&job, before)),
+                ReadEnd::Overlapped,
+                "{pairs:?}"
+            );
+            let after: Vec<_> = pairs.iter().map(|(_, new)| p(new)).collect();
+            let reread = gate.try_begin_read().expect("the rename finished");
+            assert_eq!(
+                gate.finish_read(reread, finish(&job, after.clone())),
+                ReadEnd::Sent
+            );
+            let applied = commands(deliver(&mut worker));
+            assert_eq!(
+                applied.iter().map(tracks_of).collect::<Vec<_>>(),
+                vec![("append", after)],
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_import_waits_for_a_rename_in_progress() {
+        let (mut worker, jobs) = manual_worker();
+        worker
+            .submit(QueueRequest::Import {
+                paths: vec![p("/album")],
+                replace: false,
+            })
+            .expect("queued");
+        let job = jobs.try_recv().expect("job");
+        let gate = worker.gate();
+        let renaming = gate.begin_rename();
+        assert_eq!(gate.try_begin_read(), None);
+
+        let (checked_tx, checked) = unbounded();
+        let reader = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                gate.begin_read(0, &|| {
+                    let _ = checked_tx.send(());
+                    false
+                })
+            })
+        };
+        // The reader checks for cancellation under the gate's lock before it
+        // waits, and the rename needs that lock to finish.
+        checked.recv().expect("the reader checked for cancellation");
+        let map = renames(&[("/album/01.flac", "/album/02.flac")]);
+        renaming.finish(map.clone());
+        let (read, logged) = reader
+            .join()
+            .expect("reader thread")
+            .expect("not cancelled");
+        assert_eq!(read, Read { after: 1 });
+        assert_eq!(
+            logged.iter().map(|renames| &**renames).collect::<Vec<_>>(),
+            vec![&map],
+            "the read applies the rename to its inputs"
+        );
+        assert_eq!(
+            gate.finish_read(read, finish(&job, vec![p("/album/02.flac")])),
+            ReadEnd::Sent
+        );
+        assert_eq!(message_kinds(&worker), vec!["renamed", "finished"]);
+    }
+
+    #[test]
+    fn discarding_pending_changes_wakes_an_import_waiting_for_a_rename() {
+        let (mut worker, jobs) = manual_worker();
+        worker
+            .submit(QueueRequest::Import {
+                paths: vec![p("/album")],
+                replace: false,
+            })
+            .expect("queued");
+        let job = jobs.try_recv().expect("job");
+        let gate = worker.gate();
+        let renaming = gate.begin_rename();
+
+        let (checked_tx, checked) = unbounded();
+        let (done_tx, done) = unbounded();
+        let reader = {
+            let gate = Arc::clone(&gate);
+            let active = Arc::clone(&worker.generation);
+            std::thread::spawn(move || {
+                let read = gate.begin_read(0, &|| {
+                    let cancelled = active.load(Ordering::Relaxed) != job.generation;
+                    let _ = checked_tx.send(cancelled);
+                    cancelled
+                });
+                let _ = done_tx.send(read.map(|(read, _)| read));
+            })
+        };
+        // The reader checks under the gate's lock just before it waits, and
+        // discarding takes that lock to wake it.
+        assert_eq!(checked.recv(), Ok(false), "the reader waits for the rename");
+        worker.discard_pending();
+        // Without the wakeup the reader would wait for the rename this thread
+        // holds, so fail after a generous deadline instead of hanging, and
+        // finish the rename before joining.
+        let woke = done.recv_timeout(Duration::from_secs(10));
+        drop(renaming);
+        reader.join().expect("reader thread");
+        assert_eq!(
+            woke,
+            Ok(None),
+            "the import is dropped while the rename is still in progress"
+        );
+        assert!(worker.results.is_empty());
+    }
+
+    #[test]
+    fn a_rename_that_panics_still_finishes() {
+        let (worker, _jobs) = manual_worker();
+        let gate = worker.gate();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gate.rename::<()>(|| panic!("the rename failed"));
+        }));
+        assert!(panicked.is_err());
+        assert!(worker.results.is_empty(), "nothing to report");
+        assert_eq!(gate.try_begin_read(), Some(Read { after: 1 }));
+        rename_on_disk(&worker, &[("/music/a.flac", "/music/b.flac")]);
+        assert_eq!(gate.try_begin_read(), Some(Read { after: 2 }));
+        assert_eq!(message_kinds(&worker), vec!["renamed"]);
+    }
+
+    #[test]
+    fn a_rename_that_changes_nothing_sends_nothing() {
+        let (worker, _jobs) = manual_worker();
+        assert_eq!(worker.gate().rename(|| (7, PathRenames::new())), 7);
+        assert!(worker.results.is_empty());
+        assert_eq!(worker.gate().try_begin_read(), Some(Read { after: 1 }));
+    }
+
+    /// Files on a pretend disk.
+    struct Disk(RefCell<HashSet<PathBuf>>);
+
+    impl Disk {
+        fn new(files: &[&str]) -> Self {
+            Self(RefCell::new(files.iter().map(|file| p(file)).collect()))
+        }
+
+        /// Rename files through `gate` as the tag editor does, all at once.
+        fn rename(&self, gate: &ImportGate, pairs: &[(&str, &str)]) {
+            gate.rename(|| {
+                let renames = renames(pairs);
+                let mut files = self.0.borrow_mut();
+                let moved: Vec<_> = renames
+                    .iter()
+                    .filter(|(old, _)| files.remove(*old))
+                    .map(|(_, new)| new.clone())
+                    .collect();
+                files.extend(moved);
+                ((), renames)
+            });
+        }
+
+        /// Expand `paths` as the worker does: the ones on disk are tracks.
+        fn expand(&self, paths: Vec<PathBuf>) -> ImportExpandOutcome {
+            let files = self.0.borrow();
+            let mut outcome = ImportExpandOutcome::default();
+            outcome.tracks = paths
+                .into_iter()
+                .filter(|path| files.contains(path))
+                .collect();
+            outcome
+        }
+    }
+
+    /// Run the next job as the worker does, reading with `expand`, and
+    /// return the inputs of each read.
+    fn import_next(
+        worker: &ImportWorker,
+        jobs: &Receiver<ImportJob>,
+        mut expand: impl FnMut(&[Vec<PathBuf>]) -> ImportExpandOutcome,
+    ) -> Vec<Vec<PathBuf>> {
+        let job = jobs.try_recv().expect("job");
+        let mut reads = Vec::new();
+        let flow = run_import(&worker.gate, job, &worker.generation, |paths, _| {
+            reads.push(paths);
+            expand(&reads)
+        });
+        assert!(flow.is_continue(), "the bridge is listening");
+        reads
+    }
+
+    fn logged(worker: &ImportWorker) -> Vec<u64> {
+        worker
+            .gate
+            .lock()
+            .log
+            .iter()
+            .map(|(number, _)| *number)
+            .collect()
+    }
+
+    fn submit_import(worker: &mut ImportWorker, paths: &[&str]) {
+        worker
+            .submit(QueueRequest::Import {
+                paths: paths.iter().map(|path| p(path)).collect(),
+                replace: false,
+            })
+            .expect("queued");
+    }
+
+    #[test]
+    fn a_file_renamed_during_its_read_is_read_again_under_its_new_name() {
+        for pairs in OVERLAPPING {
+            let before: Vec<_> = pairs.iter().map(|(old, _)| *old).collect();
+            let disk = Disk::new(&before);
+            let (mut worker, jobs) = manual_worker();
+            submit_import(&mut worker, &before);
+            let reads = import_next(&worker, &jobs, |reads| {
+                let found = disk.expand(reads.last().cloned().unwrap_or_default());
+                if reads.len() == 1 {
+                    // The read found the files under their old names.
+                    disk.rename(&worker.gate, pairs);
+                }
+                found
+            });
+            let before: Vec<_> = before.into_iter().map(p).collect();
+            let after: Vec<_> = pairs.iter().map(|(_, new)| p(new)).collect();
+            assert_eq!(reads, vec![before, after.clone()], "{pairs:?}");
+            let applied = commands(deliver(&mut worker));
+            assert_eq!(
+                applied.iter().map(tracks_of).collect::<Vec<_>>(),
+                vec![("append", after)],
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_input_renamed_while_its_import_waits_is_read_under_its_new_name() {
+        let disk = Disk::new(&["/slow.flac", "/music/old.flac"]);
+        let (mut worker, jobs) = manual_worker();
+        submit_import(&mut worker, &["/slow.flac"]);
+        submit_import(&mut worker, &["/music/old.flac"]);
+        let slow = import_next(&worker, &jobs, |reads| {
+            if reads.len() == 1 {
+                disk.rename(&worker.gate, &[("/music/old.flac", "/music/new.flac")]);
+            }
+            disk.expand(vec![p("/slow.flac")])
+        });
+        assert_eq!(slow.len(), 2, "the rename overlapped the slow read");
+        let waited = import_next(&worker, &jobs, |reads| {
+            disk.expand(reads.last().cloned().unwrap_or_default())
+        });
+        assert_eq!(waited, vec![vec![p("/music/new.flac")]]);
+        let applied = commands(deliver(&mut worker));
+        assert_eq!(
+            applied.iter().map(tracks_of).collect::<Vec<_>>(),
+            vec![
+                ("append", vec![p("/slow.flac")]),
+                ("append", vec![p("/music/new.flac")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn inputs_follow_each_rename_once() {
+        let disk = Disk::new(&["/album/01.flac", "/album/02.flac"]);
+        let (mut worker, jobs) = manual_worker();
+        submit_import(&mut worker, &["/album/01.flac", "/album/02.flac"]);
+        // Renumber before the first read, then swap during it.
+        disk.rename(&worker.gate, OVERLAPPING[0]);
+        let swap = [
+            ("/album/02.flac", "/album/03.flac"),
+            ("/album/03.flac", "/album/02.flac"),
+        ];
+        let reads = import_next(&worker, &jobs, |reads| {
+            let found = disk.expand(reads.last().cloned().unwrap_or_default());
+            if reads.len() == 1 {
+                disk.rename(&worker.gate, &swap);
+            }
+            found
+        });
+        assert_eq!(
+            reads,
+            vec![
+                vec![p("/album/02.flac"), p("/album/03.flac")],
+                vec![p("/album/03.flac"), p("/album/02.flac")],
+            ]
+        );
+        assert_eq!(
+            message_kinds(&worker),
+            vec!["renamed", "renamed", "finished"]
+        );
+    }
+
+    #[test]
+    fn the_bridge_forgets_renames_once_no_import_is_pending() {
+        let disk = Disk::new(&["/music/a.flac"]);
+        let (mut worker, jobs) = manual_worker();
+        disk.rename(&worker.gate, &[("/music/a.flac", "/music/b.flac")]);
+        assert_eq!(logged(&worker), vec![1]);
+        assert!(deliver(&mut worker).is_empty());
+        assert!(logged(&worker).is_empty(), "nothing is pending");
+
+        submit_import(&mut worker, &["/music/b.flac"]);
+        disk.rename(&worker.gate, &[("/music/b.flac", "/music/c.flac")]);
+        assert!(deliver(&mut worker).is_empty());
+        assert_eq!(logged(&worker), vec![2], "the pending import needs it");
+        let reads = import_next(&worker, &jobs, |reads| {
+            disk.expand(reads.last().cloned().unwrap_or_default())
+        });
+        assert_eq!(reads, vec![vec![p("/music/c.flac")]]);
+        assert_eq!(logged(&worker), vec![2]);
+        let applied = commands(deliver(&mut worker));
+        assert_eq!(
+            applied.iter().map(tracks_of).collect::<Vec<_>>(),
+            vec![("append", vec![p("/music/c.flac")])]
+        );
+        assert!(logged(&worker).is_empty(), "the import finished");
+    }
+
+    #[test]
+    fn an_import_forgets_renames_up_to_its_base_when_it_starts() {
+        let disk = Disk::new(&["/music/a.flac", "/music/x.flac"]);
+        let (mut worker, jobs) = manual_worker();
+        submit_import(&mut worker, &["/music/a.flac"]);
+        disk.rename(&worker.gate, &[("/music/a.flac", "/music/b.flac")]);
+        assert!(deliver(&mut worker).is_empty());
+        // Submitted after the bridge applied rename 1.
+        submit_import(&mut worker, &["/music/x.flac"]);
+        let first = import_next(&worker, &jobs, |reads| {
+            disk.expand(reads.last().cloned().unwrap_or_default())
+        });
+        assert_eq!(first, vec![vec![p("/music/b.flac")]]);
+        assert_eq!(logged(&worker), vec![1], "the first import started from 0");
+        let second = import_next(&worker, &jobs, |reads| {
+            disk.expand(reads.last().cloned().unwrap_or_default())
+        });
+        assert_eq!(second, vec![vec![p("/music/x.flac")]]);
+        assert!(logged(&worker).is_empty(), "the second started from 1");
+    }
+
+    #[test]
+    fn a_discarded_import_lets_the_bridge_forget_renames() {
+        let (mut worker, _jobs) = manual_worker();
+        submit_import(&mut worker, &["/music/a.flac"]);
+        rename_on_disk(&worker, &[("/music/a.flac", "/music/b.flac")]);
+        assert!(deliver(&mut worker).is_empty());
+        assert_eq!(logged(&worker), vec![1]);
+        worker.discard_pending();
+        assert!(logged(&worker).is_empty());
     }
 }
