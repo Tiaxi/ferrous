@@ -816,8 +816,3 @@ fn decode_cover_rgba(encoded: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
         rgba.into_raw(),
     ))
 }
-
-pub(crate) fn cached_embedded_cover_path(track_path: &Path) -> Option<String> {
-    let cover_path = EmbeddedCoverCache::shared()?.store_track_cover(track_path)?;
-    Some(cover_path.to_string_lossy().into_owned())
-}

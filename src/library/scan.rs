@@ -17,7 +17,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use walkdir::WalkDir;
 
 use crate::folder_cover::find_folder_cover;
-use crate::metadata::cached_embedded_cover_path;
+use crate::metadata::EmbeddedCoverCache;
 use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, read_appended_apev2_text_metadata,
 };
@@ -119,7 +119,7 @@ where
 }
 
 impl MetadataWorkerPool {
-    fn new(worker_count: usize) -> Self {
+    fn new(worker_count: usize, covers: Option<&'static EmbeddedCoverCache>) -> Self {
         let max_pending_tasks = worker_count.saturating_mul(256).clamp(512, 8192);
         if worker_count <= 1 {
             return Self {
@@ -139,7 +139,7 @@ impl MetadataWorkerPool {
             let tx_results = tx_results.clone();
             workers.push(thread::spawn(move || {
                 while let Ok(task) = rx_tasks.recv() {
-                    let indexed = read_track_info(&task.path);
+                    let indexed = read_track_info_with_cover_cache(&task.path, covers);
                     if tx_results.send(MetadataResult { task, indexed }).is_err() {
                         break;
                     }
@@ -247,7 +247,13 @@ pub(super) fn handle_add_root(
     // Reflect the newly-added root in UI state immediately, before scan completion.
     snapshot.roots = load_roots(conn);
     snapshot.bump_search_revision();
-    run_scans(conn, &[root], snapshot, event_tx)
+    run_scans(
+        conn,
+        &[root],
+        EmbeddedCoverCache::shared(),
+        snapshot,
+        event_tx,
+    )
 }
 
 pub(super) fn rename_root(conn: &Connection, root: &Path, name: &str) -> Result<(), String> {
@@ -278,7 +284,13 @@ pub(super) fn handle_rescan_root(
     if roots.is_empty() {
         return Err(format!("root '{}' is not configured", root.display()));
     }
-    run_scans(conn, &roots, snapshot, event_tx)
+    run_scans(
+        conn,
+        &roots,
+        EmbeddedCoverCache::shared(),
+        snapshot,
+        event_tx,
+    )
 }
 
 pub(super) fn handle_rescan_all(
@@ -293,7 +305,13 @@ pub(super) fn handle_rescan_all(
     if roots.is_empty() {
         return Ok(());
     }
-    run_scans(conn, &roots, snapshot, event_tx)
+    run_scans(
+        conn,
+        &roots,
+        EmbeddedCoverCache::shared(),
+        snapshot,
+        event_tx,
+    )
 }
 
 pub(super) fn backfill_search_tags(
@@ -375,9 +393,12 @@ fn backfill_search_tags_using(
     Ok(())
 }
 
-fn run_scans(
+/// Scans `roots`, caching embedded pictures in `covers`, then removes the
+/// entries of `covers` that no track row references.
+pub(super) fn run_scans(
     conn: &Connection,
     roots: &[PathBuf],
+    covers: Option<&'static EmbeddedCoverCache>,
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<(), String> {
@@ -437,7 +458,7 @@ fn run_scans(
 
         // Roots are independent: a root that fails or cannot be fully read is
         // reported without stopping the remaining scans.
-        match scan_root(conn, root, &mut on_progress, &mut collect_upsert) {
+        match scan_root(conn, root, covers, &mut on_progress, &mut collect_upsert) {
             Ok(outcome) => {
                 apply_pending_upserts_for_root(
                     snapshot,
@@ -480,7 +501,7 @@ fn run_scans(
 
     // Tracks that a scan kept or could not finish still reference their
     // covers, so the cache cleanup is safe even when a root had problems.
-    if let Err(err) = super::cover_cache::remove_unreferenced_embedded_covers(conn) {
+    if let Err(err) = super::cover_cache::remove_unreferenced_embedded_covers(conn, covers) {
         problems.push(err);
     }
 
@@ -1989,6 +2010,7 @@ pub(super) fn count_label(count: usize, singular: &str, plural: &str) -> String 
 fn scan_root<F, U>(
     conn: &Connection,
     root: &Path,
+    covers: Option<&'static EmbeddedCoverCache>,
     on_progress: &mut F,
     on_upsert: &mut U,
 ) -> Result<RootScanOutcome, String>
@@ -2020,7 +2042,7 @@ where
     progress.emit(true, discovered, processed);
 
     let now = unix_ts_i64();
-    let mut workers = MetadataWorkerPool::new(scan_worker_count());
+    let mut workers = MetadataWorkerPool::new(scan_worker_count(), covers);
     let mut walk = LibraryWalk::new(&root, nested_roots);
 
     for ScanCandidate {
@@ -2052,7 +2074,7 @@ where
                 size_bytes,
             };
             if let Err(task) = workers.submit(task) {
-                let indexed = read_track_info(&task.path);
+                let indexed = read_track_info_with_cover_cache(&task.path, covers);
                 apply_metadata_result(
                     &mut upsert_stmt,
                     &root_str,
@@ -2177,6 +2199,14 @@ fn collect_search_tags(tag: &lofty::tag::Tag, tags: &mut super::SearchTags) {
 }
 
 pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
+    read_track_info_with_cover_cache(path, EmbeddedCoverCache::shared())
+}
+
+/// Like [`read_track_info`], but caches an embedded picture in `covers`.
+fn read_track_info_with_cover_cache(
+    path: &Path,
+    covers: Option<&EmbeddedCoverCache>,
+) -> IndexedTrack {
     let mut out = IndexedTrack {
         search_tags: crate::library::SearchTags::default(),
         title: path
@@ -2259,7 +2289,10 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
 
     out.cover_path = find_cover_path_for_track(path);
     if out.cover_path.is_empty() {
-        out.cover_path = cached_embedded_cover_path(path).unwrap_or_default();
+        out.cover_path = covers
+            .and_then(|cache| cache.store_track_cover(path))
+            .map(|cover_path| cover_path.to_string_lossy().into_owned())
+            .unwrap_or_default();
     }
     out
 }
@@ -2847,6 +2880,26 @@ mod tests {
 
         let _ = fs::remove_dir_all(root_a);
         let _ = fs::remove_dir_all(root_b);
+    }
+
+    /// Scans with the shared cover cache, as the library worker does.
+    fn scan_root<F, U>(
+        conn: &Connection,
+        root: &Path,
+        on_progress: &mut F,
+        on_upsert: &mut U,
+    ) -> Result<RootScanOutcome, String>
+    where
+        F: FnMut(RootScanProgress),
+        U: FnMut(&MetadataTask, &IndexedTrack),
+    {
+        super::scan_root(
+            conn,
+            root,
+            EmbeddedCoverCache::shared(),
+            on_progress,
+            on_upsert,
+        )
     }
 
     fn indexed_paths(conn: &Connection) -> Vec<PathBuf> {

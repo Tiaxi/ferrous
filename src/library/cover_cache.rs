@@ -109,8 +109,11 @@ fn cache_rows(
 }
 
 /// Removes cache entries that no track row references. Runs after each scan.
-pub(super) fn remove_unreferenced_embedded_covers(conn: &Connection) -> Result<(), String> {
-    match EmbeddedCoverCache::shared() {
+pub(super) fn remove_unreferenced_embedded_covers(
+    conn: &Connection,
+    cache: Option<&EmbeddedCoverCache>,
+) -> Result<(), String> {
+    match cache {
         Some(cache) => remove_unreferenced_entries(conn, cache).map(|_| ()),
         None => Ok(()),
     }
@@ -294,7 +297,7 @@ fn migrate_legacy_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::scan::{handle_add_root, read_track_info};
+    use crate::library::scan::{read_track_info, run_scans};
     use crate::library::schema::init_schema;
     use crate::metadata::{encoded_picture, test_cache, write_wav_with_picture};
     use image::ImageFormat;
@@ -386,19 +389,33 @@ mod tests {
     #[test]
     fn scans_remove_unreferenced_cache_entries() {
         let conn = db();
-        let cache = EmbeddedCoverCache::shared().expect("test cache directory");
+        // A private cache: concurrent tests clean the shared one after their
+        // scans. Scan workers borrow it, so it lives until the process exits.
+        let cache: &'static EmbeddedCoverCache = Box::leak(Box::new(test_cache("scan-cleanup")));
         let referenced = write_entry(cache, &format!("{:x}.png", md5::compute("scan-kept")));
         let orphan = write_entry(cache, &format!("{:x}.jpg", md5::compute("scan-orphan")));
         insert_external_track(&conn, "/elsewhere/a.flac", &path_string(&referenced));
         let root = fixture_dir("scan-cleanup");
+        let picture = encoded_picture(13, ImageFormat::Png);
+        write_wav_with_picture(&root.join("01.wav"), &picture);
+        let scanned = cache
+            .dir()
+            .join(format!("{:x}.png", md5::compute(&picture)));
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
 
-        handle_add_root(&conn, &root, "", &mut LibrarySnapshot::default(), &event_tx)
-            .expect("scan root");
+        run_scans(
+            &conn,
+            &[root.clone()],
+            Some(cache),
+            &mut LibrarySnapshot::default(),
+            &event_tx,
+        )
+        .expect("scan root");
 
         assert!(referenced.is_file());
         assert!(!orphan.exists());
-        let _ = fs::remove_file(referenced);
+        assert_eq!(fs::read(&scanned).expect("read scanned entry"), picture);
+        let _ = fs::remove_dir_all(cache.dir().parent().unwrap());
         let _ = fs::remove_dir_all(root);
     }
 
