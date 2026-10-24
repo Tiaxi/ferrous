@@ -2464,6 +2464,35 @@ mod tests {
         std::fs::rename(&staged, playlist).expect("replace playlist");
     }
 
+    /// Rename `pairs` in `dir` while `writer` keeps an import blocked reading
+    /// a FIFO, and return the writer. A rename that waited for that read would
+    /// wait for the writer this thread holds. So the rename runs on another
+    /// thread, and after a generous deadline the test releases the read and
+    /// fails instead of hanging.
+    fn rename_during_blocked_read(
+        gate: Arc<imports::ImportGate>,
+        dir: &Path,
+        pairs: &[(&'static str, &'static str)],
+        writer: std::fs::File,
+    ) -> std::fs::File {
+        let (renamed_tx, renamed) = unbounded();
+        let renamer = {
+            let dir = dir.to_path_buf();
+            let pairs = pairs.to_vec();
+            std::thread::spawn(move || {
+                gate.rename(|| ((), rename_files(&dir, &pairs)));
+                let _ = renamed_tx.send(());
+            })
+        };
+        if renamed.recv_timeout(Duration::from_secs(10)).is_err() {
+            drop(writer);
+            renamer.join().expect("rename thread");
+            panic!("the rename waited for the blocked read");
+        }
+        renamer.join().expect("rename thread");
+        writer
+    }
+
     #[test]
     fn a_rename_does_not_wait_for_an_import_blocked_on_a_read() {
         use std::io::Write;
@@ -2477,28 +2506,13 @@ mod tests {
             BridgeCommand::Library(BridgeLibraryCommand::AddTrack(playlist.clone())),
             &event_tx,
         );
-        let mut writer = playlist_writer(&playlist);
-
-        // A rename that waited for the read would wait for the writer this
-        // thread holds. So the rename runs on another thread, and after a
-        // generous deadline the test releases the read and fails instead of
-        // hanging.
         let pairs = [("01.flac", "02.flac"), ("02.flac", "03.flac")];
-        let (renamed_tx, renamed) = unbounded();
-        let renamer = {
-            let gate = runtime.imports.gate();
-            let dir = dir.clone();
-            std::thread::spawn(move || {
-                gate.rename(|| ((), rename_files(&dir, &pairs)));
-                let _ = renamed_tx.send(());
-            })
-        };
-        if renamed.recv_timeout(Duration::from_secs(10)).is_err() {
-            drop(writer);
-            renamer.join().expect("rename thread");
-            panic!("the rename waited for the blocked read");
-        }
-        renamer.join().expect("rename thread");
+        let mut writer = rename_during_blocked_read(
+            runtime.imports.gate(),
+            &dir,
+            &pairs,
+            playlist_writer(&playlist),
+        );
         let after: Vec<_> = pairs.iter().map(|(_, new)| dir.join(new)).collect();
         replace_playlist(&playlist, &after);
         // The blocked read gets the playlist as it was before the rename.
@@ -2530,11 +2544,12 @@ mod tests {
             ])),
             &event_tx,
         );
-        let writer = playlist_writer(&playlist);
-        runtime
-            .imports
-            .gate()
-            .rename(|| ((), rename_files(&dir, &[("old.flac", "new.flac")])));
+        let writer = rename_during_blocked_read(
+            runtime.imports.gate(),
+            &dir,
+            &[("old.flac", "new.flac")],
+            playlist_writer(&playlist),
+        );
         replace_playlist(&playlist, &[]);
         drop(writer);
         apply_next_import_result(&mut runtime, &event_tx);
@@ -2561,11 +2576,12 @@ mod tests {
             );
         }
         // The worker blocks on the playlist, so `old.flac` waits behind it.
-        let writer = playlist_writer(&playlist);
-        runtime
-            .imports
-            .gate()
-            .rename(|| ((), rename_files(&dir, &[("old.flac", "new.flac")])));
+        let writer = rename_during_blocked_read(
+            runtime.imports.gate(),
+            &dir,
+            &[("old.flac", "new.flac")],
+            playlist_writer(&playlist),
+        );
         replace_playlist(&playlist, &[]);
         drop(writer);
         for _ in 0..3 {
