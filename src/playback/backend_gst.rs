@@ -273,6 +273,7 @@ struct GstPlaybackRuntime {
     /// Group of the last `stream-start`. Chained streams within one file
     /// share their group; each file the pipeline starts gets a new one.
     last_stream_group: Option<gst::GroupId>,
+    /// Shared with the about-to-finish callback and the parser probes.
     stream_durations: Arc<Mutex<StreamDurations>>,
     /// Set when `set_state(Playing)` is called in `switch_track`.
     /// Cleared when the bus handler sees `StateChanged(_, Playing)` for
@@ -786,8 +787,10 @@ impl GstPlaybackRuntime {
         // file was renamed. A playing stream keeps reading the renamed file,
         // but playbin3 takes a URI set during playback as the next gapless
         // track, so the URI is only replaced once the pipeline has stopped.
-        if let Some(uri) = restart_path.as_deref().and_then(file_uri) {
-            self.playbin.set_property("uri", uri);
+        if let Some(path) = restart_path.as_deref() {
+            if let Some(uri) = file_uri(path) {
+                self.set_run_uri(path, &uri);
+            }
         }
         if was_stopped {
             self.applied_volume = 0.0;
@@ -844,8 +847,10 @@ impl GstPlaybackRuntime {
             self.begin_pipeline_run(false);
             // The pipeline may have been given the successor. Play must
             // start the stopped track again.
-            if let Some(uri) = self.snapshot.current.as_deref().and_then(file_uri) {
-                self.playbin.set_property("uri", &uri);
+            if let Some(path) = self.snapshot.current.as_deref() {
+                if let Some(uri) = file_uri(path) {
+                    self.set_run_uri(path, &uri);
+                }
             }
             self.startup_gain_ramp = false;
             self.startup_ramp_hold_until = None;
@@ -949,7 +954,7 @@ impl GstPlaybackRuntime {
         let _ = self.playbin.set_state(gst::State::Ready);
         // Also drops a successor staged while the old run was stopping.
         self.begin_pipeline_run(true);
-        self.playbin.set_property("uri", &uri);
+        self.set_run_uri(&path, &uri);
 
         // Preroll in Paused so the pipeline accepts the seek. For local
         // files this is sub-millisecond.
@@ -986,8 +991,18 @@ impl GstPlaybackRuntime {
         }
     }
 
+    /// Give the stopped pipeline the current track at `path`, which starts
+    /// the next run.
+    fn set_run_uri(&self, path: &Path, uri: &str) {
+        if let Ok(mut durations) = self.stream_durations.lock() {
+            durations.start_run(path.to_path_buf());
+        }
+        self.playbin.set_property("uri", uri);
+    }
+
     /// Account for a new pipeline run after the pipeline was stopped:
-    /// discard the previous run's bus messages and staged successors.
+    /// discard the previous run's bus messages, streams, and staged
+    /// successors.
     fn begin_pipeline_run(&mut self, current_continues: bool) {
         if let Some(bus) = self.playbin.bus() {
             bus.set_flushing(true);
@@ -1032,11 +1047,15 @@ impl GstPlaybackRuntime {
             }
             return;
         }
-        let committed = self
-            .queue_state
-            .lock()
-            .ok()
-            .and_then(|mut queue| queue.commit_gapless());
+        let committed = self.queue_state.lock().ok().and_then(|mut queue| {
+            let committed = queue.commit_gapless()?;
+            // Under the queue lock, so that the streams stay in step with
+            // the successors that about-to-finish hands over.
+            if let Ok(mut durations) = self.stream_durations.lock() {
+                durations.commit();
+            }
+            Some(committed)
+        });
         if let Some(committed) = committed {
             self.commit_gapless_successor(committed);
         }
@@ -1080,10 +1099,7 @@ impl GstPlaybackRuntime {
             .queue_state
             .lock()
             .map_or(true, |queue| queue.successor_handed_to_pipeline());
-        let reported = || {
-            let current = self.snapshot.current.as_deref()?;
-            self.stream_durations.lock().ok()?.get(current)
-        };
+        let reported = || self.stream_durations.lock().ok()?.current();
         if handed {
             reported()
         } else {
@@ -1534,7 +1550,7 @@ impl GstPlaybackRuntime {
         let _ = self.playbin.set_state(gst::State::Ready);
         // Also drops a successor staged while the old run was stopping.
         self.begin_pipeline_run(false);
-        self.playbin.set_property("uri", uri);
+        self.set_run_uri(path, uri);
         if was_playing {
             let _ = self.playbin.set_state(gst::State::Playing);
             self.playing_state_requested_at = Some(Instant::now());
@@ -1602,6 +1618,7 @@ fn run_gst_engine(
 
     {
         let queue_state = Arc::clone(&queue_state);
+        let stream_durations = Arc::clone(&stream_durations);
         let analysis_tx = analysis_tx.clone();
         // Runs on a streaming thread once the pipeline has read all of the
         // last stream it was given, usually about 2 s before that stream
@@ -1635,6 +1652,11 @@ fn run_gst_engine(
                 let _ = analysis_tx.send(AnalysisCommand::PrepareGaplessContinuation {
                     path: staged.path.clone(),
                 });
+            }
+            if staged.handoff == Handoff::Gapless {
+                if let Ok(mut durations) = stream_durations.lock() {
+                    durations.hand_over(staged.path.clone());
+                }
             }
             drop(queue);
             if staged.handoff == Handoff::Gapless {
@@ -1702,33 +1724,59 @@ fn step_volume_level(
     (delta.abs() > max_step + VOLUME_LEVEL_SNAP).then(|| level + delta.signum() * max_step)
 }
 
-/// Durations that the parsers of recently started streams reported, keyed
-/// by the stream's file.
+/// The streams of the pipeline run that are still needed, in play order:
+/// the audible track's stream, then each successor handed to the pipeline,
+/// with the duration its parser last reported. A stream is identified by
+/// its place in this list. Its file, the path the pipeline was given, only
+/// matches parser reports to it and does not change when the track is
+/// renamed.
 #[derive(Debug, Default)]
 struct StreamDurations {
-    recent: VecDeque<(PathBuf, Duration)>,
+    streams: VecDeque<RunStream>,
+}
+
+#[derive(Debug)]
+struct RunStream {
+    file: PathBuf,
+    duration: Option<Duration>,
 }
 
 impl StreamDurations {
-    /// More than the streams a pipeline run can buffer at once.
-    const CAPACITY: usize = 8;
-
-    fn record(&mut self, path: PathBuf, duration: Duration) {
-        self.recent.retain(|(known, _)| *known != path);
-        if self.recent.len() == Self::CAPACITY {
-            self.recent.pop_front();
-        }
-        self.recent.push_back((path, duration));
+    /// Start a run with the stream of `file`.
+    fn start_run(&mut self, file: PathBuf) {
+        self.clear();
+        self.hand_over(file);
     }
 
-    fn get(&self, path: &Path) -> Option<Duration> {
-        self.recent
-            .iter()
-            .find_map(|(known, duration)| (known == path).then_some(*duration))
+    /// The pipeline was given a successor that reads `file`.
+    fn hand_over(&mut self, file: PathBuf) {
+        self.streams.push_back(RunStream {
+            file,
+            duration: None,
+        });
+    }
+
+    /// The oldest successor became audible.
+    fn commit(&mut self) {
+        self.streams.pop_front();
+    }
+
+    /// Record what the parser of a stream reading `file` reports. A file
+    /// queued twice has one duration, so every stream reading it takes the
+    /// report.
+    fn record(&mut self, file: &Path, duration: Duration) {
+        for stream in self.streams.iter_mut().filter(|stream| stream.file == file) {
+            stream.duration = Some(duration);
+        }
+    }
+
+    /// Duration of the audible stream.
+    fn current(&self) -> Option<Duration> {
+        self.streams.front()?.duration
     }
 
     fn clear(&mut self) {
-        self.recent.clear();
+        self.streams.clear();
     }
 }
 
@@ -1781,7 +1829,7 @@ fn install_stream_duration_probe(pad: &gst::Pad, durations: Arc<Mutex<StreamDura
                     (stream_file(pad), pad.query_duration::<gst::ClockTime>())
                 {
                     if let Ok(mut durations) = durations.lock() {
-                        durations.record(path, Duration::from_nanos(duration.nseconds()));
+                        durations.record(&path, Duration::from_nanos(duration.nseconds()));
                     }
                 }
             }
@@ -2216,6 +2264,33 @@ mod tests {
         assert_gain(&runtime, 0.8);
         assert!(!runtime.startup_gain_ramp);
         assert_eq!(runtime.command_wait_timeout(), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn stream_durations_keep_only_the_streams_still_needed() {
+        let (a, b) = (PathBuf::from("/music/a.wav"), PathBuf::from("/music/b.wav"));
+        let seconds = Duration::from_secs;
+        let mut durations = StreamDurations::default();
+        durations.start_run(b.clone());
+        durations.start_run(a.clone());
+        // Not a stream of this run.
+        durations.record(&b, seconds(1));
+        assert_eq!(durations.current(), None);
+        durations.record(&a, seconds(4));
+        durations.hand_over(b.clone());
+        durations.hand_over(a.clone());
+        // A file queued twice has one duration.
+        durations.record(&a, seconds(5));
+        assert_eq!(durations.current(), Some(seconds(5)));
+
+        durations.commit();
+        assert_eq!(durations.current(), None, "B has not reported yet");
+        durations.record(&b, seconds(1));
+        assert_eq!(durations.current(), Some(seconds(1)));
+        durations.commit();
+        assert_eq!(durations.current(), Some(seconds(5)));
+        durations.commit();
+        assert!(durations.streams.is_empty());
     }
 
     #[test]
@@ -2793,6 +2868,7 @@ mod gst_integration_tests {
 #[cfg(all(test, feature = "gst"))]
 mod engine_tests {
     use super::*;
+    use crate::playback::PathRenames;
 
     const TIMEOUT: Duration = Duration::from_secs(10);
     const WAV_RATE: u32 = 8_000;
@@ -3096,6 +3172,65 @@ mod engine_tests {
         engine.wait_for_playing(1, millis(1_200));
         assert_change(&engine.wait_for_changes(3), &c, 2, Expect::Gapless);
         engine.wait_for_playing(2, millis(4_500));
+    }
+
+    #[test]
+    fn renamed_staged_track_keeps_its_duration() {
+        // C is handed over while B plays, so B's duration comes from its
+        // parser, which reports it under the name the pipeline opened.
+        let fixtures = Fixtures::new("rename-staged");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 1_200);
+        let c = fixtures.wav("c.wav", 4_500);
+        let renamed = fixtures.dir.join("renamed b.wav");
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone(), c]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_window(&b);
+        // Well after the pipeline opened B, before A ends.
+        assert!(engine.run_until(TIMEOUT, |engine| engine.snapshot.position >= millis(3_000)));
+        assert_eq!(engine.snapshot.current_queue_index, Some(0));
+
+        std::fs::rename(&b, &renamed).unwrap();
+        engine.send(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
+            (b, renamed.clone()),
+        ]))));
+        assert_change(&engine.wait_for_changes(2), &renamed, 1, Expect::Gapless);
+        engine.wait_for_playing(1, millis(1_200));
+    }
+
+    #[test]
+    fn many_short_tracks_keep_their_durations() {
+        // The pipeline reads ahead by time and bytes, not by tracks, so
+        // every short track is handed over before the first is audible.
+        let fixtures = Fixtures::new("many-short");
+        let mut queue = vec![fixtures.wav("a.wav", 4_000)];
+        queue.extend((0..15).map(|index| fixtures.wav(&format!("short {index:02}.wav"), 100)));
+        queue.push(fixtures.wav("last.wav", 4_500));
+        let last = queue.len() - 1;
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(queue.clone()));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_changes(queue.len());
+        engine.wait_for_playing(last, millis(4_500));
+
+        for (index, path) in queue.iter().enumerate().take(last).skip(1) {
+            let change = &engine.changes[index];
+            assert_change(change, path, index, Expect::Gapless);
+            let durations: Vec<_> = engine
+                .snapshots
+                .iter()
+                .filter(|snapshot| snapshot.track_token == change.token)
+                .map(|snapshot| snapshot.duration)
+                .collect();
+            assert!(
+                !durations.is_empty()
+                    && durations
+                        .iter()
+                        .all(|duration| duration.abs_diff(millis(100)) < millis(20)),
+                "row {index}: {durations:?}"
+            );
+        }
     }
 
     #[test]
