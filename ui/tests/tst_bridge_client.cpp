@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QDateTime>
+#include <QDBusAbstractAdaptor>
 #include <QDBusObjectPath>
 #include <QDir>
 #include <QFile>
@@ -185,6 +186,11 @@ private slots:
     void mprisCanPauseWhilePaused();
     void mprisControllerConstructionDoesNotCrash();
     void mprisArtUrlConvertsImageProviderToFileUrl();
+    void mprisMetadataIsRebuiltOnlyForTrackChanges();
+    void mprisAlbumArtistComesFromAlbumArtistTag();
+    void albumArtistFollowsMatchingMetadataAcrossTracks();
+    void mprisRateWritePausesOnlyForZero();
+    void mprisOpenUriOpensOnlyLocalFiles();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
@@ -1663,6 +1669,183 @@ void BridgeClientTest::mprisArtUrlConvertsImageProviderToFileUrl() {
     controller.m_objectRegistered = false;
 }
 
+void BridgeClientTest::mprisMetadataIsRebuiltOnlyForTrackChanges() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_queueLength = 1;
+    client.m_playbackState = QStringLiteral("Playing");
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    client.m_currentTrackTitle = QStringLiteral("First");
+    client.m_durationSeconds = 100.0;
+
+    MprisController controller(&client);
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+    emit client.playbackChanged();
+    QCOMPARE(controller.m_lastPlayerState.metadata.value(QStringLiteral("xesam:title")).toString(),
+             QStringLiteral("First"));
+    QCOMPARE(controller.m_lastPlayerState.metadata.value(QStringLiteral("mpris:length")).toLongLong(),
+             100000000LL);
+
+    // Playback heartbeats reuse the cached map instead of rebuilding it.
+    client.m_currentTrackTitle = QStringLiteral("Unannounced");
+    client.m_positionSeconds = 12.0;
+    emit client.playbackChanged();
+    QCOMPARE(controller.metadata().value(QStringLiteral("xesam:title")).toString(),
+             QStringLiteral("First"));
+
+    // A new length is still published.
+    client.m_durationSeconds = 200.0;
+    emit client.playbackChanged();
+    QCOMPARE(controller.m_lastPlayerState.metadata.value(QStringLiteral("mpris:length")).toLongLong(),
+             200000000LL);
+
+    client.m_currentTrackTitle = QStringLiteral("Second");
+    emit client.trackMetadataChanged();
+    QCOMPARE(controller.m_lastPlayerState.metadata.value(QStringLiteral("xesam:title")).toString(),
+             QStringLiteral("Second"));
+
+    const QString firstTrackId = controller.currentTrackIdPath();
+    client.m_currentTrackPath = QStringLiteral("/music/other.flac");
+    emit client.trackIdentityChanged();
+    QVERIFY(controller.currentTrackIdPath() != firstTrackId);
+    QCOMPARE(
+        controller.m_lastPlayerState.metadata.value(QStringLiteral("mpris:trackid"))
+            .value<QDBusObjectPath>().path(),
+        controller.currentTrackIdPath());
+
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
+}
+
+void BridgeClientTest::mprisAlbumArtistComesFromAlbumArtistTag() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_queueLength = 1;
+    client.m_currentTrackPath = QStringLiteral("/music/concerto.flac");
+    client.m_currentTrackArtist = QStringLiteral("Soloist");
+    client.m_currentTrackAlbumArtist = QStringLiteral("Orchestra");
+
+    MprisController controller(&client);
+    QVariantMap meta = controller.metadata();
+    QCOMPARE(meta.value(QStringLiteral("xesam:artist")).toStringList(), QStringList{QStringLiteral("Soloist")});
+    QCOMPARE(meta.value(QStringLiteral("xesam:albumArtist")).toStringList(), QStringList{QStringLiteral("Orchestra")});
+
+    // Without an album artist tag the field is left out, not filled with the track artist.
+    client.m_currentTrackAlbumArtist.clear();
+    emit client.trackMetadataChanged();
+    meta = controller.metadata();
+    QVERIFY(!meta.contains(QStringLiteral("xesam:albumArtist")));
+    QCOMPARE(meta.value(QStringLiteral("xesam:artist")).toStringList(), QStringList{QStringLiteral("Soloist")});
+}
+
+void BridgeClientTest::albumArtistFollowsMatchingMetadataAcrossTracks() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/fixture/first.flac");
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.artist = QStringLiteral("Soloist");
+    snapshot.metadata.albumArtist = QStringLiteral("Orchestra");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackAlbumArtist(), QStringLiteral("Orchestra"));
+
+    // Metadata still describes the previous track: do not carry its album artist over.
+    snapshot.playback.currentPath = QStringLiteral("/fixture/next.flac");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.currentTrackAlbumArtist().isEmpty());
+
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.albumArtist = QStringLiteral("Ensemble");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackAlbumArtist(), QStringLiteral("Ensemble"));
+
+    // The decoder reads the album artist between album and genre.
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    auto appendText = [&stream](const QByteArray &value) {
+        stream << quint16(value.size());
+        stream.writeRawData(value.constData(), value.size());
+    };
+    for (const QByteArray &text : {QByteArray("/fixture/a.flac"), QByteArray("Title"), QByteArray("Artist"),
+                                   QByteArray("Album"), QByteArray("Album Artist"), QByteArray("Genre")}) {
+        appendText(text);
+    }
+    stream << qint32(2001) << quint32(44100) << quint32(0) << quint16(2) << quint16(16);
+    appendText("FLAC");
+    stream << quint32(0);
+    appendText("");
+    stream << quint32(0);
+    QByteArray packet;
+    QDataStream header(&packet, QIODevice::WriteOnly);
+    header.setByteOrder(QDataStream::LittleEndian);
+    header << quint32(0xFE550001u) << quint32(16 + payload.size())
+           << quint16(BinaryBridgeCodec::SectionMetadata) << quint16(0)
+           << quint32(payload.size());
+    packet.append(payload);
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error), qPrintable(error));
+    QCOMPARE(decoded.metadata.albumArtist, QStringLiteral("Album Artist"));
+    QCOMPARE(decoded.metadata.genre, QStringLiteral("Genre"));
+    QCOMPARE(decoded.metadata.year, 2001);
+}
+
+void BridgeClientTest::mprisRateWritePausesOnlyForZero() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
+    client.m_playbackState = QStringLiteral("Playing");
+    MprisController controller(&client);
+    // The isolated client reports every command it tries to send as a bridge error.
+    QSignalSpy sentCommands(&client, &BridgeClient::bridgeError);
+
+    controller.setRate(1.5);
+    controller.setRate(1.0);
+    QCOMPARE(sentCommands.count(), 0);
+    QCOMPARE(controller.rate(), 1.0);
+
+    controller.setRate(0.0);
+    QCOMPARE(sentCommands.count(), 1);
+    QCOMPARE(controller.rate(), 1.0);
+
+    // The D-Bus player interface exposes Rate as writable and has OpenUri.
+    const QMetaObject *playerMeta = nullptr;
+    for (const QDBusAbstractAdaptor *adaptor : controller.findChildren<QDBusAbstractAdaptor *>()) {
+        const QMetaObject *meta = adaptor->metaObject();
+        const int info = meta->indexOfClassInfo("D-Bus Interface");
+        if (info >= 0 && QByteArray(meta->classInfo(info).value()) == "org.mpris.MediaPlayer2.Player") {
+            playerMeta = meta;
+        }
+    }
+    QVERIFY(playerMeta != nullptr);
+    QVERIFY(playerMeta->property(playerMeta->indexOfProperty("Rate")).isWritable());
+    QVERIFY(playerMeta->indexOfSlot("OpenUri(QString)") >= 0);
+}
+
+void BridgeClientTest::mprisOpenUriOpensOnlyLocalFiles() {
+    QCOMPARE(MprisController::localPathForOpenUri(QStringLiteral("file:///music/A%20Song.flac")),
+             QStringLiteral("/music/A Song.flac"));
+    QCOMPARE(MprisController::localPathForOpenUri(QStringLiteral("  file:///music/album/  ")),
+             QStringLiteral("/music/album/"));
+    QVERIFY(MprisController::localPathForOpenUri(QStringLiteral("https://example.com/a.mp3")).isEmpty());
+    QVERIFY(MprisController::localPathForOpenUri(QStringLiteral("/music/plain-path.flac")).isEmpty());
+    QVERIFY(MprisController::localPathForOpenUri(QStringLiteral("file:")).isEmpty());
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    MprisController controller(&client);
+    QSignalSpy sentCommands(&client, &BridgeClient::bridgeError);
+    QVERIFY(!controller.openUri(QStringLiteral("https://example.com/a.mp3")));
+    QCOMPARE(sentCommands.count(), 0);
+    QVERIFY(controller.openUri(QStringLiteral("file:///music/track.flac")));
+    QCOMPARE(sentCommands.count(), 1);
+}
+
 void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -1829,7 +2012,7 @@ void BridgeClientTest::metadataChannelLabelsDecodeOptionalTail()
         stream.writeRawData(value.constData(), value.size());
     };
     appendText("/fixture/surround.wav");
-    for (int i = 0; i < 4; ++i) appendText("");
+    for (int i = 0; i < 5; ++i) appendText(""); // title, artist, album, album artist, genre
     stream << qint32(0) << quint32(48000) << quint32(0) << quint16(6) << quint16(16);
     appendText("WAV");
     stream << quint32(0);

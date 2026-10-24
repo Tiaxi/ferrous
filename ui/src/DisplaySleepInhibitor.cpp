@@ -2,179 +2,123 @@
 
 #include "DisplaySleepInhibitor.h"
 
-#include <QtGlobal>
-
 #if defined(Q_OS_LINUX)
 #include <QDBusConnection>
-#include <QDBusMessage>
 #include <QDBusPendingCallWatcher>
-#include <QDBusPendingReply>
 #include <QDebug>
-#include <QPointer>
 #include <QString>
+#include <QVariant>
 
-#include <optional>
 #include <utility>
-#include <vector>
 #endif
 
 namespace {
 
 #if defined(Q_OS_LINUX)
 
-class FreedesktopDisplaySleepInhibitorBackend final
-    : public QObject,
-      public DisplaySleepInhibitorBackend {
-public:
-    FreedesktopDisplaySleepInhibitorBackend() {
-        m_endpoints.push_back({
-            QStringLiteral("org.freedesktop.ScreenSaver"),
-            QStringLiteral("/org/freedesktop/ScreenSaver"),
-            QStringLiteral("org.freedesktop.ScreenSaver"),
-            std::nullopt,
-            nullptr,
-        });
-        m_endpoints.push_back({
-            QStringLiteral("org.freedesktop.PowerManagement"),
-            QStringLiteral("/org/freedesktop/PowerManagement/Inhibit"),
-            QStringLiteral("org.freedesktop.PowerManagement.Inhibit"),
-            std::nullopt,
-            nullptr,
-        });
-    }
+constexpr auto kScreenSaverService = "org.freedesktop.ScreenSaver";
+constexpr auto kScreenSaverPath = "/org/freedesktop/ScreenSaver";
+constexpr auto kScreenSaverInterface = "org.freedesktop.ScreenSaver";
 
-    ~FreedesktopDisplaySleepInhibitorBackend() override {
-        releaseAllCookies();
-    }
+QDBusMessage screenSaverCall(const QString &method) {
+    return QDBusMessage::createMethodCall(
+        QString::fromUtf8(kScreenSaverService),
+        QString::fromUtf8(kScreenSaverPath),
+        QString::fromUtf8(kScreenSaverInterface),
+        method);
+}
 
-    void setInhibited(bool inhibited) override {
-        if (m_inhibited == inhibited) {
-            return;
-        }
-
-        m_inhibited = inhibited;
-        if (m_inhibited) {
-            m_failureReported = false;
-            for (std::size_t index = 0; index < m_endpoints.size(); ++index) {
-                acquire(index);
-            }
-            return;
-        }
-
-        releaseAllCookies();
-    }
-
-private:
-    struct Endpoint {
-        QString service;
-        QString path;
-        QString interfaceName;
-        std::optional<quint32> cookie;
-        QPointer<QDBusPendingCallWatcher> acquireWatcher;
-    };
-
-    void acquire(std::size_t index) {
-        Endpoint &endpoint = m_endpoints[index];
-        if (endpoint.cookie.has_value() || endpoint.acquireWatcher != nullptr) {
-            return;
-        }
-
-        QDBusMessage message = QDBusMessage::createMethodCall(
-            endpoint.service,
-            endpoint.path,
-            endpoint.interfaceName,
-            QStringLiteral("Inhibit"));
-        message << QStringLiteral("Ferrous")
-                << QStringLiteral("Fullscreen audio visualization is active");
-
-        auto *watcher = new QDBusPendingCallWatcher(
-            QDBusConnection::sessionBus().asyncCall(message),
-            this);
-        endpoint.acquireWatcher = watcher;
-        connect(
-            watcher,
-            &QDBusPendingCallWatcher::finished,
-            this,
-            [this, index](QDBusPendingCallWatcher *finishedWatcher) {
-                finishAcquire(index, finishedWatcher);
-            });
-    }
-
-    void finishAcquire(std::size_t index, QDBusPendingCallWatcher *watcher) {
-        Endpoint &endpoint = m_endpoints[index];
-        endpoint.acquireWatcher.clear();
-
-        const QDBusPendingReply<quint32> reply = *watcher;
-        watcher->deleteLater();
-        if (!reply.isError()) {
-            const quint32 cookie = reply.value();
-            if (m_inhibited) {
-                endpoint.cookie = cookie;
-            } else {
-                releaseCookie(endpoint, cookie);
-            }
-        }
-
-        reportFailureIfFinished();
-    }
-
-    void reportFailureIfFinished() {
-        if (!m_inhibited || m_failureReported) {
-            return;
-        }
-
-        for (const Endpoint &endpoint : std::as_const(m_endpoints)) {
-            if (endpoint.cookie.has_value() || endpoint.acquireWatcher != nullptr) {
-                return;
-            }
-        }
-
-        m_failureReported = true;
-        qWarning() << "Unable to inhibit display sleep: no supported desktop inhibition service responded";
-    }
-
-    static void releaseCookie(const Endpoint &endpoint, quint32 cookie) {
-        QDBusMessage message = QDBusMessage::createMethodCall(
-            endpoint.service,
-            endpoint.path,
-            endpoint.interfaceName,
-            QStringLiteral("UnInhibit"));
-        message << cookie;
-        QDBusConnection::sessionBus().asyncCall(message);
-    }
-
-    void releaseAllCookies() {
-        for (Endpoint &endpoint : m_endpoints) {
-            if (!endpoint.cookie.has_value()) {
-                continue;
-            }
-            releaseCookie(endpoint, *endpoint.cookie);
-            endpoint.cookie.reset();
-        }
-    }
-
-    std::vector<Endpoint> m_endpoints;
-    bool m_inhibited{false};
-    bool m_failureReported{false};
-};
+std::unique_ptr<DisplaySleepInhibitorBackend> makeDefaultBackend() {
+    return std::make_unique<ScreenSaverInhibitorBackend>();
+}
 
 #else
 
-class FreedesktopDisplaySleepInhibitorBackend final : public DisplaySleepInhibitorBackend {
+class NoopDisplaySleepInhibitorBackend final : public DisplaySleepInhibitorBackend {
 public:
     void setInhibited(bool inhibited) override {
         Q_UNUSED(inhibited)
     }
 };
 
+std::unique_ptr<DisplaySleepInhibitorBackend> makeDefaultBackend() {
+    return std::make_unique<NoopDisplaySleepInhibitorBackend>();
+}
+
 #endif
 
 } // namespace
 
+#if defined(Q_OS_LINUX)
+
+ScreenSaverInhibitorBackend::ScreenSaverInhibitorBackend(DbusCall call)
+    : m_call(call ? std::move(call) : [](const QDBusMessage &message) {
+          return QDBusConnection::sessionBus().asyncCall(message);
+      }) {}
+
+ScreenSaverInhibitorBackend::~ScreenSaverInhibitorBackend() {
+    if (m_cookie.has_value()) {
+        releaseCookie(*m_cookie);
+    }
+}
+
+void ScreenSaverInhibitorBackend::setInhibited(bool inhibited) {
+    if (m_inhibited == inhibited) {
+        return;
+    }
+    m_inhibited = inhibited;
+    if (!m_inhibited) {
+        if (m_cookie.has_value()) {
+            releaseCookie(*m_cookie);
+            m_cookie.reset();
+        }
+        // A pending request is released when its reply arrives.
+        return;
+    }
+    if (m_cookie.has_value() || m_acquireWatcher != nullptr) {
+        return;
+    }
+
+    QDBusMessage message = screenSaverCall(QStringLiteral("Inhibit"));
+    message << QStringLiteral("Ferrous") << QStringLiteral("Fullscreen visualization is playing");
+    auto *watcher = new QDBusPendingCallWatcher(m_call(message), this);
+    m_acquireWatcher = watcher;
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *finished) {
+        finishAcquire(finished);
+    });
+}
+
+void ScreenSaverInhibitorBackend::finishAcquire(QDBusPendingCallWatcher *watcher) {
+    m_acquireWatcher.clear();
+    const QDBusMessage reply = watcher->reply();
+    watcher->deleteLater();
+    const QVariant cookie = reply.arguments().value(0);
+    if (reply.type() != QDBusMessage::ReplyMessage || cookie.metaType() != QMetaType::fromType<quint32>()) {
+        if (m_inhibited) {
+            qWarning() << "Unable to inhibit display sleep:"
+                       << (reply.type() == QDBusMessage::ErrorMessage
+                               ? reply.errorMessage()
+                               : QStringLiteral("unexpected reply"));
+        }
+        return;
+    }
+    if (m_inhibited) {
+        m_cookie = cookie.value<quint32>();
+    } else {
+        releaseCookie(cookie.value<quint32>());
+    }
+}
+
+void ScreenSaverInhibitorBackend::releaseCookie(quint32 cookie) {
+    QDBusMessage message = screenSaverCall(QStringLiteral("UnInhibit"));
+    message << cookie;
+    m_call(message);
+}
+
+#endif
+
 DisplaySleepInhibitor::DisplaySleepInhibitor(QObject *parent)
-    : DisplaySleepInhibitor(
-          std::make_unique<FreedesktopDisplaySleepInhibitorBackend>(),
-          parent) {}
+    : DisplaySleepInhibitor(makeDefaultBackend(), parent) {}
 
 DisplaySleepInhibitor::DisplaySleepInhibitor(
     std::unique_ptr<DisplaySleepInhibitorBackend> backend,

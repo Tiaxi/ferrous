@@ -7,7 +7,7 @@ use std::{fs::File, io::ErrorKind};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
-use lofty::prelude::Accessor;
+use lofty::prelude::{Accessor, ItemKey};
 use symphonia::core::codecs::{
     CodecType, CODEC_TYPE_AAC, CODEC_TYPE_ALAC, CODEC_TYPE_FLAC, CODEC_TYPE_MP1, CODEC_TYPE_MP2,
     CODEC_TYPE_MP3, CODEC_TYPE_OPUS, CODEC_TYPE_PCM_ALAW, CODEC_TYPE_PCM_F32BE,
@@ -45,6 +45,8 @@ pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
     pub album: String,
+    /// Empty when the file has no album artist tag.
+    pub album_artist: String,
     pub genre: String,
     pub year: Option<i32>,
     pub track_number: Option<u32>,
@@ -193,6 +195,9 @@ fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
     metadata.album = tag
         .album()
         .map_or_else(|| "Unknown album".to_string(), std::borrow::Cow::into_owned);
+    tag.get_string(ItemKey::AlbumArtist)
+        .unwrap_or_default()
+        .clone_into(&mut metadata.album_artist);
     metadata.genre = tag
         .genre()
         .map_or_else(String::new, std::borrow::Cow::into_owned);
@@ -222,6 +227,9 @@ fn apply_raw_surround_tags(path: &Path, metadata: &mut TrackMetadata) {
         }
         if let Some(album) = tagged.album {
             metadata.album = album;
+        }
+        if let Some(album_artist) = tagged.album_artist {
+            metadata.album_artist = album_artist;
         }
         if let Some(genre) = tagged.genre {
             metadata.genre = genre;
@@ -643,6 +651,7 @@ mod tests {
                 ("Title", "Harvest"),
                 ("Artist", "Opeth"),
                 ("Album", "In Live Concert at the Royal Albert Hall"),
+                ("Album Artist", "Opeth Live"),
                 ("Genre", "Progressive death metal"),
                 ("Year", "2010"),
                 ("Track", "03/8"),
@@ -669,9 +678,52 @@ mod tests {
         assert_eq!(metadata.title, "Harvest");
         assert_eq!(metadata.artist, "Opeth");
         assert_eq!(metadata.album, "In Live Concert at the Royal Albert Hall");
+        assert_eq!(metadata.album_artist, "Opeth Live");
         assert_eq!(metadata.genre, "Progressive death metal");
         assert_eq!(metadata.year, Some(2010));
         assert_eq!(metadata.format_label, "AC3");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn metadata_reads_album_artist_separately_from_track_artist() {
+        use lofty::config::WriteOptions;
+        use lofty::prelude::{Accessor, ItemKey};
+        use lofty::tag::{Tag, TagExt, TagType};
+
+        let path = metadata_test_path("album-artist", "wav");
+        let mut wave = Vec::new();
+        wave.extend_from_slice(b"RIFF");
+        wave.extend_from_slice(&2036_u32.to_le_bytes());
+        wave.extend_from_slice(b"WAVEfmt ");
+        wave.extend_from_slice(&16_u32.to_le_bytes());
+        wave.extend_from_slice(&1_u16.to_le_bytes());
+        wave.extend_from_slice(&1_u16.to_le_bytes());
+        wave.extend_from_slice(&1000_u32.to_le_bytes());
+        wave.extend_from_slice(&2000_u32.to_le_bytes());
+        wave.extend_from_slice(&2_u16.to_le_bytes());
+        wave.extend_from_slice(&16_u16.to_le_bytes());
+        wave.extend_from_slice(b"data");
+        wave.extend_from_slice(&2000_u32.to_le_bytes());
+        wave.resize(2044, 0);
+        std::fs::write(&path, &wave).expect("write wave fixture");
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_artist("Soloist".into());
+        tag.insert_text(ItemKey::AlbumArtist, "Orchestra".into());
+        tag.save_to_path(&path, WriteOptions::new())
+            .expect("tag fixture");
+
+        let metadata = load_metadata_for_path(&path);
+        assert_eq!(metadata.artist, "Soloist");
+        assert_eq!(metadata.album_artist, "Orchestra");
+
+        let mut untagged = Tag::new(TagType::Id3v2);
+        untagged.set_artist("Soloist".into());
+        untagged
+            .save_to_path(&path, WriteOptions::new())
+            .expect("retag fixture");
+        assert!(load_metadata_for_path(&path).album_artist.is_empty());
 
         let _ = std::fs::remove_file(path);
     }

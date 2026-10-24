@@ -11,6 +11,7 @@
 #include <QDBusInterface>
 #include <QDBusReply>
 #include <QString>
+#include <QVariant>
 
 namespace {
 
@@ -32,7 +33,11 @@ public:
         , m_controller(controller) {}
 
 public slots:
+    // Kept for second instances started from older builds.
     bool OpenPaths(const QStringList &paths) { return m_controller->openPaths(paths); }
+    bool Open(const QStringList &paths, const QVariantMap &platformData) {
+        return m_controller->open(paths, platformData);
+    }
 
 private:
     AppInstanceController *m_controller;
@@ -108,7 +113,10 @@ public:
         return reply.isValid() && reply.value();
     }
 
-    bool forwardToPrimary(const QStringList &paths, QString *errorMessage) override {
+    bool forwardToPrimary(
+        const QStringList &paths,
+        const QString &activationToken,
+        QString *errorMessage) override {
         QDBusConnection sessionBus = QDBusConnection::sessionBus();
         if (!sessionBus.isConnected()) {
             if (errorMessage != nullptr) {
@@ -131,7 +139,17 @@ public:
             return false;
         }
 
-        const QDBusReply<bool> reply = iface.call(QStringLiteral("OpenPaths"), paths);
+        QVariantMap platformData;
+        if (!activationToken.isEmpty()) {
+            platformData.insert(
+                QString::fromUtf8(AppInstanceController::kActivationTokenKey),
+                activationToken);
+        }
+        QDBusReply<bool> reply = iface.call(QStringLiteral("Open"), paths, platformData);
+        if (!reply.isValid() && reply.error().type() == QDBusError::UnknownMethod) {
+            // A primary started from an older build only has OpenPaths.
+            reply = iface.call(QStringLiteral("OpenPaths"), paths);
+        }
         if (!reply.isValid()) {
             if (errorMessage != nullptr) {
                 *errorMessage = fallbackError(
@@ -160,7 +178,8 @@ AppInstanceController::AppInstanceController(
     std::unique_ptr<AppInstanceTransport> transport,
     QObject *parent)
     : QObject(parent)
-    , m_transport(std::move(transport)) {
+    , m_transport(std::move(transport))
+    , m_activationHandler([](const QString &activationToken) { activateMainWindow(activationToken); }) {
     new AppInstanceAdaptor(this);
 }
 
@@ -168,7 +187,8 @@ AppInstanceController::~AppInstanceController() = default;
 
 AppInstanceController::StartupResult AppInstanceController::initialize(
     const QStringList &startupArgs,
-    QString *errorMessage) {
+    QString *errorMessage,
+    const QString &activationToken) {
     const QStringList sanitized = sanitizeOpenTargets(startupArgs);
     if (errorMessage != nullptr) {
         errorMessage->clear();
@@ -176,7 +196,7 @@ AppInstanceController::StartupResult AppInstanceController::initialize(
 
     if (!m_transport || !m_transport->isAvailable()) {
         if (!sanitized.isEmpty()) {
-            m_pendingRequests.push_back(sanitized);
+            m_pendingRequests.push_back({sanitized, QString()});
         }
         return StartupResult::ContinuePrimary;
     }
@@ -184,13 +204,13 @@ AppInstanceController::StartupResult AppInstanceController::initialize(
     QString transportError;
     if (m_transport->startPrimary(this, &transportError)) {
         if (!sanitized.isEmpty()) {
-            m_pendingRequests.push_back(sanitized);
+            m_pendingRequests.push_back({sanitized, QString()});
         }
         return StartupResult::ContinuePrimary;
     }
 
     if (m_transport->remoteServiceExists()) {
-        if (m_transport->forwardToPrimary(sanitized, &transportError)) {
+        if (m_transport->forwardToPrimary(sanitized, activationToken, &transportError)) {
             return StartupResult::ExitAfterForward;
         }
         if (errorMessage != nullptr) {
@@ -200,7 +220,7 @@ AppInstanceController::StartupResult AppInstanceController::initialize(
     }
 
     if (!sanitized.isEmpty()) {
-        m_pendingRequests.push_back(sanitized);
+        m_pendingRequests.push_back({sanitized, QString()});
     }
     return StartupResult::ContinuePrimary;
 }
@@ -210,19 +230,30 @@ void AppInstanceController::setOpenHandler(std::function<void(const QStringList 
     flushPendingRequests();
 }
 
-bool AppInstanceController::openPaths(const QStringList &paths) {
+void AppInstanceController::setActivationHandler(
+    std::function<void(const QString &activationToken)> handler) {
+    m_activationHandler = std::move(handler);
+}
+
+bool AppInstanceController::openPaths(const QStringList &paths, const QString &activationToken) {
     const QStringList sanitized = sanitizeOpenTargets(paths);
     if (sanitized.isEmpty()) {
-        activateTopLevelWindow();
+        m_activationHandler(activationToken);
         return true;
     }
     if (!m_openHandler) {
-        m_pendingRequests.push_back(sanitized);
+        m_pendingRequests.push_back({sanitized, activationToken});
         return true;
     }
     m_openHandler(sanitized);
-    activateTopLevelWindow();
+    m_activationHandler(activationToken);
     return true;
+}
+
+bool AppInstanceController::open(const QStringList &paths, const QVariantMap &platformData) {
+    return openPaths(
+        paths,
+        platformData.value(QString::fromUtf8(kActivationTokenKey)).toString());
 }
 
 QStringList AppInstanceController::sanitizeOpenTargets(const QStringList &rawPaths) {
@@ -240,11 +271,11 @@ void AppInstanceController::flushPendingRequests() {
     if (!m_openHandler || m_pendingRequests.isEmpty()) {
         return;
     }
-    const QList<QStringList> pending = m_pendingRequests;
+    const QList<PendingOpenRequest> pending = m_pendingRequests;
     m_pendingRequests.clear();
-    for (const QStringList &paths : pending) {
-        m_openHandler(paths);
-        activateTopLevelWindow();
+    for (const PendingOpenRequest &request : pending) {
+        m_openHandler(request.paths);
+        m_activationHandler(request.activationToken);
     }
 }
 

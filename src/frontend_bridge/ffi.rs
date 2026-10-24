@@ -2185,6 +2185,7 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u16_string(&mut out, &snapshot.metadata.title);
     push_u16_string(&mut out, &snapshot.metadata.artist);
     push_u16_string(&mut out, &snapshot.metadata.album);
+    push_u16_string(&mut out, &snapshot.metadata.album_artist);
     push_u16_string(&mut out, &snapshot.metadata.genre);
     push_i32(&mut out, snapshot.metadata.year.unwrap_or(i32::MIN));
     push_u32(&mut out, snapshot.metadata.sample_rate_hz.unwrap_or(0));
@@ -2583,6 +2584,7 @@ mod tests {
                 title: "Sample Track".to_string(),
                 artist: "Sample Artist".to_string(),
                 album: "Sample Album".to_string(),
+                album_artist: "Sample Album Artist".to_string(),
                 genre: "Rock".to_string(),
                 year: Some(2020),
                 track_number: Some(3),
@@ -3291,6 +3293,10 @@ mod tests {
         assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Track");
         assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Artist");
         assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Album");
+        assert_eq!(
+            read_u16_string(&encoded, &mut offset),
+            "Sample Album Artist"
+        );
         assert_eq!(read_u16_string(&encoded, &mut offset), "Rock");
         assert_eq!(read_i32(&encoded, &mut offset), 2020);
         assert_eq!(read_u32(&encoded, &mut offset), 48_000);

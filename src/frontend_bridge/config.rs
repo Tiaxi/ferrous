@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use crate::analysis::{SpectrogramDisplayMode, SpectrogramViewMode};
-use crate::playback::{PlaybackCommand, PlaybackEngine};
+use crate::playback::{
+    volume_gain_to_level, volume_level_to_gain, PlaybackCommand, PlaybackEngine,
+};
 
 use super::{BridgeSettings, BridgeState, LibrarySortMode, ViewerFullscreenMode};
 
@@ -219,7 +221,21 @@ pub(super) fn load_settings_into(settings: &mut BridgeSettings) {
     parse_settings_text(settings, &text);
 }
 
+/// Parse a settings value in the unit interval, rejecting NaN and infinities.
+fn parse_unit_f32(value: &str) -> Option<f32> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|x| x.is_finite())
+        .map(|x| x.clamp(0.0, 1.0))
+}
+
 pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
+    // Builds before the cubic volume scale saved only `volume`, the linear
+    // gain.  Convert it to the level with the same loudness, unless the file
+    // also has `volume_cubic`, the level itself.
+    let mut legacy_volume_gain = None;
+    let mut volume_level = None;
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else {
             continue;
@@ -227,11 +243,8 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
         let key = k.trim();
         let value = v.trim();
         match key {
-            "volume" => {
-                if let Ok(x) = value.parse::<f32>() {
-                    settings.volume = x.clamp(0.0, 1.0);
-                }
-            }
+            "volume" => legacy_volume_gain = parse_unit_f32(value).or(legacy_volume_gain),
+            "volume_cubic" => volume_level = parse_unit_f32(value).or(volume_level),
             "fft_size" => {
                 if let Ok(x) = value.parse::<usize>() {
                     settings.fft_size = x.clamp(512, 8192).next_power_of_two();
@@ -318,6 +331,9 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
             _ => {}
         }
     }
+    if let Some(level) = volume_level.or_else(|| legacy_volume_gain.map(volume_gain_to_level)) {
+        settings.volume = level;
+    }
 }
 
 pub(super) fn save_settings(settings: &BridgeSettings) {
@@ -343,9 +359,11 @@ pub(super) fn save_settings(settings: &BridgeSettings) {
 }
 
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
+    // `volume` keeps the linear gain so older builds play at the same loudness.
     format!(
-        "volume={:.4}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
         settings.volume,
+        volume_level_to_gain(settings.volume),
         settings.fft_size,
         settings.spectrogram_view_mode.settings_value(),
         settings.spectrogram_display_mode.settings_value(),
@@ -439,6 +457,51 @@ mod tests {
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
         assert!(parsed.integrations.lastfm_scrobbling_enabled);
         assert_eq!(parsed.integrations.lastfm_username, "tester");
+    }
+
+    #[test]
+    fn legacy_linear_volume_keeps_its_loudness_on_the_cubic_scale() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume=0.5\n");
+        assert!(
+            (settings.volume - 0.793_700_5).abs() < 1e-5,
+            "{}",
+            settings.volume
+        );
+        assert!((volume_level_to_gain(settings.volume) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cubic_volume_level_wins_over_legacy_gain_in_any_order() {
+        for text in [
+            "volume=0.125\nvolume_cubic=0.3\n",
+            "volume_cubic=0.3\nvolume=0.125\n",
+        ] {
+            let mut settings = BridgeSettings::default();
+            parse_settings_text(&mut settings, text);
+            assert!((settings.volume - 0.3).abs() < 1e-6, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn settings_save_volume_level_and_linear_gain_for_older_builds() {
+        let settings = BridgeSettings {
+            volume: 0.5,
+            ..BridgeSettings::default()
+        };
+        let text = format_settings_text(&settings);
+        assert!(text.contains("volume_cubic=0.5000\n"), "{text}");
+        assert!(text.contains("\nvolume=0.125000\n"), "{text}");
+    }
+
+    #[test]
+    fn non_finite_volume_values_are_ignored() {
+        let mut settings = BridgeSettings {
+            volume: 0.4,
+            ..BridgeSettings::default()
+        };
+        parse_settings_text(&mut settings, "volume_cubic=NaN\nvolume=inf\n");
+        assert!((settings.volume - 0.4).abs() < f32::EPSILON);
     }
 
     #[test]

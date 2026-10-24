@@ -25,6 +25,24 @@ pub enum RepeatMode {
     All,
 }
 
+/// Convert a volume level, the value shown by the slider, reported over MPRIS,
+/// and saved in the settings, to the linear amplitude gain applied to audio.
+///
+/// The scale is cubic like `GST_STREAM_VOLUME_FORMAT_CUBIC` and the
+/// PulseAudio/PipeWire mixers, so equal slider steps sound roughly equal:
+/// level 0.5 is gain 0.125 (about −18 dB).
+#[must_use]
+pub fn volume_level_to_gain(level: f32) -> f32 {
+    let level = level.clamp(0.0, 1.0);
+    level * level * level
+}
+
+/// Inverse of [`volume_level_to_gain`].
+#[must_use]
+pub fn volume_gain_to_level(gain: f32) -> f32 {
+    gain.clamp(0.0, 1.0).cbrt()
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlaybackSnapshot {
     pub state: PlaybackState,
@@ -33,6 +51,7 @@ pub struct PlaybackSnapshot {
     pub current: Option<PathBuf>,
     pub current_queue_index: Option<usize>,
     pub current_bitrate_kbps: Option<u32>,
+    /// Volume level requested by the user; see [`volume_level_to_gain`].
     pub volume: f32,
     pub repeat_mode: RepeatMode,
     pub shuffle_enabled: bool,
@@ -177,8 +196,24 @@ mod shared_tests {
     use std::time::Duration;
 
     use super::{
-        remove_queue_indices, stop_snapshot_at_terminal_eos, PlaybackSnapshot, PlaybackState,
+        remove_queue_indices, stop_snapshot_at_terminal_eos, volume_gain_to_level,
+        volume_level_to_gain, PlaybackSnapshot, PlaybackState,
     };
+
+    #[test]
+    fn volume_levels_map_to_cubic_gain_and_back() {
+        assert!((volume_level_to_gain(0.5) - 0.125).abs() < 1e-6);
+        assert!(volume_level_to_gain(0.0).abs() < f32::EPSILON);
+        assert!((volume_level_to_gain(1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((volume_level_to_gain(1.7) - 1.0).abs() < f32::EPSILON);
+        assert!(volume_level_to_gain(-0.2).abs() < f32::EPSILON);
+        let half_level_db = 20.0 * volume_level_to_gain(0.5).log10();
+        assert!((half_level_db + 18.06).abs() < 0.01, "{half_level_db}");
+        for level in [0.0_f32, 0.05, 0.25, 0.5, 0.8, 1.0] {
+            let roundtrip = volume_gain_to_level(volume_level_to_gain(level));
+            assert!((roundtrip - level).abs() < 1e-5, "{level} -> {roundtrip}");
+        }
+    }
 
     #[test]
     fn batched_removal_remaps_surviving_removed_and_last_current_tracks() {

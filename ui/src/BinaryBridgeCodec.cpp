@@ -383,6 +383,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
         || !reader.readUtf8U16(&out->title)
         || !reader.readUtf8U16(&out->artist)
         || !reader.readUtf8U16(&out->album)
+        || !reader.readUtf8U16(&out->albumArtist)
         || !reader.readUtf8U16(&out->genre)
         || !reader.readI32(&out->year)
         || !reader.readU32(&sampleRateHz)

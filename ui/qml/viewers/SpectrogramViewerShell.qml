@@ -18,6 +18,7 @@ Item {
     property var setVisualizationMode: function(mode) {}
     property var displaySleepInhibitor: null
     property bool displaySleepInhibitionEnabled: true
+    property bool playbackPlaying: false
 
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
@@ -28,11 +29,14 @@ Item {
         && root.useWholeScreenViewerMode
         && root.displaySleepInhibitionEnabled
         && spectrogramFullscreenWindow.visibility === Window.FullScreen
+    // A paused or stopped fullscreen view lets the screen blank as usual.
+    readonly property bool displaySleepInhibited:
+        root.fullscreenDisplayActive && root.playbackPlaying
 
     function syncDisplaySleepInhibition() {
         if (root.displaySleepInhibitor
                 && root.displaySleepInhibitor.setInhibited) {
-            root.displaySleepInhibitor.setInhibited(root.fullscreenDisplayActive)
+            root.displaySleepInhibitor.setInhibited(root.displaySleepInhibited)
         }
     }
 
@@ -47,7 +51,7 @@ Item {
     }
 
     onViewerOpenChanged: Qt.callLater(root.syncPresentation)
-    onFullscreenDisplayActiveChanged: root.syncDisplaySleepInhibition()
+    onDisplaySleepInhibitedChanged: root.syncDisplaySleepInhibition()
     onDisplaySleepInhibitorChanged: root.syncDisplaySleepInhibition()
     onUseWholeScreenViewerModeChanged: {
         if (root.viewerOpen) {
