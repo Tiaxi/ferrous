@@ -1796,6 +1796,180 @@ mod tests {
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 
+    const COMPILATION_ATOM: AtomIdent<'static> = AtomIdent::Fourcc(*b"cpil");
+
+    fn atom_count(ilst: &Ilst, ident: &AtomIdent<'_>) -> usize {
+        ilst.into_iter()
+            .filter(|atom| atom.ident() == ident)
+            .count()
+    }
+
+    /// Write `ilst` to an MP4 at `path`, then rename each placeholder atom of
+    /// `renames` to an identifier the `ilst` already holds. lofty merges atoms
+    /// with one identifier, so it cannot write them as separate atoms.
+    fn write_split_atoms_mp4(path: &Path, ilst: &Ilst, renames: &[(&[u8; 4], &[u8; 4])]) {
+        write_test_mp4(path, ilst);
+        for (placeholder, ident) in renames {
+            let bytes = patched(path, *placeholder, *ident);
+            fs::write(path, bytes).expect("write fixture");
+        }
+    }
+
+    /// An MP4 with separate `©ART` (`A`, `B`), `trkn` (1/9, 2/10), and `cpil`
+    /// (false, true) atoms, and a UTF-16 freeform atom (`KX`).
+    fn split_atoms_mp4_fixture(dir: &Path) -> PathBuf {
+        let path = dir.join("song.m4a");
+        let mut ilst = Ilst::new();
+        ilst.insert(text_atom(TITLE_ATOM, &["Old"]));
+        ilst.insert(text_atom(ARTIST_ATOM, &["A"]));
+        ilst.insert(text_atom(AtomIdent::Fourcc(*b"\xa9ARx"), &["B"]));
+        ilst.set_track(1);
+        ilst.set_track_total(9);
+        ilst.insert(Atom::new(
+            AtomIdent::Fourcc(*b"trkx"),
+            AtomData::Unknown {
+                code: lofty::mp4::DataType::Reserved,
+                data: vec![0, 0, 0, 2, 0, 10, 0, 0],
+            },
+        ));
+        ilst.insert(Atom::new(COMPILATION_ATOM, AtomData::Bool(false)));
+        ilst.insert(Atom::new(AtomIdent::Fourcc(*b"cpix"), AtomData::Bool(true)));
+        ilst.insert(text_atom(CUSTOM_ATOM, &["PQRS"]));
+        write_split_atoms_mp4(
+            &path,
+            &ilst,
+            &[
+                (b"\xa9ARx", b"\xa9ART"),
+                (b"trkx", b"trkn"),
+                (b"cpix", b"cpil"),
+            ],
+        );
+        let (from, to) = utf16_data_atom("PQRS", "KX");
+        let bytes = patched(&path, &from, &to);
+        fs::write(&path, bytes).expect("write fixture");
+
+        let written = read_ilst(&path);
+        for ident in [ARTIST_ATOM, TRACK_ATOM, COMPILATION_ATOM] {
+            assert_eq!(atom_count(&written, &ident), 2, "{ident:?}");
+        }
+        assert_eq!(
+            atom_values(&written, &CUSTOM_ATOM),
+            [AtomData::UTF16("KX".to_string())]
+        );
+        path
+    }
+
+    /// Only the UTF-16 atom is rewritten; every other atom keeps its
+    /// boundaries, which decide what lofty and players read.
+    #[test]
+    fn mp4_saves_keep_separate_atoms_next_to_utf16_values() {
+        let dir = test_dir("mp4-utf16-split");
+        let path = split_atoms_mp4_fixture(&dir);
+        let before = read_ilst(&path);
+        let generic = |ilst: &Ilst| {
+            let tag = Tag::from(ilst.clone());
+            let artists = tag
+                .get_strings(ItemKey::TrackArtist)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            (artists, tag.track(), tag.track_total())
+        };
+        assert_eq!(
+            generic(&before),
+            (vec!["A".to_string(), "B".to_string()], Some(2), Some(10))
+        );
+
+        // The second save starts from the first one's output.
+        for title in ["New", "Newer"] {
+            let mut row = load_one(&path);
+            row.title = title.to_string();
+            assert_saved(&save_json(&[edited(&row, &["title"])]));
+
+            let after = read_ilst(&path);
+            assert_eq!(
+                atoms_except(&after, &[TITLE_ATOM, CUSTOM_ATOM]),
+                atoms_except(&before, &[TITLE_ATOM, CUSTOM_ATOM]),
+                "{title}"
+            );
+            assert_eq!(
+                atom_values(&after, &CUSTOM_ATOM),
+                [AtomData::UTF8("KX".to_string())],
+                "{title}"
+            );
+            assert_eq!(
+                atom_values(&after, &TITLE_ATOM),
+                [AtomData::UTF8(title.to_string())]
+            );
+            assert_eq!(generic(&after), generic(&before), "{title}");
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    /// Edited atoms replace every atom with their identifier, so none is
+    /// merged into a kept one.
+    #[test]
+    fn edited_mp4_fields_replace_every_separate_atom() {
+        let dir = test_dir("mp4-split-edit");
+        let path = split_atoms_mp4_fixture(&dir);
+        let before = read_ilst(&path);
+
+        let mut row = load_one(&path);
+        row.artist = "C".to_string();
+        row.track_no = "3".to_string();
+        assert_saved(&save_json(&[edited(&row, &["artist", "trackNo"])]));
+
+        let after = read_ilst(&path);
+        let edited_atoms = [ARTIST_ATOM, TRACK_ATOM, CUSTOM_ATOM];
+        assert_eq!(
+            atoms_except(&after, &edited_atoms),
+            atoms_except(&before, &edited_atoms)
+        );
+        assert_eq!(
+            atom_values(&after, &CUSTOM_ATOM),
+            [AtomData::UTF8("KX".to_string())]
+        );
+        assert_eq!(atom_count(&after, &ARTIST_ATOM), 1);
+        assert_eq!(
+            atom_values(&after, &ARTIST_ATOM),
+            [AtomData::UTF8("C".to_string())]
+        );
+        assert_eq!(atom_count(&after, &TRACK_ATOM), 1);
+        assert_eq!(after.track(), Some(3));
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    /// Converting a UTF-16 value means putting its atom back, which would
+    /// merge it with another atom of its identifier, so the save is refused.
+    #[test]
+    fn mp4_saves_refuse_utf16_values_in_split_atoms() {
+        let dir = test_dir("mp4-utf16-dup");
+        let path = dir.join("song.m4a");
+        let mut ilst = Ilst::new();
+        ilst.insert(text_atom(TITLE_ATOM, &["Old"]));
+        ilst.insert(text_atom(ARTIST_ATOM, &["WXYZ"]));
+        ilst.insert(text_atom(AtomIdent::Fourcc(*b"\xa9ARx"), &["C"]));
+        write_split_atoms_mp4(&path, &ilst, &[(b"\xa9ARx", b"\xa9ART")]);
+        let (from, to) = utf16_data_atom("WXYZ", "AB");
+        let bytes = patched(&path, &from, &to);
+        fs::write(&path, &bytes).expect("write fixture");
+        let written = read_ilst(&path);
+        assert_eq!(atom_count(&written, &ARTIST_ATOM), 2);
+
+        let mut row = load_one(&path);
+        row.title = "New".to_string();
+        let response = save_json(&[edited(&row, &["title"])]);
+
+        assert!(response.successful_paths.is_empty());
+        let error = response.results[0].error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("more than one ©ART atom") && error.contains("UTF-16"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&path).expect("read file"), bytes);
+        assert_eq!(dir_entries(&dir), ["song.m4a"]);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
     /// The Ogg CRC-32 of `bytes`.
     fn ogg_crc(bytes: &[u8]) -> u32 {
         bytes.iter().fold(0, |crc, &byte| {

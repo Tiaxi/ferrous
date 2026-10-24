@@ -14,7 +14,7 @@ use lofty::config::{ParseOptions, WriteOptions};
 use lofty::error::LoftyError;
 use lofty::file::{AudioFile, FileType};
 use lofty::id3::v2::{Id3v2Tag, Id3v2Version};
-use lofty::mp4::{Atom, AtomData, Ilst};
+use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst};
 use lofty::ogg::{OggPictureStorage, VorbisComments};
 use lofty::picture::PictureInformation;
 use lofty::prelude::{SplitTag, TagExt};
@@ -39,7 +39,8 @@ use crate::safe_save::rewrite_via_temp_copy;
 /// # Errors
 ///
 /// Returns a message when the file cannot be read, the tag cannot be
-/// written, or the file cannot be replaced.
+/// written without losing what it holds, or the file cannot be replaced.
+/// The file is unchanged then.
 pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<(), String> {
     let describe = |err: LoftyError| format!("failed to save tags for {}: {err}", path.display());
     let mut tag = tag.clone();
@@ -53,18 +54,23 @@ pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<()
     } else {
         WriteOptions::new()
     };
-    let original = read_native_tag(path, file_type, tag.tag_type()).map_err(describe)?;
+    // Edit before the file is touched, so a refused edit leaves it unchanged.
+    let edited = match read_native_tag(path, file_type, tag.tag_type()).map_err(describe)? {
+        Some(NativeTag::Vorbis(original)) => {
+            Some(NativeTag::Vorbis(edit_vorbis_comments(original, &tag)))
+        }
+        Some(NativeTag::Ape(original)) => Some(NativeTag::Ape(edit_ape_tag(original, &tag))),
+        Some(NativeTag::Ilst(original)) => Some(NativeTag::Ilst(
+            edit_ilst(original, &tag)
+                .map_err(|err| format!("failed to save tags for {}: {err}", path.display()))?,
+        )),
+        None => None,
+    };
     rewrite_via_temp_copy(path, |file| {
-        match original {
-            Some(NativeTag::Vorbis(original)) => {
-                edit_vorbis_comments(original, &tag).save_to(file, write_options)
-            }
-            Some(NativeTag::Ape(original)) => {
-                edit_ape_tag(original, &tag).save_to(file, write_options)
-            }
-            Some(NativeTag::Ilst(original)) => {
-                edit_ilst(original, &tag).save_to(file, write_options)
-            }
+        match edited {
+            Some(NativeTag::Vorbis(edited)) => edited.save_to(file, write_options),
+            Some(NativeTag::Ape(edited)) => edited.save_to(file, write_options),
+            Some(NativeTag::Ilst(edited)) => edited.save_to(file, write_options),
             None => tag.save_to(file, write_options),
         }
         .map_err(describe)
@@ -356,7 +362,12 @@ fn ape_mapping(item: &ApeItem) -> Mapping {
 }
 
 /// Edit the MP4 `ilst`. Atoms the edit did not change keep all their values.
-fn edit_ilst(mut original: Ilst, edited: &Tag) -> Ilst {
+///
+/// # Errors
+///
+/// Returns a message when kept UTF-16 text cannot be written without merging
+/// atoms; see [`utf16_text_as_utf8`].
+fn edit_ilst(mut original: Ilst, edited: &Tag) -> Result<Ilst, String> {
     let mut changes = Changes::between(&original.clone().into(), edited);
     let mappings = (&original)
         .into_iter()
@@ -377,26 +388,47 @@ fn edit_ilst(mut original: Ilst, edited: &Tag) -> Ilst {
     }
     let mut replaced = replaced.into_iter();
     original.retain(|_| !replaced.next().unwrap_or_default());
-    let mut original = utf16_text_as_utf8(original);
+    let mut original = utf16_text_as_utf8(original)?;
     // Inserting merges the values of atoms with the same identifier, as the
     // edited tag holds one item per value.
     for atom in new {
         original.insert(atom);
     }
-    original
+    Ok(original)
 }
 
 /// lofty 0.24 writes UTF-16 text as UTF-8 bytes marked as UTF-16, which reads
 /// back as other text. Kept UTF-16 values are written as UTF-8 instead, with
-/// the same text, as the generic tag writes them. Rebuilding the `ilst` then
-/// merges atoms that share an identifier into one, keeping every value in order.
-fn utf16_text_as_utf8(ilst: Ilst) -> Ilst {
-    let is_utf16 = |data: &AtomData| matches!(data, AtomData::UTF16(_));
-    if !(&ilst).into_iter().any(|atom| atom.data().any(is_utf16)) {
-        return ilst;
+/// the same text, as the generic tag writes them.
+///
+/// Only the atoms holding UTF-16 values are taken out, converted, and put back
+/// at the end; the others stay as they are, including atoms that share an
+/// identifier, whose boundaries players read. lofty cannot change an atom in
+/// place or put back two atoms with one identifier without merging them, so
+/// an identifier holding UTF-16 values that also has another atom cannot be
+/// saved without losing that boundary, and the save is refused.
+fn utf16_text_as_utf8(mut ilst: Ilst) -> Result<Ilst, String> {
+    let is_utf16 = |atom: &Atom<'_>| atom.data().any(|data| matches!(data, AtomData::UTF16(_)));
+    let utf16 = (&ilst)
+        .into_iter()
+        .filter(|atom| is_utf16(atom))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(atom) = utf16.iter().find(|atom| {
+        (&ilst)
+            .into_iter()
+            .filter(|other| other.ident() == atom.ident())
+            .nth(1)
+            .is_some()
+    }) {
+        return Err(format!(
+            "the existing tag has more than one {} atom and one of them holds \
+             UTF-16 text, which cannot be saved without merging them",
+            describe_atom(atom.ident())
+        ));
     }
-    let mut converted = Ilst::new();
-    for atom in ilst {
+    ilst.retain(|atom| !is_utf16(atom));
+    for atom in utf16 {
         let ident = atom.ident().clone().into_owned();
         let data = atom
             .into_data()
@@ -407,10 +439,19 @@ fn utf16_text_as_utf8(ilst: Ilst) -> Ilst {
             .collect();
         // Every atom read holds at least one value.
         if let Some(atom) = Atom::from_collection(ident, data) {
-            converted.insert(atom);
+            ilst.insert(atom);
         }
     }
-    converted
+    Ok(ilst)
+}
+
+/// An atom identifier as players show it, such as `©ART` or
+/// `----:com.apple.iTunes:CUSTOM`.
+fn describe_atom(ident: &AtomIdent<'_>) -> String {
+    match ident {
+        AtomIdent::Fourcc(fourcc) => fourcc.iter().copied().map(char::from).collect(),
+        AtomIdent::Freeform { mean, name } => format!("----:{mean}:{name}"),
+    }
 }
 
 fn id3v2_version(path: &Path, file_type: FileType) -> Result<Option<Id3v2Version>, LoftyError> {
