@@ -1049,7 +1049,17 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::tag_write::{write_test_flac as write_flac, write_test_mp3_with_id3v23, TEST_MP3};
+    use lofty::ape::{ApeFile, ApeItem, ApeTag};
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst, Mp4File};
+    use lofty::ogg::{OggPictureStorage, OpusFile, VorbisComments};
+    use lofty::picture::{MimeType, Picture, PictureInformation, PictureType};
+    use lofty::tag::ItemValue;
+    use lofty::wavpack::WavPackFile;
+
+    use crate::tag_write::{
+        write_test_flac as write_flac, write_test_monkeys_audio, write_test_mp3_with_id3v23,
+        write_test_mp4, write_test_opus, write_test_wavpack, TEST_MP3,
+    };
 
     fn test_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -1406,5 +1416,392 @@ mod tests {
         ] {
             assert!(validated_year(value).is_err(), "{value}");
         }
+    }
+
+    fn picture(data: &[u8], mime_type: MimeType) -> Picture {
+        Picture::unchecked(data.to_vec())
+            .mime_type(mime_type)
+            .pic_type(PictureType::CoverFront)
+            .build()
+    }
+
+    const JPEG: &[u8] = b"\xff\xd8\xff\xd9";
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+    const TITLE_ATOM: AtomIdent<'static> = AtomIdent::Fourcc(*b"\xa9nam");
+    const ARTIST_ATOM: AtomIdent<'static> = AtomIdent::Fourcc(*b"\xa9ART");
+    const GENRE_ATOM: AtomIdent<'static> = AtomIdent::Fourcc(*b"\xa9gen");
+    const DATE_ATOM: AtomIdent<'static> = AtomIdent::Fourcc(*b"\xa9day");
+    const TRACK_ATOM: AtomIdent<'static> = AtomIdent::Fourcc(*b"trkn");
+
+    fn text_atom(ident: AtomIdent<'static>, values: &[&str]) -> Atom<'static> {
+        let data = values
+            .iter()
+            .map(|value| AtomData::UTF8((*value).to_string()))
+            .collect();
+        Atom::from_collection(ident, data).expect("atom values")
+    }
+
+    fn read_ilst(path: &Path) -> Ilst {
+        let mut file = fs::File::open(path).expect("open MP4");
+        Mp4File::read_from(&mut file, ParseOptions::new())
+            .expect("parse MP4")
+            .ilst()
+            .cloned()
+            .expect("ilst")
+    }
+
+    fn atom_values(ilst: &Ilst, ident: &AtomIdent<'_>) -> Vec<AtomData> {
+        ilst.get(ident)
+            .map(|atom| atom.data().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn atoms_except(ilst: &Ilst, idents: &[AtomIdent<'_>]) -> Vec<Atom<'static>> {
+        ilst.into_iter()
+            .filter(|atom| !idents.contains(atom.ident()))
+            .cloned()
+            .collect()
+    }
+
+    /// An MP4 with two artists, two covers, a track pair, and atoms lofty
+    /// has no generic key for, as read back from the file.
+    fn mp4_fixture(dir: &Path) -> (PathBuf, Ilst) {
+        let path = dir.join("song.m4a");
+        let mut ilst = Ilst::new();
+        ilst.insert(text_atom(TITLE_ATOM, &["Old"]));
+        ilst.insert(text_atom(ARTIST_ATOM, &["A", "B"]));
+        ilst.insert(text_atom(GENRE_ATOM, &["Rock", "Pop"]));
+        ilst.insert(text_atom(DATE_ATOM, &["1997-05-12"]));
+        ilst.insert(text_atom(
+            AtomIdent::Freeform {
+                mean: "com.apple.iTunes".into(),
+                name: "CUSTOM".into(),
+            },
+            &["kept"],
+        ));
+        ilst.insert(text_atom(AtomIdent::Fourcc(*b"zzzz"), &["unknown"]));
+        ilst.set_track(1);
+        ilst.set_track_total(9);
+        ilst.insert_picture(picture(JPEG, MimeType::Jpeg));
+        ilst.insert_picture(picture(PNG, MimeType::Png));
+        write_test_mp4(&path, &ilst);
+        let written = read_ilst(&path);
+        assert_eq!(atom_values(&written, &ARTIST_ATOM).len(), 2);
+        assert_eq!(written.pictures().expect("covers").count(), 2);
+        (path, written)
+    }
+
+    #[test]
+    fn title_only_mp4_save_keeps_every_value_and_picture() {
+        let dir = test_dir("mp4-title");
+        let (path, before) = mp4_fixture(&dir);
+
+        let mut row = load_one(&path);
+        assert_eq!(row.artist, "A");
+        row.title = "New".to_string();
+        assert_saved(&save_json(&[edited(&row, &["title"])]));
+
+        let after = read_ilst(&path);
+        assert_eq!(
+            atoms_except(&after, &[TITLE_ATOM]),
+            atoms_except(&before, &[TITLE_ATOM])
+        );
+        assert_eq!(
+            atom_values(&after, &TITLE_ATOM),
+            [AtomData::UTF8("New".to_string())]
+        );
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn edited_mp4_fields_replace_all_their_values() {
+        let dir = test_dir("mp4-edit");
+        let (path, before) = mp4_fixture(&dir);
+
+        let mut row = load_one(&path);
+        row.artist = "C".to_string();
+        row.genre = "Jazz".to_string();
+        row.track_no = "2".to_string();
+        row.year = "1998".to_string();
+        assert_saved(&save_json(&[edited(
+            &row,
+            &["artist", "genre", "trackNo", "year"],
+        )]));
+
+        let after = read_ilst(&path);
+        let edited_atoms = [ARTIST_ATOM, GENRE_ATOM, DATE_ATOM, TRACK_ATOM];
+        assert_eq!(
+            atoms_except(&after, &edited_atoms),
+            atoms_except(&before, &edited_atoms)
+        );
+        assert_eq!(
+            atom_values(&after, &ARTIST_ATOM),
+            [AtomData::UTF8("C".to_string())]
+        );
+        assert_eq!(
+            atom_values(&after, &GENRE_ATOM),
+            [AtomData::UTF8("Jazz".to_string())]
+        );
+        assert_eq!(
+            atom_values(&after, &DATE_ATOM),
+            [AtomData::UTF8("1998".to_string())]
+        );
+        assert_eq!((after.track(), after.track_total()), (Some(2), Some(9)));
+        let reloaded = load_one(&path);
+        assert_eq!(
+            (reloaded.artist.as_str(), reloaded.track_no.as_str()),
+            ("C", "02")
+        );
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    const VORBIS_FIXTURE: [(&str, &str); 6] = [
+        ("TITLE", "Old"),
+        ("ARTIST", "A"),
+        ("ENCODER", "Encoder X"),
+        ("artist", "B"),
+        ("TRACKNUMBER", "1"),
+        ("CUSTOM", "kept"),
+    ];
+
+    fn read_flac(path: &Path) -> FlacFile {
+        let mut file = fs::File::open(path).expect("open FLAC");
+        FlacFile::read_from(&mut file, ParseOptions::new()).expect("parse FLAC")
+    }
+
+    /// The comments of a FLAC or Opus file, with FLAC's picture blocks.
+    fn read_vorbis(path: &Path) -> (VorbisComments, Vec<(Picture, PictureInformation)>) {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "flac")
+        {
+            let flac = read_flac(path);
+            let comments = flac.vorbis_comments().cloned().expect("comments");
+            (comments, flac.pictures().to_vec())
+        } else {
+            let mut file = fs::File::open(path).expect("open Opus");
+            let opus = OpusFile::read_from(&mut file, ParseOptions::new()).expect("parse Opus");
+            let comments = opus.vorbis_comments().clone();
+            let pictures = comments.pictures().to_vec();
+            (comments, pictures)
+        }
+    }
+
+    fn vorbis_items(comments: &VorbisComments) -> Vec<(String, String)> {
+        comments
+            .items()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// FLAC and Opus files with an explicit encoder comment, two artists
+    /// spelled differently, and a cover, as read back from the files.
+    fn vorbis_fixtures(dir: &Path) -> Vec<PathBuf> {
+        let info = PictureInformation {
+            width: 1,
+            height: 1,
+            color_depth: 24,
+            num_colors: 0,
+        };
+        let flac = dir.join("song.flac");
+        write_flac(&flac, &VORBIS_FIXTURE);
+        let mut file = read_flac(&flac);
+        file.insert_picture(picture(JPEG, MimeType::Jpeg), Some(info))
+            .expect("add FLAC picture");
+        file.save_to_path(&flac, WriteOptions::new())
+            .expect("write FLAC picture");
+
+        let opus = dir.join("song.opus");
+        let mut comments = VorbisComments::new();
+        comments.set_vendor("ferrous-test".to_string());
+        for (key, value) in VORBIS_FIXTURE {
+            comments.push(key.to_string(), value.to_string());
+        }
+        comments
+            .insert_picture(picture(JPEG, MimeType::Jpeg), Some(info))
+            .expect("add Opus picture");
+        write_test_opus(&opus, &comments);
+
+        for path in [&flac, &opus] {
+            let (comments, pictures) = read_vorbis(path);
+            assert_eq!(comments.get("ENCODER"), Some("Encoder X"), "{path:?}");
+            assert_eq!(pictures.len(), 1, "{path:?}");
+        }
+        vec![flac, opus]
+    }
+
+    #[test]
+    fn title_only_vorbis_saves_keep_the_encoder_comment_and_vendor() {
+        let dir = test_dir("vorbis-title");
+        for path in vorbis_fixtures(&dir) {
+            let (before, pictures_before) = read_vorbis(&path);
+
+            let mut row = load_one(&path);
+            row.title = "New".to_string();
+            assert_saved(&save_json(&[edited(&row, &["title"])]));
+
+            let (after, pictures_after) = read_vorbis(&path);
+            let mut expected = vorbis_items(&before);
+            expected[0].1 = "New".to_string();
+            assert_eq!(vorbis_items(&after), expected, "{path:?}");
+            assert_eq!(after.vendor(), before.vendor(), "{path:?}");
+            assert_eq!(pictures_after, pictures_before, "{path:?}");
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn edited_vorbis_fields_replace_all_their_values() {
+        let dir = test_dir("vorbis-edit");
+        for path in vorbis_fixtures(&dir) {
+            let (before, pictures_before) = read_vorbis(&path);
+
+            let mut row = load_one(&path);
+            row.artist = "C".to_string();
+            row.track_no = "2".to_string();
+            assert_saved(&save_json(&[edited(&row, &["artist", "trackNo"])]));
+
+            let (after, pictures_after) = read_vorbis(&path);
+            let expected = [
+                ("TITLE", "Old"),
+                ("ARTIST", "C"),
+                ("ENCODER", "Encoder X"),
+                ("TRACKNUMBER", "2"),
+                ("CUSTOM", "kept"),
+            ]
+            .map(|(key, value)| (key.to_string(), value.to_string()));
+            assert_eq!(vorbis_items(&after), expected, "{path:?}");
+            assert_eq!(after.vendor(), before.vendor(), "{path:?}");
+            assert_eq!(pictures_after, pictures_before, "{path:?}");
+            assert_eq!(load_one(&path).artist, "C");
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    fn ape_item(key: &str, value: ItemValue, read_only: bool) -> ApeItem {
+        let mut item = ApeItem::new(key.to_string(), value).expect("APE item");
+        item.read_only = read_only;
+        item
+    }
+
+    fn ape_text(key: &str, value: &str, read_only: bool) -> ApeItem {
+        ape_item(key, ItemValue::Text(value.to_string()), read_only)
+    }
+
+    /// Items with read-only flags, a multi-value artist, a track pair, an
+    /// unknown key, and a cover.
+    fn ape_fixture_items() -> Vec<ApeItem> {
+        vec![
+            ape_text("Title", "Old", false),
+            ape_text("ARTIST", "A\0B", true),
+            ape_text("Track", "1/9", false),
+            ape_text("Year", "1997-05-12", false),
+            ape_text("Custom", "kept", true),
+            ape_item(
+                "Cover Art (Front)",
+                ItemValue::Binary(b"cover.jpg\0\xff\xd8\xff\xd9".to_vec()),
+                false,
+            ),
+        ]
+    }
+
+    /// WavPack and Monkey's Audio files holding [`ape_fixture_items`].
+    fn ape_fixtures(dir: &Path) -> Vec<PathBuf> {
+        let mut tag = ApeTag::new();
+        for item in ape_fixture_items() {
+            tag.insert(item);
+        }
+        let wavpack = dir.join("song.wv");
+        write_test_wavpack(&wavpack, &tag);
+        let monkeys_audio = dir.join("song.ape");
+        write_test_monkeys_audio(&monkeys_audio, &tag);
+        for path in [&wavpack, &monkeys_audio] {
+            assert_eq!(read_ape_items(path), ape_fixture_items(), "{path:?}");
+        }
+        vec![wavpack, monkeys_audio]
+    }
+
+    fn read_ape_items(path: &Path) -> Vec<ApeItem> {
+        let mut file = fs::File::open(path).expect("open APE-tagged file");
+        let options = ParseOptions::new();
+        let tag = if path.extension().is_some_and(|extension| extension == "wv") {
+            WavPackFile::read_from(&mut file, options)
+                .expect("parse WavPack")
+                .ape()
+                .cloned()
+        } else {
+            ApeFile::read_from(&mut file, options)
+                .expect("parse Monkey's Audio")
+                .ape()
+                .cloned()
+        };
+        tag.expect("APE tag").into_iter().collect()
+    }
+
+    #[test]
+    fn title_only_ape_saves_keep_read_only_items() {
+        let dir = test_dir("ape-title");
+        for path in ape_fixtures(&dir) {
+            let mut row = load_one(&path);
+            assert_eq!(row.artist, "A");
+            row.title = "New".to_string();
+            assert_saved(&save_json(&[edited(&row, &["title"])]));
+
+            let mut expected = ape_fixture_items();
+            expected[0] = ape_text("Title", "New", false);
+            assert_eq!(read_ape_items(&path), expected, "{path:?}");
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn edited_ape_items_keep_their_key_and_read_only_flag() {
+        let dir = test_dir("ape-edit");
+        for path in ape_fixtures(&dir) {
+            let mut row = load_one(&path);
+            row.artist = "C".to_string();
+            row.track_no = "2".to_string();
+            assert_saved(&save_json(&[edited(&row, &["artist", "trackNo"])]));
+
+            let mut expected = ape_fixture_items();
+            expected[1] = ape_text("ARTIST", "C", true);
+            expected[2] = ape_text("Track", "2/9", false);
+            assert_eq!(read_ape_items(&path), expected, "{path:?}");
+            let reloaded = load_one(&path);
+            assert_eq!(
+                (reloaded.artist.as_str(), reloaded.track_no.as_str()),
+                ("C", "02")
+            );
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn raw_surround_save_reports_tags_with_uncounted_items() {
+        let dir = test_dir("raw-uncounted");
+        let path = dir.join("song.dts");
+        let mut bytes = b"stub".to_vec();
+        let mut tag = crate::raw_audio::build_test_apev2_tag(
+            &[("Title", "Old"), ("Composer", "Hidden")],
+            true,
+        );
+        // Declare one item fewer than the tag holds.
+        tag[16] = 1;
+        let footer = tag.len() - 32;
+        tag[footer + 16] = 1;
+        bytes.append(&mut tag);
+        fs::write(&path, &bytes).expect("write file");
+
+        let mut row = load_one(&path);
+        row.title = "New".to_string();
+        let response = save_json(&[edited(&row, &["title"])]);
+
+        assert!(response.successful_paths.is_empty());
+        let error = response.results[0].error.as_deref().unwrap_or_default();
+        assert!(error.contains("malformed"), "{error}");
+        assert_eq!(fs::read(&path).expect("read file"), bytes);
+        assert_eq!(dir_entries(&dir), ["song.dts"]);
+        fs::remove_dir_all(dir).expect("remove test dir");
     }
 }
