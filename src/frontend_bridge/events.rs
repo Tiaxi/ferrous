@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
@@ -16,7 +16,7 @@ use crate::lastfm::{
     self, Command as LastFmCommand, Event as LastFmEvent, Handle as LastFmHandle,
     NowPlayingTrack as LastFmNowPlayingTrack, ScrobbleEntry as LastFmScrobbleEntry,
 };
-use crate::library::{is_supported_audio, track_file_fingerprint, IndexedTrack, LibraryEvent};
+use crate::library::{IndexedTrack, LibraryEvent, LibrarySnapshot, TrackFileFingerprint};
 use crate::metadata::{MetadataEvent, MetadataService};
 use crate::playback::{
     remap_path, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind,
@@ -25,8 +25,7 @@ use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
     library_tree, try_send_event, ApplyAlbumArtEvent, BridgeEvent, BridgeState,
-    ExternalQueueDetailsEvent, ExternalQueueDetailsRequest, LastFmPlaybackTracker,
-    PendingWaveformTrack, SnapshotUrgency,
+    LastFmPlaybackTracker, PendingWaveformTrack, SnapshotUrgency,
 };
 
 #[cfg(feature = "profiling-logs")]
@@ -55,7 +54,7 @@ pub(super) fn process_apply_album_art_event(
     }
 
     update_library_cover_paths(state, &event.indexed_by_path);
-    update_queue_cover_paths(state, &event.indexed_by_path);
+    update_queue_cover_paths(state, &event.indexed_by_path, &event.fingerprints);
 
     if let Some(current_path) = state.playback.current.as_ref() {
         if let Some(indexed) = event.indexed_by_path.get(current_path) {
@@ -99,31 +98,39 @@ pub(super) fn pump_apply_album_art_events(
     drain_apply_album_art_events(apply_album_art_rx, metadata, event_tx, state).is_pending()
 }
 
+/// Give the library's tracks the covers in `indexed_by_path`. The library
+/// is found through its path index and copied only if a cover changes.
 pub(super) fn update_library_cover_paths(
     state: &mut BridgeState,
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
 ) {
-    let mut next_library = (*state.library).clone();
-    let mut changed = false;
-    for track in &mut next_library.tracks {
-        let Some(indexed) = indexed_by_path.get(&track.path) else {
-            continue;
-        };
-        if track.cover_path == indexed.cover_path {
-            continue;
+    let mut updates = Vec::new();
+    for (path, indexed) in indexed_by_path {
+        for position in state.library_index.positions(&state.library, path) {
+            if state.library.tracks[position].cover_path != indexed.cover_path {
+                updates.push((position, &indexed.cover_path));
+            }
         }
-        track.cover_path = indexed.cover_path.clone();
-        changed = true;
     }
-    if changed {
-        next_library.search_revision = next_library.search_revision.saturating_add(1);
-        state.library = Arc::new(next_library);
+    if updates.is_empty() {
+        return;
     }
+    let previous = Arc::clone(&state.library);
+    let mut next_library = (*previous).clone();
+    for (position, cover_path) in updates {
+        next_library.tracks[position]
+            .cover_path
+            .clone_from(cover_path);
+    }
+    next_library.search_revision = next_library.search_revision.saturating_add(1);
+    state.library = Arc::new(next_library);
+    state.library_index.carry_over(&previous, &state.library);
 }
 
 pub(super) fn update_queue_cover_paths(
     state: &mut BridgeState,
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
+    fingerprints: &HashMap<PathBuf, TrackFileFingerprint>,
 ) {
     for (path, indexed) in indexed_by_path {
         let Some(existing) = Arc::make_mut(&mut state.queue_details).get_mut(path) else {
@@ -132,10 +139,10 @@ pub(super) fn update_queue_cover_paths(
         if existing.cover_path != indexed.cover_path {
             existing.cover_path.clone_from(&indexed.cover_path);
         }
-        if let Some(fingerprint) = track_file_fingerprint(path) {
+        if let Some(fingerprint) = fingerprints.get(path) {
             state
                 .queue_detail_fingerprints
-                .insert(path.clone(), fingerprint);
+                .insert(path.clone(), *fingerprint);
         }
     }
 }
@@ -222,6 +229,9 @@ pub(super) fn process_playback_event(
             state.last_track_change.generation = state.last_track_change.generation.wrapping_add(1);
             state.last_track_change.path = Some(path.clone());
             metadata.request(path.clone());
+            // A track starts: check the queue's files again, since they may
+            // have changed on disk since they were last checked.
+            super::sync_queue_details(state);
             let is_gapless = matches!(kind, TrackChangeKind::Gapless);
             let reset_spectrogram = matches!(kind, TrackChangeKind::Manual);
             if state.playback.state == PlaybackState::Stopped {
@@ -293,6 +303,10 @@ fn process_playback_snapshot_event(
     if state.playback != snapshot {
         urgency = playback_snapshot_urgency(&state.playback, &snapshot);
         state.playback = snapshot;
+    }
+    if next_state == PlaybackState::Playing && previous_playback.state == PlaybackState::Stopped {
+        // Queued files may have changed on disk while nothing played.
+        super::sync_queue_details(state);
     }
     if next_state == PlaybackState::Stopped {
         if previous_playback.state != PlaybackState::Stopped {
@@ -647,7 +661,8 @@ pub(super) fn tick_lastfm_playback_at(
         }
     }
     if tracker.track_number.is_none() {
-        tracker.track_number = current_track_number(state);
+        tracker.track_number =
+            current_track_number(state, &mut tracker.library_without_track_number);
     }
 
     let metadata_matches_current = state
@@ -744,20 +759,47 @@ fn queue_lastfm_scrobble_if_ready(
     tracker.scrobble_queued = true;
 }
 
-pub(super) fn current_track_number(state: &BridgeState) -> Option<u32> {
+/// The current track's number, from its queue details or its library track.
+/// `checked` is the library last found to have no number for the track,
+/// which is not searched again: this runs on every pass of the bridge loop.
+pub(super) fn current_track_number(
+    state: &BridgeState,
+    checked: &mut Weak<LibrarySnapshot>,
+) -> Option<u32> {
     let path = state.playback.current.as_ref()?;
-    state
+    if let Some(number) = state
         .queue_details
         .get(path)
         .and_then(|track| track.track_no)
-        .or_else(|| {
-            state
-                .library
-                .tracks
-                .iter()
-                .find(|track| &track.path == path)
-                .and_then(|track| track.track_no)
-        })
+    {
+        return Some(number);
+    }
+    if std::ptr::eq(checked.as_ptr(), Arc::as_ptr(&state.library)) {
+        return None;
+    }
+    let number = library_track_number(state, path);
+    if number.is_none() {
+        *checked = Arc::downgrade(&state.library);
+    }
+    number
+}
+
+fn library_track_number(state: &BridgeState, path: &Path) -> Option<u32> {
+    #[cfg(test)]
+    test_hooks::LIBRARY_TRACK_NUMBER_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+    let position = state.library_index.position(&state.library, path)?;
+    state.library.tracks[position].track_no
+}
+
+#[cfg(test)]
+pub(super) mod test_hooks {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// How often this thread looked up the current track's number in
+        /// the library.
+        pub(in super::super) static LIBRARY_TRACK_NUMBER_LOOKUPS: Cell<usize> = const { Cell::new(0) };
+    }
 }
 
 pub(super) fn unix_timestamp_now() -> i64 {
@@ -769,7 +811,6 @@ pub(super) fn unix_timestamp_now() -> i64 {
 
 pub(super) fn process_library_event(
     event: LibraryEvent,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     match event {
@@ -779,7 +820,7 @@ pub(super) fn process_library_event(
             state.library_artist_count = artist_count;
             state.library_album_count = album_count;
             if !state.queue.is_empty() {
-                let _ = super::sync_queue_details(state, external_queue_details_tx);
+                super::sync_queue_details(state);
             }
             SnapshotUrgency::Immediate
         }
@@ -788,16 +829,11 @@ pub(super) fn process_library_event(
 
 pub(super) fn drain_library_events(
     library_rx: &Receiver<LibraryEvent>,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     let mut urgency = SnapshotUrgency::None;
     while let Ok(event) = library_rx.try_recv() {
-        urgency = urgency.max(process_library_event(
-            event,
-            external_queue_details_tx,
-            state,
-        ));
+        urgency = urgency.max(process_library_event(event, state));
     }
     urgency
 }
@@ -806,89 +842,9 @@ pub(super) fn drain_library_events(
 #[allow(dead_code)]
 pub(super) fn pump_library_events(
     library_rx: &Receiver<LibraryEvent>,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     state: &mut BridgeState,
 ) -> bool {
-    drain_library_events(library_rx, external_queue_details_tx, state).is_pending()
-}
-
-pub(super) fn process_external_queue_detail_event(
-    event: ExternalQueueDetailsEvent,
-    state: &mut BridgeState,
-) -> SnapshotUrgency {
-    let library_paths: HashSet<&Path> = state
-        .library
-        .tracks
-        .iter()
-        .map(|track| track.path.as_path())
-        .collect();
-    let queue_paths: HashSet<&Path> = state.queue.iter().map(PathBuf::as_path).collect();
-
-    let pending = state
-        .pending_queue_detail_fingerprints
-        .get(&event.path)
-        .copied();
-    if pending != Some(event.fingerprint) {
-        return SnapshotUrgency::None;
-    }
-    state.pending_queue_detail_fingerprints.remove(&event.path);
-
-    if !queue_paths.contains(event.path.as_path())
-        || library_paths.contains(event.path.as_path())
-        || !event.path.is_file()
-        || !is_supported_audio(&event.path)
-        || track_file_fingerprint(&event.path) != Some(event.fingerprint)
-    {
-        let removed = Arc::make_mut(&mut state.queue_details)
-            .remove(&event.path)
-            .is_some();
-        state.queue_detail_fingerprints.remove(&event.path);
-        return if removed {
-            SnapshotUrgency::Immediate
-        } else {
-            SnapshotUrgency::None
-        };
-    }
-
-    state
-        .queue_detail_fingerprints
-        .insert(event.path.clone(), event.fingerprint);
-    let needs_update = state.queue_details.get(&event.path).is_none_or(|existing| {
-        existing.title != event.indexed.title
-            || existing.artist != event.indexed.artist
-            || existing.album != event.indexed.album
-            || existing.cover_path != event.indexed.cover_path
-            || existing.genre != event.indexed.genre
-            || existing.year != event.indexed.year
-            || existing.track_no != event.indexed.track_no
-            || existing.duration_secs != event.indexed.duration_secs
-    });
-    if needs_update {
-        Arc::make_mut(&mut state.queue_details).insert(event.path, event.indexed);
-        SnapshotUrgency::Immediate
-    } else {
-        SnapshotUrgency::None
-    }
-}
-
-pub(super) fn drain_external_queue_detail_events(
-    queue_detail_rx: &Receiver<ExternalQueueDetailsEvent>,
-    state: &mut BridgeState,
-) -> SnapshotUrgency {
-    let mut urgency = SnapshotUrgency::None;
-    while let Ok(event) = queue_detail_rx.try_recv() {
-        urgency = urgency.max(process_external_queue_detail_event(event, state));
-    }
-    urgency
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(super) fn pump_external_queue_detail_events(
-    queue_detail_rx: &Receiver<ExternalQueueDetailsEvent>,
-    state: &mut BridgeState,
-) -> bool {
-    drain_external_queue_detail_events(queue_detail_rx, state).is_pending()
+    drain_library_events(library_rx, state).is_pending()
 }
 
 #[cfg(test)]
@@ -1218,6 +1174,77 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn library_track_number_lookups() -> usize {
+        test_hooks::LIBRARY_TRACK_NUMBER_LOOKUPS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_track_without_a_number_is_looked_up_once_per_library_and_track() {
+        use crate::library::{LibrarySnapshot, LibraryTrack};
+
+        let (lastfm_handle, _commands) = lastfm::test_support::command_handle();
+        let track_path = p("/music/untitled.flac");
+        let other_path = p("/music/other.flac");
+        let library = |track_no| {
+            Arc::new(LibrarySnapshot {
+                tracks: (0..1000)
+                    .map(|index| LibraryTrack {
+                        path: p(&format!("/music/filler-{index}.flac")),
+                        ..LibraryTrack::default()
+                    })
+                    .chain(
+                        [track_path.clone(), other_path.clone()].map(|path| LibraryTrack {
+                            path,
+                            track_no,
+                            ..LibraryTrack::default()
+                        }),
+                    )
+                    .collect(),
+                ..LibrarySnapshot::default()
+            })
+        };
+        let mut state = lastfm_playing_state(&track_path);
+        state.library = library(None);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        let before = library_track_number_lookups();
+        let tick = |state: &BridgeState, tracker: &mut LastFmPlaybackTracker, wake: u64| {
+            tick_lastfm_playback_at(
+                state,
+                &lastfm_handle,
+                tracker,
+                start + Duration::from_millis(wake * 40),
+                1_700_000_000,
+            );
+        };
+
+        // The loop wakes about 25 times a second while playing.
+        for wake in 0..250 {
+            tick(&state, &mut tracker, wake);
+        }
+        assert_eq!(tracker.track_number, None);
+        assert_eq!(library_track_number_lookups() - before, 1);
+        assert_eq!(state.library_index.builds(), 1);
+
+        // A new library may have the number.
+        state.library = library(Some(7));
+        for wake in 250..260 {
+            tick(&state, &mut tracker, wake);
+        }
+        assert_eq!(tracker.track_number, Some(7));
+        assert_eq!(library_track_number_lookups() - before, 2);
+
+        // So may another track.
+        state.library = library(None);
+        state.playback.current = Some(other_path.clone());
+        state.metadata.source_path = Some(other_path.to_string_lossy().into_owned());
+        for wake in 260..270 {
+            tick(&state, &mut tracker, wake);
+        }
+        assert_eq!(tracker.track_number, None);
+        assert_eq!(library_track_number_lookups() - before, 3);
     }
 
     #[test]

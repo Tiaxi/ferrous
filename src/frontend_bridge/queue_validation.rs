@@ -24,6 +24,9 @@ pub(super) struct QueueValidationWorker {
     pub(super) results: Receiver<ValidationResult>,
     generation: Arc<AtomicU64>,
     in_flight: Option<u64>,
+    /// How many validations were asked of the worker.
+    #[cfg(test)]
+    pub(super) requests: usize,
 }
 
 impl QueueValidationWorker {
@@ -42,40 +45,34 @@ impl QueueValidationWorker {
                 for newer in rx.try_iter() {
                     state = newer;
                 }
-                let cancelled = || active.load(Ordering::Relaxed) != state.queue_detail_generation;
-                if cancelled() {
+                if active.load(Ordering::Relaxed) != state.queue_detail_generation {
                     continue;
                 }
                 let request_generation = state.queue_detail_generation;
-                let (request_tx, requests) = unbounded();
-                validate_queue_details(
-                    &mut state,
-                    &request_tx,
-                    &|| active.load(Ordering::Relaxed) != request_generation,
-                    |pending| {
-                        if pending.is_empty() {
-                            return HashMap::new();
-                        }
-                        cache.get_or_insert_with(&cache_factory).load_many(pending)
-                    },
-                );
-                for request in requests.try_iter() {
-                    if active.load(Ordering::Relaxed) != state.queue_detail_generation {
+                let cancelled = || active.load(Ordering::Relaxed) != request_generation;
+                let reads = validate_queue_details(&mut state, &cancelled, |pending| {
+                    if pending.is_empty() {
+                        return HashMap::new();
+                    }
+                    cache.get_or_insert_with(&cache_factory).load_many(pending)
+                });
+                for (path, fingerprint) in reads {
+                    if cancelled() {
                         break;
                     }
-                    let read = read_external_track(&request.path);
+                    let read = read_external_track(&path);
                     // Files may change while metadata is read; never cache or publish mismatched data.
-                    if track_file_fingerprint(&request.path) != Some(request.fingerprint) {
+                    if track_file_fingerprint(&path) != Some(fingerprint) {
                         continue;
                     }
                     let indexed = match &cache {
-                        Some(cache) => cache.store(&request.path, request.fingerprint, read),
+                        Some(cache) => cache.store(&path, fingerprint, read),
                         None => read.into_indexed(),
                     };
                     state
                         .queue_detail_fingerprints
-                        .insert(request.path.clone(), request.fingerprint);
-                    Arc::make_mut(&mut state.queue_details).insert(request.path, indexed);
+                        .insert(path.clone(), fingerprint);
+                    Arc::make_mut(&mut state.queue_details).insert(path, indexed);
                 }
                 if active.load(Ordering::Relaxed) == state.queue_detail_generation
                     && result_tx
@@ -95,6 +92,8 @@ impl QueueValidationWorker {
             results,
             generation,
             in_flight: None,
+            #[cfg(test)]
+            requests: 0,
         }
     }
 
@@ -115,6 +114,10 @@ impl QueueValidationWorker {
         };
         if self.tx.send(Box::new(snapshot)).is_err() {
             self.in_flight = None;
+        }
+        #[cfg(test)]
+        {
+            self.requests += 1;
         }
     }
 

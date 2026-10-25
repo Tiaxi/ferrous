@@ -19,5 +19,7 @@ mod raw_audio;
 mod safe_save;
 pub mod tag_editor;
 mod tag_write;
+#[cfg(test)]
+mod test_alloc;
 mod vorbis_comment_scan;
 mod worker_thread;

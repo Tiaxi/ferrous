@@ -7,16 +7,12 @@ use crossbeam_channel::Sender;
 use crate::playback::{PlaybackCommand, PlaybackEngine, PlaybackState};
 
 use super::queue_sync::QueueEdit;
-use super::{
-    sync_queue_details, try_send_event, BridgeEvent, BridgeQueueCommand, BridgeState,
-    ExternalQueueDetailsRequest,
-};
+use super::{sync_queue_details, try_send_event, BridgeEvent, BridgeQueueCommand, BridgeState};
 
 pub(super) fn handle_queue_command(
     cmd: BridgeQueueCommand,
     state: &mut BridgeState,
     playback: &PlaybackEngine,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
     let validate_details = !matches!(
@@ -37,7 +33,7 @@ pub(super) fn handle_queue_command(
         None => {}
     }
     if outcome.changed && validate_details {
-        let _ = sync_queue_details(state, external_queue_details_tx);
+        sync_queue_details(state);
     }
     for op in &outcome.playback_ops {
         match op {
@@ -352,7 +348,6 @@ mod tests {
         let (analysis_tx, _) = crossbeam_channel::unbounded();
 
         let (playback, _) = PlaybackEngine::new(analysis_tx);
-        let (details_tx, details_rx) = crossbeam_channel::unbounded();
         let (event_tx, _) = crossbeam_channel::unbounded();
         let mut state = BridgeState::default();
         state.queue = vec![p("/missing/a.flac"), p("/missing/b.flac")];
@@ -362,15 +357,10 @@ mod tests {
             BridgeQueueCommand::Move { from: 0, to: 1 },
         ] {
             assert!(handle_queue_command(
-                command,
-                &mut state,
-                &playback,
-                &details_tx,
-                &event_tx
+                command, &mut state, &playback, &event_tx
             ));
             assert!(!state.queue_detail_validation_requested);
         }
-        assert!(details_rx.try_recv().is_err());
     }
 
     #[test]
@@ -612,11 +602,10 @@ mod tests {
 
         let (analysis_tx, _) = crossbeam_channel::unbounded();
         let (playback, _) = PlaybackEngine::new(analysis_tx);
-        let (details_tx, _details_rx) = crossbeam_channel::unbounded();
         let (event_tx, _) = crossbeam_channel::unbounded();
         let mut state = BridgeState::default();
         let run = |state: &mut BridgeState, command| {
-            handle_queue_command(command, state, &playback, &details_tx, &event_tx);
+            handle_queue_command(command, state, &playback, &event_tx);
         };
         let mut ui_queue = Vec::new();
         let mut ui_revision = 0;

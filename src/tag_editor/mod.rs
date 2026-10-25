@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_edit_lock;
 use crate::library::{
     read_library_snapshot_from_db, rename_indexed_metadata_paths, LibraryRoot, LibrarySnapshot,
+    TrackRefresh,
 };
 use crate::panic_guard;
 use crate::raw_audio::{
@@ -928,9 +929,15 @@ pub(crate) fn save_rows(request: SaveRequest) -> SaveResponse {
     }
 }
 
+pub(crate) fn rename_rows(request: RenameRequest) -> RenameResponse {
+    rename_rows_with_refresh(request).0
+}
+
+/// [`rename_rows`], also returning what the library index holds for the
+/// renamed files once they are renamed.
 // Sequential file-rename pipeline — splitting would fragment the transactional logic.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn rename_rows(request: RenameRequest) -> RenameResponse {
+pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameResponse, TrackRefresh) {
     let mut results = Vec::new();
     let mut successful_paths = Vec::new();
     let mut renames = Vec::new();
@@ -1002,21 +1009,25 @@ pub(crate) fn rename_rows(request: RenameRequest) -> RenameResponse {
         renamed_pairs.push((row.path.clone(), target_path.to_string_lossy().into_owned()));
     }
 
-    if let Err(error) = rename_indexed_metadata_paths(&renames) {
-        for (old_path, new_path) in renamed_pairs {
-            results.push(RenameResultRow {
-                path: old_path,
-                new_path: Some(new_path),
-                ok: false,
-                error: Some(error.clone()),
-            });
+    let refresh = match rename_indexed_metadata_paths(&renames) {
+        Ok(refresh) => refresh,
+        Err(error) => {
+            for (old_path, new_path) in renamed_pairs {
+                results.push(RenameResultRow {
+                    path: old_path,
+                    new_path: Some(new_path),
+                    ok: false,
+                    error: Some(error.clone()),
+                });
+            }
+            let response = RenameResponse {
+                results,
+                successful_paths: Vec::new(),
+                error: None,
+            };
+            return (response, TrackRefresh::default());
         }
-        return RenameResponse {
-            results,
-            successful_paths: Vec::new(),
-            error: None,
-        };
-    }
+    };
 
     for row in request.rows {
         let Some((_, new_path)) = renamed_pairs
@@ -1039,11 +1050,12 @@ pub(crate) fn rename_rows(request: RenameRequest) -> RenameResponse {
         });
     }
 
-    RenameResponse {
+    let response = RenameResponse {
         results,
         successful_paths,
         error: None,
-    }
+    };
+    (response, refresh)
 }
 
 pub(crate) fn serialize_load_response(response: &LoadResponse) -> Result<Vec<u8>, String> {

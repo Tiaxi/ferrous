@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -595,6 +596,116 @@ pub(super) fn derive_tree_path_context(
         root_label: root.search_label(),
     };
     derive_tree_path_context_for_root(path, &prepared, fallback_artist)
+}
+
+/// A library root with the key its tree nodes use, worked out once for all
+/// of its tracks.
+pub(super) struct KeyedRoot<'a> {
+    path: &'a Path,
+    key: Cow<'a, str>,
+    depth: usize,
+}
+
+pub(super) fn keyed_roots(roots: &[LibraryRoot]) -> Vec<KeyedRoot<'_>> {
+    roots
+        .iter()
+        .map(|root| KeyedRoot {
+            path: &root.path,
+            key: root.path.to_string_lossy(),
+            depth: root.path.components().count(),
+        })
+        .collect()
+}
+
+/// A track's place in the library tree, as in [`TreePathContext`], borrowed
+/// from its path, so that matching every library track against a selection
+/// allocates nothing for tracks with UTF-8 paths.
+pub(super) struct TreePathParts<'a> {
+    pub(super) root_key: &'a str,
+    pub(super) artist_name: Cow<'a, str>,
+    /// The album folder, for tracks at least two levels below the artist.
+    pub(super) album_folder: Option<Cow<'a, str>>,
+    /// The folder between the album folder and the track, for tracks one
+    /// level below the album folder.
+    section: Option<Cow<'a, str>>,
+    /// Whether the track is directly in its album folder.
+    pub(super) is_main_level_album_track: bool,
+}
+
+impl TreePathParts<'_> {
+    /// Whether the track is in a disc section (Disc 1, CD 2, …) directly
+    /// below its album folder.
+    pub(super) fn is_disc_section_album_track(&self) -> bool {
+        self.section
+            .as_deref()
+            .is_some_and(is_main_album_disc_section)
+    }
+}
+
+/// The borrowed form of [`derive_tree_path_context`].
+pub(super) fn tree_path_parts<'a>(
+    path: &'a Path,
+    roots: &'a [KeyedRoot<'a>],
+    fallback_artist: &'a str,
+) -> Option<TreePathParts<'a>> {
+    let root = roots
+        .iter()
+        .filter(|root| path.starts_with(root.path))
+        .max_by_key(|root| root.depth)?;
+    let rel = path.strip_prefix(root.path).ok()?;
+    let mut count = 0usize;
+    let mut first = [None, None, None];
+    for component in rel.components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        if let Some(slot) = first.get_mut(count) {
+            *slot = Some(name.to_string_lossy());
+        }
+        count += 1;
+    }
+    let [artist_folder, album_folder, section] = first;
+    if count == 0 {
+        return None;
+    }
+    let artist_name = match artist_folder {
+        Some(folder) if count >= 2 => folder,
+        _ if fallback_artist.trim().is_empty() => Cow::Borrowed("Unknown Artist"),
+        _ => Cow::Borrowed(fallback_artist.trim()),
+    };
+    if count <= 2 {
+        return Some(TreePathParts {
+            root_key: &root.key,
+            artist_name,
+            album_folder: None,
+            section: None,
+            is_main_level_album_track: false,
+        });
+    }
+    Some(TreePathParts {
+        root_key: &root.key,
+        artist_name,
+        album_folder,
+        section: section.filter(|_| count == 4),
+        is_main_level_album_track: count == 3,
+    })
+}
+
+/// Whether `key` is `kind|part|part…`, the form of the library tree's keys.
+pub(super) fn tree_key_is(key: &str, kind: &str, parts: &[&str]) -> bool {
+    let Some(mut rest) = key.strip_prefix(kind) else {
+        return false;
+    };
+    for part in parts {
+        let Some(next) = rest
+            .strip_prefix('|')
+            .and_then(|next| next.strip_prefix(part))
+        else {
+            return false;
+        };
+        rest = next;
+    }
+    rest.is_empty()
 }
 
 // ---------------------------------------------------------------------------
