@@ -6,7 +6,9 @@
 #include "FerrousBridgeFfi.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <QFutureWatcher>
+#include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -358,6 +360,22 @@ TagEditorController::TagEditorController(BridgeClient *bridge, QObject *parent)
     , m_tableModel(this) {
     connect(&m_tableModel, &TagEditorTableModel::dirtyStateChanged, this, &TagEditorController::dirtyChanged);
     connect(&m_tableModel, &TagEditorTableModel::rowsChanged, this, &TagEditorController::bulkSummaryChanged);
+    m_workerPool = new QThreadPool();
+}
+
+TagEditorController::~TagEditorController() {
+    // Pending results are dropped with the watchers; only the workers remain.
+    ++m_operationGeneration;
+    if (m_workerPool->waitForDone(kExitWaitMs)) {
+        delete m_workerPool;
+        return;
+    }
+    // Deleting the pool would wait for the stalled operation, so it is left
+    // to end with the process. Tag saves and renames replace each file in one
+    // rename, so the file keeps its old tags or gets its new ones.
+    std::fprintf(stderr,
+                 "[ferrous] a tag editor file operation was still running at exit; "
+                 "its changes may not have been saved\n");
 }
 
 QByteArray TagEditorController::executeOperation(Operation operation, const QByteArray &payload,
@@ -396,7 +414,8 @@ void TagEditorController::runOperation(Operation operation, const QByteArray &pa
     });
     // The worker owns its input, function, and gate reference; it never accesses a
     // controller or bridge.
-    watcher->setFuture(QtConcurrent::run(m_executeOperation, operation, payload, renameGate));
+    watcher->setFuture(
+        QtConcurrent::run(m_workerPool, m_executeOperation, operation, payload, renameGate));
 }
 
 QObject *TagEditorController::tableModel() const {
@@ -433,6 +452,10 @@ bool TagEditorController::statusIsError() const {
 
 int TagEditorController::selectedCount() const {
     return static_cast<int>(m_selectedRows.size());
+}
+
+QStringList TagEditorController::operationFiles() const {
+    return m_operationFiles;
 }
 
 bool TagEditorController::openForPaths(const QStringList &paths) {
@@ -481,7 +504,7 @@ void TagEditorController::runLoad(const QByteArray &payload) {
         if (generation == m_operationGeneration) applyLoadResult(watcher->result());
     });
     // Like runOperation, the worker owns its input and function.
-    watcher->setFuture(QtConcurrent::run([execute = m_executeOperation, payload]() {
+    watcher->setFuture(QtConcurrent::run(m_workerPool, [execute = m_executeOperation, payload]() {
         return parseLoadResponse(execute(Operation::Load, payload, RenameGate()));
     }));
 }
@@ -573,6 +596,12 @@ bool TagEditorController::save() {
         return false;
     }
 
+    m_operationFiles.clear();
+    for (const TagEditorRowState &row : m_tableModel.rows()) {
+        if (row.dirty) {
+            m_operationFiles.push_back(row.fileName);
+        }
+    }
     m_saving = true;
     emit savingChanged();
 
@@ -647,6 +676,7 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
     failureLines.sort();
     setStatusText(status, buildActionDetails(successLines, failureLines), !success);
 
+    m_operationFiles.clear();
     m_saving = false;
     emit savingChanged();
     emit bulkSummaryChanged();
@@ -684,6 +714,10 @@ bool TagEditorController::renameSelectedFiles() {
 
     QJsonObject root;
     root.insert(QStringLiteral("rows"), rowArray);
+    m_operationFiles.clear();
+    for (int rowIndex : rows) {
+        m_operationFiles.push_back(m_tableModel.rowAt(rowIndex)->fileName);
+    }
     m_saving = true;
     emit savingChanged();
     runOperation(Operation::Rename, QJsonDocument(root).toJson(QJsonDocument::Compact), [this](const QByteArray &response) {
@@ -754,6 +788,7 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
     failureLines.sort();
     setStatusText(status, buildActionDetails(renamedLines, failureLines), failed);
     emit bulkSummaryChanged();
+    m_operationFiles.clear();
     m_saving = false;
     emit savingChanged();
     emit renameFinished();

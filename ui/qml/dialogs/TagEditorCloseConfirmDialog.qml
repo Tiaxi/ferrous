@@ -10,8 +10,11 @@ Dialog {
     required property var tagEditorApi
     required property var uiPalette
     required property var windowRoot
-    // Asked because Ferrous is quitting, not because the editor is closing.
-    property bool forQuit: false
+    // What the edits would be dropped for: "close" the editor, "quit"
+    // Ferrous, or "reload" the files.
+    property string purpose: "close"
+    readonly property bool forQuit: root.purpose === "quit"
+    readonly property bool forReload: root.purpose === "reload"
 
     // The editor answers these. Saving keeps this dialog open until the save
     // has finished, so its buttons stay disabled meanwhile.
@@ -47,7 +50,9 @@ Dialog {
             wrapMode: Text.WordWrap
             text: root.forQuit
                 ? "Save tag changes before quitting Ferrous?"
-                : "Save changes before closing the tag editor?"
+                : (root.forReload
+                    ? "Discard unsaved changes and reload the tags from the files?"
+                    : "Save changes before closing the tag editor?")
         }
 
         Label {
@@ -56,7 +61,9 @@ Dialog {
             color: root.uiPalette.uiMutedTextColor
             text: root.forQuit
                 ? "Save writes the current edits and quits. Discard drops every unsaved change and quits. Cancel keeps Ferrous open."
-                : "Save writes the current edits. Discard closes the dialog and drops every unsaved change."
+                : (root.forReload
+                    ? "Reloading drops every unsaved change. Cancel keeps editing."
+                    : "Save writes the current edits. Discard closes the dialog and drops every unsaved change.")
         }
 
         RowLayout {
@@ -67,13 +74,13 @@ Dialog {
 
             Button {
                 objectName: "tagEditorCloseConfirmKeepEditingButton"
-                text: root.forQuit ? "Cancel" : "Keep Editing"
+                text: root.forQuit || root.forReload ? "Cancel" : "Keep Editing"
                 enabled: !root.tagEditorApi.saving
                 onClicked: root.reject()
             }
             Button {
                 objectName: "tagEditorCloseConfirmDiscardButton"
-                text: "Discard"
+                text: root.forReload ? "Discard and Reload" : "Discard"
                 enabled: !root.tagEditorApi.saving
                 onClicked: {
                     root.close()
@@ -82,6 +89,7 @@ Dialog {
             }
             Button {
                 objectName: "tagEditorCloseConfirmSaveButton"
+                visible: !root.forReload
                 text: root.tagEditorApi.saving ? "Saving..." : "Save"
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
                 highlighted: true

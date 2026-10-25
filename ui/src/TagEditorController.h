@@ -13,6 +13,7 @@
 #include "TagEditorTableModel.h"
 
 class BridgeClient;
+class QThreadPool;
 struct FerrousFfiRenameGate;
 
 class TagEditorController final : public QObject {
@@ -27,9 +28,12 @@ class TagEditorController final : public QObject {
     // Whether the status reports something that failed.
     Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusChanged)
     Q_PROPERTY(int selectedCount READ selectedCount NOTIFY selectionChanged)
+    // The names of the files the running save or rename writes.
+    Q_PROPERTY(QStringList operationFiles READ operationFiles NOTIFY savingChanged)
 
 public:
     explicit TagEditorController(BridgeClient *bridge, QObject *parent = nullptr);
+    ~TagEditorController() override;
 
     QObject *tableModel() const;
     bool isOpen() const;
@@ -40,6 +44,7 @@ public:
     QString statusDetails() const;
     bool statusIsError() const;
     int selectedCount() const;
+    QStringList operationFiles() const;
 
     Q_INVOKABLE bool openSelection(const QVariantList &selections);
     Q_INVOKABLE bool openForPaths(const QStringList &paths);
@@ -109,6 +114,13 @@ private:
     std::function<QByteArray(Operation, const QByteArray &, const RenameGate &)> m_executeOperation{
         executeOperation};
     quint64 m_operationGeneration{0};
+    // How long destruction waits for a running file operation. One stalled
+    // on unresponsive storage is left running, so it cannot hold up the exit.
+    static constexpr int kExitWaitMs = 1000;
+    // The workers' own pool: the application waits for its global pool at
+    // exit for as long as its work takes.
+    QThreadPool *m_workerPool{nullptr};
+    QStringList m_operationFiles;
     QVector<int> targetRows() const;
     void setStatusText(const QString &text, const QString &details = QString(),
                        bool isError = false);

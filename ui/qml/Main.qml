@@ -388,6 +388,7 @@ ApplicationWindow {
         property string statusDetails: ""
         property bool statusIsError: false
         property int selectedCount: 0
+        property var operationFiles: []
         property var tableModel: []
         signal statusChanged()
         function openSelection(selections) { return false }

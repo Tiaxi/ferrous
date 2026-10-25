@@ -126,6 +126,7 @@ qt_add_qml_module(ferrous
         qml/dialogs/AutoNumberDialog.qml
         qml/dialogs/TagEditorCloseConfirmDialog.qml
         qml/dialogs/TagEditorDialog.qml
+        qml/dialogs/TagEditorQuitWaitDialog.qml
         qml/dialogs/TagEditorStatusDetailsDialog.qml
         qml/panes/LibraryPane.qml
         qml/panes/QueuePane.qml

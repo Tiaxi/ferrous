@@ -22,6 +22,12 @@ Dialog {
     property bool closeAfterSave: false
     // Ferrous is waiting to quit until the edits here are saved or dropped.
     property bool quitPending: false
+    // The user chose to quit without waiting for the running save or rename,
+    // which the exit leaves running.
+    property bool quitWithoutOperation: false
+    // How long quitting waits for a save or rename before it offers to quit
+    // without it, as quitting does for the settings and queue.
+    readonly property int quitWaitBoundMs: 5000
     readonly property int tableRowHeight: 24
     readonly property string keepText: "<keep>"
     readonly property color uiSurfaceColor: root.uiPalette.uiSurfaceColor
@@ -126,11 +132,31 @@ Dialog {
         }
         root.commitPendingEditorEdits()
         if (root.tagEditorApi.dirty) {
-            tagEditorCloseConfirmDialog.forQuit = false
+            tagEditorCloseConfirmDialog.purpose = "close"
             tagEditorCloseConfirmDialog.open()
             return
         }
         root.closeEditor()
+    }
+
+    // Reloading drops unsaved edits, so it asks first, as closing does.
+    function requestReload() {
+        if (root.tagEditorApi.loading || root.tagEditorApi.saving) {
+            return
+        }
+        root.commitPendingEditorEdits()
+        if (root.tagEditorApi.dirty) {
+            tagEditorCloseConfirmDialog.purpose = "reload"
+            tagEditorCloseConfirmDialog.open()
+            return
+        }
+        root.reloadNow()
+    }
+
+    function reloadNow() {
+        root.clearSelection()
+        root.tagEditorApi.reload()
+        root.initializeSelection()
     }
 
     function saveAndClose() {
@@ -145,7 +171,17 @@ Dialog {
     // it sends quitMayProceed once quitting may go on.
     function prepareToQuit() {
         if (root.tagEditorApi.saving) {
+            if (root.quitWithoutOperation) {
+                return true
+            }
             root.quitPending = true
+            // A repeated quit request neither stacks dialogs nor postpones
+            // the offer to quit anyway.
+            if (!tagEditorQuitWaitDialog.visible) {
+                tagEditorQuitWaitDialog.offerChoice = false
+                tagEditorQuitWaitDialog.open()
+                tagEditorQuitWaitTimeout.restart()
+            }
             return false
         }
         root.commitPendingEditorEdits()
@@ -154,12 +190,19 @@ Dialog {
             if (!root.visible) {
                 root.open()
             }
-            tagEditorCloseConfirmDialog.forQuit = true
+            tagEditorCloseConfirmDialog.purpose = "quit"
             tagEditorCloseConfirmDialog.open()
             return false
         }
         root.quitPending = false
         return true
+    }
+
+    // The save or rename that quitting waited for has finished.
+    function stopWaitingForOperation() {
+        tagEditorQuitWaitTimeout.stop()
+        tagEditorQuitWaitDialog.close()
+        root.quitWithoutOperation = false
     }
 
     function continueQuit(succeeded) {
@@ -300,6 +343,7 @@ Dialog {
             if (!root.tagEditorApi.loading) root.initializeSelection()
         }
         function onSaveFinished(success) {
+            root.stopWaitingForOperation()
             root.operationInFlight = false
             root.operationText = ""
             // A failure shows in the editor, under the confirmation.
@@ -312,6 +356,7 @@ Dialog {
             root.continueQuit(success)
         }
         function onRenameFinished() {
+            root.stopWaitingForOperation()
             root.operationInFlight = false
             root.operationText = ""
             tagEditorStatusFlash.restart()
@@ -349,10 +394,43 @@ Dialog {
         windowRoot: root.windowRoot
         onSaveRequested: root.saveAndClose()
         onDiscardRequested: {
+            if (tagEditorCloseConfirmDialog.forReload) {
+                root.reloadNow()
+                return
+            }
             root.closeEditor()
             root.continueQuit(true)
         }
         onKeepEditingRequested: root.quitPending = false
+    }
+
+    Dialogs.TagEditorQuitWaitDialog {
+        id: tagEditorQuitWaitDialog
+        tagEditorApi: root.tagEditorApi
+        uiPalette: root.uiPalette
+        windowRoot: root.windowRoot
+        onKeepWaitingRequested: {
+            tagEditorQuitWaitDialog.offerChoice = false
+            tagEditorQuitWaitTimeout.restart()
+        }
+        onQuitAnywayRequested: {
+            tagEditorQuitWaitTimeout.stop()
+            tagEditorQuitWaitDialog.close()
+            root.quitPending = false
+            root.quitWithoutOperation = true
+            root.quitMayProceed()
+        }
+        onStopQuittingRequested: {
+            tagEditorQuitWaitTimeout.stop()
+            root.quitPending = false
+        }
+    }
+
+    Timer {
+        id: tagEditorQuitWaitTimeout
+        objectName: "tagEditorQuitWaitTimeout"
+        interval: root.quitWaitBoundMs
+        onTriggered: tagEditorQuitWaitDialog.offerChoice = true
     }
 
     Dialogs.TagEditorStatusDetailsDialog {
@@ -488,13 +566,10 @@ Dialog {
             Item { Layout.fillWidth: true }
 
             Button {
+                objectName: "tagEditorReloadButton"
                 text: "Reload"
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
-                onClicked: {
-                    root.clearSelection()
-                    root.tagEditorApi.reload()
-                    root.initializeSelection()
-                }
+                onClicked: root.requestReload()
             }
             Button {
                 objectName: "tagEditorAutoNumberButton"
@@ -545,6 +620,7 @@ Dialog {
             context: Qt.WindowShortcut
             enabled: root.visible && !tagEditorCloseConfirmDialog.visible
                 && !autoNumberDialog.visible && !tagEditorStatusDetailsDialog.visible
+                && !tagEditorQuitWaitDialog.visible
             onActivated: root.requestClose()
         }
 

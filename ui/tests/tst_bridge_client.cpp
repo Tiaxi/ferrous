@@ -14,6 +14,8 @@
 #include <QQuickWindow>
 #include <QSignalSpy>
 #include <QSemaphore>
+#include <QThreadPool>
+#include <QElapsedTimer>
 #include <QSocketNotifier>
 #include <QFutureWatcher>
 #include <algorithm>
@@ -214,6 +216,7 @@ private slots:
     void tagEditorSelectionIsAModelRole();
     void tagEditorEditsOfManyRowsAnnounceOnce();
     void tagEditorRenameKeepsRowsInPlace();
+    void tagEditorExitDoesNotWaitForAStalledSave();
     void batchRemovalCodecPreservesIndices();
     void pathListsFarBeyond64KiBAreSentWholeInOneCommand();
     void thousandsOfAppendedPathsReachTheBackendInOrder();
@@ -912,6 +915,36 @@ void BridgeClientTest::tagEditorRenameKeepsRowsInPlace() {
     QCOMPARE(editor.selectedRows(), QVariantList{1});
     QVERIFY(editor.m_tableModel.rowAt(1)->selected);
     QVERIFY(!editor.statusIsError());
+}
+
+void BridgeClientTest::tagEditorExitDoesNotWaitForAStalledSave() {
+    auto stalled = std::make_shared<QSemaphore>();
+    auto finished = std::make_shared<QSemaphore>();
+    auto editor = std::make_unique<TagEditorController>(nullptr);
+    QVERIFY(loadTagEditorRows(*editor, tagEditorRows(1, 1)));
+    editor->m_executeOperation = [stalled, finished](TagEditorController::Operation, const QByteArray &,
+                                                     const TagEditorController::RenameGate &) {
+        // Storage that does not answer, for longer than any exit may take.
+        stalled->tryAcquire(1, 30000);
+        finished->release();
+        return QByteArray();
+    };
+    editor->setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+    QVERIFY(editor->save());
+    QCOMPARE(editor->operationFiles(), QStringList{QStringLiteral("0.flac")});
+
+    // The application waits for its global pool at exit however long its
+    // work takes, so the save must not run there.
+    QTest::qWait(50);
+    QCOMPARE(QThreadPool::globalInstance()->activeThreadCount(), 0);
+
+    QElapsedTimer timer;
+    timer.start();
+    editor.reset();
+    QVERIFY2(timer.elapsed() < 3000, qPrintable(QString::number(timer.elapsed())));
+
+    stalled->release();
+    QVERIFY(finished->tryAcquire(1, 5000));
 }
 
 void BridgeClientTest::batchRemovalCodecPreservesIndices() {

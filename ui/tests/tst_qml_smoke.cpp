@@ -630,6 +630,10 @@ private slots:
     void tagSaveFailureWhileQuittingKeepsTheWindowOpen();
     void closingTheWindowWhileTagsSaveWaitsForTheSave();
     void mprisQuitWithTagEditsAsksFirst();
+    void quittingDuringAStalledTagSaveOffersToQuitAnyway();
+    void keepWaitingForAStalledTagSaveQuitsWhenItFinishes();
+    void repeatedQuitsDuringATagSaveShowOneWait();
+    void tagEditorReloadAsksBeforeDroppingEdits();
     void autoNumberRejectsStartsThatAreNotNumbers();
     void tagEditorRowsFollowTheKeyboard();
     void tagEditorShowsEveryValueOfMultiValueFields();
@@ -1128,6 +1132,7 @@ Item {
         property string statusDetails: ""
         property bool statusIsError: false
         property int selectedCount: 0
+        property var operationFiles: []
         property var tableModel: []
         signal selectionChanged()
         signal bulkSummaryChanged()
@@ -2472,6 +2477,31 @@ struct TagEditorWindow {
         return message != nullptr ? message->property("text").toString() : QString();
     }
     int stateSaves() const { return bridge->property("lastStateSaveRequestId").toInt(); }
+    QObject *quitWait() const {
+        return window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitDialog"));
+    }
+    bool quitWaitShown() const {
+        return quitWait() != nullptr && quitWait()->property("visible").toBool();
+    }
+    bool quitAnywayOffered() const {
+        QObject *button = window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitQuitButton"));
+        return quitWaitShown() && quitWait()->property("offerChoice").toBool() && button != nullptr
+            && button->property("visible").toBool();
+    }
+    // Runs the quit wait's bound now, in place of the running timer.
+    bool passQuitWaitBound() const {
+        QObject *timeout = window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitTimeout"));
+        return timeout != nullptr && timeout->property("running").toBool()
+            && timeout->setProperty("running", false)
+            && QMetaObject::invokeMethod(timeout, "triggered");
+    }
+    // Starts a save of the edit that does not finish until `saves->release`.
+    bool startStalledSave() {
+        saves->setHold(true);
+        return clickButton(window, QStringLiteral("tagEditorSaveButton"))
+            && QTest::qWaitFor([this]() { return saves->saveCount() == 1; })
+            && editor.saving();
+    }
 };
 
 } // namespace
@@ -2745,6 +2775,138 @@ void QmlSmokeTest::mprisQuitWithTagEditsAsksFirst() {
     QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCloseConfirmDiscardButton")));
     QTRY_VERIFY(!fixture.window->isVisible());
     QCOMPARE(fixture.stateSaves(), 1);
+}
+
+void QmlSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(fixture.startStalledSave());
+
+    fixture.window->close();
+
+    // Quitting waits for the save and says which files it writes.
+    QTRY_VERIFY(fixture.quitWaitShown());
+    QObject *files = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitFiles"));
+    QVERIFY(files != nullptr);
+    QCOMPARE(files->property("text").toString(), QStringLiteral("01 Song.flac"));
+    QVERIFY(!fixture.quitAnywayOffered());
+    QVERIFY(fixture.window->isVisible());
+    QCOMPARE(fixture.stateSaves(), 0);
+
+    // After the bound, it offers to quit without the save.
+    QVERIFY(fixture.passQuitWaitBound());
+    QTRY_VERIFY(fixture.quitAnywayOffered());
+    QObject *message = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitMessage"));
+    QVERIFY(message != nullptr);
+    QVERIFY(message->property("text").toString().contains(QStringLiteral("may be lost")));
+
+    // Quit Anyway goes on to the usual shutdown: the settings and queue are
+    // saved, and the window closes while the tag save still runs.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorQuitWaitQuitButton")));
+    QTRY_VERIFY(!fixture.window->isVisible());
+    QCOMPARE(fixture.stateSaves(), 1);
+    QVERIFY(fixture.editor.saving());
+    fixture.saves->release.release();
+}
+
+void QmlSmokeTest::keepWaitingForAStalledTagSaveQuitsWhenItFinishes() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(fixture.startStalledSave());
+    fixture.window->close();
+    QTRY_VERIFY(fixture.quitWaitShown());
+    QVERIFY(fixture.passQuitWaitBound());
+    QTRY_VERIFY(fixture.quitAnywayOffered());
+
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorQuitWaitKeepWaitingButton")));
+
+    // The wait goes on, and offers the choice again after another bound.
+    QCoreApplication::processEvents();
+    QVERIFY(fixture.window->isVisible());
+    QVERIFY(fixture.quitWaitShown());
+    QVERIFY(!fixture.quitAnywayOffered());
+    QCOMPARE(fixture.stateSaves(), 0);
+    QVERIFY(fixture.passQuitWaitBound());
+    QTRY_VERIFY(fixture.quitAnywayOffered());
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorQuitWaitKeepWaitingButton")));
+
+    // Once the save is done, quitting goes on.
+    fixture.saves->release.release();
+    QTRY_VERIFY(!fixture.window->isVisible());
+    QCOMPARE(fixture.stateSaves(), 1);
+    QVERIFY(!fixture.quitWaitShown());
+    QVERIFY(!fixture.editor.dirty());
+}
+
+void QmlSmokeTest::repeatedQuitsDuringATagSaveShowOneWait() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    const auto restoreMainWindow = useAsMainWindow(fixture.window);
+    QVERIFY(fixture.startStalledSave());
+    QObject *saveFailed = fixture.window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(saveFailed != nullptr);
+
+    // MPRIS Quit takes the same bounded wait.
+    callMprisQuit();
+    QTRY_VERIFY(fixture.quitWaitShown());
+    QVERIFY(fixture.passQuitWaitBound());
+    QTRY_VERIFY(fixture.quitAnywayOffered());
+
+    fixture.window->close();
+    callMprisQuit();
+    QCoreApplication::processEvents();
+
+    // Still the one wait, still offering to quit anyway.
+    QCOMPARE(fixture.window->findChildren<QObject *>(QStringLiteral("tagEditorQuitWaitDialog")).size(), 1);
+    QVERIFY(fixture.quitWaitShown());
+    QVERIFY(fixture.quitAnywayOffered());
+    QVERIFY(!fixture.confirmShown());
+    QVERIFY(!saveFailed->property("visible").toBool());
+    QCOMPARE(fixture.stateSaves(), 0);
+
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorQuitWaitQuitButton")));
+    QTRY_VERIFY(!fixture.window->isVisible());
+    QCOMPARE(fixture.stateSaves(), 1);
+    fixture.saves->release.release();
+}
+
+void QmlSmokeTest::tagEditorReloadAsksBeforeDroppingEdits() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    QObject *save = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorCloseConfirmSaveButton"));
+    QVERIFY(save != nullptr);
+
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
+    QTRY_VERIFY(fixture.confirmShown());
+    QCOMPARE(fixture.confirmMessage(),
+             QStringLiteral("Discard unsaved changes and reload the tags from the files?"));
+    QVERIFY(!save->property("visible").toBool());
+
+    // Cancel keeps the edit.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCloseConfirmKeepEditingButton")));
+    QTRY_VERIFY(!fixture.confirmShown());
+    QVERIFY(!fixture.editor.loading());
+    QVERIFY(fixture.editor.dirty());
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Edited"));
+
+    // Discard and Reload reads the files again; the editor stays open.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
+    QTRY_VERIFY(fixture.confirmShown());
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCloseConfirmDiscardButton")));
+    QTRY_VERIFY(!fixture.editor.loading());
+    QTRY_COMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Song 0"));
+    QVERIFY(!fixture.editor.dirty());
+    QVERIFY(fixture.editorShown());
+    QVERIFY(!fixture.confirmShown());
+
+    // Without edits, Reload does not ask.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
+    QVERIFY(fixture.editor.loading());
+    QVERIFY(!fixture.confirmShown());
+    QTRY_VERIFY(!fixture.editor.loading());
 }
 
 void QmlSmokeTest::autoNumberRejectsStartsThatAreNotNumbers() {
