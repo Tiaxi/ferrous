@@ -1130,6 +1130,25 @@ fn update_queue_track_details(
     changed
 }
 
+/// Refresh the library rows of `paths` from their files, reporting the files
+/// that could not be read fully. `None` if the refresh failed as a whole.
+fn refresh_indexed_paths(
+    paths: &[PathBuf],
+    event_tx: &Sender<BridgeEvent>,
+) -> Option<HashMap<PathBuf, IndexedTrack>> {
+    let refresh = match refresh_indexed_metadata_for_paths(paths) {
+        Ok(refresh) => refresh,
+        Err(err) => {
+            let _ = try_send_event(event_tx, BridgeEvent::Error(err));
+            return None;
+        }
+    };
+    if let Some(problem) = refresh.problem {
+        let _ = try_send_event(event_tx, BridgeEvent::Error(problem));
+    }
+    Some(refresh.indexed)
+}
+
 fn refresh_edited_paths(
     state: &mut BridgeState,
     paths: &[PathBuf],
@@ -1141,12 +1160,8 @@ fn refresh_edited_paths(
         return false;
     }
 
-    let indexed_by_path = match refresh_indexed_metadata_for_paths(paths) {
-        Ok(indexed) => indexed,
-        Err(err) => {
-            let _ = try_send_event(event_tx, BridgeEvent::Error(err));
-            return false;
-        }
+    let Some(indexed_by_path) = refresh_indexed_paths(paths, event_tx) else {
+        return false;
     };
 
     let mut changed = false;
@@ -1180,12 +1195,8 @@ pub(super) fn refresh_renamed_paths(
     }
 
     let new_paths = rename_map.values().cloned().collect::<Vec<_>>();
-    let indexed_by_path = match refresh_indexed_metadata_for_paths(&new_paths) {
-        Ok(indexed) => indexed,
-        Err(err) => {
-            let _ = try_send_event(event_tx, BridgeEvent::Error(err));
-            return false;
-        }
+    let Some(indexed_by_path) = refresh_indexed_paths(&new_paths, event_tx) else {
+        return false;
     };
 
     let mut changed = false;
@@ -2439,5 +2450,71 @@ mod tests {
         assert_eq!(state.library.search_revision, 1);
         assert_eq!(state.library.tracks[0].search_tags, tags);
         assert!(!update_library_track_details(&mut state, &updates));
+    }
+
+    #[test]
+    fn a_refresh_reports_a_file_whose_tags_cannot_be_read_and_keeps_its_details() {
+        use crate::vorbis_comment_scan::fixtures::{comment_block, flac};
+
+        let dir = test_dir("refresh-unreadable");
+        fs::create_dir_all(&dir).expect("fixture directory");
+        let dir = dir.canonicalize().expect("canonical fixture directory");
+        let path = dir.join("song.flac");
+        let tags: [&[u8]; 3] = [
+            b"TITLE=Saved Title",
+            b"ARTIST=Saved Artist",
+            b"ALBUM=Saved Album",
+        ];
+        fs::write(&path, flac(&[&comment_block(&tags)])).expect("write track");
+        crate::library::index_tracks_for_test(&dir, std::slice::from_ref(&path));
+        // A `COVERART` picture too short for lofty, which panics on reading it.
+        let broken: [&[u8]; 4] = [tags[0], tags[1], tags[2], b"COVERART=AAAA"];
+        fs::write(&path, flac(&[&comment_block(&broken)])).expect("break track");
+        let mut state = BridgeState {
+            library: Arc::new(LibrarySnapshot {
+                tracks: vec![LibraryTrack {
+                    path: path.clone(),
+                    root_path: dir.clone(),
+                    title: "Saved Title".to_string(),
+                    artist: "Saved Artist".to_string(),
+                    album: "Saved Album".to_string(),
+                    ..LibraryTrack::default()
+                }],
+                ..LibrarySnapshot::default()
+            }),
+            ..BridgeState::default()
+        };
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (details_tx, _details_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+
+        refresh_edited_paths(
+            &mut state,
+            std::slice::from_ref(&path),
+            &metadata,
+            &details_tx,
+            &event_tx,
+        );
+
+        match event_rx.try_recv() {
+            Ok(BridgeEvent::Error(message)) => {
+                assert!(
+                    message.contains("could not read the tags of 1 file")
+                        && message.contains(&path.display().to_string()),
+                    "{message}"
+                );
+            }
+            other => panic!("expected the unreadable file to be reported, got {other:?}"),
+        }
+        let track = &state.library.tracks[0];
+        assert_eq!(
+            (
+                track.title.as_str(),
+                track.artist.as_str(),
+                track.album.as_str()
+            ),
+            ("Saved Title", "Saved Artist", "Saved Album")
+        );
+        fs::remove_dir_all(dir).expect("remove fixture");
     }
 }

@@ -332,25 +332,31 @@ pub(super) fn handle_rescan_all(
     )
 }
 
+/// Fills the search tags of rows that have none from their files. Returns
+/// the files whose tags could not be read, for the user; their rows stay
+/// without search tags, so the next scan reads them again.
 pub(super) fn backfill_search_tags(
     conn: &Connection,
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     backfill_search_tags_using(conn, snapshot, event_tx, |path| {
         let before = track_file_fingerprint(path)?;
         fs::File::open(path).ok()?;
-        let indexed = read_track_info(path);
-        (track_file_fingerprint(path) == Some(before)).then_some(indexed.search_tags)
+        let read = read_track_catching_panic(path, EmbeddedCoverCache::shared());
+        (track_file_fingerprint(path) == Some(before))
+            .then(|| read.failure.map_or(Ok(read.indexed.search_tags), Err))
     })
 }
 
+/// [`backfill_search_tags`], reading each file with `read_tags`: `None`
+/// skips the file, and an error is why its tags could not be read.
 fn backfill_search_tags_using(
     conn: &Connection,
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
-    mut read_tags: impl FnMut(&Path) -> Option<super::SearchTags>,
-) -> Result<(), String> {
+    mut read_tags: impl FnMut(&Path) -> Option<Result<super::SearchTags, String>>,
+) -> Result<Option<String>, String> {
     let paths = conn
         .prepare("SELECT path FROM tracks WHERE search_tags IS NULL ORDER BY path")
         .map_err(|error| error.to_string())?
@@ -358,6 +364,7 @@ fn backfill_search_tags_using(
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    let mut failures = ReadFailures::default();
     let mut last_emit = Instant::now();
     for (batch_index, batch) in paths.chunks(256).enumerate() {
         // Metadata I/O must finish before taking a write lock: tag edits and
@@ -365,9 +372,13 @@ fn backfill_search_tags_using(
         let mut pending = Vec::new();
         for path in batch {
             let path = PathBuf::from(path);
-            if let Some(tags) = read_tags(&path) {
-                let json = serde_json::to_string(&tags).map_err(|error| error.to_string())?;
-                pending.push((path, tags, json));
+            match read_tags(&path) {
+                Some(Ok(tags)) => {
+                    let json = serde_json::to_string(&tags).map_err(|error| error.to_string())?;
+                    pending.push((path, tags, json));
+                }
+                Some(Err(failure)) => failures.tags.note(&path, Some(&failure)),
+                None => {}
             }
         }
         let tx = conn
@@ -408,7 +419,7 @@ fn backfill_search_tags_using(
             last_emit = Instant::now();
         }
     }
-    Ok(())
+    Ok(failures.refresh_problem())
 }
 
 /// Scans `roots`, caching embedded pictures in `covers`, then removes the
@@ -650,16 +661,63 @@ impl ExternalTrackCache {
             load_external_track_caches_from_conn(conn, requests)
         })
     }
+    /// Caches `read` of `path` at `fingerprint`, and returns the details to
+    /// show for the file; see [`cache_external_read`].
     pub(crate) fn store(
         &self,
         path: &Path,
         fingerprint: TrackFileFingerprint,
-        indexed: &IndexedTrack,
-    ) {
-        if let Some(conn) = &self.0 {
-            let _ = store_external_track_cache_in_conn(conn, path, fingerprint, indexed);
-        }
+        read: ExternalTrackRead,
+    ) -> IndexedTrack {
+        cache_external_read(self.0.as_ref(), path, fingerprint, read.0)
     }
+}
+
+/// A file read for the external-track cache by [`read_external_track`].
+#[derive(Debug)]
+pub(crate) struct ExternalTrackRead(TrackRead);
+
+impl ExternalTrackRead {
+    /// The details read, for a file that is not cached.
+    pub(crate) fn into_indexed(self) -> IndexedTrack {
+        self.0.indexed
+    }
+}
+
+/// Reads `path` for the external-track cache.
+pub(crate) fn read_external_track(path: &Path) -> ExternalTrackRead {
+    ExternalTrackRead(read_track_catching_panic(
+        path,
+        EmbeddedCoverCache::shared(),
+    ))
+}
+
+/// Caches `read` of `path` at `fingerprint` in `conn`, and returns the
+/// details to show for the file.
+///
+/// A read that failed replaces no row: the row keeps the last good read, and
+/// its file state, which no longer matches the file, makes the next lookup
+/// read the file again. Meanwhile the file shows the row's tags if its tags
+/// could not be read, as a refresh keeps a library row, and the row's cover
+/// if its picture could not be cached.
+fn cache_external_read(
+    conn: Option<&Connection>,
+    path: &Path,
+    fingerprint: TrackFileFingerprint,
+    read: TrackRead,
+) -> IndexedTrack {
+    let Some(conn) = conn else {
+        return read.indexed;
+    };
+    if read.is_complete() {
+        let _ = store_external_track_cache_in_conn(conn, path, fingerprint, &read.indexed);
+        return read.indexed;
+    }
+    // The cache is not needed to show the file, so a row that cannot be read
+    // counts as none.
+    let stored = stored_track(conn, &path.to_string_lossy()).unwrap_or(None);
+    let Ok(update) = row_update(read, || Ok::<_, std::convert::Infallible>(stored));
+    update.into_indexed()
 }
 
 fn load_external_track_cache_from_conn(
@@ -680,26 +738,7 @@ fn load_external_track_cache_from_conn(
             fingerprint.mtime_ns,
             fingerprint.size_bytes,
         ],
-        |row| {
-            Ok(IndexedTrack {
-                search_tags: serde_json::from_str(
-                    &row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                )
-                .unwrap_or_default(),
-                title: row.get::<_, String>(0)?,
-                artist: row.get::<_, String>(1)?,
-                album: row.get::<_, String>(2)?,
-                cover_path: row.get::<_, String>(3)?,
-                genre: row.get::<_, String>(4)?,
-                year: row
-                    .get::<_, Option<i64>>(5)?
-                    .and_then(|v| i32::try_from(v).ok()),
-                track_no: row
-                    .get::<_, Option<i64>>(6)?
-                    .and_then(|v| u32::try_from(v).ok()),
-                duration_secs: row.get::<_, Option<f32>>(7)?,
-            })
-        },
+        indexed_track_from_row,
     )
     .ok()
 }
@@ -743,14 +782,17 @@ fn leading_track_number(input: &str) -> Option<u32> {
     }
 }
 
+/// Caches `read` of `path` at `fingerprint` in the library database, and
+/// returns the details to show for the file; see [`cache_external_read`].
 pub(crate) fn store_external_track_cache(
     path: &Path,
     fingerprint: TrackFileFingerprint,
-    indexed: &IndexedTrack,
-) -> Result<(), String> {
-    let conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
-    init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
-    store_external_track_cache_in_conn(&conn, path, fingerprint, indexed)
+    read: ExternalTrackRead,
+) -> IndexedTrack {
+    let conn = open_library_db()
+        .ok()
+        .filter(|conn| init_schema(conn).is_ok());
+    cache_external_read(conn.as_ref(), path, fingerprint, read.0)
 }
 
 fn store_external_track_cache_in_conn(
@@ -811,79 +853,121 @@ fn store_external_track_cache_in_conn(
     Ok(())
 }
 
+/// Rows read again from their files, and the files that could not be read.
+#[derive(Debug, Default)]
+pub(crate) struct TrackRefresh {
+    /// What the index holds for each file after the refresh.
+    pub(crate) indexed: HashMap<PathBuf, IndexedTrack>,
+    /// The files that could not be read fully, for the user.
+    pub(crate) problem: Option<String>,
+}
+
+impl TrackRefresh {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            indexed: HashMap::with_capacity(capacity),
+            problem: None,
+        }
+    }
+}
+
+/// Reads `paths` again and updates their library and external-track cache
+/// rows; see [`row_update`] for files that cannot be read fully.
 pub(crate) fn refresh_indexed_metadata_for_paths(
     paths: &[PathBuf],
-) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
+) -> Result<TrackRefresh, String> {
     let mut conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
     init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
+    refresh_indexed_metadata_in_conn(&mut conn, paths, EmbeddedCoverCache::shared())
+}
+
+fn refresh_indexed_metadata_in_conn(
+    conn: &mut Connection,
+    paths: &[PathBuf],
+    covers: Option<&EmbeddedCoverCache>,
+) -> Result<TrackRefresh, String> {
     // Writes lock as they start, so the busy timeout covers another writer;
     // see `rename_indexed_metadata_paths_in_conn`.
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("failed to start metadata refresh transaction: {e}"))?;
     let now = unix_ts_i64();
-    let mut refreshed = HashMap::with_capacity(paths.len());
+    let mut refreshed = TrackRefresh::with_capacity(paths.len());
+    let mut failures = ReadFailures::default();
 
     for path in paths {
-        let indexed = read_track_info(path);
+        let read = read_track_catching_panic(path, covers);
+        failures.note(path, &read);
+        let complete = read.is_complete();
         let path_string = path.to_string_lossy().to_string();
         let fingerprint = track_file_fingerprint(path);
+        let update = row_update(read, || stored_track(&tx, &path_string))?;
 
-        tx.execute(
-            r"
-            UPDATE tracks
-            SET title = ?2,
-                artist = ?3,
-                album = ?4,
-                cover_path = ?5,
-                cover_checked = 1,
-                genre = ?6,
-                year = ?7,
-                track_no = ?8,
-                duration_secs = ?9,
-                mtime_ns = COALESCE(?10, mtime_ns),
-                size_bytes = COALESCE(?11, size_bytes),
-                indexed_at = ?12,
-                search_tags = ?13
-            WHERE path = ?1
-            ",
-            params![
-                path_string,
-                indexed.title.as_str(),
-                indexed.artist.as_str(),
-                indexed.album.as_str(),
-                indexed.cover_path.as_str(),
-                indexed.genre.as_str(),
-                indexed.year.map(i64::from),
-                indexed.track_no.map(i64::from),
-                indexed.duration_secs,
-                fingerprint.map(|value| value.mtime_ns),
-                fingerprint.map(|value| value.size_bytes),
-                now,
-                serde_json::to_string(&indexed.search_tags).ok(),
-            ],
-        )
-        .map_err(|e| format!("failed to refresh indexed track metadata: {e}"))?;
-
-        let exists_in_external = tx
-            .query_row(
-                "SELECT 1 FROM external_tracks WHERE path = ?1 LIMIT 1",
-                params![path.to_string_lossy().to_string()],
-                |_row| Ok(()),
+        if let RowUpdate::Write {
+            indexed,
+            cover_checked,
+        } = &update
+        {
+            tx.execute(
+                r"
+                UPDATE tracks
+                SET title = ?2,
+                    artist = ?3,
+                    album = ?4,
+                    cover_path = ?5,
+                    cover_checked = ?6,
+                    genre = ?7,
+                    year = ?8,
+                    track_no = ?9,
+                    duration_secs = ?10,
+                    mtime_ns = COALESCE(?11, mtime_ns),
+                    size_bytes = COALESCE(?12, size_bytes),
+                    indexed_at = ?13,
+                    search_tags = ?14
+                WHERE path = ?1
+                ",
+                params![
+                    path_string,
+                    indexed.title.as_str(),
+                    indexed.artist.as_str(),
+                    indexed.album.as_str(),
+                    indexed.cover_path.as_str(),
+                    i64::from(*cover_checked),
+                    indexed.genre.as_str(),
+                    indexed.year.map(i64::from),
+                    indexed.track_no.map(i64::from),
+                    indexed.duration_secs,
+                    fingerprint.map(|value| value.mtime_ns),
+                    fingerprint.map(|value| value.size_bytes),
+                    now,
+                    serde_json::to_string(&indexed.search_tags).ok(),
+                ],
             )
-            .is_ok();
-        if exists_in_external {
+            .map_err(|e| format!("failed to refresh indexed track metadata: {e}"))?;
+        }
+
+        let indexed = update.into_indexed();
+        if complete && is_in_external_cache(&tx, &path_string) {
             if let Some(fingerprint) = fingerprint {
                 store_external_track_cache_in_conn(&tx, path, fingerprint, &indexed)?;
             }
         }
-
-        refreshed.insert(path.clone(), indexed);
+        refreshed.indexed.insert(path.clone(), indexed);
     }
 
     tx.commit()
         .map_err(|e| format!("failed to finalize metadata refresh transaction: {e}"))?;
+    refreshed.problem = failures.refresh_problem();
     Ok(refreshed)
+}
+
+fn is_in_external_cache(conn: &Connection, key: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM external_tracks WHERE path = ?1 LIMIT 1",
+        params![key],
+        |_row| Ok(()),
+    )
+    .is_ok()
 }
 
 /// The renames made on disk for one request, in order, so that a failure
@@ -1204,9 +1288,13 @@ fn is_case_only_rename(current: &Path, target: &Path) -> bool {
 /// Either everything succeeds or the database is unchanged and the files are
 /// put back under their original names; the error says if that failed.
 /// No rename replaces an existing file.
+///
+/// The rows are refreshed from the renamed files as by
+/// [`refresh_indexed_metadata_for_paths`], which the bridge then runs on the
+/// new paths and which reports the files that cannot be read to the user.
 pub(crate) fn rename_indexed_metadata_paths(
     renames: &[(PathBuf, PathBuf)],
-) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
+) -> Result<TrackRefresh, String> {
     let mut conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
     init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
     rename_indexed_metadata_paths_in_conn(&mut conn, renames)
@@ -1215,15 +1303,21 @@ pub(crate) fn rename_indexed_metadata_paths(
 fn rename_indexed_metadata_paths_in_conn(
     conn: &mut Connection,
     renames: &[(PathBuf, PathBuf)],
-) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
-    rename_with_journal(conn, renames, DiskRenameJournal::new(renames))
+) -> Result<TrackRefresh, String> {
+    rename_with_journal(
+        conn,
+        renames,
+        DiskRenameJournal::new(renames),
+        EmbeddedCoverCache::shared(),
+    )
 }
 
 fn rename_with_journal(
     conn: &mut Connection,
     renames: &[(PathBuf, PathBuf)],
     mut journal: DiskRenameJournal,
-) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
+    covers: Option<&EmbeddedCoverCache>,
+) -> Result<TrackRefresh, String> {
     // Take the write lock before any file moves. A deferred transaction that
     // reads first cannot wait for the lock when it then writes: SQLite fails
     // it at once with "database is locked" if another writer holds the lock.
@@ -1231,7 +1325,7 @@ fn rename_with_journal(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("failed to start rename transaction: {e}"))?;
     let updated = apply_disk_renames(renames, &mut journal)
-        .and_then(|()| update_renamed_track_rows(&tx, renames));
+        .and_then(|()| update_renamed_track_rows(&tx, renames, covers));
     let committed = match updated {
         Ok(refreshed) => tx
             .commit()
@@ -1336,42 +1430,45 @@ struct RenamedTrackRow<'a> {
     new_path: &'a Path,
     old_key: String,
     new_key: String,
-    indexed: IndexedTrack,
+    update: RowUpdate,
+    /// Whether the file was read fully, so that its cache row may be replaced.
+    complete: bool,
     fingerprint: TrackFileFingerprint,
-    in_external_cache: bool,
+    /// The file's external-track cache row before the rename.
+    external: Option<(IndexedTrack, TrackFileFingerprint)>,
 }
 
 /// Reads the renamed files, filling `refreshed` for files that keep their
-/// path, and notes which rows the external cache holds before any change.
+/// path, and notes the rows the index holds for them before any change.
 fn read_renamed_track_rows<'a>(
     tx: &Connection,
     renames: &'a [(PathBuf, PathBuf)],
+    covers: Option<&EmbeddedCoverCache>,
     refreshed: &mut HashMap<PathBuf, IndexedTrack>,
+    failures: &mut ReadFailures,
 ) -> Result<Vec<RenamedTrackRow<'a>>, String> {
     let mut rows = Vec::with_capacity(renames.len());
     for (old_path, new_path) in renames {
-        let indexed = read_track_info(new_path);
+        let read = read_track_catching_panic(new_path, covers);
+        failures.note(new_path, &read);
+        let complete = read.is_complete();
+        let old_key = old_path.to_string_lossy().to_string();
+        let update = row_update(read, || stored_track(tx, &old_key))?;
         if old_path == new_path {
-            refreshed.insert(new_path.clone(), indexed);
+            refreshed.insert(new_path.clone(), update.into_indexed());
             continue;
         }
         let fingerprint = track_file_fingerprint(new_path)
             .ok_or_else(|| format!("failed to fingerprint {}", new_path.to_string_lossy()))?;
-        let old_key = old_path.to_string_lossy().to_string();
-        let in_external_cache = tx
-            .query_row(
-                "SELECT 1 FROM external_tracks WHERE path = ?1 LIMIT 1",
-                params![old_key],
-                |_row| Ok(()),
-            )
-            .is_ok();
+        let external = external_row(tx, &old_key)?;
         rows.push(RenamedTrackRow {
             new_path,
             old_key,
             new_key: new_path.to_string_lossy().to_string(),
-            indexed,
+            update,
+            complete,
             fingerprint,
-            in_external_cache,
+            external,
         });
     }
     Ok(rows)
@@ -1384,10 +1481,12 @@ fn read_renamed_track_rows<'a>(
 fn update_renamed_track_rows(
     tx: &Connection,
     renames: &[(PathBuf, PathBuf)],
-) -> Result<HashMap<PathBuf, IndexedTrack>, String> {
+    covers: Option<&EmbeddedCoverCache>,
+) -> Result<TrackRefresh, String> {
     let now = unix_ts_i64();
-    let mut refreshed = HashMap::with_capacity(renames.len());
-    let rows = read_renamed_track_rows(tx, renames, &mut refreshed)?;
+    let mut refreshed = TrackRefresh::with_capacity(renames.len());
+    let mut failures = ReadFailures::default();
+    let rows = read_renamed_track_rows(tx, renames, covers, &mut refreshed.indexed, &mut failures)?;
     let new_keys = rows
         .iter()
         .map(|row| row.new_key.clone())
@@ -1407,7 +1506,7 @@ fn update_renamed_track_rows(
         .map_err(|e| format!("failed to move renamed track row aside: {e}"))?;
         current_keys.push(placeholder);
     }
-    for row in rows.iter().filter(|row| row.in_external_cache) {
+    for row in rows.iter().filter(|row| row.external.is_some()) {
         tx.execute(
             "DELETE FROM external_tracks WHERE path = ?1",
             params![row.old_key],
@@ -1419,53 +1518,73 @@ fn update_renamed_track_rows(
         let RenamedTrackRow {
             new_path,
             new_key,
-            indexed,
+            update,
+            complete,
             fingerprint,
-            in_external_cache,
+            external,
             ..
         } = row;
-        tx.execute(
-            r"
-            UPDATE tracks
-            SET path = ?2,
-                title = ?3,
-                artist = ?4,
-                album = ?5,
-                cover_path = ?6,
-                cover_checked = 1,
-                genre = ?7,
-                year = ?8,
-                track_no = ?9,
-                duration_secs = ?10,
-                mtime_ns = ?11,
-                size_bytes = ?12,
-                indexed_at = ?13,
-                search_tags = ?14
-            WHERE path = ?1
-            ",
-            params![
-                current_key,
-                new_key,
-                indexed.title.as_str(),
-                indexed.artist.as_str(),
-                indexed.album.as_str(),
-                indexed.cover_path.as_str(),
-                indexed.genre.as_str(),
-                indexed.year.map(i64::from),
-                indexed.track_no.map(i64::from),
-                indexed.duration_secs,
-                fingerprint.mtime_ns,
-                fingerprint.size_bytes,
-                now,
-                serde_json::to_string(&indexed.search_tags).ok(),
-            ],
-        )
-        .map_err(|e| format!("failed to update renamed track row: {e}"))?;
-        if in_external_cache {
-            store_external_track_cache_in_conn(tx, new_path, fingerprint, &indexed)?;
+        match &update {
+            RowUpdate::Keep(_) => tx.execute(
+                "UPDATE tracks SET path = ?2 WHERE path = ?1",
+                params![current_key, new_key],
+            ),
+            RowUpdate::Write {
+                indexed,
+                cover_checked,
+            } => tx.execute(
+                r"
+                UPDATE tracks
+                SET path = ?2,
+                    title = ?3,
+                    artist = ?4,
+                    album = ?5,
+                    cover_path = ?6,
+                    cover_checked = ?7,
+                    genre = ?8,
+                    year = ?9,
+                    track_no = ?10,
+                    duration_secs = ?11,
+                    mtime_ns = ?12,
+                    size_bytes = ?13,
+                    indexed_at = ?14,
+                    search_tags = ?15
+                WHERE path = ?1
+                ",
+                params![
+                    current_key,
+                    new_key,
+                    indexed.title.as_str(),
+                    indexed.artist.as_str(),
+                    indexed.album.as_str(),
+                    indexed.cover_path.as_str(),
+                    i64::from(*cover_checked),
+                    indexed.genre.as_str(),
+                    indexed.year.map(i64::from),
+                    indexed.track_no.map(i64::from),
+                    indexed.duration_secs,
+                    fingerprint.mtime_ns,
+                    fingerprint.size_bytes,
+                    now,
+                    serde_json::to_string(&indexed.search_tags).ok(),
+                ],
+            ),
         }
-        refreshed.insert(new_path.to_path_buf(), indexed);
+        .map_err(|e| format!("failed to update renamed track row: {e}"))?;
+        let indexed = update.into_indexed();
+        // A cache row that the file could not be read for moves as it is.
+        match external {
+            Some(_) if complete => {
+                store_external_track_cache_in_conn(tx, new_path, fingerprint, &indexed)?;
+            }
+            Some((cached, cached_fingerprint)) => {
+                store_external_track_cache_in_conn(tx, new_path, cached_fingerprint, &cached)?;
+            }
+            None => {}
+        }
+        refreshed.indexed.insert(new_path.to_path_buf(), indexed);
     }
+    refreshed.problem = failures.refresh_problem();
     Ok(refreshed)
 }
 
@@ -1490,20 +1609,14 @@ fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
                 path_string: path.to_string_lossy().to_string(),
                 mtime_ns: fingerprint.mtime_ns,
                 size_bytes: fingerprint.size_bytes,
-                indexed_before: false,
             };
-            let indexed = read_track_info(path);
+            let read = read_track_catching_panic(path, EmbeddedCoverCache::shared());
             apply_metadata_result(
                 &mut writer,
                 &root.to_string_lossy(),
                 unix_ts_i64(),
                 &mut |_, _| {},
-                MetadataResult {
-                    task,
-                    indexed,
-                    failure: None,
-                    cover_failure: None,
-                },
+                MetadataResult { task, read },
             )
             .expect("index fixture");
         }
@@ -1654,47 +1767,21 @@ struct MetadataTask {
     path_string: String,
     mtime_ns: i64,
     size_bytes: i64,
-    /// Whether the index already has a row for the file.
-    indexed_before: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct MetadataResult {
     task: MetadataTask,
-    indexed: IndexedTrack,
-    /// Why the file's tags could not be read, when reading them failed
-    /// abnormally; a file the index already has keeps its row then, and a
-    /// new one is indexed by its name.
-    failure: Option<String>,
-    /// Why the file's embedded picture could not be cached; the row keeps
-    /// the cover it had and is left due for the next scan to retry.
-    cover_failure: Option<String>,
+    read: TrackRead,
 }
 
-/// Read the file of `task` for the index.
-///
-/// A panic while reading one file, in the tag reader or elsewhere, fails
-/// that file alone, and the scan goes on and reports it.
+/// Read the file of `task` for the index; see [`read_track_catching_panic`].
 fn read_scan_task(task: MetadataTask, covers: Option<&EmbeddedCoverCache>) -> MetadataResult {
-    let read = crate::panic_guard::catch(&format!("reading '{}'", task.path.display()), || {
-        #[cfg(test)]
-        scan_test_hooks::before_read(&task.path);
-        read_track_info_with_cover_cache(&task.path, covers)
-    });
-    let read = read.unwrap_or_else(|failure| TrackRead {
-        indexed: untagged_track(&task.path),
-        failure: Some(failure),
-        cover_failure: None,
-    });
-    MetadataResult {
-        task,
-        indexed: read.indexed,
-        failure: read.failure,
-        cover_failure: read.cover_failure,
-    }
+    let read = read_track_catching_panic(&task.path, covers);
+    MetadataResult { task, read }
 }
 
-/// How many files of a scan failed one way, and the first of them.
+/// How many files failed one way, and the first of them.
 #[derive(Default)]
 struct FileFailures {
     count: usize,
@@ -1710,9 +1797,20 @@ impl FileFailures {
         self.first
             .get_or_insert_with(|| (path.to_path_buf(), failure.clone()));
     }
+
+    /// `summary` of the failed files, given their count, then the first of
+    /// them and why it failed.
+    fn describe(&self, summary: impl FnOnce(&str) -> String) -> Option<String> {
+        let (path, failure) = self.first.as_ref()?;
+        Some(format!(
+            "{} (first: '{}': {failure})",
+            summary(&count_label(self.count, "file", "files")),
+            path.display()
+        ))
+    }
 }
 
-/// The files of a scan that could not be read fully.
+/// The files of a scan or a refresh that could not be read fully.
 #[derive(Default)]
 struct ReadFailures {
     tags: FileFailures,
@@ -1720,32 +1818,42 @@ struct ReadFailures {
 }
 
 impl ReadFailures {
-    fn note(&mut self, result: &MetadataResult) {
-        self.tags.note(&result.task.path, result.failure.as_ref());
-        self.covers
-            .note(&result.task.path, result.cover_failure.as_ref());
+    fn note(&mut self, path: &Path, read: &TrackRead) {
+        self.tags.note(path, read.failure.as_ref());
+        self.covers.note(path, read.cover_failure.as_ref());
     }
 
+    /// The failures of a scan of `root`.
     fn problems(&self, root: &Path) -> impl Iterator<Item = String> {
-        let tags = self.tags.first.as_ref().map(|(path, failure)| {
+        let root = root.display();
+        let tags = self.tags.describe(|files| {
             format!(
-                "could not read the tags of {} in '{}'; kept the tags indexed before, \
-                 or indexed new files by file name (first: '{}': {failure})",
-                count_label(self.tags.count, "file", "files"),
-                root.display(),
-                path.display()
+                "could not read the tags of {files} in '{root}'; kept the tags indexed before, \
+                 or indexed new files by file name"
             )
         });
-        let covers = self.covers.first.as_ref().map(|(path, failure)| {
+        let covers = self.covers.describe(|files| {
             format!(
-                "could not cache the embedded covers of {} in '{}'; kept their previous \
-                 covers and will retry at the next scan (first: '{}': {failure})",
-                count_label(self.covers.count, "file", "files"),
-                root.display(),
-                path.display()
+                "could not cache the embedded covers of {files} in '{root}'; kept their previous \
+                 covers and will retry at the next scan"
             )
         });
         tags.into_iter().chain(covers)
+    }
+
+    /// The failures of a refresh of chosen files, for the user.
+    fn refresh_problem(&self) -> Option<String> {
+        let tags = self.tags.describe(|files| {
+            format!("could not read the tags of {files}; kept the tags indexed before")
+        });
+        let covers = self.covers.describe(|files| {
+            format!(
+                "could not cache the embedded covers of {files}; kept their previous covers \
+                 and will retry at the next scan"
+            )
+        });
+        let problems: Vec<String> = tags.into_iter().chain(covers).collect();
+        (!problems.is_empty()).then(|| problems.join("; "))
     }
 }
 
@@ -1906,26 +2014,20 @@ fn prepare_track_upsert_statement<'conn>(
 /// The statements a scan writes track rows with.
 struct TrackWriter<'conn> {
     upsert: rusqlite::CachedStatement<'conn>,
-    previous_cover: rusqlite::CachedStatement<'conn>,
+    stored: rusqlite::CachedStatement<'conn>,
 }
 
 impl<'conn> TrackWriter<'conn> {
     fn new(tx: &'conn rusqlite::Transaction<'conn>) -> Result<Self, String> {
         Ok(Self {
             upsert: prepare_track_upsert_statement(tx)?,
-            previous_cover: tx
-                .prepare_cached("SELECT cover_path FROM tracks WHERE path = ?1")
-                .map_err(|e| format!("failed to prepare track cover statement: {e}"))?,
+            stored: prepare_library_row_statement(tx)?,
         })
     }
 
-    /// The cover that the row of `task` stores now, if it has one.
-    fn previous_cover(&mut self, task: &MetadataTask) -> Result<String, String> {
-        self.previous_cover
-            .query_row(params![task.path_string.as_str()], |row| row.get(0))
-            .optional()
-            .map(Option::unwrap_or_default)
-            .map_err(|e| format!("failed to read the cover of '{}': {e}", task.path.display()))
+    /// The row the index has for the file of `task`, whichever root indexed it.
+    fn stored(&mut self, task: &MetadataTask) -> Result<Option<IndexedTrack>, String> {
+        query_library_row(&mut self.stored, &task.path_string)
     }
 }
 
@@ -1939,23 +2041,16 @@ fn apply_metadata_result<U>(
 where
     U: FnMut(&MetadataTask, &IndexedTrack),
 {
-    if result.failure.is_some() && result.task.indexed_before {
-        // The row holds the tags of the last good read; replacing them with
-        // the file name would lose them. The scan reports the file, and the
-        // row's old file state makes the next scan read it again.
+    let MetadataResult { task, read } = result;
+    // The row may belong to another root that this one reclaims, so it is
+    // looked up by path.
+    let RowUpdate::Write {
+        indexed,
+        cover_checked,
+    } = row_update(read, || writer.stored(&task))?
+    else {
         return Ok(());
-    }
-    let task = result.task;
-    let mut indexed = result.indexed;
-    // A picture that could not be cached is not "no cover": the row keeps
-    // the cover it had, which also keeps that cache entry from the cleanup,
-    // and stays unchecked so the next scan reads the file again.
-    // The row may belong to another root that this one reclaims, so the
-    // previous cover is looked up by path, whichever root indexed it.
-    let cover_checked = result.cover_failure.is_none();
-    if !cover_checked {
-        indexed.cover_path = writer.previous_cover(&task)?;
-    }
+    };
     writer
         .upsert
         .execute(params![
@@ -2258,11 +2353,10 @@ where
                 path_string,
                 mtime_ns,
                 size_bytes,
-                indexed_before: existing_state.is_some(),
             };
             if let Err(task) = workers.submit(task) {
                 let result = read_scan_task(task, covers);
-                read_failures.note(&result);
+                read_failures.note(&result.task.path, &result.read);
                 apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
                 processed = processed.saturating_add(1);
                 progress.emit(false, discovered, processed);
@@ -2273,13 +2367,13 @@ where
         }
 
         for result in workers.drain_ready()? {
-            read_failures.note(&result);
+            read_failures.note(&result.task.path, &result.read);
             apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
             processed = processed.saturating_add(1);
             progress.emit(false, discovered, processed);
         }
         if let Some(result) = workers.wait_for_capacity()? {
-            read_failures.note(&result);
+            read_failures.note(&result.task.path, &result.read);
             apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
             processed = processed.saturating_add(1);
             progress.emit(false, discovered, processed);
@@ -2287,7 +2381,7 @@ where
     }
 
     for result in workers.finish()? {
-        read_failures.note(&result);
+        read_failures.note(&result.task.path, &result.read);
         apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
         processed = processed.saturating_add(1);
         progress.emit(false, discovered, processed);
@@ -2392,13 +2486,179 @@ pub(crate) fn read_track_info(path: &Path) -> IndexedTrack {
 }
 
 /// A file read for the index by [`read_track_info_with_cover_cache`].
+#[derive(Debug)]
 struct TrackRead {
     indexed: IndexedTrack,
-    /// Why the tags could not be read, if the tag reader panicked.
+    /// Why the tags could not be read, if reading the file panicked, in the
+    /// tag reader or elsewhere.
     failure: Option<String>,
     /// Why the embedded picture could not be cached; `indexed` has no cover
     /// then, though the file has one.
     cover_failure: Option<String>,
+}
+
+impl TrackRead {
+    /// Whether the read got all the file has. Only such reads replace rows
+    /// of the external-track cache.
+    fn is_complete(&self) -> bool {
+        self.failure.is_none() && self.cover_failure.is_none()
+    }
+}
+
+/// Read `path` for the index, caching an embedded picture in `covers`.
+///
+/// A panic while reading the file, in the tag reader or elsewhere, fails the
+/// read of that file alone, which the caller then reports.
+fn read_track_catching_panic(path: &Path, covers: Option<&EmbeddedCoverCache>) -> TrackRead {
+    crate::panic_guard::catch(&format!("reading '{}'", path.display()), || {
+        #[cfg(test)]
+        scan_test_hooks::before_read(path);
+        read_track_info_with_cover_cache(path, covers)
+    })
+    .unwrap_or_else(|failure| TrackRead {
+        indexed: untagged_track(path),
+        failure: Some(failure),
+        cover_failure: None,
+    })
+}
+
+/// How a file read again updates the index row of the file.
+#[derive(Debug)]
+enum RowUpdate {
+    /// The tags could not be read, and the row stays as it is: it holds the
+    /// tags of the last good read, which the file name would replace, and its
+    /// old file state makes the next scan read the file again.
+    Keep(IndexedTrack),
+    /// Write `indexed` to the row. Without `cover_checked`, the picture could
+    /// not be cached, and `indexed` has the cover the row had, which also
+    /// keeps that cache entry from the cleanup; the next scan retries it.
+    Write {
+        indexed: IndexedTrack,
+        cover_checked: bool,
+    },
+}
+
+impl RowUpdate {
+    /// What the row holds after the update.
+    fn into_indexed(self) -> IndexedTrack {
+        match self {
+            Self::Keep(indexed) | Self::Write { indexed, .. } => indexed,
+        }
+    }
+}
+
+/// How `read` updates the row of its file. `stored` looks up the row the
+/// index has for the file, if any; only a failed read needs it.
+fn row_update<E>(
+    read: TrackRead,
+    stored: impl FnOnce() -> Result<Option<IndexedTrack>, E>,
+) -> Result<RowUpdate, E> {
+    if read.is_complete() {
+        return Ok(RowUpdate::Write {
+            indexed: read.indexed,
+            cover_checked: true,
+        });
+    }
+    let stored = stored()?;
+    if read.failure.is_some() {
+        if let Some(stored) = stored {
+            return Ok(RowUpdate::Keep(stored));
+        }
+    }
+    // A picture that could not be cached is not "no cover".
+    let mut indexed = read.indexed;
+    let cover_checked = read.cover_failure.is_none();
+    if !cover_checked {
+        indexed.cover_path = stored.map(|stored| stored.cover_path).unwrap_or_default();
+    }
+    Ok(RowUpdate::Write {
+        indexed,
+        cover_checked,
+    })
+}
+
+fn prepare_library_row_statement(
+    conn: &Connection,
+) -> Result<rusqlite::CachedStatement<'_>, String> {
+    conn.prepare_cached(
+        r"
+        SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags
+        FROM tracks
+        WHERE path = ?1
+        ",
+    )
+    .map_err(|e| format!("failed to prepare track row statement: {e}"))
+}
+
+fn query_library_row(
+    statement: &mut rusqlite::CachedStatement<'_>,
+    key: &str,
+) -> Result<Option<IndexedTrack>, String> {
+    statement
+        .query_row(params![key], indexed_track_from_row)
+        .optional()
+        .map_err(|e| format!("failed to read the indexed row of '{key}': {e}"))
+}
+
+/// The library row of the file at `key`.
+fn library_row(conn: &Connection, key: &str) -> Result<Option<IndexedTrack>, String> {
+    query_library_row(&mut prepare_library_row_statement(conn)?, key)
+}
+
+/// The external-track cache row of the file at `key`, whatever file state it
+/// was read at, and that state.
+fn external_row(
+    conn: &Connection,
+    key: &str,
+) -> Result<Option<(IndexedTrack, TrackFileFingerprint)>, String> {
+    conn.query_row(
+        r"
+        SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags,
+               mtime_ns, size_bytes
+        FROM external_tracks
+        WHERE path = ?1
+        ",
+        params![key],
+        |row| {
+            let fingerprint = TrackFileFingerprint {
+                mtime_ns: row.get(9)?,
+                size_bytes: row.get(10)?,
+            };
+            Ok((indexed_track_from_row(row)?, fingerprint))
+        },
+    )
+    .optional()
+    .map_err(|e| format!("failed to read the cached row of '{key}': {e}"))
+}
+
+/// The row the index has for the file at `key`: its library row, or else its
+/// external-track cache row.
+fn stored_track(conn: &Connection, key: &str) -> Result<Option<IndexedTrack>, String> {
+    if let Some(row) = library_row(conn, key)? {
+        return Ok(Some(row));
+    }
+    Ok(external_row(conn, key)?.map(|(indexed, _)| indexed))
+}
+
+/// An [`IndexedTrack`] from the columns `title, artist, album, cover_path,
+/// genre, year, track_no, duration_secs, search_tags`, in that order.
+fn indexed_track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedTrack> {
+    Ok(IndexedTrack {
+        search_tags: serde_json::from_str(&row.get::<_, Option<String>>(8)?.unwrap_or_default())
+            .unwrap_or_default(),
+        title: row.get::<_, String>(0)?,
+        artist: row.get::<_, String>(1)?,
+        album: row.get::<_, String>(2)?,
+        cover_path: row.get::<_, String>(3)?,
+        genre: row.get::<_, String>(4)?,
+        year: row
+            .get::<_, Option<i64>>(5)?
+            .and_then(|v| i32::try_from(v).ok()),
+        track_no: row
+            .get::<_, Option<i64>>(6)?
+            .and_then(|v| u32::try_from(v).ok()),
+        duration_secs: row.get::<_, Option<f32>>(7)?,
+    })
 }
 
 /// Like [`read_track_info`], but caches an embedded picture in `covers`, and
@@ -2532,45 +2792,64 @@ fn unix_ts_i64() -> i64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn refresh_cover_paths_for_tracks(paths: &[PathBuf]) -> Result<(), String> {
+/// Reads the covers of `paths` again, after their pictures changed, and
+/// updates their library and external-track cache rows; see [`row_update`]
+/// for files that cannot be read fully.
+pub(crate) fn refresh_cover_paths_for_tracks(paths: &[PathBuf]) -> Result<TrackRefresh, String> {
     let conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
     init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
+    refresh_cover_paths_in_conn(&conn, paths, EmbeddedCoverCache::shared())
+}
+
+fn refresh_cover_paths_in_conn(
+    conn: &Connection,
+    paths: &[PathBuf],
+    covers: Option<&EmbeddedCoverCache>,
+) -> Result<TrackRefresh, String> {
     let now = unix_ts_i64();
+    let mut refreshed = TrackRefresh::with_capacity(paths.len());
+    let mut failures = ReadFailures::default();
 
     for path in paths {
-        let indexed = read_track_info(path);
-        conn.execute(
-            r"
-            UPDATE tracks
-            SET cover_path = ?2,
-                cover_checked = 1,
-                indexed_at = ?3
-            WHERE path = ?1
-            ",
-            params![
-                path.to_string_lossy().to_string(),
-                indexed.cover_path.as_str(),
-                now,
-            ],
-        )
-        .map_err(|e| format!("failed to refresh track cover path: {e}"))?;
-
-        let exists_in_external = conn
-            .query_row(
-                "SELECT 1 FROM external_tracks WHERE path = ?1 LIMIT 1",
-                params![path.to_string_lossy().to_string()],
-                |_row| Ok(()),
+        let read = read_track_catching_panic(path, covers);
+        failures.note(path, &read);
+        let complete = read.is_complete();
+        let path_string = path.to_string_lossy().to_string();
+        let update = row_update(read, || stored_track(conn, &path_string))?;
+        if let RowUpdate::Write {
+            indexed,
+            cover_checked,
+        } = &update
+        {
+            conn.execute(
+                r"
+                UPDATE tracks
+                SET cover_path = ?2,
+                    cover_checked = ?3,
+                    indexed_at = ?4
+                WHERE path = ?1
+                ",
+                params![
+                    path_string,
+                    indexed.cover_path.as_str(),
+                    i64::from(*cover_checked),
+                    now,
+                ],
             )
-            .is_ok();
-        if exists_in_external {
-            let Some(fingerprint) = track_file_fingerprint(path) else {
-                continue;
-            };
-            store_external_track_cache_in_conn(&conn, path, fingerprint, &indexed)?;
+            .map_err(|e| format!("failed to refresh track cover path: {e}"))?;
         }
+
+        let indexed = update.into_indexed();
+        if complete && is_in_external_cache(conn, &path_string) {
+            if let Some(fingerprint) = track_file_fingerprint(path) {
+                store_external_track_cache_in_conn(conn, path, fingerprint, &indexed)?;
+            }
+        }
+        refreshed.indexed.insert(path.clone(), indexed);
     }
 
-    Ok(())
+    refreshed.problem = failures.refresh_problem();
+    Ok(refreshed)
 }
 
 pub(crate) fn refresh_cover_paths_for_tracks_with_override(
@@ -2622,6 +2901,9 @@ pub(crate) fn read_library_snapshot_from_db() -> Result<LibrarySnapshot, String>
     load_snapshot(&conn, &mut snapshot);
     Ok(snapshot)
 }
+
+#[cfg(test)]
+mod refresh_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4136,10 +4418,10 @@ mod tests {
                     params![serde_json::to_string(&edited).expect("json")],
                 )
                 .expect("tag edit can write during metadata read");
-            Some(super::super::SearchTags::from([(
+            Some(Ok(super::super::SearchTags::from([(
                 "comment".into(),
                 vec!["Old".into()],
-            )]))
+            )])))
         })
         .expect("backfill");
         load_snapshot(&conn, &mut snapshot);
@@ -4261,7 +4543,7 @@ mod tests {
         // and fails with "database is locked".
         let refreshed = result.expect("rename waits for the write lock");
         assert!(RENAME_WAITED_FOR_LOCK.load(Ordering::SeqCst));
-        assert_eq!(refreshed[&renamed].title, "One");
+        assert_eq!(refreshed.indexed[&renamed].title, "One");
         assert_eq!(
             file_names(&dir)[..2],
             ["02 - Two.flac", "03 - Renamed.flac"]
@@ -4284,8 +4566,8 @@ mod tests {
         )
         .expect("swap");
 
-        assert_eq!(refreshed[&one].title, "Two");
-        assert_eq!(refreshed[&two].title, "One");
+        assert_eq!(refreshed.indexed[&one].title, "Two");
+        assert_eq!(refreshed.indexed[&two].title, "One");
         // Each row follows its file: same rowid and root, new path.
         assert_eq!(
             track_rows(&conn),
@@ -4678,8 +4960,8 @@ mod tests {
         )
         .expect("swap");
 
-        assert_eq!(refreshed[&one].title, "Two");
-        assert_eq!(refreshed[&two].title, "One");
+        assert_eq!(refreshed.indexed[&one].title, "Two");
+        assert_eq!(refreshed.indexed[&two].title, "One");
         assert_eq!(file_names(&dir), [long_file_name('a'), long_file_name('b')]);
         fs::remove_dir_all(dir).expect("cleanup");
     }
@@ -4748,7 +5030,8 @@ mod tests {
                 let journal = journal_blocking(&renames, &target, blocker);
 
                 let error =
-                    rename_with_journal(&mut conn, &renames, journal).expect_err("target taken");
+                    rename_with_journal(&mut conn, &renames, journal, EmbeddedCoverCache::shared())
+                        .expect_err("target taken");
 
                 assert!(
                     error.starts_with(&format!(
@@ -4803,7 +5086,8 @@ mod tests {
             let journal = journal_blocking(&renames, &paths[0], blocker);
 
             let error =
-                rename_with_journal(&mut conn, &renames, journal).expect_err("injected failure");
+                rename_with_journal(&mut conn, &renames, journal, EmbeddedCoverCache::shared())
+                    .expect_err("injected failure");
 
             assert_eq!(
                 error,
