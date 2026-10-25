@@ -298,6 +298,11 @@ struct AnalysisRuntimeState {
     pending_track_load: Option<u64>,
     /// Formats the helper found, by file.
     formats: FormatCache,
+    /// A rolling gapless switch to this track that continued the worker's
+    /// timeline on a format known before the switch, with the session's
+    /// effective rate and channel count before it.  The file may have
+    /// changed since; the helper's reply for the track tells.
+    unconfirmed_continuation: Option<(u64, u32, usize)>,
     /// The gapless successor whose format the helper is probing, with the
     /// request's number.
     pending_candidate: Option<(u64, PathBuf)>,
@@ -584,6 +589,7 @@ impl AnalysisRuntimeState {
             track_io_lost: false,
             pending_track_load: None,
             formats: FormatCache::default(),
+            unconfirmed_continuation: None,
             pending_candidate: None,
             next_candidate_request: 0,
             spectrogram_position_offset: 0.0,
@@ -1148,6 +1154,7 @@ impl AnalysisRuntimeState {
         self.suppress_next_spectrogram_position_update = false;
         // A successor still being probed is not the one that follows now.
         self.pending_candidate = None;
+        self.unconfirmed_continuation = None;
 
         // Save previous compat params so the rolling gapless path can
         // detect incompatible transitions (e.g. 48 kHz/6ch → 44.1 kHz/2ch)
@@ -1205,6 +1212,10 @@ impl AnalysisRuntimeState {
             && !reset_spectrogram
             && self.display_mode == SpectrogramDisplayMode::Rolling
         {
+            if format_compatible {
+                self.unconfirmed_continuation =
+                    Some((track_token, prev_effective_rate, prev_channel_count));
+            }
             self.handle_rolling_gapless(&path, track_token, format_compatible, ctx);
         } else if gapless && !reset_spectrogram {
             self.handle_centered_gapless(&path, track_token, ctx);
@@ -1361,6 +1372,22 @@ impl AnalysisRuntimeState {
             self.formats.insert(path.clone(), format, stamp);
             self.apply_track_format(format);
         }
+        if let Some((_, rate, channels)) = self.unconfirmed_continuation.take() {
+            if (
+                self.active_session_effective_rate,
+                self.active_session_channel_count,
+            ) != (rate, channels)
+            {
+                // The file changed after its format was read, and does not
+                // fit the continued timeline: the worker starts it afresh,
+                // so the position offset would send it past the end.  Take
+                // the format-changed path, which keeps the history shown.
+                self.clear_early_continuation(ctx);
+                self.spectrogram_position_offset = 0.0;
+                let position = self.last_spectrogram_position;
+                self.start_spectrogram_session(position, true, false, ctx);
+            }
+        }
         if let Some(peaks) = peaks {
             self.snapshot.waveform_peaks = peaks;
             self.snapshot.waveform_coverage_seconds = 0.0;
@@ -1454,6 +1481,7 @@ impl AnalysisRuntimeState {
         // re-adjusted into the old continuous coordinate space and the worker
         // seeks far forward immediately after the restart.
         self.spectrogram_position_offset = 0.0;
+        self.unconfirmed_continuation = None;
         self.spectrogram_session_start = start.start_seconds;
         self.spectrogram_session_margin = self.centered_margin_seconds();
         let generation = ctx.spectrogram_decode_generation.load(Ordering::Relaxed);
@@ -1691,6 +1719,7 @@ impl AnalysisRuntimeState {
 
     fn seek_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
         self.spectrogram_position_offset = 0.0;
+        self.unconfirmed_continuation = None;
         self.last_spectrogram_position = position_seconds;
         if !self.spectrogram_active {
             return;
@@ -5328,6 +5357,82 @@ mod tests {
             drop(release_staging);
             state.handle_command(AnalysisCommand::Shutdown, &ctx);
             assert!(state.retired_staging.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_rolling_continuation_on_a_format_that_changed_starts_afresh_keeping_history() {
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        let probed_at = WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+        };
+        let changed = WaveformSourceStamp {
+            modified_secs: 2,
+            ..probed_at
+        };
+        let cd = TrackFormat::Known {
+            sample_rate: 44_100,
+            channels: 2,
+        };
+        let hi_res = TrackFormat::Known {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        // B was probed at 44.1 kHz, then replaced by a 48 kHz file; with and
+        // without the continuation sent early, and when the file still fits.
+        for (staged_early, reprobed, restarts) in [
+            (false, hi_res, true),
+            (true, hi_res, true),
+            (false, cd, false),
+        ] {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+            state.active_session_effective_rate = 44_100;
+            state.last_spectrogram_position = 200.0;
+            state.formats.insert(b.to_path_buf(), cd, Some(probed_at));
+            if staged_early {
+                state.handle_prepare_gapless_continuation(b.to_path_buf(), &ctx);
+                assert!(state.staged_continuation_path.is_some());
+            }
+            state.handle_track_change(b.to_path_buf(), false, true, 2, &ctx);
+            assert!((state.spectrogram_position_offset - 200.0).abs() < 0.001);
+            assert!(matches!(
+                only_track_io_request(&state),
+                TrackIoRequest::LoadTrack { probed_at: Some(stamp), .. } if stamp == probed_at
+            ));
+            channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+            // Playback has moved on in B meanwhile.
+            state.handle_command(AnalysisCommand::PositionUpdate(0.3), &ctx);
+            channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+
+            let stamp = if restarts { changed } else { probed_at };
+            state.handle_track_io_reply(
+                TrackIoReply::TrackLoaded {
+                    track_token: 2,
+                    stamp: Some(stamp),
+                    format: restarts.then_some(reprobed),
+                    peaks: None,
+                },
+                &ctx,
+            );
+            let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+            if restarts {
+                assert_eq!(state.spectrogram_position_offset, 0.0, "{staged_early}");
+                assert_eq!(state.active_session_effective_rate, 48_000);
+                assert!(
+                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::NewTrack {
+                        track_token: 2, start_seconds, emit_initial_reset: true,
+                        clear_history_on_reset: false, ..
+                    }] if (*start_seconds - 0.3).abs() < 0.001),
+                    "staged_early={staged_early}: {commands:?}"
+                );
+            } else {
+                assert!(commands.is_empty(), "{commands:?}");
+                assert!((state.spectrogram_position_offset - 200.0).abs() < 0.001);
+            }
         }
     }
 }

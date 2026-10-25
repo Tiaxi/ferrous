@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use super::decoders::{open_audio_file, AudioFrameSource, AudioFrames, AudioRead};
 use super::usize_to_u64;
@@ -26,6 +26,8 @@ static SERVICE: Mutex<ServiceSlot> = Mutex::new(ServiceSlot {
 });
 /// Signalled when an open of a session ends.
 static OPENED: Condvar = Condvar::new();
+/// How often a request waiting for another's open looks at its cancellation.
+const CANCELLATION_CHECK_INTERVAL: Duration = Duration::from_millis(5);
 
 struct ServiceSlot {
     session: Option<Arc<WaveformSession>>,
@@ -201,10 +203,12 @@ impl WaveformSession {
                 self.broken.store(true, Ordering::Relaxed);
                 anyhow::bail!("waveform decoder failed");
             };
-            // Another request may have decoded it while this one waited.
+            // Another request may have decoded it while this one waited,
+            // or this one may have been cancelled meanwhile.
             if let Some(tile) = self.caches().pcm.get(index) {
                 return Ok(tile);
             }
+            anyhow::ensure!(!cancelled(), "waveform decode cancelled");
             let eof_frame = self.caches().eof_frame;
             #[cfg(test)]
             if !eof_frame.is_some_and(|eof| index.saturating_mul(TILE_FRAMES) >= eof) {
@@ -335,10 +339,17 @@ impl Drop for OpeningGuard {
 }
 
 /// The shared session for the file at `path`, opened if it is not open.
-fn shared_session(path: &Path) -> anyhow::Result<Arc<WaveformSession>> {
+fn shared_session(
+    path: &Path,
+    cancelled: &impl Fn() -> bool,
+) -> anyhow::Result<Arc<WaveformSession>> {
+    anyhow::ensure!(!cancelled(), "waveform decode cancelled");
     let identity = SourceIdentity::read(path)?;
     let mut service = lock_service();
     loop {
+        // Before every wait and before opening: a request cancelled while
+        // it waited, by a skip to another track, must not open its file.
+        anyhow::ensure!(!cancelled(), "waveform decode cancelled");
         if let Some(session) = service
             .session
             .as_ref()
@@ -351,8 +362,12 @@ fn shared_session(path: &Path) -> anyhow::Result<Arc<WaveformSession>> {
             break;
         }
         // The decoder is needed before anything can be read, and the
-        // request opening one may be opening this file.
-        service = OPENED.wait(service).unwrap_or_else(PoisonError::into_inner);
+        // request opening one may be opening this file. Qt cancels a
+        // request by setting a flag, which wakes nothing, so the wait ends
+        // now and then to look at it; the end of the open wakes it at once.
+        service = OPENED
+            .wait_timeout(service, CANCELLATION_CHECK_INTERVAL)
+            .map_or_else(|poisoned| poisoned.into_inner().0, |(guard, _)| guard);
     }
     // Release the previous decoder before opening another; requests still
     // reading it keep it until they finish their tile.
@@ -360,6 +375,8 @@ fn shared_session(path: &Path) -> anyhow::Result<Arc<WaveformSession>> {
     service.opening = true;
     drop(service);
     let opening = OpeningGuard;
+    #[cfg(test)]
+    test_hooks::opening();
     let session = Arc::new(WaveformSession::open_identified(identity)?);
     lock_service().session = Some(Arc::clone(&session));
     drop(opening);
@@ -371,18 +388,31 @@ pub(super) fn with_session<T>(
     cancelled: &impl Fn() -> bool,
     operation: impl FnOnce(&WaveformSession) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-    let session = shared_session(path)?;
+    let session = shared_session(path, cancelled)?;
     operation(&session)
 }
 
-/// Pause a decode between tiles.
+/// Pause a decode between tiles, or a request as it opens its file.
 #[cfg(test)]
 pub(super) mod test_hooks {
     use std::cell::RefCell;
 
     thread_local! {
         static AFTER_TILE: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        static BEFORE_OPEN: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `hook` when this thread starts opening a file for the service.
+    pub(in super::super) fn before_each_open(hook: impl FnMut() + 'static) {
+        BEFORE_OPEN.with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn opening() {
+        BEFORE_OPEN.with(|cell| {
+            if let Some(hook) = cell.borrow_mut().as_mut() {
+                hook();
+            }
+        });
     }
 
     /// Run `hook` after each tile this thread decodes.
@@ -404,7 +434,6 @@ mod tests {
     use super::super::waveform_window::decode_waveform_window;
     use super::super::waveform_window::tests::write_test_wave;
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn the_level_meter_is_not_blocked_by_a_detail_decode_in_progress() {
@@ -519,6 +548,61 @@ mod tests {
         );
         assert_eq!(tile.segments.first().unwrap().first_frame, 0);
         std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_request_cancelled_while_another_opens_a_file_does_not_open_its_own() {
+        let a = write_test_wave(&vec![2_048; 48_013], 48_000, 1);
+        let b = write_test_wave(&vec![2_048; 48_017], 48_000, 1);
+        // Holds the first request where it opens A, as slow storage would.
+        let (opening_tx, opening_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+        let opener_path = a.clone();
+        let opener = std::thread::spawn(move || {
+            test_hooks::before_each_open(move || {
+                let _ = opening_tx.send(());
+                let _ = release_rx.recv();
+            });
+            shared_session(&opener_path, &|| false).map(|_| ())
+        });
+        opening_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first request opens A");
+
+        // A meter request for B waits for that open; it is cancelled while
+        // it waits.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (checked_tx, checked_rx) = crossbeam_channel::unbounded();
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let waiter_cancel = Arc::clone(&cancel);
+        let waiter_path = b.clone();
+        let waiter = std::thread::spawn(move || {
+            test_hooks::before_each_open(|| panic!("the cancelled request opened B"));
+            let cancelled = || {
+                let _ = checked_tx.send(());
+                waiter_cancel.load(Ordering::Relaxed)
+            };
+            let result = shared_session(&waiter_path, &cancelled).map(|_| ());
+            let _ = done_tx.send(());
+            result
+        });
+        // Checked on entry, then again after waiting once.
+        for _ in 0..2 {
+            checked_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the waiter checks its cancellation");
+        }
+        cancel.store(true, Ordering::Relaxed);
+        let returned = done_rx.recv_timeout(Duration::from_secs(10));
+        drop(release_tx);
+        let waited = waiter.join().expect("waiter");
+        opener.join().expect("opener").expect("open A");
+        assert!(returned.is_ok(), "the cancelled request kept waiting");
+        let error = waited.expect_err("cancelled request");
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        for path in [a, b] {
+            std::fs::remove_file(path).expect("remove fixture");
+        }
     }
 
     #[test]
