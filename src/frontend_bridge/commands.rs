@@ -14,8 +14,9 @@ use crate::lastfm::{self, Command as LastFmCommand, Handle as LastFmHandle};
 #[cfg(test)]
 use crate::library::load_external_track_caches;
 use crate::library::{
-    is_supported_audio, refresh_indexed_metadata_for_paths, track_file_fingerprint, IndexedTrack,
-    LibraryCommand, LibraryService, LibraryTrack, TrackFileFingerprint,
+    is_audio_track_file, is_supported_audio, refresh_indexed_metadata_for_paths,
+    track_file_fingerprint, IndexedTrack, LibraryCommand, LibraryService, LibraryTrack,
+    TrackFileFingerprint,
 };
 use crate::metadata::MetadataService;
 use crate::playback::{remap_path, PathRenames, PlaybackCommand, PlaybackEngine};
@@ -786,7 +787,7 @@ fn append_folder_tracks(
             continue;
         }
         let path = entry.path();
-        if is_playlist_file(path) || !is_supported_audio(path) {
+        if is_playlist_file(path) || !is_audio_track_file(path) {
             continue;
         }
         folder_tracks.push(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
@@ -836,7 +837,7 @@ fn append_import_path(
         return;
     }
 
-    if path.is_file() && is_supported_audio(path) {
+    if path.is_file() && is_audio_track_file(path) {
         outcome.tracks.push(path.to_path_buf());
         return;
     }
@@ -1542,6 +1543,29 @@ mod tests {
         let outcome = expand_import_paths(vec![root.clone()]);
         assert_eq!(outcome.tracks, vec![track_a, track_z]);
         assert_eq!(outcome.skipped_count(), 0);
+    }
+
+    #[test]
+    fn expand_import_paths_skips_apple_double_sidecars_but_keeps_dot_underscore_tracks() {
+        let root = test_dir("apple-double-import");
+        fs::create_dir_all(&root).expect("mkdir");
+        let track = root.join("01.mp3");
+        let sidecar = root.join("._01.mp3");
+        let live = root.join("._live.mp3");
+        write_stub(&track, crate::tag_write::TEST_MP3);
+        crate::library::write_test_apple_double(&sidecar);
+        write_stub(&live, crate::tag_write::TEST_MP3);
+        let playlist = root.join("list.m3u");
+        fs::write(&playlist, b"._01.mp3\n._live.mp3\n01.mp3\n").expect("write playlist");
+
+        let folder = expand_import_paths(vec![root.clone()]);
+        assert_eq!(folder.tracks, [live.clone(), track.clone()]);
+        assert_eq!(folder.skipped_count(), 0);
+
+        let listed = expand_import_paths(vec![playlist, sidecar]);
+        assert_eq!(listed.tracks, [live, track]);
+        assert_eq!(listed.unsupported_count, 2);
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

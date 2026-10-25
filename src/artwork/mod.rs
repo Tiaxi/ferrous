@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -376,35 +376,12 @@ fn sibling_supported_audio_files(track_path: &Path) -> Result<Vec<PathBuf>> {
         .with_context(|| format!("failed to read directory {}", dir.to_string_lossy()))?
     {
         let path = entry?.path();
-        if path.is_file()
-            && crate::library::is_supported_audio(&path)
-            && !is_apple_double_sidecar(&path)
-        {
+        if path.is_file() && crate::library::is_audio_track_file(&path) {
             out.push(path);
         }
     }
     out.sort();
     Ok(out)
-}
-
-/// Whether `path` is an `AppleDouble` file, which macOS writes as `._<name>`
-/// next to `<name>` to keep its metadata on file systems that cannot. It
-/// holds no audio, though it has the audio file's extension.
-///
-/// Only files with such a name are read, to check for the `AppleDouble` magic
-/// number, so a track that merely starts with `._` is still a track.
-fn is_apple_double_sidecar(path: &Path) -> bool {
-    const APPLE_DOUBLE_MAGIC: [u8; 4] = 0x0005_1607_u32.to_be_bytes();
-    let has_sidecar_name = path
-        .file_name()
-        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"._"));
-    if !has_sidecar_name {
-        return false;
-    }
-    let mut magic = [0; 4];
-    fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut magic))
-        .is_ok_and(|()| magic == APPLE_DOUBLE_MAGIC)
 }
 
 /// The album tag of `path`, empty when it has none.
@@ -948,15 +925,6 @@ mod tests {
         fs::remove_dir_all(root).expect("remove test dir");
     }
 
-    /// An `AppleDouble` file as macOS writes one next to a file it copies:
-    /// the header and no entries.
-    fn write_apple_double(path: &Path) {
-        let mut bytes = vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00];
-        bytes.extend_from_slice(b"Mac OS X        ");
-        bytes.extend_from_slice(&[0, 0]);
-        fs::write(path, bytes).expect("write AppleDouble file");
-    }
-
     #[test]
     fn embedded_artwork_skips_apple_double_files_next_to_the_tracks() {
         use crate::tag_write::write_test_mp3_with_id3v23;
@@ -971,7 +939,7 @@ mod tests {
         });
         let sidecars = ["._01.mp3", "._02.mp3"].map(|name| {
             let path = album.join(name);
-            write_apple_double(&path);
+            crate::library::write_test_apple_double(&path);
             (
                 path.clone(),
                 fs::read(&path).expect("read AppleDouble file"),
@@ -997,23 +965,6 @@ mod tests {
             dir_entries(&album),
             ["._01.mp3", "._02.mp3", "01.mp3", "02.mp3"]
         );
-        fs::remove_dir_all(root).expect("remove test dir");
-    }
-
-    #[test]
-    fn only_a_dot_underscore_file_with_the_apple_double_header_is_a_sidecar() {
-        let root = test_dir("apple-double-name");
-        let sidecar = root.join("._01.mp3");
-        write_apple_double(&sidecar);
-        let header_without_name = root.join("01.mp3");
-        write_apple_double(&header_without_name);
-        let track_with_name = root.join("._live.mp3");
-        fs::write(&track_with_name, crate::tag_write::TEST_MP3).expect("write MP3 fixture");
-
-        assert!(is_apple_double_sidecar(&sidecar));
-        assert!(!is_apple_double_sidecar(&header_without_name));
-        assert!(!is_apple_double_sidecar(&track_with_name));
-        assert!(!is_apple_double_sidecar(&root.join("._missing.mp3")));
         fs::remove_dir_all(root).expect("remove test dir");
     }
 

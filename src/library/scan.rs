@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Read as _;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -2172,7 +2173,7 @@ impl LibraryWalk {
             });
             return WalkStep::Continue;
         }
-        if !entry.file_type().is_file() || !is_supported_audio(path) {
+        if !entry.file_type().is_file() || !is_audio_track_file(path) {
             return WalkStep::Continue;
         }
 
@@ -2433,6 +2434,48 @@ where
     })
 }
 
+/// Whether `path` is a track: a file with a supported audio extension that
+/// is not an `AppleDouble` sidecar. Track discovery (library walks, imports,
+/// album membership) uses this.
+///
+/// It reads files named `._*`, so call it only from worker threads; the
+/// bridge and UI threads use [`is_supported_audio`].
+pub(crate) fn is_audio_track_file(path: &Path) -> bool {
+    is_supported_audio(path) && !is_apple_double_sidecar(path)
+}
+
+/// Whether `path` is an `AppleDouble` file, which macOS writes as `._<name>`
+/// next to `<name>` to keep its metadata on file systems that cannot. It
+/// holds no audio, though it has the audio file's extension.
+///
+/// Only files with such a name are read, to check for the `AppleDouble` magic
+/// number, so a track that merely starts with `._` is still a track.
+fn is_apple_double_sidecar(path: &Path) -> bool {
+    const APPLE_DOUBLE_MAGIC: [u8; 4] = 0x0005_1607_u32.to_be_bytes();
+    let has_sidecar_name = path
+        .file_name()
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"._"));
+    if !has_sidecar_name {
+        return false;
+    }
+    let mut magic = [0; 4];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok_and(|()| magic == APPLE_DOUBLE_MAGIC)
+}
+
+/// An `AppleDouble` file as macOS writes one next to a file it copies: the
+/// header and no entries.
+#[cfg(test)]
+pub(crate) fn write_test_apple_double(path: &Path) {
+    let mut bytes = vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00];
+    bytes.extend_from_slice(b"Mac OS X        ");
+    bytes.extend_from_slice(&[0, 0]);
+    fs::write(path, bytes).expect("write AppleDouble file");
+}
+
+/// Whether `path` has a supported audio extension. It reads nothing, so the
+/// bridge thread can use it; discovery uses [`is_audio_track_file`].
 pub(crate) fn is_supported_audio(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
@@ -3165,6 +3208,85 @@ mod tests {
         assert_eq!(last.processed, 3);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_root_skips_apple_double_sidecars_but_keeps_dot_underscore_tracks() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("apple-double");
+        fs::create_dir_all(&root).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        write_stub(&root.join("01.mp3"), crate::tag_write::TEST_MP3);
+        write_test_apple_double(&root.join("._01.mp3"));
+        write_stub(&root.join("._live.mp3"), crate::tag_write::TEST_MP3);
+
+        let mut last = RootScanProgress::default();
+        scan_root(
+            &conn,
+            &root,
+            &mut |progress| last = progress,
+            &mut |_, _| {},
+        )
+        .expect("scan");
+
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let mut paths: Vec<PathBuf> = snapshot.tracks.iter().map(|t| t.path.clone()).collect();
+        paths.sort();
+        assert_eq!(paths, [root.join("._live.mp3"), root.join("01.mp3")]);
+        assert_eq!(last.discovered, 2);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn scan_root_removes_rows_indexed_from_apple_double_sidecars() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("apple-double-stale");
+        fs::create_dir_all(&root).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let track = root.join("01.mp3");
+        let sidecar = root.join("._01.mp3");
+        write_stub(&track, crate::tag_write::TEST_MP3);
+        write_test_apple_double(&sidecar);
+        // As a scan before sidecars were skipped indexed them.
+        insert_indexed_tracks(&mut conn, &root, &[track.clone(), sidecar.clone()]);
+
+        let outcome = scan_root(&conn, &root, &mut |_| {}, &mut |_, _| {}).expect("scan");
+
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let paths: Vec<PathBuf> = snapshot.tracks.iter().map(|t| t.path.clone()).collect();
+        assert_eq!(paths, [track]);
+        assert_eq!(outcome.removed, [sidecar.to_string_lossy().to_string()]);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn only_a_dot_underscore_file_with_the_apple_double_header_is_a_sidecar() {
+        let root = test_dir("apple-double-name");
+        fs::create_dir_all(&root).expect("mkdir");
+        let sidecar = root.join("._01.mp3");
+        write_test_apple_double(&sidecar);
+        let header_without_name = root.join("01.mp3");
+        write_test_apple_double(&header_without_name);
+        let track_with_name = root.join("._live.mp3");
+        write_stub(&track_with_name, crate::tag_write::TEST_MP3);
+        let sidecar_text = root.join("._notes.txt");
+        write_test_apple_double(&sidecar_text);
+
+        assert!(!is_audio_track_file(&sidecar));
+        assert!(is_audio_track_file(&header_without_name));
+        assert!(is_audio_track_file(&track_with_name));
+        assert!(!is_audio_track_file(&sidecar_text));
+        // Unreadable, so not known to be a sidecar.
+        assert!(is_audio_track_file(&root.join("._missing.mp3")));
+        assert!(is_apple_double_sidecar(&sidecar));
+        assert!(!is_apple_double_sidecar(&header_without_name));
+        assert!(!is_apple_double_sidecar(&track_with_name));
+        assert!(!is_apple_double_sidecar(&root.join("._missing.mp3")));
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
