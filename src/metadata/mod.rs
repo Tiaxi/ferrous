@@ -29,7 +29,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::TimeBase;
 
-use crate::folder_cover::{cover_candidates, find_folder_cover};
+use crate::folder_cover::find_folder_cover;
 use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, raw_surround_format_label,
     read_appended_apev2_text_metadata,
@@ -60,7 +60,6 @@ pub struct TrackMetadata {
     pub current_bitrate_kbps: Option<u32>,
     pub bitrate_timeline_kbps: Vec<u16>,
     pub cover_art_path: Option<String>,
-    pub cover_art_rgba: Option<(usize, usize, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,9 +134,6 @@ fn run_metadata_worker(
         if metadata.current_bitrate_kbps.is_none() {
             metadata.current_bitrate_kbps = metadata.bitrate_kbps;
         }
-        if metadata.cover_art_rgba.is_none() {
-            metadata.cover_art_rgba = load_folder_cover_art(&path);
-        }
         let _ = event_tx.send(MetadataEvent::Loaded(metadata));
     }
 }
@@ -209,7 +205,6 @@ fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
             EmbeddedCoverCache::shared().and_then(|cache| cache.store(pic.data()))
         {
             metadata.cover_art_path = Some(cover_path.to_string_lossy().into_owned());
-            metadata.cover_art_rgba = decode_cover_rgba(pic.data());
         }
     }
 }
@@ -297,10 +292,6 @@ struct StreamTechnicalDetails {
     bit_depth: Option<u8>,
     current_bitrate_kbps: Option<u32>,
     bitrate_timeline_kbps: Vec<u16>,
-}
-
-fn u32_to_usize(value: u32) -> usize {
-    usize::try_from(value).unwrap_or(usize::MAX)
 }
 
 fn u64_to_f64(value: u64) -> f64 {
@@ -568,8 +559,8 @@ fn codec_label(codec: CodecType) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bytes_to_kbps, encoded_picture, format_label_from_extension, load_folder_cover_art,
-        load_metadata_for_path, needs_stream_details_probe, write_wav_with_picture,
+        bytes_to_kbps, encoded_picture, format_label_from_extension, load_metadata_for_path,
+        needs_stream_details_probe, run_metadata_worker, write_wav_with_picture,
         EmbeddedCoverCache, MetadataEvent, MetadataService, TrackMetadata,
     };
     use crate::raw_audio::write_test_apev2_file;
@@ -743,14 +734,12 @@ mod tests {
 
         let expected = dir.join("Front.PNG");
         assert_eq!(metadata.cover_art_path.as_deref(), expected.to_str());
-        let (_, _, rgba) = load_folder_cover_art(&track).expect("decoded cover");
-        assert_eq!(rgba[0], 31);
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn embedded_cover_is_cached_with_its_original_bytes_and_decoded_for_display() {
+    fn embedded_cover_is_cached_with_its_original_bytes() {
         let dir = metadata_test_path("embedded-cover", "d");
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         let track = dir.join("01.wav");
@@ -768,8 +757,62 @@ mod tests {
         assert_eq!(first.cover_art_path.as_deref(), Some(entry.as_str()));
         assert_eq!(second.cover_art_path, first.cover_art_path);
         assert_eq!(std::fs::read(&entry).expect("read cache entry"), picture);
-        let (width, height, rgba) = first.cover_art_rgba.expect("decoded cover");
-        assert_eq!((width, height, rgba.len()), (8, 6, 8 * 6 * 4));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn track_change_finds_covers_without_decoding_them() {
+        // A flat picture this size compresses to a few kilobytes but decodes
+        // to 16 MiB of RGBA, far more than the rest of a track change asks for.
+        const SIDE: u32 = 2048;
+        let decoded_bytes = usize::try_from(SIDE * SIDE * 4).expect("picture size");
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            SIDE,
+            SIDE,
+            image::Rgb([40, 80, 120]),
+        ))
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .expect("encode picture");
+        let picture = cursor.into_inner();
+
+        let dir = metadata_test_path("no-cover-decode", "d");
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let embedded = dir.join("01.wav");
+        write_wav_with_picture(&embedded, &picture);
+        let folder_only = dir.join("02.flac");
+        std::fs::write(&folder_only, b"not audio").expect("write track fixture");
+        std::fs::write(dir.join("cover.png"), &picture).expect("write folder cover");
+        let cache = EmbeddedCoverCache::shared().expect("test cache directory");
+        let cached = cache
+            .dir()
+            .join(format!("{:x}.png", md5::compute(&picture)));
+
+        for (track, expected_cover) in [(&embedded, cached), (&folder_only, dir.join("cover.png"))]
+        {
+            let (request_tx, request_rx) = crossbeam_channel::unbounded();
+            let (event_tx, event_rx) = crossbeam_channel::unbounded();
+            request_tx.send(track.clone()).expect("queue request");
+            drop(request_tx);
+
+            // Run the worker loop on this thread so the allocator counts it.
+            let before = crate::test_alloc::allocated_bytes();
+            run_metadata_worker(&request_rx, &event_tx, Duration::ZERO);
+            let allocated = crate::test_alloc::allocated_bytes() - before;
+
+            let MetadataEvent::Loaded(metadata) =
+                event_rx.try_iter().last().expect("final metadata");
+            assert_eq!(
+                metadata.cover_art_path.as_deref(),
+                expected_cover.to_str(),
+                "{track:?}"
+            );
+            assert!(
+                allocated < decoded_bytes,
+                "{track:?}: a track change allocated {allocated} bytes"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -797,22 +840,4 @@ mod tests {
 
 fn find_folder_cover_path(track_path: &Path) -> Option<PathBuf> {
     track_path.parent().and_then(find_folder_cover)
-}
-
-fn load_folder_cover_art(track_path: &Path) -> Option<(usize, usize, Vec<u8>)> {
-    track_path
-        .parent()
-        .map(cover_candidates)
-        .unwrap_or_default()
-        .into_iter()
-        .find_map(|path| decode_cover_rgba(&std::fs::read(path).ok()?))
-}
-
-fn decode_cover_rgba(encoded: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
-    let rgba = image::load_from_memory(encoded).ok()?.to_rgba8();
-    Some((
-        u32_to_usize(rgba.width()),
-        u32_to_usize(rgba.height()),
-        rgba.into_raw(),
-    ))
 }

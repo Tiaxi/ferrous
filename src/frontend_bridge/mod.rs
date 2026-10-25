@@ -632,8 +632,6 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         current_bitrate_kbps: metadata.current_bitrate_kbps,
         bitrate_timeline_kbps: Vec::new(),
         cover_art_path: metadata.cover_art_path.clone(),
-        // Large RGBA cover payload is not needed in bridge snapshots; avoid per-snapshot megabyte clones.
-        cover_art_rgba: None,
     }
 }
 
