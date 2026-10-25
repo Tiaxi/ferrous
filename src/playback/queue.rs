@@ -353,6 +353,12 @@ impl GaplessQueue {
         (!self.queue.is_empty()).then_some(self.cursor.index)
     }
 
+    /// Path of the row at `index`.
+    #[cfg(any(test, feature = "gst"))]
+    pub(crate) fn path_at(&self, index: usize) -> Option<&Path> {
+        self.queue.get(index).map(PathBuf::as_path)
+    }
+
     /// Whether the pipeline was given a successor that has not started.
     /// Once the decoder links that successor, before it is audible, the
     /// pipeline's duration query describes the successor.

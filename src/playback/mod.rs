@@ -94,7 +94,9 @@ pub enum PlaybackCommand {
     AddToQueue(Vec<PathBuf>),
     /// Replace the paths of renamed files in place. The queue order, current
     /// track, position, and playback state stay the same, and the current
-    /// track keeps playing from the file it has open. The engine answers with
+    /// track keeps playing from the file it has open. A track whose old path
+    /// the engine opened after the rename, finding another file or none, is
+    /// started again from its new path. The engine answers with
     /// [`PlaybackEvent::PathsRemapped`].
     RemapPaths(Arc<PathRenames>),
     RemoveAt(usize),
