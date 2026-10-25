@@ -2596,7 +2596,7 @@ mod tests {
         let (metadata, _metadata_rx) = MetadataService::new();
         let mut refreshes = super::super::edit_refresh::EditRefreshWorker::new();
 
-        assert!(refreshes.request(vec![path.clone()]));
+        assert!(refreshes.request(vec![path.clone()]).is_some());
         let result = refreshes
             .results
             .recv_timeout(Duration::from_secs(10))

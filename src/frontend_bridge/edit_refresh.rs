@@ -4,18 +4,23 @@
 //! on a worker, so the bridge thread, which also drives playback, never waits
 //! for tag reads or the library database.
 //!
-//! Every request has a generation. A result updates a path only if no newer
-//! request for the path is pending and no rename has moved the path since the
-//! request, so an older read never overwrites newer details. A read that a
-//! rename made stale is asked for again under the file's new path, so the
-//! details shown always come from a read after both the rename and the save,
-//! in whichever order the bridge learns of them.
+//! Requests and renames are ordered by one process-wide sequence (see
+//! [`next_file_sequence`]): a request takes its number when the bridge sends
+//! it, so the worker reads after every rename with a lower number, and a
+//! rename takes its number once it has read the files it renamed. When the
+//! bridge applies a rename, a refresh with a higher number than the rename,
+//! whether still in flight or already applied, read the file later than the
+//! rename did, so its row wins over the rename's. A refresh with a lower
+//! number may have read a file before it moved, and is ignored for the
+//! rename's paths. Which order the bridge handles the rename notification,
+//! the save's command, and the refresh's result in does not matter.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
+use super::imports::{next_file_sequence, RenamedDetails};
 use crate::library::{
     refresh_indexed_metadata_for_paths, track_file_fingerprint, IndexedTrack, TrackFileFingerprint,
     TrackRefresh,
@@ -23,13 +28,14 @@ use crate::library::{
 use crate::playback::PathRenames;
 
 struct RefreshRequest {
-    generation: u64,
+    sequence: u64,
     paths: Vec<PathBuf>,
 }
 
 pub(super) struct RefreshResult {
-    /// The newest request the result answers.
-    generation: u64,
+    /// The newest request the result answers. The files were read after it
+    /// was sent.
+    sequence: u64,
     outcome: Result<TrackRefresh, String>,
     fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
 }
@@ -44,17 +50,26 @@ pub(super) struct AcceptedRefresh {
     pub(super) problem: Option<String>,
 }
 
+/// A row a refresh read, with the sequence number it was read after.
+struct AcceptedRow {
+    sequence: u64,
+    indexed: IndexedTrack,
+    fingerprint: Option<TrackFileFingerprint>,
+}
+
 pub(super) struct EditRefreshWorker {
     tx: Sender<RefreshRequest>,
     pub(super) results: Receiver<RefreshResult>,
-    next_generation: u64,
-    /// The generation of the last request sent.
+    /// The sequence number of the last request sent.
     last_requested: u64,
-    /// The generation of the last result accepted.
+    /// The sequence number of the last result accepted.
     last_accepted: u64,
-    /// For each path with a refresh in flight, the oldest generation whose
-    /// result may update it.
+    /// For each path with a refresh in flight, the lowest sequence number
+    /// of a result that may update it.
     current_from: HashMap<PathBuf, u64>,
+    /// The rows accepted while a rename notification may still be on its
+    /// way, for renames numbered below them; see [`Self::renamed`].
+    accepted: HashMap<PathBuf, AcceptedRow>,
 }
 
 impl EditRefreshWorker {
@@ -69,11 +84,12 @@ impl EditRefreshWorker {
         let (result_tx, results) = unbounded();
         crate::worker_thread::spawn_worker("ferrous-edit-refresh", move || {
             while let Ok(first) = rx.recv() {
-                // Saves that queued up meanwhile are read in the same pass.
-                let mut generation = first.generation;
+                // Saves that queued up meanwhile are read in the same pass,
+                // after the newest of them was sent.
+                let mut sequence = first.sequence;
                 let mut paths = first.paths;
                 for next in rx.try_iter() {
-                    generation = next.generation;
+                    sequence = next.sequence;
                     paths.extend(next.paths);
                 }
                 paths.sort_unstable();
@@ -84,7 +100,7 @@ impl EditRefreshWorker {
                     .filter_map(|path| Some((path.clone(), track_file_fingerprint(path)?)))
                     .collect();
                 let result = RefreshResult {
-                    generation,
+                    sequence,
                     outcome,
                     fingerprints,
                 };
@@ -96,56 +112,77 @@ impl EditRefreshWorker {
         Self {
             tx,
             results,
-            next_generation: 0,
             last_requested: 0,
             last_accepted: 0,
             current_from: HashMap::new(),
+            accepted: HashMap::new(),
         }
     }
 
-    /// Ask for `paths` to be read again. Returns `false` if the worker has
-    /// stopped.
-    pub(super) fn request(&mut self, paths: Vec<PathBuf>) -> bool {
-        let generation = self.advance();
+    /// Start a new worker in place of one that stopped. Its requests are
+    /// lost; the rows it accepted are kept for renames still on their way.
+    pub(super) fn restart(&mut self) {
+        let accepted = std::mem::take(&mut self.accepted);
+        *self = Self::new();
+        self.accepted = accepted;
+    }
+
+    /// Ask for `paths` to be read again. Returns the request's sequence
+    /// number, or `None` if the worker has stopped.
+    pub(super) fn request(&mut self, paths: Vec<PathBuf>) -> Option<u64> {
+        let sequence = next_file_sequence();
         for path in &paths {
-            self.current_from.insert(path.clone(), generation);
+            self.current_from.insert(path.clone(), sequence);
         }
-        self.last_requested = generation;
-        self.tx.send(RefreshRequest { generation, paths }).is_ok()
+        self.last_requested = sequence;
+        self.tx
+            .send(RefreshRequest { sequence, paths })
+            .is_ok()
+            .then_some(sequence)
     }
 
-    /// Files were renamed on disk. A read in flight of any of their old or
-    /// new paths may have read another file, or none, so it is ignored.
-    /// Returns the paths, under their new names, that must be read again:
-    /// the read may also hold a save the rename's own read missed, as when
-    /// a file is saved under its new name before the bridge applies the
-    /// rename. Request them once the rename is applied.
-    #[must_use]
-    pub(super) fn renamed(&mut self, renames: &PathRenames) -> Vec<PathBuf> {
-        if self.current_from.is_empty() {
-            return Vec::new();
-        }
-        let generation = self.advance();
-        let new_paths = renames.values().collect::<HashSet<_>>();
-        let mut read_again = Vec::new();
+    /// Files were renamed on disk by the rename numbered `sequence`, which
+    /// read them into `details`.
+    ///
+    /// - A read in flight of one of their old or new paths that was asked
+    ///   for before the rename may have read another file, or none, so it is
+    ///   ignored. One asked for after the rename read the files later, so it
+    ///   stands and updates the renamed track when it arrives.
+    /// - A row already accepted for a new path from a read after the rename
+    ///   is newer than the rename's own, so it replaces the rename's row in
+    ///   `details`.
+    pub(super) fn renamed(
+        &mut self,
+        renames: &PathRenames,
+        sequence: u64,
+        details: &mut RenamedDetails,
+    ) {
         for path in renames.keys().chain(renames.values()) {
-            let Some(current_from) = self.current_from.get_mut(path) else {
+            if let Some(current_from) = self.current_from.get_mut(path) {
+                *current_from = (*current_from).max(sequence);
+            }
+        }
+        for new_path in renames.values() {
+            let Some(row) = self.accepted.get(new_path) else {
                 continue;
             };
-            *current_from = generation;
-            // The request meant the file that had the path, now under its
-            // new name, or, if it was sent once the rename was on disk, the
-            // file that has it now.
-            if let Some(new_path) = renames.get(path) {
-                read_again.push(new_path.clone());
+            if row.sequence <= sequence {
+                continue;
             }
-            if new_paths.contains(path) {
-                read_again.push(path.clone());
-            }
+            details
+                .indexed
+                .insert(new_path.clone(), row.indexed.clone());
+            match row.fingerprint {
+                Some(fingerprint) => details.fingerprints.insert(new_path.clone(), fingerprint),
+                None => details.fingerprints.remove(new_path),
+            };
         }
-        read_again.sort_unstable();
-        read_again.dedup();
-        read_again
+    }
+
+    /// Forget the accepted rows: no rename that read the files before them
+    /// can still arrive.
+    pub(super) fn forget_accepted(&mut self) {
+        self.accepted.clear();
     }
 
     /// Whether every request has been answered.
@@ -157,7 +194,7 @@ impl EditRefreshWorker {
     /// The part of `result` that is still current.
     pub(super) fn accept(&mut self, result: RefreshResult) -> AcceptedRefresh {
         let RefreshResult {
-            generation,
+            sequence,
             outcome,
             mut fingerprints,
         } = result;
@@ -168,12 +205,12 @@ impl EditRefreshWorker {
         let is_current = |path: &Path| {
             self.current_from
                 .get(path)
-                .is_some_and(|current_from| *current_from <= generation)
+                .is_some_and(|current_from| *current_from <= sequence)
         };
         indexed.retain(|path, _| is_current(path));
         fingerprints.retain(|path, _| indexed.contains_key(path));
-        self.last_accepted = generation;
-        if generation == self.last_requested {
+        self.last_accepted = sequence;
+        if sequence == self.last_requested {
             // Nothing is in flight any more.
             self.current_from.clear();
         } else {
@@ -181,16 +218,21 @@ impl EditRefreshWorker {
                 self.current_from.remove(path);
             }
         }
+        for (path, row) in &indexed {
+            self.accepted.insert(
+                path.clone(),
+                AcceptedRow {
+                    sequence,
+                    indexed: row.clone(),
+                    fingerprint: fingerprints.get(path).copied(),
+                },
+            );
+        }
         AcceptedRefresh {
             indexed,
             fingerprints,
             problem,
         }
-    }
-
-    fn advance(&mut self) -> u64 {
-        self.next_generation = self.next_generation.wrapping_add(1);
-        self.next_generation
     }
 }
 
@@ -214,9 +256,9 @@ mod tests {
         }
     }
 
-    fn result(generation: u64, entries: &[(&str, &str)]) -> RefreshResult {
+    fn result(sequence: u64, entries: &[(&str, &str)]) -> RefreshResult {
         RefreshResult {
-            generation,
+            sequence,
             outcome: Ok(TrackRefresh {
                 indexed: entries
                     .iter()
@@ -233,44 +275,65 @@ mod tests {
         EditRefreshWorker::with_refresh(|_| Err("unread".to_string()))
     }
 
+    fn request(worker: &mut EditRefreshWorker, paths: &[&str]) -> u64 {
+        worker
+            .request(paths.iter().map(PathBuf::from).collect())
+            .expect("the worker takes requests")
+    }
+
+    fn swap(a: &str, b: &str) -> PathRenames {
+        PathRenames::from([
+            (PathBuf::from(a), PathBuf::from(b)),
+            (PathBuf::from(b), PathBuf::from(a)),
+        ])
+    }
+
+    fn titles(details: &RenamedDetails) -> HashMap<&Path, &str> {
+        details
+            .indexed
+            .iter()
+            .map(|(path, row)| (path.as_path(), row.title.as_str()))
+            .collect()
+    }
+
     #[test]
     fn an_older_result_for_a_path_with_a_newer_request_is_ignored() {
         let mut worker = idle_worker();
-        assert!(worker.request(vec![PathBuf::from("/m/a.flac"), PathBuf::from("/m/b.flac")]));
-        assert!(worker.request(vec![PathBuf::from("/m/a.flac")]));
+        let first = request(&mut worker, &["/m/a.flac", "/m/b.flac"]);
+        let second = request(&mut worker, &["/m/a.flac"]);
 
         // The first read, which began before the second save of a.flac.
-        let accepted = worker.accept(result(1, &[("/m/a.flac", "old"), ("/m/b.flac", "b")]));
+        let accepted = worker.accept(result(first, &[("/m/a.flac", "old"), ("/m/b.flac", "b")]));
         assert_eq!(
             accepted.indexed.keys().collect::<Vec<_>>(),
             vec![&PathBuf::from("/m/b.flac")]
         );
-        let accepted = worker.accept(result(2, &[("/m/a.flac", "new")]));
+        let accepted = worker.accept(result(second, &[("/m/a.flac", "new")]));
         assert_eq!(accepted.indexed[&PathBuf::from("/m/a.flac")].title, "new");
     }
 
     #[test]
-    fn a_result_read_before_a_rename_is_ignored() {
+    fn a_result_asked_for_before_a_rename_is_ignored_for_its_paths() {
         let mut worker = idle_worker();
-        assert!(worker.request(vec![PathBuf::from("/m/a.flac"), PathBuf::from("/m/c.flac")]));
+        let before = request(&mut worker, &["/m/a.flac", "/m/c.flac"]);
         // a and b swap names while a is read.
-        let read_again = worker.renamed(&PathRenames::from([
-            (PathBuf::from("/m/a.flac"), PathBuf::from("/m/b.flac")),
-            (PathBuf::from("/m/b.flac"), PathBuf::from("/m/a.flac")),
-        ]));
-        // Either file may hold the save the read was for.
-        assert_eq!(
-            read_again,
-            vec![PathBuf::from("/m/a.flac"), PathBuf::from("/m/b.flac")]
+        let mut details = RenamedDetails::default();
+        worker.renamed(
+            &swap("/m/a.flac", "/m/b.flac"),
+            next_file_sequence(),
+            &mut details,
         );
-        let accepted = worker.accept(result(1, &[("/m/a.flac", "a before"), ("/m/c.flac", "c")]));
+        let accepted = worker.accept(result(
+            before,
+            &[("/m/a.flac", "a before"), ("/m/c.flac", "c")],
+        ));
         assert_eq!(
             accepted.indexed.keys().collect::<Vec<_>>(),
             vec![&PathBuf::from("/m/c.flac")]
         );
         // A save after the rename is read and applied.
-        assert!(worker.request(vec![PathBuf::from("/m/a.flac")]));
-        let accepted = worker.accept(result(3, &[("/m/a.flac", "a after")]));
+        let after = request(&mut worker, &["/m/a.flac"]);
+        let accepted = worker.accept(result(after, &[("/m/a.flac", "a after")]));
         assert_eq!(
             accepted.indexed[&PathBuf::from("/m/a.flac")].title,
             "a after"
@@ -278,11 +341,74 @@ mod tests {
     }
 
     #[test]
+    fn a_result_asked_for_after_a_rename_stands_in_whatever_order_they_arrive() {
+        // The rename read its files first; a save of b followed it.
+        let renamed_at = next_file_sequence();
+        let renames = swap("/m/a.flac", "/m/b.flac");
+        let rename_rows = || RenamedDetails {
+            indexed: HashMap::from([
+                (PathBuf::from("/m/a.flac"), indexed("b's file")),
+                (PathBuf::from("/m/b.flac"), indexed("a's file")),
+            ]),
+            ..RenamedDetails::default()
+        };
+
+        // The save's result is still in flight when the rename arrives.
+        let mut worker = idle_worker();
+        let saved = request(&mut worker, &["/m/b.flac"]);
+        let mut details = rename_rows();
+        worker.renamed(&renames, renamed_at, &mut details);
+        assert_eq!(titles(&details)[Path::new("/m/b.flac")], "a's file");
+        let accepted = worker.accept(result(saved, &[("/m/b.flac", "a's file, saved")]));
+        assert_eq!(
+            accepted.indexed[&PathBuf::from("/m/b.flac")].title,
+            "a's file, saved"
+        );
+
+        // The save's result was applied before the rename arrives.
+        let mut worker = idle_worker();
+        let saved = request(&mut worker, &["/m/b.flac"]);
+        let _ = worker.accept(result(saved, &[("/m/b.flac", "a's file, saved")]));
+        let mut details = rename_rows();
+        worker.renamed(&renames, renamed_at, &mut details);
+        assert_eq!(
+            titles(&details),
+            HashMap::from([
+                (Path::new("/m/a.flac"), "b's file"),
+                (Path::new("/m/b.flac"), "a's file, saved"),
+            ])
+        );
+
+        // Rows forgotten once no rename can arrive are not used.
+        worker.forget_accepted();
+        let mut details = rename_rows();
+        worker.renamed(&renames, renamed_at, &mut details);
+        assert_eq!(titles(&details)[Path::new("/m/b.flac")], "a's file");
+    }
+
+    #[test]
+    fn a_row_accepted_before_a_rename_was_read_gives_way_to_the_rename() {
+        let mut worker = idle_worker();
+        let saved = request(&mut worker, &["/m/b.flac"]);
+        let _ = worker.accept(result(saved, &[("/m/b.flac", "before the rename")]));
+        let mut details = RenamedDetails {
+            indexed: HashMap::from([(PathBuf::from("/m/b.flac"), indexed("renamed"))]),
+            ..RenamedDetails::default()
+        };
+        worker.renamed(
+            &PathRenames::from([(PathBuf::from("/m/a.flac"), PathBuf::from("/m/b.flac"))]),
+            next_file_sequence(),
+            &mut details,
+        );
+        assert_eq!(titles(&details)[Path::new("/m/b.flac")], "renamed");
+    }
+
+    #[test]
     fn a_failed_refresh_is_reported() {
         let mut worker = idle_worker();
-        assert!(worker.request(vec![PathBuf::from("/m/a.flac")]));
+        let sequence = request(&mut worker, &["/m/a.flac"]);
         let accepted = worker.accept(RefreshResult {
-            generation: 1,
+            sequence,
             outcome: Err("failed to open library db".to_string()),
             fingerprints: HashMap::new(),
         });
@@ -310,13 +436,15 @@ mod tests {
                 problem: None,
             })
         });
-        assert!(worker.request(vec![PathBuf::from("/m/a.flac")]));
+        assert!(worker.request(vec![PathBuf::from("/m/a.flac")]).is_some());
         let first = started
             .recv_timeout(Duration::from_secs(10))
             .expect("first read");
         assert_eq!(first, vec![PathBuf::from("/m/a.flac")]);
         for name in ["c", "b", "c", "d"] {
-            assert!(worker.request(vec![PathBuf::from(format!("/m/{name}.flac"))]));
+            assert!(worker
+                .request(vec![PathBuf::from(format!("/m/{name}.flac"))])
+                .is_some());
         }
         release.send(()).expect("release the first read");
         let second = started

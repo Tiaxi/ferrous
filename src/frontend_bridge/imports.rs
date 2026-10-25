@@ -79,7 +79,20 @@ pub(super) enum ImportMessage {
         number: u64,
         renames: Arc<PathRenames>,
         details: RenamedDetails,
+        /// Taken from [`next_file_sequence`] once the rename had read the
+        /// files it renamed.
+        sequence: u64,
     },
+}
+
+static FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// The next number of one process-wide sequence that orders the bridge's
+/// edit refresh requests against renames: a rename takes its number after it
+/// has read the renamed files, and the bridge takes a request's number when
+/// it sends the request, before the files are read.
+pub(super) fn next_file_sequence() -> u64 {
+    FILE_SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1
 }
 
 /// What a rename read from the files it renamed, so that the bridge does
@@ -153,6 +166,8 @@ struct RenameSequence {
     /// The maps of finished renames that changed something, by number, that
     /// a pending import may not have applied to its inputs yet.
     log: VecDeque<(u64, Arc<PathRenames>)>,
+    /// The [`next_file_sequence`] number of the last rename sent.
+    last_sent_sequence: u64,
 }
 
 impl RenameSequence {
@@ -200,15 +215,20 @@ impl Drop for Renaming<'_> {
             .filter(|(renames, _)| !renames.is_empty())
         {
             let renames = Arc::new(renames);
+            // Taken under the lock, so that the bridge cannot find no rename
+            // on its way while this one has a number.
+            let file_sequence = next_file_sequence();
             let sent = self.gate.messages.send(ImportMessage::Renamed {
                 number: self.number,
                 renames: Arc::clone(&renames),
                 details,
+                sequence: file_sequence,
             });
             // The bridge has shut down if this fails; the renames on disk
             // stand, and no import is left to follow them.
             if sent.is_ok() {
                 sequence.log.push_back((self.number, renames));
+                sequence.last_sent_sequence = file_sequence;
             }
         }
         sequence.finished = self.number;
@@ -336,6 +356,12 @@ impl ImportGate {
         }
     }
 
+    /// Whether a rename was sent to the bridge after the one numbered
+    /// `applied` in [`next_file_sequence`].
+    fn renames_sent_after(&self, applied: u64) -> bool {
+        self.lock().last_sent_sequence > applied
+    }
+
     /// Wake imports waiting for a rename so they notice they were cancelled.
     fn wake_readers(&self) {
         // Taking the lock orders this after a waiting import checked for
@@ -405,6 +431,13 @@ impl ImportWorker {
     /// The gate that orders file renames against this worker's reads.
     pub(super) fn gate(&self) -> Arc<ImportGate> {
         Arc::clone(&self.gate)
+    }
+
+    /// Whether a rename was sent to the bridge after the one numbered
+    /// `applied` in [`next_file_sequence`], so its notification may still
+    /// be on its way.
+    pub(super) fn renames_sent_after(&self, applied: u64) -> bool {
+        self.gate.renames_sent_after(applied)
     }
 
     /// Queue `request` behind earlier changes and return the changes that can

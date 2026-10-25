@@ -823,6 +823,8 @@ struct BridgeLoopRuntime {
     tree_worker: tree_worker::TreeWorker,
     queue_validator: queue_validation::QueueValidationWorker,
     edit_refreshes: edit_refresh::EditRefreshWorker,
+    /// The [`imports::next_file_sequence`] number of the last rename applied.
+    applied_rename_sequence: u64,
     analysis: AnalysisEngine,
     analysis_rx: Receiver<AnalysisEvent>,
     playback: PlaybackEngine,
@@ -1015,6 +1017,7 @@ impl BridgeLoopRuntime {
             tree_worker: tree_worker::TreeWorker::new(),
             queue_validator: queue_validation::QueueValidationWorker::new(),
             edit_refreshes: edit_refresh::EditRefreshWorker::new(),
+            applied_rename_sequence: 0,
             analysis,
             analysis_rx,
             playback,
@@ -1211,7 +1214,8 @@ impl BridgeLoopRuntime {
                 number,
                 renames,
                 details,
-            }) => self.apply_renamed_paths(number, renames, details, event_tx),
+                sequence,
+            }) => self.apply_renamed_paths(number, renames, details, sequence, event_tx),
             BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
             BridgeLoopWake::QueueValidated(result) => {
                 if self.queue_validator.apply(result, &mut self.state) {
@@ -1264,11 +1268,16 @@ impl BridgeLoopRuntime {
         &mut self,
         number: u64,
         renames: Arc<PathRenames>,
-        details: imports::RenamedDetails,
+        mut details: imports::RenamedDetails,
+        sequence: u64,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         self.imports.remap_pending_paths(number, &renames);
-        let read_again = self.edit_refreshes.renamed(&renames);
+        // Refreshes that read the files after the rename keep their rows.
+        self.edit_refreshes
+            .renamed(&renames, sequence, &mut details);
+        self.applied_rename_sequence = self.applied_rename_sequence.max(sequence);
+        self.forget_accepted_refreshes_once_renames_arrived();
         let current = self.state.playback.current.clone();
         if commands::refresh_renamed_paths(
             &mut self.state,
@@ -1290,9 +1299,6 @@ impl BridgeLoopRuntime {
                 .active_path
                 .clone_from(&self.state.playback.current);
         }
-        // After the rename's rows, so that a save the rename missed lands
-        // on top of them.
-        self.request_edit_refresh(read_again, event_tx);
         self.request_tree();
         SnapshotUrgency::Immediate
     }
@@ -1302,7 +1308,7 @@ impl BridgeLoopRuntime {
         if paths.is_empty() {
             return;
         }
-        if !self.edit_refreshes.request(paths) {
+        if self.edit_refreshes.request(paths).is_none() {
             let _ = try_send_event(
                 event_tx,
                 BridgeEvent::Error(
@@ -1320,6 +1326,7 @@ impl BridgeLoopRuntime {
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         let refresh = self.edit_refreshes.accept(result);
+        self.forget_accepted_refreshes_once_renames_arrived();
         if let Some(problem) = refresh.problem {
             let _ = try_send_event(event_tx, BridgeEvent::Error(problem));
         }
@@ -1335,6 +1342,19 @@ impl BridgeLoopRuntime {
         self.state.refresh_queue_rows();
         self.request_tree();
         SnapshotUrgency::Immediate
+    }
+
+    /// The refresh worker keeps the rows it accepted for renames numbered
+    /// below them whose notifications are still on their way. Once every
+    /// rename sent has been applied here, none can be: a rename numbered
+    /// later reads the files after those rows were read.
+    fn forget_accepted_refreshes_once_renames_arrived(&mut self) {
+        if !self
+            .imports
+            .renames_sent_after(self.applied_rename_sequence)
+        {
+            self.edit_refreshes.forget_accepted();
+        }
     }
 
     fn apply_queue_changes(
@@ -1385,7 +1405,7 @@ impl BridgeLoopRuntime {
             }
             Worker::QueueValidation => self.queue_validator.results = never(),
             Worker::EditRefresh if restart => {
-                self.edit_refreshes = edit_refresh::EditRefreshWorker::new();
+                self.edit_refreshes.restart();
             }
             Worker::EditRefresh => self.edit_refreshes.results = never(),
             Worker::Search if restart => {
@@ -2657,6 +2677,7 @@ mod tests {
             1,
             Arc::new(PathRenames::from([(old_path, new_path.clone())])),
             imports::RenamedDetails::default(),
+            imports::next_file_sequence(),
             &event_tx,
         );
         assert_eq!(runtime.state.playback.current.as_ref(), Some(&new_path));
@@ -3617,6 +3638,7 @@ mod tests {
             1,
             Arc::new(PathRenames::from([(files[0].clone(), renamed.clone())])),
             imports::RenamedDetails::default(),
+            imports::next_file_sequence(),
             &event_tx,
         );
         runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
@@ -3763,7 +3785,12 @@ mod tests {
             .collect()
     }
 
-    fn stale_refresh_runtime(tracks: &[(&PathBuf, &str)]) -> BridgeLoopRuntime {
+    /// A runtime whose library holds `tracks` with their titles, and whose
+    /// queue holds `queued`, files outside the library with their titles.
+    fn stale_refresh_runtime(
+        tracks: &[(&PathBuf, &str)],
+        queued: &[(&PathBuf, &str)],
+    ) -> BridgeLoopRuntime {
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         let (_library_tx, library_rx) = unbounded();
         runtime.library_rx = library_rx;
@@ -3784,60 +3811,251 @@ mod tests {
                 .collect(),
             ..LibrarySnapshot::default()
         });
+        runtime.state.queue = tracks
+            .iter()
+            .chain(queued)
+            .map(|(path, _)| (*path).clone())
+            .collect();
+        Arc::make_mut(&mut runtime.state.queue_details).extend(
+            queued
+                .iter()
+                .map(|(path, title)| ((*path).clone(), indexed_titled(title))),
+        );
         runtime
     }
 
-    #[test]
-    fn a_save_under_a_new_name_handled_before_its_rename_is_shown() {
+    /// Rename files on disk through the gate, as the tag editor does, which
+    /// reads them at their new names as `disk` then has them. The rename's
+    /// notification waits on the import channel.
+    fn rename_on_disk(
+        runtime: &BridgeLoopRuntime,
+        refreshes: &GatedRefreshes,
+        renames: &[(&PathBuf, &PathBuf)],
+        disk: &[(&PathBuf, &str)],
+    ) {
+        refreshes.set(disk);
+        let renames = renames
+            .iter()
+            .map(|(old, new)| ((*old).clone(), (*new).clone()))
+            .collect::<PathRenames>();
+        let details = imports::RenamedDetails {
+            indexed: disk
+                .iter()
+                .map(|(path, title)| ((*path).clone(), indexed_titled(title)))
+                .collect(),
+            ..imports::RenamedDetails::default()
+        };
+        runtime
+            .imports
+            .gate()
+            .rename_with_details(|| ((), renames, details));
+    }
+
+    /// Have the bridge send a refresh of the files the tag editor saved.
+    fn save(
+        runtime: &mut BridgeLoopRuntime,
+        refreshes: &GatedRefreshes,
+        saved: &[&PathBuf],
+        event_tx: &Sender<BridgeEvent>,
+    ) {
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Library(
+                BridgeLibraryCommand::RefreshEditedPaths(
+                    saved.iter().map(|path| (*path).clone()).collect(),
+                ),
+            )),
+            event_tx,
+        );
+        let mut read = refreshes.wait_for_read();
+        read.sort();
+        let mut expected = saved.iter().map(|path| (*path).clone()).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(read, expected);
+    }
+
+    /// Let the refresh read and apply its result.
+    fn accept_refresh(
+        runtime: &mut BridgeLoopRuntime,
+        refreshes: &GatedRefreshes,
+        event_tx: &Sender<BridgeEvent>,
+    ) {
+        refreshes.release.send(()).expect("release the read");
+        let result = runtime
+            .edit_refreshes
+            .results
+            .recv_timeout(Duration::from_secs(10))
+            .expect("refresh result");
+        runtime.handle_wake(BridgeLoopWake::EditsRefreshed(result), event_tx);
+    }
+
+    fn queue_titles(runtime: &BridgeLoopRuntime) -> Vec<(PathBuf, String)> {
+        runtime
+            .state
+            .queue
+            .iter()
+            .map(|path| {
+                let title = runtime
+                    .state
+                    .library_index
+                    .position(&runtime.state.library, path)
+                    .map(|position| runtime.state.library.tracks[position].title.clone())
+                    .or_else(|| {
+                        runtime
+                            .state
+                            .queue_details
+                            .get(path)
+                            .map(|details| details.title.clone())
+                    })
+                    .unwrap_or_default();
+                (path.clone(), title)
+            })
+            .collect()
+    }
+
+    fn owned(rows: &[(&PathBuf, &str)]) -> Vec<(PathBuf, String)> {
+        rows.iter()
+            .map(|(path, title)| ((*path).clone(), title.to_string()))
+            .collect()
+    }
+
+    /// The order in which the bridge handles a rename A→B and a save at B
+    /// made after it.
+    #[derive(Clone, Copy, Debug)]
+    enum SaveAfterRename {
+        /// The save's result is applied before the rename's notification.
+        ResultFirst,
+        /// The save is asked for before the rename's notification, and its
+        /// result arrives after it.
+        RequestFirst,
+        RenameFirst,
+    }
+
+    fn save_after_rename_shows_the_saved_tags(order: SaveAfterRename) {
         let _guard = test_guard();
         let (a, b) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/b.flac"));
         // A queued file outside the library, renamed and saved with a.
         let (e, f) = (p("/elsewhere/e.flac"), p("/elsewhere/f.flac"));
-        let mut runtime = stale_refresh_runtime(&[(&a, "Old")]);
-        runtime.state.queue = vec![a.clone(), e.clone()];
-        let (event_tx, _event_rx) = unbounded();
+        let mut runtime = stale_refresh_runtime(&[(&a, "Old")], &[(&e, "Old E")]);
+        let (event_tx, event_rx) = unbounded();
         let refreshes = gated_refreshes(&mut runtime);
-        // On disk, both files were renamed and then saved.
-        refreshes.set(&[(&b, "Saved"), (&f, "Saved F")]);
 
-        // The save's command overtakes the rename's older notification.
-        runtime.handle_wake(
-            BridgeLoopWake::Command(BridgeCommand::Library(
-                BridgeLibraryCommand::RefreshEditedPaths(vec![b.clone(), f.clone()]),
-            )),
-            &event_tx,
+        rename_on_disk(
+            &runtime,
+            &refreshes,
+            &[(&a, &b), (&e, &f)],
+            &[(&b, "Renamed"), (&f, "Renamed F")],
         );
-        assert_eq!(refreshes.wait_for_read(), vec![f.clone(), b.clone()]);
-        // The rename read the files before the save.
-        let _ = runtime.apply_renamed_paths(
-            1,
-            Arc::new(PathRenames::from([
-                (a.clone(), b.clone()),
-                (e.clone(), f.clone()),
-            ])),
-            imports::RenamedDetails {
-                indexed: HashMap::from([
-                    (b.clone(), indexed_titled("Renamed")),
-                    (f.clone(), indexed_titled("Renamed F")),
-                ]),
-                ..imports::RenamedDetails::default()
-            },
-            &event_tx,
-        );
+        if matches!(order, SaveAfterRename::RenameFirst) {
+            apply_next_import_result(&mut runtime, &event_tx);
+        }
+        refreshes.set(&[(&b, "Saved"), (&f, "Saved F")]);
+        save(&mut runtime, &refreshes, &[&b, &f], &event_tx);
+        match order {
+            SaveAfterRename::ResultFirst => {
+                accept_refresh(&mut runtime, &refreshes, &event_tx);
+                apply_next_import_result(&mut runtime, &event_tx);
+            }
+            SaveAfterRename::RequestFirst => apply_next_import_result(&mut runtime, &event_tx),
+            SaveAfterRename::RenameFirst => {}
+        }
         finish_edit_refreshes(&mut runtime, &refreshes, &event_tx);
 
         assert_eq!(
-            library_titles(&runtime),
-            HashMap::from([(b.clone(), "Saved".to_string())])
+            queue_titles(&runtime),
+            owned(&[(&b, "Saved"), (&f, "Saved F")]),
+            "{order:?}"
         );
-        assert_eq!(runtime.state.queue, vec![b, f.clone()]);
         assert_eq!(
-            runtime
-                .state
-                .queue_details
-                .get(&f)
-                .map(|details| details.title.as_str()),
-            Some("Saved F")
+            library_titles(&runtime),
+            HashMap::from([(b, "Saved".to_string())])
+        );
+        assert!(error_messages(&event_rx).is_empty());
+    }
+
+    #[test]
+    fn a_save_after_a_rename_applied_before_the_rename_arrives_is_shown() {
+        save_after_rename_shows_the_saved_tags(SaveAfterRename::ResultFirst);
+    }
+
+    #[test]
+    fn a_save_after_a_rename_in_flight_when_the_rename_arrives_is_shown() {
+        save_after_rename_shows_the_saved_tags(SaveAfterRename::RequestFirst);
+    }
+
+    #[test]
+    fn a_save_after_a_rename_the_bridge_already_applied_is_shown() {
+        save_after_rename_shows_the_saved_tags(SaveAfterRename::RenameFirst);
+    }
+
+    #[test]
+    fn a_save_between_the_renames_of_a_chain_is_shown() {
+        let _guard = test_guard();
+        let (a, b, c) = (
+            p("/music/stale/A/x/a.flac"),
+            p("/music/stale/A/x/b.flac"),
+            p("/music/stale/A/x/c.flac"),
+        );
+        let (e, f, g) = (
+            p("/elsewhere/e.flac"),
+            p("/elsewhere/f.flac"),
+            p("/elsewhere/g.flac"),
+        );
+        let mut runtime = stale_refresh_runtime(&[(&a, "Old")], &[(&e, "Old E")]);
+        let (event_tx, _event_rx) = unbounded();
+        let refreshes = gated_refreshes(&mut runtime);
+
+        rename_on_disk(
+            &runtime,
+            &refreshes,
+            &[(&a, &b), (&e, &f)],
+            &[(&b, "First rename"), (&f, "First rename F")],
+        );
+        apply_next_import_result(&mut runtime, &event_tx);
+        rename_on_disk(
+            &runtime,
+            &refreshes,
+            &[(&b, &c), (&f, &g)],
+            &[(&c, "Second rename"), (&g, "Second rename G")],
+        );
+        // The save at the last names is handled between the two
+        // notifications, and its result too.
+        refreshes.set(&[(&c, "Saved"), (&g, "Saved G")]);
+        save(&mut runtime, &refreshes, &[&c, &g], &event_tx);
+        accept_refresh(&mut runtime, &refreshes, &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+        finish_edit_refreshes(&mut runtime, &refreshes, &event_tx);
+
+        assert_eq!(
+            queue_titles(&runtime),
+            owned(&[(&c, "Saved"), (&g, "Saved G")])
+        );
+    }
+
+    #[test]
+    fn a_save_after_a_swap_is_shown() {
+        let _guard = test_guard();
+        let (a, b) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/b.flac"));
+        let (e, f) = (p("/elsewhere/e.flac"), p("/elsewhere/f.flac"));
+        let mut runtime = stale_refresh_runtime(&[(&a, "A"), (&b, "B")], &[(&e, "E"), (&f, "F")]);
+        let (event_tx, _event_rx) = unbounded();
+        let refreshes = gated_refreshes(&mut runtime);
+
+        // Each pair swaps names, and then one file of each is saved.
+        rename_on_disk(
+            &runtime,
+            &refreshes,
+            &[(&a, &b), (&b, &a), (&e, &f), (&f, &e)],
+            &[(&a, "B"), (&b, "A"), (&e, "F"), (&f, "E")],
+        );
+        refreshes.set(&[(&a, "B"), (&b, "A, saved"), (&e, "F"), (&f, "E, saved")]);
+        save(&mut runtime, &refreshes, &[&b, &f], &event_tx);
+        accept_refresh(&mut runtime, &refreshes, &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+        finish_edit_refreshes(&mut runtime, &refreshes, &event_tx);
+
+        assert_eq!(
+            queue_titles(&runtime),
+            owned(&[(&b, "A, saved"), (&a, "B"), (&f, "E, saved"), (&e, "F")])
         );
     }
 
@@ -3845,18 +4063,12 @@ mod tests {
     fn an_edit_refresh_read_before_a_rename_leaves_the_renamed_tracks_alone() {
         let _guard = test_guard();
         let (a, b) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/b.flac"));
-        let mut runtime = stale_refresh_runtime(&[(&a, "First"), (&b, "Second")]);
+        let mut runtime = stale_refresh_runtime(&[(&a, "First"), (&b, "Second")], &[]);
         let (event_tx, _event_rx) = unbounded();
         let refreshes = gated_refreshes(&mut runtime);
         refreshes.set(&[(&a, "First, edited"), (&b, "Second")]);
 
-        runtime.handle_wake(
-            BridgeLoopWake::Command(BridgeCommand::Library(
-                BridgeLibraryCommand::RefreshEditedPaths(vec![a.clone()]),
-            )),
-            &event_tx,
-        );
-        assert_eq!(refreshes.wait_for_read(), vec![a.clone()]);
+        save(&mut runtime, &refreshes, &[&a], &event_tx);
         refreshes.release.send(()).expect("release the read");
         // The read is done before the files swap names, and its result
         // reaches the bridge after the rename.
@@ -3865,31 +4077,15 @@ mod tests {
             .results
             .recv_timeout(Duration::from_secs(10))
             .expect("refresh result");
-        refreshes.set(&[(&a, "Second"), (&b, "First, edited")]);
-        let _ = runtime.apply_renamed_paths(
-            1,
-            Arc::new(PathRenames::from([
-                (a.clone(), b.clone()),
-                (b.clone(), a.clone()),
-            ])),
-            imports::RenamedDetails {
-                indexed: HashMap::from([
-                    (a.clone(), indexed_titled("Second")),
-                    (b.clone(), indexed_titled("First, edited")),
-                ]),
-                ..imports::RenamedDetails::default()
-            },
-            &event_tx,
+        rename_on_disk(
+            &runtime,
+            &refreshes,
+            &[(&a, &b), (&b, &a)],
+            &[(&a, "Second"), (&b, "First, edited")],
         );
+        apply_next_import_result(&mut runtime, &event_tx);
         runtime.handle_wake(BridgeLoopWake::EditsRefreshed(stale), &event_tx);
-        assert_eq!(
-            library_titles(&runtime),
-            HashMap::from([
-                (a.clone(), "Second".to_string()),
-                (b.clone(), "First, edited".to_string()),
-            ])
-        );
-        finish_edit_refreshes(&mut runtime, &refreshes, &event_tx);
+        assert!(runtime.edit_refreshes.is_idle());
 
         assert_eq!(
             library_titles(&runtime),
