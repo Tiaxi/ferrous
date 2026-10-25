@@ -24,7 +24,7 @@ use super::clock::{self, MonotonicClock, MonotonicTime};
 use super::queue::{
     same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff, ManualMove,
 };
-use super::source_activation::{activate_sources, connect_type_finding_hold};
+use super::source_activation::SourceActivation;
 use super::{
     PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
     PlaybackSnapshot, PlaybackState, RepeatMode, TrackChangeKind,
@@ -313,6 +313,9 @@ struct GstPlaybackRuntime {
     /// Shared with the about-to-finish callback and the probes on the
     /// outputs of the pipeline's sources; see `InputSwitches`.
     input_switches: Arc<InputSwitches>,
+    /// Shared with the about-to-finish callback, which activates the
+    /// successor's source in it; see `SourceActivation`.
+    source_activation: Arc<SourceActivation>,
     #[cfg(test)]
     about_to_finish: Arc<AboutToFinishCalls>,
 }
@@ -393,8 +396,9 @@ impl GstPlaybackRuntime {
         stream_durations: Arc<Mutex<StreamDurations>>,
         stream_ends: Arc<Mutex<StreamEndHold>>,
     ) -> Self {
-        // The runtime activates sources only in `activate_sources`.
-        connect_type_finding_hold(&playbin);
+        // The runtime changes the pipeline's state only in
+        // `set_pipeline_state`, which orders it against the type finding.
+        let source_activation = SourceActivation::connect(&playbin);
         Self {
             playbin,
             queue_state,
@@ -434,6 +438,7 @@ impl GstPlaybackRuntime {
             missing_plugin: None,
             missing_on_open: None,
             input_switches: Arc::default(),
+            source_activation,
             #[cfg(test)]
             about_to_finish: Arc::default(),
         }
@@ -1374,14 +1379,18 @@ impl GstPlaybackRuntime {
         }
     }
 
-    /// Change the state of the pipeline, which activates the sources of a
-    /// new run (see `activate_sources`), or ends the run at Ready or Null
+    /// Change the state of the pipeline once no source finds the type of
+    /// its file, which also holds back the type finding of the sources of a
+    /// new run (see `SourceActivation`), or end the run at Ready or Null
     /// (see `InputSwitches::end_run`).
     fn set_pipeline_state(
         &self,
         state: gst::State,
     ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
-        let change = || activate_sources(|| self.playbin.set_state(state));
+        let change = || {
+            self.source_activation
+                .change_state(|| self.playbin.set_state(state))
+        };
         if state <= gst::State::Ready {
             self.input_switches.end_run(change)
         } else {
@@ -2304,6 +2313,7 @@ fn connect_about_to_finish(runtime: &GstPlaybackRuntime) {
     let stream_durations = Arc::clone(&runtime.stream_durations);
     let analysis_tx = runtime.analysis_tx.clone();
     let input_switches = Arc::clone(&runtime.input_switches);
+    let source_activation = Arc::clone(&runtime.source_activation);
     #[cfg(test)]
     let calls = Arc::clone(&runtime.about_to_finish);
     // Runs on a streaming thread once the pipeline has read all of the
@@ -2322,7 +2332,7 @@ fn connect_about_to_finish(runtime: &GstPlaybackRuntime) {
                 let handed_over = input_switches.hand_over(|| {
                     stage_successor(&queue_state, &stream_durations, &analysis_tx, |uri| {
                         // Activates the successor's source.
-                        activate_sources(|| playbin.set_property("uri", uri));
+                        source_activation.hand_over(|| playbin.set_property("uri", uri));
                     })
                 });
                 if let Some(stream) = handed_over.flatten() {
@@ -4222,7 +4232,10 @@ mod gst_integration_tests {
 
     impl Drop for TestEngine {
         fn drop(&mut self) {
-            let _ = self.runtime.playbin.set_state(gst::State::Null);
+            let runtime = &self.runtime;
+            let _ = runtime
+                .source_activation
+                .change_state(|| runtime.playbin.set_state(gst::State::Null));
         }
     }
 
@@ -4392,23 +4405,24 @@ mod gst_integration_tests {
             .expect("playbin3");
         configure_playbin_buffering(&playbin);
         install_raw_surround_source_probe(&playbin);
-        connect_type_finding_hold(&playbin);
+        let activation = SourceActivation::connect(&playbin);
+        let set_state = |state| activation.change_state(|| playbin.set_state(state));
         playbin.set_property("audio-sink", &make_full_analysis_sink());
         let trace = PipelineTrace::new(&playbin);
 
-        let _ = playbin.set_state(gst::State::Ready);
+        let _ = set_state(gst::State::Ready);
         let uri = file_uri(test_path).expect("file_uri");
         playbin.set_property("uri", &uri);
-        activate_sources(|| playbin.set_state(gst::State::Playing)).expect("set_state(Playing)");
+        set_state(gst::State::Playing).expect("set_state(Playing)");
 
         match wait_for_playing_or_error(&playbin, &trace, 5) {
             Ok(()) => {}
             Err(e) => {
-                let _ = playbin.set_state(gst::State::Null);
+                let _ = set_state(gst::State::Null);
                 panic!("{e}");
             }
         }
-        let _ = playbin.set_state(gst::State::Null);
+        let _ = set_state(gst::State::Null);
         std::fs::remove_file(test_path).unwrap();
     }
 }
@@ -4799,6 +4813,8 @@ mod engine_tests {
         playbin: gst::Element,
         /// The engine's queue, to seed its shuffle.
         queue: Arc<Mutex<GaplessQueue>>,
+        /// The engine's order of type finding and state changes.
+        activation: Arc<SourceActivation>,
         snapshot: PlaybackSnapshot,
         snapshots: Vec<PlaybackSnapshot>,
         changes: Vec<Change>,
@@ -4827,6 +4843,7 @@ mod engine_tests {
             runtime.clock = clock;
             let playbin = runtime.playbin.clone();
             let queue = Arc::clone(&runtime.queue_state);
+            let activation = Arc::clone(&runtime.source_activation);
             let trace = Trace::new(&runtime);
             let (commands, command_rx) = unbounded();
             std::thread::spawn(move || run_gst_engine(runtime, &bus, &command_rx));
@@ -4836,6 +4853,7 @@ mod engine_tests {
                 analysis,
                 playbin,
                 queue,
+                activation,
                 snapshot: PlaybackSnapshot::default(),
                 snapshots: Vec::new(),
                 changes: Vec::new(),
@@ -6342,7 +6360,10 @@ mod engine_tests {
 
     impl Drop for DirectEngine {
         fn drop(&mut self) {
-            let _ = self.runtime.playbin.set_state(gst::State::Null);
+            let runtime = &self.runtime;
+            let _ = runtime
+                .source_activation
+                .change_state(|| runtime.playbin.set_state(gst::State::Null));
         }
     }
 
@@ -6933,6 +6954,146 @@ mod engine_tests {
             *second.lock().unwrap(),
             Some(ActivationRace::TypeFindingHeld)
         );
+    }
+
+    /// How a state change of the engine met a source that a
+    /// `TypeFoundHold` holds while it finds the type of its file.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TypeFoundRace {
+        /// The state change waited for the type finding to end.
+        StateChangeWaited,
+        /// The state change started, and can reach the `parsebin` that
+        /// `urisourcebin` sets up for the source once it goes on.
+        StateChangeStarted,
+        /// Neither happened within `RACE_TIMEOUT`.
+        Neither,
+    }
+
+    /// How long a `TypeFoundHold` holds a source at most.
+    const RACE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[derive(Default)]
+    struct TypeFoundHoldState {
+        /// The source found the type of its file and waits.
+        reached: bool,
+        /// The test sends the state change.
+        armed: bool,
+        race: Option<TypeFoundRace>,
+    }
+
+    /// Holds the type finder of the source that reads a file in its
+    /// `have-type` signal, before `urisourcebin` sets up a `parsebin` for
+    /// it, and once armed, until the engine's next state change starts or
+    /// waits for it.
+    #[derive(Default)]
+    struct TypeFoundHold {
+        state: Mutex<TypeFoundHoldState>,
+    }
+
+    impl TypeFoundHold {
+        fn new(engine: &Engine, file: &Path) -> Arc<Self> {
+            let hold = Arc::new(Self::default());
+            let uri = file_uri(file).unwrap();
+            let source = Arc::clone(&hold);
+            let playbin = engine.playbin.downgrade();
+            let activation = Arc::clone(&engine.activation);
+            engine
+                .playbin
+                .connect("deep-element-added", false, move |values| {
+                    let bin = values.get(1)?.get::<gst::Element>().ok()?;
+                    let element = values.get(2)?.get::<gst::Element>().ok()?;
+                    let is_source = bin.factory().is_some_and(|f| f.name() == "urisourcebin")
+                        && bin.property::<Option<String>>("uri").as_deref() == Some(&uri);
+                    if !is_source || element.factory().is_none_or(|f| f.name() != "typefind") {
+                        return None;
+                    }
+                    let source = Arc::clone(&source);
+                    let playbin = playbin.clone();
+                    let activation = Arc::clone(&activation);
+                    // Connected before urisourcebin's handler, which sets up
+                    // the parsebin.
+                    element.connect("have-type", false, move |_| {
+                        let playbin = playbin.upgrade()?;
+                        source.hold(&playbin, &activation);
+                        None
+                    });
+                    None
+                });
+            hold
+        }
+
+        fn hold(&self, playbin: &gst::Element, activation: &SourceActivation) {
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.reached {
+                    return;
+                }
+                state.reached = true;
+            }
+            let deadline = Instant::now() + RACE_TIMEOUT;
+            let race = loop {
+                if self.state.lock().unwrap().armed {
+                    if activation.state_change_waits() {
+                        break TypeFoundRace::StateChangeWaited;
+                    }
+                    if (playbin.current_state(), playbin.pending_state())
+                        != (gst::State::Playing, gst::State::VoidPending)
+                    {
+                        break TypeFoundRace::StateChangeStarted;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    break TypeFoundRace::Neither;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            self.state.lock().unwrap().race = Some(race);
+        }
+
+        fn reached(&self) -> bool {
+            self.state.lock().unwrap().reached
+        }
+
+        fn arm(&self) {
+            self.state.lock().unwrap().armed = true;
+        }
+
+        fn race(&self) -> Option<TypeFoundRace> {
+            self.state.lock().unwrap().race
+        }
+    }
+
+    #[test]
+    fn state_changes_wait_for_a_source_that_finds_the_type_of_its_file() {
+        // Once a source has found the type of its file, its streaming thread
+        // sets up a parsebin, which deadlocks with a state change of the
+        // pipeline that reaches the new parsebin (GStreamer issue 4472).
+        // The successor's source finds its type after the handover that
+        // activated it has returned, when the engine can change the
+        // pipeline's state again, as for the seek restart's Playing.
+        let fixtures = Fixtures::new("type-found");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = TypeFoundHold::new(&engine, &b);
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("B's source did not find its type", |_| hold.reached());
+        engine.wait_until("the pipeline did not reach Playing", |engine| {
+            (
+                engine.playbin.current_state(),
+                engine.playbin.pending_state(),
+            ) == (gst::State::Playing, gst::State::VoidPending)
+        });
+        hold.arm();
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("the hold did not end", |_| hold.race().is_some());
+        assert_eq!(hold.race(), Some(TypeFoundRace::StateChangeWaited));
+        engine.wait_until("playback did not pause", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        engine.send(PlaybackCommand::Play);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
     }
 
     /// How long a `SwitchHold` holds the state change it released the

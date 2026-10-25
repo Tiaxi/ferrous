@@ -3,78 +3,237 @@
 //! Activation of the sources of `playbin3` pipelines that cannot deadlock
 //! with their own type finding.
 //!
-//! A `playbin3` pipeline connects `connect_type_finding_hold` and runs each
-//! of its state changes, and each successor it hands over in
-//! about-to-finish, in `activate_sources`. The playback engine does, and so
-//! must every other pipeline whose sources are `urisourcebin`s, tests
-//! included.
+//! A `playbin3` pipeline connects a `SourceActivation`, makes each of its
+//! state changes in `change_state`, and hands over each successor in
+//! about-to-finish in `hand_over`. The playback engine does, and so must
+//! every other pipeline whose sources are `urisourcebin`s, tests included.
+//!
+//! `urisourcebin` starts to find the type of its file while it still changes
+//! state. Once its type finder has found the type, its streaming thread adds
+//! a `parsebin` and changes its state. That deadlocks when another thread
+//! changes the state of the new `parsebin` meanwhile, as a state change of
+//! the pipeline does when it reaches the source: each thread waits for a
+//! lock that the other holds. Under load the threads are slow enough for
+//! that to happen. See
+//! <https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/4472>, open
+//! in 1.28.
+//!
+//! So a source finds the type of its file only while no state change of the
+//! pipeline and no handover is in progress, and a state change starts only
+//! once no source is finding the type of its file.
 
-use std::cell::RefCell;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
+use gst::glib;
 use gst::prelude::*;
 use gstreamer as gst;
 
-thread_local! {
-    /// While the thread runs `activate_sources`, the probes that hold back
-    /// the type finding of the sources it activates.
-    static TYPE_FINDING_HOLDS: RefCell<Option<Vec<(gst::Pad, gst::PadProbeId)>>> =
-        const { RefCell::new(None) };
+/// Orders the type finding of the sources of a `playbin3` pipeline against
+/// the activations of the sources: the pipeline's state changes and the
+/// successors it is handed.
+pub(crate) struct SourceActivation {
+    state: Mutex<ActivationState>,
+    /// Signalled when a source has found the type of its file, or no longer
+    /// finds it.
+    found: Condvar,
 }
 
-/// Run `activate`, which can activate sources of a pipeline that
-/// `connect_type_finding_hold` was connected to: a state change of the
-/// pipeline, or a successor handed over. The sources find the type
-/// of their files only once it has returned.
-///
-/// `urisourcebin` starts to find the type of its file while it still changes
-/// state. Its streaming thread then adds a `parsebin` and changes its state,
-/// which deadlocks when the activating thread changes the state of the new
-/// `parsebin` too: each waits for a lock that the other holds. Under load
-/// the activating thread is slow enough for that to happen. See
-/// <https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/4472>, open
-/// in 1.28.
-pub(crate) fn activate_sources<R>(activate: impl FnOnce() -> R) -> R {
-    let outer = TYPE_FINDING_HOLDS.with(|holds| holds.replace(Some(Vec::new())));
-    let result = activate();
-    let holds = TYPE_FINDING_HOLDS.with(|holds| holds.replace(outer));
-    for (pad, probe) in holds.into_iter().flatten() {
-        pad.remove_probe(probe);
+#[derive(Default)]
+struct ActivationState {
+    /// State changes and handovers in progress.
+    activations: usize,
+    /// The source pads of type finders held at the start of their stream,
+    /// before they find the type, with the probes that hold them, until no
+    /// activation is in progress.
+    held: Vec<(gst::Pad, gst::PadProbeId)>,
+    /// Type finders that were let go and find the type of their file.
+    finding: Vec<glib::WeakRef<gst::Element>>,
+    /// State changes that wait for the type finding to end.
+    #[cfg(test)]
+    waiting: usize,
+}
+
+impl ActivationState {
+    fn finding(&self) -> bool {
+        self.finding
+            .iter()
+            .any(|typefind| typefind.upgrade().is_some())
     }
-    result
 }
 
-/// Hold back the type finding of every source that `urisourcebin` sets up
-/// in `activate_sources`, until that returns. The type finder of a source
-/// announces the stream before it finds the type, so the probe holds it
-/// there. That holds both when the type finder reads the file itself and
-/// when the file source pushes the file to it, as for a raw surround file
-/// that `raw_audio`'s byte filter offers in push mode only.
-pub(crate) fn connect_type_finding_hold(playbin: &gst::Element) {
-    // Runs on the thread that adds the type finder, before it starts.
-    playbin.connect("deep-element-added", false, |values| {
-        let bin = values.get(1)?.get::<gst::Bin>().ok()?;
-        let element = values.get(2)?.get::<gst::Element>().ok()?;
-        let factory_is = |element: &gst::Element, name: &str| {
-            element
-                .factory()
-                .is_some_and(|factory| factory.name() == name)
-        };
-        if !factory_is(&element, "typefind") || !factory_is(bin.upcast_ref(), "urisourcebin") {
-            return None;
-        }
-        TYPE_FINDING_HOLDS.with(|holds| {
-            let mut holds = holds.borrow_mut();
-            let holds = holds.as_mut()?;
-            let pad = element.static_pad("src")?;
-            let probe = pad.add_probe(
-                gst::PadProbeType::BLOCK | gst::PadProbeType::DATA_DOWNSTREAM,
-                |_, _| gst::PadProbeReturn::Ok,
-            )?;
-            holds.push((pad, probe));
-            Some(())
+impl SourceActivation {
+    /// Order the type finding of every source that `urisourcebin` sets up in
+    /// `playbin`. The type finder of a source announces the stream before it
+    /// finds the type, so a probe holds it there. That holds both when the
+    /// type finder reads the file itself and when the file source pushes the
+    /// file to it, as for a raw surround file that `raw_audio`'s byte filter
+    /// offers in push mode only.
+    pub(crate) fn connect(playbin: &gst::Element) -> Arc<Self> {
+        let activation = Arc::new(Self {
+            state: Mutex::default(),
+            found: Condvar::new(),
         });
-        None
-    });
+        let added = Arc::clone(&activation);
+        // Runs on the thread that adds the type finder, before it starts.
+        playbin.connect("deep-element-added", false, move |values| {
+            added.watch(&source_type_finder(values)?);
+            None
+        });
+        let removed = Arc::clone(&activation);
+        playbin.connect("deep-element-removed", false, move |values| {
+            removed.done(&source_type_finder(values)?);
+            None
+        });
+        activation
+    }
+
+    /// Run `change`, a state change of the pipeline, once no source finds
+    /// the type of its file. Sources that reach their type finding
+    /// meanwhile find it once `change` has returned.
+    ///
+    /// The wait takes as long as finding a type does, a moment for a local
+    /// file: a source that has started to find its type needs no lock that a
+    /// thread outside a state change holds.
+    pub(crate) fn change_state<R>(&self, change: impl FnOnce() -> R) -> R {
+        let mut state = self.lock();
+        state.activations += 1;
+        #[cfg(test)]
+        {
+            state.waiting += 1;
+        }
+        while state.finding() {
+            state = self
+                .found
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        #[cfg(test)]
+        {
+            state.waiting -= 1;
+        }
+        drop(state);
+        self.activated(change)
+    }
+
+    /// Run `hand_over`, which hands the pipeline a successor and activates
+    /// its source. The source finds the type of its file once `hand_over`
+    /// has returned. Unlike a state change, a handover changes the state of
+    /// the successor's source only, so it does not wait for other sources.
+    pub(crate) fn hand_over<R>(&self, hand_over: impl FnOnce() -> R) -> R {
+        self.lock().activations += 1;
+        self.activated(hand_over)
+    }
+
+    /// Run `activate`, counted as an activation in progress, and let the
+    /// held type finders go once no activation is in progress.
+    fn activated<R>(&self, activate: impl FnOnce() -> R) -> R {
+        let result = activate();
+        let released = {
+            let mut state = self.lock();
+            state.activations -= 1;
+            if state.activations == 0 {
+                let held = std::mem::take(&mut state.held);
+                // A type finder that a state change deactivated meanwhile
+                // finds no type.
+                let finding = held
+                    .iter()
+                    .filter(|(pad, _)| pad.is_active())
+                    .filter_map(|(pad, _)| pad.parent_element())
+                    .map(|typefind| typefind.downgrade())
+                    .collect::<Vec<_>>();
+                state.finding.extend(finding);
+                held
+            } else {
+                Vec::new()
+            }
+        };
+        for (pad, probe) in released {
+            pad.remove_probe(probe);
+        }
+        result
+    }
+
+    /// Hold `typefind` at the start of its stream while an activation is in
+    /// progress, and count it as finding the type of its file from then on
+    /// until it has found it or given up.
+    fn watch(self: &Arc<Self>, typefind: &gst::Element) {
+        let Some(src) = typefind.static_pad("src") else {
+            return;
+        };
+        let activation = Arc::clone(self);
+        let weak = typefind.downgrade();
+        src.add_probe(
+            gst::PadProbeType::BLOCK | gst::PadProbeType::DATA_DOWNSTREAM,
+            move |pad, info| {
+                let mut state = activation.lock();
+                if state.activations == 0 {
+                    state.finding.push(weak.clone());
+                    return gst::PadProbeReturn::Remove;
+                }
+                match info.id.take() {
+                    Some(probe) => {
+                        state.held.push((pad.clone(), probe));
+                        gst::PadProbeReturn::Ok
+                    }
+                    None => gst::PadProbeReturn::Pass,
+                }
+            },
+        );
+        // A type finder that finds no type pushes the end of the stream.
+        let activation = Arc::clone(self);
+        let weak = typefind.downgrade();
+        src.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            let eos = matches!(
+                &info.data,
+                Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::Eos
+            );
+            if let Some(typefind) = weak.upgrade().filter(|_| eos) {
+                activation.done(&typefind);
+            }
+            gst::PadProbeReturn::Ok
+        });
+        // After the handler of `urisourcebin`, which sets up the `parsebin`.
+        let activation = Arc::clone(self);
+        typefind.connect("have-type", true, move |values| {
+            activation.done(&values.first()?.get::<gst::Element>().ok()?);
+            None
+        });
+    }
+
+    /// `typefind` has found the type of its file, or no longer finds it.
+    fn done(&self, typefind: &gst::Element) {
+        self.lock().finding.retain(|finding| {
+            finding
+                .upgrade()
+                .is_some_and(|finding| finding != *typefind)
+        });
+        self.found.notify_all();
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ActivationState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether a state change waits for a source to find the type of its
+    /// file.
+    #[cfg(test)]
+    pub(crate) fn state_change_waits(&self) -> bool {
+        self.lock().waiting > 0
+    }
+}
+
+/// The type finder of a `urisourcebin` that a `deep-element-added` or
+/// `deep-element-removed` signal with `values` reports, if it reports one.
+fn source_type_finder(values: &[glib::Value]) -> Option<gst::Element> {
+    let bin = values.get(1)?.get::<gst::Bin>().ok()?;
+    let element = values.get(2)?.get::<gst::Element>().ok()?;
+    let factory_is = |element: &gst::Element, name: &str| {
+        element
+            .factory()
+            .is_some_and(|factory| factory.name() == name)
+    };
+    (factory_is(&element, "typefind") && factory_is(bin.upcast_ref(), "urisourcebin"))
+        .then_some(element)
 }
 
 /// Races the type finding of a source against the thread that activates it,
