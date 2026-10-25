@@ -681,6 +681,7 @@ private slots:
     void queueAutoCenterIsDeferredOffHandlerStack();
     void queueRemovalSendsOneBatch();
     void queueEditsKeepSelectionAndViewport();
+    void queueRemovalsKeepActionsOnHighlightedRows();
     void queueContainIndexSkipsScrollWhenVisible();
     void queueContainIndexScrollsUpWhenAboveViewport();
     void queueContainIndexClampsAtListEnd();
@@ -7856,6 +7857,236 @@ Window {
     rows.setRows(initial);
     QCOMPARE(resets.count(), 1);
     QCOMPARE(selection(), (QList<int>{50}));
+}
+
+void QmlSmokeTest::queueRemovalsKeepActionsOnHighlightedRows() {
+    QueueRowsModel rows;
+    const auto row = [](int number) {
+        QueueRowData data;
+        data.title = QStringLiteral("Track %1").arg(number);
+        data.path = QStringLiteral("/music/%1.flac").arg(number);
+        return data;
+    };
+    const auto load = [&rows, &row](int count) {
+        QVector<QueueRowData> initial;
+        for (int number = 0; number < count; ++number) {
+            initial.push_back(row(number));
+        }
+        rows.setRows(initial);
+    };
+
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+Item {
+    id: harness
+    property var commands: []
+    property alias bridge: bridge
+    property alias controller: controller
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property var queueRows: queueRowsModel
+        property int queueLength: 0
+        property int selectedQueueIndex: -1
+        property int playingQueueIndex: -1
+        property string playbackState: "Stopped"
+        property string currentTrackPath: ""
+        function record(command) { harness.commands = harness.commands.concat([command]) }
+        function selectQueueIndex(index) {
+            if (index < 0 || index === selectedQueueIndex) return
+            selectedQueueIndex = index
+            record("select " + index)
+        }
+        function playAt(index) { record("play " + index) }
+        function removeAt(index) { record("remove " + index) }
+        function removeIndices(indices) { record("remove " + indices.join(",")) }
+        function moveQueue(from, to) { record("move " + from + "," + to) }
+        function clearQueue() { record("clear") }
+        function queuePathAt(index) { return "" }
+    }
+    Controllers.QueueController {
+        id: controller
+        uiBridge: bridge
+        tagEditorApi: null
+        openTagEditorDialog: function() {}
+        autoCenterSelection: false
+    }
+    // The Delete shortcut runs only while something is highlighted.
+    function pressDelete() {
+        if (controller.selectionCount() > 0) controller.removeSelectedTrack()
+    }
+    function pressEnter() {
+        controller.handlePlaylistKeyPress({ key: Qt.Key_Return, modifiers: Qt.NoModifier })
+    }
+    function takeCommands() {
+        const taken = harness.commands.join("; ")
+        harness.commands = []
+        return taken
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *bridge = root->property("bridge").value<QObject *>();
+    QObject *controller = root->property("controller").value<QObject *>();
+    QVERIFY(bridge != nullptr);
+    QVERIFY(controller != nullptr);
+
+    const auto selection = [controller]() {
+        QList<int> indices;
+        for (const QVariant &value : controller->property("selectedIndices").toList()) {
+            indices.push_back(value.toInt());
+        }
+        return indices;
+    };
+    const auto call = [&root](const char *method) {
+        QVERIFY(QMetaObject::invokeMethod(root.data(), method));
+    };
+    const auto takeCommands = [&root]() {
+        QVariant taken;
+        QMetaObject::invokeMethod(root.data(), "takeCommands", Q_RETURN_ARG(QVariant, taken));
+        return taken.toString();
+    };
+    const auto titleAt = [&rows](int index) {
+        const QueueRowData *data = rows.rowAt(index);
+        return data != nullptr ? data->title : QString{};
+    };
+    const auto start = [&](int count, const QVariantList &selected, int bridgeSelected) {
+        bridge->setProperty("queueLength", count);
+        bridge->setProperty("selectedQueueIndex", bridgeSelected);
+        load(count);
+        QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
+            Q_ARG(QVariant, QVariant(selected))));
+        controller->setProperty("selectionAnchorIndex", bridgeSelected);
+        QVERIFY(QMetaObject::invokeMethod(controller, "handleBridgeSnapshotUpdate"));
+        takeCommands();
+    };
+    // What the backend sends back for a removal, wherever it came from: the
+    // selection it remapped, in place before the rows change as
+    // BridgeClient does, then the removed ranges last first.
+    const auto backendRemove = [&](QList<int> removed) {
+        std::sort(removed.begin(), removed.end());
+        int length = bridge->property("queueLength").toInt();
+        int selected = bridge->property("selectedQueueIndex").toInt();
+        if (selected >= 0) {
+            const auto below = std::lower_bound(removed.begin(), removed.end(), selected);
+            selected -= static_cast<int>(below - removed.begin());
+            const int remaining = length - static_cast<int>(removed.size());
+            selected = remaining > 0 ? std::min(selected, remaining - 1) : -1;
+        }
+        bridge->setProperty("selectedQueueIndex", selected);
+        for (qsizetype end = removed.size(); end > 0;) {
+            qsizetype first = end - 1;
+            while (first > 0 && removed[first - 1] == removed[first] - 1) {
+                --first;
+            }
+            const int count = static_cast<int>(end - first);
+            length -= count;
+            bridge->setProperty("queueLength", length);
+            QVERIFY(rows.removeRowsAt(removed[first], count));
+            end = first;
+        }
+    };
+    const auto snapshotArrives = [controller]() {
+        QVERIFY(QMetaObject::invokeMethod(controller, "handleBridgeSnapshotUpdate"));
+    };
+
+    // Deleting the highlighted row highlights the row that moves into its
+    // place, the one the backend now has selected.
+    start(5, {1}, 1);
+    call("pressDelete");
+    QCOMPARE(takeCommands(), QStringLiteral("remove 1"));
+    // The row stays highlighted until the removal arrives.
+    QCOMPARE(selection(), (QList<int>{1}));
+    backendRemove({1});
+    QCOMPARE(selection(), (QList<int>{1}));
+    QCOMPARE(titleAt(1), QStringLiteral("Track 2"));
+    // Before the snapshot's notification, Enter and Delete already act on
+    // the highlighted row.
+    call("pressEnter");
+    QCOMPARE(takeCommands(), QStringLiteral("play 1"));
+    snapshotArrives();
+    QCOMPARE(takeCommands(), QString{});
+    QCOMPARE(selection(), (QList<int>{1}));
+    call("pressDelete");
+    QCOMPARE(takeCommands(), QStringLiteral("remove 1"));
+    backendRemove({1});
+    snapshotArrives();
+    QCOMPARE(selection(), (QList<int>{1}));
+    QCOMPARE(titleAt(1), QStringLiteral("Track 3"));
+    QCOMPARE(bridge->property("selectedQueueIndex").toInt(), 1);
+    QCOMPARE(takeCommands(), QString{});
+
+    // Deleting the last row highlights the new last row.
+    start(3, {2}, 2);
+    call("pressDelete");
+    backendRemove({2});
+    QCOMPARE(selection(), (QList<int>{1}));
+    snapshotArrives();
+    QCOMPARE(takeCommands(), QStringLiteral("remove 2"));
+    QCOMPARE(bridge->property("selectedQueueIndex").toInt(), 1);
+
+    // Deleting a multi-selection highlights the row that moves into the
+    // place of the first one, and the backend is told so.
+    start(6, {1, 3}, 3);
+    call("pressDelete");
+    QCOMPARE(takeCommands(), QStringLiteral("remove 3,1"));
+    backendRemove({1, 3});
+    QCOMPARE(selection(), (QList<int>{1}));
+    QCOMPARE(titleAt(1), QStringLiteral("Track 2"));
+    call("pressEnter");
+    QCOMPARE(takeCommands(), QStringLiteral("play 1"));
+    snapshotArrives();
+    QCOMPARE(takeCommands(), QStringLiteral("select 1"));
+
+    // A removal from elsewhere of one row of a multi-selection keeps the
+    // rest. The backend's selection was that row, so it moved to a row
+    // that is not highlighted; moving acts on a highlighted row anyway.
+    start(10, {2, 5, 7}, 5);
+    backendRemove({5});
+    QCOMPARE(selection(), (QList<int>{2, 6}));
+    QCOMPARE(bridge->property("selectedQueueIndex").toInt(), 5);
+    QVERIFY(QMetaObject::invokeMethod(controller, "moveSelected", Q_ARG(QVariant, 1)));
+    QCOMPARE(takeCommands(), QStringLiteral("move 6,7"));
+    snapshotArrives();
+    QCOMPARE(takeCommands(), QStringLiteral("select 6"));
+    QCOMPARE(selection(), (QList<int>{2, 6}));
+    call("pressDelete");
+    QCOMPARE(takeCommands(), QStringLiteral("remove 6,2"));
+
+    // A removal elsewhere keeps the selection on its rows.
+    start(6, {3}, 3);
+    backendRemove({0});
+    QCOMPARE(selection(), (QList<int>{2}));
+    QCOMPARE(titleAt(2), QStringLiteral("Track 3"));
+    snapshotArrives();
+    QCOMPARE(takeCommands(), QString{});
+    QCOMPARE(bridge->property("selectedQueueIndex").toInt(), 2);
+
+    // A move from elsewhere carries the highlighted row and the backend's
+    // selection along together.
+    start(6, {1}, 1);
+    bridge->setProperty("selectedQueueIndex", 4);
+    QVERIFY(rows.moveRow(1, 4));
+    QCOMPARE(selection(), (QList<int>{4}));
+    snapshotArrives();
+    QCOMPARE(takeCommands(), QString{});
+    call("pressEnter");
+    QCOMPARE(takeCommands(), QStringLiteral("play 4"));
+
+    // With nothing highlighted, Delete and Enter do nothing, whatever the
+    // backend last had selected.
+    start(4, {}, 2);
+    QCOMPARE(selection(), QList<int>{});
+    call("pressDelete");
+    call("pressEnter");
+    QVERIFY(QMetaObject::invokeMethod(controller, "moveSelected", Q_ARG(QVariant, 1)));
+    QCOMPARE(takeCommands(), QString{});
 }
 
 void QmlSmokeTest::queueAutoCenterIsDeferredOffHandlerStack() {

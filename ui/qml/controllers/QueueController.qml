@@ -15,6 +15,7 @@ QtObject {
     property var selectedIndexLookup: ({})
     property int selectionAnchorIndex: -1
     property int lastSyncedBridgeSelectedIndex: -2
+    property bool _rowsChangedSinceSync: false
     property int lastCenteredIndex: -2
     property string lastAutoCenterPlaybackState: ""
     property string lastAutoCenterTrackPath: ""
@@ -38,16 +39,27 @@ QtObject {
             root._remapSelection(function(index) {
                 return index >= first ? index + count : index
             })
+            root._rowsChangedSinceSync = true
         }
 
         function onRowsRemoved(parent, first, last) {
             const count = last - first + 1
+            const hadSelection = root.selectedIndices.length > 0
             root._remapSelection(function(index) {
                 if (index < first) {
                     return index
                 }
                 return index > last ? index - count : -1
             })
+            // When the last highlighted row goes, the row that moves into
+            // its place is highlighted, as the backend selects it.
+            if (hadSelection && root.selectedIndices.length === 0
+                    && root.uiBridge.queueLength > 0) {
+                const next = Math.min(first, root.uiBridge.queueLength - 1)
+                root.setSelectedIndices([next])
+                root.selectionAnchorIndex = next
+            }
+            root._rowsChangedSinceSync = true
         }
 
         // Rows start..end moved before the row that was at `row`.
@@ -66,6 +78,7 @@ QtObject {
                 }
                 return index
             })
+            root._rowsChangedSinceSync = true
         }
 
         function onModelReset() {
@@ -126,14 +139,37 @@ QtObject {
     }
 
     function selectionCount() {
-        if (root.selectedIndices.length > 0) {
-            return root.selectedIndices.length
-        }
-        return root.uiBridge.selectedQueueIndex >= 0 ? 1 : 0
+        return root.selectedIndices.length
     }
 
     function isIndexSelected(index) {
         return !!root.selectedIndexLookup[index]
+    }
+
+    // The highlighted row that single-row actions use: the backend's
+    // selection when it is highlighted, otherwise the first highlighted
+    // row after it, or the last one before it.
+    function primarySelectedIndex() {
+        const selected = root.uiBridge.selectedQueueIndex
+        if (root.isIndexSelected(selected)) {
+            return selected
+        }
+        let after = -1
+        let before = -1
+        for (let i = 0; i < root.selectedIndices.length; ++i) {
+            const idx = root.selectedIndices[i]
+            if (!root.isIndexSelected(idx)) {
+                continue
+            }
+            if (idx >= selected) {
+                if (after < 0 || idx < after) {
+                    after = idx
+                }
+            } else if (idx > before) {
+                before = idx
+            }
+        }
+        return after >= 0 ? after : before
     }
 
     function setSelectedIndices(indices) {
@@ -301,16 +337,19 @@ QtObject {
         if (root.uiBridge.queueLength <= 0) {
             return
         }
-        const current = root.uiBridge.selectedQueueIndex >= 0
-            ? root.uiBridge.selectedQueueIndex
-            : root.uiBridge.playingQueueIndex
+        const primary = root.primarySelectedIndex()
+        const current = primary >= 0
+            ? primary
+            : (root.uiBridge.selectedQueueIndex >= 0
+                ? root.uiBridge.selectedQueueIndex
+                : root.uiBridge.playingQueueIndex)
         const base = current >= 0 ? current : 0
         const nextIdx = Math.max(0, Math.min(root.uiBridge.queueLength - 1, base + delta))
         root.setSingleSelection(nextIdx)
     }
 
     function moveSelected(delta) {
-        const from = root.uiBridge.selectedQueueIndex
+        const from = root.primarySelectedIndex()
         if (from < 0 || root.uiBridge.queueLength <= 0) {
             return
         }
@@ -351,14 +390,7 @@ QtObject {
                 first = idx
             }
         }
-        if (first >= 0) {
-            return first
-        }
-        if (root.uiBridge.selectedQueueIndex >= 0
-                && root.uiBridge.selectedQueueIndex < root.uiBridge.queueLength) {
-            return root.uiBridge.selectedQueueIndex
-        }
-        return -1
+        return first
     }
 
     function playFirstSelectedTrack() {
@@ -437,9 +469,12 @@ QtObject {
             return
         }
 
-        const current = root.uiBridge.selectedQueueIndex >= 0
-            ? root.uiBridge.selectedQueueIndex
-            : (root.uiBridge.playingQueueIndex >= 0 ? root.uiBridge.playingQueueIndex : 0)
+        const primary = root.primarySelectedIndex()
+        const current = primary >= 0
+            ? primary
+            : (root.uiBridge.selectedQueueIndex >= 0
+                ? root.uiBridge.selectedQueueIndex
+                : (root.uiBridge.playingQueueIndex >= 0 ? root.uiBridge.playingQueueIndex : 0))
         const next = Math.max(0, Math.min(root.uiBridge.queueLength - 1, current + delta))
         if (shift) {
             root.setRangeSelection(next)
@@ -450,31 +485,43 @@ QtObject {
         event.accepted = true
     }
 
+    // Removes the highlighted rows. They stay highlighted until the
+    // backend's removal arrives, which then selects the row that moves into
+    // their place.
     function removeSelectedTrack() {
-        if (root.selectedIndices.length > 0) {
-            const indices = root.selectedIndices.slice()
-            indices.sort(function(a, b) { return b - a })
-            if (root.uiBridge.queueLength > 0 && indices.length >= root.uiBridge.queueLength) {
-                root.uiBridge.clearQueue()
-                root.setSelectedIndices([])
-                root.selectionAnchorIndex = -1
-                return
-            }
-            root.uiBridge.removeIndices(indices)
+        if (root.selectedIndices.length === 0) {
+            return
+        }
+        const indices = root.selectedIndices.slice()
+        indices.sort(function(a, b) { return b - a })
+        if (root.uiBridge.queueLength > 0 && indices.length >= root.uiBridge.queueLength) {
+            root.uiBridge.clearQueue()
             root.setSelectedIndices([])
             root.selectionAnchorIndex = -1
             return
         }
-        if (root.uiBridge.selectedQueueIndex >= 0) {
-            root.uiBridge.removeAt(root.uiBridge.selectedQueueIndex)
-        }
+        root.uiBridge.removeIndices(indices)
     }
 
     function handleBridgeSnapshotUpdate() {
         if (root.uiBridge.selectedQueueIndex !== root.lastSyncedBridgeSelectedIndex) {
             root.syncSelectionToCurrentQueue()
-            root.lastSyncedBridgeSelectedIndex = root.uiBridge.selectedQueueIndex
         }
+        // An edit can remove the backend's selected row while other
+        // highlighted rows survive; the backend then selects a row that is
+        // not highlighted. The rows have their new revision by now, so the
+        // selection command names the row the user sees.
+        if (root._rowsChangedSinceSync) {
+            root._rowsChangedSinceSync = false
+            const primary = root.primarySelectedIndex()
+            if (primary >= 0 && primary !== root.uiBridge.selectedQueueIndex) {
+                root.uiBridge.selectQueueIndex(primary)
+            }
+            if (primary >= 0 && root.selectionAnchorIndex < 0) {
+                root.selectionAnchorIndex = primary
+            }
+        }
+        root.lastSyncedBridgeSelectedIndex = root.uiBridge.selectedQueueIndex
     }
 
     function initializeFromBridge() {
