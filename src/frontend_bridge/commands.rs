@@ -1100,7 +1100,7 @@ pub(super) fn apply_edited_details(
 pub(super) fn refresh_renamed_paths(
     state: &mut BridgeState,
     rename_map: Arc<PathRenames>,
-    details: RenamedDetails,
+    mut details: RenamedDetails,
     playback: &PlaybackEngine,
     analysis: &AnalysisEngine,
     metadata: &MetadataService,
@@ -1109,12 +1109,12 @@ pub(super) fn refresh_renamed_paths(
     if rename_map.is_empty() {
         return false;
     }
-    if let Some(problem) = details.problem {
+    if let Some(problem) = details.problem.take() {
         let _ = try_send_event(event_tx, BridgeEvent::Error(problem));
     }
 
     let mut changed = false;
-    changed |= apply_renamed_library_paths(state, &rename_map, &details.indexed);
+    changed |= apply_renamed_library_paths(state, &rename_map, &details);
     changed |= apply_renamed_queue_paths(state, &rename_map, &details.indexed, metadata);
     changed |= update_queue_track_details(state, &details.indexed, &details.fingerprints);
     sync_queue_details(state);
@@ -1131,24 +1131,37 @@ pub(super) fn refresh_renamed_paths(
 
 /// Move the library's renamed tracks to their new paths, in one pass that
 /// finds them through the path index. A renamed track goes to its new
-/// path's place in the library's order. The library is copied only if a
-/// track changes.
+/// path's place in the library's order, unless the path is gone. The library
+/// is copied only if a track changes.
 fn apply_renamed_library_paths(
     state: &mut BridgeState,
     rename_map: &PathRenames,
-    indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
+    details: &RenamedDetails,
 ) -> bool {
     let new_paths: HashSet<&PathBuf> = rename_map.values().collect();
     let mut changes = crate::library::LibraryChanges::default();
     for (old_path, new_path) in rename_map {
-        let indexed = indexed_by_path.get(new_path);
+        let indexed = details.indexed.get(new_path);
+        let gone = details.gone.contains(new_path);
         let Some(position) = state.library_index.position(&state.library, old_path) else {
             continue;
         };
         let track = &state.library.tracks[position];
         if &track.path == new_path
+            && !gone
             && !indexed.is_some_and(|indexed| track_details_differ(track, indexed))
         {
+            continue;
+        }
+        if gone {
+            // A read after the rename found the file gone again.
+            if !new_paths.contains(old_path) {
+                changes.removed.push(old_path.clone());
+            }
+            changes.removed.push(new_path.clone());
+            state
+                .library_rows_to_read
+                .extend([old_path.clone(), new_path.clone()]);
             continue;
         }
         let mut renamed = (**track).clone();
@@ -1165,7 +1178,7 @@ fn apply_renamed_library_paths(
             .library_rows_to_read
             .extend([old_path.clone(), new_path.clone()]);
     }
-    if changes.upserted.is_empty() {
+    if changes.upserted.is_empty() && changes.removed.is_empty() {
         return false;
     }
     state.apply_library_changes(&changes).changed
@@ -2524,7 +2537,7 @@ mod tests {
         assert!(!apply_renamed_library_paths(
             &mut state,
             &renames,
-            &HashMap::new()
+            &RenamedDetails::default()
         ));
         let allocations = crate::test_alloc::allocations() - before;
         assert!(allocations < 16, "{allocations} allocations");
@@ -2555,7 +2568,7 @@ mod tests {
         assert!(apply_renamed_library_paths(
             &mut state,
             &renames,
-            &HashMap::new()
+            &RenamedDetails::default()
         ));
         assert_eq!(state.library_rows_to_read, [inside, renamed]);
     }

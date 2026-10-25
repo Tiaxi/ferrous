@@ -13,7 +13,9 @@ use crossbeam_channel::Sender;
 use rusqlite::Connection;
 
 use super::schema::load_snapshot;
-use super::{LibraryEvent, LibraryRoot, LibrarySnapshot, LibraryStatus, LibraryTrack};
+use super::{
+    next_file_sequence, LibraryEvent, LibraryRoot, LibrarySnapshot, LibraryStatus, LibraryTrack,
+};
 
 /// Changes to the library's roots and tracks. A path is either upserted or
 /// removed, never both.
@@ -215,6 +217,8 @@ struct Pending {
     upserted: Vec<PathBuf>,
     upserted_set: HashSet<PathBuf>,
     removed: HashSet<PathBuf>,
+    /// The [`WorkerLibrary::reads_after`] number of the first change.
+    read_after: Option<u64>,
 }
 
 impl Pending {
@@ -242,6 +246,9 @@ pub(super) struct WorkerLibrary {
     pending: Pending,
     /// The status of the previous event, if there was one.
     published_status: Option<LibraryStatus>,
+    /// The [`next_file_sequence`] number taken before the reads of the
+    /// command running began; see [`Self::begin_reads`].
+    reads_after: u64,
 }
 
 impl WorkerLibrary {
@@ -258,6 +265,15 @@ impl WorkerLibrary {
         &self.snapshot.tracks
     }
 
+    /// Takes the number that the changes made from now on are published
+    /// as read after. Called when a command begins, before it reads
+    /// anything, and not again during it: a scan's reads run ahead of the
+    /// rows it records, and the commands run between its files publish with
+    /// those rows.
+    pub(super) fn begin_reads(&mut self) {
+        self.reads_after = next_file_sequence();
+    }
+
     pub(super) fn roots(&self) -> &[LibraryRoot] {
         &self.snapshot.roots
     }
@@ -267,6 +283,7 @@ impl WorkerLibrary {
             self.snapshot.roots = roots;
             self.snapshot.bump_search_revision();
             self.pending.roots = true;
+            self.note_change();
         }
     }
 
@@ -294,6 +311,13 @@ impl WorkerLibrary {
             self.snapshot.tracks.push(track);
         }
         self.snapshot.bump_search_revision();
+        self.note_change();
+    }
+
+    /// Notes that a change is pending. The changes of earlier commands that
+    /// are still pending were read after a lower number.
+    fn note_change(&mut self) {
+        self.pending.read_after.get_or_insert(self.reads_after);
     }
 
     /// Changes the track at `path`, if there is one.
@@ -322,6 +346,7 @@ impl WorkerLibrary {
         for path in &removed {
             self.pending.removed(path);
         }
+        self.note_change();
         self.reindex();
         self.snapshot.bump_search_revision();
     }
@@ -364,6 +389,7 @@ impl WorkerLibrary {
                     self.remove_where(|track| track.path == *path);
                 } else {
                     self.pending.removed(path);
+                    self.note_change();
                 }
             }
         }
@@ -373,7 +399,9 @@ impl WorkerLibrary {
         Ok(())
     }
 
-    fn take_changes(&mut self) -> LibraryChanges {
+    /// The changes since the previous event, and the number they were read
+    /// after.
+    fn take_changes(&mut self) -> (LibraryChanges, u64) {
         let pending = std::mem::take(&mut self.pending);
         let mut upserted_set = pending.upserted_set;
         let upserted = pending
@@ -388,17 +416,18 @@ impl WorkerLibrary {
             .collect();
         let mut removed: Vec<PathBuf> = pending.removed.into_iter().collect();
         removed.sort_unstable();
-        LibraryChanges {
+        let changes = LibraryChanges {
             roots: pending.roots.then(|| self.snapshot.roots.clone()),
             upserted,
             removed,
-        }
+        };
+        (changes, pending.read_after.unwrap_or(self.reads_after))
     }
 
     /// Sends the changes since the previous event with the status, unless
     /// there are none and the status is the same.
     pub(super) fn publish(&mut self, event_tx: &Sender<LibraryEvent>) {
-        let changes = self.take_changes();
+        let (changes, read_after) = self.take_changes();
         if changes.is_empty() && self.published_status.as_ref() == Some(&self.status) {
             return;
         }
@@ -406,6 +435,7 @@ impl WorkerLibrary {
         let _ = event_tx.send(LibraryEvent {
             changes,
             status: self.status.clone(),
+            read_after,
         });
     }
 }

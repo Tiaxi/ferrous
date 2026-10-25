@@ -14,16 +14,21 @@
 //! number may have read a file before it moved, and is ignored for the
 //! rename's paths. Which order the bridge handles the rename notification,
 //! the save's command, and the refresh's result in does not matter.
+//!
+//! The library worker's events are numbered from the same sequence, before
+//! their rows were read, so a library row read after a rename also wins over
+//! the rename's row, and over a refresh row the bridge applied before it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
-use super::imports::{next_file_sequence, RenamedDetails};
+use super::imports::RenamedDetails;
 use crate::library::{
-    refresh_indexed_metadata_for_paths, track_file_fingerprint, IndexedTrack, TrackFileFingerprint,
-    TrackRefresh,
+    next_file_sequence, refresh_indexed_metadata_for_paths, track_file_fingerprint, IndexedTrack,
+    LibraryChanges, LibraryTrack, TrackFileFingerprint, TrackRefresh,
 };
 use crate::playback::PathRenames;
 
@@ -50,11 +55,23 @@ pub(super) struct AcceptedRefresh {
     pub(super) problem: Option<String>,
 }
 
-/// A row a refresh read, with the sequence number it was read after.
-struct AcceptedRow {
+/// A row the bridge applied to a path, with the sequence number it was read
+/// after.
+struct AppliedRow {
     sequence: u64,
-    indexed: IndexedTrack,
-    fingerprint: Option<TrackFileFingerprint>,
+    row: Row,
+}
+
+enum Row {
+    /// A refresh read the file, in this state.
+    Refreshed {
+        indexed: IndexedTrack,
+        fingerprint: Option<TrackFileFingerprint>,
+    },
+    /// A library event had this row.
+    Library(Arc<LibraryTrack>),
+    /// A library event removed the path.
+    Removed,
 }
 
 pub(super) struct EditRefreshWorker {
@@ -67,9 +84,12 @@ pub(super) struct EditRefreshWorker {
     /// For each path with a refresh in flight, the lowest sequence number
     /// of a result that may update it.
     current_from: HashMap<PathBuf, u64>,
-    /// The rows accepted while a rename notification may still be on its
-    /// way, for renames numbered below them; see [`Self::renamed`].
-    accepted: HashMap<PathBuf, AcceptedRow>,
+    /// The rows applied while a rename notification may still be on its
+    /// way, for renames numbered below them; see [`Self::renamed`]. In the
+    /// order they were applied; a row is dropped once a row read after a
+    /// number as high as its own is applied after it, since that row is
+    /// newer than every rename the dropped one is.
+    applied: HashMap<PathBuf, Vec<AppliedRow>>,
 }
 
 impl EditRefreshWorker {
@@ -115,16 +135,16 @@ impl EditRefreshWorker {
             last_requested: 0,
             last_accepted: 0,
             current_from: HashMap::new(),
-            accepted: HashMap::new(),
+            applied: HashMap::new(),
         }
     }
 
     /// Start a new worker in place of one that stopped. Its requests are
-    /// lost; the rows it accepted are kept for renames still on their way.
+    /// lost; the rows applied are kept for renames still on their way.
     pub(super) fn restart(&mut self) {
-        let accepted = std::mem::take(&mut self.accepted);
+        let applied = std::mem::take(&mut self.applied);
         *self = Self::new();
-        self.accepted = accepted;
+        self.applied = applied;
     }
 
     /// Ask for `paths` to be read again. Returns the request's sequence
@@ -148,9 +168,11 @@ impl EditRefreshWorker {
     ///   for before the rename may have read another file, or none, so it is
     ///   ignored. One asked for after the rename read the files later, so it
     ///   stands and updates the renamed track when it arrives.
-    /// - A row already accepted for a new path from a read after the rename
-    ///   is newer than the rename's own, so it replaces the rename's row in
-    ///   `details`.
+    /// - A row already applied for a new path from a read after the rename,
+    ///   by a refresh or a library event, is newer than the rename's own, so
+    ///   it replaces the rename's row in `details`. Of several, the one
+    ///   applied last does, as the library shows it. A path such a read
+    ///   found gone is marked gone.
     pub(super) fn renamed(
         &mut self,
         renames: &PathRenames,
@@ -163,26 +185,66 @@ impl EditRefreshWorker {
             }
         }
         for new_path in renames.values() {
-            let Some(row) = self.accepted.get(new_path) else {
+            // The rows read after higher numbers come first.
+            let Some(applied) = self.applied.get(new_path).and_then(|rows| {
+                rows.iter()
+                    .take_while(|applied| applied.sequence > sequence)
+                    .last()
+            }) else {
                 continue;
             };
-            if row.sequence <= sequence {
-                continue;
-            }
-            details
-                .indexed
-                .insert(new_path.clone(), row.indexed.clone());
-            match row.fingerprint {
+            let (indexed, fingerprint) = match &applied.row {
+                Row::Refreshed {
+                    indexed,
+                    fingerprint,
+                } => (indexed.clone(), *fingerprint),
+                Row::Library(track) => (IndexedTrack::from(&**track), None),
+                Row::Removed => {
+                    details.indexed.remove(new_path);
+                    details.fingerprints.remove(new_path);
+                    details.gone.insert(new_path.clone());
+                    continue;
+                }
+            };
+            details.indexed.insert(new_path.clone(), indexed);
+            match fingerprint {
                 Some(fingerprint) => details.fingerprints.insert(new_path.clone(), fingerprint),
                 None => details.fingerprints.remove(new_path),
             };
         }
     }
 
-    /// Forget the accepted rows: no rename that read the files before them
+    /// The bridge applied `changes`, read after `read_after`, while a rename
+    /// notification may still be on its way.
+    pub(super) fn library_changed(&mut self, changes: &LibraryChanges, read_after: u64) {
+        for track in &changes.upserted {
+            self.keep(
+                track.path.clone(),
+                read_after,
+                Row::Library(Arc::clone(track)),
+            );
+        }
+        for path in &changes.removed {
+            self.keep(path.clone(), read_after, Row::Removed);
+        }
+    }
+
+    fn keep(&mut self, path: PathBuf, sequence: u64, row: Row) {
+        let rows = self.applied.entry(path).or_default();
+        rows.retain(|applied| applied.sequence > sequence);
+        rows.push(AppliedRow { sequence, row });
+    }
+
+    /// Forget the applied rows: no rename that read the files before them
     /// can still arrive.
-    pub(super) fn forget_accepted(&mut self) {
-        self.accepted.clear();
+    pub(super) fn forget_applied(&mut self) {
+        self.applied.clear();
+    }
+
+    /// How many paths have rows kept for renames on their way.
+    #[cfg(test)]
+    pub(super) fn kept_paths(&self) -> usize {
+        self.applied.len()
     }
 
     /// Whether every request has been answered.
@@ -219,10 +281,10 @@ impl EditRefreshWorker {
             }
         }
         for (path, row) in &indexed {
-            self.accepted.insert(
+            self.keep(
                 path.clone(),
-                AcceptedRow {
-                    sequence,
+                sequence,
+                Row::Refreshed {
                     indexed: row.clone(),
                     fingerprint: fingerprints.get(path).copied(),
                 },
@@ -380,7 +442,7 @@ mod tests {
         );
 
         // Rows forgotten once no rename can arrive are not used.
-        worker.forget_accepted();
+        worker.forget_applied();
         let mut details = rename_rows();
         worker.renamed(&renames, renamed_at, &mut details);
         assert_eq!(titles(&details)[Path::new("/m/b.flac")], "a's file");
@@ -401,6 +463,143 @@ mod tests {
             &mut details,
         );
         assert_eq!(titles(&details)[Path::new("/m/b.flac")], "renamed");
+    }
+
+    fn library_rows(upserted: &[(&str, &str)], removed: &[&str]) -> LibraryChanges {
+        LibraryChanges {
+            roots: None,
+            upserted: upserted
+                .iter()
+                .map(|(path, title)| {
+                    Arc::new(LibraryTrack {
+                        path: PathBuf::from(path),
+                        title: (*title).to_string(),
+                        ..LibraryTrack::default()
+                    })
+                })
+                .collect(),
+            removed: removed.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    fn fingerprint(mtime_ns: i64) -> TrackFileFingerprint {
+        TrackFileFingerprint {
+            mtime_ns,
+            size_bytes: 1,
+        }
+    }
+
+    #[test]
+    fn a_library_row_read_after_a_rename_wins_over_older_rows() {
+        let renamed_at = next_file_sequence();
+        let renames = swap("/m/a.flac", "/m/b.flac");
+        let rename_rows = || RenamedDetails {
+            indexed: HashMap::from([
+                (PathBuf::from("/m/a.flac"), indexed("b's file")),
+                (PathBuf::from("/m/b.flac"), indexed("a's file")),
+            ]),
+            fingerprints: HashMap::from([(PathBuf::from("/m/b.flac"), fingerprint(1))]),
+            ..RenamedDetails::default()
+        };
+
+        // A save of b is applied, then a scan's newer row for it.
+        let mut worker = idle_worker();
+        let saved = request(&mut worker, &["/m/b.flac"]);
+        let mut refreshed = result(saved, &[("/m/b.flac", "a's file, saved")]);
+        refreshed
+            .fingerprints
+            .insert(PathBuf::from("/m/b.flac"), fingerprint(2));
+        let _ = worker.accept(refreshed);
+        worker.library_changed(
+            &library_rows(&[("/m/b.flac", "a's file, scanned")], &[]),
+            next_file_sequence(),
+        );
+        let mut details = rename_rows();
+        worker.renamed(&renames, renamed_at, &mut details);
+        assert_eq!(
+            titles(&details),
+            HashMap::from([
+                (Path::new("/m/a.flac"), "b's file"),
+                (Path::new("/m/b.flac"), "a's file, scanned"),
+            ])
+        );
+        // The scan did not stat the file.
+        assert!(details.fingerprints.is_empty());
+
+        // A scan's row without a save wins over the rename's own.
+        let mut worker = idle_worker();
+        worker.library_changed(
+            &library_rows(&[("/m/a.flac", "b's file, scanned")], &[]),
+            next_file_sequence(),
+        );
+        let mut details = rename_rows();
+        worker.renamed(&renames, renamed_at, &mut details);
+        assert_eq!(
+            titles(&details)[Path::new("/m/a.flac")],
+            "b's file, scanned"
+        );
+    }
+
+    #[test]
+    fn a_library_row_read_before_a_rename_leaves_the_newer_rows() {
+        // A scan read b before the rename, and its row reaches the bridge
+        // after a save's that followed the rename.
+        let scanned_from = next_file_sequence();
+        let renamed_at = next_file_sequence();
+        let renames = swap("/m/a.flac", "/m/b.flac");
+        let mut worker = idle_worker();
+        let saved = request(&mut worker, &["/m/b.flac"]);
+        let _ = worker.accept(result(saved, &[("/m/b.flac", "a's file, saved")]));
+        worker.library_changed(
+            &library_rows(&[("/m/a.flac", "a"), ("/m/b.flac", "b")], &[]),
+            scanned_from,
+        );
+        let mut details = RenamedDetails {
+            indexed: HashMap::from([
+                (PathBuf::from("/m/a.flac"), indexed("b's file")),
+                (PathBuf::from("/m/b.flac"), indexed("a's file")),
+            ]),
+            ..RenamedDetails::default()
+        };
+        worker.renamed(&renames, renamed_at, &mut details);
+        assert_eq!(
+            titles(&details),
+            HashMap::from([
+                (Path::new("/m/a.flac"), "b's file"),
+                (Path::new("/m/b.flac"), "a's file, saved"),
+            ])
+        );
+        assert!(details.gone.is_empty());
+    }
+
+    #[test]
+    fn a_path_a_library_event_removed_after_a_rename_is_gone() {
+        let renamed_at = next_file_sequence();
+        let renames = PathRenames::from([(PathBuf::from("/m/a.flac"), PathBuf::from("/m/c.flac"))]);
+        let mut worker = idle_worker();
+        let saved = request(&mut worker, &["/m/c.flac"]);
+        let _ = worker.accept(result(saved, &[("/m/c.flac", "saved")]));
+        worker.library_changed(&library_rows(&[], &["/m/c.flac"]), next_file_sequence());
+        let mut details = RenamedDetails {
+            indexed: HashMap::from([(PathBuf::from("/m/c.flac"), indexed("renamed"))]),
+            fingerprints: HashMap::from([(PathBuf::from("/m/c.flac"), fingerprint(1))]),
+            ..RenamedDetails::default()
+        };
+        worker.renamed(&renames, renamed_at, &mut details);
+        assert!(details.indexed.is_empty());
+        assert!(details.fingerprints.is_empty());
+        assert_eq!(
+            details.gone,
+            std::collections::HashSet::from([PathBuf::from("/m/c.flac")])
+        );
+
+        // A save after the removal, applied last, is shown.
+        let saved = request(&mut worker, &["/m/c.flac"]);
+        let _ = worker.accept(result(saved, &[("/m/c.flac", "saved again")]));
+        let mut details = RenamedDetails::default();
+        worker.renamed(&renames, renamed_at, &mut details);
+        assert_eq!(titles(&details)[Path::new("/m/c.flac")], "saved again");
+        assert!(details.gone.is_empty());
     }
 
     #[test]

@@ -863,7 +863,8 @@ struct BridgeLoopRuntime {
     tree_worker: tree_worker::TreeWorker,
     queue_validator: queue_validation::QueueValidationWorker,
     edit_refreshes: edit_refresh::EditRefreshWorker,
-    /// The [`imports::next_file_sequence`] number of the last rename applied.
+    /// The [`crate::library::next_file_sequence`] number of the last rename
+    /// applied.
     applied_rename_sequence: u64,
     analysis: AnalysisEngine,
     analysis_rx: Receiver<AnalysisEvent>,
@@ -1358,11 +1359,12 @@ impl BridgeLoopRuntime {
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         self.imports.remap_pending_paths(number, &renames);
-        // Refreshes that read the files after the rename keep their rows.
+        // Refreshes and library events that read the files after the rename
+        // keep their rows.
         self.edit_refreshes
             .renamed(&renames, sequence, &mut details);
         self.applied_rename_sequence = self.applied_rename_sequence.max(sequence);
-        self.forget_accepted_refreshes_once_renames_arrived();
+        self.forget_applied_rows_once_renames_arrived();
         let current = self.state.playback.current.clone();
         if commands::refresh_renamed_paths(
             &mut self.state,
@@ -1411,7 +1413,7 @@ impl BridgeLoopRuntime {
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         let refresh = self.edit_refreshes.accept(result);
-        self.forget_accepted_refreshes_once_renames_arrived();
+        self.forget_applied_rows_once_renames_arrived();
         if let Some(problem) = refresh.problem {
             let _ = try_send_event(event_tx, BridgeEvent::Error(problem));
         }
@@ -1429,17 +1431,19 @@ impl BridgeLoopRuntime {
         SnapshotUrgency::Immediate
     }
 
-    /// The refresh worker keeps the rows it accepted for renames numbered
-    /// below them whose notifications are still on their way. Once every
-    /// rename sent has been applied here, none can be: a rename numbered
-    /// later reads the files after those rows were read.
-    fn forget_accepted_refreshes_once_renames_arrived(&mut self) {
-        if !self
-            .imports
-            .renames_sent_after(self.applied_rename_sequence)
-        {
-            self.edit_refreshes.forget_accepted();
+    /// The refresh worker keeps the rows applied for renames numbered below
+    /// them whose notifications are still on their way. Once every rename
+    /// sent has been applied here, none can be: a rename numbered later reads
+    /// the files after those rows were read.
+    fn forget_applied_rows_once_renames_arrived(&mut self) {
+        if !self.renames_on_their_way() {
+            self.edit_refreshes.forget_applied();
         }
+    }
+
+    fn renames_on_their_way(&self) -> bool {
+        self.imports
+            .renames_sent_after(self.applied_rename_sequence)
     }
 
     fn apply_queue_changes(
@@ -1703,10 +1707,22 @@ impl BridgeLoopRuntime {
 
     /// Apply `first` and the library events after it as one change.
     fn handle_library_events(&mut self, first: Option<LibraryEvent>) -> SnapshotUrgency {
-        let applied = apply_library_events(
-            first.into_iter().chain(self.library_rx.try_iter()),
-            &mut self.state,
-        );
+        let events: Vec<LibraryEvent> = first
+            .into_iter()
+            .chain(self.library_rx.try_iter())
+            .collect();
+        // A rename on its way that read its files before these rows were
+        // read must not replace them, nor older rows kept for it. Without
+        // one, a rename sent later takes a higher number than theirs.
+        if self.renames_on_their_way() {
+            for event in &events {
+                self.edit_refreshes
+                    .library_changed(&event.changes, event.read_after);
+            }
+        } else {
+            self.edit_refreshes.forget_applied();
+        }
+        let applied = apply_library_events(events, &mut self.state);
         self.handle_library_refresh(applied);
         applied.urgency()
     }
@@ -2842,7 +2858,7 @@ mod tests {
             1,
             Arc::new(PathRenames::from([(old_path, new_path.clone())])),
             imports::RenamedDetails::default(),
-            imports::next_file_sequence(),
+            crate::library::next_file_sequence(),
             &event_tx,
         );
         assert_eq!(runtime.state.playback.current.as_ref(), Some(&new_path));
@@ -3810,7 +3826,7 @@ mod tests {
             1,
             Arc::new(PathRenames::from([(files[0].clone(), renamed.clone())])),
             imports::RenamedDetails::default(),
-            imports::next_file_sequence(),
+            crate::library::next_file_sequence(),
             &event_tx,
         );
         runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
@@ -4264,6 +4280,127 @@ mod tests {
             library_titles(&runtime),
             HashMap::from([(a, "Second".to_string()), (b, "First, edited".to_string()),])
         );
+    }
+
+    /// A library worker's event with these rows, read after `read_after`.
+    fn library_rows_event(
+        upserted: &[(&PathBuf, &str)],
+        removed: &[&PathBuf],
+        read_after: u64,
+    ) -> LibraryEvent {
+        LibraryEvent {
+            changes: crate::library::LibraryChanges {
+                roots: None,
+                upserted: upserted
+                    .iter()
+                    .map(|(path, title)| {
+                        Arc::new(LibraryTrack {
+                            path: (*path).clone(),
+                            root_path: p("/music/stale"),
+                            title: title.to_string(),
+                            ..LibraryTrack::default()
+                        })
+                    })
+                    .collect(),
+                removed: removed.iter().map(|path| (*path).clone()).collect(),
+            },
+            status: crate::library::LibraryStatus::default(),
+            read_after,
+        }
+    }
+
+    #[test]
+    fn a_library_change_read_after_a_rename_stays_when_the_rename_is_applied() {
+        let _guard = test_guard();
+        let (a, b) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/b.flac"));
+        let mut runtime = stale_refresh_runtime(&[(&a, "A"), (&b, "B")], &[]);
+        let (event_tx, event_rx) = unbounded();
+        let refreshes = gated_refreshes(&mut runtime);
+
+        // The files swap names, and the rename's notification waits.
+        rename_on_disk(
+            &runtime,
+            &refreshes,
+            &[(&a, &b), (&b, &a)],
+            &[(&a, "B"), (&b, "A")],
+        );
+        // A save of b is read and applied, and its row is kept for the
+        // rename.
+        refreshes.set(&[(&a, "B"), (&b, "A, saved")]);
+        save(&mut runtime, &refreshes, &[&b], &event_tx);
+        accept_refresh(&mut runtime, &refreshes, &event_tx);
+        assert_eq!(library_titles(&runtime)[&b], "A, saved");
+        // A scan reads b again after it changed on disk once more.
+        runtime.handle_wake(
+            BridgeLoopWake::Library(library_rows_event(
+                &[(&b, "A, changed again")],
+                &[],
+                crate::library::next_file_sequence(),
+            )),
+            &event_tx,
+        );
+        assert_eq!(library_titles(&runtime)[&b], "A, changed again");
+        assert_eq!(runtime.edit_refreshes.kept_paths(), 1);
+
+        apply_next_import_result(&mut runtime, &event_tx);
+        let shown = HashMap::from([
+            (a.clone(), "B".to_string()),
+            (b.clone(), "A, changed again".to_string()),
+        ]);
+        assert_eq!(
+            library_titles(&runtime),
+            shown,
+            "once the rename is applied"
+        );
+        assert_eq!(
+            queue_titles(&runtime),
+            owned(&[(&b, "A, changed again"), (&a, "B")])
+        );
+        // The worker reads the rows the rename changed again; the database
+        // has the scan's row for b.
+        runtime.handle_wake(
+            BridgeLoopWake::Library(library_rows_event(
+                &[(&a, "B"), (&b, "A, changed again")],
+                &[],
+                crate::library::next_file_sequence(),
+            )),
+            &event_tx,
+        );
+        assert_eq!(
+            library_titles(&runtime),
+            shown,
+            "once the rows are read again"
+        );
+        // With no rename on its way, nothing is kept for one.
+        assert_eq!(runtime.edit_refreshes.kept_paths(), 0);
+        assert!(error_messages(&event_rx).is_empty());
+    }
+
+    #[test]
+    fn a_path_removed_after_a_rename_is_not_restored_when_the_rename_is_applied() {
+        let _guard = test_guard();
+        let (a, c) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/c.flac"));
+        let mut runtime = stale_refresh_runtime(&[(&a, "A")], &[]);
+        let (event_tx, event_rx) = unbounded();
+        let refreshes = gated_refreshes(&mut runtime);
+
+        rename_on_disk(&runtime, &refreshes, &[(&a, &c)], &[(&c, "A")]);
+        refreshes.set(&[(&c, "A, saved")]);
+        save(&mut runtime, &refreshes, &[&c], &event_tx);
+        accept_refresh(&mut runtime, &refreshes, &event_tx);
+        // c is deleted, and a scan finds it gone.
+        runtime.handle_wake(
+            BridgeLoopWake::Library(library_rows_event(
+                &[],
+                &[&c],
+                crate::library::next_file_sequence(),
+            )),
+            &event_tx,
+        );
+
+        apply_next_import_result(&mut runtime, &event_tx);
+        assert_eq!(library_titles(&runtime), HashMap::new());
+        assert!(error_messages(&event_rx).is_empty());
     }
 
     #[test]
@@ -5147,7 +5284,7 @@ mod tests {
             1,
             Arc::new(PathRenames::from([(old.clone(), new.clone())])),
             imports::RenamedDetails::default(),
-            imports::next_file_sequence(),
+            crate::library::next_file_sequence(),
             &event_tx,
         );
 

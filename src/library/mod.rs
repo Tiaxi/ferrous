@@ -10,6 +10,7 @@ mod test_fixtures;
 mod worker;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -182,12 +183,26 @@ pub enum LibraryCommand {
     ReadRows(Vec<PathBuf>),
 }
 
+static FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// The next number of one process-wide sequence that orders reads of the
+/// files against renames: a rename takes its number after it has read the
+/// renamed files, and a read takes one before it begins. The bridge takes a
+/// number for each edit refresh request it sends, and the library worker one
+/// for each command it runs.
+pub(crate) fn next_file_sequence() -> u64 {
+    FILE_SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1
+}
+
 /// What changed in the library since the worker's previous event. The
 /// first event has every row.
 #[derive(Debug, Clone, Default)]
 pub struct LibraryEvent {
     pub changes: LibraryChanges,
     pub status: LibraryStatus,
+    /// A [`next_file_sequence`] number taken before the rows in `changes`
+    /// were read, from the files or the database.
+    pub read_after: u64,
 }
 
 #[cfg(test)]
@@ -202,6 +217,7 @@ impl LibraryEvent {
                 removed: Vec::new(),
             },
             status: LibraryStatus::default(),
+            read_after: 0,
         }
     }
 }
@@ -217,6 +233,22 @@ pub(crate) struct IndexedTrack {
     pub(crate) year: Option<i32>,
     pub(crate) track_no: Option<u32>,
     pub(crate) duration_secs: Option<f32>,
+}
+
+impl From<&LibraryTrack> for IndexedTrack {
+    fn from(track: &LibraryTrack) -> Self {
+        Self {
+            search_tags: track.search_tags.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            cover_path: track.cover_path.clone(),
+            genre: track.genre.clone(),
+            year: track.year,
+            track_no: track.track_no,
+            duration_secs: track.duration_secs,
+        }
+    }
 }
 
 /// How long dropping the [`LibraryService`] waits for its worker to stop a

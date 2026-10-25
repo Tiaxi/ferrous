@@ -1606,6 +1606,7 @@ fn renamed_details(renames: &PathRenames, refresh: TrackRefresh) -> RenamedDetai
         indexed,
         fingerprints,
         problem,
+        ..RenamedDetails::default()
     }
 }
 

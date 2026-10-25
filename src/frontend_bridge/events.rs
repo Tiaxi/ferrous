@@ -1599,7 +1599,7 @@ mod tests {
                 upserted: upserted.into_iter().map(Arc::new).collect(),
                 removed,
             },
-            status: crate::library::LibraryStatus::default(),
+            ..LibraryEvent::default()
         }
     }
 
@@ -1790,6 +1790,7 @@ mod tests {
                     scan_in_progress: true,
                     ..crate::library::LibraryStatus::default()
                 },
+                read_after: 0,
             }],
             &mut state,
         );
