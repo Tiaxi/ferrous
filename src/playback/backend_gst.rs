@@ -161,59 +161,137 @@ fn recent_seek_trace(
     }
 }
 
-/// How closely a position read after a gapless switch must match the
-/// previous track's timeline to have come from its stream.
-const PREVIOUS_STREAM_TOLERANCE: Duration = Duration::from_millis(250);
-/// How long after the successor's start the pipeline may still answer
-/// position queries from the previous stream.
-const GAPLESS_HANDOVER_WINDOW: Duration = Duration::from_secs(1);
-
-/// The previous track's timeline at a gapless switch. Right after the
-/// successor's stream starts, the pipeline can still answer a position
-/// query from the previous stream, before the successor's segment applies;
-/// such a position would show the successor at the end of the previous
-/// track. The successor starts where the previous track ends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GaplessHandover {
-    /// The previous track's last position sample.
+/// When a gapless successor starts: where the previous track ends, after
+/// the last sample of that track, which advanced and lasts `duration`, or
+/// at `now` if it has ended already.
+fn gapless_successor_start(
     previous_position: Duration,
     previous_sampled_at: MonotonicTime,
-    /// When the previous track ends, which is when the successor starts.
-    successor_starts_at: MonotonicTime,
+    duration: Duration,
+    now: MonotonicTime,
+) -> MonotonicTime {
+    let remaining = duration.saturating_sub(previous_position);
+    now.max(previous_sampled_at.saturating_add(remaining))
 }
 
-impl GaplessHandover {
-    /// The handover from the last sample of a track that advanced and
-    /// lasts `duration`, read at `now`.
-    fn after(
-        previous_position: Duration,
-        previous_sampled_at: MonotonicTime,
-        duration: Duration,
-        now: MonotonicTime,
-    ) -> Self {
-        let remaining = duration.saturating_sub(previous_position);
-        Self {
-            previous_position,
-            previous_sampled_at,
-            successor_starts_at: now.max(previous_sampled_at.saturating_add(remaining)),
+/// An item that reaches the output, in stream order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputItem {
+    /// The start of a stream of the group, if it has one.
+    StreamStart(Option<gst::GroupId>),
+    Segment,
+    /// A buffer or another serialized event.
+    Other,
+}
+
+/// Which stream's segment the output applies. A position query answers on
+/// that stream's timeline.
+///
+/// The output reports the start of a stream, which the pipeline posts as
+/// `stream-start`, before the stream's segment reaches it, and a starved
+/// streaming thread can take a while in between. A gapless successor
+/// starts at the output while the previous stream still plays, so until
+/// then a query answers on the previous stream's timeline: the successor
+/// would show the end of the previous track, such as the previous pass of
+/// a Repeat-One replay. The other way round, the output can apply the
+/// successor's segment before the engine has seen the successor start, and
+/// a query shows the previous track at the successor's start.
+///
+/// A probe on the output's sink pad sees each item before the output
+/// handles it, and the output handles an item before the next one of its
+/// stream reaches it. So the output may apply a segment from when the
+/// probe sees it, and does once the probe sees the next item. Streams are
+/// told apart by group: each file that the pipeline plays gets a new one,
+/// also the same file again.
+#[derive(Debug, Default)]
+struct OutputSegments(Mutex<OutputSegmentState>);
+
+/// The segment that the output applies, as far as its probe can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputSegment {
+    /// The segment of a stream of the group, or of a stream without one or
+    /// before any.
+    Of(Option<gst::GroupId>),
+    /// The segment of another stream has reached the output, which may
+    /// have applied it or not.
+    Changing,
+}
+
+#[derive(Debug, Default)]
+struct OutputSegmentState {
+    /// Group of the stream that started at the output last.
+    started: Option<gst::GroupId>,
+    /// Whether the segment of that stream has reached the output.
+    segment_arrived: bool,
+    /// Group of the stream whose segment the output has applied.
+    applied: Option<gst::GroupId>,
+}
+
+impl OutputSegments {
+    /// Follow the segments that `output`, the element that plays the audio,
+    /// applies. Of an output without a sink pad, no segment is known, and
+    /// positions are taken as the pipeline reports them.
+    fn observe(output: &gst::Element) -> Arc<Self> {
+        let segments = Arc::new(Self::default());
+        let Some(pad) = output.static_pad("sink") else {
+            return segments;
+        };
+        let observed = Arc::downgrade(&segments);
+        pad.add_probe(
+            gst::PadProbeType::BUFFER
+                | gst::PadProbeType::BUFFER_LIST
+                | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                let item = match &info.data {
+                    Some(gst::PadProbeData::Event(event)) => match event.view() {
+                        gst::EventView::StreamStart(start) => {
+                            OutputItem::StreamStart(start.group_id())
+                        }
+                        gst::EventView::Segment(_) => OutputItem::Segment,
+                        // Out of stream order, such as the start of a flush.
+                        _ if !event.is_serialized() => return gst::PadProbeReturn::Ok,
+                        _ => OutputItem::Other,
+                    },
+                    Some(gst::PadProbeData::Buffer(_) | gst::PadProbeData::BufferList(_)) => {
+                        OutputItem::Other
+                    }
+                    _ => return gst::PadProbeReturn::Ok,
+                };
+                if let Some(segments) = observed.upgrade() {
+                    segments.reach(item);
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+        segments
+    }
+
+    /// Account for `item` reaching the output, which has handled the items
+    /// before it.
+    fn reach(&self, item: OutputItem) {
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        if std::mem::take(&mut state.segment_arrived) {
+            state.applied = state.started;
+        }
+        match item {
+            OutputItem::StreamStart(group) => state.started = group,
+            OutputItem::Segment => state.segment_arrived = true,
+            OutputItem::Other => {}
         }
     }
 
-    /// Whether `position`, read at `now`, is the previous track's: where
-    /// its last sample says that track is now, rather than near the
-    /// successor's start.
-    fn is_previous_stream(&self, position: Duration, now: MonotonicTime) -> bool {
-        let previous_now =
-            self.previous_position + now.saturating_duration_since(self.previous_sampled_at);
-        position > PREVIOUS_STREAM_TOLERANCE
-            && position.abs_diff(previous_now) <= PREVIOUS_STREAM_TOLERANCE
-    }
-
-    /// Whether the pipeline has had long enough to report the successor.
-    fn is_over(&self, now: MonotonicTime) -> bool {
-        now > self
-            .successor_starts_at
-            .saturating_add(GAPLESS_HANDOVER_WINDOW)
+    /// The segment that the output applies now.
+    fn applied(&self) -> OutputSegment {
+        let Ok(state) = self.0.lock() else {
+            return OutputSegment::Of(None);
+        };
+        if state.segment_arrived && state.started != state.applied {
+            OutputSegment::Changing
+        } else {
+            OutputSegment::Of(state.applied)
+        }
     }
 }
 
@@ -278,9 +356,10 @@ struct GstPlaybackRuntime {
     last_seek_target: Option<Duration>,
     /// Time stamps the position samples in the snapshot.
     clock: MonotonicClock,
-    /// Set after a gapless switch while the pipeline may still report the
-    /// previous track's position.
-    gapless_handover: Option<GaplessHandover>,
+    /// Shared with a probe on the output's sink pad, which tells whose
+    /// position a position query answers. Of an output that is not
+    /// observed, no segment is known.
+    output_segments: Arc<OutputSegments>,
     /// The next `stream-start` belongs to the track the pipeline was last
     /// started with, not to a staged successor.
     awaiting_run_stream_start: bool,
@@ -425,7 +504,7 @@ impl GstPlaybackRuntime {
             last_seek_released_at: None,
             last_seek_target: None,
             clock: clock::system_clock(),
-            gapless_handover: None,
+            output_segments: Arc::default(),
             awaiting_run_stream_start: true,
             last_stream_group: None,
             stream_durations,
@@ -522,51 +601,63 @@ impl GstPlaybackRuntime {
     /// tell where it is keeps the last position, which no longer advances.
     /// Returns whether the snapshot changed.
     fn sample_pipeline_position(&mut self) -> bool {
+        // The output never goes back to a stream it has left, so a query
+        // between two checks that both find the current stream's segment
+        // answers from it.
+        let applied_before = self.output_applies_current_stream();
         let Some(position) = self.playbin.query_position::<gst::ClockTime>() else {
             return self.set_position_sample(self.snapshot.position, false);
         };
+        let current_stream = applied_before && self.output_applies_current_stream();
         let position = Duration::from_nanos(position.nseconds());
         let now = (self.clock)();
         let advancing = self.pipeline_advancing();
-        self.apply_position_read(position, now, advancing)
+        self.apply_position_read(position, now, advancing, current_stream)
+    }
+
+    /// Whether the output applies the segment of the stream that the
+    /// engine saw start last, so that a position query answers on the
+    /// timeline of the current track; see `OutputSegments`. A stream
+    /// without a group cannot be told apart, and its position is taken as
+    /// the pipeline reports it.
+    fn output_applies_current_stream(&self) -> bool {
+        let Some(current) = self.last_stream_group else {
+            return true;
+        };
+        match self.output_segments.applied() {
+            OutputSegment::Of(Some(applied)) => applied == current,
+            OutputSegment::Of(None) => true,
+            OutputSegment::Changing => false,
+        }
     }
 
     /// Report a pipeline position read at `now`, while the pipeline
-    /// `advancing` or not. Returns whether the snapshot changed.
+    /// `advancing` or not, which the output answered from the segment of
+    /// the current track's stream if `current_stream`. Returns whether the
+    /// snapshot changed.
     ///
-    /// Right after a gapless switch, a reading on the previous track's
-    /// timeline is not the current track's position. A position query does
-    /// not tell which stream's segment answered it, so the reading's value
-    /// decides, which cannot tell the streams apart after a track shorter
-    /// than [`PREVIOUS_STREAM_TOLERANCE`]. Such a mistake stays harmless: a
-    /// rejected reading only stands in for the position the current sample
-    /// has reached, which is what the UI shows, and whether the position
-    /// advances is always taken from the pipeline. The handover ends as
-    /// soon as the pipeline reports the successor past its start, after
-    /// which the previous stream's segment no longer applies.
+    /// A reading from another stream's segment is not the current track's
+    /// position: right after a gapless switch, it is on the previous
+    /// track's timeline, and right before the engine sees the successor
+    /// start, on the successor's. The current sample stands for it then,
+    /// which is what the UI shows: while the position advances, the sample
+    /// holds; otherwise the position stops where that sample has reached.
+    /// Whether the position advances is always taken from the pipeline.
     fn apply_position_read(
         &mut self,
         position: Duration,
         now: MonotonicTime,
         advancing: bool,
+        current_stream: bool,
     ) -> bool {
-        if let Some(handover) = self.gapless_handover {
-            if handover.is_over(now) {
-                self.gapless_handover = None;
-            } else if handover.is_previous_stream(position, now) {
-                // While the position advances, the sample from the switch
-                // still holds; otherwise it stops where that sample has
-                // reached.
-                if advancing && self.snapshot.position_advancing {
-                    return false;
-                }
-                let reached = self.sampled_position_at(now);
-                return self.set_position_sample_at(reached, now, advancing);
-            } else if !position.is_zero() {
-                self.gapless_handover = None;
-            }
+        if current_stream {
+            return self.set_position_sample_at(position, now, advancing);
         }
-        self.set_position_sample_at(position, now, advancing)
+        if advancing && self.snapshot.position_advancing {
+            return false;
+        }
+        let reached = self.sampled_position_at(now);
+        self.set_position_sample_at(reached, now, advancing)
     }
 
     /// Where the snapshot's position sample has reached at `now`.
@@ -764,8 +855,6 @@ impl GstPlaybackRuntime {
     }
 
     fn stop_with_empty_queue(&mut self) {
-        // Positions from now on belong to another run or position.
-        self.gapless_handover = None;
         self.mute();
         let _ = self.set_pipeline_state(gst::State::Ready);
         self.begin_pipeline_run(false);
@@ -1030,8 +1119,6 @@ impl GstPlaybackRuntime {
     /// Account for a pipeline that was stopped in Ready or Null: the current
     /// track stays current, and Play starts it from the beginning.
     fn enter_stopped(&mut self) {
-        // Positions from now on belong to another run or position.
-        self.gapless_handover = None;
         self.playing_state_requested_at = None;
         self.begin_pipeline_run(false);
         // The pipeline may have been given the successor. Play must
@@ -1075,8 +1162,6 @@ impl GstPlaybackRuntime {
 
     /// Queue `seek` for the pipeline, replacing a seek that waits.
     fn queue_seek(&mut self, seek: SeekTarget) {
-        // Positions from now on belong to another run or position.
-        self.gapless_handover = None;
         self.queued_seek = Some(seek);
         // Positions are not sampled until the seek lands, and the position
         // does not advance meanwhile.
@@ -1491,31 +1576,28 @@ impl GstPlaybackRuntime {
 
     fn commit_gapless_successor(&mut self, committed: CommittedAdvance) {
         let track_token = self.advance_track_token();
-        let mut position = self
+        // Until the output applies the successor's segment, the pipeline
+        // reports the previous track's position, and the successor is at
+        // its start.
+        let applied_before = self.output_applies_current_stream();
+        let position = self
             .playbin
             .query_position::<gst::ClockTime>()
+            .filter(|_| applied_before && self.output_applies_current_stream())
             .map_or(Duration::ZERO, |position| {
                 Duration::from_nanos(position.nseconds())
             });
         let mut sampled_at = (self.clock)();
         // The successor's stream starts while the end of the previous track
         // is still to be heard, and its position stays at its start until
-        // then, if the pipeline does not still report the previous track's.
-        self.gapless_handover = self.snapshot.position_advancing.then(|| {
-            GaplessHandover::after(
+        // then.
+        if position.is_zero() && self.snapshot.position_advancing {
+            sampled_at = gapless_successor_start(
                 self.snapshot.position,
                 self.snapshot.position_sampled_at,
                 self.snapshot.duration,
                 sampled_at,
-            )
-        });
-        if let Some(handover) = self.gapless_handover {
-            if handover.is_previous_stream(position, sampled_at) {
-                position = Duration::ZERO;
-            }
-            if position.is_zero() {
-                sampled_at = handover.successor_starts_at;
-            }
+            );
         }
         // A seek for the previous track no longer applies.
         self.abandon_seeks();
@@ -2220,8 +2302,6 @@ impl GstPlaybackRuntime {
     }
 
     fn switch_track(&mut self, path: &Path, uri: &str, force_play: bool) {
-        // Positions from now on belong to another run or position.
-        self.gapless_handover = None;
         let was_playing = self.snapshot.state == PlaybackState::Playing || force_play;
         self.mute();
         self.playing_state_requested_at = None;
@@ -2270,8 +2350,9 @@ fn start_gst_engine(
 
     let channel_mute_mask = Arc::new(AtomicU64::new(0));
 
-    let analysis_sink =
-        build_audio_output_bin(analysis_tx.clone(), &channel_mute_mask, &build_output()?)?;
+    let output = build_output()?;
+    let output_segments = OutputSegments::observe(&output);
+    let analysis_sink = build_audio_output_bin(analysis_tx.clone(), &channel_mute_mask, &output)?;
     playbin.set_property("audio-sink", &analysis_sink);
 
     // Strip leading partial-frame data and trailing APEv2 tags from raw
@@ -2287,7 +2368,7 @@ fn start_gst_engine(
     let queue_state = Arc::new(Mutex::new(GaplessQueue::new()));
 
     let bus = playbin.bus().context("playbin has no bus")?;
-    let runtime = GstPlaybackRuntime::new(
+    let mut runtime = GstPlaybackRuntime::new(
         playbin,
         queue_state,
         analysis_tx,
@@ -2296,6 +2377,7 @@ fn start_gst_engine(
         stream_durations,
         stream_ends,
     );
+    runtime.output_segments = output_segments;
     runtime.input_switches.connect(&runtime.playbin);
     connect_about_to_finish(&runtime);
     runtime
@@ -3849,45 +3931,66 @@ mod tests {
     }
 
     #[test]
-    fn gapless_handover_starts_the_successor_where_the_previous_track_ends() {
+    fn gapless_successor_starts_where_the_previous_track_ends() {
         // The previous track was at 3.8 s of 4 s at 0 ms; the switch is
         // committed at 15 ms, and the successor starts at 200 ms.
-        let handover = GaplessHandover::after(
+        let start = gapless_successor_start(
             Duration::from_millis(3_800),
             at(0),
             Duration::from_secs(4),
             at(15),
         );
-        assert_eq!(handover.successor_starts_at, at(200));
+        assert_eq!(start, at(200));
         // A track that already ended starts its successor now.
-        let late = GaplessHandover::after(
+        let late = gapless_successor_start(
             Duration::from_millis(3_800),
             at(0),
             Duration::from_secs(4),
             at(500),
         );
-        assert_eq!(late.successor_starts_at, at(500));
+        assert_eq!(late, at(500));
     }
 
     #[test]
-    fn gapless_handover_tells_the_previous_streams_position_from_the_successors() {
-        let handover = GaplessHandover::after(
-            Duration::from_millis(3_837),
-            at(0),
-            Duration::from_secs(4),
-            at(3),
-        );
-        // The pipeline still reports the previous pass of a Repeat-One
-        // replay, seen at its commit in #187.
-        assert!(handover.is_previous_stream(Duration::from_millis(3_840), at(3)));
-        assert!(handover.is_previous_stream(Duration::from_millis(3_900), at(60)));
-        // The successor's own positions near its start.
-        assert!(!handover.is_previous_stream(Duration::ZERO, at(3)));
-        assert!(!handover.is_previous_stream(Duration::from_millis(40), at(203)));
-        assert!(!handover.is_previous_stream(Duration::from_millis(200), at(400)));
-        // Until the pipeline has had long enough to report the successor.
-        assert!(!handover.is_over(at(1_163)));
-        assert!(handover.is_over(at(1_164)));
+    fn output_applies_a_segment_once_the_next_item_reaches_it() {
+        let segments = OutputSegments::default();
+        let (first, second) = (gst::GroupId::next(), gst::GroupId::next());
+        assert_eq!(segments.applied(), OutputSegment::Of(None));
+        segments.reach(OutputItem::StreamStart(Some(first)));
+        assert_eq!(segments.applied(), OutputSegment::Of(None));
+        // The output handles the segment after the probe has seen it.
+        segments.reach(OutputItem::Segment);
+        assert_eq!(segments.applied(), OutputSegment::Changing);
+        segments.reach(OutputItem::Other);
+        assert_eq!(segments.applied(), OutputSegment::Of(Some(first)));
+
+        // A gapless successor: the output reports its start and still
+        // applies the previous stream's segment, until the successor's
+        // reaches it and the next item follows.
+        segments.reach(OutputItem::StreamStart(Some(second)));
+        assert_eq!(segments.applied(), OutputSegment::Of(Some(first)));
+        segments.reach(OutputItem::Segment);
+        assert_eq!(segments.applied(), OutputSegment::Changing);
+        segments.reach(OutputItem::Other);
+        assert_eq!(segments.applied(), OutputSegment::Of(Some(second)));
+
+        // A new segment of the same stream, such as after a seek, keeps it.
+        segments.reach(OutputItem::Segment);
+        assert_eq!(segments.applied(), OutputSegment::Of(Some(second)));
+        segments.reach(OutputItem::Other);
+        assert_eq!(segments.applied(), OutputSegment::Of(Some(second)));
+
+        // A stream that ends right after its segment has applied it when
+        // the next stream starts.
+        let third = gst::GroupId::next();
+        segments.reach(OutputItem::StreamStart(Some(third)));
+        segments.reach(OutputItem::Segment);
+        segments.reach(OutputItem::StreamStart(None));
+        assert_eq!(segments.applied(), OutputSegment::Of(Some(third)));
+        segments.reach(OutputItem::Segment);
+        assert_eq!(segments.applied(), OutputSegment::Changing);
+        segments.reach(OutputItem::Other);
+        assert_eq!(segments.applied(), OutputSegment::Of(None));
     }
 
     #[test]
@@ -4082,7 +4185,7 @@ mod gst_integration_tests {
             let bus = playbin.bus().expect("bus");
             let (analysis_tx, analysis) = unbounded();
             let (event_tx, events) = unbounded();
-            let runtime = GstPlaybackRuntime::new(
+            let mut runtime = GstPlaybackRuntime::new(
                 playbin,
                 Arc::new(Mutex::new(GaplessQueue::new())),
                 analysis_tx,
@@ -4091,6 +4194,7 @@ mod gst_integration_tests {
                 Arc::new(Mutex::new(StreamDurations::default())),
                 Arc::new(Mutex::new(StreamEndHold::default())),
             );
+            runtime.output_segments = OutputSegments::observe(&sink);
             Self {
                 trace: PipelineTrace::new(&runtime.playbin),
                 runtime,
@@ -4141,90 +4245,158 @@ mod gst_integration_tests {
         MonotonicTime::from_nanos(1_000_000_000_000).saturating_add(Duration::from_millis(millis))
     }
 
-    /// A runtime that just switched gaplessly from a 200 ms track, whose
-    /// last sample read 150 ms at 0 ms, to a successor that starts at 50 ms.
-    fn after_short_track_switch() -> TestEngine {
+    /// A runtime that just switched gaplessly to a successor that starts at
+    /// 50 ms, while its output still applies the previous stream's segment.
+    /// Returns the output's segments, to apply the successor's, and the
+    /// previous stream's group.
+    fn after_gapless_switch() -> (TestEngine, Arc<OutputSegments>, gst::GroupId) {
         let mut engine = TestEngine::new();
         let runtime = &mut engine.runtime;
-        runtime.gapless_handover = Some(GaplessHandover::after(
-            Duration::from_millis(150),
-            at(0),
-            Duration::from_millis(200),
-            at(20),
-        ));
+        let (previous, successor) = (gst::GroupId::next(), gst::GroupId::next());
+        let segments = Arc::new(OutputSegments::default());
+        for item in [
+            OutputItem::StreamStart(Some(previous)),
+            OutputItem::Segment,
+            OutputItem::Other,
+            OutputItem::StreamStart(Some(successor)),
+        ] {
+            segments.reach(item);
+        }
+        runtime.output_segments = Arc::clone(&segments);
+        runtime.last_stream_group = Some(successor);
         runtime.snapshot.position = Duration::ZERO;
         runtime.snapshot.position_sampled_at = at(50);
         runtime.snapshot.position_advancing = true;
         runtime.snapshot.duration = Duration::from_secs(4);
-        engine
+        (engine, segments, previous)
+    }
+
+    /// Let the output apply the segment of the stream that started last.
+    fn apply_segment(segments: &OutputSegments) {
+        segments.reach(OutputItem::Segment);
+        segments.reach(OutputItem::Other);
+    }
+
+    /// Report `position`, read at `now`, as `sample_pipeline_position`
+    /// would from the runtime's output.
+    fn read_position(
+        runtime: &mut GstPlaybackRuntime,
+        position: Duration,
+        now: MonotonicTime,
+        advancing: bool,
+    ) -> bool {
+        let current_stream = runtime.output_applies_current_stream();
+        runtime.apply_position_read(position, now, advancing, current_stream)
     }
 
     #[test]
-    fn pause_after_a_short_track_stops_the_position_at_once() {
-        let mut engine = after_short_track_switch();
+    fn pause_before_the_successors_segment_applies_stops_the_position_at_once() {
+        let (mut engine, segments, _) = after_gapless_switch();
         let runtime = &mut engine.runtime;
-        // The successor's own position at 400 ms is within the tolerance of
-        // the previous track's timeline, so it is taken for that track's.
-        let successor = Duration::from_millis(350);
-        assert!(runtime
-            .gapless_handover
-            .unwrap()
-            .is_previous_stream(successor, at(400)));
-        assert!(!runtime.apply_position_read(successor, at(400), true));
+        let reading = Duration::from_millis(350);
+        assert!(!read_position(runtime, reading, at(400), true));
         assert!(runtime.snapshot.position_advancing);
 
         // Paused there: the position stops advancing at once, where the
         // sample from the switch has reached.
-        assert!(runtime.apply_position_read(successor, at(400), false));
+        assert!(read_position(runtime, reading, at(400), false));
         assert!(!runtime.snapshot.position_advancing);
-        assert_eq!(runtime.snapshot.position, successor);
+        assert_eq!(runtime.snapshot.position, Duration::from_millis(350));
         assert_eq!(runtime.snapshot.position_sampled_at, at(400));
 
-        // And stays there, whether a reading is still taken for the
-        // previous track's or no longer.
-        for millis in [450, 600, 2_000] {
-            assert!(!runtime.apply_position_read(successor, at(millis), false));
+        // And stays there, before the successor's segment applies and
+        // after.
+        for millis in [450, 600] {
+            assert!(!read_position(runtime, reading, at(millis), false));
             assert!(!runtime.snapshot.position_advancing);
-            assert_eq!(runtime.snapshot.position, successor);
+            assert_eq!(runtime.snapshot.position, reading);
         }
-        assert_eq!(runtime.gapless_handover, None);
+        apply_segment(&segments);
+        assert!(!read_position(runtime, reading, at(2_000), false));
+        assert_eq!(runtime.snapshot.position, reading);
     }
 
     #[test]
-    fn successor_reported_past_its_start_ends_the_gapless_handover() {
-        let mut engine = after_short_track_switch();
+    fn successor_readings_apply_once_the_output_applies_its_segment() {
+        let (mut engine, segments, _) = after_gapless_switch();
         let runtime = &mut engine.runtime;
-        // Before its start the successor reports its start.
-        assert!(!runtime.apply_position_read(Duration::ZERO, at(30), true));
-        assert!(runtime.gapless_handover.is_some());
-        assert!(runtime.apply_position_read(Duration::from_millis(40), at(90), true));
-        assert_eq!(runtime.gapless_handover, None);
-        // Its later positions are taken as they are.
-        assert!(runtime.apply_position_read(Duration::from_millis(350), at(400), false));
+        // Before its segment applies, no reading is the successor's.
+        assert!(!read_position(
+            runtime,
+            Duration::from_millis(40),
+            at(90),
+            true
+        ));
+        assert_eq!(runtime.snapshot.position, Duration::ZERO);
+        assert_eq!(runtime.snapshot.position_sampled_at, at(50));
+
+        // Then the successor's readings are taken as they are, also those
+        // that match the timeline of a previous track of 200 ms.
+        apply_segment(&segments);
+        assert!(read_position(
+            runtime,
+            Duration::from_millis(350),
+            at(400),
+            true
+        ));
         assert_eq!(runtime.snapshot.position, Duration::from_millis(350));
-        assert!(!runtime.snapshot.position_advancing);
+        assert_eq!(runtime.snapshot.position_sampled_at, at(400));
+        assert!(runtime.snapshot.position_advancing);
     }
 
     #[test]
     fn previous_streams_reading_keeps_the_successors_sample_while_advancing() {
         // The Repeat-One replay from #187: the pipeline still answers from
         // the previous pass right after the switch.
-        let mut engine = TestEngine::new();
+        let (mut engine, _segments, _) = after_gapless_switch();
         let runtime = &mut engine.runtime;
-        runtime.gapless_handover = Some(GaplessHandover::after(
-            Duration::from_millis(3_837),
-            at(0),
-            Duration::from_secs(4),
-            at(3),
+        assert!(!read_position(
+            runtime,
+            Duration::from_millis(3_900),
+            at(60),
+            true
         ));
-        runtime.snapshot.position = Duration::ZERO;
-        runtime.snapshot.position_sampled_at = at(163);
-        runtime.snapshot.position_advancing = true;
-        runtime.snapshot.duration = Duration::from_secs(4);
-        assert!(!runtime.apply_position_read(Duration::from_millis(3_900), at(60), true));
         assert_eq!(runtime.snapshot.position, Duration::ZERO);
-        assert_eq!(runtime.snapshot.position_sampled_at, at(163));
-        assert!(runtime.gapless_handover.is_some());
+        assert_eq!(runtime.snapshot.position_sampled_at, at(50));
+        assert!(runtime.snapshot.position_advancing);
+    }
+
+    #[test]
+    fn successors_reading_keeps_the_previous_tracks_sample_until_its_start_is_seen() {
+        // The output applies the successor's segment before the engine has
+        // seen the successor start, and reports its start.
+        let (mut engine, segments, previous) = after_gapless_switch();
+        let runtime = &mut engine.runtime;
+        runtime.last_stream_group = Some(previous);
+        runtime.snapshot.position = Duration::from_millis(3_800);
+        apply_segment(&segments);
+        assert!(!read_position(runtime, Duration::ZERO, at(150), true));
+        assert_eq!(runtime.snapshot.position, Duration::from_millis(3_800));
+        assert_eq!(runtime.snapshot.position_sampled_at, at(50));
+    }
+
+    #[test]
+    fn stream_without_a_group_reports_the_pipelines_position() {
+        let (mut engine, segments, _) = after_gapless_switch();
+        let runtime = &mut engine.runtime;
+        runtime.last_stream_group = None;
+        assert!(read_position(
+            runtime,
+            Duration::from_millis(3_900),
+            at(60),
+            true
+        ));
+        assert_eq!(runtime.snapshot.position, Duration::from_millis(3_900));
+        segments.reach(OutputItem::StreamStart(None));
+        apply_segment(&segments);
+        runtime.last_stream_group = Some(gst::GroupId::next());
+        assert!(read_position(
+            runtime,
+            Duration::from_millis(10),
+            at(70),
+            true
+        ));
+        assert_eq!(runtime.snapshot.position, Duration::from_millis(10));
     }
 
     impl Drop for TestEngine {
@@ -6040,6 +6212,258 @@ mod engine_tests {
                 && engine.snapshot.position >= millis(300)
         });
         assert_continuous(&engine.snapshots, clock());
+    }
+
+    /// Holds the segment of the second stream that starts at the output,
+    /// which follows that stream's `stream-start`, until released.
+    /// Meanwhile the output still applies the previous stream's segment,
+    /// as when the scheduler holds back the streaming thread between the
+    /// two events, and a position query answers from it.
+    struct SegmentHold {
+        pad: gst::Pad,
+        probe: Option<gst::PadProbeId>,
+        state: Arc<(Mutex<SegmentHoldState>, Condvar)>,
+    }
+
+    #[derive(Default)]
+    struct SegmentHoldState {
+        /// Groups of the streams that started at the output.
+        groups: Vec<Option<gst::GroupId>>,
+        /// Whether the segment of the second stream was reached.
+        held: bool,
+        released: bool,
+    }
+
+    impl SegmentHold {
+        fn new(playbin: &gst::Element) -> Self {
+            let pad = output_sink_pad(playbin);
+            let state = Arc::new((Mutex::new(SegmentHoldState::default()), Condvar::new()));
+            let hold = Arc::clone(&state);
+            let probe = pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+                let Some(gst::PadProbeData::Event(event)) = &info.data else {
+                    return gst::PadProbeReturn::Ok;
+                };
+                let (lock, changed) = &*hold;
+                let mut state = lock.lock().unwrap();
+                match event.view() {
+                    gst::EventView::StreamStart(start) => {
+                        if state.groups.last() != Some(&start.group_id()) {
+                            state.groups.push(start.group_id());
+                        }
+                    }
+                    gst::EventView::Segment(_) if state.groups.len() == 2 && !state.held => {
+                        state.held = true;
+                        changed.notify_all();
+                        let _ = changed.wait_timeout_while(state, TIMEOUT, |state| !state.released);
+                    }
+                    _ => {}
+                }
+                gst::PadProbeReturn::Ok
+            });
+            assert!(probe.is_some());
+            Self { pad, probe, state }
+        }
+
+        fn held(&self) -> bool {
+            self.state.0.lock().unwrap().held
+        }
+
+        /// Group of the second stream that started at the output.
+        fn held_group(&self) -> Option<gst::GroupId> {
+            self.state
+                .0
+                .lock()
+                .unwrap()
+                .groups
+                .get(1)
+                .copied()
+                .flatten()
+        }
+
+        fn release(&mut self) {
+            let (lock, changed) = &*self.state;
+            lock.lock().unwrap().released = true;
+            changed.notify_all();
+            if let Some(probe) = self.probe.take() {
+                self.pad.remove_probe(probe);
+            }
+        }
+    }
+
+    impl Drop for SegmentHold {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    /// How long after the successor's start the output is held on the
+    /// previous stream's segment: longer than the pipeline takes to play
+    /// past the end of that stream, after which its position stops there.
+    const SEGMENT_HOLD: Duration = Duration::from_millis(1_500);
+
+    /// Play `queue` in `mode` and hold the gapless successor's segment at
+    /// the output, so the engine commits the successor and polls while
+    /// the output still answers position queries from the previous
+    /// stream. The successor must stay at its start until the output
+    /// applies its segment, and then go on from there.
+    fn assert_successor_waits_for_its_segment(queue: Vec<PathBuf>, mode: RepeatMode) {
+        let clock = shifted_clock();
+        let mut engine = DirectEngine::start_with_clock(Arc::clone(&clock));
+        let mut hold = SegmentHold::new(&engine.runtime.playbin);
+        engine.play_until_opened(queue, mode);
+        let previous_token = engine.runtime.snapshot.track_token;
+        engine.wait_until("the successor's segment was not held", |_| hold.held());
+        engine.wait_until("the successor was not committed", |runtime| {
+            runtime.snapshot.track_token != previous_token
+        });
+        assert!(hold.held_group().is_some(), "the successor has a group");
+        let switched = engine.runtime.snapshot.clone();
+        assert!(switched.position_advancing, "{switched:?}");
+        assert_eq!(switched.position, Duration::ZERO, "{switched:?}");
+
+        // The output answers from the previous stream, near its end.
+        let until = switched.position_sampled_at.saturating_add(SEGMENT_HOLD);
+        let mut snapshots = Vec::new();
+        engine.wait_until("the hold did not last", |runtime| {
+            snapshots.push(runtime.snapshot.clone());
+            clock() >= until
+        });
+        let stale = engine
+            .runtime
+            .playbin
+            .query_position::<gst::ClockTime>()
+            .map(|position| Duration::from_nanos(position.nseconds()));
+        assert!(
+            stale.is_some_and(|stale| stale >= millis(3_000)),
+            "the output answered {stale:?}, not from the previous stream"
+        );
+        let moved: Vec<_> = snapshots
+            .iter()
+            .filter(|snapshot| {
+                snapshot.track_token != switched.track_token
+                    || snapshot.position != Duration::ZERO
+                    || snapshot.position_sampled_at != switched.position_sampled_at
+                    || !snapshot.position_advancing
+            })
+            .collect();
+        assert!(
+            moved.is_empty(),
+            "the successor left its start at {switched:?} before its segment applied: {moved:#?}"
+        );
+
+        // Once its segment applies, the successor goes on from its start.
+        hold.release();
+        engine.wait_until("the successor did not advance", |runtime| {
+            runtime.snapshot.position > Duration::ZERO
+        });
+        let resumed = &engine.runtime.snapshot;
+        assert_eq!(resumed.track_token, switched.track_token);
+        let since_start = resumed
+            .position_sampled_at
+            .saturating_duration_since(switched.position_sampled_at);
+        assert!(
+            resumed.position <= since_start + SAMPLE_SLACK,
+            "{resumed:?} is {since_start:?} after the successor's start"
+        );
+    }
+
+    #[test]
+    fn gapless_successor_stays_at_its_start_until_its_segment_applies() {
+        let fixtures = Fixtures::new("held-segment");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        assert_successor_waits_for_its_segment(vec![a, b], RepeatMode::Off);
+    }
+
+    #[test]
+    fn repeat_one_replay_stays_at_its_start_until_its_segment_applies() {
+        // #187: the replay's first samples read the previous pass.
+        let fixtures = Fixtures::new("held-segment-repeat");
+        let a = fixtures.wav("a.wav", 4_000);
+        assert_successor_waits_for_its_segment(vec![a], RepeatMode::One);
+    }
+
+    /// Play `queue` in `mode` and let the output apply the gapless
+    /// successor's segment before the engine sees the successor start on
+    /// the bus. The previous track must keep its position meanwhile, rather
+    /// than show the successor's start, and the successor must go on from
+    /// where it ends.
+    fn assert_previous_track_waits_for_the_successors_start(queue: Vec<PathBuf>, mode: RepeatMode) {
+        let clock = shifted_clock();
+        let mut engine = DirectEngine::start_with_clock(Arc::clone(&clock));
+        engine.play_until_opened(queue, mode);
+        let previous_group = engine.runtime.last_stream_group;
+        assert!(previous_group.is_some());
+        let stream_start = engine.handle_messages_until("the successor's start", |message| {
+            matches!(message.view(), gst::MessageView::StreamStart(start)
+                if start.group_id() != previous_group)
+        });
+        let gst::MessageView::StreamStart(start) = stream_start.view() else {
+            unreachable!();
+        };
+        let successor_group = start.group_id();
+        let output = Arc::clone(&engine.runtime.output_segments);
+        let previous = engine.runtime.snapshot.clone();
+        let mut polled = Vec::new();
+        let deadline = Instant::now() + TIMEOUT;
+        while output.applied() != OutputSegment::Of(successor_group) {
+            assert!(
+                Instant::now() < deadline,
+                "{}",
+                engine.report("the output did not apply the successor's segment")
+            );
+            engine.runtime.poll();
+            polled.push(engine.runtime.snapshot.clone());
+            std::thread::sleep(millis(1));
+        }
+        for _ in 0..5 {
+            engine.runtime.poll();
+            polled.push(engine.runtime.snapshot.clone());
+        }
+        polled.insert(0, previous.clone());
+        let moved: Vec<_> = polled
+            .windows(2)
+            .filter(|pair| {
+                pair[1].track_token != previous.track_token || pair[1].position < pair[0].position
+            })
+            .collect();
+        assert!(
+            moved.is_empty(),
+            "the previous track went back before the successor started: {moved:#?}"
+        );
+
+        engine.runtime.handle_bus_message(&stream_start);
+        assert_ne!(engine.runtime.snapshot.track_token, previous.track_token);
+        let successor = engine.runtime.snapshot.track_token;
+        engine.wait_until("the successor did not play 0.3 s", |runtime| {
+            runtime.snapshot.track_token == successor
+                && runtime.snapshot.position_advancing
+                && runtime.snapshot.position >= millis(300)
+        });
+        let snapshots: Vec<_> = engine
+            .events
+            .try_iter()
+            .filter_map(|event| match event {
+                PlaybackEvent::Snapshot(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .collect();
+        assert_continuous(&snapshots, clock());
+    }
+
+    #[test]
+    fn previous_track_keeps_its_position_until_the_gapless_successor_starts() {
+        let fixtures = Fixtures::new("early-segment");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        assert_previous_track_waits_for_the_successors_start(vec![a, b], RepeatMode::Off);
+    }
+
+    #[test]
+    fn previous_pass_keeps_its_position_until_the_repeat_one_replay_starts() {
+        let fixtures = Fixtures::new("early-segment-repeat");
+        let a = fixtures.wav("a.wav", 4_000);
+        assert_previous_track_waits_for_the_successors_start(vec![a], RepeatMode::One);
     }
 
     #[test]
