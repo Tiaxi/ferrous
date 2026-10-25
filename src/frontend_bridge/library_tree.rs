@@ -56,7 +56,7 @@ struct RootNodeBuilder {
 struct OrderedTrack {
     label: String,
     path: String,
-    number: u16,
+    number: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -84,8 +84,8 @@ struct FlatTreeRow {
     row_type: u8,
     depth: u16,
     source_index: i32,
-    track_number: u16,
-    child_count: u16,
+    track_number: u32,
+    child_count: u32,
     title: String,
     key: String,
     artist: String,
@@ -102,7 +102,7 @@ impl FlatTreeRow {
             depth,
             source_index: -1,
             track_number: 0,
-            child_count: clamp_u16(child_count),
+            child_count: clamp_u32(child_count),
             title: title.to_string(),
             key: root_row_key(path),
             artist: String::new(),
@@ -126,7 +126,7 @@ impl FlatTreeRow {
             depth,
             source_index: -1,
             track_number: 0,
-            child_count: clamp_u16(child_count),
+            child_count: clamp_u32(child_count),
             title: format!("{artist_name} ({album_count})"),
             key,
             artist: artist_name.to_string(),
@@ -151,7 +151,7 @@ impl FlatTreeRow {
             depth,
             source_index: -1,
             track_number: 0,
-            child_count: clamp_u16(album.root_tracks.len() + album.sections.len()),
+            child_count: clamp_u32(album.root_tracks.len() + album.sections.len()),
             title: album_title.to_string(),
             key,
             artist: artist_name.to_string(),
@@ -176,7 +176,7 @@ impl FlatTreeRow {
             depth,
             source_index: -1,
             track_number: 0,
-            child_count: clamp_u16(child_count),
+            child_count: clamp_u32(child_count),
             title: title.to_string(),
             key,
             artist: String::new(),
@@ -187,7 +187,7 @@ impl FlatTreeRow {
         }
     }
 
-    fn track(depth: u16, artist_name: &str, title: &str, path: &str, track_number: u16) -> Self {
+    fn track(depth: u16, artist_name: &str, title: &str, path: &str, track_number: u32) -> Self {
         Self {
             row_type: ROW_TYPE_TRACK,
             depth,
@@ -747,8 +747,8 @@ fn encode_flat_rows(rows: &[FlatTreeRow]) -> Vec<u8> {
         push_u8(&mut out, row.row_type);
         push_u16(&mut out, row.depth);
         push_i32(&mut out, row.source_index);
-        push_u16(&mut out, row.track_number);
-        push_u16(&mut out, row.child_count);
+        push_u32(&mut out, row.track_number);
+        push_u32(&mut out, row.child_count);
         push_string(&mut out, &row.title);
         push_string(&mut out, &row.key);
         push_string(&mut out, &row.artist);
@@ -766,8 +766,8 @@ fn encode_flat_rows(rows: &[FlatTreeRow]) -> Vec<u8> {
     out
 }
 
-fn clamp_u16(value: usize) -> u16 {
-    u16::try_from(value.min(usize::from(u16::MAX))).unwrap_or(u16::MAX)
+fn clamp_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn push_u8(out: &mut Vec<u8>, value: u8) {
@@ -966,7 +966,7 @@ fn order_tracks(tracks: &[TrackLeaf]) -> Vec<OrderedTrack> {
                 width = width
             ),
             path: candidate.path,
-            number: u16::try_from(candidate.number.min(u32::from(u16::MAX))).unwrap_or(u16::MAX),
+            number: candidate.number,
         })
         .collect()
 }
@@ -1209,8 +1209,8 @@ mod tests {
         row_type: u8,
         depth: u16,
         source_index: i32,
-        track_number: u16,
-        child_count: u16,
+        track_number: u32,
+        child_count: u32,
         title: String,
         key: String,
         artist: String,
@@ -1292,10 +1292,10 @@ mod tests {
             let Some(source_index) = read_i32(bytes, &mut offset) else {
                 break;
             };
-            let Some(track_number) = read_u16(bytes, &mut offset) else {
+            let Some(track_number) = read_u32(bytes, &mut offset) else {
                 break;
             };
-            let Some(child_count) = read_u16(bytes, &mut offset) else {
+            let Some(child_count) = read_u32(bytes, &mut offset) else {
                 break;
             };
             let Some(title) = read_string(bytes, &mut offset) else {
@@ -1752,6 +1752,103 @@ mod tests {
         assert!(!track_row.artist.is_empty());
         assert!(track_row.cover_path.is_empty());
         assert!(track_row.depth > 0);
+    }
+
+    #[test]
+    fn counts_and_track_numbers_above_16_bits_are_sent_whole() {
+        let loose = 70_000;
+        let mut tracks: Vec<LibraryTrack> = (0..loose)
+            .map(|index| LibraryTrack {
+                path: PathBuf::from(format!("/music/Loose Artist/{index:05}.flac")),
+                root_path: PathBuf::from("/music"),
+                title: format!("Loose {index}"),
+                ..LibraryTrack::default()
+            })
+            .collect();
+        tracks.push(track(
+            "/music/Artist A/Album A/01.flac",
+            "Album A",
+            None,
+            Some(100_000),
+            "Track",
+        ));
+        let library = LibrarySnapshot::new(vec![root("/music")], tracks);
+        let expanded = HashSet::from([
+            "artist|/music|Artist A".to_string(),
+            "album|/music|Artist A|Album A".to_string(),
+        ]);
+
+        let rows = decode_rows(&build_library_tree_flat_binary(
+            &library,
+            LibrarySortMode::Year,
+            Some(&expanded),
+        ));
+
+        let artist = rows
+            .iter()
+            .find(|row| row.key == "artist|/music|Loose Artist")
+            .expect("artist row");
+        assert_eq!(artist.child_count, 70_000);
+        let numbered = rows
+            .iter()
+            .find(|row| row.track_path == "/music/Artist A/Album A/01.flac")
+            .expect("track row");
+        assert_eq!(numbered.track_number, 100_000);
+    }
+
+    #[test]
+    fn the_tree_counts_the_artists_and_albums_it_builds() {
+        let library = LibrarySnapshot::new(
+            vec![root("/music"), root("/more")],
+            vec![
+                track(
+                    "/music/Artist A/Album A/01.flac",
+                    "Album A",
+                    None,
+                    Some(1),
+                    "One",
+                ),
+                track(
+                    "/music/Artist A/Album A/CD1/01.flac",
+                    "Album A",
+                    None,
+                    Some(1),
+                    "Disc",
+                ),
+                track(
+                    "/music/Artist A/Album B/01.flac",
+                    "Album B",
+                    None,
+                    Some(1),
+                    "Two",
+                ),
+                // A loose track: an artist without an album.
+                track("/music/Artist B/loose.flac", "", None, None, "Loose"),
+                LibraryTrack {
+                    root_path: PathBuf::from("/more"),
+                    ..track(
+                        "/more/Artist A/Album C/01.flac",
+                        "Album C",
+                        None,
+                        Some(1),
+                        "Three",
+                    )
+                },
+                // Outside every root: not in the tree.
+                track(
+                    "/elsewhere/Artist C/Album D/01.flac",
+                    "Album D",
+                    None,
+                    Some(1),
+                    "Out",
+                ),
+            ],
+        );
+
+        let cache = LibraryTreeCache::new(&library);
+
+        // Artist A in each root, and Artist B; albums A, B and C.
+        assert_eq!(cache.counts, (3, 3));
     }
 
     fn leaf(path: &str, album: &str, year: Option<i32>, track_no: Option<u32>) -> TrackLeaf {

@@ -10,7 +10,7 @@ use std::time::Instant;
 use crossbeam_channel::{Receiver, Sender};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::library::{LibraryRoot, LibrarySearchTrack, LibrarySnapshot};
+use crate::library::{LibraryRoot, LibrarySearchTrack, LibrarySnapshot, LibraryTrack};
 
 use super::search_query::SearchQuery;
 
@@ -272,37 +272,81 @@ struct PreparedSearchTrack {
 
 #[derive(Debug, Clone, Default)]
 struct PreparedSearchLibrary {
-    tracks: Vec<PreparedSearchTrack>,
+    tracks: Vec<Arc<PreparedSearchTrack>>,
     album_inventory: HashMap<String, AlbumInventoryAcc>,
     artist_album_counts: HashMap<String, u32>,
 }
+
+/// The album group a track belongs to, for the album inventory.
+#[derive(Debug, Clone)]
+struct AlbumMembership {
+    album_key: String,
+    artist_key: String,
+    in_main_album: bool,
+}
+
+/// One track as the search index has it.
+#[derive(Debug)]
+struct PreparedTrackEntry {
+    track: Arc<PreparedSearchTrack>,
+    album: Option<AlbumMembership>,
+}
+
+/// The prepared entry of each library track, by the track's address. The
+/// library shares the tracks a change keeps, so a library that changed
+/// only prepares its changed tracks again.
+#[derive(Debug, Default)]
+struct SearchTrackMemo {
+    roots: Vec<LibraryRoot>,
+    entries: HashMap<usize, (Arc<LibraryTrack>, Arc<PreparedTrackEntry>)>,
+}
+
+/// How many tracks a preparation reads between checks for a newer query.
+const PREPARE_CANCEL_POLL_TRACKS: usize = 1024;
 
 #[derive(Default)]
 pub(super) struct SearchWorkerPreparedCache {
     source_library: Option<Arc<LibrarySnapshot>>,
     source_search_revision: Option<u64>,
     prepared: Option<Arc<PreparedSearchLibrary>>,
+    memo: SearchTrackMemo,
+    /// How many tracks were prepared, rather than reused.
+    #[cfg(test)]
+    tracks_prepared: usize,
 }
 
 impl SearchWorkerPreparedCache {
+    /// The index of `library`, prepared unless it is cached. `newer` is
+    /// asked between tracks for a query that replaces the one waiting for
+    /// the index; the preparation then stops with it, and keeps the tracks
+    /// it prepared for next time.
     #[cfg_attr(
         not(feature = "profiling-logs"),
         allow(unused_variables, unused_assignments)
     )]
-    fn prepared_for(&mut self, library: &Arc<LibrarySnapshot>) -> Arc<PreparedSearchLibrary> {
+    fn prepared_for(
+        &mut self,
+        library: &Arc<LibrarySnapshot>,
+        newer: impl FnMut() -> Option<SearchWorkerQuery>,
+    ) -> Result<Arc<PreparedSearchLibrary>, SearchWorkerQuery> {
         if let (Some(source), Some(prepared)) = (&self.source_library, &self.prepared) {
             let revision = library.search_revision;
             if revision != 0 && self.source_search_revision == Some(revision) {
                 self.source_library = Some(Arc::clone(library));
-                return Arc::clone(prepared);
+                return Ok(Arc::clone(prepared));
             }
             if revision == 0 && Arc::ptr_eq(source, library) {
-                return Arc::clone(prepared);
+                return Ok(Arc::clone(prepared));
             }
         }
         #[allow(unused_variables)]
         let started = Instant::now();
-        let prepared = Arc::new(prepare_search_library(library.as_ref()));
+        let prepared = prepare_search_library_with(library.as_ref(), &mut self.memo, newer);
+        #[cfg(test)]
+        {
+            self.tracks_prepared += prepared.1;
+        }
+        let prepared = Arc::new(prepared.0?);
         if search_profile_enabled() {
             profile_eprintln!(
                 "[search-worker] cache rebuild tracks={} elapsed_ms={}",
@@ -314,7 +358,7 @@ impl SearchWorkerPreparedCache {
         self.source_search_revision =
             (library.search_revision != 0).then_some(library.search_revision);
         self.prepared = Some(Arc::clone(&prepared));
-        prepared
+        Ok(prepared)
     }
 }
 
@@ -986,80 +1030,147 @@ fn derive_hit_context(
         .or_else(|| derive_tree_path_context(&hit.path, roots, &hit.artist))
 }
 
+#[cfg(test)]
 fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
-    let roots = library.roots.clone();
-    if roots.is_empty() {
-        return PreparedSearchLibrary::default();
+    prepare_search_library_with(library, &mut SearchTrackMemo::default(), || None)
+        .0
+        .unwrap_or_default()
+}
+
+/// The search index of `library`, reusing the entries in `memo` of tracks
+/// it shares with the library they were prepared for. Stops with the query
+/// `newer` returns, keeping what it prepared in `memo`. Also returns how
+/// many tracks it prepared.
+fn prepare_search_library_with(
+    library: &LibrarySnapshot,
+    memo: &mut SearchTrackMemo,
+    mut newer: impl FnMut() -> Option<SearchWorkerQuery>,
+) -> (Result<PreparedSearchLibrary, SearchWorkerQuery>, usize) {
+    if library.roots.is_empty() {
+        return (Ok(PreparedSearchLibrary::default()), 0);
     }
-    let roots_by_path = roots_by_path_for_search(&roots);
+    if memo.roots != library.roots {
+        // Root labels and paths are part of every entry.
+        memo.roots.clone_from(&library.roots);
+        memo.entries.clear();
+    }
+    let roots_by_path = roots_by_path_for_search(&library.roots);
+
+    let mut entries = HashMap::with_capacity(library.tracks.len());
+    let mut prepared_count = 0;
+    for (index, track) in library.tracks.iter().enumerate() {
+        if index % PREPARE_CANCEL_POLL_TRACKS == 0 && index > 0 {
+            if let Some(next) = newer() {
+                memo.entries.extend(entries);
+                return (Err(next), prepared_count);
+            }
+        }
+        let address = Arc::as_ptr(track) as usize;
+        let entry = match memo.entries.get(&address) {
+            Some((source, entry)) if Arc::ptr_eq(source, track) => Arc::clone(entry),
+            _ => {
+                prepared_count += 1;
+                Arc::new(prepare_search_track(track, &roots_by_path))
+            }
+        };
+        entries.insert(address, (Arc::clone(track), entry));
+    }
 
     let mut tracks = Vec::with_capacity(library.tracks.len());
     let mut album_inventory: HashMap<String, AlbumInventoryAcc> = HashMap::new();
     let mut artist_album_counts: HashMap<String, u32> = HashMap::new();
-
     for track in &library.tracks {
-        let path_string = track.path.to_string_lossy().to_string();
-        let title = track.title.trim().to_string();
-        let artist = track.artist.trim().to_string();
-        let album = track.album.trim().to_string();
-        let genre = track.genre.trim().to_string();
-        let title_l = normalize_for_search(&title);
-        let artist_l = normalize_for_search(&artist);
-        let album_l = normalize_for_search(&album);
-        let genre_l = normalize_for_search(&genre);
-        let path_n = normalize_for_search(&path_string);
-        let mut fields: BTreeMap<String, String> = track
-            .search_tags
-            .iter()
-            .map(|(key, values)| (key.clone(), normalize_for_search(&values.join(" "))))
-            .collect();
-        for (key, value) in [
-            ("title", &title_l),
-            ("artist", &artist_l),
-            ("album", &album_l),
-            ("genre", &genre_l),
-            ("path", &path_n),
-        ] {
-            let field = fields.entry(key.into()).or_default();
-            field.push(' ');
-            field.push_str(value);
-        }
-        if let Some(year) = track.year {
-            fields.insert("year".into(), year.to_string());
-        }
-        if let Some(number) = track.track_no {
-            fields.insert("track".into(), number.to_string());
-        }
-        if let Some(root) = roots_by_path.get(&track.root_path) {
-            fields.insert("root".into(), normalize_for_search(&root.root_label));
-        }
-
-        if let Some(context) = roots_by_path
-            .get(&track.root_path)
-            .and_then(|root| derive_tree_path_context_for_root(&track.path, root, &artist))
-        {
-            if let Some(album_key) = context.album_key.clone() {
-                let include_in_main_album =
-                    context.is_main_level_album_track || context.is_disc_section_album_track;
-                let inventory = album_inventory.entry(album_key).or_insert_with(|| {
+        let (_, entry) = &entries[&(Arc::as_ptr(track) as usize)];
+        if let Some(album) = &entry.album {
+            let inventory = album_inventory
+                .entry(album.album_key.clone())
+                .or_insert_with(|| {
                     // Count each library album group once, including multi-disc albums.
-                    let count = artist_album_counts.entry(context.artist_key).or_default();
+                    let count = artist_album_counts
+                        .entry(album.artist_key.clone())
+                        .or_default();
                     *count = count.saturating_add(1);
                     AlbumInventoryAcc::default()
                 });
-                if include_in_main_album {
-                    inventory.main_track_count = inventory.main_track_count.saturating_add(1);
-                    if let Some(duration) = track.duration_secs {
-                        if duration.is_finite() && duration >= 0.0 {
-                            inventory.main_total_length += duration;
-                            inventory.has_main_duration = true;
-                        }
+            if album.in_main_album {
+                inventory.main_track_count = inventory.main_track_count.saturating_add(1);
+                if let Some(duration) = track.duration_secs {
+                    if duration.is_finite() && duration >= 0.0 {
+                        inventory.main_total_length += duration;
+                        inventory.has_main_duration = true;
                     }
                 }
             }
         }
+        tracks.push(Arc::clone(&entry.track));
+    }
+    memo.entries = entries;
 
-        tracks.push(PreparedSearchTrack {
+    (
+        Ok(PreparedSearchLibrary {
+            tracks,
+            album_inventory,
+            artist_album_counts,
+        }),
+        prepared_count,
+    )
+}
+
+fn prepare_search_track(
+    track: &LibraryTrack,
+    roots_by_path: &HashMap<PathBuf, PreparedSearchRoot>,
+) -> PreparedTrackEntry {
+    let path_string = track.path.to_string_lossy().to_string();
+    let title = track.title.trim().to_string();
+    let artist = track.artist.trim().to_string();
+    let album = track.album.trim().to_string();
+    let genre = track.genre.trim().to_string();
+    let title_l = normalize_for_search(&title);
+    let artist_l = normalize_for_search(&artist);
+    let album_l = normalize_for_search(&album);
+    let genre_l = normalize_for_search(&genre);
+    let path_n = normalize_for_search(&path_string);
+    let mut fields: BTreeMap<String, String> = track
+        .search_tags
+        .iter()
+        .map(|(key, values)| (key.clone(), normalize_for_search(&values.join(" "))))
+        .collect();
+    for (key, value) in [
+        ("title", &title_l),
+        ("artist", &artist_l),
+        ("album", &album_l),
+        ("genre", &genre_l),
+        ("path", &path_n),
+    ] {
+        let field = fields.entry(key.into()).or_default();
+        field.push(' ');
+        field.push_str(value);
+    }
+    if let Some(year) = track.year {
+        fields.insert("year".into(), year.to_string());
+    }
+    if let Some(number) = track.track_no {
+        fields.insert("track".into(), number.to_string());
+    }
+    let root = roots_by_path.get(&track.root_path);
+    if let Some(root) = root {
+        fields.insert("root".into(), normalize_for_search(&root.root_label));
+    }
+
+    let album_membership = root
+        .and_then(|root| derive_tree_path_context_for_root(&track.path, root, &artist))
+        .and_then(|context| {
+            let in_main_album =
+                context.is_main_level_album_track || context.is_disc_section_album_track;
+            context.album_key.map(|album_key| AlbumMembership {
+                album_key,
+                artist_key: context.artist_key,
+                in_main_album,
+            })
+        });
+
+    PreparedTrackEntry {
+        track: Arc::new(PreparedSearchTrack {
             path: track.path.clone(),
             root_path: track.root_path.clone(),
             title,
@@ -1071,13 +1182,8 @@ fn prepare_search_library(library: &LibrarySnapshot) -> PreparedSearchLibrary {
             track_no: track.track_no,
             duration_secs: track.duration_secs,
             fields,
-        });
-    }
-
-    PreparedSearchLibrary {
-        tracks,
-        album_inventory,
-        artist_album_counts,
+        }),
+        album: album_membership,
     }
 }
 
@@ -1393,7 +1499,11 @@ fn build_search_results_frame(
     if library.roots.is_empty() {
         return empty_search_results_frame(seq);
     }
-    let prepared = prepared_cache.prepared_for(&query.library);
+    let prepared =
+        match prepared_cache.prepared_for(&query.library, || poll_latest_search_query(query_rx)) {
+            Ok(prepared) => prepared,
+            Err(next) => return SearchBuildOutcome::Cancelled(next),
+        };
     let buckets = match search_tracks_prepared(
         query_text,
         prepared.as_ref(),
@@ -1447,7 +1557,13 @@ pub(super) fn run_search_worker(
         #[allow(unused_variables)]
         let query_started = Instant::now();
         if query.seq == 0 && query.query.is_empty() {
-            let _ = prepared_cache.prepared_for(&query.library);
+            if let Err(next) =
+                prepared_cache.prepared_for(&query.library, || poll_latest_search_query(query_rx))
+            {
+                // An interactive query arrived; what was prepared is kept.
+                query = next;
+                continue;
+            }
             match query_rx.recv() {
                 Ok(next) => {
                     query = next;
@@ -1692,8 +1808,8 @@ mod tests {
         let second = Arc::new(library);
 
         let mut cache = SearchWorkerPreparedCache::default();
-        let prepared_first = cache.prepared_for(&first);
-        let prepared_second = cache.prepared_for(&second);
+        let prepared_first = cache.prepared_for(&first, || None).expect("prepared");
+        let prepared_second = cache.prepared_for(&second, || None).expect("prepared");
 
         assert!(Arc::ptr_eq(&prepared_first, &prepared_second));
     }
@@ -1721,10 +1837,102 @@ mod tests {
         });
 
         let mut cache = SearchWorkerPreparedCache::default();
-        let prepared_first = cache.prepared_for(&first);
-        let prepared_second = cache.prepared_for(&second);
+        let prepared_first = cache.prepared_for(&first, || None).expect("prepared");
+        let prepared_second = cache.prepared_for(&second, || None).expect("prepared");
 
         assert!(!Arc::ptr_eq(&prepared_first, &prepared_second));
+    }
+
+    fn many_tracks(root: &PathBuf, count: usize) -> Vec<crate::library::LibraryTrack> {
+        (0..count)
+            .map(|index| {
+                library_track(
+                    &format!("/music/Artist {}/Album/{index:04} - Song.flac", index % 20),
+                    root,
+                    &format!("Artist {}", index % 20),
+                    "Album",
+                    Some(2020),
+                    Some(1),
+                )
+            })
+            .collect()
+    }
+
+    fn titles_found(
+        cache: &mut SearchWorkerPreparedCache,
+        library: &Arc<LibrarySnapshot>,
+        query: &str,
+    ) -> usize {
+        let (_query_tx, query_rx) = crossbeam_channel::unbounded();
+        let prepared = cache.prepared_for(library, || None).expect("prepared");
+        match search_tracks_prepared(query, &prepared, &library.roots, 100, &query_rx) {
+            PreparedSearchOutcome::Hits(buckets) => buckets.track_rows.len(),
+            PreparedSearchOutcome::Cancelled(_) => panic!("not cancelled"),
+        }
+    }
+
+    #[test]
+    fn a_changed_library_prepares_only_its_changed_tracks_for_search() {
+        let root = p("/music");
+        let mut library = LibrarySnapshot {
+            roots: vec![library_root(&root)],
+            tracks: crate::library::shared_tracks(many_tracks(&root, 3_000)),
+            search_revision: 1,
+        };
+        let first = Arc::new(library.clone());
+        let mut cache = SearchWorkerPreparedCache::default();
+        assert_eq!(titles_found(&mut cache, &first, "nocturne"), 0);
+        assert_eq!(cache.tracks_prepared, 3_000);
+
+        // A scan's change: one track edited, one added.
+        let mut edited = (*library.tracks[5]).clone();
+        edited.title = "Nocturne".to_string();
+        library.tracks[5] = Arc::new(edited);
+        let mut added = (*library.tracks[6]).clone();
+        added.path = p("/music/Artist 6/Album/added.flac");
+        added.title = "Nocturne, added".to_string();
+        library.tracks.push(Arc::new(added));
+        library.search_revision = 2;
+        let second = Arc::new(library);
+
+        assert_eq!(titles_found(&mut cache, &second, "nocturne"), 2);
+        assert_eq!(cache.tracks_prepared, 3_002, "only the two changed tracks");
+        // Searching the first library again finds what it had.
+        assert_eq!(titles_found(&mut cache, &first, "nocturne"), 0);
+    }
+
+    #[test]
+    fn a_newer_query_stops_preparing_the_index_and_keeps_its_progress() {
+        let root = p("/music");
+        let library = Arc::new(LibrarySnapshot {
+            roots: vec![library_root(&root)],
+            tracks: crate::library::shared_tracks(many_tracks(&root, 5_000)),
+            search_revision: 1,
+        });
+        let mut newer = Some(SearchWorkerQuery {
+            limit: 0,
+            seq: 9,
+            query: "newer".to_string(),
+            library: Arc::clone(&library),
+        });
+        let mut cache = SearchWorkerPreparedCache::default();
+        let mut polls = 0;
+
+        let stopped = cache.prepared_for(&library, || {
+            polls += 1;
+            if polls == 2 {
+                newer.take()
+            } else {
+                None
+            }
+        });
+
+        let next = stopped.expect_err("a newer query stops the preparation");
+        assert_eq!(next.seq, 9);
+        let prepared_before = cache.tracks_prepared;
+        assert!(prepared_before < 5_000, "{prepared_before}");
+        cache.prepared_for(&library, || None).expect("prepared");
+        assert_eq!(cache.tracks_prepared, 5_000, "nothing was prepared twice");
     }
 
     #[test]

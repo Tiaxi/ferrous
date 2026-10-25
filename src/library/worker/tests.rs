@@ -476,3 +476,142 @@ fn the_worker_reports_a_damaged_database_that_it_moved_aside() {
     assert!(first.roots.is_empty());
     drop(service);
 }
+
+/// The events until the worker is idle again after a command.
+fn events_until_idle(events: &mut Events) -> Vec<LibraryEvent> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut received = Vec::new();
+    loop {
+        let event = events
+            .rx
+            .recv_deadline(deadline)
+            .expect("the command finishes");
+        events.mirror.apply(&event);
+        let idle = !event.status.scan_in_progress;
+        received.push(event);
+        if idle && received.len() > 1 {
+            return received;
+        }
+    }
+}
+
+#[test]
+fn an_unchanged_rescan_publishes_its_progress_and_no_rows() {
+    let names: Vec<String> = (0..40).map(|index| format!("{index:02}.mp3")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let fixture = Fixture::new("unchanged-rescan", &names);
+    let (service, mut events) = fixture.start();
+    service.command(LibraryCommand::AddRoot {
+        path: fixture.root.clone(),
+        name: String::new(),
+    });
+    next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 40));
+    events.mirror.drain(&events.rx);
+
+    service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
+    let rescan = events_until_idle(&mut events);
+
+    assert!(
+        rescan.iter().any(|event| event.status.scan_in_progress),
+        "the rescan's progress is published"
+    );
+    for event in &rescan {
+        assert!(
+            event.changes.is_empty(),
+            "an unchanged rescan sends no rows: {:?}",
+            event.changes
+        );
+    }
+    assert_eq!(events.mirror.snapshot.tracks.len(), 40);
+}
+
+#[test]
+fn a_rescan_publishes_only_the_rows_that_changed() {
+    let names: Vec<String> = (0..40).map(|index| format!("{index:02}.mp3")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let fixture = Fixture::new("changed-rescan", &names);
+    let (service, mut events) = fixture.start();
+    service.command(LibraryCommand::AddRoot {
+        path: fixture.root.clone(),
+        name: String::new(),
+    });
+    next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 40));
+    events.mirror.drain(&events.rx);
+    // The scan reads this file again, but its row stays the same.
+    fs::write(fixture.track("07.mp3"), b"changed, and longer").expect("change a track");
+    fs::remove_file(fixture.track("08.mp3")).expect("remove a track");
+    fs::write(fixture.track("new.mp3"), b"new").expect("add a track");
+
+    service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
+    let rescan = events_until_idle(&mut events);
+
+    let mut upserted: Vec<PathBuf> = rescan
+        .iter()
+        .flat_map(|event| {
+            event
+                .changes
+                .upserted
+                .iter()
+                .map(|track| track.path.clone())
+        })
+        .collect();
+    upserted.sort();
+    let removed: Vec<PathBuf> = rescan
+        .iter()
+        .flat_map(|event| event.changes.removed.iter().cloned())
+        .collect();
+    assert_eq!(upserted, [fixture.track("new.mp3")]);
+    assert_eq!(removed, [fixture.track("08.mp3")]);
+    assert!(rescan.iter().all(|event| event.changes.roots.is_none()));
+    assert_eq!(events.mirror.paths(), fixture.indexed());
+}
+
+#[test]
+fn reading_rows_again_corrects_a_copy_that_diverged() {
+    let fixture = Fixture::new("read-rows", &["a.mp3", "b.mp3"]);
+    let (service, mut events) = fixture.start();
+    service.command(LibraryCommand::AddRoot {
+        path: fixture.root.clone(),
+        name: String::new(),
+    });
+    next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 2));
+    events.mirror.drain(&events.rx);
+    // A copy that applied an older change after a newer one: a's details
+    // are stale, and it has a track the database no longer has.
+    let a = fixture.track("a.mp3");
+    let stale = fixture.track("stale.mp3");
+    events.mirror.snapshot.apply_changes(
+        &crate::library::LibraryChanges {
+            upserted: vec![
+                std::sync::Arc::new(crate::library::LibraryTrack {
+                    path: a.clone(),
+                    title: "Stale".to_string(),
+                    ..crate::library::LibraryTrack::default()
+                }),
+                std::sync::Arc::new(crate::library::LibraryTrack {
+                    path: stale.clone(),
+                    ..crate::library::LibraryTrack::default()
+                }),
+            ],
+            ..crate::library::LibraryChanges::default()
+        },
+        |path| {
+            if path == a {
+                vec![0]
+            } else {
+                Vec::new()
+            }
+        },
+    );
+
+    service.command(LibraryCommand::ReadRows(vec![a.clone(), stale]));
+    let corrected = next_snapshot(&mut events, |snapshot| snapshot.tracks.len() == 2);
+
+    let read = corrected
+        .tracks
+        .iter()
+        .find(|track| track.path == a)
+        .expect("a is still there");
+    assert_ne!(read.title, "Stale");
+    assert_eq!(events.mirror.paths(), fixture.indexed());
+}

@@ -390,36 +390,11 @@ impl LibraryMirror {
         self.rows_received += event.changes.upserted.len();
     }
 
-    /// Applies events until the library satisfies `wanted`, waiting up to
-    /// 20 s.
-    pub(crate) fn wait_for(
-        &mut self,
-        events: &crossbeam_channel::Receiver<LibraryEvent>,
-        mut wanted: impl FnMut(&Self) -> bool,
-    ) -> &Self {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        loop {
-            match events.recv_deadline(deadline) {
-                Ok(event) => {
-                    self.apply(&event);
-                    if wanted(self) {
-                        return self;
-                    }
-                }
-                Err(error) => panic!("the library never got there: {error}"),
-            }
-        }
-    }
-
     /// Applies the events already sent.
     pub(crate) fn drain(&mut self, events: &crossbeam_channel::Receiver<LibraryEvent>) {
         while let Ok(event) = events.try_recv() {
             self.apply(&event);
         }
-    }
-
-    pub(crate) fn idle_with_tracks(&self, count: usize) -> bool {
-        !self.status.scan_in_progress && self.snapshot.tracks.len() == count
     }
 
     pub(crate) fn paths(&self) -> Vec<PathBuf> {

@@ -2538,6 +2538,23 @@ mod tests {
             .iter()
             .enumerate()
             .all(|(index, track)| index == 1234 || track.title.is_empty()));
+        assert!(
+            Arc::ptr_eq(&library.tracks[0], &state.library.tracks[0]),
+            "the copy shares the tracks it keeps"
+        );
+        // The library worker reads the edited row again, in case a newer
+        // change reached the bridge first.
+        assert_eq!(state.library_rows_to_read, [inside.clone()]);
+
+        state.library_rows_to_read.clear();
+        let renamed = p("/music/Artist/Album/renamed.flac");
+        let renames = PathRenames::from([(inside.clone(), renamed.clone())]);
+        assert!(apply_renamed_library_paths(
+            &mut state,
+            &renames,
+            &HashMap::new()
+        ));
+        assert_eq!(state.library_rows_to_read, [inside, renamed]);
     }
 
     #[test]
