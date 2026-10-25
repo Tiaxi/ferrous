@@ -106,8 +106,9 @@ pub enum BridgeCommand {
     Settings(BridgeSettingsCommand),
     /// Save the settings and the session now, and answer with
     /// [`BridgeEvent::StateSaved`], so the UI can close the window only once
-    /// they are on disk, or tell the user they are not.
-    SaveState,
+    /// they are on disk, or tell the user they are not. The answer carries
+    /// this request ID, so the UI can tell which of its attempts it settles.
+    SaveState(u32),
     Shutdown,
 }
 
@@ -339,9 +340,12 @@ pub enum BridgeEvent {
     Stopped,
     /// The bridge stopped without being asked to, for this reason.
     Failed(String),
-    /// The answer to [`BridgeCommand::SaveState`]: what to show the user if
-    /// a save failed.
-    StateSaved(Result<(), String>),
+    /// The answer to [`BridgeCommand::SaveState`] with that request ID: what
+    /// to show the user if a save failed.
+    StateSaved {
+        request_id: u32,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1444,9 +1448,15 @@ impl BridgeLoopRuntime {
             BridgeCommand::Shutdown | BridgeCommand::Queue(BridgeQueueCommand::Clear) => {
                 self.imports.discard_pending();
             }
-            BridgeCommand::SaveState => {
-                let saved = self.save_state_now();
-                let _ = try_send_event(event_tx, BridgeEvent::StateSaved(saved));
+            BridgeCommand::SaveState(request_id) => {
+                let result = self.save_state_now();
+                let _ = try_send_event(
+                    event_tx,
+                    BridgeEvent::StateSaved {
+                        request_id: *request_id,
+                        result,
+                    },
+                );
                 return SnapshotUrgency::None;
             }
             _ => {}

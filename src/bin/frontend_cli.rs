@@ -189,8 +189,10 @@ fn drain_bridge_events(bridge: &FrontendBridgeHandle) {
                 eprintln!("bridge failed: {err}");
                 return;
             }
-            BridgeEvent::StateSaved(Ok(())) => println!("state saved"),
-            BridgeEvent::StateSaved(Err(err)) => eprintln!("state not saved: {err}"),
+            BridgeEvent::StateSaved { result: Ok(()), .. } => println!("state saved"),
+            BridgeEvent::StateSaved {
+                result: Err(err), ..
+            } => eprintln!("state not saved: {err}"),
         }
     }
 }

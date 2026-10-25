@@ -3765,21 +3765,28 @@ void BridgeClient::requestSnapshot() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot));
 }
 
-void BridgeClient::saveStateBeforeQuit() {
+quint32 BridgeClient::saveStateBeforeQuit() {
+    // 0 is never an attempt, so callers can use it for none.
+    m_lastStateSaveRequestId = m_lastStateSaveRequestId == std::numeric_limits<quint32>::max()
+        ? 1
+        : m_lastStateSaveRequestId + 1;
+    const quint32 requestId = m_lastStateSaveRequestId;
     if (m_backendFailure.isEmpty()
         && sendBinaryCommand(
-            BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdSaveState))) {
-        return;
+            BinaryBridgeCodec::encodeCommandU32(BinaryBridgeCodec::CmdSaveState, requestId))) {
+        return requestId;
     }
     // Answer after the caller has returned, as the backend would.
     QMetaObject::invokeMethod(
         this,
-        [this]() {
+        [this, requestId]() {
             emit stateSaveFinished(
+                requestId,
                 false,
                 QStringLiteral("Settings and the queue could not be saved: the backend has stopped."));
         },
         Qt::QueuedConnection);
+    return requestId;
 }
 
 void BridgeClient::shutdown() {
@@ -4814,7 +4821,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     if (snapshot.hasStateSaved) {
-        emit stateSaveFinished(snapshot.stateSaved, snapshot.stateSaveError);
+        emit stateSaveFinished(
+            snapshot.stateSaveRequestId, snapshot.stateSaved, snapshot.stateSaveError);
         return false;
     }
 

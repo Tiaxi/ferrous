@@ -533,6 +533,9 @@ private slots:
     void quitActionClosesTheWindowThroughItsCloseHandler();
     void failedSaveBeforeQuitShowsTheErrorAndRetrySaves();
     void quitAnywayClosesAfterAFailedSave();
+    void saveAnsweredAfterItsTimeoutStillClosesTheWindow();
+    void answerToAnEarlierSaveAttemptDoesNotSettleARetry();
+    void escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLate();
     void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
@@ -1902,6 +1905,23 @@ bool clickButton(QObject *window, const QString &objectName) {
     return button != nullptr && QMetaObject::invokeMethod(button, "clicked");
 }
 
+// Answers the fallback bridge's save request with this ID.
+bool answerStateSave(QObject *bridge, int requestId, bool saved, const QString &message = {}) {
+    return QMetaObject::invokeMethod(bridge, "stateSaveFinished", Q_ARG(int, requestId),
+        Q_ARG(bool, saved), Q_ARG(QString, message));
+}
+
+// Runs the save timeout's handler now, in place of the running timer.
+bool timeOutStateSave(QObject *window) {
+    QObject *timeout = window->findChild<QObject *>(QStringLiteral("quitStateSaveTimeout"));
+    return timeout != nullptr && timeout->property("running").toBool()
+        && timeout->setProperty("running", false)
+        && QMetaObject::invokeMethod(timeout, "triggered");
+}
+
+const QString kStateSaveTimeoutMessage = QStringLiteral(
+    "The backend did not answer in time; settings and the queue may not have been saved.");
+
 } // namespace
 
 void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
@@ -1978,6 +1998,109 @@ void QmlSmokeTest::quitAnywayClosesAfterAFailedSave() {
     QTRY_VERIFY(dialog->property("visible").toBool());
     QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedQuitButton")));
 
+    QTRY_VERIFY(!window->isVisible());
+}
+
+void QmlSmokeTest::saveAnsweredAfterItsTimeoutStillClosesTheWindow() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QObject *message = window->findChild<QObject *>(QStringLiteral("quitSaveFailedMessage"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(message != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(bridge->setProperty("holdStateSaveAnswers", true));
+
+    window->close();
+    const int requestId = bridge->property("lastStateSaveRequestId").toInt();
+    QCOMPARE(requestId, 1);
+    QVERIFY(timeOutStateSave(window));
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QCOMPARE(message->property("text").toString(), kStateSaveTimeoutMessage);
+    QVERIFY(window->isVisible());
+
+    // Slow storage finishes the save after all.
+    QVERIFY(answerStateSave(bridge, requestId, true));
+
+    QTRY_VERIFY(!window->isVisible());
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+}
+
+void QmlSmokeTest::answerToAnEarlierSaveAttemptDoesNotSettleARetry() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QObject *message = window->findChild<QObject *>(QStringLiteral("quitSaveFailedMessage"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(message != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(bridge->setProperty("holdStateSaveAnswers", true));
+
+    window->close();
+    const int first = bridge->property("lastStateSaveRequestId").toInt();
+    QVERIFY(timeOutStateSave(window));
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    // Retry before the first attempt has answered.
+    QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedRetryButton")));
+    const int retry = bridge->property("lastStateSaveRequestId").toInt();
+    QVERIFY(retry != first);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+
+    // Neither answer to the first attempt settles the retry.
+    QVERIFY(answerStateSave(bridge, first, false, QStringLiteral("Settings could not be saved")));
+    QVERIFY(answerStateSave(bridge, first, true));
+    QCoreApplication::processEvents();
+    QVERIFY(window->isVisible());
+    QVERIFY(!dialog->property("visible").toBool());
+
+    // The retry's own answer does: its failure is shown, not the first's.
+    const QString error = QStringLiteral("Settings could not be saved: disk full");
+    QVERIFY(answerStateSave(bridge, retry, false, error));
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QCOMPARE(message->property("text").toString(), error);
+
+    // A success after another retry closes the window.
+    QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedRetryButton")));
+    const int last = bridge->property("lastStateSaveRequestId").toInt();
+    QVERIFY(answerStateSave(bridge, last, true));
+    QTRY_VERIFY(!window->isVisible());
+}
+
+void QmlSmokeTest::escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLate() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(dialog != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(bridge->setProperty("holdStateSaveAnswers", true));
+
+    window->close();
+    const int requestId = bridge->property("lastStateSaveRequestId").toInt();
+    QVERIFY(timeOutStateSave(window));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+
+    QVERIFY(answerStateSave(bridge, requestId, true));
+    QCoreApplication::processEvents();
+    QVERIFY(window->isVisible());
+
+    // Closing the window again saves again.
+    window->close();
+    QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), requestId + 1);
+    QVERIFY(answerStateSave(bridge, requestId + 1, true));
     QTRY_VERIFY(!window->isVisible());
 }
 

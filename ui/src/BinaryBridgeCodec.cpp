@@ -789,12 +789,14 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
         }
         case SectionStateSaved: {
             Reader sectionReader(sectionPayload);
+            quint32 requestId = 0;
             quint8 saved = 0;
             QString message;
-            ok = sectionReader.readU8(&saved) && saved <= 1
+            ok = sectionReader.readU32(&requestId) && sectionReader.readU8(&saved) && saved <= 1
                 && sectionReader.readUtf8(&message) && sectionReader.atEnd();
             if (ok) {
                 out->hasStateSaved = true;
+                out->stateSaveRequestId = requestId;
                 out->stateSaved = saved == 1;
                 out->stateSaveError = message;
             }

@@ -66,7 +66,7 @@ pub(super) fn handle_bridge_command(
             false
         }
         // The runtime answers it before commands get here.
-        BridgeCommand::SaveState => false,
+        BridgeCommand::SaveState(_) => false,
         BridgeCommand::Playback(cmd) => {
             handle_playback_bridge_command(&cmd, state, context);
             false

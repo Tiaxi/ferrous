@@ -2539,10 +2539,19 @@ void BridgeClientTest::saveBeforeQuitReportsAFailedSaveAndSavesOnRetry() {
     QVERIFY(client.m_ffiBridge != nullptr);
     QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
 
-    client.saveStateBeforeQuit();
-    QTRY_COMPARE(finished.count(), 1);
-    QVERIFY2(finished.at(0).at(0).toBool(), qPrintable(finished.at(0).at(1).toString()));
+    // A second request sent before the first is answered: each answer
+    // carries the ID of its own request.
+    const quint32 first = client.saveStateBeforeQuit();
+    const quint32 second = client.saveStateBeforeQuit();
+    QVERIFY(first != 0);
+    QVERIFY(second != first);
+    QTRY_COMPARE(finished.count(), 2);
+    QCOMPARE(finished.at(0).at(0).value<quint32>(), first);
+    QVERIFY2(finished.at(0).at(1).toBool(), qPrintable(finished.at(0).at(2).toString()));
+    QCOMPARE(finished.at(1).at(0).value<quint32>(), second);
+    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toString()));
     QVERIFY(QFileInfo(settingsPath).isFile());
+    finished.clear();
 
     // Nothing can be renamed over a directory, as when the disk is full.
     QVERIFY(QFile::remove(settingsPath));
@@ -2551,18 +2560,20 @@ void BridgeClientTest::saveBeforeQuitReportsAFailedSaveAndSavesOnRetry() {
         configDir.rmdir(QStringLiteral("settings.txt"));
     });
     client.setDbRange(103.0);
-    client.saveStateBeforeQuit();
-    QTRY_COMPARE(finished.count(), 2);
-    QVERIFY(!finished.at(1).at(0).toBool());
-    const QString message = finished.at(1).at(1).toString();
+    const quint32 failing = client.saveStateBeforeQuit();
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(0).value<quint32>(), failing);
+    QVERIFY(!finished.at(0).at(1).toBool());
+    const QString message = finished.at(0).at(2).toString();
     QVERIFY2(message.startsWith(QStringLiteral("Settings could not be saved")), qPrintable(message));
     QVERIFY2(message.contains(settingsPath), qPrintable(message));
 
     // Retry once the cause is gone.
     QVERIFY(configDir.rmdir(QStringLiteral("settings.txt")));
-    client.saveStateBeforeQuit();
-    QTRY_COMPARE(finished.count(), 3);
-    QVERIFY2(finished.at(2).at(0).toBool(), qPrintable(finished.at(2).at(1).toString()));
+    const quint32 retry = client.saveStateBeforeQuit();
+    QTRY_COMPARE(finished.count(), 2);
+    QCOMPARE(finished.at(1).at(0).value<quint32>(), retry);
+    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toString()));
     QFile settings(settingsPath);
     QVERIFY(settings.open(QIODevice::ReadOnly));
     const QByteArray saved = settings.readAll();
@@ -2576,13 +2587,15 @@ void BridgeClientTest::saveBeforeQuitFailsWhenTheBackendHasStopped() {
     client.setBackendFailure(QStringLiteral("The Ferrous backend stopped unexpectedly."));
     QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
 
-    client.saveStateBeforeQuit();
+    const quint32 requestId = client.saveStateBeforeQuit();
 
     // Answered later, as the backend would answer.
     QCOMPARE(finished.count(), 0);
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(!finished.at(0).at(0).toBool());
-    QCOMPARE(finished.at(0).at(1).toString(),
+    QCOMPARE(finished.at(0).at(0).value<quint32>(), requestId);
+    QVERIFY(requestId != 0);
+    QVERIFY(!finished.at(0).at(1).toBool());
+    QCOMPARE(finished.at(0).at(2).toString(),
         QStringLiteral("Settings and the queue could not be saved: the backend has stopped."));
 }
 

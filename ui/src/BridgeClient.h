@@ -377,8 +377,9 @@ public:
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
     // Ask the backend to save the settings and the queue now. Answers with
-    // stateSaveFinished, so the window can close once they are on disk.
-    Q_INVOKABLE void saveStateBeforeQuit();
+    // stateSaveFinished carrying the returned request ID (never 0), so the
+    // window can close once they are on disk.
+    Q_INVOKABLE quint32 saveStateBeforeQuit();
     Q_INVOKABLE void clearDiagnostics();
     Q_INVOKABLE void reloadDiagnosticsFromDisk();
     // Tag editor renames go through this gate so the bridge applies them in
@@ -408,9 +409,10 @@ signals:
     void connectedChanged();
     void backendFailureChanged();
     void bridgeError(const QString &message);
-    // The answer to saveStateBeforeQuit: whether the settings and the queue
-    // were saved, and what to show the user if not.
-    void stateSaveFinished(bool saved, const QString &message);
+    // The answer to the saveStateBeforeQuit call that returned requestId:
+    // whether the settings and the queue were saved, and what to show the
+    // user if not.
+    void stateSaveFinished(quint32 requestId, bool saved, const QString &message);
 
 private:
     struct SearchWorkerInputFrame {
@@ -748,6 +750,7 @@ private:
     qint64 m_pendingAddRootIssuedMs{0};
     bool m_connected{false};
     QString m_backendFailure;
+    quint32 m_lastStateSaveRequestId{0};
     // Set once the UI has asked the backend to stop, after which its stop is expected.
     bool m_bridgeShutdownRequested{false};
     bool m_loggedStartupQueueMissing{false};

@@ -557,8 +557,10 @@ impl FfiEncoder {
                     prepared.push(PreparedEvent::Binary(encode_failure_event(&message)));
                     prepared.push(PreparedEvent::Stopped);
                 }
-                BridgeEvent::StateSaved(result) => {
-                    prepared.push(PreparedEvent::Binary(encode_state_saved_event(&result)));
+                BridgeEvent::StateSaved { request_id, result } => {
+                    prepared.push(PreparedEvent::Binary(encode_state_saved_event(
+                        request_id, &result,
+                    )));
                 }
             }
         }
@@ -1983,7 +1985,7 @@ fn parse_system_command(
     let command = match cmd_id {
         33 => BridgeCommand::RequestSnapshot,
         34 => BridgeCommand::Shutdown,
-        66 => BridgeCommand::SaveState,
+        66 => BridgeCommand::SaveState(reader.read_u32()?),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -2104,8 +2106,9 @@ fn encode_error_event(message: &str) -> Vec<u8> {
     encode_packet(vec![(SECTION_ERROR, payload)])
 }
 
-fn encode_state_saved_event(result: &Result<(), String>) -> Vec<u8> {
+fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec<u8> {
     let mut payload = Vec::new();
+    push_u32(&mut payload, request_id);
     push_u8(&mut payload, u8::from(result.is_ok()));
     push_string(
         &mut payload,
@@ -4695,21 +4698,38 @@ mod tests {
         assert!(!unsafe { ferrous_ffi_bridge_destroy(handle) });
     }
 
-    /// Ask the bridge to save its state, and return its answer: `None` for
-    /// success, or what the user is shown.
-    fn ffi_save_state(handle: *mut FerrousFfiBridge) -> Option<String> {
-        assert!(ffi_send_binary(handle, &encode_command(66, &[])));
+    fn ffi_send_save_state(handle: *mut FerrousFfiBridge, request_id: u32) {
+        assert!(ffi_send_binary(
+            handle,
+            &encode_command(66, &request_id.to_le_bytes())
+        ));
+    }
+
+    /// The next answer to a save request: its request ID, and `None` for
+    /// success or what the user is shown.
+    fn ffi_next_state_saved(handle: *mut FerrousFfiBridge) -> (u32, Option<String>) {
         let packet = ffi_wait_for_mask(handle, SECTION_STATE_SAVED, Duration::from_secs(5))
             .expect("the bridge answers");
         let (_, _, mask) = parse_packet_header(&packet);
         assert_eq!(mask, SECTION_STATE_SAVED);
-        // The header, the section length, and the success flag.
-        let saved = packet[16] != 0;
-        let len = u32::from_le_bytes(packet[17..21].try_into().expect("length")) as usize;
-        let message = String::from_utf8(packet[21..21 + len].to_vec()).expect("UTF-8");
-        assert_eq!(packet.len(), 21 + len);
+        // The header and the section length, then the request ID, the
+        // success flag, and the message.
+        let request_id = u32::from_le_bytes(packet[16..20].try_into().expect("request ID"));
+        let saved = packet[20] != 0;
+        let len = u32::from_le_bytes(packet[21..25].try_into().expect("length")) as usize;
+        let message = String::from_utf8(packet[25..25 + len].to_vec()).expect("UTF-8");
+        assert_eq!(packet.len(), 25 + len);
         assert_eq!(saved, message.is_empty());
-        (!saved).then_some(message)
+        (request_id, (!saved).then_some(message))
+    }
+
+    /// Ask the bridge to save its state, and return its answer: `None` for
+    /// success, or what the user is shown.
+    fn ffi_save_state(handle: *mut FerrousFfiBridge) -> Option<String> {
+        ffi_send_save_state(handle, 7);
+        let (request_id, message) = ffi_next_state_saved(handle);
+        assert_eq!(request_id, 7);
+        message
     }
 
     #[test]
@@ -4740,6 +4760,22 @@ mod tests {
         std::fs::remove_dir(&settings_path).expect("unblock the settings");
         assert_eq!(ffi_save_state(handle), None);
         assert!(saved_settings().contains("db_range=102.00"));
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+    }
+
+    #[test]
+    fn save_state_answers_each_request_with_its_own_id() {
+        let _guard = super::super::tests::test_guard();
+        let handle = ffi_bridge_saving_state();
+        // A retry sent before the first answer arrived.
+        ffi_send_save_state(handle, 1);
+        ffi_send_save_state(handle, u32::MAX);
+        assert_eq!(ffi_next_state_saved(handle), (1, None));
+        assert_eq!(ffi_next_state_saved(handle), (u32::MAX, None));
+        // A save request must say which attempt it is.
+        assert!(parse_binary_command(&encode_command(66, &[])).is_err());
 
         // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
         assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
