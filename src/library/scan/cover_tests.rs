@@ -208,7 +208,7 @@ fn replacing_the_cover_image_at_the_same_name_gives_it_a_new_stamp() {
 #[test]
 fn a_folder_that_loses_its_images_shows_the_embedded_picture() {
     let root = test_root("embedded");
-    let track = root.join("Album/01.wav");
+    let track = root.join("Album/song.wav");
     fs::create_dir_all(track.parent().expect("parent")).expect("folder");
     write_wav_with_picture(&track, &encoded_picture(7, image::ImageFormat::Png));
     let image = root.join("Album/cover.jpg");
