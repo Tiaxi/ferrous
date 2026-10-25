@@ -5554,7 +5554,8 @@ mod engine_tests {
         assert!(engine.errors().is_empty());
         engine.runtime.playing_state_timeout = GstPlaybackRuntime::PLAYING_STATE_TIMEOUT;
 
-        let source = engine.file_source();
+        // The restarted run was given B once its seek had been applied.
+        let source = engine.file_source(&a);
         engine.fail_reading(&source);
         let errors = engine.errors();
         assert_eq!(errors.len(), 1, "{errors:?}");
@@ -6273,13 +6274,12 @@ mod engine_tests {
                 matches!(message.view(), gst::MessageView::StreamStart(_))
             });
             self.runtime.handle_bus_message(&stream_start);
-            let source = self.file_source();
-            assert_eq!(input_file(Some(source.upcast_ref())), Some(first));
-            source
+            self.file_source(&first)
         }
 
-        /// The file source of the pipeline's run.
-        fn file_source(&self) -> gst::Element {
+        /// The source that reads `file`. The pipeline can have been handed
+        /// the successor already, whose source reads another file.
+        fn file_source(&self, file: &Path) -> gst::Element {
             self.runtime
                 .playbin
                 .clone()
@@ -6292,6 +6292,7 @@ mod engine_tests {
                     element
                         .factory()
                         .is_some_and(|factory| factory.name() == "filesrc")
+                        && input_file(Some(element.upcast_ref())).as_deref() == Some(file)
                 })
                 .expect("file source")
         }
@@ -6750,7 +6751,11 @@ mod engine_tests {
         // A now has B's old name.
         engine.wait_until_playing(&b, 0, millis(4_000));
         assert_ne!(engine.runtime.snapshot.track_token, started);
-        assert_ne!(engine.file_source(), source, "the pipeline opened A again");
+        assert_ne!(
+            engine.file_source(&b),
+            source,
+            "the pipeline opened A again"
+        );
         let events: Vec<_> = engine.events.try_iter().collect();
         let (changes, errors) = changes_and_errors(after_remap(&events));
         assert!(errors.is_empty(), "{errors:?}");
