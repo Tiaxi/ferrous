@@ -50,7 +50,7 @@ pub(super) fn open_waveform_cache_db() -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
-fn init_waveform_cache_schema(conn: &Connection) -> anyhow::Result<()> {
+pub(super) fn init_waveform_cache_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         r"
         CREATE TABLE IF NOT EXISTS waveform_cache (

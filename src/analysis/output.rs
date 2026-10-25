@@ -10,6 +10,11 @@ use std::time::Duration;
 
 pub(super) trait AnalysisEventOutput: Send + Sync {
     fn send(&self, event: AnalysisEvent) -> Result<(), ()>;
+
+    /// Whether spectral chunks are waiting for the consumer to take them.
+    fn spectral_backpressured(&self) -> bool {
+        false
+    }
 }
 
 impl AnalysisEventOutput for Sender<AnalysisEvent> {
@@ -45,7 +50,9 @@ impl AnalysisEventOutput for AnalysisOutputs {
             if self.pending_resets.load(Ordering::Relaxed) > 0 {
                 return Err(());
             }
-            if generation != 0 && generation != self.generation.load(Ordering::Relaxed) {
+            // Every chunk carries the generation of the session it belongs
+            // to, so a chunk waiting here stops waiting once it is stale.
+            if generation != self.generation.load(Ordering::Relaxed) {
                 return Err(());
             }
             match self.spectra.send_timeout(event, Duration::from_millis(20)) {
@@ -54,6 +61,10 @@ impl AnalysisEventOutput for AnalysisOutputs {
                 Err(SendTimeoutError::Timeout(pending)) => event = pending,
             }
         }
+    }
+
+    fn spectral_backpressured(&self) -> bool {
+        self.spectra.is_full()
     }
 }
 

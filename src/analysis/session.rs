@@ -217,6 +217,7 @@ pub(super) enum SpectrogramWorkerCommand {
         clear_history_on_reset: bool,
         view_mode: SpectrogramViewMode,
         display_mode: SpectrogramDisplayMode,
+        handoff: SessionHandoff,
     },
     PositionUpdate {
         position_seconds: f64,
@@ -259,6 +260,20 @@ pub(super) enum SpectrogramWorkerCommand {
     /// worker has not opened yet opens its file at the new path; the file
     /// it reads stays open.
     RemapPaths(Arc<PathRenames>),
+}
+
+/// Output the analysis thread hands to the worker with a session, so that
+/// the worker is the only writer of the spectral stream: what the UI
+/// receives stays in order, and nothing waits on the analysis thread.
+#[derive(Debug, Clone, Default)]
+pub(super) struct SessionHandoff {
+    /// Before switching, publish the decoded extent of the session this one
+    /// replaces, for its track: a centered gapless switch shows the new
+    /// track's columns next.
+    pub(super) finalize_previous: bool,
+    /// Chunks to emit before the session opens its file. They carry the
+    /// session's track token and generation.
+    pub(super) prelude: Vec<PrecomputedSpectrogramChunk>,
 }
 
 /// Point a session that has not started at its file's new path.
@@ -460,6 +475,9 @@ fn centered_staging_decode(
     stop: &AtomicBool,
     tx: &Sender<PrecomputedSpectrogramChunk>,
 ) {
+    if stop.load(Ordering::Relaxed) {
+        return;
+    }
     let Some((mut source, native_sample_rate, native_channels, total_columns)) =
         open_audio_file(path)
     else {
@@ -570,8 +588,13 @@ fn centered_staging_decode(
 
 /// Spawn a short-lived staging thread that pre-decodes a track for
 /// centered-mode gapless.  Produces `PrecomputedSpectrogramChunk`s
-/// with 0-based column indices and `track_token: 0` (placeholder).
-/// Returns the chunk receiver and the thread's join handle.
+/// with 0-based column indices, and `track_token: 0` and `generation: 0`
+/// as placeholders for the session that shows them.
+/// Returns the chunk receiver and the thread, or `None` if it cannot start.
+///
+/// The thread holds its chunk sender until it ends, so the receiver
+/// disconnects when it does. `open_gate`, when given, is waited on before
+/// the file is opened.
 pub(super) fn spawn_centered_staging_worker(
     path: PathBuf,
     fft_size: usize,
@@ -579,18 +602,16 @@ pub(super) fn spawn_centered_staging_worker(
     zoom_level: f32,
     view_mode: SpectrogramViewMode,
     stop: Arc<AtomicBool>,
-) -> (
-    Receiver<PrecomputedSpectrogramChunk>,
-    std::thread::JoinHandle<()>,
-) {
+    open_gate: Option<Receiver<()>>,
+) -> Option<(Receiver<PrecomputedSpectrogramChunk>, JoinableThread)> {
     let (tx, rx) = unbounded::<PrecomputedSpectrogramChunk>();
-    let handle = std::thread::Builder::new()
-        .name("ferrous-spectrogram-staging".to_string())
-        .spawn(move || {
-            centered_staging_decode(&path, fft_size, hop_size, zoom_level, view_mode, &stop, &tx);
-        })
-        .expect("failed to spawn staging thread");
-    (rx, handle)
+    let thread = crate::worker_thread::spawn_worker("ferrous-spectrogram-staging", move || {
+        if let Some(gate) = open_gate {
+            let _ = gate.recv();
+        }
+        centered_staging_decode(&path, fft_size, hop_size, zoom_level, view_mode, &stop, &tx);
+    })?;
+    Some((rx, thread))
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +725,10 @@ pub(crate) mod spawn_test_hooks {
 /// `ContinueWithFile` arriving outside a live session can be
 /// converted to a `NewTrack` fallback.
 struct LastSessionParams {
+    /// The generation of the session these came from. A continuation that
+    /// arrives after the session ended belongs to it, and is stale once the
+    /// analysis thread has started another.
+    generation: u64,
     fft_size: usize,
     hop_size: usize,
     zoom_level: f32,
@@ -736,6 +761,7 @@ fn spectrogram_worker_loop(
 
         match cmd {
             SpectrogramWorkerCommand::NewTrack {
+                generation: session_generation,
                 fft_size,
                 hop_size,
                 zoom_level,
@@ -746,6 +772,7 @@ fn spectrogram_worker_loop(
                 ..
             } => {
                 last_params = Some(LastSessionParams {
+                    generation: session_generation,
                     fft_size,
                     hop_size,
                     zoom_level,
@@ -754,8 +781,9 @@ fn spectrogram_worker_loop(
                     view_mode,
                     display_mode,
                 });
+                let mut cmd = cmd;
                 next_cmd = run_spectrogram_session(
-                    &cmd,
+                    &mut cmd,
                     cmd_rx,
                     event_tx,
                     generation,
@@ -764,12 +792,16 @@ fn spectrogram_worker_loop(
                 );
             }
             SpectrogramWorkerCommand::ContinueWithFile { path, track_token } => {
-                // No active session — convert to NewTrack fallback.
+                // No active session — convert to NewTrack fallback. Only the
+                // analysis thread creates generations: the fallback belongs
+                // to the ended session, and a newer one supersedes it.
                 if let Some(params) = &last_params {
-                    let gen = generation.fetch_add(1, Ordering::Relaxed) + 1;
-                    let fallback = SpectrogramWorkerCommand::NewTrack {
+                    if params.generation != generation.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let mut fallback = SpectrogramWorkerCommand::NewTrack {
                         track_token,
-                        generation: gen,
+                        generation: params.generation,
                         path,
                         fft_size: params.fft_size,
                         hop_size: params.hop_size,
@@ -782,8 +814,10 @@ fn spectrogram_worker_loop(
                         clear_history_on_reset: false,
                         view_mode: params.view_mode,
                         display_mode: params.display_mode,
+                        handoff: SessionHandoff::default(),
                     };
                     last_params = Some(LastSessionParams {
+                        generation: params.generation,
                         fft_size: params.fft_size,
                         hop_size: params.hop_size,
                         zoom_level: params.zoom_level,
@@ -793,7 +827,7 @@ fn spectrogram_worker_loop(
                         display_mode: params.display_mode,
                     });
                     next_cmd = run_spectrogram_session(
-                        &fallback,
+                        &mut fallback,
                         cmd_rx,
                         event_tx,
                         generation,
@@ -946,14 +980,21 @@ enum SessionAction {
 /// Returns `Some(cmd)` if interrupted by a NewTrack/Stop, `None` if session ended naturally.
 #[allow(clippy::too_many_lines)]
 fn run_spectrogram_session(
-    initial_cmd: &SpectrogramWorkerCommand,
+    initial_cmd: &mut SpectrogramWorkerCommand,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &dyn AnalysisEventOutput,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
 ) -> Option<SpectrogramWorkerCommand> {
-    let &SpectrogramWorkerCommand::NewTrack {
+    let SpectrogramWorkerCommand::NewTrack { handoff, .. } = initial_cmd else {
+        return None;
+    };
+    // Emitted before the file opens, which can take a while.
+    for chunk in std::mem::take(&mut handoff.prelude) {
+        let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(chunk));
+    }
+    let &mut SpectrogramWorkerCommand::NewTrack {
         track_token,
         generation: gen,
         ref path,
@@ -968,6 +1009,7 @@ fn run_spectrogram_session(
         clear_history_on_reset,
         view_mode,
         display_mode,
+        handoff: _,
     } = initial_cmd
     else {
         return None;
@@ -1179,14 +1221,16 @@ fn run_spectrogram_session(
                     );
                     continue; // re-enter session_decode_loop
                 }
-                // Incompatible or open failed — fall back to NewTrack.
+                // Incompatible or open failed — fall back to NewTrack. It
+                // continues this session's stream, so it keeps the session's
+                // generation: only the analysis thread creates generations,
+                // and one created here would make its next session stale.
                 profile_eprintln!(
                     "[spect-worker] ContinueWithFile incompatible, falling back to NewTrack"
                 );
-                let gen = generation.fetch_add(1, Ordering::Relaxed) + 1;
                 return Some(SpectrogramWorkerCommand::NewTrack {
                     track_token,
-                    generation: gen,
+                    generation: session.gen,
                     path,
                     fft_size: session.fft_size,
                     hop_size: session.hop_size,
@@ -1199,10 +1243,19 @@ fn run_spectrogram_session(
                     clear_history_on_reset: false,
                     view_mode: session.view_mode,
                     display_mode: session.display_mode,
+                    handoff: SessionHandoff::default(),
                 });
             }
             Some(cmd) => {
                 // Interrupted by NewTrack or Stop.
+                let finalize = matches!(
+                    &cmd,
+                    SpectrogramWorkerCommand::NewTrack { handoff, .. } if handoff.finalize_previous
+                );
+                // A session parked at EOF has published its extent already.
+                if finalize && !session.source_reached_eof && session.columns_produced > 0 {
+                    session_emit_finalize_chunk(&session, event_tx);
+                }
                 profile_eprintln!(
                     "[spect-worker] SESSION END (interrupted) elapsed={:.1}ms cols_produced={}",
                     session_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -2156,6 +2209,7 @@ mod tests {
                         clear_history_on_reset: true,
                         view_mode: SpectrogramViewMode::Downmix,
                         display_mode: mode,
+                        handoff: SessionHandoff::default(),
                     })
                     .unwrap();
                 let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -2208,7 +2262,7 @@ mod tests {
             let (events, event_rx) = unbounded();
             let file = path.clone();
             let worker = std::thread::spawn(move || {
-                let command = SpectrogramWorkerCommand::NewTrack {
+                let mut command = SpectrogramWorkerCommand::NewTrack {
                     track_token: 1,
                     generation: 1,
                     path: file,
@@ -2223,9 +2277,10 @@ mod tests {
                     clear_history_on_reset: true,
                     view_mode: SpectrogramViewMode::Downmix,
                     display_mode: mode,
+                    handoff: SessionHandoff::default(),
                 };
                 run_spectrogram_session(
-                    &command,
+                    &mut command,
                     &command_rx,
                     &events,
                     &AtomicU64::new(1),
@@ -2353,7 +2408,7 @@ mod tests {
                 let hop = super::super::zoom_hop_size(fft, zoom);
                 let (commands, command_rx) = unbounded();
                 let (events, event_rx) = unbounded();
-                let command = SpectrogramWorkerCommand::NewTrack {
+                let mut command = SpectrogramWorkerCommand::NewTrack {
                     track_token: 1,
                     generation: 1,
                     path: path.clone(),
@@ -2368,11 +2423,12 @@ mod tests {
                     clear_history_on_reset: true,
                     view_mode: SpectrogramViewMode::PerChannel,
                     display_mode: mode,
+                    handoff: SessionHandoff::default(),
                 };
                 let initial = command.clone();
                 let worker = std::thread::spawn(move || {
                     run_spectrogram_session(
-                        &command,
+                        &mut command,
                         &command_rx,
                         &events,
                         &AtomicU64::new(1),
@@ -2419,7 +2475,7 @@ mod tests {
                 let (events, event_rx) = unbounded();
                 let worker = std::thread::spawn(move || {
                     run_spectrogram_session(
-                        &initial,
+                        &mut initial,
                         &command_rx,
                         &events,
                         &AtomicU64::new(1),
@@ -2941,6 +2997,7 @@ mod tests {
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
+            handoff: SessionHandoff::default(),
         })
         .unwrap();
 
@@ -2969,6 +3026,7 @@ mod tests {
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Centered,
+            handoff: SessionHandoff::default(),
         })
         .unwrap();
         tx.send(SpectrogramWorkerCommand::NewTrack {
@@ -2986,6 +3044,7 @@ mod tests {
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Centered,
+            handoff: SessionHandoff::default(),
         })
         .unwrap();
 
@@ -3021,6 +3080,7 @@ mod tests {
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Centered,
+            handoff: SessionHandoff::default(),
         };
         tx.send(SpectrogramWorkerCommand::NewTrack {
             track_token: 30,
@@ -3037,6 +3097,7 @@ mod tests {
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Centered,
+            handoff: SessionHandoff::default(),
         })
         .unwrap();
 
@@ -3073,6 +3134,7 @@ mod tests {
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Centered,
+            handoff: SessionHandoff::default(),
         };
 
         let cmd = coalesce_queued_new_track_command(initial, &rx, &generation_state);
@@ -3364,6 +3426,7 @@ mod tests {
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
             display_mode: SpectrogramDisplayMode::Rolling,
+            handoff: SessionHandoff::default(),
         }
     }
 
