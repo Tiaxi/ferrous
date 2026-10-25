@@ -32,10 +32,12 @@
 //!   one. Such a minimal ACL, with only owner, group, and other entries, says
 //!   no more than the mode and counts as no ACL.
 //!
-//! The replaced path gets a new inode. Other hard links to the file keep its
-//! previous contents, and the edited path splits off from them. Hard links
-//! are not refused: seeding and library tools hard-link a download into the
-//! library on purpose and rely on edits leaving the seeded copy intact.
+//! The replaced path gets a new inode, which is recorded with
+//! [`crate::file_identity::replaced`] so that readers that hold the file open
+//! still know it. Other hard links to the file keep its previous contents,
+//! and the edited path splits off from them. Hard links are not refused:
+//! seeding and library tools hard-link a download into the library on purpose
+//! and rely on edits leaving the seeded copy intact.
 
 use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions, Permissions};
@@ -45,6 +47,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::file_identity::{self, FileId};
 use crate::no_replace::rename_no_replace;
 
 mod xattr;
@@ -299,6 +302,8 @@ impl Writable {
 
 /// The metadata of a replaced file that its replacement takes over.
 struct KeptMetadata {
+    /// The replaced file.
+    identity: FileId,
     /// Permission bits, including set-id and sticky bits.
     mode: u32,
     uid: u32,
@@ -338,6 +343,7 @@ impl KeptMetadata {
         // the mode leave it out of the list.
         let access_acl = read_access_acl(file, path, calls)?;
         Ok(Self {
+            identity: FileId::of(&metadata),
             mode: metadata.mode() & 0o7777,
             uid: metadata.uid(),
             gid: metadata.gid(),
@@ -554,10 +560,21 @@ impl TempSibling {
     /// Flush the file and rename it to `target`, with the metadata of the
     /// file it replaces if given.
     fn commit(mut self, target: &Path, replaced: Option<&KeptMetadata>) -> Result<(), String> {
-        if let Some(replaced) = replaced {
-            replaced.apply(&self.file, target, &System)?;
+        let replacement = replaced
+            .map(|replaced| {
+                replaced.apply(&self.file, target, &System)?;
+                let copy = self.file.metadata().map_err(|err| {
+                    format!("failed to read metadata for {}: {err}", self.path.display())
+                })?;
+                Ok::<_, String>((replaced.identity, FileId::of(&copy)))
+            })
+            .transpose()?;
+        let result = self.persist(target);
+        if let Some((old, new)) = replacement.filter(|_| self.persisted) {
+            // Replaced, even when flushing the directory failed after.
+            file_identity::replaced(target, old, new);
         }
-        self.persist(target).map_err(|(step, err)| match step {
+        result.map_err(|(step, err)| match step {
             WriteStep::Flush => format!("failed to flush {}: {err}", self.path.display()),
             WriteStep::Replace => format!(
                 "failed to replace {} with {}: {err}",
@@ -945,6 +962,7 @@ mod tests {
         let current = copy.metadata().expect("metadata");
         let (uid, gid) = (current.uid() + 1, current.gid() + 1);
         let kept = KeptMetadata {
+            identity: FileId::of(&current),
             mode: 0o640,
             uid,
             gid,
@@ -1122,6 +1140,48 @@ mod tests {
             dir_entries(&dir),
             vec!["seeded.flac".to_string(), "song.flac".to_string()]
         );
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn readers_that_watch_a_file_follow_its_replacements() {
+        let dir = test_dir("watched");
+        let path = dir.join("song.flac");
+        fs::write(&path, b"original").expect("write original");
+        let link = dir.join("link.flac");
+        std::os::unix::fs::symlink(&path, &link).expect("symlink");
+        let hard_link = dir.join("hard-link.flac");
+        fs::hard_link(&path, &hard_link).expect("hard link");
+        let watch = |path: &Path| {
+            let found = file_identity::file_id(path).expect("identity");
+            let resolved = file_identity::ResolvedPath::of(path);
+            file_identity::WatchedFile::new(resolved, found, file_identity::since_now())
+        };
+        let opened = file_identity::file_id(&path).expect("identity");
+        let (watched, through_link, through_hard_link) =
+            (watch(&path), watch(&link), watch(&hard_link));
+
+        rewrite_via_temp_copy(&path, |file| replace_contents(file, b"edited")).expect("rewrite");
+        let rewritten = file_identity::file_id(&path);
+        assert_ne!(rewritten, Some(opened));
+        assert_eq!(watched.current(), rewritten);
+        assert_eq!(through_link.current(), rewritten);
+        // The other link keeps the file it named, which its reader reads.
+        assert_eq!(through_hard_link.current(), Some(opened));
+        assert_eq!(file_identity::file_id(&hard_link), Some(opened));
+        // A save through the symbolic link replaces the file it points to.
+        rewrite_via_temp_copy(&link, |file| replace_contents(file, b"again")).expect("rewrite");
+        let rewritten = file_identity::file_id(&path);
+        assert_eq!(watched.current(), rewritten);
+        assert_eq!(through_link.current(), rewritten);
+        assert_eq!(through_hard_link.current(), Some(opened));
+        replace_file(&path, b"replaced").expect("replace");
+        let replaced = file_identity::file_id(&path);
+        assert_ne!(replaced, rewritten);
+        assert_eq!(watched.current(), replaced);
+        // A failed rewrite replaces nothing.
+        rewrite_via_temp_copy(&path, |_| Err("disk full".to_string())).expect_err("fails");
+        assert_eq!(watched.current(), replaced);
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 

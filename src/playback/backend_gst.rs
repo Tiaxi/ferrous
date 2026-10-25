@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -26,14 +26,51 @@ use super::queue::{
 };
 use super::source_activation::{activate_sources, connect_type_finding_hold};
 use super::{
-    PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent, PlaybackSnapshot,
-    PlaybackState, RepeatMode, TrackChangeKind,
+    PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
+    PlaybackSnapshot, PlaybackState, RepeatMode, TrackChangeKind,
 };
+use crate::file_identity::{self, file_id, FileId, ResolvedPath, WatchedFile};
 
 /// Tracks that may fail in a row before playback stops. A track that plays
 /// to its end, or a command that starts or navigates playback, ends a run
 /// of failures.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
+/// A current track whose file the pipeline found missing when it opened it.
+#[derive(Debug, Clone)]
+struct MissingTrack {
+    /// The track's path, which follows renames.
+    path: PathBuf,
+    /// The track's queue row.
+    index: usize,
+    /// Whether the track was started to play rather than paused.
+    play: bool,
+}
+
+/// A file that the pipeline opened for a track that a rename moved.
+#[derive(Debug)]
+struct RenamedInput {
+    /// Place of the track in the pipeline's play order; see
+    /// `StreamDurations`.
+    position: usize,
+    /// Serial number of the track's stream.
+    serial: u64,
+    /// The track's new path.
+    path: PathBuf,
+    /// What the pipeline found when it opened the track's old path, as the
+    /// app's saves replaced it since; see `OpenedFile`.
+    found: Option<FileId>,
+}
+
+impl RenamedInput {
+    /// Whether the pipeline opened the old path after the rename, and so
+    /// reads another file or none instead of the track's, given `file`,
+    /// the file at the new path. A track whose new path names no file
+    /// either is left to fail or to be renamed again.
+    fn misread(&self, file: Option<FileId>) -> bool {
+        file.is_some_and(|file| self.found != Some(file))
+    }
+}
 
 /// A plugin that the pipeline reported missing in the current run.
 #[derive(Debug, Clone)]
@@ -269,6 +306,10 @@ struct GstPlaybackRuntime {
     consecutive_failures: u32,
     /// The first missing plugin reported in the current pipeline run.
     missing_plugin: Option<MissingPlugin>,
+    /// The first current track found missing since failures were last
+    /// forgotten. Its old path may have been given to the pipeline after
+    /// a rename that has not reached the engine yet.
+    missing_on_open: Option<MissingTrack>,
     /// Shared with the about-to-finish callback and the probes on the
     /// outputs of the pipeline's sources; see `InputSwitches`.
     input_switches: Arc<InputSwitches>,
@@ -391,6 +432,7 @@ impl GstPlaybackRuntime {
             soloed_channel: None,
             consecutive_failures: 0,
             missing_plugin: None,
+            missing_on_open: None,
             input_switches: Arc::default(),
             #[cfg(test)]
             about_to_finish: Arc::default(),
@@ -944,21 +986,23 @@ impl GstPlaybackRuntime {
             self.emit_snapshot();
             return;
         }
-        if self.set_pipeline_state(gst::State::Playing).is_ok() {
-            self.playing_state_requested_at = Some(Instant::now());
-            if was_stopped {
-                // Re-assert mute after state transition to close the race
-                // window where new internal elements may not have volume=0.
-                self.playbin.set_property("volume", 0.0_f64);
-            }
-            self.snapshot.state = PlaybackState::Playing;
-            // The position advances once the pipeline has reached Playing.
-            self.sample_pipeline_position();
-            if (self.target_volume - self.applied_volume).abs() > f32::EPSILON {
-                self.startup_gain_ramp = true;
-            }
-            self.emit_snapshot();
+        // A state change that fails, such as for a file that is missing,
+        // posts the error, which skips the track or stops. Until then
+        // playback plays, so the track skipped to plays.
+        let _ = self.set_pipeline_state(gst::State::Playing);
+        self.playing_state_requested_at = Some(Instant::now());
+        if was_stopped {
+            // Re-assert mute after state transition to close the race
+            // window where new internal elements may not have volume=0.
+            self.playbin.set_property("volume", 0.0_f64);
         }
+        self.snapshot.state = PlaybackState::Playing;
+        // The position advances once the pipeline has reached Playing.
+        self.sample_pipeline_position();
+        if (self.target_volume - self.applied_volume).abs() > f32::EPSILON {
+            self.startup_gain_ramp = true;
+        }
+        self.emit_snapshot();
     }
 
     fn pause(&mut self) {
@@ -1345,8 +1389,25 @@ impl GstPlaybackRuntime {
         if state <= gst::State::Ready {
             self.input_switches.end_run(change)
         } else {
-            change()
+            let result = change();
+            self.note_run_opened();
+            result
         }
+    }
+
+    /// Record what the source of a run that the pipeline has just started
+    /// found at its file; see `OpenedFile`. Later state changes of the run
+    /// find its stream opened.
+    fn note_run_opened(&self) {
+        let Some(stream) = self
+            .stream_durations
+            .lock()
+            .ok()
+            .and_then(|mut durations| durations.run_opened())
+        else {
+            return;
+        };
+        record_opened(&self.stream_durations, &stream);
     }
 
     /// Give the stopped pipeline the current track at `path`, which starts
@@ -1677,6 +1738,7 @@ impl GstPlaybackRuntime {
     /// started or navigated playback.
     fn reset_failures(&mut self) {
         self.consecutive_failures = 0;
+        self.missing_on_open = None;
         if let Ok(mut queue) = self.queue_state.lock() {
             queue.clear_failed();
         }
@@ -1688,6 +1750,147 @@ impl GstPlaybackRuntime {
             detail,
             outcome,
         }));
+    }
+
+    /// Apply renames of files on disk to the queue and the snapshot.
+    ///
+    /// The pipeline has opened every file it was given; see `OpenedFile`.
+    /// A file it opened before the rename plays on, as the open file
+    /// follows the rename, also when a tag save replaced it before. One
+    /// whose old path it opened after the rename is another file or none,
+    /// so the track is given to the pipeline again at its new path: the
+    /// current track starts over, and a successor is dropped from the
+    /// pipeline, to be handed over again. A current track that already
+    /// failed that way is started again.
+    fn remap_paths(&mut self, renames: &PathRenames) {
+        let renamed_inputs = self
+            .queue_state
+            .lock()
+            .ok()
+            .map(|mut queue| {
+                // Under the queue lock, which a successor is staged and
+                // handed over under, so the streams match the queue's rows.
+                let opened = self
+                    .stream_durations
+                    .lock()
+                    .map(|durations| durations.opened_files())
+                    .unwrap_or_default();
+                let moved: Vec<_> = opened
+                    .into_iter()
+                    .filter_map(|(position, serial, found)| {
+                        let mut path = queue.path_in_pipeline(position)?;
+                        super::remap_path(&mut path, renames).then_some(RenamedInput {
+                            position,
+                            serial,
+                            path,
+                            found,
+                        })
+                    })
+                    .collect();
+                queue.remap_paths(renames);
+                moved
+            })
+            .unwrap_or_default();
+        let renamed_current = self
+            .snapshot
+            .current
+            .as_mut()
+            .is_some_and(|current| super::remap_path(current, renames));
+        // Acknowledge before the first event with the new paths.
+        let _ = self.event_tx.send(PlaybackEvent::PathsRemapped);
+
+        if self.retry_missing_on_open(renames) {
+            return;
+        }
+        // Outside the queue lock, and once for each path: in Repeat-One the
+        // current track and its replay read the same file.
+        let mut files = HashMap::new();
+        let misread = renamed_inputs
+            .iter()
+            .filter(|input| {
+                let file = *files
+                    .entry(input.path.as_path())
+                    .or_insert_with(|| file_id(&input.path));
+                input.misread(file)
+            })
+            .map(|input| input.position)
+            .min();
+        let Some(misread) = misread else {
+            // The pipeline reads on from the files it opened, which are at
+            // their new paths now.
+            self.follow_renames(&renamed_inputs);
+            if renamed_current {
+                self.emit_snapshot();
+            }
+            return;
+        };
+        if misread == 0 {
+            let current = self
+                .queue_state
+                .lock()
+                .ok()
+                .and_then(|queue| Some((queue.current()?, queue.current_index()?)));
+            if let Some((path, index)) = current {
+                // Also drops the successors handed over after it.
+                self.switch_to_path(path, index, TrackChangeKind::Manual, false);
+            }
+        } else {
+            let cancelled = self
+                .queue_state
+                .lock()
+                .ok()
+                .and_then(|mut queue| queue.cancel_pending());
+            self.continue_after_cancelled_advance(cancelled);
+            self.emit_snapshot();
+        }
+    }
+
+    /// The streams of `inputs` read on from the files they opened, which
+    /// were renamed, so that saves at the new paths replace them.
+    fn follow_renames(&self, inputs: &[RenamedInput]) {
+        // Resolved outside the lock, because that reads the file system.
+        let renamed: Vec<_> = inputs
+            .iter()
+            .map(|input| (input.serial, ResolvedPath::of(&input.path)))
+            .collect();
+        if let Ok(durations) = self.stream_durations.lock() {
+            for (serial, path) in renamed {
+                durations.renamed(serial, path);
+            }
+        }
+    }
+
+    /// Start the current track that the pipeline found missing again, if
+    /// `renames` moved it to a file that is there. Returns whether it was
+    /// started.
+    fn retry_missing_on_open(&mut self, renames: &PathRenames) -> bool {
+        let Some(missing) = self.missing_on_open.as_mut() else {
+            return false;
+        };
+        if !super::remap_path(&mut missing.path, renames) || file_id(&missing.path).is_none() {
+            return false;
+        }
+        let Some(missing) = self.missing_on_open.take() else {
+            return false;
+        };
+        let target = self.queue_state.lock().ok().and_then(|mut queue| {
+            // Rows may have moved since.
+            if queue.path_at(missing.index) != Some(missing.path.as_path()) {
+                return None;
+            }
+            queue.set_current(missing.index)
+        });
+        let Some(target) = target else {
+            return false;
+        };
+        // The failures came from the old path.
+        self.reset_failures();
+        self.release_staged_spectrogram(target.cancelled, false);
+        // Playback paused since stays paused. Playback that the failure
+        // stopped starts as the track was started.
+        let play = missing.play && self.snapshot.state != PlaybackState::Paused;
+        self.switch_to_path(target.path, target.index, TrackChangeKind::Manual, play);
+        true
     }
 
     /// Handle a track that cannot be played. `file` is the path that the
@@ -1710,6 +1913,7 @@ impl GstPlaybackRuntime {
             .and_then(|file| self.stream_durations.lock().ok()?.position(file))
             .unwrap_or(0);
         let successor_failed = position > 0;
+        let mut missing = None;
         let failed = self
             .queue_state
             .lock()
@@ -1723,9 +1927,19 @@ impl GstPlaybackRuntime {
                 if !stale_path {
                     queue.mark_failed(path.clone());
                 }
+                if not_found && !successor_failed {
+                    missing = queue.current_index().map(|index| MissingTrack {
+                        path: path.clone(),
+                        index,
+                        play: self.snapshot.state == PlaybackState::Playing,
+                    });
+                }
                 Some(path)
             })
             .or(file);
+        if self.missing_on_open.is_none() {
+            self.missing_on_open = missing;
+        }
 
         if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
             self.stop_after_failure();
@@ -1795,21 +2009,7 @@ impl GstPlaybackRuntime {
         match cmd {
             PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
             PlaybackCommand::AddToQueue(paths) => self.add_to_queue(paths),
-            PlaybackCommand::RemapPaths(renames) => {
-                if let Ok(mut state) = self.queue_state.lock() {
-                    state.remap_paths(&renames);
-                }
-                let renamed_current = self
-                    .snapshot
-                    .current
-                    .as_mut()
-                    .is_some_and(|current| super::remap_path(current, &renames));
-                // Acknowledge before the first snapshot with the new paths.
-                let _ = self.event_tx.send(PlaybackEvent::PathsRemapped);
-                if renamed_current {
-                    self.emit_snapshot();
-                }
-            }
+            PlaybackCommand::RemapPaths(renames) => self.remap_paths(&renames),
             PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
             PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
             PlaybackCommand::MoveQueue { from, to } => self.move_queue_item(from, to),
@@ -2133,12 +2333,15 @@ fn connect_about_to_finish(runtime: &GstPlaybackRuntime) {
                 .and_then(|value| value.get::<gst::Element>().ok())
             {
                 // Not while the run ends, which drops the successor anyway.
-                input_switches.hand_over(|| {
+                let handed_over = input_switches.hand_over(|| {
                     stage_successor(&queue_state, &stream_durations, &analysis_tx, |uri| {
                         // Activates the successor's source.
                         activate_sources(|| playbin.set_property("uri", uri));
-                    });
+                    })
                 });
+                if let Some(stream) = handed_over.flatten() {
+                    record_opened(&stream_durations, &stream);
+                }
             }
             #[cfg(test)]
             calls.returned.fetch_add(1, Ordering::SeqCst);
@@ -2250,32 +2453,32 @@ fn merge_burst(commands: Vec<PlaybackCommand>) -> Vec<EngineStep> {
 ///
 /// The URI is handed over under the queue lock, so a rename reaches the
 /// queue either before the successor is staged or after the pipeline was
-/// given its URI. Do not call into playbin here otherwise: a query can
-/// deadlock with a state change on the engine thread.
+/// given its URI and opened the file. Returns the stream of a successor
+/// given to the pipeline, for the caller to record with `record_opened`.
+/// Do not call into playbin here otherwise: a query can deadlock with a
+/// state change on the engine thread.
 fn stage_successor(
     queue_state: &Mutex<GaplessQueue>,
     stream_durations: &Mutex<StreamDurations>,
     analysis_tx: &Sender<AnalysisCommand>,
     hand_over: impl FnOnce(&str),
-) {
+) -> Option<OpenedStream> {
     let mut queue = match queue_state.lock() {
         Ok(queue) => queue,
         Err(e) => {
             eprintln!("[ferrous] about-to-finish: queue lock poisoned: {e}");
-            return;
+            return None;
         }
     };
     // Same file extension → gapless (same decoder reused).
     // Different extension → let EOS fire, handle in bus handler.
-    let Some(staged) = queue.stage_natural(|finishing, next| {
+    let staged = queue.stage_natural(|finishing, next| {
         if same_audio_extension(finishing, next) && file_uri(next).is_some() {
             Handoff::Gapless
         } else {
             Handoff::AtEos
         }
-    }) else {
-        return;
-    };
+    })?;
     if staged.staged_spectrogram {
         // Send while holding the queue lock so that a cancellation cannot
         // reach analysis before this request. The staging thread checks
@@ -2284,13 +2487,29 @@ fn stage_successor(
             path: staged.path.clone(),
         });
     }
-    if staged.handoff == Handoff::Gapless {
-        if let Some(uri) = file_uri(&staged.path) {
-            if let Ok(mut durations) = stream_durations.lock() {
-                durations.hand_over(staged.path);
-            }
-            hand_over(&uri);
-        }
+    if staged.handoff != Handoff::Gapless {
+        return None;
+    }
+    let uri = file_uri(&staged.path)?;
+    let stream = stream_durations
+        .lock()
+        .ok()
+        .map(|mut durations| durations.hand_over(staged.path));
+    // Opens the file; see `OpenedFile`.
+    hand_over(&uri);
+    stream
+}
+
+/// Record what the source of `stream` found at its file right after it
+/// opened it; see `OpenedFile`. This reads the file system, which can
+/// block, so call it outside the queue lock and outside a handover, which
+/// playback commands and the end of a run wait for.
+fn record_opened(stream_durations: &Mutex<StreamDurations>, stream: &OpenedStream) {
+    let since = file_identity::since_now();
+    let found = file_id(&stream.file)
+        .map(|found| WatchedFile::new(ResolvedPath::of(&stream.file), found, since));
+    if let Ok(mut durations) = stream_durations.lock() {
+        durations.opened(stream.serial, found);
     }
 }
 
@@ -2327,27 +2546,126 @@ fn step_volume_level(
 #[derive(Debug, Default)]
 struct StreamDurations {
     streams: VecDeque<RunStream>,
+    /// Serial number of the next stream.
+    next_serial: u64,
 }
 
 #[derive(Debug)]
 struct RunStream {
+    serial: u64,
     file: PathBuf,
     duration: Option<Duration>,
+    opened: OpenedFile,
+}
+
+/// A stream whose source opened its file, for `record_opened`.
+#[derive(Debug)]
+struct OpenedStream {
+    serial: u64,
+    file: PathBuf,
+}
+
+/// What a stream's source found at its file when it opened it.
+///
+/// The source opens its file while the thread that gives the pipeline the
+/// file activates it: during the state change that starts the run, or the
+/// handover of a successor. So the pipeline has opened every file it was
+/// given, except that of a run that has not been started. A rename on disk
+/// before then leaves the source with another file or none, while one after
+/// then is followed by the open file. A tag save replaces the file with an
+/// edited copy that has another identity, while the source reads on from
+/// the file it opened, so the identity follows the app's saves.
+#[derive(Debug)]
+enum OpenedFile {
+    /// The run was not started yet.
+    NotYet,
+    /// The source opened the file, and what it found there is being read.
+    Unrecorded,
+    /// The file at the stream's path right after the source opened it, or
+    /// `None` when there was none. Read after the open, so a rename in
+    /// between makes this differ from the file that was opened.
+    Found(Option<WatchedFile>),
 }
 
 impl StreamDurations {
     /// Start a run with the stream of `file`.
     fn start_run(&mut self, file: PathBuf) {
         self.clear();
-        self.hand_over(file);
+        self.push(file, OpenedFile::NotYet);
     }
 
-    /// The pipeline was given a successor that reads `file`.
-    fn hand_over(&mut self, file: PathBuf) {
+    /// The pipeline was given a successor that reads `file`, and its source
+    /// opens it.
+    fn hand_over(&mut self, file: PathBuf) -> OpenedStream {
+        self.push(file, OpenedFile::Unrecorded)
+    }
+
+    fn push(&mut self, file: PathBuf, opened: OpenedFile) -> OpenedStream {
+        let serial = self.next_serial;
+        self.next_serial += 1;
         self.streams.push_back(RunStream {
-            file,
+            serial,
+            file: file.clone(),
             duration: None,
+            opened,
         });
+        OpenedStream { serial, file }
+    }
+
+    /// The run's first stream, when the run was started just now. A
+    /// successor is opened by its handover instead.
+    fn run_opened(&mut self) -> Option<OpenedStream> {
+        let stream = self
+            .streams
+            .front_mut()
+            .filter(|stream| matches!(stream.opened, OpenedFile::NotYet))?;
+        stream.opened = OpenedFile::Unrecorded;
+        Some(OpenedStream {
+            serial: stream.serial,
+            file: stream.file.clone(),
+        })
+    }
+
+    /// The source of the stream `serial` found `found` when it opened its
+    /// file.
+    fn opened(&mut self, serial: u64, found: Option<WatchedFile>) {
+        if let Some(stream) = self.streams.iter_mut().find(|stream| {
+            stream.serial == serial && matches!(stream.opened, OpenedFile::Unrecorded)
+        }) {
+            stream.opened = OpenedFile::Found(found);
+        }
+    }
+
+    /// What the source of each opened stream found, by place in play order,
+    /// as the app's saves replaced it since. What a source found is not
+    /// known while it is read, and counts as nothing: the track is given to
+    /// the pipeline again if its new path names a file, as when a rename
+    /// races the open.
+    fn opened_files(&self) -> Vec<(usize, u64, Option<FileId>)> {
+        self.streams
+            .iter()
+            .enumerate()
+            .filter_map(|(position, stream)| {
+                let found = match &stream.opened {
+                    OpenedFile::Found(found) => found.as_ref().and_then(WatchedFile::current),
+                    OpenedFile::Unrecorded => None,
+                    OpenedFile::NotYet => return None,
+                };
+                Some((position, stream.serial, found))
+            })
+            .collect()
+    }
+
+    /// The file that the stream `serial` opened was renamed to `path`.
+    fn renamed(&self, serial: u64, path: ResolvedPath) {
+        if let Some(OpenedFile::Found(Some(watched))) = self
+            .streams
+            .iter()
+            .find(|stream| stream.serial == serial)
+            .map(|stream| &stream.opened)
+        {
+            watched.renamed(path);
+        }
     }
 
     /// The oldest successor became audible.
@@ -2578,18 +2896,19 @@ impl InputSwitches {
     }
 
     /// Run `hand_over`, which hands a successor to the pipeline, unless the
-    /// run ends.
-    fn hand_over(&self, hand_over: impl FnOnce()) {
+    /// run ends. Returns what it returned, if it ran.
+    fn hand_over<T>(&self, hand_over: impl FnOnce() -> T) -> Option<T> {
         {
             let mut state = self.lock();
             if state.ending {
-                return;
+                return None;
             }
             state.handovers += 1;
         }
-        hand_over();
+        let result = hand_over();
         self.lock().handovers -= 1;
         self.settled.notify_all();
+        Some(result)
     }
 
     /// Watch the outputs of every source that uridecodebin3 in `playbin`
@@ -3439,6 +3758,45 @@ mod tests {
             durations.lock().unwrap().current(),
             Some(Duration::from_millis(1_200))
         );
+    }
+
+    #[test]
+    fn handover_records_the_file_that_the_successor_opened() {
+        let dir =
+            std::env::temp_dir().join(format!("ferrous-handover-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+        let queue = Mutex::new(GaplessQueue::new());
+        let _ = queue.lock().unwrap().set_queue(vec![a.clone(), b.clone()]);
+        let durations = Mutex::new(StreamDurations::default());
+        durations.lock().unwrap().start_run(a);
+        let (analysis_tx, _analysis_rx) = unbounded();
+        let stream = stage_successor(&queue, &durations, &analysis_tx, |_| {
+            std::fs::write(&b, b"").unwrap();
+        })
+        .expect("B handed over");
+        // Not read under the queue lock: a rename meanwhile finds that
+        // what B's source found is not known. The run itself has not been
+        // started.
+        assert_eq!(
+            durations.lock().unwrap().opened_files(),
+            vec![(1, stream.serial, None)]
+        );
+        record_opened(&durations, &stream);
+        let found = file_id(&b);
+        assert!(found.is_some());
+        assert_eq!(
+            durations.lock().unwrap().opened_files(),
+            vec![(1, stream.serial, found)]
+        );
+        // A tag save replaces B's file, which its source reads on.
+        crate::safe_save::rewrite_via_temp_copy(&b, |_| Ok(())).unwrap();
+        assert_ne!(file_id(&b), found);
+        assert_eq!(
+            durations.lock().unwrap().opened_files(),
+            vec![(1, stream.serial, file_id(&b))]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5658,6 +6016,23 @@ mod engine_tests {
     }
 
     #[test]
+    fn missing_current_track_is_reported_and_skipped() {
+        // The pipeline fails to start playing at once.
+        let fixtures = Fixtures::new("missing-current");
+        let missing = fixtures.dir.join("missing.wav");
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![missing.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        let error = engine.wait_for_errors(1);
+        assert_eq!(error.path.as_deref(), Some(missing.as_path()));
+        assert_eq!(error.outcome, PlaybackErrorOutcome::Skipped);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
+        engine.wait_for_playing(1, millis(4_500));
+        assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+    }
+
+    #[test]
     fn corrupt_track_in_the_middle_is_skipped_after_the_track_before_it() {
         // The corrupt track is handed to the pipeline as the successor of
         // A and fails to open while A plays.
@@ -5918,69 +6293,564 @@ mod engine_tests {
         }
     }
 
+    /// Rename `a` and `b` to each other's names on disk.
+    fn swap_files(a: &Path, b: &Path) -> PathRenames {
+        let swap = a.with_extension("swap");
+        std::fs::rename(a, &swap).unwrap();
+        std::fs::rename(b, a).unwrap();
+        std::fs::rename(&swap, b).unwrap();
+        PathRenames::from([
+            (a.to_path_buf(), b.to_path_buf()),
+            (b.to_path_buf(), a.to_path_buf()),
+        ])
+    }
+
+    /// The events after the engine acknowledged a rename.
+    fn after_remap(events: &[PlaybackEvent]) -> &[PlaybackEvent] {
+        let remapped = events
+            .iter()
+            .position(|event| matches!(event, PlaybackEvent::PathsRemapped))
+            .expect("rename acknowledged");
+        &events[remapped + 1..]
+    }
+
+    /// The track changes and the errors among `events`.
+    fn changes_and_errors(
+        events: &[PlaybackEvent],
+    ) -> (Vec<(PathBuf, usize, TrackChangeKind)>, Vec<PlaybackError>) {
+        let mut changes = Vec::new();
+        let mut errors = Vec::new();
+        for event in events {
+            match event {
+                PlaybackEvent::TrackChanged {
+                    path,
+                    queue_index,
+                    kind,
+                    ..
+                } => changes.push((path.clone(), *queue_index, kind.clone())),
+                PlaybackEvent::Error(error) => errors.push(error.clone()),
+                _ => {}
+            }
+        }
+        (changes, errors)
+    }
+
+    impl DirectEngine {
+        /// Handle bus messages until the pipeline posts an error, which is
+        /// left on the bus, not handled yet.
+        #[track_caller]
+        fn wait_for_unhandled_error(&mut self) {
+            let error = self.handle_messages_until("error", |message| {
+                matches!(message.view(), gst::MessageView::Error(_))
+            });
+            self.bus.post(error).unwrap();
+        }
+
+        /// Wait until row `index` plays from `path`, lasting about
+        /// `duration`, which identifies the fixture the pipeline reads.
+        #[track_caller]
+        fn wait_until_playing(&mut self, path: &Path, index: usize, duration: Duration) {
+            let uri = file_uri(path);
+            let what = format!("row {index} did not play from {}", path.display());
+            self.wait_until(&what, |runtime| {
+                runtime.snapshot.state == PlaybackState::Playing
+                    && runtime.playbin.current_state() == gst::State::Playing
+                    && runtime.snapshot.current_queue_index == Some(index)
+                    && runtime.snapshot.current.as_deref() == Some(path)
+                    && runtime.snapshot.duration.abs_diff(duration) < millis(100)
+                    && runtime.playbin.property::<Option<String>>("current-uri") == uri
+            });
+        }
+
+        fn remap(&mut self, renames: PathRenames) {
+            self.runtime
+                .apply_command(PlaybackCommand::RemapPaths(Arc::new(renames)));
+        }
+
+        /// Wait until what the source of the successor handed over found
+        /// is recorded, which the about-to-finish handler does after the
+        /// handover. A rename before then finds it not known yet; see
+        /// `StreamDurations::opened_files`. Bus messages are left alone, so
+        /// an error from the handover stays unhandled.
+        #[track_caller]
+        fn wait_until_successor_recorded(&self) {
+            let deadline = Instant::now() + TIMEOUT;
+            while !self
+                .runtime
+                .stream_durations
+                .lock()
+                .unwrap()
+                .streams
+                .get(1)
+                .is_some_and(|stream| matches!(stream.opened, OpenedFile::Found(_)))
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "{}",
+                    self.report("the successor's file was not recorded")
+                );
+                std::thread::sleep(millis(1));
+            }
+        }
+    }
+
     #[test]
-    fn successor_renamed_before_its_remap_plays_from_the_new_path_once_remapped() {
-        // The rename reaches the engine after the pipeline failed to open
-        // the old path, but before the engine handles the failure.
-        let fixtures = Fixtures::new("rename-remapped");
+    fn files_renamed_after_the_pipeline_opened_them_play_on() {
+        let fixtures = Fixtures::new("rename-after-open");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let renamed_a = fixtures.dir.join("renamed a.wav");
+        let renamed_b = fixtures.dir.join("renamed b.wav");
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(vec![a.clone(), b.clone()], RepeatMode::Off);
+        let old_b = file_uri(&b);
+        engine.wait_until("no successor was handed over", |runtime| {
+            runtime
+                .queue_state
+                .lock()
+                .unwrap()
+                .successor_handed_to_pipeline()
+        });
+        engine.wait_until_successor_recorded();
+        let started = engine.runtime.snapshot.track_token;
+        std::fs::rename(&a, &renamed_a).unwrap();
+        std::fs::rename(&b, &renamed_b).unwrap();
+        while engine.events.try_recv().is_ok() {}
+        engine.remap(PathRenames::from([
+            (a, renamed_a.clone()),
+            (b, renamed_b.clone()),
+        ]));
+
+        assert_eq!(engine.runtime.snapshot.track_token, started);
+        assert_eq!(
+            engine.runtime.snapshot.current.as_deref(),
+            Some(renamed_a.as_path())
+        );
+        assert_eq!(engine.runtime.restart, None);
+        assert!(
+            engine
+                .runtime
+                .queue_state
+                .lock()
+                .unwrap()
+                .successor_handed_to_pipeline(),
+            "B stays handed over"
+        );
+        engine.wait_until("B did not start", |runtime| {
+            runtime.snapshot.current_queue_index == Some(1)
+                && runtime.snapshot.duration.abs_diff(millis(4_500)) < millis(100)
+        });
+        assert_eq!(
+            engine.runtime.snapshot.current.as_deref(),
+            Some(renamed_b.as_path())
+        );
+        assert_eq!(
+            engine
+                .runtime
+                .playbin
+                .property::<Option<String>>("current-uri"),
+            old_b,
+            "the pipeline reads the file it opened"
+        );
+        let events: Vec<_> = engine.events.try_iter().collect();
+        let (changes, errors) = changes_and_errors(after_remap(&events));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            matches!(
+                changes.as_slice(),
+                [(path, 1, TrackChangeKind::Gapless)] if *path == renamed_b
+            ),
+            "{changes:?}"
+        );
+    }
+
+    /// Save `path` as a tag save does, through an edited copy that
+    /// replaces it, with the same audio.
+    fn save_tags(path: &Path) {
+        crate::safe_save::rewrite_via_temp_copy(path, |_| Ok(())).unwrap();
+    }
+
+    impl DirectEngine {
+        /// Play `queue` until its first track has played for 1 s.
+        fn play_for_a_second(&mut self, queue: Vec<PathBuf>) {
+            self.play_until_opened(queue, RepeatMode::Off);
+            self.wait_until("the track did not play for 1 s", |runtime| {
+                runtime.snapshot.state == PlaybackState::Playing
+                    && runtime.snapshot.position >= millis(1_000)
+            });
+        }
+
+        /// Apply `renames`, which moved the playing track to `new_path`,
+        /// and check that the track plays on from where it was, with no
+        /// restart.
+        #[track_caller]
+        fn remap_and_play_on(&mut self, renames: PathRenames, new_path: &Path) {
+            let started = self.runtime.snapshot.track_token;
+            let position = self.runtime.snapshot.position;
+            while self.events.try_recv().is_ok() {}
+            self.remap(renames);
+
+            assert_eq!(self.runtime.snapshot.track_token, started);
+            assert_eq!(self.runtime.restart, None);
+            assert_eq!(self.runtime.playbin.current_state(), gst::State::Playing);
+            assert_eq!(self.runtime.snapshot.current.as_deref(), Some(new_path));
+            let mut lowest = position;
+            self.wait_until("the track did not play on", |runtime| {
+                lowest = lowest.min(runtime.snapshot.position);
+                runtime.snapshot.position >= position + millis(500)
+            });
+            assert_eq!(lowest, position, "the track did not start over");
+            assert_eq!(self.runtime.snapshot.track_token, started);
+            let events: Vec<_> = self.events.try_iter().collect();
+            let (changes, errors) = changes_and_errors(after_remap(&events));
+            assert!(errors.is_empty(), "{errors:?}");
+            assert!(changes.is_empty(), "{changes:?}");
+        }
+    }
+
+    #[test]
+    fn playing_track_saved_and_renamed_plays_on() {
+        let fixtures = Fixtures::new("save-rename-current");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let renamed = fixtures.dir.join("renamed a.wav");
+        let mut engine = DirectEngine::start();
+        engine.play_for_a_second(vec![a.clone(), b]);
+        let opened = file_id(&a);
+        save_tags(&a);
+        assert_ne!(file_id(&a), opened, "the save replaced A's file");
+        std::fs::rename(&a, &renamed).unwrap();
+        engine.remap_and_play_on(PathRenames::from([(a, renamed.clone())]), &renamed);
+    }
+
+    #[test]
+    fn playing_track_renamed_saved_and_renamed_again_plays_on() {
+        let fixtures = Fixtures::new("rename-save-rename-current");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let renamed = fixtures.dir.join("renamed a.wav");
+        let renamed_again = fixtures.dir.join("renamed again a.wav");
+        let mut engine = DirectEngine::start();
+        engine.play_for_a_second(vec![a.clone(), b]);
+        std::fs::rename(&a, &renamed).unwrap();
+        engine.remap_and_play_on(PathRenames::from([(a, renamed.clone())]), &renamed);
+        // The save replaces the playing track at its new path.
+        save_tags(&renamed);
+        std::fs::rename(&renamed, &renamed_again).unwrap();
+        engine.remap_and_play_on(
+            PathRenames::from([(renamed, renamed_again.clone())]),
+            &renamed_again,
+        );
+    }
+
+    #[test]
+    fn playing_track_renamed_after_a_save_of_another_hard_link_plays_on() {
+        let fixtures = Fixtures::new("save-link-rename-current");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.dir.join("b.wav");
+        std::fs::hard_link(&a, &b).unwrap();
+        let other = fixtures.wav("other.wav", 4_500);
+        let renamed = fixtures.dir.join("renamed b.wav");
+        let mut engine = DirectEngine::start();
+        engine.play_for_a_second(vec![b.clone(), other]);
+        let opened = file_id(&b);
+        // The save splits A off; B, which the pipeline reads, is unchanged.
+        save_tags(&a);
+        assert_ne!(file_id(&a), opened, "the save replaced A's file");
+        assert_eq!(file_id(&b), opened);
+        std::fs::rename(&b, &renamed).unwrap();
+        engine.remap_and_play_on(PathRenames::from([(b, renamed.clone())]), &renamed);
+    }
+
+    #[test]
+    fn open_successor_saved_and_renamed_switches_gaplessly() {
+        let fixtures = Fixtures::new("save-rename-successor");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let renamed = fixtures.dir.join("renamed b.wav");
+        let mut engine = DirectEngine::start();
+        let source = engine.play_until_opened(vec![a.clone(), b.clone()], RepeatMode::Off);
+        let old_b = file_uri(&b);
+        engine.wait_until("no successor was handed over", |runtime| {
+            runtime
+                .queue_state
+                .lock()
+                .unwrap()
+                .successor_handed_to_pipeline()
+        });
+        engine.wait_until_successor_recorded();
+        let started = engine.runtime.snapshot.track_token;
+        save_tags(&b);
+        std::fs::rename(&b, &renamed).unwrap();
+        while engine.events.try_recv().is_ok() {}
+        engine.remap(PathRenames::from([(b, renamed.clone())]));
+
+        assert_eq!(engine.runtime.snapshot.track_token, started);
+        assert_eq!(engine.runtime.restart, None, "A does not start over");
+        assert_eq!(
+            source.current_state(),
+            gst::State::Playing,
+            "A's source reads on"
+        );
+        assert!(
+            engine
+                .runtime
+                .queue_state
+                .lock()
+                .unwrap()
+                .successor_handed_to_pipeline(),
+            "B stays handed over"
+        );
+        engine.wait_until("B did not start", |runtime| {
+            runtime.snapshot.current_queue_index == Some(1)
+                && runtime.snapshot.duration.abs_diff(millis(4_500)) < millis(100)
+        });
+        assert_eq!(
+            engine.runtime.snapshot.current.as_deref(),
+            Some(renamed.as_path())
+        );
+        assert_eq!(
+            engine
+                .runtime
+                .playbin
+                .property::<Option<String>>("current-uri"),
+            old_b,
+            "the pipeline reads the file it opened"
+        );
+        let events: Vec<_> = engine.events.try_iter().collect();
+        let (changes, errors) = changes_and_errors(after_remap(&events));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            matches!(
+                changes.as_slice(),
+                [(path, 1, TrackChangeKind::Gapless)] if *path == renamed
+            ),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn current_track_renamed_before_the_pipeline_opened_it_plays_from_its_new_path() {
+        // The pipeline opens A's old path after the rename, which reaches
+        // the engine before it handles the failure.
+        let fixtures = Fixtures::new("rename-before-open");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let renamed = fixtures.dir.join("renamed a.wav");
+        std::fs::rename(&a, &renamed).unwrap();
+        let mut engine = DirectEngine::start();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_for_unhandled_error();
+        engine.remap(PathRenames::from([(a, renamed.clone())]));
+
+        engine.wait_until_playing(&renamed, 0, millis(4_000));
+        let events: Vec<_> = engine.events.try_iter().collect();
+        let (changes, errors) = changes_and_errors(after_remap(&events));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            matches!(
+                changes.as_slice(),
+                [(path, 0, TrackChangeKind::Manual)] if *path == renamed
+            ),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn current_track_swapped_before_the_pipeline_opened_it_plays_the_right_file() {
+        // A and B swap names before the pipeline opens A's old path, which
+        // then names B, and it starts playing B before the swap reaches the
+        // engine.
+        let fixtures = Fixtures::new("swap-before-open");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let swap = swap_files(&a, &b);
+        let mut engine = DirectEngine::start();
+        let source = engine.play_until_opened(vec![a.clone(), b.clone()], RepeatMode::Off);
+        let started = engine.runtime.snapshot.track_token;
+        engine.remap(swap);
+
+        // A now has B's old name.
+        engine.wait_until_playing(&b, 0, millis(4_000));
+        assert_ne!(engine.runtime.snapshot.track_token, started);
+        assert_ne!(engine.file_source(), source, "the pipeline opened A again");
+        let events: Vec<_> = engine.events.try_iter().collect();
+        let (changes, errors) = changes_and_errors(after_remap(&events));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            matches!(
+                changes.as_slice(),
+                [(path, 0, TrackChangeKind::Manual)] if *path == b
+            ),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn successor_renamed_before_its_handover_plays_gaplessly_from_its_new_path() {
+        // The pipeline is given B's old path after the rename, which reaches
+        // the engine before it handles the failure.
+        let fixtures = Fixtures::new("rename-before-handover");
         let a = fixtures.wav("a.wav", 4_000);
         let b = fixtures.wav("b.wav", 4_500);
         let c = fixtures.wav("c.wav", 5_000);
         let renamed = fixtures.dir.join("renamed b.wav");
         std::fs::rename(&b, &renamed).unwrap();
         let mut engine = DirectEngine::start();
-        engine
-            .runtime
-            .apply_command(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone(), c]));
-        engine.runtime.apply_command(PlaybackCommand::Play);
-        let failure = engine.handle_messages_until("error", |message| {
-            matches!(message.view(), gst::MessageView::Error(_))
+        engine.play_until_opened(vec![a.clone(), b.clone(), c], RepeatMode::Off);
+        engine.wait_for_unhandled_error();
+        engine.wait_until_successor_recorded();
+        engine.remap(PathRenames::from([(b, renamed.clone())]));
+        assert!(
+            !engine
+                .runtime
+                .queue_state
+                .lock()
+                .unwrap()
+                .successor_handed_to_pipeline(),
+            "B's old path was dropped from the pipeline"
+        );
+
+        engine.wait_until_playing(&renamed, 1, millis(4_500));
+        let (changes, errors) = changes_and_errors(&engine.events.try_iter().collect::<Vec<_>>());
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            matches!(
+                changes.as_slice(),
+                [.., (path, 1, TrackChangeKind::Gapless)] if *path == renamed
+            ),
+            "{changes:?}"
+        );
+        assert!(
+            changes
+                .iter()
+                .all(|(path, _, _)| *path == a || *path == renamed),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn successor_swapped_before_its_handover_plays_gaplessly_from_its_new_path() {
+        // B and C swap names before B's old path, which then names C, is
+        // handed over.
+        let fixtures = Fixtures::new("swap-before-handover");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let c = fixtures.wav("c.wav", 5_000);
+        let swap = swap_files(&b, &c);
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(vec![a.clone(), b.clone(), c.clone()], RepeatMode::Off);
+        engine.wait_until("no successor was handed over", |runtime| {
+            runtime
+                .queue_state
+                .lock()
+                .unwrap()
+                .successor_handed_to_pipeline()
         });
-        engine
-            .runtime
-            .apply_command(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
-                (b.clone(), renamed.clone()),
+        engine.wait_until_successor_recorded();
+        engine.remap(swap);
+
+        // B now has C's old name and is row 1.
+        engine.wait_until_playing(&c, 1, millis(4_500));
+        let (changes, errors) = changes_and_errors(&engine.events.try_iter().collect::<Vec<_>>());
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            matches!(
+                changes.as_slice(),
+                [.., (path, 1, TrackChangeKind::Gapless)] if *path == c
+            ),
+            "{changes:?}"
+        );
+        assert!(
+            changes.iter().all(|(path, _, _)| *path == a || *path == c),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn repeat_one_replays_gaplessly_from_the_new_path_of_a_track_renamed_while_it_plays() {
+        // The pipeline opened A before the rename, and is given A's old path
+        // again for the replay after it.
+        let fixtures = Fixtures::new("rename-repeat-one");
+        let a = fixtures.wav("a.wav", 4_000);
+        let renamed = fixtures.dir.join("renamed a.wav");
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(vec![a.clone()], RepeatMode::One);
+        let started = engine.runtime.snapshot.track_token;
+        std::fs::rename(&a, &renamed).unwrap();
+        engine.wait_for_unhandled_error();
+        engine.wait_until_successor_recorded();
+        engine.remap(PathRenames::from([(a, renamed.clone())]));
+        assert_eq!(
+            engine.runtime.snapshot.track_token, started,
+            "A plays on from the file it has open"
+        );
+        assert!(
+            engine.runtime.restart.is_some(),
+            "A restarts where it plays, without its old path's replay"
+        );
+
+        engine.wait_until("the replay did not start", |runtime| {
+            runtime.snapshot.track_token != started
+        });
+        engine.wait_until_playing(&renamed, 0, millis(4_000));
+        let events: Vec<_> = engine.events.try_iter().collect();
+        let (changes, errors) = changes_and_errors(after_remap(&events));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            matches!(
+                changes.as_slice(),
+                [(path, 0, TrackChangeKind::Gapless)] if *path == renamed
+            ),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn current_track_found_missing_before_its_rename_arrived_plays_from_its_new_path() {
+        // The engine handles the failure to open A's old path before the
+        // rename reaches it, as it does when the rename follows Play.
+        for queue_b in [false, true] {
+            let fixtures = Fixtures::new(&format!("missing-before-rename-{queue_b}"));
+            let a = fixtures.wav("a.wav", 4_000);
+            let b = fixtures.wav("b.wav", 4_500);
+            let renamed = fixtures.dir.join("renamed a.wav");
+            std::fs::rename(&a, &renamed).unwrap();
+            let mut engine = Engine::start();
+            let queue = if queue_b {
+                vec![a.clone(), b]
+            } else {
+                vec![a.clone()]
+            };
+            engine.send(PlaybackCommand::LoadQueue(queue));
+            engine.send(PlaybackCommand::Play);
+            let error = engine.wait_for_errors(1);
+            assert_eq!(error.path.as_deref(), Some(a.as_path()));
+            let outcome = if queue_b {
+                PlaybackErrorOutcome::Skipped
+            } else {
+                PlaybackErrorOutcome::Stopped
+            };
+            assert_eq!(error.outcome, outcome);
+            let changes = engine.changes.len();
+
+            engine.send(PlaybackCommand::RemapPaths(Arc::new(PathRenames::from([
+                (a, renamed.clone()),
             ]))));
-        engine.runtime.handle_bus_message(&failure);
-
-        let errors: Vec<_> = engine
-            .events
-            .try_iter()
-            .filter_map(|event| match event {
-                PlaybackEvent::Error(error) => Some(error),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].path.as_deref(), Some(renamed.as_path()));
-        assert_eq!(errors[0].outcome, PlaybackErrorOutcome::Skipped);
-        assert_eq!(
-            engine.runtime.snapshot.current.as_deref(),
-            Some(a.as_path())
-        );
-        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
-
-        let deadline = Instant::now() + TIMEOUT;
-        let change = loop {
-            let change = engine.events.try_iter().find_map(|event| match event {
-                PlaybackEvent::TrackChanged {
-                    path, queue_index, ..
-                } => Some((path, queue_index)),
-                _ => None,
-            });
-            if change.is_some() || Instant::now() >= deadline {
-                break change;
-            }
-            if let Some(message) = engine.bus.timed_pop(gst::ClockTime::from_mseconds(20)) {
-                engine.runtime.handle_bus_message(&message);
-            }
-        };
-        assert_eq!(
-            change,
-            Some((renamed, 1)),
-            "{}",
-            engine.report("the renamed track did not start")
-        );
+            assert_change(
+                &engine.wait_for_changes(changes + 1),
+                &renamed,
+                0,
+                Expect::Manual,
+            );
+            engine.wait_for_playing(0, millis(4_000));
+            assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+            assert_eq!(engine.snapshot.current.as_deref(), Some(renamed.as_path()));
+            assert_eq!(engine.errors.len(), 1, "{:?}", engine.errors);
+        }
     }
 
     #[test]
