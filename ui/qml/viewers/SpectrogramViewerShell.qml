@@ -19,6 +19,8 @@ Item {
     property var displaySleepInhibitor: null
     property bool displaySleepInhibitionEnabled: true
     property bool playbackPlaying: false
+    // Actions whose shortcuts also work in the viewer.
+    property var viewerActions: []
 
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
@@ -85,6 +87,7 @@ Item {
 
     Popup {
         id: spectrogramViewer
+        objectName: "spectrogramViewerPopup"
         parent: Overlay.overlay
         x: 0
         y: 0
@@ -105,6 +108,11 @@ Item {
         background: Rectangle {
             color: "#000000"
             opacity: 0.87
+        }
+
+        Components.ActionShortcuts {
+            actions: root.viewerActions
+            active: spectrogramViewer.visible
         }
 
         MouseArea {
@@ -165,6 +173,7 @@ Item {
 
     Window {
         id: spectrogramFullscreenWindow
+        objectName: "spectrogramFullscreenWindow"
         screen: root.windowRoot.screen
         transientParent: root.windowRoot
         modality: Qt.ApplicationModal

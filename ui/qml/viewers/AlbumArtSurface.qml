@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import "../logic/WheelUtils.js" as WheelUtils
 
 Item {
     id: root
@@ -22,6 +23,9 @@ Item {
     required property bool comparisonModeAvailable
 
     property real zoom: 1.0
+    // One wheel notch zooms by this factor; smaller steps by part of it.
+    readonly property real zoomPerNotch: 1.1
+    readonly property real wheelPixelsPerNotch: 120
     property real panX: 0.0
     property real panY: 0.0
     property bool pendingInitialView: false
@@ -32,6 +36,12 @@ Item {
         root.panY = 0.0
         root.pendingInitialView = true
         root.applyInitialView()
+    }
+
+    // Opens the context menu from the keyboard, at the viewer's centre.
+    function openContextMenu() {
+        albumArtViewerContextMenu.popup(albumArtViewport,
+            albumArtViewport.width / 2, albumArtViewport.height / 2)
     }
 
     function clampPan() {
@@ -176,9 +186,14 @@ Item {
             }
 
             onWheel: function(wheel) {
+                const notches = WheelUtils.verticalNotches(wheel, root.wheelPixelsPerNotch)
+                if (notches === 0) {
+                    wheel.accepted = false
+                    return
+                }
                 const oldZoom = root.zoom
-                const delta = wheel.angleDelta.y > 0 ? 1.1 : 0.9
-                const nextZoom = Math.max(1.0, Math.min(6.0, oldZoom * delta))
+                const nextZoom = Math.max(1.0, Math.min(
+                    6.0, oldZoom * Math.pow(root.zoomPerNotch, notches)))
                 if (Math.abs(nextZoom - oldZoom) < 0.0001) {
                     wheel.accepted = true
                     return

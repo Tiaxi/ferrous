@@ -12,6 +12,8 @@ struct FerrousFfiRenameGate;
 std::uint64_t ferrous_ffi_spectrogram_ring_capacity(
     std::uint32_t width, std::uint32_t sampleRate, std::uint32_t hop,
     std::uint32_t bins, std::uint32_t channels, double zoom, bool centered);
+// The column hop of spectrogram data for fftSize at zoom; 0 on failure.
+std::uint32_t ferrous_ffi_spectrogram_column_hop(std::uint32_t fftSize, float zoom);
 
 FerrousFfiBridge *ferrous_ffi_bridge_create();
 // Blocks until the backend has saved its state, for a few seconds at most.

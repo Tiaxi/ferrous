@@ -100,6 +100,7 @@ qt_add_qml_module(ferrous
     NO_IMPORT_SCAN
     QML_FILES
         qml/Main.qml
+        qml/components/ActionShortcuts.qml
         qml/components/AlbumArtTile.qml
         qml/components/ColumnHeaderRow.qml
         qml/components/SearchResultIcon.qml
@@ -155,6 +156,7 @@ qt_add_qml_module(ferrous
         qml/logic/ColorUtils.js
         qml/logic/FormatUtils.js
         qml/logic/PathUtils.js
+        qml/logic/WheelUtils.js
 )
 
 if(NOT MSVC)

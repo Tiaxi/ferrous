@@ -107,7 +107,26 @@ Rectangle {
             }
 
             Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Menu
+                        || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                    libraryAlbumView.openContextMenuForSelection()
+                    event.accepted = true
+                    return
+                }
                 root.controller.handleKeyPress(event)
+            }
+
+            // Opens the context menu from the keyboard, for the selected row.
+            function openContextMenuForSelection() {
+                const index = root.controller.currentSelectionIndex()
+                if (index < 0) {
+                    return
+                }
+                libraryAlbumView.positionViewAtIndex(index, ListView.Contain)
+                const row = libraryAlbumView.itemAtIndex(index)
+                if (row) {
+                    row.openContextMenu(0, row.height)
+                }
             }
 
             delegate: Rectangle {
@@ -134,6 +153,25 @@ Rectangle {
                     && (y <= libraryAlbumView.contentY + libraryAlbumView.height + 48)
                 readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
                 readonly property int depthResolved: depth !== undefined ? depth : 0
+
+                function actionRowMap() {
+                    return {
+                        selectionKey: selectionKeyResolved,
+                        sourceIndex: sourceIndexResolved,
+                        rowType: rowTypeResolved,
+                        artist: artist || "",
+                        name: name || "",
+                        title: rowTitle,
+                        trackPath: trackPathResolved,
+                        openPath: openPathResolved,
+                        playPaths: playPathsResolved
+                    }
+                }
+
+                function openContextMenu(x, y) {
+                    libraryContextMenu.rowMap = libraryRow.actionRowMap()
+                    libraryContextMenu.popup(libraryRow, x, y)
+                }
 
                 width: ListView.view.width
                 height: 24
@@ -228,17 +266,7 @@ Rectangle {
 
                     onClicked: function(mouse) {
                         libraryAlbumView.forceActiveFocus()
-                        const rowMap = {
-                            selectionKey: selectionKeyResolved,
-                            sourceIndex: sourceIndexResolved,
-                            rowType: rowTypeResolved,
-                            artist: artist || "",
-                            name: name || "",
-                            title: rowTitle,
-                            trackPath: trackPathResolved,
-                            openPath: openPathResolved,
-                            playPaths: playPathsResolved
-                        }
+                        const rowMap = libraryRow.actionRowMap()
                         if (mouse.button === Qt.LeftButton
                                 && hasChildren
                                 && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
@@ -251,23 +279,12 @@ Rectangle {
                             mouse.button,
                             mouse.modifiers || Qt.NoModifier)
                         if (mouse.button === Qt.RightButton) {
-                            libraryContextMenu.rowMap = rowMap
-                            libraryContextMenu.popup()
+                            libraryRow.openContextMenu(mouse.x, mouse.y)
                         }
                     }
 
                     onDoubleClicked: function(mouse) {
-                        const rowMap = {
-                            selectionKey: selectionKeyResolved,
-                            sourceIndex: sourceIndexResolved,
-                            rowType: rowTypeResolved,
-                            artist: artist || "",
-                            name: name || "",
-                            title: rowTitle,
-                            trackPath: trackPathResolved,
-                            openPath: openPathResolved,
-                            playPaths: playPathsResolved
-                        }
+                        const rowMap = libraryRow.actionRowMap()
                         if (hasChildren && mouse.x <= expanderIcon.x + expanderIcon.width + 6) {
                             root.controller.toggleNode(key)
                             return
@@ -281,6 +298,7 @@ Rectangle {
 
                 Menu {
                     id: libraryContextMenu
+                    objectName: "libraryContextMenu"
                     property var rowMap: ({})
                     enter: Components.PopupTransition { duration: root.popupTransitionMs }
                     exit: Components.PopupTransition { duration: root.popupTransitionMs }

@@ -103,6 +103,21 @@ fn output_interval_for_hop(hop: usize, zoom_level: f32) -> f64 {
     interval.max(1.0)
 }
 
+/// The output row interval for an STFT hop at `zoom_level`.
+fn output_interval_for_zoom(hop_size: usize, zoom_level: f32) -> f64 {
+    if zoom_level > 1.0 {
+        1.0 // Bypass decimation -- keep all STFT rows for fine temporal resolution
+    } else {
+        output_interval_for_hop(hop_size, zoom_level)
+    }
+}
+
+/// The column hop that a session with STFT hop `hop_size` reports at
+/// `zoom_level`.
+pub(super) fn effective_hop_for_zoom(hop_size: usize, zoom_level: f32) -> usize {
+    effective_hop_from_interval(hop_size, output_interval_for_zoom(hop_size, zoom_level))
+}
+
 /// Locate the first input FFT window contributing to an absolute output column.
 fn stft_seek_grid(
     position_seconds: f64,
@@ -491,11 +506,7 @@ fn centered_staging_decode(
         SpectrogramViewMode::PerChannel => native_channels,
     };
     let bins_per_column = (fft_size / 2) + 1;
-    let output_interval = if zoom_level > 1.0 {
-        1.0
-    } else {
-        output_interval_for_hop(hop_size, zoom_level)
-    };
+    let output_interval = output_interval_for_zoom(hop_size, zoom_level);
 
     let mut stfts: Vec<StftComputer> = (0..channel_count)
         .map(|_| StftComputer::new(fft_size, hop_size))
@@ -1038,11 +1049,7 @@ fn run_spectrogram_session(
         SpectrogramViewMode::Downmix => 1,
         SpectrogramViewMode::PerChannel => native_channels,
     };
-    let output_interval = if zoom_level > 1.0 {
-        1.0 // Bypass decimation -- keep all STFT rows for fine temporal resolution
-    } else {
-        output_interval_for_hop(hop_size, zoom_level)
-    };
+    let output_interval = output_interval_for_zoom(hop_size, zoom_level);
     let effective_hop = effective_hop_from_interval(hop_size, output_interval);
     let cols_per_second = f64::from(effective_rate) / usize_to_f64_approx(effective_hop);
     let total_columns_estimate = scale_columns_estimate(total_columns, effective_hop);

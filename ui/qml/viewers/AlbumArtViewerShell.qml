@@ -16,6 +16,9 @@ Item {
     required property var closeViewer
     required property var toggleInfoVisible
     required property var switchComparisonImage
+    required property var openContextMenu
+    // Actions whose shortcuts also work in the viewer.
+    property var viewerActions: []
 
     property alias popupHost: albumArtPopupHost
     property alias windowHost: albumArtWindowHost
@@ -56,6 +59,7 @@ Item {
 
     Popup {
         id: albumArtViewer
+        objectName: "albumArtViewerPopup"
         parent: Overlay.overlay
         x: 0
         y: 0
@@ -69,11 +73,23 @@ Item {
         enter: Components.PopupTransition { duration: root.popupTransitionMs }
         exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
+        Components.ActionShortcuts {
+            actions: root.viewerActions
+            active: albumArtViewer.visible
+        }
+
         Shortcut {
             sequence: "I"
             context: Qt.WindowShortcut
             enabled: albumArtViewer.visible
             onActivated: root.toggleInfoVisible()
+        }
+
+        Shortcut {
+            sequences: ["Menu", "Shift+F10"]
+            context: Qt.WindowShortcut
+            enabled: albumArtViewer.visible
+            onActivated: root.openContextMenu()
         }
 
         Shortcut {
@@ -125,6 +141,7 @@ Item {
 
     Window {
         id: albumArtFullscreenWindow
+        objectName: "albumArtFullscreenWindow"
         screen: root.windowRoot.screen
         transientParent: root.windowRoot
         modality: Qt.ApplicationModal
@@ -160,6 +177,10 @@ Item {
                 } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
                     event.accepted = true
                     root.switchComparisonImage()
+                } else if (event.key === Qt.Key_Menu
+                        || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                    event.accepted = true
+                    root.openContextMenu()
                 }
             }
         }

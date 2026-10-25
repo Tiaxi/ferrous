@@ -18,6 +18,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QScreen>
+#include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QSGRendererInterface>
 #include <QQmlComponent>
@@ -44,6 +45,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include "../src/BridgeClient.h"
 #include "../src/DiagnosticsLog.h"
@@ -833,6 +835,20 @@ private slots:
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramSyntheticClearPreservesCanvasDuringSeek();
     void spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent();
+    void wheelScrollsListsByTheWheelDelta();
+    void queueKeysReachBothEndsAndOpenTheContextMenu();
+    void albumArtZoomFollowsTheWheelDelta();
+    void spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll();
+    void spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData();
+    void spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData();
+    void spaceTogglesPlaybackWhenTheLibraryHasFocus();
+    void libraryKeysReachBothEndsAndOpenTheContextMenu();
+    void spaceTypesIntoTextFields();
+    void playbackShortcutsWorkInTheViewers();
+    void viewerShortcutsOpenAndCloseTheViewers();
+    void visualizationModeSwitchTakesKeyboardFocus();
+    void menuMnemonicsOpenTheMenusAndShowShortcuts();
+    void spectrogramZoomWithinTheBackendToleranceNeedsNoNewData();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -898,7 +914,10 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
     QVERIFY(modeSwitch->property("width").toDouble() <= 50.0);
     QCOMPARE(modeSwitch->property("proximityHovered").toBool(), false);
-    QCOMPARE(modeSwitch->property("opacity").toDouble(), 0.0);
+    // Visible without hovering, dimmed until the pointer comes close.
+    const double idleOpacity = modeSwitch->property("idleOpacity").toDouble();
+    QVERIFY(idleOpacity >= 0.5 && idleOpacity < 0.95);
+    QCOMPARE(modeSwitch->property("opacity").toDouble(), idleOpacity);
     auto *modeSwitchItem = qobject_cast<QQuickItem *>(modeSwitch);
     QVERIFY(modeSwitchItem != nullptr);
     QVERIFY(modeSwitch->setProperty("proximityHovered", true));
@@ -906,7 +925,7 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QVERIFY(modeSwitch->setProperty("controlsVisible", false));
     QCOMPARE(modeSwitch->property("proximityHovered").toBool(), false);
     QVERIFY(modeSwitch->setProperty("controlsVisible", true));
-    QTRY_VERIFY(modeSwitch->property("opacity").toDouble() < 0.05);
+    QTRY_COMPARE(modeSwitch->property("opacity").toDouble(), idleOpacity);
     QJSValue setMode = qvariant_cast<QJSValue>(modeSwitch->property("setMode"));
     QVERIFY(setMode.isCallable());
     setMode.call(QJSValueList{QJSValue(1)});
@@ -1285,6 +1304,7 @@ Item {
         closeViewer: function() {}
         toggleInfoVisible: function() {}
         switchComparisonImage: function() {}
+        openContextMenu: function() {}
     }
 
     Viewers.AlbumArtSurface {
@@ -11641,6 +11661,790 @@ ApplicationWindow {
             QTRY_VERIFY(!object->property("searchVisible").toBool());
         }
     }
+}
+
+namespace {
+
+// Loads Main.qml with its fallback bridge and makes it the active window,
+// where its shortcuts work.
+QQuickWindow *loadActiveMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    if (window == nullptr) {
+        return nullptr;
+    }
+    window->requestActivate();
+    return QTest::qWaitForWindowActive(window) ? window : nullptr;
+}
+
+// Sends a wheel event at `scenePosition`; returns whether something took it.
+bool sendWheel(QQuickWindow *window, QPointF scenePosition, QPoint pixelDelta, QPoint angleDelta) {
+    QWheelEvent event(scenePosition, window->mapToGlobal(scenePosition),
+                      pixelDelta, angleDelta, Qt::NoButton, Qt::NoModifier,
+                      Qt::NoScrollPhase, false);
+    QSpontaneKeyEvent::setSpontaneous(&event);
+    QCoreApplication::sendEvent(window, &event);
+    return event.isAccepted();
+}
+
+QVariantList sampleQueueRows(int count) {
+    QVariantList rows;
+    for (int i = 0; i < count; ++i) {
+        rows.push_back(QVariantMap{
+            {QStringLiteral("title"), QStringLiteral("Track %1").arg(i)},
+            {QStringLiteral("artist"), QStringLiteral("Artist")},
+            {QStringLiteral("album"), QStringLiteral("Album")},
+            {QStringLiteral("lengthText"), QStringLiteral("1:00")},
+        });
+    }
+    return rows;
+}
+
+// The first item named `objectName` that is visible in `window`.
+QQuickItem *visibleItemNamed(QQuickWindow *window, const QString &objectName) {
+    const std::function<QQuickItem *(QQuickItem *)> find = [&](QQuickItem *item) -> QQuickItem * {
+        if (item->objectName() == objectName && item->isVisible()) {
+            return item;
+        }
+        for (QQuickItem *child : item->childItems()) {
+            if (QQuickItem *found = find(child)) {
+                return found;
+            }
+        }
+        return nullptr;
+    };
+    return find(window->contentItem());
+}
+
+bool anyMenuVisible(QObject *root, const QString &objectName) {
+    const QList<QObject *> menus = root->findChildren<QObject *>(objectName);
+    return std::any_of(menus.cbegin(), menus.cend(), [](QObject *menu) {
+        return menu->property("visible").toBool();
+    });
+}
+
+int callIntFunction(QObject *object, const char *function) {
+    QVariant result;
+    if (!QMetaObject::invokeMethod(object, function, Q_RETURN_ARG(QVariant, result))) {
+        return -2;
+    }
+    return result.toInt();
+}
+
+// How much larger than in the canvas the drawn canvas spans are on screen:
+// all of them share one scale. -1 without spans, -2 for differing scales.
+double drawnCanvasScale(QSGNode *node) {
+    QSGNode *tilesRoot = node != nullptr ? node->childAtIndex(1) : nullptr;
+    if (tilesRoot == nullptr) {
+        return -1.0;
+    }
+    double scale = -1.0;
+    for (int i = 0; i < tilesRoot->childCount(); ++i) {
+        auto *fragment = static_cast<QSGSimpleTextureNode *>(tilesRoot->childAtIndex(i));
+        if (fragment->rect().isEmpty() || fragment->sourceRect().width() <= 0.0) {
+            continue;
+        }
+        const double fragmentScale = fragment->rect().width() / fragment->sourceRect().width();
+        if (scale >= 0.0 && std::abs(fragmentScale - scale) > 1e-6) {
+            return -2.0;
+        }
+        scale = fragmentScale;
+    }
+    return scale;
+}
+
+// The drawn spans' extent on screen.
+QPair<double, double> drawnCanvasExtent(QSGNode *node) {
+    QSGNode *tilesRoot = node->childAtIndex(1);
+    double left = std::numeric_limits<double>::max();
+    double right = std::numeric_limits<double>::lowest();
+    for (int i = 0; i < tilesRoot->childCount(); ++i) {
+        auto *fragment = static_cast<QSGSimpleTextureNode *>(tilesRoot->childAtIndex(i));
+        if (fragment->rect().isEmpty()) {
+            continue;
+        }
+        left = std::min(left, fragment->rect().left());
+        right = std::max(right, fragment->rect().right());
+    }
+    return {left, right};
+}
+
+// Lets the item's zoom debounce send its request to the backend.
+bool sendPendingBackendZoom(SpectrogramItem &item) {
+    return QTest::qWaitFor(
+        [&item]() { return !item.m_zoomDebounceTimer->isActive(); }, 1000);
+}
+
+} // namespace
+
+void QmlSmokeTest::wheelScrollsListsByTheWheelDelta() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("queueRows", sampleQueueRows(300));
+    auto *view = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(view != nullptr);
+    QTRY_VERIFY(view->property("contentHeight").toReal() > view->height() * 3);
+    const QPointF center = view->mapToScene(QPointF(view->width() / 2, view->height() / 2));
+    const auto contentY = [view]() { return view->property("contentY").toReal(); };
+
+    // A touchpad reports the pixels to scroll, along with an angle that
+    // is a small part of a notch. The list scrolls by the pixels.
+    qreal before = contentY();
+    QVERIFY(sendWheel(window, center, QPoint(0, -3), QPoint(0, -24)));
+    QCOMPARE(contentY() - before, 3.0);
+
+    // A high-resolution wheel reports an eighth of a notch; a notch
+    // scrolls three rows of 24 pixels.
+    before = contentY();
+    QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, -15)));
+    QCOMPARE(contentY() - before, 9.0);
+
+    // Steps smaller than a pixel add up instead of being rounded away.
+    before = contentY();
+    for (int i = 0; i < 10; ++i) {
+        QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, -2)));
+    }
+    QVERIFY2(std::abs(contentY() - before - 12.0) <= 1.0,
+             qPrintable(QStringLiteral("scrolled %1").arg(contentY() - before)));
+
+    // Scrolling back up works the same way.
+    before = contentY();
+    QVERIFY(sendWheel(window, center, QPoint(0, 5), QPoint(0, 40)));
+    QVERIFY(std::abs(before - contentY() - 5.0) <= 1.0);
+
+    // Horizontal scrolling does not scroll the list.
+    before = contentY();
+    sendWheel(window, center, QPoint(), QPoint(-120, 0));
+    QCOMPARE(contentY(), before);
+}
+
+void QmlSmokeTest::queueKeysReachBothEndsAndOpenTheContextMenu() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("queueRows", sampleQueueRows(300));
+    bridge->setProperty("queueLength", 300);
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
+    auto *view = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(controller != nullptr && view != nullptr);
+    QTRY_COMPARE(bridge->property("queueLength").toInt(), 300);
+    QVERIFY(QMetaObject::invokeMethod(view, "forceActiveFocus"));
+    QTRY_VERIFY(view->hasActiveFocus());
+
+    QTest::keyClick(window, Qt::Key_Down);
+    QTest::keyClick(window, Qt::Key_End);
+    QTRY_COMPARE(callIntFunction(controller, "primarySelectedIndex"), 299);
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_COMPARE(callIntFunction(controller, "primarySelectedIndex"), 0);
+
+    QVERIFY(!anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+    QTest::keyClick(window, Qt::Key_Menu);
+    QTRY_VERIFY(anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+    QTRY_VERIFY(view->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_F10, Qt::ShiftModifier);
+    QTRY_VERIFY(anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+}
+
+void QmlSmokeTest::albumArtZoomFollowsTheWheelDelta() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "viewers" as Viewers
+
+Window {
+    width: 400
+    height: 400
+    visible: true
+    property alias surface: surface
+
+    Action { id: replaceFromItunesAction }
+
+    Viewers.AlbumArtSurface {
+        id: surface
+        anchors.fill: parent
+        viewerOpen: true
+        viewerSource: ""
+        infoVisible: false
+        initialViewToken: 0
+        viewerDecodeWidth: 400
+        viewerDecodeHeight: 400
+        infoOverlayText: ""
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        closeViewer: function() {}
+        toggleInfoVisible: function() {}
+        focusFullscreen: function() {}
+        comparisonLabel: ""
+        comparisonModeAvailable: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QObject *surface = qvariant_cast<QObject *>(root->property("surface"));
+    QVERIFY(surface != nullptr);
+    const QPointF center(200, 200);
+    const auto zoom = [surface]() { return surface->property("zoom").toDouble(); };
+    const double perNotch = surface->property("zoomPerNotch").toDouble();
+    QVERIFY(perNotch > 1.0);
+
+    // An eighth of a notch zooms by an eighth of a notch's factor.
+    QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, 15)));
+    QVERIFY(std::abs(zoom() - std::pow(perNotch, 0.125)) < 1e-9);
+    double expected = zoom();
+    QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, 360)));
+    expected *= std::pow(perNotch, 3.0);
+    QVERIFY(std::abs(zoom() - expected) < 1e-9);
+
+    // A pixel-only event counts by its pixels.
+    QVERIFY(sendWheel(window, center, QPoint(0, 60), QPoint()));
+    expected *= std::pow(perNotch, 0.5);
+    QVERIFY(std::abs(zoom() - expected) < 1e-9);
+
+    // Events with no vertical delta leave the zoom alone.
+    sendWheel(window, center, QPoint(), QPoint(120, 0));
+    QVERIFY(std::abs(zoom() - expected) < 1e-9);
+
+    // Zooming out is as fine-grained, down to the fitted size.
+    QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, -15)));
+    expected /= std::pow(perNotch, 0.125);
+    QVERIFY(std::abs(zoom() - expected) < 1e-9);
+    QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, -1200)));
+    QCOMPARE(zoom(), 1.0);
+}
+
+void QmlSmokeTest::spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setZoomEnabled(true);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x40'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false);
+    QSignalSpy requested(&item, &SpectrogramItem::zoomRequested);
+    const auto wheel = [&item](QPoint pixelDelta, QPoint angleDelta) {
+        QWheelEvent event(QPointF(100, 50), QPointF(100, 50), pixelDelta, angleDelta,
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        event.setAccepted(false);
+        item.wheelEvent(&event);
+        return event.isAccepted();
+    };
+
+    // Horizontal scrolling passes through to whatever is behind.
+    QVERIFY(!wheel(QPoint(), QPoint(120, 0)));
+    QCOMPARE(requested.count(), 0);
+
+    // An eighth of a notch zooms by an eighth of a notch's factor.
+    QVERIFY(wheel(QPoint(), QPoint(0, 15)));
+    QCOMPARE(requested.count(), 1);
+    QVERIFY(std::abs(requested.takeFirst().at(0).toDouble() - std::pow(1.25, 0.125)) < 1e-9);
+
+    // A pixel-only event counts by its pixels.
+    QVERIFY(wheel(QPoint(0, 60), QPoint()));
+    QCOMPARE(requested.count(), 1);
+    QVERIFY(std::abs(requested.takeFirst().at(0).toDouble() - std::pow(1.25, 0.5)) < 1e-9);
+}
+
+void QmlSmokeTest::spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData() {
+    // Textures, and so drawn spans, need a window.
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x40'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 10.0);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+    QVERIFY(std::abs(playhead->rect().x() - 100.0) <= 1.0);
+
+    // The user zooms out to half, and the backend restarts for it; then,
+    // before its data arrives, in to 2x.
+    item.setZoomLevel(0.5);
+    QVERIFY(sendPendingBackendZoom(item));
+    item.setZoomLevel(2.0);
+
+    // The next frame shows the canvas at 2x at once, around the playhead,
+    // which stays where the 2x data will put it.
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
+    QVERIFY(std::abs(playhead->rect().x() - 100.0) <= 1.0);
+    const QPair<double, double> extent = drawnCanvasExtent(node);
+    QVERIFY(extent.first >= 0.0 && extent.second <= 200.0);
+
+    // Data for half arrives from the restart. It is not for the zoom on
+    // screen, so it must not flash: the 2x preview stays.
+    constexpr int staleHop = 2048;
+    const int staleStart = static_cast<int>(10.0 * 48000 / staleHop) - 200;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 400, '\x60'), bins, 0, 400,
+        staleStart, columns / 2, 48000, staleHop, false, true, 1, false, 2);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
+    QVERIFY(std::abs(playhead->rect().x() - 100.0) <= 1.0);
+    QVERIFY(item.m_zoomFillActive);
+
+    // Data for 2x replaces the preview.
+    constexpr int hop = 512;
+    const int nowColumn = static_cast<int>(10.0 * 48000 / hop);
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 400, '\x70'), bins, 0, 400,
+        nowColumn - 150, columns * 2, 48000, hop, false, true, 1, false, 3);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(!item.m_zoomFillActive);
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
+    QCOMPARE(item.m_renderZoomLevel, 2.0);
+    QVERIFY(std::abs(playhead->rect().x() - 100.0) <= 1.0);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(nowColumn - 100));
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData() {
+    // Textures, and so drawn spans, need a window.
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(0);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x40'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 10.0);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+
+    item.setZoomLevel(4.0);
+    QVERIFY(sendPendingBackendZoom(item));
+    item.setZoomLevel(2.0);
+
+    // Shown at 2x at once, with the playhead's time at the right edge,
+    // where rolling data for any zoom puts it.
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
+    const QPair<double, double> extent = drawnCanvasExtent(node);
+    QVERIFY2(extent.first >= 0.0 && std::abs(extent.second - 200.0) <= 2.0,
+             qPrintable(QStringLiteral("%1..%2").arg(extent.first).arg(extent.second)));
+
+    // The restart's 4x data does not flash.
+    constexpr int staleHop = 256;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 200, '\x60'), bins, 0, 200,
+        static_cast<int>(10.0 * 48000 / staleHop), columns * 4, 48000, staleHop,
+        false, true, 1, true, 2);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
+
+    // The 2x data replaces the preview as it arrives.
+    constexpr int hop = 512;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 300, '\x70'), bins, 0, 300,
+        static_cast<int>(10.0 * 48000 / hop), columns * 2, 48000, hop,
+        false, true, 1, true, 3);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(!item.m_zoomFillActive);
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
+    QCOMPARE(item.m_renderZoomLevel, 2.0);
+
+    delete node;
+}
+
+void QmlSmokeTest::spaceTogglesPlaybackWhenTheLibraryHasFocus() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    libraryModel.setExpandedKeys(QStringList{
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    });
+    libraryModel.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary());
+    QTRY_COMPARE(libraryModel.rowCount(), 3);
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QVERIFY(playPause != nullptr);
+    QCOMPARE(playPause->property("shortcut").value<QKeySequence>(), QKeySequence(Qt::Key_Space));
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+    auto *libraryView = qvariant_cast<QQuickItem *>(window->property("libraryViewRef"));
+    QVERIFY(libraryView != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(libraryView, "forceActiveFocus"));
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QObject *library = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(library != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(library, "selectIndex", Q_ARG(QVariant, 0)));
+
+    QTest::keyClick(window, Qt::Key_Space);
+    QCOMPARE(toggled.count(), 1);
+    // Space no longer folds the selected artist.
+    QCOMPARE(libraryModel.rowCount(), 3);
+    QTest::keyClick(window, Qt::Key_Space);
+    QCOMPARE(toggled.count(), 2);
+}
+
+void QmlSmokeTest::libraryKeysReachBothEndsAndOpenTheContextMenu() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    libraryModel.setExpandedKeys(QStringList{
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    });
+    libraryModel.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary());
+    QTRY_COMPARE(libraryModel.rowCount(), 3);
+    auto *libraryView = qvariant_cast<QQuickItem *>(window->property("libraryViewRef"));
+    QObject *library = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(libraryView != nullptr && library != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(libraryView, "forceActiveFocus"));
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QVERIFY(QMetaObject::invokeMethod(library, "selectIndex", Q_ARG(QVariant, 0)));
+    const auto current = [library]() {
+        return callIntFunction(library, "currentSelectionIndex");
+    };
+    // Each row has its own context menu.
+    const auto rowMenuVisible = [libraryView]() {
+        for (int row = 0; row < 3; ++row) {
+            QQuickItem *rowItem = nullptr;
+            QMetaObject::invokeMethod(libraryView, "itemAtIndex",
+                Q_RETURN_ARG(QQuickItem *, rowItem), Q_ARG(int, row));
+            QObject *menu = rowItem != nullptr
+                ? rowItem->findChild<QObject *>(QStringLiteral("libraryContextMenu"))
+                : nullptr;
+            if (menu != nullptr && menu->property("visible").toBool()) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto selectedCount = [library]() {
+        return library->property("selectedSelectionKeys").toStringList().size();
+    };
+
+    QTest::keyClick(window, Qt::Key_End);
+    QTRY_COMPARE(current(), 2);
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_COMPARE(current(), 0);
+    // A page is more than these three rows.
+    QTest::keyClick(window, Qt::Key_PageDown);
+    QTRY_COMPARE(current(), 2);
+    QTest::keyClick(window, Qt::Key_PageUp);
+    QTRY_COMPARE(current(), 0);
+    QTest::keyClick(window, Qt::Key_End, Qt::ShiftModifier);
+    QTRY_COMPARE(selectedCount(), 3);
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_COMPARE(selectedCount(), 1);
+
+    QVERIFY(!rowMenuVisible());
+    QTest::keyClick(window, Qt::Key_Menu);
+    QTRY_VERIFY(rowMenuVisible());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!rowMenuVisible());
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_F10, Qt::ShiftModifier);
+    QTRY_VERIFY(rowMenuVisible());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!rowMenuVisible());
+}
+
+void QmlSmokeTest::spaceTypesIntoTextFields() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QObject *seekBackward = window->findChild<QObject *>(QStringLiteral("seekBackwardAction"));
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(playPause != nullptr && seekBackward != nullptr && bridge != nullptr);
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+    QSignalSpy seeked(seekBackward, SIGNAL(triggered(QObject*)));
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    bridge->setProperty("durationSeconds", 100.0);
+    QObject *search = nullptr;
+    for (QObject *action : window->findChildren<QObject *>()) {
+        if (action->property("text").toString() == QStringLiteral("&Global Search...")) {
+            search = action;
+            break;
+        }
+    }
+    QVERIFY(search != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(search, "trigger"));
+    auto *field = window->findChild<QQuickItem *>(QStringLiteral("globalSearchQueryField"));
+    QVERIFY(field != nullptr);
+    QTRY_VERIFY(field->hasActiveFocus());
+
+    for (const char key : {'a', ' ', 'b'}) {
+        QTest::keyClick(window, key);
+    }
+    QTRY_COMPARE(field->property("text").toString(), QStringLiteral("a b"));
+    QCOMPARE(toggled.count(), 0);
+    // Shift+arrows select in the field rather than seek.
+    QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
+    QCOMPARE(seeked.count(), 0);
+    QCOMPARE(field->property("selectedText").toString(), QStringLiteral("b"));
+    QTest::keyClick(window, Qt::Key_Escape);
+}
+
+void QmlSmokeTest::playbackShortcutsWorkInTheViewers() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QObject *stop = window->findChild<QObject *>(QStringLiteral("stopAction"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && playPause != nullptr
+            && stop != nullptr && surface != nullptr);
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+    QSignalSpy stopped(stop, SIGNAL(triggered(QObject*)));
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    bridge->setProperty("durationSeconds", 100.0);
+
+    // The viewer as a modal popup inside the main window.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_Space);
+    QCOMPARE(toggled.count(), 1);
+    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier);
+    QCOMPARE(stopped.count(), 1);
+    QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
+    QCOMPARE(bridge->property("lastSeekSeconds").toDouble(), 5.0);
+    QTest::keyClick(window, Qt::Key_Down, Qt::AltModifier);
+    QVERIFY(std::abs(bridge->property("volume").toDouble() - 0.95) < 1e-9);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+
+    // The viewer as a window of its own over the whole screen.
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(surface->window() != nullptr && surface->window() != window);
+    QQuickWindow *fullscreen = surface->window();
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    QTest::keyClick(fullscreen, Qt::Key_Space);
+    QCOMPARE(toggled.count(), 2);
+    QTest::keyClick(fullscreen, Qt::Key_Space, Qt::ControlModifier);
+    QCOMPARE(stopped.count(), 2);
+    QTest::keyClick(fullscreen, Qt::Key_Left, Qt::ShiftModifier);
+    QCOMPARE(bridge->property("lastSeekSeconds").toDouble(), 0.0);
+    QTest::keyClick(fullscreen, Qt::Key_Up, Qt::AltModifier);
+    QVERIFY(std::abs(bridge->property("volume").toDouble() - 1.0) < 1e-9);
+    QTest::keyClick(fullscreen, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void QmlSmokeTest::viewerShortcutsOpenAndCloseTheViewers() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(16, 16, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QObject *albumArtPopup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && surface != nullptr
+            && popup != nullptr && albumArtPopup != nullptr);
+    const auto spectrogramOpen = [viewer]() {
+        return viewer->property("spectrogramViewerOpen").toBool();
+    };
+    const auto albumArtOpen = [viewer]() {
+        return viewer->property("albumArtViewerOpen").toBool();
+    };
+
+    // F11 opens and closes the visualization viewer as a popup.
+    QTest::keyClick(window, Qt::Key_F11);
+    QTRY_VERIFY(spectrogramOpen());
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_F11);
+    QTRY_VERIFY(!spectrogramOpen());
+    QTRY_VERIFY(!popup->property("visible").toBool());
+
+    // Shift+F11 opens the album art viewer once there is album art, and
+    // F11 switches from it to the visualization viewer.
+    QTest::keyClick(window, Qt::Key_F11, Qt::ShiftModifier);
+    QVERIFY(!albumArtOpen());
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    QTest::keyClick(window, Qt::Key_F11, Qt::ShiftModifier);
+    QTRY_VERIFY(albumArtOpen());
+    QTRY_VERIFY(albumArtPopup->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_F11);
+    QTRY_VERIFY(spectrogramOpen());
+    QVERIFY(!albumArtOpen());
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_F11);
+    QTRY_VERIFY(!spectrogramOpen());
+    QTRY_VERIFY(!popup->property("visible").toBool());
+
+    // In a window of its own, too.
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QTest::keyClick(window, Qt::Key_F11);
+    QTRY_VERIFY(spectrogramOpen());
+    QTRY_VERIFY(surface->window() != nullptr && surface->window() != window);
+    QQuickWindow *fullscreen = surface->window();
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    QTest::keyClick(fullscreen, Qt::Key_F11);
+    QTRY_VERIFY(!spectrogramOpen());
+    QTRY_VERIFY(!fullscreen->isVisible());
+}
+
+void QmlSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QVERIFY(viewer != nullptr && playPause != nullptr);
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+    QQuickItem *spectrogramButton =
+        visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
+    QQuickItem *waveformButton =
+        visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
+    QVERIFY(spectrogramButton != nullptr && waveformButton != nullptr);
+    QVERIFY(spectrogramButton->activeFocusOnTab());
+    QVERIFY(waveformButton->activeFocusOnTab());
+    QQuickItem *modeSwitch = waveformButton->parentItem();
+    QVERIFY(modeSwitch != nullptr);
+    // Visible without hovering.
+    QVERIFY(modeSwitch->isVisible());
+    QVERIFY(modeSwitch->opacity() >= 0.5);
+
+    // Tab reaches the switch.
+    QQuickItem *beforeSwitch = spectrogramButton->nextItemInFocusChain(false);
+    QVERIFY(beforeSwitch != nullptr);
+    beforeSwitch->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(spectrogramButton->hasActiveFocus());
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(waveformButton->hasActiveFocus());
+
+    // Space picks the focused mode instead of playing or pausing.
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
+    QCOMPARE(toggled.count(), 0);
+    QTest::keyClick(window, Qt::Key_Tab, Qt::ShiftModifier);
+    QTRY_VERIFY(spectrogramButton->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
+}
+
+void QmlSmokeTest::menuMnemonicsOpenTheMenusAndShowShortcuts() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *playback = nullptr;
+    for (QObject *object : window->findChildren<QObject *>()) {
+        if (object->property("title").toString() == QStringLiteral("&Playback")) {
+            playback = object;
+            break;
+        }
+    }
+    QVERIFY(playback != nullptr);
+    QVERIFY(!playback->property("visible").toBool());
+    QTest::keyClick(window, Qt::Key_P, Qt::AltModifier);
+    QTRY_VERIFY(playback->property("visible").toBool());
+
+    // The Play/Pause entry shows its shortcut.
+    bool shown = false;
+    for (QObject *object : window->findChildren<QObject *>()) {
+        QObject *action = qvariant_cast<QObject *>(object->property("action"));
+        if (action != nullptr
+                && action->objectName() == QStringLiteral("playPauseAction")
+                && object->property("visible").toBool()) {
+            shown = action->property("shortcut").value<QKeySequence>()
+                == QKeySequence(Qt::Key_Space);
+        }
+    }
+    QVERIFY(shown);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!playback->property("visible").toBool());
+}
+
+void QmlSmokeTest::spectrogramZoomWithinTheBackendToleranceNeedsNoNewData() {
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x40'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 10.0);
+
+    // At 4.0075x the data comes at a hop of 256.
+    item.setZoomLevel(4.0075);
+    QVERIFY(sendPendingBackendZoom(item));
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 800, '\x60'), bins, 0, 800,
+        static_cast<int>(10.0 * 48000 / 256) - 400, columns * 4, 48000, 256,
+        false, true, 1, false, 2);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(!item.m_awaitingZoomData);
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+
+    // 4.0083x would be a hop of 255, but the backend keeps its zoom for
+    // so small a change and sends nothing new. The data on screen is final.
+    item.setZoomLevel(4.0083);
+    QVERIFY(sendPendingBackendZoom(item));
+    QVERIFY(!item.m_awaitingZoomData);
+    node = item.updatePaintNode(node, nullptr);
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+
+    delete node;
 }
 
 int main(int argc, char **argv) {

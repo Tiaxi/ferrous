@@ -24,6 +24,7 @@ class QQuickWindow;
 class QSGNode;
 class QWheelEvent;
 struct SpectrogramProjection;
+struct SpectrogramZoomPreview;
 
 class SpectrogramItem : public QQuickItem {
     Q_OBJECT
@@ -239,6 +240,16 @@ private:
         bool rollingMode, double columnsPerSecond, double drawX);
     double effectiveZoomLocked() const;
     double minimumZoomLevelLocked() const;
+    double backendZoomForRequestLocked() const;
+    int columnHopForZoomLocked(double zoom) const;
+    double renderZoomForZoomLocked(double zoom) const;
+    bool zoomPreviewWantedLocked() const;
+    SpectrogramZoomPreview zoomPreviewLocked(
+        int width,
+        double positionSeconds,
+        double drawX,
+        bool rollingMode,
+        double columnsPerSecond) const;
     double pixelToFrequencyHzLocked(int pixelY, int viewHeight) const;
     int frequencyToPixelYLocked(double freqHz, int viewHeight) const;
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
@@ -383,9 +394,26 @@ private:
     // the display.  updatePaintNode skips canvas updates while active.
     bool m_zoomFillActive{false};
     double m_precomputedCanvasZoomLevel{1.0};
+    // Restarting the backend for every wheel step would decode the same
+    // window again and again, so zoom requests reach it after a pause.
     QTimer *m_zoomDebounceTimer{nullptr};
     float m_pendingBackendZoom{1.0f};
+    // The zoom the backend was asked for last.
+    float m_lastBackendZoom{1.0f};
+    // The data on screen is not for m_zoomLevel yet. Until it is, the
+    // canvas is shown scaled to m_zoomLevel.
     bool m_awaitingZoomData{false};
+    // Where the canvas content is in time: its columns per second, the
+    // rolling epoch it was drawn with, and its pixels per second.
+    double m_precomputedCanvasColumnsPerSecond{0.0};
+    qint64 m_precomputedCanvasEpoch{0};
+    double m_precomputedCanvasPixelsPerSecond{0.0};
+    // The scaled canvas drawn last, so that clicks seek where it shows:
+    // the track time at anchor X, and pixels per second.
+    bool m_zoomPreviewShown{false};
+    double m_zoomPreviewAnchorSeconds{0.0};
+    double m_zoomPreviewAnchorX{0.0};
+    double m_zoomPreviewPixelsPerSecond{0.0};
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};

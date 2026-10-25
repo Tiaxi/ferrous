@@ -251,6 +251,14 @@ fn zoom_hop_size(fft_size: usize, zoom_level: f32) -> usize {
     }
 }
 
+/// The column hop that spectrogram sessions report at `zoom_level`, which
+/// tells Qt whether data is for the zoom it asked for.
+#[must_use]
+pub fn spectrogram_column_hop(fft_size: usize, zoom_level: f32) -> usize {
+    let zoom_level = zoom_level.clamp(0.05, 16.0);
+    session::effective_hop_for_zoom(zoom_hop_size(fft_size, zoom_level), zoom_level)
+}
+
 #[derive(Debug, Clone)]
 struct WaveformDecodeJob {
     track_token: u64,
@@ -4288,6 +4296,19 @@ mod tests {
         assert!(!rewritten[1].clear_history);
         assert_eq!(rewritten[2].track_token, 42);
         assert!(!rewritten[2].buffer_reset);
+    }
+
+    #[test]
+    fn spectrogram_column_hop_matches_the_session_hops() {
+        assert_eq!(spectrogram_column_hop(8192, 1.0), 1024);
+        assert_eq!(spectrogram_column_hop(2048, 1.0), 1024);
+        assert_eq!(spectrogram_column_hop(8192, 4.0), 256);
+        assert_eq!(spectrogram_column_hop(2048, 3.815), 268);
+        assert_eq!(spectrogram_column_hop(8192, 0.5), 2048);
+        assert_eq!(spectrogram_column_hop(512, 0.1), 10240);
+        // The backend's clamp applies.
+        assert_eq!(spectrogram_column_hop(8192, 64.0), 64);
+        assert_eq!(spectrogram_column_hop(8192, 0.001), 20480);
     }
 
     #[test]

@@ -47,6 +47,33 @@ QtObject {
         root.spectrogramViewerOpen = true
     }
 
+    // Opens the visualization viewer in place of the album art viewer, or
+    // closes it.
+    function toggleSpectrogramViewer() {
+        if (root.spectrogramViewerOpen) {
+            root.closeSpectrogramViewer()
+            return
+        }
+        if (root.albumArtViewerOpen) {
+            root.closeAlbumArtViewer()
+        }
+        root.openSpectrogramViewer()
+    }
+
+    function toggleAlbumArtViewer() {
+        if (root.albumArtViewerOpen) {
+            root.closeAlbumArtViewer()
+            return
+        }
+        if ((root.uiBridge.currentTrackCoverPath || "").length === 0) {
+            return
+        }
+        if (root.spectrogramViewerOpen) {
+            root.closeSpectrogramViewer()
+        }
+        root.openAlbumArtViewer()
+    }
+
     function refreshAlbumArtFileInfo() {
         const infoSource = root.albumArtViewerInfoSource || ""
         if (infoSource.length <= 0) {

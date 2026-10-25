@@ -764,6 +764,13 @@ QtObject {
         })
     }
 
+    // Rows that PageUp and PageDown move by: a viewful, less one row.
+    function pageStep() {
+        const rowHeight = 24
+        const viewportHeight = root.view ? root.view.height : 240
+        return Math.max(1, Math.floor(viewportHeight / rowHeight) - 1)
+    }
+
     function selectRelative(delta, extendSelection) {
         if (root.libraryModel.count <= 0) {
             return
@@ -900,15 +907,17 @@ QtObject {
             event.accepted = true
             return
         }
-        if (event.key === Qt.Key_Space) {
-            const index = root.currentSelectionIndex()
-            if (index >= 0) {
-                const rowMap = root.libraryModel.rowDataForRow(index)
-                const rowType = rowMap.rowType || ""
-                if (rowType !== "track" && (rowMap.key || "").length > 0 && (rowMap.count || 0) > 0) {
-                    root.toggleNode(rowMap.key || "")
-                }
-            }
+        if (event.key === Qt.Key_PageUp || event.key === Qt.Key_PageDown) {
+            root.selectRelative(
+                event.key === Qt.Key_PageUp ? -root.pageStep() : root.pageStep(),
+                extendSelection)
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
+            root.selectRelative(
+                event.key === Qt.Key_Home ? -root.libraryModel.count : root.libraryModel.count,
+                extendSelection)
             event.accepted = true
             return
         }
