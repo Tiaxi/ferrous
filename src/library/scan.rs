@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -42,30 +42,26 @@ struct RootScanProgress {
     eta_seconds: Option<f32>,
 }
 
-struct ScanProgressReporter<'a, F>
-where
-    F: FnMut(RootScanProgress),
-{
+struct ScanProgressReporter {
     previous_index_count: usize,
     smoothed_rate: Option<f32>,
     start: Instant,
     last_emit: Instant,
-    on_progress: &'a mut F,
 }
 
+/// Reads files for a scan on worker threads.
 struct MetadataWorkerPool {
     task_tx: Option<Sender<MetadataTask>>,
+    /// Kept to discard the tasks no worker has started when a scan stops.
+    task_rx: Option<Receiver<MetadataTask>>,
     result_rx: Option<Receiver<MetadataResult>>,
     workers: Vec<thread::JoinHandle<()>>,
     pending_tasks: usize,
     max_pending_tasks: usize,
 }
 
-impl<'a, F> ScanProgressReporter<'a, F>
-where
-    F: FnMut(RootScanProgress),
-{
-    fn new(previous_index_count: usize, on_progress: &'a mut F) -> Self {
+impl ScanProgressReporter {
+    fn new(previous_index_count: usize) -> Self {
         Self {
             previous_index_count,
             smoothed_rate: None,
@@ -73,13 +69,18 @@ where
             last_emit: Instant::now()
                 .checked_sub(Duration::from_millis(500))
                 .unwrap_or_else(Instant::now),
-            on_progress,
         }
     }
 
-    fn emit(&mut self, force: bool, discovered: usize, processed: usize) {
+    /// The progress to report, if it is `force`d or due.
+    fn emit(
+        &mut self,
+        force: bool,
+        discovered: usize,
+        processed: usize,
+    ) -> Option<RootScanProgress> {
         if !force && self.last_emit.elapsed() < Duration::from_millis(180) {
-            return;
+            return None;
         }
 
         let elapsed = self.start.elapsed().as_secs_f32();
@@ -110,27 +111,29 @@ where
             None
         };
 
-        (self.on_progress)(RootScanProgress {
+        self.last_emit = Instant::now();
+        Some(RootScanProgress {
             discovered,
             processed,
             files_per_second,
             eta_seconds,
-        });
-        self.last_emit = Instant::now();
+        })
     }
 }
 
 impl MetadataWorkerPool {
     fn new(worker_count: usize, covers: Option<&'static EmbeddedCoverCache>) -> Self {
         let max_pending_tasks = worker_count.saturating_mul(256).clamp(512, 8192);
+        let inline = Self {
+            task_tx: None,
+            task_rx: None,
+            result_rx: None,
+            workers: Vec::new(),
+            pending_tasks: 0,
+            max_pending_tasks,
+        };
         if worker_count <= 1 {
-            return Self {
-                task_tx: None,
-                result_rx: None,
-                workers: Vec::new(),
-                pending_tasks: 0,
-                max_pending_tasks,
-            };
+            return inline;
         }
 
         let (tx_tasks, rx_tasks) = unbounded::<MetadataTask>();
@@ -155,21 +158,15 @@ impl MetadataWorkerPool {
                 Err(error) => eprintln!("[ferrous] failed to start a scan worker: {error}"),
             }
         }
-        drop(rx_tasks);
         drop(tx_results);
         if workers.is_empty() {
             // The scan reads every file itself, as with one worker.
-            return Self {
-                task_tx: None,
-                result_rx: None,
-                workers,
-                pending_tasks: 0,
-                max_pending_tasks,
-            };
+            return inline;
         }
 
         Self {
             task_tx: Some(tx_tasks),
+            task_rx: Some(rx_tasks),
             result_rx: Some(rx_results),
             workers,
             pending_tasks: 0,
@@ -210,45 +207,60 @@ impl MetadataWorkerPool {
         Ok(ready)
     }
 
-    fn wait_for_capacity(&mut self) -> Result<Option<MetadataResult>, String> {
-        if self.pending_tasks < self.max_pending_tasks {
-            return Ok(None);
-        }
+    fn at_capacity(&self) -> bool {
+        self.pending_tasks >= self.max_pending_tasks
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending_tasks > 0
+    }
+
+    /// The next result, or `None` if none arrives within `timeout`, so that
+    /// the scan can check for commands while a slow file is read.
+    fn next_result(&mut self, timeout: Duration) -> Result<Option<MetadataResult>, String> {
         let Some(result_rx) = self.result_rx.as_ref() else {
             return Ok(None);
         };
-        match result_rx.recv() {
+        if self.pending_tasks == 0 {
+            return Ok(None);
+        }
+        match result_rx.recv_timeout(timeout) {
             Ok(result) => {
                 self.pending_tasks -= 1;
                 Ok(Some(result))
             }
-            Err(_) => Err("metadata scan workers disconnected unexpectedly".to_string()),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => {
+                Err("metadata scan workers disconnected unexpectedly".to_string())
+            }
         }
     }
 
-    fn finish(&mut self) -> Result<Vec<MetadataResult>, String> {
-        if let Some(task_tx) = self.task_tx.take() {
-            drop(task_tx);
-        }
-        let Some(result_rx) = self.result_rx.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let mut results = Vec::new();
-        while self.pending_tasks > 0 {
-            match result_rx.recv() {
-                Ok(result) => {
-                    self.pending_tasks -= 1;
-                    results.push(result);
-                }
-                Err(_) => {
-                    return Err("metadata scan workers disconnected unexpectedly".to_string());
-                }
-            }
-        }
+    /// Ends the workers once they have read every task submitted.
+    fn close_tasks(&mut self) {
+        self.task_tx = None;
+        self.task_rx = None;
+    }
+
+    /// Waits for the workers, after [`Self::close_tasks`] and every result.
+    fn join(&mut self) {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
-        Ok(results)
+    }
+}
+
+impl Drop for MetadataWorkerPool {
+    /// Stops a scan's reads early: the tasks no worker has started are
+    /// discarded, and each worker ends after the file it is reading, without
+    /// being waited for. After [`MetadataWorkerPool::join`] there is nothing
+    /// left to stop.
+    fn drop(&mut self) {
+        if let Some(task_rx) = self.task_rx.take() {
+            while task_rx.try_recv().is_ok() {}
+        }
+        self.task_tx = None;
+        self.result_rx = None;
     }
 }
 
@@ -258,6 +270,7 @@ pub(super) fn handle_add_root(
     name: &str,
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
+    control: &mut dyn ScanControl,
 ) -> Result<(), String> {
     let root = canonicalize_root(root)
         .map_err(|e| format!("cannot add library root '{}': {e}", root.display()))?;
@@ -266,22 +279,28 @@ pub(super) fn handle_add_root(
     // Reflect the newly-added root in UI state immediately, before scan completion.
     snapshot.roots = load_roots(conn);
     snapshot.bump_search_revision();
-    run_scans(
+    run_scans_with(
         conn,
         &[root],
         EmbeddedCoverCache::shared(),
         snapshot,
         event_tx,
+        control,
     )
 }
 
 pub(super) fn rename_root(conn: &Connection, root: &Path, name: &str) -> Result<(), String> {
-    let root = if root.exists() {
+    update_root_name(conn, &resolve_root_path(root), name)
+}
+
+/// The path a command's root is stored under: canonical while the folder
+/// exists, and as given once it is gone.
+pub(super) fn resolve_root_path(root: &Path) -> PathBuf {
+    if root.exists() {
         root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
     } else {
         root.to_path_buf()
-    };
-    update_root_name(conn, &root, name)
+    }
 }
 
 pub(super) fn handle_rescan_root(
@@ -289,12 +308,9 @@ pub(super) fn handle_rescan_root(
     root: &Path,
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
+    control: &mut dyn ScanControl,
 ) -> Result<(), String> {
-    let root = if root.exists() {
-        root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
-    } else {
-        root.to_path_buf()
-    };
+    let root = resolve_root_path(root);
     let roots = load_roots(conn)
         .into_iter()
         .filter(|known| known.path == root)
@@ -303,12 +319,13 @@ pub(super) fn handle_rescan_root(
     if roots.is_empty() {
         return Err(format!("root '{}' is not configured", root.display()));
     }
-    run_scans(
+    run_scans_with(
         conn,
         &roots,
         EmbeddedCoverCache::shared(),
         snapshot,
         event_tx,
+        control,
     )
 }
 
@@ -316,6 +333,7 @@ pub(super) fn handle_rescan_all(
     conn: &Connection,
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
+    control: &mut dyn ScanControl,
 ) -> Result<(), String> {
     let roots = load_roots(conn)
         .into_iter()
@@ -324,12 +342,13 @@ pub(super) fn handle_rescan_all(
     if roots.is_empty() {
         return Ok(());
     }
-    run_scans(
+    run_scans_with(
         conn,
         &roots,
         EmbeddedCoverCache::shared(),
         snapshot,
         event_tx,
+        control,
     )
 }
 
@@ -423,8 +442,84 @@ fn backfill_search_tags_using(
     Ok(failures.refresh_problem())
 }
 
-/// Scans `roots`, caching embedded pictures in `covers`, then removes the
-/// entries of `covers` that no track row references.
+/// What a scan does after checking for commands between files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScanDirective {
+    Continue,
+    /// Stop scanning the current root, which was removed, and go on with the
+    /// next one.
+    SkipRoot,
+    /// Stop every scan: the library worker is shutting down.
+    StopAll,
+}
+
+/// Lets the library worker act on commands while a scan runs.
+pub(super) trait ScanControl {
+    /// Called between files and batches, while the scan holds no write lock
+    /// and the database has everything it committed. May run commands that
+    /// must not wait for the scan, such as removing or renaming a root,
+    /// updating `snapshot` and publishing it.
+    fn poll(
+        &mut self,
+        conn: &Connection,
+        snapshot: &mut LibrarySnapshot,
+        event_tx: &Sender<LibraryEvent>,
+        scanning: &Path,
+        remaining: &[PathBuf],
+    ) -> ScanDirective;
+
+    /// Whether another connection, such as a tag edit's, committed to the
+    /// database since the last call, so that `snapshot` must be read again
+    /// before it is published.
+    fn external_writes(&mut self, conn: &Connection) -> bool;
+}
+
+/// Tells whether another connection committed to the database, with
+/// `SQLite`'s `data_version`, which changes only for other connections'
+/// commits.
+#[derive(Debug, Default)]
+pub(super) struct ExternalWrites {
+    version: Option<i64>,
+}
+
+impl ExternalWrites {
+    /// Whether another connection committed since the last call; see
+    /// [`ScanControl::external_writes`].
+    pub(super) fn since_last_check(&mut self, conn: &Connection) -> bool {
+        let Ok(version) = conn.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+        else {
+            return false;
+        };
+        let changed = self.version.is_some_and(|known| known != version);
+        self.version = Some(version);
+        changed
+    }
+}
+
+/// A scan that nothing interrupts.
+#[cfg(test)]
+pub(super) struct Uninterrupted;
+
+#[cfg(test)]
+impl ScanControl for Uninterrupted {
+    fn poll(
+        &mut self,
+        _conn: &Connection,
+        _snapshot: &mut LibrarySnapshot,
+        _event_tx: &Sender<LibraryEvent>,
+        _scanning: &Path,
+        _remaining: &[PathBuf],
+    ) -> ScanDirective {
+        ScanDirective::Continue
+    }
+
+    fn external_writes(&mut self, _conn: &Connection) -> bool {
+        false
+    }
+}
+
+/// Scans `roots` without interruption; see [`run_scans_with`].
+#[cfg(test)]
 pub(super) fn run_scans(
     conn: &Connection,
     roots: &[PathBuf],
@@ -432,70 +527,50 @@ pub(super) fn run_scans(
     snapshot: &mut LibrarySnapshot,
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<(), String> {
+    run_scans_with(conn, roots, covers, snapshot, event_tx, &mut Uninterrupted)
+}
+
+/// Scans `roots`, caching embedded pictures in `covers`, then removes the
+/// entries of `covers` that no track row references. `control` is polled
+/// between files; a root it removes is not scanned.
+pub(super) fn run_scans_with(
+    conn: &Connection,
+    roots: &[PathBuf],
+    covers: Option<&'static EmbeddedCoverCache>,
+    snapshot: &mut LibrarySnapshot,
+    event_tx: &Sender<LibraryEvent>,
+    control: &mut dyn ScanControl,
+) -> Result<(), String> {
     if roots.is_empty() {
         return Ok(());
     }
 
     let roots_total = roots.len();
-    let snapshot_emit_interval = scan_snapshot_emit_interval();
-    let snapshot_min_processed_delta = scan_snapshot_min_processed_delta();
     let mut problems = Vec::new();
     for (idx, root) in roots.iter().enumerate() {
-        let mut final_progress = RootScanProgress::default();
-        // Indexed across roots: a root can claim tracks that another root
-        // owned, and its entries must replace theirs.
-        let mut track_indices: HashMap<String, usize> = snapshot
-            .tracks
-            .iter()
-            .enumerate()
-            .map(|(track_index, track)| (track.path.to_string_lossy().to_string(), track_index))
-            .collect();
-        let pending_upserts = std::cell::RefCell::new(Vec::<(MetadataTask, IndexedTrack)>::new());
+        let remaining = &roots[idx + 1..];
+        match control.poll(conn, snapshot, event_tx, root, remaining) {
+            ScanDirective::Continue => {}
+            ScanDirective::SkipRoot => continue,
+            ScanDirective::StopAll => return scan_result(&problems),
+        }
         let revision_before_scan = snapshot.search_revision;
-        let mut last_snapshot_emit = Instant::now()
-            .checked_sub(snapshot_emit_interval)
-            .unwrap_or_else(Instant::now);
-        let mut last_snapshot_processed = 0usize;
-        let mut collect_upsert = |task: &MetadataTask, indexed: &IndexedTrack| {
-            pending_upserts
-                .borrow_mut()
-                .push((task.clone(), indexed.clone()));
-        };
-        let mut on_progress = |progress: RootScanProgress| {
-            apply_pending_upserts_for_root(snapshot, root, &mut track_indices, &pending_upserts);
-            final_progress = progress.clone();
-            snapshot.scan_in_progress = true;
-            snapshot.scan_progress = Some(LibraryScanProgress {
-                current_root: Some(root.clone()),
-                roots_completed: idx,
-                roots_total,
-                supported_files_discovered: progress.discovered,
-                supported_files_processed: progress.processed,
-                files_per_second: progress.files_per_second,
-                eta_seconds: progress.eta_seconds,
-            });
-            let processed_delta = progress.processed.saturating_sub(last_snapshot_processed);
-            let emit_due = progress.processed == 0
-                || progress.processed >= progress.discovered
-                || processed_delta >= snapshot_min_processed_delta
-                || last_snapshot_emit.elapsed() >= snapshot_emit_interval;
-            if emit_due {
-                emit_snapshot(event_tx, snapshot);
-                last_snapshot_emit = Instant::now();
-                last_snapshot_processed = progress.processed;
-            }
-        };
+        let mut sink = SnapshotSink::new(
+            snapshot,
+            event_tx,
+            &mut *control,
+            root,
+            remaining,
+            (idx, roots_total),
+        );
 
         // Roots are independent: a root that fails or cannot be fully read is
         // reported without stopping the remaining scans.
-        match scan_root(conn, root, covers, &mut on_progress, &mut collect_upsert) {
+        let result = scan_root(conn, root, covers, &mut sink);
+        let stopped = sink.stopped;
+        let final_progress = sink.final_progress.clone();
+        match result {
             Ok(outcome) => {
-                apply_pending_upserts_for_root(
-                    snapshot,
-                    root,
-                    &mut track_indices,
-                    &pending_upserts,
-                );
                 if !outcome.removed.is_empty() {
                     let stale_set: HashSet<String> = outcome.removed.into_iter().collect();
                     snapshot
@@ -506,16 +581,26 @@ pub(super) fn run_scans(
                 problems.extend(outcome.problem);
             }
             Err(err) => {
-                // The scan transaction was rolled back; drop any tracks this
-                // root already published to the snapshot.
+                // The batches committed before the failure stay, and the
+                // snapshot already has them; the failed batch was rolled
+                // back. Read the snapshot again so it matches the database
+                // whatever the failure left.
                 if snapshot.search_revision != revision_before_scan {
+                    control.external_writes(conn);
                     load_snapshot(conn, snapshot);
                     snapshot.bump_search_revision();
                 }
                 problems.push(format!("failed to scan '{}': {err}", root.display()));
             }
         }
+        if stopped == Some(ScanDirective::StopAll) {
+            return scan_result(&problems);
+        }
 
+        if control.external_writes(conn) {
+            load_snapshot(conn, snapshot);
+            snapshot.bump_search_revision();
+        }
         snapshot.scan_in_progress = true;
         snapshot.scan_progress = Some(LibraryScanProgress {
             current_root: Some(root.clone()),
@@ -535,10 +620,181 @@ pub(super) fn run_scans(
         problems.push(err);
     }
 
+    scan_result(&problems)
+}
+
+fn scan_result(problems: &[String]) -> Result<(), String> {
     if problems.is_empty() {
         Ok(())
     } else {
-        Err(summarize_scan_problems(&problems))
+        Err(summarize_scan_problems(problems))
+    }
+}
+
+/// Receives what a scan of one root does: its progress, the rows each batch
+/// committed, and the checks for commands between files.
+trait ScanSink {
+    fn progress(&mut self, conn: &Connection, progress: RootScanProgress);
+    fn committed(&mut self, root: &Path, rows: Vec<(MetadataTask, IndexedTrack)>);
+    /// Whether the scan of the root must stop now.
+    fn should_stop(&mut self, conn: &Connection) -> bool;
+}
+
+/// Keeps the library worker's snapshot in step with a scan of one root, and
+/// publishes it as the scan goes.
+struct SnapshotSink<'a> {
+    snapshot: &'a mut LibrarySnapshot,
+    event_tx: &'a Sender<LibraryEvent>,
+    control: &'a mut dyn ScanControl,
+    root: &'a Path,
+    remaining: &'a [PathBuf],
+    /// The root's index in the run, and the number of roots in the run.
+    position: (usize, usize),
+    /// Indexed across roots: a root can claim tracks that another root
+    /// owned, and its entries must replace theirs. Built for the snapshot at
+    /// `indexed_revision`.
+    track_indices: HashMap<String, usize>,
+    indexed_revision: Option<u64>,
+    emit_interval: Duration,
+    min_processed_delta: usize,
+    last_emit: Instant,
+    last_processed: usize,
+    final_progress: RootScanProgress,
+    /// Why the scan stopped early, if it did.
+    stopped: Option<ScanDirective>,
+}
+
+impl<'a> SnapshotSink<'a> {
+    fn new(
+        snapshot: &'a mut LibrarySnapshot,
+        event_tx: &'a Sender<LibraryEvent>,
+        control: &'a mut dyn ScanControl,
+        root: &'a Path,
+        remaining: &'a [PathBuf],
+        position: (usize, usize),
+    ) -> Self {
+        let emit_interval = scan_snapshot_emit_interval();
+        Self {
+            snapshot,
+            event_tx,
+            control,
+            root,
+            remaining,
+            position,
+            track_indices: HashMap::new(),
+            indexed_revision: None,
+            emit_interval,
+            min_processed_delta: scan_snapshot_min_processed_delta(),
+            last_emit: Instant::now()
+                .checked_sub(emit_interval)
+                .unwrap_or_else(Instant::now),
+            last_processed: 0,
+            final_progress: RootScanProgress::default(),
+            stopped: None,
+        }
+    }
+
+    /// The position of each track of the snapshot, by path.
+    fn track_indices(&mut self) -> &mut HashMap<String, usize> {
+        if self.indexed_revision != Some(self.snapshot.search_revision) {
+            self.track_indices = self
+                .snapshot
+                .tracks
+                .iter()
+                .enumerate()
+                .map(|(index, track)| (track.path.to_string_lossy().to_string(), index))
+                .collect();
+            self.indexed_revision = Some(self.snapshot.search_revision);
+        }
+        &mut self.track_indices
+    }
+}
+
+impl ScanSink for SnapshotSink<'_> {
+    fn progress(&mut self, conn: &Connection, progress: RootScanProgress) {
+        let (idx, roots_total) = self.position;
+        self.snapshot.scan_in_progress = true;
+        self.snapshot.scan_progress = Some(LibraryScanProgress {
+            current_root: Some(self.root.to_path_buf()),
+            roots_completed: idx,
+            roots_total,
+            supported_files_discovered: progress.discovered,
+            supported_files_processed: progress.processed,
+            files_per_second: progress.files_per_second,
+            eta_seconds: progress.eta_seconds,
+        });
+        let processed_delta = progress.processed.saturating_sub(self.last_processed);
+        let emit_due = progress.processed == 0
+            || progress.processed >= progress.discovered
+            || processed_delta >= self.min_processed_delta
+            || self.last_emit.elapsed() >= self.emit_interval;
+        if emit_due {
+            // A tag edit or a rename may have changed rows that this copy
+            // still has as they were.
+            if self.control.external_writes(conn) {
+                load_snapshot(conn, self.snapshot);
+                self.snapshot.bump_search_revision();
+            }
+            emit_snapshot(self.event_tx, self.snapshot);
+            self.last_emit = Instant::now();
+            self.last_processed = progress.processed;
+        }
+        self.final_progress = progress;
+    }
+
+    fn committed(&mut self, root: &Path, rows: Vec<(MetadataTask, IndexedTrack)>) {
+        if rows.is_empty() {
+            return;
+        }
+        let mut new_tracks = Vec::new();
+        let indices = self.track_indices();
+        let mut replaced = Vec::new();
+        for (task, indexed) in rows {
+            let track = LibraryTrack {
+                search_tags: indexed.search_tags,
+                path: task.path,
+                root_path: root.to_path_buf(),
+                title: indexed.title,
+                artist: indexed.artist,
+                album: indexed.album,
+                cover_path: indexed.cover_path,
+                genre: indexed.genre,
+                year: indexed.year,
+                track_no: indexed.track_no,
+                duration_secs: indexed.duration_secs,
+            };
+            match indices.get(&task.path_string) {
+                Some(&index) => replaced.push((index, track)),
+                None => new_tracks.push((task.path_string, track)),
+            }
+        }
+        let tracks = &mut self.snapshot.tracks;
+        for (index, track) in replaced {
+            if let Some(existing) = tracks.get_mut(index) {
+                *existing = track;
+            }
+        }
+        for (path_string, track) in new_tracks {
+            self.track_indices.insert(path_string, tracks.len());
+            tracks.push(track);
+        }
+        self.snapshot.bump_search_revision();
+        self.indexed_revision = Some(self.snapshot.search_revision);
+    }
+
+    fn should_stop(&mut self, conn: &Connection) -> bool {
+        let directive = self.control.poll(
+            conn,
+            self.snapshot,
+            self.event_tx,
+            self.root,
+            self.remaining,
+        );
+        if directive == ScanDirective::Continue {
+            return false;
+        }
+        self.stopped = Some(directive);
+        true
     }
 }
 
@@ -559,45 +815,6 @@ fn summarize_scan_problems(problems: &[String]) -> String {
         );
     }
     message
-}
-
-fn apply_pending_upserts_for_root(
-    snapshot: &mut LibrarySnapshot,
-    root: &Path,
-    track_indices: &mut HashMap<String, usize>,
-    pending_upserts: &std::cell::RefCell<Vec<(MetadataTask, IndexedTrack)>>,
-) {
-    let mut updates = pending_upserts.borrow_mut();
-    if updates.is_empty() {
-        return;
-    }
-    snapshot.bump_search_revision();
-    for (task, indexed) in updates.drain(..) {
-        let as_snapshot_track = LibraryTrack {
-            search_tags: indexed.search_tags,
-            path: task.path.clone(),
-            root_path: root.to_path_buf(),
-            title: indexed.title,
-            artist: indexed.artist,
-            album: indexed.album,
-            cover_path: indexed.cover_path,
-            genre: indexed.genre,
-            year: indexed.year,
-            track_no: indexed.track_no,
-            duration_secs: indexed.duration_secs,
-        };
-
-        if let Some(existing_index) = track_indices.get(&task.path_string).copied() {
-            if let Some(existing) = snapshot.tracks.get_mut(existing_index) {
-                *existing = as_snapshot_track;
-            }
-            continue;
-        }
-
-        let new_index = snapshot.tracks.len();
-        snapshot.tracks.push(as_snapshot_track);
-        track_indices.insert(task.path_string, new_index);
-    }
 }
 
 pub(crate) fn track_file_fingerprint(path: &Path) -> Option<TrackFileFingerprint> {
@@ -759,10 +976,31 @@ fn load_external_track_caches_from_conn(
 
 #[derive(Debug, Clone, Copy)]
 struct ExistingTrackScanState {
-    mtime_ns: i64,
-    size_bytes: i64,
+    row: RowState,
     has_cover_path: bool,
     suspicious_metadata: bool,
+}
+
+/// What tells a scan that another connection wrote a library row since the
+/// scan read it: an edit's refresh writes the file's new state, and a cover
+/// refresh writes a new cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowState {
+    mtime_ns: i64,
+    size_bytes: i64,
+    cover_path_hash: u64,
+}
+
+impl RowState {
+    fn new(mtime_ns: i64, size_bytes: i64, cover_path: &str) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(cover_path, &mut hasher);
+        Self {
+            mtime_ns,
+            size_bytes,
+            cover_path_hash: std::hash::Hasher::finish(&hasher),
+        }
+    }
 }
 
 fn leading_track_number(input: &str) -> Option<u32> {
@@ -1600,7 +1838,12 @@ pub(crate) fn index_tracks_for_test(root: &Path, paths: &[PathBuf]) {
 
 #[cfg(test)]
 fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) {
-    let tx = conn.transaction().expect("index transaction");
+    // Take the write lock first, as the scan's batches do: a transaction
+    // that reads before it writes fails at once if another connection
+    // committed since its read.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("index transaction");
     {
         let mut writer = TrackWriter::new(&tx).expect("track statements");
         for path in paths {
@@ -1616,7 +1859,7 @@ fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
                 &mut writer,
                 &root.to_string_lossy(),
                 unix_ts_i64(),
-                &mut |_, _| {},
+                &HashMap::new(),
                 MetadataResult { task, read },
             )
             .expect("index fixture");
@@ -1702,11 +1945,7 @@ fn update_root_name(conn: &Connection, root: &Path, name: &str) -> Result<(), St
 }
 
 pub(super) fn remove_root_and_purge(conn: &Connection, root: &Path) -> Result<(), String> {
-    let root = if root.exists() {
-        root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
-    } else {
-        root.to_path_buf()
-    };
+    let root = resolve_root_path(root);
     let root_str = root.to_string_lossy().to_string();
 
     // Take the write lock up front, like the library's other write
@@ -1858,13 +2097,30 @@ impl ReadFailures {
     }
 }
 
-/// Make reading chosen files panic during a scan.
+/// Make scans of chosen files panic or wait, count scans, and tune batches.
 #[cfg(test)]
 pub(crate) mod scan_test_hooks {
+    use std::cell::Cell;
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
+    use std::time::Duration;
+
+    use crossbeam_channel::{bounded, Receiver, Sender};
+
+    use super::ScanTuning;
 
     static PANIC_ON_READ: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    /// A held read: the file, the sender told when the read waits, and the
+    /// receiver that releases it.
+    type ReadGate = (PathBuf, Sender<()>, Receiver<()>);
+
+    static READ_GATES: Mutex<Vec<ReadGate>> = Mutex::new(Vec::new());
+    static SCANS: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
+
+    thread_local! {
+        static TUNING: Cell<Option<ScanTuning>> = const { Cell::new(None) };
+    }
 
     /// Make every scan read of `path` panic.
     pub(crate) fn panic_on_read(path: &Path) {
@@ -1874,6 +2130,47 @@ pub(crate) mod scan_test_hooks {
             .push(path.to_path_buf());
     }
 
+    /// Make the next scan read of `path` wait until the returned sender
+    /// sends or is dropped. The first receiver gets a message when the read
+    /// starts waiting.
+    pub(crate) fn hold_read(path: &Path) -> (Receiver<()>, Sender<()>) {
+        let (started_tx, started_rx) = bounded(1);
+        let (release_tx, release_rx) = bounded(1);
+        READ_GATES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((path.to_path_buf(), started_tx, release_rx));
+        (started_rx, release_tx)
+    }
+
+    /// Scans on this thread use `tuning`.
+    pub(crate) fn set_tuning(tuning: ScanTuning) {
+        TUNING.with(|cell| cell.set(Some(tuning)));
+    }
+
+    pub(super) fn tuning() -> Option<ScanTuning> {
+        TUNING.with(Cell::get)
+    }
+
+    /// How many scans of `root` started.
+    pub(crate) fn scans_of(root: &Path) -> usize {
+        SCANS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|scans| scans.get(root).copied())
+            .unwrap_or(0)
+    }
+
+    pub(super) fn note_scan(root: &Path) {
+        *SCANS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .entry(root.to_path_buf())
+            .or_default() += 1;
+    }
+
     pub(super) fn before_read(path: &Path) {
         let panics = PANIC_ON_READ
             .lock()
@@ -1881,6 +2178,18 @@ pub(crate) mod scan_test_hooks {
             .iter()
             .any(|chosen| chosen == path);
         assert!(!panics, "test panic while reading {}", path.display());
+        let gate = {
+            let mut gates = READ_GATES.lock().unwrap_or_else(PoisonError::into_inner);
+            gates
+                .iter()
+                .position(|(chosen, _, _)| chosen == path)
+                .map(|index| gates.remove(index))
+        };
+        if let Some((_, started, release)) = gate {
+            let _ = started.send(());
+            // A test that fails before it releases the read must not hang.
+            let _ = release.recv_timeout(Duration::from_secs(30));
+        }
     }
 }
 
@@ -1923,7 +2232,8 @@ fn load_existing_tracks_for_root(
     let mut existing = HashMap::new();
     if let Ok(mut stmt) = conn.prepare(
         r"
-        SELECT path, title, track_no, mtime_ns, size_bytes, cover_checked, duration_secs, search_tags IS NULL
+        SELECT path, title, track_no, mtime_ns, size_bytes, cover_checked, duration_secs, search_tags IS NULL,
+               cover_path
         FROM tracks
         WHERE root_path = ?1
            OR (root_path = '' AND (path = ?1 OR substr(path, 1, length(?2)) = ?2))
@@ -1939,6 +2249,7 @@ fn load_existing_tracks_for_root(
                 row.get::<_, i64>(5)?,
                 row.get::<_, Option<f64>>(6)?,
                 row.get::<_, bool>(7)?,
+                row.get::<_, String>(8)?,
             ))
         });
         if let Ok(rows) = mapped {
@@ -1957,8 +2268,7 @@ fn load_existing_tracks_for_root(
                 existing.insert(
                     item.0,
                     ExistingTrackScanState {
-                        mtime_ns: item.3,
-                        size_bytes: item.4,
+                        row: RowState::new(item.3, item.4, &item.8),
                         has_cover_path: item.5 != 0,
                         suspicious_metadata,
                     },
@@ -2016,6 +2326,7 @@ fn prepare_track_upsert_statement<'conn>(
 struct TrackWriter<'conn> {
     upsert: rusqlite::CachedStatement<'conn>,
     stored: rusqlite::CachedStatement<'conn>,
+    state: rusqlite::CachedStatement<'conn>,
 }
 
 impl<'conn> TrackWriter<'conn> {
@@ -2023,6 +2334,11 @@ impl<'conn> TrackWriter<'conn> {
         Ok(Self {
             upsert: prepare_track_upsert_statement(tx)?,
             stored: prepare_library_row_statement(tx)?,
+            state: tx
+                .prepare_cached(
+                    "SELECT mtime_ns, size_bytes, cover_path FROM tracks WHERE path = ?1",
+                )
+                .map_err(|e| format!("failed to prepare track state statement: {e}"))?,
         })
     }
 
@@ -2030,19 +2346,67 @@ impl<'conn> TrackWriter<'conn> {
     fn stored(&mut self, task: &MetadataTask) -> Result<Option<IndexedTrack>, String> {
         query_library_row(&mut self.stored, &task.path_string)
     }
+
+    /// Whether the read of `task` may still be written. The scan read the
+    /// file without a lock, so meanwhile a rename may have moved it, or an
+    /// edit changed it and refreshed its row, or a cover refresh written its
+    /// row; their rows are newer than the read. The batch holds the write
+    /// lock now, so none of them can happen until it commits.
+    ///
+    /// `seen` is the row the scan started with.
+    fn still_current(
+        &mut self,
+        task: &MetadataTask,
+        seen: Option<&ExistingTrackScanState>,
+    ) -> Result<bool, String> {
+        let Some(on_disk) = track_file_fingerprint(&task.path) else {
+            // Moved or deleted: a rename has its row, or the next scan
+            // removes it.
+            return Ok(false);
+        };
+        let row = self
+            .state
+            .query_row(params![task.path_string], |row| {
+                Ok(RowState::new(
+                    row.get(0)?,
+                    row.get(1)?,
+                    &row.get::<_, String>(2)?,
+                ))
+            })
+            .optional()
+            .map_err(|e| {
+                format!(
+                    "failed to read the indexed row of '{}': {e}",
+                    task.path.display()
+                )
+            })?;
+        let Some(row) = row else {
+            // A new file. If it changed since it was read, its row keeps the
+            // older state, so the next scan reads it again.
+            return Ok(true);
+        };
+        let read_state = TrackFileFingerprint {
+            mtime_ns: task.mtime_ns,
+            size_bytes: task.size_bytes,
+        };
+        Ok(on_disk == read_state && seen.is_none_or(|seen| seen.row == row))
+    }
 }
 
-fn apply_metadata_result<U>(
+/// Writes the row of `result` unless it is stale (see
+/// [`TrackWriter::still_current`]) or the read failed and the row stays as
+/// it is (see [`row_update`]). Returns the row written.
+fn apply_metadata_result(
     writer: &mut TrackWriter<'_>,
     root_str: &str,
     now: i64,
-    on_upsert: &mut U,
+    existing: &HashMap<String, ExistingTrackScanState>,
     result: MetadataResult,
-) -> Result<(), String>
-where
-    U: FnMut(&MetadataTask, &IndexedTrack),
-{
+) -> Result<Option<(MetadataTask, IndexedTrack)>, String> {
     let MetadataResult { task, read } = result;
+    if !writer.still_current(&task, existing.get(&task.path_string))? {
+        return Ok(None);
+    }
     // The row may belong to another root that this one reclaims, so it is
     // looked up by path.
     let RowUpdate::Write {
@@ -2050,7 +2414,7 @@ where
         cover_checked,
     } = row_update(read, || writer.stored(&task))?
     else {
-        return Ok(());
+        return Ok(None);
     };
     writer
         .upsert
@@ -2072,8 +2436,7 @@ where
             serde_json::to_string(&indexed.search_tags).ok(),
         ])
         .map_err(|e| format!("failed to index '{}': {e}", task.path.display()))?;
-    on_upsert(&task, &indexed);
-    Ok(())
+    Ok(Some((task, indexed)))
 }
 
 /// Identity of a file independent of the path that reached it.
@@ -2288,21 +2651,185 @@ pub(super) fn count_label(count: usize, singular: &str, plural: &str) -> String 
     }
 }
 
-// Full directory scan with progress reporting — sequential walk with interleaved DB writes.
+/// How a scan batches its writes and reads its files.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ScanTuning {
+    /// The most rows one transaction writes.
+    pub(super) batch_rows: usize,
+    /// The longest a read row waits for its batch to be written.
+    pub(super) batch_interval: Duration,
+    /// Threads reading files; one reads them on the scan's own thread.
+    pub(super) workers: usize,
+}
+
+impl ScanTuning {
+    fn current() -> Self {
+        #[cfg(test)]
+        if let Some(tuning) = scan_test_hooks::tuning() {
+            return tuning;
+        }
+        Self {
+            batch_rows: 256,
+            batch_interval: Duration::from_secs(1),
+            workers: scan_worker_count(),
+        }
+    }
+}
+
+/// How long a scan waits for a file read before it checks for commands.
+const SCAN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The state of a scan of one root between files.
+struct RootScan<'a> {
+    conn: &'a Connection,
+    root: &'a Path,
+    root_str: &'a str,
+    /// The rows of the root when the scan started.
+    existing: &'a HashMap<String, ExistingTrackScanState>,
+    now: i64,
+    tuning: ScanTuning,
+    /// Rows read and not yet written.
+    batch: Vec<MetadataResult>,
+    batch_started: Option<Instant>,
+    discovered: usize,
+    processed: usize,
+    progress: ScanProgressReporter,
+    read_failures: ReadFailures,
+}
+
+impl RootScan<'_> {
+    fn report(&mut self, sink: &mut dyn ScanSink, force: bool) {
+        if let Some(progress) = self.progress.emit(force, self.discovered, self.processed) {
+            sink.progress(self.conn, progress);
+        }
+    }
+
+    /// Counts a file whose row is up to date.
+    fn skip_unchanged(&mut self, sink: &mut dyn ScanSink) {
+        self.processed = self.processed.saturating_add(1);
+        self.report(sink, false);
+    }
+
+    /// Adds a file read to the batch, and writes the batch if it is due.
+    fn accept(&mut self, result: MetadataResult, sink: &mut dyn ScanSink) -> Result<(), String> {
+        self.read_failures.note(&result.task.path, &result.read);
+        self.batch_started.get_or_insert_with(Instant::now);
+        self.batch.push(result);
+        self.processed = self.processed.saturating_add(1);
+        if self.batch.len() >= self.tuning.batch_rows {
+            self.flush(sink)?;
+        } else {
+            self.flush_if_due(sink)?;
+        }
+        self.report(sink, false);
+        Ok(())
+    }
+
+    fn flush_if_due(&mut self, sink: &mut dyn ScanSink) -> Result<(), String> {
+        if self
+            .batch_started
+            .is_some_and(|started| started.elapsed() >= self.tuning.batch_interval)
+        {
+            self.flush(sink)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the batch in one transaction and puts its rows in the snapshot.
+    fn flush(&mut self, sink: &mut dyn ScanSink) -> Result<(), String> {
+        self.batch_started = None;
+        if self.batch.is_empty() {
+            return Ok(());
+        }
+        let results = std::mem::take(&mut self.batch);
+        let written = write_batch(self.conn, self.root_str, self.now, self.existing, results)?;
+        sink.committed(self.root, written);
+        Ok(())
+    }
+}
+
+/// Writes the rows of `results` in one transaction, and returns those
+/// written; see [`apply_metadata_result`].
+fn write_batch(
+    conn: &Connection,
+    root_str: &str,
+    now: i64,
+    existing: &HashMap<String, ExistingTrackScanState>,
+    results: Vec<MetadataResult>,
+) -> Result<Vec<(MetadataTask, IndexedTrack)>, String> {
+    // Take the write lock up front: a deferred transaction that reads before
+    // it writes cannot wait for another writer, and fails at once.
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| format!("failed to begin a scan batch: {e}"))?;
+    let mut written = Vec::with_capacity(results.len());
+    {
+        let mut writer = TrackWriter::new(&tx)?;
+        for result in results {
+            written.extend(apply_metadata_result(
+                &mut writer,
+                root_str,
+                now,
+                existing,
+                result,
+            )?);
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("failed to commit a scan batch: {e}"))?;
+    Ok(written)
+}
+
+/// Removes the rows of files that a complete walk did not find. A row that
+/// another connection wrote since the scan started, such as a rename's,
+/// stays.
+fn delete_stale_rows(
+    conn: &Connection,
+    stale: Vec<String>,
+    existing: &HashMap<String, ExistingTrackScanState>,
+) -> Result<Vec<String>, String> {
+    if stale.is_empty() {
+        return Ok(stale);
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| format!("failed to begin removing deleted tracks: {e}"))?;
+    let mut removed = Vec::with_capacity(stale.len());
+    for path in stale {
+        let Some(seen) = existing.get(&path) else {
+            continue;
+        };
+        let deleted = tx
+            .execute(
+                "DELETE FROM tracks WHERE path=?1 AND mtime_ns=?2 AND size_bytes=?3",
+                params![path, seen.row.mtime_ns, seen.row.size_bytes],
+            )
+            .map_err(|e| format!("failed to remove deleted track '{path}' from the index: {e}"))?;
+        if deleted > 0 {
+            removed.push(path);
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("failed to finalize removing deleted tracks: {e}"))?;
+    Ok(removed)
+}
+
+/// Scans one root: walks it, reads the files that changed on worker
+/// threads, and writes their rows in batches of short transactions.
+///
+/// Other connections can write between batches, and a scan that stops early
+/// or fails keeps every batch it committed. Rows of files that are gone are
+/// removed only after a complete walk. A scan that `sink` stops returns an
+/// outcome with nothing removed and no problem.
 #[allow(clippy::too_many_lines)]
-fn scan_root<F, U>(
+fn scan_root(
     conn: &Connection,
     root: &Path,
     covers: Option<&'static EmbeddedCoverCache>,
-    on_progress: &mut F,
-    on_upsert: &mut U,
-) -> Result<RootScanOutcome, String>
-where
-    F: FnMut(RootScanProgress),
-    U: FnMut(&MetadataTask, &IndexedTrack),
-{
+    sink: &mut dyn ScanSink,
+) -> Result<RootScanOutcome, String> {
     let root = canonicalize_root(root)?;
     insert_root(conn, &root, "")?;
+    #[cfg(test)]
+    scan_test_hooks::note_scan(&root);
 
     let root_str = root.to_string_lossy().to_string();
     let existing = load_existing_tracks_for_root(conn, &root_str);
@@ -2313,81 +2840,100 @@ where
         .filter(|path| path != &root && path.starts_with(&root))
         .collect();
     let mut seen_paths: HashSet<String> = HashSet::new();
-    let tx = match conn.unchecked_transaction() {
-        Ok(tx) => tx,
-        Err(e) => return Err(format!("failed to begin transaction: {e}")),
+    let tuning = ScanTuning::current();
+    let mut scan = RootScan {
+        conn,
+        root: &root,
+        root_str: &root_str,
+        existing: &existing,
+        now: unix_ts_i64(),
+        tuning,
+        batch: Vec::new(),
+        batch_started: None,
+        discovered: 0,
+        processed: 0,
+        progress: ScanProgressReporter::new(previous_index_count),
+        read_failures: ReadFailures::default(),
     };
-    let mut writer = TrackWriter::new(&tx)?;
+    scan.report(sink, true);
 
-    let mut discovered = 0usize;
-    let mut processed = 0usize;
-    let mut progress = ScanProgressReporter::new(previous_index_count, on_progress);
-    progress.emit(true, discovered, processed);
-
-    let now = unix_ts_i64();
-    let mut workers = MetadataWorkerPool::new(scan_worker_count(), covers);
+    let mut workers = MetadataWorkerPool::new(tuning.workers, covers);
     let mut walk = LibraryWalk::new(&root, nested_roots);
-    let mut read_failures = ReadFailures::default();
 
-    for ScanCandidate {
-        path,
-        mtime_ns,
-        size_bytes,
-    } in walk.by_ref()
-    {
-        discovered = discovered.saturating_add(1);
-
-        let path_string = path.to_string_lossy().to_string();
-        seen_paths.insert(path_string.clone());
-
-        let existing_state = existing.get(&path_string);
-        let needs_update = existing_state.is_none_or(|existing_state| {
-            existing_state.mtime_ns != mtime_ns
-                || existing_state.size_bytes != size_bytes
-                || !existing_state.has_cover_path
-                || existing_state.suspicious_metadata
-        });
-
-        if needs_update {
-            let task = MetadataTask {
-                path,
-                path_string,
-                mtime_ns,
-                size_bytes,
-            };
-            if let Err(task) = workers.submit(task) {
-                let result = read_scan_task(task, covers);
-                read_failures.note(&result.task.path, &result.read);
-                apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
-                processed = processed.saturating_add(1);
-                progress.emit(false, discovered, processed);
+    let complete = 'scan: {
+        for ScanCandidate {
+            path,
+            mtime_ns,
+            size_bytes,
+        } in walk.by_ref()
+        {
+            if sink.should_stop(conn) {
+                break 'scan false;
             }
-        } else {
-            processed = processed.saturating_add(1);
-            progress.emit(false, discovered, processed);
+            scan.discovered = scan.discovered.saturating_add(1);
+
+            let path_string = path.to_string_lossy().to_string();
+            seen_paths.insert(path_string.clone());
+
+            let existing_state = existing.get(&path_string);
+            let needs_update = existing_state.is_none_or(|existing_state| {
+                existing_state.row.mtime_ns != mtime_ns
+                    || existing_state.row.size_bytes != size_bytes
+                    || !existing_state.has_cover_path
+                    || existing_state.suspicious_metadata
+            });
+
+            if needs_update {
+                let task = MetadataTask {
+                    path,
+                    path_string,
+                    mtime_ns,
+                    size_bytes,
+                };
+                if let Err(task) = workers.submit(task) {
+                    scan.accept(read_scan_task(task, covers), sink)?;
+                }
+            } else {
+                scan.skip_unchanged(sink);
+            }
+
+            for result in workers.drain_ready()? {
+                scan.accept(result, sink)?;
+            }
+            while workers.at_capacity() {
+                if sink.should_stop(conn) {
+                    break 'scan false;
+                }
+                match workers.next_result(SCAN_POLL_INTERVAL)? {
+                    Some(result) => scan.accept(result, sink)?,
+                    None => scan.flush_if_due(sink)?,
+                }
+            }
+            scan.flush_if_due(sink)?;
         }
 
-        for result in workers.drain_ready()? {
-            read_failures.note(&result.task.path, &result.read);
-            apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
-            processed = processed.saturating_add(1);
-            progress.emit(false, discovered, processed);
+        workers.close_tasks();
+        while workers.has_pending() {
+            if sink.should_stop(conn) {
+                break 'scan false;
+            }
+            match workers.next_result(SCAN_POLL_INTERVAL)? {
+                Some(result) => scan.accept(result, sink)?,
+                None => scan.flush_if_due(sink)?,
+            }
         }
-        if let Some(result) = workers.wait_for_capacity()? {
-            read_failures.note(&result.task.path, &result.read);
-            apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
-            processed = processed.saturating_add(1);
-            progress.emit(false, discovered, processed);
-        }
+        workers.join();
+        scan.flush(sink)?;
+        true
+    };
+    if !complete {
+        // The rows read since the last batch are dropped with the workers'
+        // remaining reads; the next scan reads those files again.
+        return Ok(RootScanOutcome {
+            removed: Vec::new(),
+            problem: None,
+        });
     }
-
-    for result in workers.finish()? {
-        read_failures.note(&result.task.path, &result.read);
-        apply_metadata_result(&mut writer, &root_str, now, on_upsert, result)?;
-        processed = processed.saturating_add(1);
-        progress.emit(false, discovered, processed);
-    }
-    drop(writer);
 
     // A root that previously had tracks but now has no audio files at all is
     // most likely an unmounted or offline folder, not an emptied library.
@@ -2396,19 +2942,14 @@ where
         Vec::new()
     } else {
         existing
-            .into_keys()
-            .filter(|p| !seen_paths.contains(p) && !walk.keeps(Path::new(p)))
+            .keys()
+            .filter(|p| !seen_paths.contains(*p) && !walk.keeps(Path::new(p)))
+            .cloned()
             .collect()
     };
-    for p in &stale {
-        tx.execute("DELETE FROM tracks WHERE path=?1", params![p])
-            .map_err(|e| format!("failed to remove deleted track '{p}' from the index: {e}"))?;
-    }
+    let removed = delete_stale_rows(conn, stale, &existing)?;
 
-    tx.commit()
-        .map_err(|e| format!("failed to finalize scan transaction: {e}"))?;
-
-    progress.emit(true, discovered, processed);
+    scan.report(sink, true);
 
     let walk_problem = match walk.first_read_error {
         Some(first_error) => Some(format!(
@@ -2426,10 +2967,10 @@ where
     };
     let problems: Vec<String> = walk_problem
         .into_iter()
-        .chain(read_failures.problems(&root))
+        .chain(scan.read_failures.problems(&root))
         .collect();
     Ok(RootScanOutcome {
-        removed: stale,
+        removed,
         problem: (!problems.is_empty()).then(|| problems.join("; ")),
     })
 }
@@ -2945,6 +3486,61 @@ pub(crate) fn read_library_snapshot_from_db() -> Result<LibrarySnapshot, String>
     Ok(snapshot)
 }
 
+/// Feeds a scan's progress and the rows it writes to closures.
+#[cfg(test)]
+struct ClosureSink<'a, F, U> {
+    on_progress: &'a mut F,
+    on_upsert: &'a mut U,
+}
+
+#[cfg(test)]
+impl<F, U> ScanSink for ClosureSink<'_, F, U>
+where
+    F: FnMut(RootScanProgress),
+    U: FnMut(&MetadataTask, &IndexedTrack),
+{
+    fn progress(&mut self, _conn: &Connection, progress: RootScanProgress) {
+        (self.on_progress)(progress);
+    }
+
+    fn committed(&mut self, _root: &Path, rows: Vec<(MetadataTask, IndexedTrack)>) {
+        for (task, indexed) in &rows {
+            (self.on_upsert)(task, indexed);
+        }
+    }
+
+    fn should_stop(&mut self, _conn: &Connection) -> bool {
+        false
+    }
+}
+
+/// Scans `root` uninterrupted, reporting its progress and the rows it
+/// writes to closures.
+#[cfg(test)]
+fn scan_root_observed<F, U>(
+    conn: &Connection,
+    root: &Path,
+    covers: Option<&'static EmbeddedCoverCache>,
+    on_progress: &mut F,
+    on_upsert: &mut U,
+) -> Result<RootScanOutcome, String>
+where
+    F: FnMut(RootScanProgress),
+    U: FnMut(&MetadataTask, &IndexedTrack),
+{
+    scan_root(
+        conn,
+        root,
+        covers,
+        &mut ClosureSink {
+            on_progress,
+            on_upsert,
+        },
+    )
+}
+
+#[cfg(test)]
+mod batch_tests;
 #[cfg(test)]
 mod refresh_tests;
 
@@ -3518,13 +4114,29 @@ mod tests {
         F: FnMut(RootScanProgress),
         U: FnMut(&MetadataTask, &IndexedTrack),
     {
-        super::scan_root(
+        scan_root_observed(
             conn,
             root,
             EmbeddedCoverCache::shared(),
             on_progress,
             on_upsert,
         )
+    }
+
+    /// Runs `cmd` as the library worker does, with nothing queued.
+    fn handle_command(
+        conn: &Connection,
+        cmd: LibraryCommand,
+        snapshot: &mut LibrarySnapshot,
+        event_tx: &Sender<LibraryEvent>,
+    ) {
+        super::super::worker::handle_command(
+            conn,
+            cmd,
+            snapshot,
+            event_tx,
+            &mut super::super::worker::Control::detached(),
+        );
     }
 
     fn indexed_paths(conn: &Connection) -> Vec<PathBuf> {
@@ -3913,7 +4525,7 @@ mod tests {
         let mut snapshot = LibrarySnapshot::default();
         let (tx, _rx) = unbounded();
         let add = |snapshot: &mut LibrarySnapshot, path: &Path| {
-            handle_add_root(&conn, path, "", snapshot, &tx)
+            handle_add_root(&conn, path, "", snapshot, &tx, &mut Uninterrupted)
         };
 
         add(&mut snapshot, &base.join("music")).expect("add root");
@@ -4123,7 +4735,8 @@ mod tests {
         let mut snapshot = LibrarySnapshot::default();
         load_snapshot(&conn, &mut snapshot);
         let (tx, _rx) = unbounded();
-        let err = handle_rescan_all(&conn, &mut snapshot, &tx).expect_err("failure is reported");
+        let err = handle_rescan_all(&conn, &mut snapshot, &tx, &mut Uninterrupted)
+            .expect_err("failure is reported");
 
         assert!(
             err.contains(&format!("failed to scan '{}'", missing.display())),
@@ -4285,7 +4898,8 @@ mod tests {
         load_snapshot(&conn, &mut snapshot);
         let (tx, _rx) = unbounded();
 
-        handle_rescan_root(&conn, &inner, &mut snapshot, &tx).expect("rescan inner");
+        handle_rescan_root(&conn, &inner, &mut snapshot, &tx, &mut Uninterrupted)
+            .expect("rescan inner");
 
         let expected = [
             inner.join("one.mp3"),
@@ -4334,7 +4948,7 @@ mod tests {
         load_snapshot(&conn, &mut snapshot);
         let (tx, rx) = unbounded();
 
-        super::super::handle_command(&conn, LibraryCommand::RescanAll, &mut snapshot, &tx);
+        handle_command(&conn, LibraryCommand::RescanAll, &mut snapshot, &tx);
 
         let published = last_published(&rx);
         let error = published.last_error.as_deref().unwrap_or_default();
@@ -4359,7 +4973,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_stale_track_removal_rolls_back_its_root_and_is_reported() {
+    fn a_failed_stale_track_removal_keeps_the_scanned_rows_and_is_reported() {
         let conn = Connection::open_in_memory().expect("db");
         init_schema(&conn).expect("schema");
         let root = test_dir("stale-delete-fails");
@@ -4379,7 +4993,7 @@ mod tests {
         load_snapshot(&conn, &mut snapshot);
         let (tx, rx) = unbounded();
 
-        super::super::handle_command(
+        handle_command(
             &conn,
             LibraryCommand::RescanRoot(root.clone()),
             &mut snapshot,
@@ -4392,7 +5006,12 @@ mod tests {
             error.contains("injected delete failure"),
             "unexpected error: {error}"
         );
-        let expected = [root.join("deleted.mp3"), root.join("kept.mp3")];
+        // The scanned rows stay in their committed batch; nothing was removed.
+        let expected = [
+            root.join("added.mp3"),
+            root.join("deleted.mp3"),
+            root.join("kept.mp3"),
+        ];
         assert_eq!(indexed_paths(&conn), expected);
         assert_eq!(snapshot_paths(&published), expected);
         let _ = fs::remove_dir_all(root);
@@ -4587,19 +5206,6 @@ mod tests {
         .expect("rows")
     }
 
-    fn fts_paths(conn: &Connection, term: &str) -> Vec<PathBuf> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT t.path FROM tracks_fts JOIN tracks t ON t.rowid = tracks_fts.rowid \
-                 WHERE tracks_fts MATCH ?1",
-            )
-            .expect("prepare");
-        stmt.query_map(params![term], |row| row.get::<_, String>(0))
-            .expect("query")
-            .map(|path| PathBuf::from(path.expect("path")))
-            .collect()
-    }
-
     fn file_names(dir: &Path) -> Vec<String> {
         let mut names = fs::read_dir(dir)
             .expect("read dir")
@@ -4698,8 +5304,6 @@ mod tests {
                 (before[0].0, two.clone(), dir.clone(), "One".to_string()),
             ]
         );
-        assert_eq!(fts_paths(&conn, "One"), [two]);
-        assert_eq!(fts_paths(&conn, "Two"), [one]);
         assert_eq!(file_names(&dir), ["01 - One.flac", "02 - Two.flac"]);
         fs::remove_dir_all(dir).expect("cleanup");
     }
@@ -4816,7 +5420,6 @@ mod tests {
         assert_eq!(fs::read(&two).expect("read"), bytes[1]);
         assert_eq!(file_names(&dir), ["01 - One.flac", "02 - Two.flac"]);
         assert_eq!(track_rows(&conn), before);
-        assert_eq!(fts_paths(&conn, "One"), [one]);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
