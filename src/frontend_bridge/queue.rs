@@ -6,6 +6,7 @@ use crossbeam_channel::Sender;
 
 use crate::playback::{PlaybackCommand, PlaybackEngine, PlaybackState};
 
+use super::queue_sync::QueueEdit;
 use super::{
     sync_queue_details, try_send_event, BridgeEvent, BridgeQueueCommand, BridgeState,
     ExternalQueueDetailsRequest,
@@ -30,6 +31,11 @@ pub(super) fn handle_queue_command(
         &mut state.selected_queue_index,
         state.playback.state,
     );
+    match outcome.row_change.clone() {
+        Some(QueueRowChange::Edit(edit)) => state.queue_sync.record(edit, state.queue.len()),
+        Some(QueueRowChange::Reset) => state.queue_sync.reset(),
+        None => {}
+    }
     if outcome.changed && validate_details {
         let _ = sync_queue_details(state, external_queue_details_tx);
     }
@@ -72,11 +78,20 @@ pub(super) enum QueuePlaybackOp {
     Play,
 }
 
+/// How a command changed the queue's rows, for the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum QueueRowChange {
+    Edit(QueueEdit),
+    /// Every row was replaced.
+    Reset,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct QueueCommandOutcome {
     pub(super) changed: bool,
     pub(super) playback_ops: Vec<QueuePlaybackOp>,
     pub(super) error: Option<String>,
+    pub(super) row_change: Option<QueueRowChange>,
 }
 
 fn replace_queue_command_outcome(
@@ -104,6 +119,7 @@ fn replace_queue_command_outcome(
         changed: true,
         playback_ops,
         error: None,
+        row_change: Some(QueueRowChange::Reset),
     }
 }
 
@@ -115,18 +131,21 @@ fn append_queue_command_outcome(
         return QueueCommandOutcome::default();
     }
 
-    let mut playback_ops = Vec::new();
-    if queue.is_empty() {
-        queue.extend(tracks);
-        playback_ops.push(QueuePlaybackOp::LoadQueue(queue.clone()));
+    let at = queue.len();
+    queue.extend(tracks.iter().cloned());
+    let playback_ops = vec![if at == 0 {
+        QueuePlaybackOp::LoadQueue(queue.clone())
     } else {
-        queue.extend(tracks.clone());
-        playback_ops.push(QueuePlaybackOp::AddToQueue(tracks));
-    }
+        QueuePlaybackOp::AddToQueue(tracks.clone())
+    }];
     QueueCommandOutcome {
         changed: true,
         playback_ops,
         error: None,
+        row_change: Some(QueueRowChange::Edit(QueueEdit::Insert {
+            at,
+            paths: tracks,
+        })),
     }
 }
 
@@ -138,9 +157,8 @@ fn play_at_queue_command_outcome(
 ) -> QueueCommandOutcome {
     if idx >= queue_len {
         return QueueCommandOutcome {
-            changed: false,
-            playback_ops: Vec::new(),
             error: Some(format!("queue index {idx} out of bounds")),
+            ..QueueCommandOutcome::default()
         };
     }
 
@@ -152,7 +170,7 @@ fn play_at_queue_command_outcome(
     QueueCommandOutcome {
         changed: true,
         playback_ops,
-        error: None,
+        ..QueueCommandOutcome::default()
     }
 }
 
@@ -181,6 +199,7 @@ fn remove_queue_command_outcome(
         changed: true,
         playback_ops,
         error: None,
+        row_change: Some(QueueRowChange::Edit(QueueEdit::Remove(vec![idx]))),
     }
 }
 
@@ -211,6 +230,7 @@ fn move_queue_command_outcome(
         changed: true,
         playback_ops: vec![QueuePlaybackOp::Move { from, to }],
         error: None,
+        row_change: Some(QueueRowChange::Edit(QueueEdit::Move { from, to })),
     }
 }
 
@@ -233,10 +253,16 @@ pub(super) fn apply_queue_command_state(
             play_at_queue_command_outcome(idx, queue.len(), selected_queue_index, playback_state)
         }
         BridgeQueueCommand::RemoveMany(indices) => {
-            let old_len = queue.len();
+            let mut removed: Vec<usize> = indices
+                .iter()
+                .copied()
+                .filter(|index| *index < queue.len())
+                .collect();
+            removed.sort_unstable();
+            removed.dedup();
             *selected_queue_index =
                 crate::playback::remove_queue_indices(queue, *selected_queue_index, &indices);
-            if old_len == queue.len() {
+            if removed.is_empty() {
                 return QueueCommandOutcome::default();
             }
             QueueCommandOutcome {
@@ -247,6 +273,7 @@ pub(super) fn apply_queue_command_state(
                     QueuePlaybackOp::RemoveMany(indices)
                 }],
                 error: None,
+                row_change: Some(QueueRowChange::Edit(QueueEdit::Remove(removed))),
             }
         }
         BridgeQueueCommand::Remove(idx) => {
@@ -261,8 +288,7 @@ pub(super) fn apply_queue_command_state(
             *selected_queue_index = normalized;
             QueueCommandOutcome {
                 changed,
-                playback_ops: Vec::new(),
-                error: None,
+                ..QueueCommandOutcome::default()
             }
         }
         BridgeQueueCommand::Clear => {
@@ -272,6 +298,7 @@ pub(super) fn apply_queue_command_state(
                 changed: true,
                 playback_ops: vec![QueuePlaybackOp::ClearQueue],
                 error: None,
+                row_change: Some(QueueRowChange::Reset),
             }
         }
     }
@@ -283,7 +310,7 @@ mod tests {
 
     use crate::playback::PlaybackState;
 
-    use super::super::{BridgeCommand, BridgeQueueCommand};
+    use super::super::BridgeQueueCommand;
     use super::*;
 
     fn p(path: &str) -> PathBuf {
@@ -580,15 +607,84 @@ mod tests {
     }
 
     #[test]
-    fn selection_only_queue_commands_do_not_require_queue_snapshot() {
-        use super::super::command_requires_queue_snapshot;
+    fn each_queue_edit_reaches_the_ui_as_its_delta() {
+        use super::super::{QueueEdit, QueueUpdate};
 
-        assert!(!command_requires_queue_snapshot(&BridgeCommand::Queue(
-            BridgeQueueCommand::Select(Some(0)),
-        )));
-        assert!(!command_requires_queue_snapshot(&BridgeCommand::Queue(
-            BridgeQueueCommand::PlayAt(0),
-        )));
+        let (analysis_tx, _) = crossbeam_channel::unbounded();
+        let (playback, _) = PlaybackEngine::new(analysis_tx);
+        let (details_tx, _details_rx) = crossbeam_channel::unbounded();
+        let (event_tx, _) = crossbeam_channel::unbounded();
+        let mut state = BridgeState::default();
+        let run = |state: &mut BridgeState, command| {
+            handle_queue_command(command, state, &playback, &details_tx, &event_tx);
+        };
+        let mut ui_queue = Vec::new();
+        let mut ui_revision = 0;
+        // What the UI's queue becomes with the update a snapshot carries now.
+        let mut sync_ui = |state: &mut BridgeState| {
+            let update = state.queue_sync.update(&state.queue);
+            if let Some(QueueUpdate::Edits { base_revision, .. }) = &update {
+                assert_eq!(
+                    *base_revision, ui_revision,
+                    "an update since the UI's revision"
+                );
+            }
+            if let Some(update) = &update {
+                assert!(update.apply_to(&mut ui_queue));
+            }
+            state.queue_sync.mark_sent();
+            ui_revision = state.queue_sync.revision();
+            assert_eq!(ui_queue, state.queue);
+            update
+        };
+
+        run(
+            &mut state,
+            BridgeQueueCommand::Replace {
+                tracks: vec![p("/a"), p("/b"), p("/c"), p("/d")],
+                autoplay: false,
+            },
+        );
+        assert!(matches!(sync_ui(&mut state), Some(QueueUpdate::Full(_))));
+
+        let edits = |update: Option<QueueUpdate>| match update {
+            Some(QueueUpdate::Edits { edits, .. }) => edits,
+            other => panic!("expected edits, got {other:?}"),
+        };
+        run(&mut state, BridgeQueueCommand::Append(vec![p("/e")]));
+        assert_eq!(
+            edits(sync_ui(&mut state)),
+            vec![QueueEdit::Insert {
+                at: 4,
+                paths: vec![p("/e")]
+            }]
+        );
+        run(&mut state, BridgeQueueCommand::Move { from: 4, to: 0 });
+        run(&mut state, BridgeQueueCommand::Remove(1));
+        assert_eq!(
+            edits(sync_ui(&mut state)),
+            vec![
+                QueueEdit::Move { from: 4, to: 0 },
+                QueueEdit::Remove(vec![1])
+            ]
+        );
+        run(&mut state, BridgeQueueCommand::RemoveMany(vec![3, 0, 3, 9]));
+        assert_eq!(
+            edits(sync_ui(&mut state)),
+            vec![QueueEdit::Remove(vec![0, 3])]
+        );
+        assert_eq!(state.queue, vec![p("/b"), p("/c")]);
+
+        // Selecting and playing a row change no rows.
+        let revision = state.queue_sync.revision();
+        run(&mut state, BridgeQueueCommand::Select(Some(1)));
+        run(&mut state, BridgeQueueCommand::PlayAt(0));
+        run(&mut state, BridgeQueueCommand::Move { from: 1, to: 1 });
+        assert_eq!(state.queue_sync.revision(), revision);
+        assert!(!state.queue_sync.has_pending());
+
+        run(&mut state, BridgeQueueCommand::Clear);
+        assert_eq!(sync_ui(&mut state), Some(QueueUpdate::Full(Vec::new())));
     }
 
     #[test]

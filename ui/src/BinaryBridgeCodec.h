@@ -37,6 +37,9 @@ enum SnapshotSection : quint16 {
     SectionStateSaved = 1u << 9,
 };
 
+// Queue commands that name rows (CmdPlayAt, CmdSelectQueue, CmdRemoveAt,
+// CmdMoveQueue, CmdRemoveMany) start with the u64 queue revision the rows
+// showed, so the backend can carry them across edits made since.
 enum CommandId : quint16 {
     CmdPlay = 1,
     CmdPause = 2,
@@ -146,13 +149,50 @@ struct DecodedQueueTrack {
     QString path;
 };
 
+// The queue section: the whole queue, the row operations since an earlier
+// revision, or word that the backend lost track of the queue and the client
+// should ask for it whole. The layout is described in
+// src/frontend_bridge/queue_relay.rs.
+enum QueueSectionKind : quint8 {
+    QueueFull = 0,
+    QueueDelta = 1,
+    QueueResync = 2,
+};
+
+enum QueueOpType : quint8 {
+    // Insert `tracks` before row `index`.
+    QueueOpInsert = 1,
+    // Remove `count` rows from `index`.
+    QueueOpRemove = 2,
+    // Take row `index` out and put it back at `to`.
+    QueueOpMove = 3,
+    // Row `index` is now `tracks[0]`.
+    QueueOpUpdate = 4,
+};
+
+struct DecodedQueueOp {
+    int type{0};
+    int index{0};
+    int count{0};
+    int to{0};
+    QVector<DecodedQueueTrack> tracks;
+};
+
 struct DecodedQueue {
     bool present{false};
+    int kind{QueueFull};
+    // The revision of the rows once the section is applied, and for a
+    // delta, the revision it applies to.
+    quint64 revision{0};
+    quint64 baseRevision{0};
     int len{0};
     int selectedIndex{-1};
     double totalDurationSeconds{0.0};
     int unknownDurationCount{0};
+    // The rows of a whole queue.
     QVector<DecodedQueueTrack> tracks;
+    // The operations of a delta, in order.
+    QVector<DecodedQueueOp> ops;
 };
 
 struct DecodedLibraryRoot {
@@ -300,9 +340,12 @@ QByteArray encodeCommandLibraryViewState(
     const QString &anchorKey,
     float anchorOffset);
 QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query, quint32 limit = 0);
-QByteArray encodeCommandIndices(quint16 cmdId, const QList<quint32> &indices);
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
-QByteArray encodeCommandMoveQueue(quint32 from, quint32 to);
+// Queue commands for rows of the queue at `revision`.
+QByteArray encodeCommandQueueRow(quint16 cmdId, quint64 revision, quint32 index);
+QByteArray encodeCommandSelectQueue(quint64 revision, qint32 index);
+QByteArray encodeCommandMoveQueue(quint64 revision, quint32 from, quint32 to);
+QByteArray encodeCommandRemoveMany(quint64 revision, const QList<quint32> &indices);
 
 bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QString *errorMessage);
 bool decodeSearchResultsFrame(

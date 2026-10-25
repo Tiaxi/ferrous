@@ -73,7 +73,15 @@ public:
     QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
 
+    // Replace every row, with a model reset.
     bool setRows(QVector<QueueRowData> rows);
+    // The row edits of a queue delta, each with its row signals. Each
+    // returns false, changing nothing, if it does not fit the rows.
+    bool insertRowsAt(int at, QVector<QueueRowData> rows);
+    bool removeRowsAt(int start, int count);
+    // Take the row at `from` out and put it back at `to`.
+    bool moveRow(int from, int to);
+    bool updateRow(int index, QueueRowData row);
     const QueueRowData *rowAt(int index) const;
     QVariant trackNumberAt(int index) const;
 
@@ -90,7 +98,6 @@ class BridgeClient : public QObject {
     Q_PROPERTY(double durationSeconds READ durationSeconds NOTIFY playbackChanged)
     Q_PROPERTY(double volume READ volume NOTIFY snapshotChanged)
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
-    Q_PROPERTY(int queueVersion READ queueVersion NOTIFY snapshotChanged)
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
@@ -197,7 +204,6 @@ public:
     double durationSeconds() const;
     double volume() const;
     int queueLength() const;
-    int queueVersion() const;
     QString queueDurationText() const;
     QObject *queueRows() const;
     int selectedQueueIndex() const;
@@ -547,8 +553,12 @@ private:
     void coverLookupWorkerLoop();
     void applyTrackCoverLookupResult(const QString &trackPath, const QString &coverUrl);
     void cacheTrackCoverForPath(const QString &trackPath, const QString &coverUrl);
-    void rebuildQueuePathFirstIndex();
     int queuePathFirstIndex(const QString &path) const;
+    // Apply the rows of a queue section that fits the client's rows.
+    // Returns false if its operations did not fit them after all.
+    bool applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue);
+    // Ask for the whole queue, once, after a section the rows cannot take.
+    void requestQueueResync();
     QString coverUrlForPath(const QString &path) const;
     void bumpCoverRefreshNonce(const QString &path);
     void cancelItunesArtworkRequests();
@@ -605,6 +615,9 @@ private:
     void sendLibraryRootCommand(quint16 cmdId, const QString &path, const QString &name);
     static QString formatSeconds(double seconds);
     static QString formatDurationCompact(double seconds);
+    static QueueRowData queueRowFromTrack(const BinaryBridgeCodec::DecodedQueueTrack &track);
+    static QVector<QueueRowData> queueRowsFromTracks(
+        const QVector<BinaryBridgeCodec::DecodedQueueTrack> &tracks);
 
     FerrousFfiBridge *m_ffiBridge{nullptr};
     QSocketNotifier *m_bridgeWakeNotifier{nullptr};
@@ -617,12 +630,18 @@ private:
     QString m_durationText{"00:00"};
     double m_durationSeconds{0.0};
     double m_volume{1.0};
+    // The rows' count, which follows the model's row signals.
     int m_queueLength{0};
-    int m_queueVersion{0};
     QString m_queueDurationText{"00:00"};
     QueueRowsModel m_queueRowsModel;
-    QStringList m_queuePaths;
-    QHash<QString, int> m_queuePathFirstIndex;
+    // The backend's revision of the rows, which commands naming rows carry;
+    // 0 while the rows match none.
+    quint64 m_queueRevision{0};
+    // A whole queue was asked for and has not arrived yet.
+    bool m_queueResyncRequested{false};
+    // The first row of each path, built when needed after the rows change.
+    mutable QHash<QString, int> m_queuePathFirstIndex;
+    mutable bool m_queuePathFirstIndexStale{true};
     int m_selectedQueueIndex{-1};
     int m_playingQueueIndex{-1};
     QString m_currentTrackPath;

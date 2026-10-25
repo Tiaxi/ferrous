@@ -761,6 +761,62 @@ bool QueueRowsModel::setRows(QVector<QueueRowData> rows) {
     return true;
 }
 
+bool QueueRowsModel::insertRowsAt(int at, QVector<QueueRowData> rows) {
+    if (at < 0 || at > m_rows.size()) {
+        return false;
+    }
+    if (rows.isEmpty()) {
+        return true;
+    }
+    beginInsertRows(QModelIndex(), at, at + static_cast<int>(rows.size()) - 1);
+    m_rows.insert(at, rows.size(), QueueRowData{});
+    std::move(rows.begin(), rows.end(), m_rows.begin() + at);
+    endInsertRows();
+    return true;
+}
+
+bool QueueRowsModel::removeRowsAt(int start, int count) {
+    if (start < 0 || count < 0 || count > m_rows.size() - start) {
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    beginRemoveRows(QModelIndex(), start, start + count - 1);
+    m_rows.remove(start, count);
+    endRemoveRows();
+    return true;
+}
+
+bool QueueRowsModel::moveRow(int from, int to) {
+    if (from < 0 || to < 0 || from >= m_rows.size() || to >= m_rows.size()) {
+        return false;
+    }
+    if (from == to) {
+        return true;
+    }
+    // Qt names the row the moved one goes before, counted before the move.
+    if (!beginMoveRows(QModelIndex(), from, from, QModelIndex(), to > from ? to + 1 : to)) {
+        return false;
+    }
+    m_rows.move(from, to);
+    endMoveRows();
+    return true;
+}
+
+bool QueueRowsModel::updateRow(int index, QueueRowData row) {
+    if (index < 0 || index >= m_rows.size()) {
+        return false;
+    }
+    if (m_rows.at(index) == row) {
+        return true;
+    }
+    m_rows[index] = std::move(row);
+    const QModelIndex changed = this->index(index, 0);
+    emit dataChanged(changed, changed);
+    return true;
+}
+
 const QueueRowData *QueueRowsModel::rowAt(int index) const {
     if (index < 0 || index >= m_rows.size()) {
         return nullptr;
@@ -784,6 +840,17 @@ BridgeClient::BridgeClient(QObject *parent)
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
 #endif
     m_fileBrowserName = detectFileBrowserNameHeuristic();
+    // The row count follows each row signal before anything else hears it,
+    // so handlers of these signals read the count the rows have.
+    const auto followQueueRows = [this]() {
+        m_queueLength = m_queueRowsModel.rowCount();
+        m_queuePathFirstIndexStale = true;
+    };
+    connect(&m_queueRowsModel, &QAbstractItemModel::rowsInserted, this, followQueueRows);
+    connect(&m_queueRowsModel, &QAbstractItemModel::rowsRemoved, this, followQueueRows);
+    connect(&m_queueRowsModel, &QAbstractItemModel::rowsMoved, this, followQueueRows);
+    connect(&m_queueRowsModel, &QAbstractItemModel::modelReset, this, followQueueRows);
+    connect(&m_queueRowsModel, &QAbstractItemModel::dataChanged, this, followQueueRows);
     m_diagnosticsLogPath = resolveDiagnosticsLogPath();
     m_diagnosticsFlushTimer.setSingleShot(true);
     m_diagnosticsFlushTimer.setInterval(readEnvMillis("FERROUS_DIAGNOSTICS_FLUSH_MS", 25));
@@ -1146,20 +1213,21 @@ void BridgeClient::cacheTrackCoverForPath(const QString &trackPath, const QStrin
     }
 }
 
-void BridgeClient::rebuildQueuePathFirstIndex() {
-    m_queuePathFirstIndex.clear();
-    m_queuePathFirstIndex.reserve(m_queuePaths.size());
-    for (int index = 0; index < m_queuePaths.size(); ++index) {
-        const QString &path = m_queuePaths.at(index);
-        if (!path.isEmpty() && !m_queuePathFirstIndex.contains(path)) {
-            m_queuePathFirstIndex.insert(path, index);
-        }
-    }
-}
-
 int BridgeClient::queuePathFirstIndex(const QString &path) const {
     if (path.isEmpty()) {
         return -1;
+    }
+    if (m_queuePathFirstIndexStale) {
+        m_queuePathFirstIndex.clear();
+        const int rows = m_queueRowsModel.rowCount();
+        m_queuePathFirstIndex.reserve(rows);
+        for (int index = 0; index < rows; ++index) {
+            const QString &rowPath = m_queueRowsModel.rowAt(index)->path;
+            if (!rowPath.isEmpty() && !m_queuePathFirstIndex.contains(rowPath)) {
+                m_queuePathFirstIndex.insert(rowPath, index);
+            }
+        }
+        m_queuePathFirstIndexStale = false;
     }
     return m_queuePathFirstIndex.value(path, -1);
 }
@@ -2026,10 +2094,6 @@ int BridgeClient::queueLength() const {
     return m_queueLength;
 }
 
-int BridgeClient::queueVersion() const {
-    return m_queueVersion;
-}
-
 QString BridgeClient::queueDurationText() const {
     return m_queueDurationText;
 }
@@ -2833,8 +2897,9 @@ void BridgeClient::playAt(int index) {
 #endif
     m_pendingQueueSelection = index;
     m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandQueueRow(
         BinaryBridgeCodec::CmdPlayAt,
+        m_queueRevision,
         static_cast<quint32>(index)));
 }
 
@@ -2849,8 +2914,8 @@ void BridgeClient::selectQueueIndex(int index) {
     scheduleSnapshotChanged();
     m_pendingQueueSelection = index;
     m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandI32(
-        BinaryBridgeCodec::CmdSelectQueue,
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandSelectQueue(
+        m_queueRevision,
         static_cast<qint32>(index)));
 }
 
@@ -2863,10 +2928,11 @@ void BridgeClient::removeIndices(const QVariantList &indices) {
     }
     QList<quint32> sorted = unique.values();
     std::sort(sorted.begin(), sorted.end(), std::greater<quint32>());
-    // Descending batches preserve the original indexes in all subsequent batches.
+    // Every batch names rows at the same revision; the backend carries the
+    // later batches across the removals of the earlier ones.
     for (qsizetype start = 0; start < sorted.size(); start += 4096) {
-        sendBinaryCommand(BinaryBridgeCodec::encodeCommandIndices(
-            BinaryBridgeCodec::CmdRemoveMany, sorted.mid(start, 4096)));
+        sendBinaryCommand(BinaryBridgeCodec::encodeCommandRemoveMany(
+            m_queueRevision, sorted.mid(start, 4096)));
     }
 }
 
@@ -2874,8 +2940,9 @@ void BridgeClient::removeAt(int index) {
     if (index < 0) {
         return;
     }
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandQueueRow(
         BinaryBridgeCodec::CmdRemoveAt,
+        m_queueRevision,
         static_cast<quint32>(index)));
 }
 
@@ -2884,6 +2951,7 @@ void BridgeClient::moveQueue(int from, int to) {
         return;
     }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandMoveQueue(
+        m_queueRevision,
         static_cast<quint32>(from),
         static_cast<quint32>(to)));
 }
@@ -3084,10 +3152,80 @@ QString BridgeClient::libraryThumbnailSource(const QString &path) const {
 }
 
 QString BridgeClient::queuePathAt(int index) const {
-    if (index < 0 || index >= m_queuePaths.size()) {
-        return {};
+    const QueueRowData *row = m_queueRowsModel.rowAt(index);
+    return row != nullptr ? row->path : QString{};
+}
+
+QueueRowData BridgeClient::queueRowFromTrack(const BinaryBridgeCodec::DecodedQueueTrack &track) {
+    QueueRowData row;
+    row.title = track.title.trimmed().isEmpty() ? track.path : track.title;
+    row.artist = track.artist;
+    row.album = track.album;
+    row.coverPath = track.coverPath;
+    row.genre = track.genre;
+    row.lengthText = track.lengthSeconds >= 0.0f
+        ? formatDurationCompact(static_cast<double>(track.lengthSeconds))
+        : QStringLiteral("--:--");
+    row.path = track.path;
+    row.trackNumber = track.trackNumber;
+    row.year = track.year;
+    return row;
+}
+
+QVector<QueueRowData> BridgeClient::queueRowsFromTracks(
+    const QVector<BinaryBridgeCodec::DecodedQueueTrack> &tracks) {
+    QVector<QueueRowData> rows;
+    rows.reserve(tracks.size());
+    for (const auto &track : tracks) {
+        rows.push_back(queueRowFromTrack(track));
     }
-    return m_queuePaths[index];
+    return rows;
+}
+
+bool BridgeClient::applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue) {
+    if (queue.kind == BinaryBridgeCodec::QueueFull) {
+        m_queueRowsModel.setRows(queueRowsFromTracks(queue.tracks));
+        return m_queueRowsModel.rowCount() == queue.len;
+    }
+    // Only the rows the operations name change, each with its row signals,
+    // so views keep their place and selections follow their rows.
+    for (const BinaryBridgeCodec::DecodedQueueOp &op : queue.ops) {
+        bool applied = false;
+        switch (op.type) {
+        case BinaryBridgeCodec::QueueOpInsert:
+            applied = m_queueRowsModel.insertRowsAt(op.index, queueRowsFromTracks(op.tracks));
+            break;
+        case BinaryBridgeCodec::QueueOpRemove:
+            applied = m_queueRowsModel.removeRowsAt(op.index, op.count);
+            break;
+        case BinaryBridgeCodec::QueueOpMove:
+            applied = m_queueRowsModel.moveRow(op.index, op.to);
+            break;
+        case BinaryBridgeCodec::QueueOpUpdate:
+            applied = op.tracks.size() == 1
+                && m_queueRowsModel.updateRow(op.index, queueRowFromTrack(op.tracks.first()));
+            break;
+        default:
+            break;
+        }
+        if (!applied) {
+            return false;
+        }
+    }
+    return m_queueRowsModel.rowCount() == queue.len;
+}
+
+void BridgeClient::requestQueueResync() {
+    if (m_queueResyncRequested) {
+        return;
+    }
+    m_queueResyncRequested = true;
+    logDiagnostic(
+        QStringLiteral("bridge"),
+        QStringLiteral("queue rows at revision %1 cannot take the backend's update; "
+                       "asking for the whole queue")
+            .arg(m_queueRevision));
+    requestSnapshot();
 }
 
 QVariant BridgeClient::queueTrackNumberAt(int index) const {
@@ -4876,8 +5014,14 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         : playbackCurrentPath;
     int playing = snapshot.playback.present ? snapshot.playback.currentQueueIndex : m_playingQueueIndex;
 
-    const int qlen = snapshot.queue.present ? snapshot.queue.len : m_queueLength;
-    const int selected = snapshot.queue.present ? snapshot.queue.selectedIndex : m_selectedQueueIndex;
+    // A delta applies only to the rows of the revision it builds on.
+    const BinaryBridgeCodec::DecodedQueue &queue = snapshot.queue;
+    const bool queueFits = queue.present
+        && (queue.kind == BinaryBridgeCodec::QueueFull
+            || (queue.kind == BinaryBridgeCodec::QueueDelta && m_queueRevision != 0
+                && queue.baseRevision == m_queueRevision));
+    const int qlen = queueFits ? queue.len : m_queueLength;
+    const int selected = queueFits ? queue.selectedIndex : m_selectedQueueIndex;
 
     const QString metadataSourcePath = snapshot.metadata.present ? snapshot.metadata.sourcePath : QString{};
     const QString metadataCoverPath = snapshot.metadata.present ? snapshot.metadata.coverPath : QString{};
@@ -5056,67 +5200,14 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         snapshotSignalChanged = true;
     }
 
-    if (m_queueLength != qlen) {
-        m_queueLength = qlen;
-        changed = true;
-        snapshotSignalChanged = true;
-        if (m_pendingQueueSelection >= qlen) {
-            m_pendingQueueSelection = -1;
-            m_pendingQueueSelectionUntilMs = 0;
-        }
+    if (m_pendingQueueSelection >= qlen) {
+        m_pendingQueueSelection = -1;
+        m_pendingQueueSelectionUntilMs = 0;
     }
     finishSnapshotSection(snapshotPlaybackMs);
 
-    if (snapshot.queue.present) {
-        QString nextQueueDurationText = formatSeconds(snapshot.queue.totalDurationSeconds);
-        const int queueUnknownDurationCount = std::max(0, snapshot.queue.unknownDurationCount);
-        if (queueUnknownDurationCount > 0) {
-            nextQueueDurationText = QStringLiteral("%1+?").arg(nextQueueDurationText);
-        }
-        if (m_queueDurationText != nextQueueDurationText) {
-            m_queueDurationText = nextQueueDurationText;
-            changed = true;
-            snapshotSignalChanged = true;
-        }
-
-        QVector<QueueRowData> rows;
-        QStringList paths;
-        rows.reserve(snapshot.queue.tracks.size());
-        paths.reserve(snapshot.queue.tracks.size());
-        for (const auto &track : snapshot.queue.tracks) {
-            QueueRowData row;
-            row.title = track.title.trimmed().isEmpty() ? track.path : track.title;
-            row.artist = track.artist;
-            row.album = track.album;
-            row.coverPath = track.coverPath;
-            row.genre = track.genre;
-            row.lengthText = track.lengthSeconds >= 0.0f
-                ? formatDurationCompact(static_cast<double>(track.lengthSeconds))
-                : QStringLiteral("--:--");
-            row.path = track.path;
-            row.trackNumber = track.trackNumber;
-            row.year = track.year;
-
-            paths.push_back(track.path);
-            rows.push_back(row);
-        }
-        if (m_queueRowsModel.setRows(std::move(rows))) {
-            changed = true;
-            snapshotSignalChanged = true;
-        }
-        if (m_queuePaths != paths) {
-            m_queuePaths = paths;
-            rebuildQueuePathFirstIndex();
-            m_queueVersion = m_queueVersion < std::numeric_limits<int>::max()
-                ? (m_queueVersion + 1)
-                : 1;
-            changed = true;
-            snapshotSignalChanged = true;
-        } else if (m_queuePathFirstIndex.isEmpty() && !m_queuePaths.isEmpty()) {
-            rebuildQueuePathFirstIndex();
-        }
-    }
-
+    // The selection the rows come with is in place before the rows change,
+    // so handlers of the row signals see it.
     if (m_pendingQueueSelection >= 0) {
         if (selected == m_pendingQueueSelection || nowMs >= m_pendingQueueSelectionUntilMs) {
             m_pendingQueueSelection = -1;
@@ -5132,6 +5223,38 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         changed = true;
         snapshotSignalChanged = true;
     }
+
+    if (queue.present && !queueFits) {
+        requestQueueResync();
+    } else if (queueFits) {
+        QString nextQueueDurationText = formatSeconds(queue.totalDurationSeconds);
+        const int queueUnknownDurationCount = std::max(0, queue.unknownDurationCount);
+        if (queueUnknownDurationCount > 0) {
+            nextQueueDurationText = QStringLiteral("%1+?").arg(nextQueueDurationText);
+        }
+        if (m_queueDurationText != nextQueueDurationText) {
+            m_queueDurationText = nextQueueDurationText;
+            changed = true;
+            snapshotSignalChanged = true;
+        }
+
+        const int previousLength = m_queueLength;
+        if (applyQueueRows(queue)) {
+            m_queueRevision = queue.revision;
+            if (queue.kind == BinaryBridgeCodec::QueueFull) {
+                m_queueResyncRequested = false;
+            }
+        } else {
+            // The rows match no revision now; the whole queue replaces them.
+            m_queueRevision = 0;
+            requestQueueResync();
+        }
+        if (m_queueLength != previousLength || queue.kind == BinaryBridgeCodec::QueueFull
+            || !queue.ops.isEmpty()) {
+            changed = true;
+            snapshotSignalChanged = true;
+        }
+    }
     finishSnapshotSection(snapshotQueueMs);
 
     if (currentPathChanged) {
@@ -5140,7 +5263,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         trackIdentitySignalChanged = true;
     }
 
-    if (playing < 0 && !currentPath.isEmpty() && !m_queuePaths.isEmpty()) {
+    if (playing < 0 && !currentPath.isEmpty() && m_queueLength > 0) {
         playing = queuePathFirstIndex(currentPath);
     }
     if (m_playingQueueIndex != playing) {
@@ -5208,26 +5331,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (!currentPath.isEmpty()) {
         int detailIndex = playing;
-        if (detailIndex < 0 && !m_queuePaths.isEmpty()) {
+        if (detailIndex < 0 && m_queueLength > 0) {
             detailIndex = queuePathFirstIndex(currentPath);
         }
 
-        if (snapshot.queue.present
-            && detailIndex >= 0
-            && detailIndex < snapshot.queue.tracks.size()) {
-            const auto &track = snapshot.queue.tracks[detailIndex];
-            nextTrackTitle = track.title;
-            nextTrackArtist = track.artist;
-            nextTrackAlbum = track.album;
-            nextTrackGenre = track.genre;
-            queueTrackCover = coverUrlForPath(track.coverPath);
-            if (track.year != std::numeric_limits<int>::min()) {
-                nextTrackYear = track.year;
-            }
-            if (track.trackNumber > 0) {
-                nextTrackNumber = track.trackNumber;
-            }
-        } else if (const QueueRowData *row = m_queueRowsModel.rowAt(detailIndex)) {
+        if (const QueueRowData *row = m_queueRowsModel.rowAt(detailIndex)) {
             nextTrackTitle = row->title;
             nextTrackArtist = row->artist;
             nextTrackAlbum = row->album;
@@ -5782,7 +5890,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                     .arg(snapshotSettingsMs, 0, 'f', 2)
                     .arg(snapshotLastFmMs, 0, 'f', 2)
                     .arg(snapshotLibraryMs, 0, 'f', 2)
-                    .arg(snapshot.queue.present ? snapshot.queue.tracks.size() : m_queuePaths.size())
+                    .arg(m_queueLength)
                     .arg(snapshot.library.present ? snapshot.library.rootEntries.size() : m_libraryRootEntries.size())
                     .arg(changed ? 1 : 0));
         }

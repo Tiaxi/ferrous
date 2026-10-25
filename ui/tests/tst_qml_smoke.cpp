@@ -42,6 +42,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "../src/BridgeClient.h"
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/MprisController.h"
@@ -679,6 +680,7 @@ private slots:
     void trackIdentityChangedSignalTriggersQmlHandler();
     void queueAutoCenterIsDeferredOffHandlerStack();
     void queueRemovalSendsOneBatch();
+    void queueEditsKeepSelectionAndViewport();
     void queueContainIndexSkipsScrollWhenVisible();
     void queueContainIndexScrollsUpWhenAboveViewport();
     void queueContainIndexClampsAtListEnd();
@@ -857,7 +859,6 @@ Item {
         property real volume: 0.5
         property var queueRows: []
         property int queueLength: queueRows.length
-        property int queueVersion: 0
         property string queueDurationText: "00:00"
         property var waveformPeaksPacked: ""
         property real waveformCoverageSeconds: 0
@@ -7693,6 +7694,170 @@ Item {
     QCOMPARE(root->property("removed").toString(), QStringLiteral("9999,200,1"));
 }
 
+void QmlSmokeTest::queueEditsKeepSelectionAndViewport() {
+    QueueRowsModel rows;
+    const auto row = [](int number) {
+        QueueRowData data;
+        data.title = QStringLiteral("Track %1").arg(number);
+        data.path = QStringLiteral("/music/%1.flac").arg(number);
+        data.lengthText = QStringLiteral("1:00");
+        return data;
+    };
+    QVector<QueueRowData> initial;
+    for (int number = 0; number < 200; ++number) {
+        initial.push_back(row(number));
+    }
+    rows.setRows(initial);
+
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "controllers" as Controllers
+import "panes" as Panes
+
+Window {
+    id: harness
+    width: 900
+    height: 400
+    visible: true
+    property alias controller: queueController
+
+    QtObject {
+        id: bridge
+        property var queueRows: queueRowsModel
+        property int queueLength: 1000
+        property int selectedQueueIndex: 50
+        property int playingQueueIndex: -1
+        property string playbackState: "Stopped"
+        property string currentTrackPath: ""
+        property bool profileLogsEnabled: false
+        signal snapshotChanged()
+        signal trackIdentityChanged()
+        function selectQueueIndex(index) { selectedQueueIndex = index }
+        function queuePathAt(index) { return "" }
+        function removeAt(index) {}
+        function removeIndices(indices) {}
+        function moveQueue(from, to) {}
+        function clearQueue() {}
+        function openContainingFolder(path) {}
+    }
+
+    Components.UiPalette {
+        id: palette
+        windowRoot: harness
+    }
+
+    Action { id: clearPlaylistAction }
+
+    Controllers.QueueController {
+        id: queueController
+        objectName: "queueController"
+        uiBridge: bridge
+        tagEditorApi: QtObject { function openSelection(selection) { return false } }
+        openTagEditorDialog: function() {}
+        autoCenterSelection: false
+    }
+
+    QtObject {
+        id: libraryControllerStub
+        function rowsForAction(row) { return [] }
+        function appendRows(rows) {}
+        function showTrackInLibrary(path) {}
+    }
+
+    Panes.QueuePane {
+        anchors.fill: parent
+        controller: queueController
+        uiBridge: bridge
+        uiPalette: palette
+        preferredHeight: height
+        playlistIndicatorColumnWidth: 22
+        playlistOrderColumnWidth: 34
+        playlistOrderText: function(index) { return String(index + 1) }
+        libraryController: libraryControllerStub
+        stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
+        clearPlaylistAction: clearPlaylistAction
+        popupTransitionMs: 0
+        snappyScrollFlickDeceleration: 18000
+        snappyScrollMaxFlickVelocity: 1400
+        droppedExternalPaths: function(drop) { return [] }
+        submitExternalImport: function(paths, replaceQueue) { return false }
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *controller = root->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(controller != nullptr);
+    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
+    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    QVERIFY(view != nullptr);
+    QTRY_VERIFY(view->height() > 0);
+
+    const auto selection = [controller]() {
+        QList<int> indices;
+        for (const QVariant &value : controller->property("selectedIndices").toList()) {
+            indices.push_back(value.toInt());
+        }
+        return indices;
+    };
+    // The title of the row at the top of the viewport.
+    const auto topRowTitle = [view, &rows]() {
+        int index = -1;
+        QMetaObject::invokeMethod(view, "indexAt", Q_RETURN_ARG(int, index),
+            Q_ARG(qreal, 10.0), Q_ARG(qreal, view->property("contentY").toReal() + 1.0));
+        const QueueRowData *top = rows.rowAt(index);
+        return top != nullptr ? top->title : QString{};
+    };
+
+    const QVariantList selected{40, 60, 120};
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
+        Q_ARG(QVariant, QVariant(selected))));
+    controller->setProperty("selectionAnchorIndex", 60);
+    view->setProperty("contentY", 50 * 24);
+    QTRY_COMPARE(topRowTitle(), QStringLiteral("Track 50"));
+    QSignalSpy resets(&rows, &QAbstractItemModel::modelReset);
+
+    // Edits elsewhere in the queue keep both where the user left them.
+    QVERIFY(rows.removeRowsAt(10, 1));
+    QCOMPARE(selection(), (QList<int>{39, 59, 119}));
+    QVERIFY(rows.insertRowsAt(5, {row(1000), row(1001)}));
+    QCOMPARE(selection(), (QList<int>{41, 61, 121}));
+    QVERIFY(rows.moveRow(150, 0));
+    QCOMPARE(selection(), (QList<int>{42, 62, 122}));
+    QVERIFY(rows.moveRow(62, 190));
+    QCOMPARE(selection(), (QList<int>{42, 122 - 1, 190}));
+    QVERIFY(rows.updateRow(42, row(2000)));
+    QCOMPARE(selection(), (QList<int>{42, 121, 190}));
+    QCOMPARE(controller->property("selectionAnchorIndex").toInt(), 190);
+    QCoreApplication::processEvents();
+    QCOMPARE(topRowTitle(), QStringLiteral("Track 50"));
+
+    // Removing a selected row drops only that row from the selection.
+    QVERIFY(rows.removeRowsAt(121, 1));
+    QCOMPARE(selection(), (QList<int>{42, 189}));
+    // Removing a row in view, as the context menu does, keeps the rows
+    // above it in place.
+    int topIndex = -1;
+    QMetaObject::invokeMethod(view, "indexAt", Q_RETURN_ARG(int, topIndex),
+        Q_ARG(qreal, 10.0), Q_ARG(qreal, view->property("contentY").toReal() + 1.0));
+    QVERIFY(rows.removeRowsAt(topIndex + 2, 1));
+    QCoreApplication::processEvents();
+    QCOMPARE(topRowTitle(), QStringLiteral("Track 50"));
+    QCOMPARE(resets.count(), 0);
+
+    // A whole new queue starts from the backend's selection.
+    rows.setRows(initial);
+    QCOMPARE(resets.count(), 1);
+    QCOMPARE(selection(), (QList<int>{50}));
+}
+
 void QmlSmokeTest::queueAutoCenterIsDeferredOffHandlerStack() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -7715,7 +7880,6 @@ Item {
         property string currentTrackPath: "/music/old.flac"
         property int playingQueueIndex: 5
         property int queueLength: 100
-        property int queueVersion: 1
         property int selectedQueueIndex: -1
         property bool profileLogsEnabled: false
     }
@@ -7795,7 +7959,6 @@ Item {
         property string currentTrackPath: "/music/track.flac"
         property int playingQueueIndex: 0
         property int queueLength: 1000
-        property int queueVersion: 1
         property int selectedQueueIndex: -1
         property bool profileLogsEnabled: false
     }

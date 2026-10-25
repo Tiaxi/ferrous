@@ -34,6 +34,8 @@ pub mod ffi;
 mod imports;
 pub mod library_tree;
 mod queue;
+mod queue_relay;
+mod queue_sync;
 mod queue_validation;
 mod search;
 mod search_query;
@@ -52,6 +54,7 @@ use events::{
     process_apply_album_art_event, process_external_queue_detail_event, process_lastfm_event,
     process_library_event, process_metadata_event, process_playback_event, tick_lastfm_playback,
 };
+pub use queue_sync::{QueueEdit, QueueUpdate};
 pub(crate) use search::is_main_album_disc_section;
 use search::{drain_search_results, process_search_results, SearchWorkerQuery};
 use workers::{
@@ -101,6 +104,13 @@ pub enum BridgeCommand {
     RequestSnapshot,
     Playback(BridgePlaybackCommand),
     Queue(BridgeQueueCommand),
+    /// A queue command from the UI with the queue revision its rows
+    /// showed, so the bridge can carry its indices across later edits; see
+    /// [`queue_sync::QueueSync::resolve`].
+    QueueAt {
+        revision: u64,
+        command: BridgeQueueCommand,
+    },
     Library(BridgeLibraryCommand),
     Analysis(BridgeAnalysisCommand),
     Settings(BridgeSettingsCommand),
@@ -399,8 +409,10 @@ pub struct BridgeSnapshot {
     pub library_view_anchor_offset: f32,
     pub library_reveal_generation: u32,
     pub pre_built_tree_bytes: Option<Arc<Vec<u8>>>,
-    pub queue_included: bool,
-    pub queue: Vec<PathBuf>,
+    pub queue_len: usize,
+    pub queue_revision: u64,
+    /// The queue's changes since the previous snapshot, if any.
+    pub queue_update: Option<QueueUpdate>,
     pub selected_queue_index: Option<usize>,
     pub settings: BridgeSettings,
     pub lastfm: LastFmRuntimeState,
@@ -493,6 +505,7 @@ pub(super) struct BridgeState {
     library_view_anchor_offset: f32,
     library_reveal_generation: u32,
     queue: Vec<PathBuf>,
+    queue_sync: queue_sync::QueueSync,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
     lastfm: LastFmRuntimeState,
@@ -565,7 +578,15 @@ pub(super) struct ApplyAlbumArtEvent {
 }
 
 impl BridgeState {
-    fn snapshot(&self, include_tree: bool, include_queue: bool) -> BridgeSnapshot {
+    /// Have the UI compare its queue rows with the queue's details, which
+    /// may have changed.
+    fn refresh_queue_rows(&mut self) {
+        if !self.queue.is_empty() {
+            self.queue_sync.record(QueueEdit::Refresh, self.queue.len());
+        }
+    }
+
+    fn snapshot(&self, include_tree: bool) -> BridgeSnapshot {
         let mut metadata = metadata_for_snapshot(&self.metadata);
         metadata.current_bitrate_kbps = self
             .metadata
@@ -590,12 +611,9 @@ impl BridgeState {
             } else {
                 None
             },
-            queue_included: include_queue,
-            queue: if include_queue {
-                self.queue.clone()
-            } else {
-                Vec::new()
-            },
+            queue_len: self.queue.len(),
+            queue_revision: self.queue_sync.revision(),
+            queue_update: self.queue_sync.update(&self.queue),
             selected_queue_index: self.selected_queue_index,
             settings: self.settings.clone(),
             lastfm: self.lastfm.clone(),
@@ -874,7 +892,6 @@ struct BridgeLoopDiagnostics {
 
 struct BridgeSnapshotPlan {
     include_tree_in_next_snapshot: bool,
-    include_queue_in_next_snapshot: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -1061,7 +1078,6 @@ impl BridgeLoopRuntime {
             last_snapshot_emit: Instant::now(),
             snapshot_plan: BridgeSnapshotPlan {
                 include_tree_in_next_snapshot: true,
-                include_queue_in_next_snapshot: true,
             },
             queue_detail_revalidate_interval: Duration::from_secs(2),
             last_queue_detail_revalidate: Instant::now(),
@@ -1091,7 +1107,7 @@ impl BridgeLoopRuntime {
     }
 
     fn emit_initial_snapshot(&mut self, event_tx: &Sender<BridgeEvent>) {
-        if !self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot) {
+        if !self.emit_snapshot(event_tx) {
             self.flags.pending_snapshot = SnapshotUrgency::Immediate;
         }
     }
@@ -1226,7 +1242,7 @@ impl BridgeLoopRuntime {
             BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
             BridgeLoopWake::QueueValidated(result) => {
                 if self.queue_validator.apply(result, &mut self.state) {
-                    self.snapshot_plan.include_queue_in_next_snapshot = true;
+                    self.state.refresh_queue_rows();
                     self.flags.session_dirty = true;
                     SnapshotUrgency::Immediate
                 } else {
@@ -1291,7 +1307,7 @@ impl BridgeLoopRuntime {
             event_tx,
         ) {
             self.flags.session_dirty = true;
-            self.snapshot_plan.include_queue_in_next_snapshot = true;
+            self.state.refresh_queue_rows();
         }
         // Renaming the playing file continues its play. The tracker follows
         // the current path here, before the next tick could take the new
@@ -1326,7 +1342,6 @@ impl BridgeLoopRuntime {
                 event_tx,
             ) {
                 self.flags.session_dirty = true;
-                self.snapshot_plan.include_queue_in_next_snapshot = true;
                 urgency = SnapshotUrgency::Immediate;
             }
         }
@@ -1430,6 +1445,19 @@ impl BridgeLoopRuntime {
     ) -> SnapshotUrgency {
         #[cfg(test)]
         crate::panic_guard::test_hooks::checkpoint("bridge_command");
+        let cmd = match cmd {
+            BridgeCommand::QueueAt { revision, command } => {
+                match self.state.queue_sync.resolve(revision, command) {
+                    Ok(Some(command)) => BridgeCommand::Queue(command),
+                    Ok(None) => return SnapshotUrgency::None,
+                    Err(message) => {
+                        let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+                        return SnapshotUrgency::None;
+                    }
+                }
+            }
+            cmd => cmd,
+        };
         if let Some(request) = commands::queue_request(&cmd, &self.state) {
             return match self.imports.submit(request) {
                 Ok(changes) => self.apply_queue_changes(changes, event_tx),
@@ -1464,7 +1492,7 @@ impl BridgeLoopRuntime {
         let rebuild_tree =
             command_requires_tree_rebuild(&cmd, self.state.settings.library_sort_mode);
         let deferred_tree_rebuild = command_tree_rebuild_delay(&cmd);
-        let refresh_queue_snapshot = command_requires_queue_snapshot(&cmd);
+        let refresh_queue_rows = command_refreshes_queue_rows(&cmd);
         let force_snapshot = matches!(cmd, BridgeCommand::RequestSnapshot);
         let mut command_context = BridgeCommandContext {
             playback: &self.playback,
@@ -1494,13 +1522,15 @@ impl BridgeLoopRuntime {
             if !session_only {
                 urgency = SnapshotUrgency::Immediate;
             }
-            if refresh_queue_snapshot {
-                self.snapshot_plan.include_queue_in_next_snapshot = true;
+            if refresh_queue_rows {
+                self.state.refresh_queue_rows();
             }
         }
         if force_snapshot && self.flags.running {
-            let include_queue = self.snapshot_plan.include_queue_in_next_snapshot || force_snapshot;
-            if !self.emit_snapshot(event_tx, include_queue) {
+            // The UI asks for a snapshot when it starts and when it lost
+            // track of the queue, so it gets the queue whole.
+            self.state.queue_sync.request_full();
+            if !self.emit_snapshot(event_tx) {
                 urgency = urgency.max(SnapshotUrgency::Immediate);
             }
         }
@@ -1588,7 +1618,7 @@ impl BridgeLoopRuntime {
         let urgency = process_external_queue_detail_event(event, &mut self.state);
         if urgency.is_pending() {
             self.flags.session_dirty = true;
-            self.snapshot_plan.include_queue_in_next_snapshot = true;
+            self.state.refresh_queue_rows();
         }
         urgency
     }
@@ -1686,7 +1716,7 @@ impl BridgeLoopRuntime {
         }
         self.handle_library_refresh(library_urgency);
         if external_queue_details_urgency.is_pending() {
-            self.snapshot_plan.include_queue_in_next_snapshot = true;
+            self.state.refresh_queue_rows();
         }
         urgency = urgency
             .max(analysis_urgency)
@@ -1714,7 +1744,7 @@ impl BridgeLoopRuntime {
             return;
         }
         self.deferred_tree_rebuild_at = None;
-        self.snapshot_plan.include_queue_in_next_snapshot = true;
+        self.state.refresh_queue_rows();
         let now = Instant::now();
         let track_delta = self
             .state
@@ -1754,13 +1784,11 @@ impl BridgeLoopRuntime {
         match self.flags.pending_snapshot {
             SnapshotUrgency::None => {}
             SnapshotUrgency::Immediate => {
-                let _ =
-                    self.emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
+                let _ = self.emit_snapshot(event_tx);
             }
             SnapshotUrgency::Analysis => {
                 if self.last_snapshot_emit.elapsed() >= self.analysis_snapshot_interval {
-                    let _ = self
-                        .emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
+                    let _ = self.emit_snapshot(event_tx);
                 }
             }
             SnapshotUrgency::Heartbeat => {
@@ -1768,19 +1796,17 @@ impl BridgeLoopRuntime {
                     return;
                 };
                 if self.last_snapshot_emit.elapsed() >= interval {
-                    let _ = self
-                        .emit_snapshot(event_tx, self.snapshot_plan.include_queue_in_next_snapshot);
+                    let _ = self.emit_snapshot(event_tx);
                 }
             }
         }
     }
 
-    fn emit_snapshot(&mut self, event_tx: &Sender<BridgeEvent>, include_queue: bool) -> bool {
+    fn emit_snapshot(&mut self, event_tx: &Sender<BridgeEvent>) -> bool {
         if send_snapshot_event(
             event_tx,
             &self.state,
             self.snapshot_plan.include_tree_in_next_snapshot,
-            include_queue,
         ) {
             self.diagnostics.prof_snapshots_sent += 1;
             if self.snapshot_plan.include_tree_in_next_snapshot {
@@ -1789,9 +1815,7 @@ impl BridgeLoopRuntime {
             }
             self.last_snapshot_emit = Instant::now();
             self.snapshot_plan.include_tree_in_next_snapshot = false;
-            if include_queue {
-                self.snapshot_plan.include_queue_in_next_snapshot = false;
-            }
+            self.state.queue_sync.mark_sent();
             self.flags.pending_snapshot = SnapshotUrgency::None;
             true
         } else {
@@ -2094,7 +2118,6 @@ fn send_snapshot_event(
     event_tx: &Sender<BridgeEvent>,
     state: &BridgeState,
     include_tree: bool,
-    include_queue: bool,
 ) -> bool {
     // Drop stale snapshot updates when the consumer is behind; next snapshot will replace it.
     if relay_is_behind(event_tx) {
@@ -2102,7 +2125,7 @@ fn send_snapshot_event(
     }
     try_send_event(
         event_tx,
-        BridgeEvent::Snapshot(Box::new(state.snapshot(include_tree, include_queue))),
+        BridgeEvent::Snapshot(Box::new(state.snapshot(include_tree))),
     )
     .is_ok()
 }
@@ -2166,15 +2189,13 @@ fn command_tree_rebuild_delay(cmd: &BridgeCommand) -> Option<Duration> {
     }
 }
 
-pub(super) fn command_requires_queue_snapshot(cmd: &BridgeCommand) -> bool {
-    match cmd {
-        BridgeCommand::Queue(queue_cmd) => !matches!(
-            queue_cmd,
-            BridgeQueueCommand::Select(_) | BridgeQueueCommand::PlayAt(_)
-        ),
-        BridgeCommand::Library(BridgeLibraryCommand::RefreshEditedPaths(_)) => true,
-        _ => false,
-    }
+/// Whether `cmd` may change the details the queue's rows show. Queue
+/// commands note their own edits.
+fn command_refreshes_queue_rows(cmd: &BridgeCommand) -> bool {
+    matches!(
+        cmd,
+        BridgeCommand::Library(BridgeLibraryCommand::RefreshEditedPaths(_))
+    )
 }
 
 #[cfg(feature = "profiling-logs")]
@@ -2463,8 +2484,8 @@ mod tests {
                 duration_secs: Some(10.0),
             },
         );
-        let first = state.snapshot(false, false);
-        let second = state.snapshot(false, false);
+        let first = state.snapshot(false);
+        let second = state.snapshot(false);
         assert!(Arc::ptr_eq(&first.queue_details, &second.queue_details));
         assert!(Arc::ptr_eq(&first.queue_details, &state.queue_details));
         Arc::make_mut(&mut state.queue_details)
@@ -2472,10 +2493,7 @@ mod tests {
             .expect("fixture track")
             .title = "After".into();
         assert_eq!(first.queue_details[&path].title, "Before");
-        assert_eq!(
-            state.snapshot(false, true).queue_details[&path].title,
-            "After"
-        );
+        assert_eq!(state.snapshot(false).queue_details[&path].title, "After");
     }
 
     #[test]
@@ -2941,6 +2959,132 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// What the UI sends to remove the row at `index` of the queue it
+    /// shows at `revision`.
+    fn ui_remove(revision: u64, index: usize) -> BridgeCommand {
+        BridgeCommand::QueueAt {
+            revision,
+            command: BridgeQueueCommand::Remove(index),
+        }
+    }
+
+    #[test]
+    fn a_removal_issued_before_an_import_replaced_the_queue_leaves_the_import_alone() {
+        let _guard = test_guard();
+        for removal_first in [false, true] {
+            let (mut runtime, _engine_rx, event_tx, _album) = queue_order_runtime();
+            let (dir, c) = import_fixture("stale-removal");
+            let (a, b) = (p("/music/a.flac"), p("/music/b.flac"));
+            runtime.handle_command(
+                BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                    tracks: vec![a.clone(), b.clone()],
+                    autoplay: false,
+                }),
+                &event_tx,
+            );
+            // The UI shows [a, b].
+            let shown = runtime.state.queue_sync.revision();
+            runtime.handle_command(
+                BridgeCommand::Library(BridgeLibraryCommand::PlayTrack(c.clone())),
+                &event_tx,
+            );
+            wait_for_import_result(&runtime);
+            // The loop takes the import's result and the user's removal of
+            // a, sent while the UI showed [a, b], in either order.
+            if removal_first {
+                runtime.handle_command(ui_remove(shown, 0), &event_tx);
+                apply_next_import_result(&mut runtime, &event_tx);
+            } else {
+                apply_next_import_result(&mut runtime, &event_tx);
+                runtime.handle_command(ui_remove(shown, 0), &event_tx);
+            }
+            assert_eq!(
+                runtime.state.queue,
+                vec![c],
+                "removal first: {removal_first}"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn stale_queue_commands_act_on_the_rows_the_user_saw() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let (event_tx_errors, event_rx) = bounded::<BridgeEvent>(64);
+        let (a, b, c) = (p("/music/a.flac"), p("/music/b.flac"), p("/music/c.flac"));
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                tracks: vec![a.clone(), b.clone(), c.clone()],
+                autoplay: false,
+            }),
+            &event_tx,
+        );
+        let shown = runtime.state.queue_sync.revision();
+        // A row arrives at the top before the UI's commands do.
+        runtime.state.queue.insert(0, p("/music/new.flac"));
+        runtime.state.queue_sync.record(
+            QueueEdit::Insert {
+                at: 0,
+                paths: vec![p("/music/new.flac")],
+            },
+            4,
+        );
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_remove(shown, 1), &event_tx_errors);
+        assert_eq!(runtime.state.queue, vec![p("/music/new.flac"), a, c]);
+        assert_eq!(queue_ops(&engine_rx), vec!["RemoveAt(2)".to_string()]);
+        runtime.handle_command(
+            BridgeCommand::QueueAt {
+                revision: shown,
+                command: BridgeQueueCommand::PlayAt(1),
+            },
+            &event_tx_errors,
+        );
+        assert!(queue_ops(&engine_rx).is_empty(), "b is gone; nothing plays");
+        let errors: Vec<String> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            errors,
+            ["The track you chose to play is no longer in the queue."]
+        );
+    }
+
+    #[test]
+    fn a_ui_that_asks_for_a_snapshot_gets_the_whole_queue() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        // The UI has the queue the bridge started with.
+        assert!(runtime.emit_snapshot(&event_tx));
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Queue(BridgeQueueCommand::Append(vec![p(
+                "/music/a.flac",
+            )]))),
+            &event_tx,
+        );
+        let edited = emitted_snapshots(&event_rx).pop().expect("a snapshot");
+        assert!(matches!(
+            edited.queue_update,
+            Some(QueueUpdate::Edits { .. })
+        ));
+
+        runtime.handle_command(BridgeCommand::RequestSnapshot, &event_tx);
+        let resync = emitted_snapshots(&event_rx).pop().expect("a snapshot");
+        assert_eq!(
+            resync.queue_update,
+            Some(QueueUpdate::Full(vec![p("/music/a.flac")]))
+        );
+        assert_eq!(resync.queue_revision, edited.queue_revision);
+    }
+
     /// A folder of stub tracks, canonicalized like import results.
     fn rename_fixture(name: &str, files: &[&str]) -> (PathBuf, Vec<PathBuf>) {
         let dir = std::env::temp_dir().join(format!(
@@ -3342,19 +3486,19 @@ mod tests {
         bridge.command(BridgeCommand::RequestSnapshot);
 
         let loaded = wait_for_snapshot_matching(&bridge, Duration::from_secs(10), |s| {
-            s.queue.len() == 2 && s.selected_queue_index == Some(0)
+            s.queue_len == 2 && s.selected_queue_index == Some(0)
         })
         .expect("snapshot with loaded queue");
-        assert_eq!(loaded.queue.len(), 2);
+        assert_eq!(loaded.queue_len, 2);
         assert_eq!(loaded.selected_queue_index, Some(0));
 
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Clear));
         bridge.command(BridgeCommand::RequestSnapshot);
         let cleared = wait_for_snapshot_matching(&bridge, Duration::from_secs(10), |s| {
-            s.queue.is_empty() && s.selected_queue_index.is_none()
+            s.queue_len == 0 && s.selected_queue_index.is_none()
         })
         .expect("snapshot with cleared queue");
-        assert!(cleared.queue.is_empty());
+        assert_eq!(cleared.queue_len, 0);
         assert!(cleared.selected_queue_index.is_none());
 
         bridge.command(BridgeCommand::Shutdown);
@@ -3388,7 +3532,8 @@ mod tests {
         let (playback_tx, playback_rx) = unbounded();
         runtime.playback_rx = playback_rx;
         // The UI has the queue the bridge started with.
-        assert!(runtime.emit_snapshot(&event_tx, true));
+        runtime.state.queue_sync.request_full();
+        assert!(runtime.emit_snapshot(&event_tx));
         while event_rx.try_recv().is_ok() {}
 
         // On its own, a gapless change moves only the playing index, which
@@ -3399,7 +3544,9 @@ mod tests {
         );
         let snapshots = emitted_snapshots(&event_rx);
         assert!(!snapshots.is_empty());
-        assert!(snapshots.iter().all(|snapshot| !snapshot.queue_included));
+        assert!(snapshots
+            .iter()
+            .all(|snapshot| snapshot.queue_update.is_none()));
 
         // The engine's next gapless change is waiting when the loop takes a
         // queue edit, and the loop handles both before it sends a snapshot.
@@ -3416,9 +3563,18 @@ mod tests {
         let snapshot = emitted_snapshots(&event_rx)
             .pop()
             .expect("a snapshot after the edit");
-        assert!(snapshot.queue_included);
-        assert_eq!(snapshot.queue.last(), Some(&p("/music/edit.flac")));
-        assert!(!runtime.snapshot_plan.include_queue_in_next_snapshot);
+        let Some(QueueUpdate::Edits { edits, .. }) = snapshot.queue_update else {
+            panic!("the edit, not the whole queue: {:?}", snapshot.queue_update);
+        };
+        assert_eq!(
+            edits,
+            vec![QueueEdit::Insert {
+                at: 0,
+                paths: vec![p("/music/edit.flac")]
+            }]
+        );
+        assert_eq!(snapshot.playback.current_queue_index, Some(1));
+        assert!(!runtime.state.queue_sync.has_pending());
     }
 
     #[test]
@@ -3429,7 +3585,7 @@ mod tests {
         drain_initial_events(&mut runtime, &event_tx, &event_rx);
         // The relay falls behind: snapshots fill its backlog, and the bridge
         // holds back the next one.
-        while runtime.emit_snapshot(&event_tx, false) {}
+        while runtime.emit_snapshot(&event_tx) {}
         assert_eq!(event_rx.len(), MAX_RELAY_BACKLOG);
 
         runtime.handle_wake(
@@ -3458,7 +3614,7 @@ mod tests {
             }
         ));
         // With the backlog gone, snapshots go again.
-        assert!(runtime.emit_snapshot(&event_tx, false));
+        assert!(runtime.emit_snapshot(&event_tx));
     }
 
     #[test]
@@ -3703,7 +3859,7 @@ mod tests {
                 bridge.command(BridgeCommand::RequestSnapshot);
                 if let Some(snap) =
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(200), |s| {
-                        s.queue.len() == 2
+                        s.queue_len == 2
                             && s.selected_queue_index == Some(1)
                             && s.playback.current.as_ref() == Some(&sc)
                     })
@@ -3727,7 +3883,7 @@ mod tests {
                 bridge.command(BridgeCommand::RequestSnapshot);
                 if let Some(snap) =
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(200), |s| {
-                        s.queue.len() == 1
+                        s.queue_len == 1
                             && s.selected_queue_index == Some(0)
                             && s.playback.current.as_ref() != Some(&sc2)
                     })
@@ -3767,7 +3923,7 @@ mod tests {
                 bridge.command(BridgeCommand::RequestSnapshot);
                 if let Some(snap) =
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(200), |s| {
-                        s.queue.len() == 2
+                        s.queue_len == 2
                             && s.playback.current.as_ref() == Some(&fc)
                             && s.playback.state == crate::playback::PlaybackState::Playing
                     })
@@ -3794,7 +3950,7 @@ mod tests {
                 let sc = second.clone();
                 if let Some(snap) =
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(200), move |s| {
-                        s.queue.len() == 2
+                        s.queue_len == 2
                             && s.playback.current.as_ref() == Some(&sc)
                             && s.playback.state == crate::playback::PlaybackState::Playing
                     })
@@ -3833,7 +3989,7 @@ mod tests {
             autoplay: true,
         }));
         let first = poll_for(&|s| {
-            s.queue.len() == 2
+            s.queue_len == 2
                 && s.playback.current.as_ref() == Some(&track)
                 && s.playback.state == crate::playback::PlaybackState::Playing
         });
@@ -3887,7 +4043,7 @@ mod tests {
                 bridge.command(BridgeCommand::RequestSnapshot);
                 if let Some(snap) =
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(200), |s| {
-                        s.queue.len() == 2
+                        s.queue_len == 2
                             && s.playback.current.as_ref() == Some(&fc)
                             && s.metadata.title == ft
                     })
@@ -3915,7 +4071,7 @@ mod tests {
                 bridge.command(BridgeCommand::RequestSnapshot);
                 if let Some(snap) =
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(100), |s| {
-                        s.queue.len() == 2
+                        s.queue_len == 2
                             && s.playback.current.as_ref() == Some(&second_for_handoff)
                             && s.metadata.title == first_title_str
                     })
@@ -3939,7 +4095,7 @@ mod tests {
                 bridge.command(BridgeCommand::RequestSnapshot);
                 if let Some(snap) =
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(100), |s| {
-                        s.queue.len() == 2
+                        s.queue_len == 2
                             && s.playback.current.as_ref() == Some(&second_for_meta)
                             && s.metadata.title == second_title_str
                     })

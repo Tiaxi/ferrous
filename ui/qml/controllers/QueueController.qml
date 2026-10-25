@@ -15,17 +15,81 @@ QtObject {
     property var selectedIndexLookup: ({})
     property int selectionAnchorIndex: -1
     property int lastSyncedBridgeSelectedIndex: -2
-    property int lastSeenQueueVersion: -1
     property int lastCenteredIndex: -2
     property string lastAutoCenterPlaybackState: ""
     property string lastAutoCenterTrackPath: ""
-    property real viewportRestoreUntilMs: 0
-    property real viewportRestoreContentY: 0
     property bool autoCenterSelection: true
     property int _pendingScrollIndex: -1
     property var _pendingScrollView: null
 
     readonly property int _rowHeight: 24
+
+    // The backend changes the rows one edit at a time, so the selection
+    // follows its rows through edits elsewhere in the queue. A whole new
+    // queue starts from the backend's selection.
+    property Connections _queueRowsConnections: Connections {
+        target: root.uiBridge && root.uiBridge.queueRows
+            && typeof root.uiBridge.queueRows.rowCount === "function"
+            ? root.uiBridge.queueRows
+            : null
+
+        function onRowsInserted(parent, first, last) {
+            const count = last - first + 1
+            root._remapSelection(function(index) {
+                return index >= first ? index + count : index
+            })
+        }
+
+        function onRowsRemoved(parent, first, last) {
+            const count = last - first + 1
+            root._remapSelection(function(index) {
+                if (index < first) {
+                    return index
+                }
+                return index > last ? index - count : -1
+            })
+        }
+
+        // Rows start..end moved before the row that was at `row`.
+        function onRowsMoved(parent, start, end, destination, row) {
+            const count = end - start + 1
+            const newStart = row > end ? row - count : row
+            root._remapSelection(function(index) {
+                if (index >= start && index <= end) {
+                    return newStart + index - start
+                }
+                if (row > end && index > end && index < row) {
+                    return index - count
+                }
+                if (row < start && index >= row && index < start) {
+                    return index + count
+                }
+                return index
+            })
+        }
+
+        function onModelReset() {
+            root.resetSelectionForUpdatedQueue()
+            root.lastSyncedBridgeSelectedIndex = root.uiBridge.selectedQueueIndex
+        }
+    }
+
+    // Move each selected row, and the anchor, to where `map` says it is
+    // now; -1 drops it.
+    function _remapSelection(map) {
+        const next = []
+        for (let i = 0; i < root.selectedIndices.length; ++i) {
+            const mapped = map(root.selectedIndices[i])
+            if (mapped >= 0) {
+                next.push(mapped)
+            }
+        }
+        next.sort(function(a, b) { return a - b })
+        root.setSelectedIndices(next)
+        if (root.selectionAnchorIndex >= 0) {
+            root.selectionAnchorIndex = map(root.selectionAnchorIndex)
+        }
+    }
 
     property Timer _scrollTimer: Timer {
         interval: 0
@@ -102,30 +166,6 @@ QtObject {
         root.uiBridge.selectQueueIndex(-1)
     }
 
-    function requestViewportRestoreWindow(durationMs) {
-        if (!root.view) {
-            return
-        }
-        const ms = Math.max(100, durationMs || 700)
-        root.viewportRestoreContentY = root.view.contentY
-        root.viewportRestoreUntilMs = Math.max(root.viewportRestoreUntilMs, Date.now() + ms)
-    }
-
-    function viewportRestoreActive() {
-        return root.viewportRestoreUntilMs > Date.now()
-    }
-
-    function applyPendingViewportRestore() {
-        if (!root.view || !root.viewportRestoreActive()) {
-            return
-        }
-        const maxY = Math.max(0, root.view.contentHeight - root.view.height)
-        const targetY = Math.max(0, Math.min(maxY, root.viewportRestoreContentY))
-        if (Math.abs(root.view.contentY - targetY) > 0.5) {
-            root.view.contentY = targetY
-        }
-    }
-
     function handleSnapshotChanged(view) {
         const playlistView = view || root.view
         if (!playlistView) {
@@ -135,11 +175,6 @@ QtObject {
         const playbackState = root.uiBridge.playbackState || ""
         const currentTrackPath = root.uiBridge.currentTrackPath || ""
         if (!root.autoCenterSelection) {
-            root.lastAutoCenterPlaybackState = playbackState
-            root.lastAutoCenterTrackPath = currentTrackPath
-            return
-        }
-        if (root.viewportRestoreActive()) {
             root.lastAutoCenterPlaybackState = playbackState
             root.lastAutoCenterTrackPath = currentTrackPath
             return
@@ -420,32 +455,22 @@ QtObject {
             const indices = root.selectedIndices.slice()
             indices.sort(function(a, b) { return b - a })
             if (root.uiBridge.queueLength > 0 && indices.length >= root.uiBridge.queueLength) {
-                root.requestViewportRestoreWindow(700)
                 root.uiBridge.clearQueue()
                 root.setSelectedIndices([])
                 root.selectionAnchorIndex = -1
                 return
             }
-            root.requestViewportRestoreWindow(700)
             root.uiBridge.removeIndices(indices)
             root.setSelectedIndices([])
             root.selectionAnchorIndex = -1
             return
         }
         if (root.uiBridge.selectedQueueIndex >= 0) {
-            root.requestViewportRestoreWindow(700)
             root.uiBridge.removeAt(root.uiBridge.selectedQueueIndex)
         }
     }
 
     function handleBridgeSnapshotUpdate() {
-        if (root.uiBridge.queueVersion !== root.lastSeenQueueVersion) {
-            root.lastSeenQueueVersion = root.uiBridge.queueVersion
-            root.resetSelectionForUpdatedQueue()
-            root.applyPendingViewportRestore()
-            root.syncSelectionToCurrentQueue()
-            root.lastSyncedBridgeSelectedIndex = root.uiBridge.selectedQueueIndex
-        }
         if (root.uiBridge.selectedQueueIndex !== root.lastSyncedBridgeSelectedIndex) {
             root.syncSelectionToCurrentQueue()
             root.lastSyncedBridgeSelectedIndex = root.uiBridge.selectedQueueIndex
@@ -453,7 +478,6 @@ QtObject {
     }
 
     function initializeFromBridge() {
-        root.lastSeenQueueVersion = root.uiBridge.queueVersion
         root.lastAutoCenterPlaybackState = root.uiBridge.playbackState
         root.lastAutoCenterTrackPath = root.uiBridge.currentTrackPath
         root.syncSelectionToCurrentQueue()
