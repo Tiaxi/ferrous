@@ -631,6 +631,7 @@ private slots:
     void closingTheWindowWhileTagsSaveWaitsForTheSave();
     void mprisQuitWithTagEditsAsksFirst();
     void quittingDuringAStalledTagSaveOffersToQuitAnyway();
+    void savingTagEditsChosenWhenQuittingWaitsWithinTheBound();
     void keepWaitingForAStalledTagSaveQuitsWhenItFinishes();
     void repeatedQuitsDuringATagSaveShowOneWait();
     void tagEditorReloadAsksBeforeDroppingEdits();
@@ -2807,6 +2808,36 @@ void QmlSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     QTRY_VERIFY(!fixture.window->isVisible());
     QCOMPARE(fixture.stateSaves(), 1);
     QVERIFY(fixture.editor.saving());
+    fixture.saves->release.release();
+}
+
+void QmlSmokeTest::savingTagEditsChosenWhenQuittingWaitsWithinTheBound() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    fixture.saves->setHold(true);
+    fixture.window->close();
+    QTRY_VERIFY(fixture.confirmShown());
+
+    // Saving from the quit confirmation, on storage that does not answer.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCloseConfirmSaveButton")));
+    QTRY_COMPARE(fixture.saves->saveCount(), 1);
+
+    // The confirmation gives way to the wait, which shows the file.
+    QTRY_VERIFY(fixture.quitWaitShown());
+    QVERIFY(!fixture.confirmShown());
+    QObject *files = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitFiles"));
+    QVERIFY(files != nullptr);
+    QCOMPARE(files->property("text").toString(), QStringLiteral("01 Song.flac"));
+    QVERIFY(!fixture.quitAnywayOffered());
+    QCOMPARE(fixture.stateSaves(), 0);
+
+    QVERIFY(fixture.passQuitWaitBound());
+    QTRY_VERIFY(fixture.quitAnywayOffered());
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorQuitWaitQuitButton")));
+    QTRY_VERIFY(!fixture.window->isVisible());
+    QCOMPARE(fixture.stateSaves(), 1);
+    QCOMPARE(fixture.window->findChildren<QObject *>(QStringLiteral("tagEditorQuitWaitDialog")).size(), 1);
     fixture.saves->release.release();
 }
 

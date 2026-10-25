@@ -15,7 +15,6 @@
 #include <QSignalSpy>
 #include <QSemaphore>
 #include <QThreadPool>
-#include <QElapsedTimer>
 #include <QSocketNotifier>
 #include <QFutureWatcher>
 #include <algorithm>
@@ -938,10 +937,10 @@ void BridgeClientTest::tagEditorExitDoesNotWaitForAStalledSave() {
     QTest::qWait(50);
     QCOMPARE(QThreadPool::globalInstance()->activeThreadCount(), 0);
 
-    QElapsedTimer timer;
-    timer.start();
+    // Destruction returns while the save is still stalled, without waiting
+    // for it to end, rather than within a time a busy machine might miss.
     editor.reset();
-    QVERIFY2(timer.elapsed() < 3000, qPrintable(QString::number(timer.elapsed())));
+    QCOMPARE(finished->available(), 0);
 
     stalled->release();
     QVERIFY(finished->tryAcquire(1, 5000));

@@ -163,6 +163,13 @@ Dialog {
         if (!root.triggerSave(true)) {
             tagEditorCloseConfirmDialog.close()
             root.continueQuit(!root.tagEditorApi.dirty)
+            return
+        }
+        if (root.quitPending) {
+            // Quitting waits for this save within the same bound as for any
+            // other, so the confirmation gives way to the wait.
+            tagEditorCloseConfirmDialog.close()
+            root.waitForOperationToQuit()
         }
     }
 
@@ -174,14 +181,7 @@ Dialog {
             if (root.quitWithoutOperation) {
                 return true
             }
-            root.quitPending = true
-            // A repeated quit request neither stacks dialogs nor postpones
-            // the offer to quit anyway.
-            if (!tagEditorQuitWaitDialog.visible) {
-                tagEditorQuitWaitDialog.offerChoice = false
-                tagEditorQuitWaitDialog.open()
-                tagEditorQuitWaitTimeout.restart()
-            }
+            root.waitForOperationToQuit()
             return false
         }
         root.commitPendingEditorEdits()
@@ -196,6 +196,19 @@ Dialog {
         }
         root.quitPending = false
         return true
+    }
+
+    // The one way quitting waits for a running save or rename: it shows the
+    // files being written, and after the bound offers to quit without them.
+    function waitForOperationToQuit() {
+        root.quitPending = true
+        // A repeated quit request neither stacks dialogs nor postpones the
+        // offer to quit anyway.
+        if (!tagEditorQuitWaitDialog.visible) {
+            tagEditorQuitWaitDialog.offerChoice = false
+            tagEditorQuitWaitDialog.open()
+            tagEditorQuitWaitTimeout.restart()
+        }
     }
 
     // The save or rename that quitting waited for has finished.
