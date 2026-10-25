@@ -877,8 +877,7 @@ struct BridgeLoopRuntime {
 struct BridgeLoopFlags {
     running: bool,
     settings_dirty: bool,
-    /// Save the dirty settings without waiting for the periodic save.
-    settings_save_now: bool,
+    settings_save_timing: SettingsSaveTiming,
     session_dirty: bool,
     pending_snapshot: SnapshotUrgency,
 }
@@ -892,6 +891,16 @@ struct BridgeLoopDiagnostics {
 
 struct BridgeSnapshotPlan {
     include_tree_in_next_snapshot: bool,
+}
+
+/// When dirty settings are saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsSaveTiming {
+    /// With the periodic save.
+    #[default]
+    Periodic,
+    /// Without waiting for the periodic save.
+    Now,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -1044,7 +1053,7 @@ impl BridgeLoopRuntime {
             flags: BridgeLoopFlags {
                 running: true,
                 settings_dirty: false,
-                settings_save_now: false,
+                settings_save_timing: SettingsSaveTiming::Periodic,
                 session_dirty: false,
                 pending_snapshot: SnapshotUrgency::None,
             },
@@ -1203,7 +1212,7 @@ impl BridgeLoopRuntime {
 
     fn next_settings_save_delay(&self) -> Option<Duration> {
         self.flags.settings_dirty.then(|| {
-            if self.flags.settings_save_now {
+            if self.flags.settings_save_timing == SettingsSaveTiming::Now {
                 Duration::ZERO
             } else {
                 Duration::from_secs(2).saturating_sub(self.last_settings_save.elapsed())
@@ -1848,7 +1857,8 @@ impl BridgeLoopRuntime {
     }
 
     fn maybe_persist(&mut self, event_tx: &Sender<BridgeEvent>) {
-        let save_now = std::mem::take(&mut self.flags.settings_save_now);
+        let save_now =
+            std::mem::take(&mut self.flags.settings_save_timing) == SettingsSaveTiming::Now;
         if !self.persisted_state_enabled {
             self.flags.settings_dirty = false;
             self.flags.session_dirty = false;
@@ -2590,7 +2600,10 @@ mod tests {
             "{messages:?}"
         );
         assert!(runtime.flags.settings_dirty);
-        assert!(!runtime.flags.settings_save_now);
+        assert_eq!(
+            runtime.flags.settings_save_timing,
+            SettingsSaveTiming::Periodic
+        );
 
         // The periodic save tries again.
         std::fs::remove_dir(&settings_path).expect("unblock the settings");
