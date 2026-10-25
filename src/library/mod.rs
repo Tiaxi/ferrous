@@ -391,7 +391,7 @@ impl LibraryService {
     ) -> (Self, Receiver<LibraryEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<LibraryCommand>();
         let (event_tx, event_rx) = unbounded::<LibraryEvent>();
-        let (watcher, changes) = watch::WatchService::spawn(watching);
+        let (watcher, changes, roots_watched) = watch::WatchService::spawn(watching);
         let roots = watcher.handle();
 
         let thread = crate::worker_thread::spawn_worker("ferrous-library", move || {
@@ -403,6 +403,7 @@ impl LibraryService {
                     commands: cmd_rx,
                     changes,
                     roots,
+                    roots_watched,
                 },
                 &event_tx,
             );

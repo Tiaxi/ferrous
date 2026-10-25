@@ -12,6 +12,9 @@
 //!   tracks there are checked again.
 //! - When watching starts, at startup or when it is turned on, every root
 //!   is rescanned, so that changes made meanwhile appear.
+//! - The worker is told when the roots it sent are watched, and walks a
+//!   root it added only then: a change after the watches are set up is
+//!   seen by the walk or by them.
 //! - A root that cannot be watched (a network or FUSE file system, the
 //!   inotify watch limit, a folder that is gone) is rescanned every
 //!   [`WatchTuning::periodic`] instead, and the worker publishes it, with
@@ -92,7 +95,10 @@ impl Default for WatchTuning {
 enum WatchMessage {
     Enabled(bool),
     /// The configured roots. The first message comes once the library is
-    /// ready, and starts watching.
+    /// ready, and starts watching. Once the watches of these roots are set
+    /// up, or the roots are noted as not watched, the watcher sends the
+    /// number of these messages it has handled; see
+    /// [`WatchService::spawn`].
     Roots(Vec<PathBuf>),
     Stop,
 }
@@ -128,12 +134,16 @@ pub(super) struct WatchService {
 
 impl WatchService {
     /// Starts the watcher, with watching off until it is turned on. The
-    /// receiver gets its commands for the library worker.
-    pub(super) fn spawn(tuning: WatchTuning) -> (Self, Receiver<LibraryCommand>) {
+    /// first receiver gets its commands for the library worker. The second
+    /// gets, after each roots message the watcher handled, how many it has
+    /// handled; it closes once the watcher ends.
+    pub(super) fn spawn(tuning: WatchTuning) -> (Self, Receiver<LibraryCommand>, Receiver<u64>) {
         let (commands_tx, commands_rx) = unbounded();
         let (tx, messages) = unbounded();
+        let (roots_watched_tx, roots_watched) = unbounded();
         let stop = Arc::new(AtomicBool::new(false));
-        let watcher = Watcher::new(tuning, messages, commands_tx, Arc::clone(&stop));
+        let mut watcher = Watcher::new(tuning, messages, commands_tx, Arc::clone(&stop));
+        watcher.roots_watched = Some(roots_watched_tx);
         let waker = watcher.waker.clone();
         let thread =
             crate::worker_thread::spawn_worker("ferrous-library-watch", move || watcher.run());
@@ -144,6 +154,7 @@ impl WatchService {
                 thread,
             },
             commands_rx,
+            roots_watched,
         )
     }
 
@@ -510,6 +521,9 @@ struct Watcher {
     stop: Arc<AtomicBool>,
     stopped: bool,
     commands: Sender<LibraryCommand>,
+    /// Told the number of roots messages handled, after each.
+    roots_watched: Option<Sender<u64>>,
+    roots_messages: u64,
     tuning: WatchTuning,
     enabled: bool,
     /// The configured roots, once the worker sent them.
@@ -557,6 +571,8 @@ impl Watcher {
             stop,
             stopped: false,
             commands,
+            roots_watched: None,
+            roots_messages: 0,
             tuning,
             enabled: false,
             roots: None,
@@ -647,12 +663,20 @@ impl Watcher {
     }
 
     fn handle(&mut self, message: WatchMessage) {
+        let roots_told = matches!(message, WatchMessage::Roots(_));
         match message {
             WatchMessage::Stop => self.stopped = true,
             WatchMessage::Enabled(enabled) => self.set_enabled(enabled),
             WatchMessage::Roots(roots) => self.set_roots(&roots),
         }
         self.catch_up();
+        if roots_told {
+            // The worker walks a root it added once its watches are set up.
+            self.roots_messages += 1;
+            if let Some(roots_watched) = &self.roots_watched {
+                let _ = roots_watched.send(self.roots_messages);
+            }
+        }
     }
 
     fn set_enabled(&mut self, enabled: bool) {
@@ -777,6 +801,8 @@ impl Watcher {
 
     /// Watches `root` and the folders below it, or notes why it cannot be.
     fn watch_root(&mut self, root: &Path) {
+        #[cfg(test)]
+        watch_test_hooks::before_watching(root);
         self.unwatched.remove(root);
         let table = mounts::mount_table();
         let fallback = self.try_watch_root(root, &table);
@@ -1251,6 +1277,10 @@ pub(crate) mod watch_test_hooks {
     static HELD: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     static PENDING: Mutex<Vec<(PathBuf, Sender<usize>)>> = Mutex::new(Vec::new());
     static WATCHED: Mutex<Vec<(PathBuf, Sender<usize>)>> = Mutex::new(Vec::new());
+    /// A held root: the sender told when watching it waits, and the
+    /// receiver that releases it.
+    static HELD_WATCHING: Mutex<Vec<(PathBuf, Sender<()>, Receiver<()>)>> = Mutex::new(Vec::new());
+    static SCAN_WAITS: Mutex<Vec<(PathBuf, Sender<()>)>> = Mutex::new(Vec::new());
 
     fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -1330,6 +1360,61 @@ pub(crate) mod watch_test_hooks {
         for (observed, tx) in lock(&WATCHED).iter() {
             if observed == root {
                 let _ = tx.send(count);
+            }
+        }
+    }
+
+    /// Makes the watcher wait before it watches `root`, until the guard is
+    /// dropped. [`HeldWatching::reached`] gets a message each time it
+    /// waits.
+    pub(crate) fn hold_watching(root: &Path) -> HeldWatching {
+        let (reached_tx, reached) = unbounded();
+        let (release, release_rx) = unbounded();
+        lock(&HELD_WATCHING).push((root.to_path_buf(), reached_tx, release_rx));
+        HeldWatching {
+            root: root.to_path_buf(),
+            reached,
+            _release: release,
+        }
+    }
+
+    pub(crate) struct HeldWatching {
+        root: PathBuf,
+        pub(crate) reached: Receiver<()>,
+        /// Dropped with the guard, which releases the watcher.
+        _release: Sender<()>,
+    }
+
+    impl Drop for HeldWatching {
+        fn drop(&mut self) {
+            lock(&HELD_WATCHING).retain(|(root, _, _)| *root != self.root);
+        }
+    }
+
+    pub(super) fn before_watching(root: &Path) {
+        let held = lock(&HELD_WATCHING)
+            .iter()
+            .find(|(held, _, _)| held == root)
+            .map(|(_, reached, release)| (reached.clone(), release.clone()));
+        if let Some((reached, release)) = held {
+            let _ = reached.send(());
+            // Returns once the guard is dropped.
+            let _ = release.recv();
+        }
+    }
+
+    /// Receives a message whenever the worker waits for the watches of
+    /// `root` before it scans the root.
+    pub(crate) fn observe_scan_waits(root: &Path) -> Receiver<()> {
+        let (tx, rx) = unbounded();
+        lock(&SCAN_WAITS).push((root.to_path_buf(), tx));
+        rx
+    }
+
+    pub(in crate::library) fn note_scan_wait(root: &Path) {
+        for (observed, tx) in lock(&SCAN_WAITS).iter() {
+            if observed == root {
+                let _ = tx.send(());
             }
         }
     }

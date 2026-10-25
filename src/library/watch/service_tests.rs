@@ -8,7 +8,8 @@ use std::fs;
 use std::sync::atomic::AtomicUsize;
 
 use super::watch_test_hooks::{
-    fail_watches, hold_changes, observe_pending, observe_watched, set_fs_type,
+    fail_watches, hold_changes, hold_watching, observe_pending, observe_scan_waits,
+    observe_watched, set_fs_type,
 };
 use super::*;
 use crate::library::scan::scan_test_hooks::scans_of;
@@ -137,14 +138,44 @@ impl Running {
             let event = self.events.recv_deadline(deadline).unwrap_or_else(|error| {
                 panic!("{what}: {error}; library {:?}", self.mirror.paths())
             });
-            if event.status.unwatched_roots != self.mirror.status.unwatched_roots {
-                self.unwatched_changes += 1;
-            }
-            self.mirror.apply(&event);
+            self.apply(&event);
             if wanted(&self.mirror) {
                 return;
             }
         }
+    }
+
+    /// Applies events until the library satisfies `wanted`, or until
+    /// `waits` gets a message.
+    fn wait_for_or(
+        &mut self,
+        waits: &crossbeam_channel::Receiver<()>,
+        what: &str,
+        mut wanted: impl FnMut(&LibraryMirror) -> bool,
+    ) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            crossbeam_channel::select! {
+                recv(waits) -> _ => return,
+                recv(self.events) -> event => {
+                    let event = event.unwrap_or_else(|error| panic!("{what}: {error}"));
+                    self.apply(&event);
+                    if wanted(&self.mirror) {
+                        return;
+                    }
+                },
+                default(deadline.saturating_duration_since(Instant::now())) => {
+                    panic!("{what}: timed out; library {:?}", self.mirror.paths());
+                },
+            }
+        }
+    }
+
+    fn apply(&mut self, event: &LibraryEvent) {
+        if event.status.unwatched_roots != self.mirror.status.unwatched_roots {
+            self.unwatched_changes += 1;
+        }
+        self.mirror.apply(event);
     }
 
     fn has(&self, path: &Path) -> bool {
@@ -466,6 +497,110 @@ fn added_and_removed_roots_are_watched_and_unwatched() {
     running.wait_for("the root removed", |mirror| {
         mirror.snapshot.roots.is_empty()
     });
+}
+
+/// The first scan of an added root walks it only once its watches are set
+/// up, so a file written before then is indexed too (#238).
+#[test]
+fn a_file_written_before_an_added_roots_watches_are_set_up_is_indexed() {
+    let fixture = Fixture::new("added-before-watched");
+    fixture.write("a.mp3");
+    let watched = observe_watched(&fixture.root);
+    let waits = observe_scan_waits(&fixture.root);
+    let mut running = fixture.start(tuning(Duration::from_secs(3600)));
+    running.service.set_watching(true);
+    let held = hold_watching(&fixture.root);
+    running.service.command(LibraryCommand::AddRoot {
+        path: fixture.root.clone(),
+        name: String::new(),
+    });
+    held.reached
+        .recv_timeout(WAIT)
+        .expect("the watcher about to watch the added root");
+    // The first scan waits for the watches; without that, it would have
+    // walked past the root's folder before this file is written.
+    running.wait_for_or(&waits, "the first scan, or its wait", |mirror| {
+        mirror.paths().contains(&fixture.path("a.mp3")) && !mirror.status.scan_in_progress
+    });
+    fixture.write("b.mp3");
+    drop(held);
+    wait_for_count(&watched, "the added root watched", |count| count > 0);
+
+    // Seen by the watches, after the first scan.
+    fixture.write("c.mp3");
+    running.wait_for("a change after the watches are set up", |mirror| {
+        mirror.paths().contains(&fixture.path("c.mp3")) && !mirror.status.scan_in_progress
+    });
+    assert_eq!(
+        running.mirror.paths(),
+        vec![
+            fixture.path("a.mp3"),
+            fixture.path("b.mp3"),
+            fixture.path("c.mp3")
+        ]
+    );
+}
+
+/// Turning watching on rescans the roots once they are watched, so a file
+/// written before the watches are set up is indexed too.
+#[test]
+fn a_file_written_before_the_watches_are_set_up_when_watching_is_turned_on_is_indexed() {
+    let fixture = Fixture::new("enabled-before-watched");
+    fixture.write("a.mp3");
+    let watched = observe_watched(&fixture.root);
+    let mut running = fixture.start(tuning(Duration::from_secs(3600)));
+    running.service.command(LibraryCommand::AddRoot {
+        path: fixture.root.clone(),
+        name: String::new(),
+    });
+    running.wait_for("the root added", |mirror| {
+        mirror.paths().contains(&fixture.path("a.mp3")) && !mirror.status.scan_in_progress
+    });
+    let held = hold_watching(&fixture.root);
+    running.service.set_watching(true);
+    held.reached
+        .recv_timeout(WAIT)
+        .expect("the watcher about to watch the root");
+    fixture.write("b.mp3");
+    drop(held);
+    wait_for_count(&watched, "the root watched", |count| count > 0);
+
+    fixture.write("c.mp3");
+    running.wait_for("a change after the watches are set up", |mirror| {
+        mirror.paths().contains(&fixture.path("c.mp3")) && !mirror.status.scan_in_progress
+    });
+    assert_eq!(
+        running.mirror.paths(),
+        vec![
+            fixture.path("a.mp3"),
+            fixture.path("b.mp3"),
+            fixture.path("c.mp3")
+        ]
+    );
+}
+
+/// The worker stops while an added root waits for its watches.
+#[test]
+fn the_worker_stops_while_an_added_root_waits_for_its_watches() {
+    let fixture = Fixture::new("stop-before-watched");
+    fixture.write("a.mp3");
+    let waits = observe_scan_waits(&fixture.root);
+    let mut running = fixture.start(tuning(Duration::from_secs(3600)));
+    running.service.set_watching(true);
+    let held = hold_watching(&fixture.root);
+    running.service.command(LibraryCommand::AddRoot {
+        path: fixture.root.clone(),
+        name: String::new(),
+    });
+    waits
+        .recv_timeout(WAIT)
+        .expect("the first scan waiting for the watches");
+
+    running.service.tx = None;
+    let worker = running.service.thread.take().expect("the worker");
+    assert!(worker.join_by(Instant::now() + Duration::from_secs(5)));
+    assert!(!running.has(&fixture.path("a.mp3")));
+    drop(held);
 }
 
 #[test]
