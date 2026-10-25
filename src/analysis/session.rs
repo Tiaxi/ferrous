@@ -3878,4 +3878,225 @@ mod tests {
         let i4 = output_interval_for_hop(128, 0.7);
         assert!((i4 - 11.43).abs() < 0.1);
     }
+
+    /// Write a mono 16-bit tone WAV and return its path.
+    fn write_tone_fixture(name: &str, seconds: u32, rate: u32) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("ferrous-session-{name}-{}.wav", std::process::id()));
+        let frames = seconds * rate;
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x01\0");
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(b"\x02\0\x10\0data");
+        bytes.extend_from_slice(&(frames * 2).to_le_bytes());
+        for frame in 0..frames {
+            let phase = f64::from(frame % 64) / 64.0 * std::f64::consts::TAU;
+            #[allow(clippy::cast_possible_truncation)]
+            let sample = (phase.sin() * 8_000.0) as i16;
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).expect("write fixture");
+        path
+    }
+
+    fn session_on(path: &Path, track_token: u64, generation: u64) -> SpectrogramWorkerCommand {
+        let mut command = test_new_track(&path.to_string_lossy(), generation);
+        if let SpectrogramWorkerCommand::NewTrack {
+            track_token: token,
+            fft_size,
+            hop_size,
+            display_mode,
+            ..
+        } = &mut command
+        {
+            *token = track_token;
+            *fft_size = 512;
+            *hop_size = 1024;
+            *display_mode = SpectrogramDisplayMode::Centered;
+        }
+        command
+    }
+
+    fn next_chunk(events: &Receiver<AnalysisEvent>) -> PrecomputedSpectrogramChunk {
+        match events.recv_timeout(Duration::from_secs(10)) {
+            Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) => chunk,
+            other => panic!("expected a chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_continuation_fallback_does_not_drop_a_session_started_meanwhile() {
+        let path = write_tone_fixture("fallback", 1, 8_000);
+        // The continuation falls back to a new session from the worker
+        // (its file cannot be opened) while the session has ended and the
+        // worker is idle, or while it is parked at EOF.
+        for ended_first in [true, false] {
+            let generation = Arc::new(AtomicU64::new(1));
+            let (commands, command_rx) = unbounded();
+            let (events, event_rx) = unbounded();
+            let worker_generation = Arc::clone(&generation);
+            let worker = std::thread::spawn(move || {
+                spectrogram_worker_loop(
+                    &command_rx,
+                    &events,
+                    &worker_generation,
+                    &AtomicU64::new(0),
+                    &AtomicU64::new(0),
+                );
+            });
+            commands.send(session_on(&path, 1, 1)).unwrap();
+            while !next_chunk(&event_rx).complete {}
+
+            // The analysis thread seeks: a new generation, then its session.
+            generation.store(2, Ordering::Relaxed);
+            if ended_first {
+                // Ends the stale session.
+                commands
+                    .send(SpectrogramWorkerCommand::PositionUpdate {
+                        position_seconds: 0.5,
+                    })
+                    .unwrap();
+            }
+            commands
+                .send(SpectrogramWorkerCommand::ContinueWithFile {
+                    path: path.with_extension("missing.wav"),
+                    track_token: 2,
+                })
+                .unwrap();
+            commands.send(session_on(&path, 3, 2)).unwrap();
+
+            let seek_session = loop {
+                let chunk = next_chunk(&event_rx);
+                if chunk.track_token == 3 {
+                    break chunk;
+                }
+            };
+            assert_eq!(seek_session.generation, 2, "ended_first={ended_first}");
+            assert!(seek_session.buffer_reset, "ended_first={ended_first}");
+            assert_eq!(generation.load(Ordering::Relaxed), 2);
+            drop(commands);
+            worker.join().expect("worker");
+        }
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_continuation_fallback_continues_the_session_generation() {
+        let path = write_tone_fixture("continuation", 1, 8_000);
+        let generation = AtomicU64::new(4);
+        let (commands, command_rx) = unbounded();
+        let (events, _event_rx) = unbounded();
+        commands
+            .send(SpectrogramWorkerCommand::ContinueWithFile {
+                path: path.with_extension("missing.wav"),
+                track_token: 2,
+            })
+            .unwrap();
+        let mut session = session_on(&path, 1, 4);
+        let fallback = run_spectrogram_session(
+            &mut session,
+            &command_rx,
+            &events,
+            &generation,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        );
+        assert!(
+            matches!(
+                fallback,
+                Some(SpectrogramWorkerCommand::NewTrack {
+                    track_token: 2,
+                    generation: 4,
+                    ..
+                })
+            ),
+            "{fallback:?}"
+        );
+        assert_eq!(generation.load(Ordering::Relaxed), 4);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_centered_gapless_switch_finalizes_the_outgoing_track_before_its_prelude() {
+        let path = write_tone_fixture("handoff", 30, 8_000);
+        let generation = Arc::new(AtomicU64::new(1));
+        let (commands, command_rx) = unbounded();
+        // One slot, so the session cannot run ahead of this test.
+        let (events, event_rx) = crossbeam_channel::bounded(1);
+        let worker_generation = Arc::clone(&generation);
+        let worker = std::thread::spawn(move || {
+            spectrogram_worker_loop(
+                &command_rx,
+                &events,
+                &worker_generation,
+                &AtomicU64::new(0),
+                &AtomicU64::new(0),
+            );
+        });
+        commands.send(session_on(&path, 7, 1)).unwrap();
+        let mut outgoing = vec![next_chunk(&event_rx)];
+        while outgoing.iter().all(|chunk| chunk.column_count == 0) {
+            outgoing.push(next_chunk(&event_rx));
+        }
+
+        let mut switch = session_on(&path, 8, 1);
+        let staged = PrecomputedSpectrogramChunk {
+            track_token: 8,
+            generation: 1,
+            columns_u8: vec![0; 257],
+            bins_per_column: 257,
+            column_count: 1,
+            channel_count: 1,
+            start_column_index: 0,
+            total_columns_estimate: 300,
+            sample_rate_hz: 8_000,
+            hop_size: 1024,
+            coverage_seconds: 0.0,
+            complete: false,
+            buffer_reset: true,
+            clear_history: true,
+        };
+        if let SpectrogramWorkerCommand::NewTrack {
+            emit_initial_reset,
+            handoff,
+            ..
+        } = &mut switch
+        {
+            *emit_initial_reset = false;
+            handoff.finalize_previous = true;
+            handoff.prelude = vec![staged];
+        }
+        commands.send(switch).unwrap();
+
+        let prelude = loop {
+            let chunk = next_chunk(&event_rx);
+            if chunk.track_token == 8 {
+                break chunk;
+            }
+            outgoing.push(chunk);
+        };
+        assert!(prelude.buffer_reset && prelude.column_count == 1);
+        let finalize = outgoing.last().expect("outgoing chunks");
+        assert!(
+            finalize.complete
+                && finalize.column_count == 0
+                && finalize.track_token == 7
+                && finalize.generation == 1,
+            "{finalize:?}"
+        );
+        let decoded: u32 = outgoing
+            .iter()
+            .map(|chunk| u32::from(chunk.column_count))
+            .sum();
+        assert_eq!(finalize.total_columns_estimate, decoded);
+        // The new session's own chunks follow, without a reset.
+        let next = next_chunk(&event_rx);
+        assert!(next.track_token == 8 && !next.buffer_reset, "{next:?}");
+        drop(commands);
+        drop(event_rx);
+        worker.join().expect("worker");
+        std::fs::remove_file(path).expect("remove fixture");
+    }
 }

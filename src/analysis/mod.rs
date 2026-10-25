@@ -4596,22 +4596,38 @@ mod tests {
         spectrogram_cmd_tx: Sender<SpectrogramWorkerCommand>,
         spectrogram_cmd_rx: Receiver<SpectrogramWorkerCommand>,
         waveform_job_tx: Sender<WaveformDecodeJob>,
+        waveform_job_rx: Receiver<WaveformDecodeJob>,
         waveform_decode_active_token: AtomicU64,
         generation: AtomicU64,
         columns_produced: AtomicU64,
         track_duration_ms: AtomicU64,
     }
 
+    /// An output whose spectral stream is full.
+    struct Backpressured(Sender<AnalysisEvent>);
+
+    impl AnalysisEventOutput for Backpressured {
+        fn send(&self, event: AnalysisEvent) -> Result<(), ()> {
+            AnalysisEventOutput::send(&self.0, event)
+        }
+
+        fn spectral_backpressured(&self) -> bool {
+            true
+        }
+    }
+
     impl TestChannels {
         fn new() -> Self {
             let (event_tx, event_rx) = unbounded();
             let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded();
+            let (waveform_job_tx, waveform_job_rx) = unbounded();
             Self {
                 event_tx,
                 event_rx,
                 spectrogram_cmd_tx,
                 spectrogram_cmd_rx,
-                waveform_job_tx: unbounded().0,
+                waveform_job_tx,
+                waveform_job_rx,
                 waveform_decode_active_token: AtomicU64::new(0),
                 generation: AtomicU64::new(0),
                 columns_produced: AtomicU64::new(0),
@@ -4620,8 +4636,15 @@ mod tests {
         }
 
         fn ctx(&self) -> AnalysisContext<'_> {
+            self.ctx_with_output(&self.event_tx)
+        }
+
+        fn ctx_with_output<'a>(
+            &'a self,
+            output: &'a dyn AnalysisEventOutput,
+        ) -> AnalysisContext<'a> {
             AnalysisContext {
-                event_tx: &self.event_tx,
+                event_tx: output,
                 waveform_job_tx: &self.waveform_job_tx,
                 waveform_decode_active_token: &self.waveform_decode_active_token,
                 spectrogram_cmd_tx: &self.spectrogram_cmd_tx,
@@ -4925,5 +4948,289 @@ mod tests {
             let opened = assert_successor_continued(&channels, mode);
             assert!(opened.iter().all(|path| path == a), "{mode:?}: {opened:?}");
         }
+    }
+
+    #[test]
+    fn a_seek_is_applied_while_a_staging_thread_cannot_open_its_file() {
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        let channels = TestChannels::new();
+        let mut state = playing_state(SpectrogramDisplayMode::Centered, a);
+        // Holds the staging thread where it would open the file, as a slow
+        // network share or GStreamer would.
+        let (release_staging, staging_gate) = crossbeam_channel::bounded::<()>(0);
+        state.staging_open_gate = Some(staging_gate);
+        successor_probed(&mut state, "/music/b.flac");
+        state.handle_command(
+            AnalysisCommand::PrepareGaplessContinuation {
+                path: b.to_path_buf(),
+            },
+            &channels.ctx(),
+        );
+        assert!(state.staged_centered_thread.is_some(), "staging started");
+
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let state = std::thread::scope(|scope| {
+            let handler = scope.spawn(|| {
+                let ctx = channels.ctx();
+                // Seeking back near the end drops the staged successor, then
+                // seeks; a zoom change drops it as well.
+                state.handle_command(AnalysisCommand::CancelStagedContinuation, &ctx);
+                state.handle_command(AnalysisCommand::SeekPosition(500.0), &ctx);
+                state.handle_command(AnalysisCommand::SetSpectrogramZoomLevel(2.0), &ctx);
+                let _ = done_tx.send(());
+                state
+            });
+            let handled = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            // Let a blocked handler finish, so a failure is reported.
+            drop(release_staging);
+            let state = handler.join().expect("handler");
+            assert!(handled, "the seek waited for the staging thread");
+            state
+        });
+        let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+        assert!(
+            commands.iter().any(|cmd| matches!(cmd,
+                SpectrogramWorkerCommand::NewTrack { target_position_seconds, .. }
+                    if (*target_position_seconds - 500.0).abs() < 0.001)),
+            "the seek must restart the session: {commands:?}"
+        );
+        assert!(state.staged_centered_thread.is_none());
+
+        // The stopped thread is joined at shutdown.
+        let mut state = state;
+        assert_eq!(state.retired_staging.len(), 1);
+        state.handle_command(AnalysisCommand::Shutdown, &channels.ctx());
+        assert!(state.retired_staging.is_empty());
+    }
+
+    #[test]
+    fn a_seek_while_the_spectral_stream_is_full_keeps_history_inside_the_analysed_range() {
+        for mode in MODES {
+            let channels = TestChannels::new();
+            let full = Backpressured(channels.event_tx.clone());
+            let ctx = channels.ctx_with_output(&full);
+            let mut state = playing_state(mode, Path::new("/music/a.flac"));
+
+            state.handle_command(AnalysisCommand::SeekPosition(5.0), &ctx);
+            let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+            if mode == SpectrogramDisplayMode::Rolling {
+                // Queued columns were decoded before the seek: a new session
+                // drops them, and its reset keeps what is on screen.
+                assert!(
+                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::NewTrack {
+                        start_seconds, generation: 1, emit_initial_reset: true,
+                        clear_history_on_reset: false, ..
+                    }] if (*start_seconds - 5.0).abs() < 0.001),
+                    "{commands:?}"
+                );
+            } else {
+                // Queued columns belong to the decoded window, which the
+                // target is inside: nothing restarts or clears.
+                assert!(
+                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::PositionUpdate {
+                        position_seconds
+                    }] if (*position_seconds - 5.0).abs() < 0.001),
+                    "{commands:?}"
+                );
+                assert_eq!(channels.generation.load(Ordering::Relaxed), 0);
+
+                // Outside the window there is no history to keep.
+                state.handle_command(AnalysisCommand::SeekPosition(500.0), &ctx);
+                let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+                assert!(
+                    matches!(
+                        commands.as_slice(),
+                        [SpectrogramWorkerCommand::NewTrack {
+                            clear_history_on_reset: true,
+                            ..
+                        }]
+                    ),
+                    "{commands:?}"
+                );
+            }
+        }
+    }
+
+    /// The request the file helper received, which must be the only one.
+    fn only_track_io_request(state: &AnalysisRuntimeState) -> TrackIoRequest {
+        let requests: Vec<_> = state.track_io_requests.try_iter().collect();
+        let [request] = <[_; 1]>::try_from(requests).expect("one request");
+        request
+    }
+
+    #[test]
+    fn a_new_track_is_read_by_the_file_helper_and_its_saved_waveform_shown() {
+        let path = Path::new("/music/a.flac");
+        for saved in [false, true] {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            let mut state = AnalysisRuntimeState::new();
+            state.handle_track_change(path.to_path_buf(), true, false, 4, &ctx);
+            assert!(matches!(
+                only_track_io_request(&state),
+                TrackIoRequest::LoadTrack {
+                    track_token: 4,
+                    probe: true,
+                    ..
+                }
+            ));
+            assert!(channels.waveform_job_rx.try_recv().is_err());
+            channels.event_rx.try_iter().for_each(drop);
+
+            let stamp = WaveformSourceStamp {
+                size_bytes: 10,
+                modified_secs: 1,
+                modified_nanos: 0,
+            };
+            let loaded = |track_token| TrackIoReply::TrackLoaded {
+                track_token,
+                stamp: Some(stamp),
+                format: Some(TrackFormat::Known {
+                    sample_rate: 44_100,
+                    channels: 2,
+                }),
+                peaks: saved.then(|| vec![0.5; 4]),
+            };
+            // A reply for a track that is no longer current changes nothing.
+            state.handle_track_io_reply(loaded(3), &ctx);
+            assert_eq!(state.active_track_stamp, None);
+            state.handle_track_io_reply(loaded(4), &ctx);
+            assert_eq!(state.active_track_stamp, Some(stamp));
+            assert_eq!(state.active_session_effective_rate, 44_100);
+            if saved {
+                assert!(channels.waveform_job_rx.try_recv().is_err());
+                assert!(channels.event_rx.try_iter().any(|event| matches!(event,
+                    AnalysisEvent::Snapshot(snapshot)
+                        if snapshot.waveform_complete && snapshot.waveform_peaks == [0.5; 4])));
+            } else {
+                assert!(matches!(
+                    channels.waveform_job_rx.try_recv(),
+                    Ok(WaveformDecodeJob { track_token: 4, .. })
+                ));
+            }
+
+            // Playing it again needs no probe.
+            state.handle_track_change(path.to_path_buf(), true, false, 5, &ctx);
+            assert!(matches!(
+                only_track_io_request(&state),
+                TrackIoRequest::LoadTrack {
+                    track_token: 5,
+                    probe: false,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn a_gapless_successor_is_probed_once_off_the_analysis_thread() {
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+        state.last_spectrogram_position = 200.0;
+
+        // A probe answered after its staging was dropped is ignored.
+        state.handle_prepare_gapless_continuation(b.to_path_buf(), &ctx);
+        let TrackIoRequest::ProbeCandidate { request: stale, .. } = only_track_io_request(&state)
+        else {
+            panic!("expected a probe");
+        };
+        state.handle_command(AnalysisCommand::ClearStagedContinuation, &ctx);
+        let compatible = TrackFormat::Known {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        state.handle_track_io_reply(
+            TrackIoReply::CandidateProbed {
+                request: stale,
+                format: compatible,
+            },
+            &ctx,
+        );
+        assert!(state.staged_continuation_path.is_none());
+
+        state.handle_prepare_gapless_continuation(b.to_path_buf(), &ctx);
+        let TrackIoRequest::ProbeCandidate { request, .. } = only_track_io_request(&state) else {
+            panic!("expected a probe");
+        };
+        assert!(channels.spectrogram_cmd_rx.try_recv().is_err());
+        state.handle_track_io_reply(
+            TrackIoReply::CandidateProbed {
+                request,
+                format: compatible,
+            },
+            &ctx,
+        );
+        assert!(matches!(
+            channels.spectrogram_cmd_rx.try_recv(),
+            Ok(SpectrogramWorkerCommand::ContinueWithFile { ref path, .. }) if path == b
+        ));
+
+        // The switch uses what the probe found.
+        state.handle_track_change(b.to_path_buf(), false, true, 2, &ctx);
+        assert!(matches!(
+            channels.spectrogram_cmd_rx.try_recv(),
+            Ok(SpectrogramWorkerCommand::UpdateTrackToken { track_token: 2 })
+        ));
+        assert!(matches!(
+            only_track_io_request(&state),
+            TrackIoRequest::LoadTrack { probe: false, .. }
+        ));
+        assert!((state.spectrogram_position_offset - 200.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn an_unprobed_rolling_successor_starts_a_session_that_keeps_history() {
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = playing_state(SpectrogramDisplayMode::Rolling, Path::new("/music/a.flac"));
+        state.last_spectrogram_position = 200.0;
+
+        // Without its format the switch cannot know that the worker's
+        // continuous timeline still fits.
+        state.handle_track_change(PathBuf::from("/music/b.flac"), false, true, 2, &ctx);
+        let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+        assert!(
+            matches!(commands.as_slice(), [SpectrogramWorkerCommand::NewTrack {
+                start_seconds, emit_initial_reset: true, clear_history_on_reset: false, ..
+            }] if *start_seconds == 0.0),
+            "{commands:?}"
+        );
+        assert_eq!(state.spectrogram_position_offset, 0.0);
+    }
+
+    #[test]
+    fn a_lost_file_helper_is_reported_and_waveforms_are_still_decoded() {
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = AnalysisRuntimeState::with_track_io(unbounded().0);
+        state.handle_track_change(PathBuf::from("/music/a.flac"), true, false, 4, &ctx);
+        assert!(matches!(
+            channels.waveform_job_rx.try_recv(),
+            Ok(WaveformDecodeJob { track_token: 4, .. })
+        ));
+        state.handle_track_change(PathBuf::from("/music/b.flac"), true, false, 5, &ctx);
+        assert!(matches!(
+            channels.waveform_job_rx.try_recv(),
+            Ok(WaveformDecodeJob { track_token: 5, .. })
+        ));
+        let failures = channels
+            .event_rx
+            .try_iter()
+            .filter(|event| matches!(event, AnalysisEvent::WorkerFailed(_)))
+            .count();
+        assert_eq!(failures, 1, "the loss is reported once");
+
+        // A load lost with the helper is decoded too.
+        let (track_io, requests) = unbounded();
+        let mut state = AnalysisRuntimeState::with_track_io(track_io);
+        state.handle_track_change(PathBuf::from("/music/a.flac"), true, false, 6, &ctx);
+        drop(requests);
+        state.handle_track_io_lost(&ctx);
+        assert!(matches!(
+            channels.waveform_job_rx.try_recv(),
+            Ok(WaveformDecodeJob { track_token: 6, .. })
+        ));
     }
 }
