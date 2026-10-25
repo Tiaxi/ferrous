@@ -4889,7 +4889,8 @@ mod engine_tests {
                 self.prepared,
                 self.cancelled_staging,
             );
-            self.trace.report(what, &engine)
+            let files = describe_error_files(&self.errors);
+            self.trace.report(what, &format!("{engine}{files}"))
         }
 
         /// Poll and record until `done` holds, or panic with a report of
@@ -5017,6 +5018,54 @@ mod engine_tests {
                 },
             );
         }
+    }
+
+    /// Whether the files that `errors` name exist, and what their
+    /// directories hold, for a report: a test's own fixture that is missing
+    /// points to the test rather than the engine.
+    fn describe_error_files(errors: &[PlaybackError]) -> String {
+        use std::fmt::Write as _;
+        let mut files = String::new();
+        for path in errors.iter().filter_map(|error| error.path.as_deref()) {
+            let entries = path
+                .parent()
+                .and_then(|dir| std::fs::read_dir(dir).ok())
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.file_name())
+                        .collect::<Vec<_>>()
+                });
+            let _ = writeln!(
+                files,
+                "  {} exists: {}, its directory holds {entries:?}",
+                path.display(),
+                path.exists(),
+            );
+        }
+        files
+    }
+
+    #[test]
+    fn reports_tell_whether_the_files_of_errors_exist() {
+        let fixtures = Fixtures::new("error-files");
+        let a = fixtures.wav("a.wav", 100);
+        let missing = fixtures.dir.join("b.wav");
+        let errors = [&a, &missing].map(|path| PlaybackError {
+            path: Some(path.clone()),
+            detail: String::new(),
+            outcome: PlaybackErrorOutcome::Skipped,
+        });
+        let report = describe_error_files(&errors);
+        assert!(
+            report.contains(&format!("{} exists: true", a.display())),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!("{} exists: false", missing.display())),
+            "{report}"
+        );
+        assert!(report.contains(r#"holds Some(["a.wav"])"#), "{report}");
     }
 
     #[derive(Debug, Clone, Copy)]
