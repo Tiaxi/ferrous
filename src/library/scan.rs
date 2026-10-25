@@ -672,6 +672,9 @@ impl ScanRun<'_> {
         position: (usize, usize),
         remaining: &[PathBuf],
     ) -> RootScanEnd {
+        // Before the root's reads, and before the commands run between its
+        // files, which publish with its rows.
+        self.library.begin_reads();
         let conn = self.conn;
         match self
             .control

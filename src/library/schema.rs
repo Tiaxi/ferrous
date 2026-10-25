@@ -247,9 +247,14 @@ pub(super) fn load_snapshot(conn: &Connection, snapshot: &mut super::LibrarySnap
     snapshot.roots = load_roots(conn);
     snapshot.tracks.clear();
 
+    // The order of `track_order`, which incremental changes keep: paths
+    // that `NOCASE` finds equal, such as `song.flac` and `Song.flac`, are
+    // ordered by their exact bytes. The index covers the `NOCASE` terms, so
+    // only such ties are sorted.
     if let Ok(mut stmt) = conn.prepare(&format!(
         "SELECT {TRACK_COLUMNS} FROM tracks \
-         ORDER BY root_path COLLATE NOCASE, path COLLATE NOCASE"
+         ORDER BY root_path COLLATE NOCASE, path COLLATE NOCASE, \
+         root_path COLLATE BINARY, path COLLATE BINARY"
     )) {
         if let Ok(rows) = stmt.query_map([], track_from_row) {
             for row in rows.flatten() {

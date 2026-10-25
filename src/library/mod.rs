@@ -210,7 +210,7 @@ static FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// files against renames: a rename takes its number after it has read the
 /// renamed files, and a read takes one before it begins. The bridge takes a
 /// number for each edit refresh request it sends, and the library worker one
-/// for each command it runs.
+/// for each command it runs and each root its scans read.
 pub(crate) fn next_file_sequence() -> u64 {
     FILE_SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1
 }

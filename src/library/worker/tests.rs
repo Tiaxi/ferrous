@@ -814,6 +814,68 @@ fn reading_rows_again_corrects_a_copy_that_diverged() {
 }
 
 #[test]
+fn each_root_of_a_scan_is_numbered_before_its_reads() {
+    let fixture = Fixture::new("read-after-roots", &["a.mp3", "b.mp3"]);
+    // Scanned after `music`.
+    let next = fixture.folder.join("next");
+    fs::create_dir_all(&next).expect("second root");
+    let next = next.canonicalize().expect("canonical root");
+    for name in ["c.mp3", "d.mp3"] {
+        fs::write(next.join(name), name.as_bytes()).expect("track");
+    }
+    let (service, mut events) = fixture.start();
+    for root in [&fixture.root, &next] {
+        service.command(LibraryCommand::AddRoot {
+            path: root.clone(),
+            name: String::new(),
+        });
+    }
+    next_snapshot(&mut events, |view| idle_with_tracks(view, 4));
+
+    // The rescan waits in the first root.
+    fs::write(fixture.track("a.mp3"), b"a.mp3, changed").expect("change a");
+    let (started, release) = hold_read(&fixture.track("a.mp3"));
+    let before_scan = crate::library::next_file_sequence();
+    service.command(LibraryCommand::RescanAll);
+    started
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the scan reads the held file");
+    // A rename numbered now read the second root's files before the scan
+    // did; they change after it.
+    let renamed = crate::library::next_file_sequence();
+    let (added, deleted) = (next.join("e.mp3"), next.join("d.mp3"));
+    fs::write(&added, b"e.mp3").expect("add a track");
+    fs::remove_file(&deleted).expect("delete a track");
+    drop(release);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut second_root = Vec::new();
+    while events.view().scan_in_progress || !events.mirror.paths().contains(&added) {
+        let event = events.rx.recv_deadline(deadline).expect("an event");
+        events.mirror.apply(&event);
+        assert!(
+            before_scan < event.read_after,
+            "{before_scan} < {}",
+            event.read_after
+        );
+        let paths = event
+            .changes
+            .upserted
+            .iter()
+            .map(|track| &track.path)
+            .chain(&event.changes.removed);
+        if paths.into_iter().any(|path| path.starts_with(&next)) {
+            second_root.push(event.read_after);
+        }
+    }
+    assert!(!events.mirror.paths().contains(&deleted));
+    assert!(
+        !second_root.is_empty() && second_root.iter().all(|&number| renamed < number),
+        "{renamed} < {second_root:?}"
+    );
+}
+
+#[test]
 fn events_are_numbered_before_the_reads_of_their_rows() {
     let fixture = Fixture::new("read-after", &["a.mp3", "b.mp3", "c.mp3"]);
     let (started, release) = hold_read(&fixture.track("b.mp3"));
