@@ -6164,7 +6164,7 @@ mod tests {
 
     #[test]
     fn a_rolling_continuation_the_worker_rejects_starts_afresh_at_the_playback_position() {
-        let (a, b) = (Path::new("/music/a.ac3"), Path::new("/music/b.ac3"));
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
         let surround = TrackFormat::Known {
             sample_rate: 48_000,
             channels: 6,
@@ -6183,6 +6183,16 @@ mod tests {
             state.spectrogram_view_mode = SpectrogramViewMode::PerChannel;
             state.active_session_channel_count = 2;
             state.last_spectrogram_position = 200.0;
+            // B was probed in stereo, and has been replaced by a 5.1 file
+            // since: the worker finds that when it opens it.
+            state.formats.insert(
+                b.to_path_buf(),
+                TrackFormat::Known {
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+                None,
+            );
             state.handle_prepare_gapless_continuation(b.to_path_buf(), &ctx);
             assert!(matches!(
                 channels.spectrogram_cmd_rx.try_recv(),

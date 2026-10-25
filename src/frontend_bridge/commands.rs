@@ -1275,7 +1275,8 @@ mod tests {
     use std::time::Duration;
 
     use super::super::events::{
-        apply_library_events, process_playback_event, pump_metadata_events, pump_playback_events,
+        apply_library_events, drain_analysis_events, process_playback_event, pump_metadata_events,
+        pump_playback_events,
     };
     use crate::library::load_external_track_caches;
 
@@ -2209,16 +2210,89 @@ mod tests {
             crate::analysis::AnalysisEvent::Snapshot(_) => {}
             _ => panic!("unexpected event variant"),
         }
-        // The file does not exist, so the spectrogram reports that it cannot
-        // read it; no further waveform snapshot follows.
+        // The file does not exist, so the spectrogram clears what it shows;
+        // no further waveform snapshot follows, and playback, not analysis,
+        // reports the missing file.
         let later: Vec<_> =
             std::iter::from_fn(|| analysis_rx.recv_timeout(Duration::from_millis(120)).ok())
                 .collect();
         assert!(
-            !later
-                .iter()
-                .any(|event| matches!(event, crate::analysis::AnalysisEvent::Snapshot(_))),
+            !later.iter().any(|event| matches!(
+                event,
+                crate::analysis::AnalysisEvent::Snapshot(_)
+                    | crate::analysis::AnalysisEvent::WorkerFailed(_)
+            )),
             "{later:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_reported_by_playback_alone() {
+        use crate::analysis::AnalysisEngine;
+        use crate::playback::{PlaybackError, PlaybackErrorOutcome, PlaybackEvent, PlaybackState};
+
+        let (analysis, analysis_rx) = AnalysisEngine::new();
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded::<BridgeEvent>();
+        let mut state = BridgeState::default();
+        state.playback.state = PlaybackState::Playing;
+        let path =
+            std::env::temp_dir().join(format!("ferrous-missing-{}/gone.flac", std::process::id()));
+
+        let _ = process_playback_event(
+            PlaybackEvent::TrackChanged {
+                path: path.clone(),
+                queue_index: 0,
+                kind: TrackChangeKind::Manual,
+                track_token: 1,
+            },
+            &analysis,
+            &metadata,
+            &event_tx,
+            &mut state,
+        );
+        let _ = process_playback_event(
+            PlaybackEvent::Error(PlaybackError {
+                path: Some(path),
+                detail: "Resource not found.".to_string(),
+                outcome: PlaybackErrorOutcome::Stopped,
+            }),
+            &analysis,
+            &metadata,
+            &event_tx,
+            &mut state,
+        );
+
+        // The spectrogram tries the file and clears what it shows; anything
+        // it reported about the file would follow within a moment.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut events = Vec::new();
+        let mut cleared_at = None;
+        while cleared_at
+            .is_none_or(|at| at + Duration::from_millis(300) > std::time::Instant::now())
+        {
+            assert!(std::time::Instant::now() < deadline, "{events:?}");
+            let _ = drain_analysis_events(&analysis_rx, &event_tx, &mut state);
+            for event in event_rx.try_iter() {
+                if matches!(&event, BridgeEvent::PrecomputedSpectrogramChunk(chunk)
+                    if chunk.track_token == 1 && chunk.buffer_reset)
+                {
+                    cleared_at.get_or_insert_with(std::time::Instant::now);
+                }
+                events.push(event);
+            }
+            std::thread::yield_now();
+        }
+        let errors: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(message) => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            errors,
+            ["Couldn't play \u{201c}gone.flac\u{201d} (Resource not found); playback stopped."]
         );
     }
 

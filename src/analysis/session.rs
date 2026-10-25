@@ -315,8 +315,9 @@ pub(super) enum SessionReport {
         stamp: Option<WaveformSourceStamp>,
         format: Option<TrackFormat>,
     },
-    /// The session could not read `path` and ended after resetting the
-    /// spectral stream.
+    /// The session could not read the audio of `path`, which it could
+    /// open, and ended after resetting the spectral stream.  A file that
+    /// cannot be opened at all is not reported: playback reports it.
     Failed {
         generation: u64,
         track_token: u64,
@@ -1026,6 +1027,10 @@ fn run_spectrogram_session(
     let Some((mut source, native_sample_rate, native_channels, total_columns)) =
         open_audio_file(path)
     else {
+        let cause = match std::fs::File::open(path) {
+            Err(error) => FailureCause::Unopenable(error),
+            Ok(_) => FailureCause::Analysis("its audio could not be read".to_string()),
+        };
         fail_session(
             event_tx,
             reports,
@@ -1034,7 +1039,7 @@ fn run_spectrogram_session(
                 track_token,
                 channel_count: requested_channel_count,
                 path: path.clone(),
-                error: "its audio could not be read".to_string(),
+                cause,
             },
         );
         return None;
@@ -1105,7 +1110,7 @@ fn run_spectrogram_session(
                     track_token,
                     channel_count: actual_channel_count,
                     path: path.clone(),
-                    error: format!("seeking failed ({error})"),
+                    cause: FailureCause::Analysis(format!("seeking failed ({error})")),
                 },
             );
             return None;
@@ -1334,22 +1339,42 @@ struct SessionFailure {
     track_token: u64,
     channel_count: usize,
     path: PathBuf,
-    error: String,
+    cause: FailureCause,
+}
+
+/// Why a session cannot read its file.
+enum FailureCause {
+    /// The file cannot be opened at all, which playback reports itself.
+    Unopenable(std::io::Error),
+    /// The spectrogram cannot read audio that playback may play.
+    Analysis(String),
 }
 
 /// End a session that cannot read its file: clear what the UI shows of it,
-/// as a far seek does, and tell the analysis thread, which tells the user.
-/// The worker waits for the next session, which may read its file.
+/// as a far seek does, and tell the analysis thread, which tells the user
+/// unless playback does. The worker waits for the next session, which may
+/// read its file.
 fn fail_session(
     event_tx: &dyn AnalysisEventOutput,
     reports: &Sender<SessionReport>,
     failure: SessionFailure,
 ) {
-    eprintln!(
-        "[analysis] spectrogram of {} failed: {}",
-        failure.path.display(),
-        failure.error
-    );
+    let error = match failure.cause {
+        FailureCause::Unopenable(error) => {
+            eprintln!(
+                "[analysis] spectrogram cannot open {}: {error}",
+                failure.path.display()
+            );
+            None
+        }
+        FailureCause::Analysis(error) => {
+            eprintln!(
+                "[analysis] spectrogram of {} failed: {error}",
+                failure.path.display()
+            );
+            Some(error)
+        }
+    };
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token: failure.track_token,
@@ -1368,12 +1393,14 @@ fn fail_session(
             clear_history: true,
         },
     ));
-    let _ = reports.send(SessionReport::Failed {
-        generation: failure.generation,
-        track_token: failure.track_token,
-        path: failure.path,
-        error: failure.error,
-    });
+    if let Some(error) = error {
+        let _ = reports.send(SessionReport::Failed {
+            generation: failure.generation,
+            track_token: failure.track_token,
+            path: failure.path,
+            error,
+        });
+    }
 }
 
 impl SpectrogramSessionState {
@@ -1391,7 +1418,7 @@ impl SpectrogramSessionState {
                 track_token: self.track_token,
                 channel_count: self.channel_count,
                 path: self.path.clone(),
-                error,
+                cause: FailureCause::Analysis(error),
             },
         );
     }
