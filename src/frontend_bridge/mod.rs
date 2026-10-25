@@ -3470,6 +3470,56 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_editor_rename_shows_what_the_rename_read() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (_library_tx, library_rx) = unbounded();
+        runtime.library_rx = library_rx;
+        let (event_tx, event_rx) = unbounded();
+        let (dir, _) = rename_fixture("tag-editor-rename", &[]);
+        let old = dir.join("01 - Old.flac");
+        crate::tag_write::write_test_flac(&old, &[("TITLE", "New"), ("TRACKNUMBER", "1")]);
+        crate::library::index_tracks_for_test(&dir, std::slice::from_ref(&old));
+        // The bridge's copy of the library predates the last save.
+        runtime.state.library = Arc::new(LibrarySnapshot {
+            roots: vec![LibraryRoot {
+                path: dir.clone(),
+                name: String::new(),
+            }],
+            tracks: vec![LibraryTrack {
+                path: old.clone(),
+                root_path: dir.clone(),
+                title: "Old".to_string(),
+                ..LibraryTrack::default()
+            }],
+            ..LibrarySnapshot::default()
+        });
+        runtime.state.queue = vec![old.clone()];
+        let loaded = crate::tag_editor::serialize_load_response(
+            &crate::tag_editor::load_rows_for_paths(std::slice::from_ref(&old)),
+        )
+        .expect("rows");
+        let request = crate::tag_editor::parse_rename_request(&loaded).expect("request");
+
+        let response = ffi::rename_through_gate(&runtime.imports.gate(), request);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        let new = dir.join("01 - New.flac");
+        assert_eq!(
+            response.successful_paths,
+            vec![new.to_string_lossy().into_owned()]
+        );
+        assert_eq!(runtime.state.queue, vec![new.clone()]);
+        let track = &runtime.state.library.tracks[0];
+        assert_eq!(
+            (&track.path, track.title.as_str(), track.track_no),
+            (&new, "New", Some(1))
+        );
+        assert!(error_messages(&event_rx).is_empty());
+        std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
+    #[test]
     fn queued_files_are_checked_after_events_and_never_while_idle() {
         use crate::playback::{PlaybackEvent, TrackChangeKind};
 

@@ -2384,6 +2384,40 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_reports_the_files_it_could_not_read() {
+        let (analysis_tx, _analysis_rx) = crossbeam_channel::unbounded();
+        let analysis = AnalysisEngine::from_command_sender(analysis_tx);
+        let (metadata, _metadata_rx) = MetadataService::new();
+        let (engine_tx, _engine_rx) = crossbeam_channel::unbounded();
+        let playback = PlaybackEngine::from_command_sender(engine_tx);
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (old, new) = (p("/music/old.flac"), p("/music/new.flac"));
+        let mut state = BridgeState {
+            queue: vec![old.clone()],
+            ..BridgeState::default()
+        };
+
+        assert!(refresh_renamed_paths(
+            &mut state,
+            Arc::new(PathRenames::from([(old, new.clone())])),
+            RenamedDetails {
+                problem: Some("could not read the tags of 1 file".to_string()),
+                ..RenamedDetails::default()
+            },
+            &playback,
+            &analysis,
+            &metadata,
+            &event_tx,
+        ));
+
+        assert_eq!(state.queue, vec![new]);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(BridgeEvent::Error(message)) if message == "could not read the tags of 1 file"
+        ));
+    }
+
+    #[test]
     fn a_swap_moves_each_file_once() {
         let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded();
         let analysis = AnalysisEngine::from_command_sender(analysis_tx);

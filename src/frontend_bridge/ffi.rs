@@ -1568,18 +1568,27 @@ pub unsafe extern "C" fn ferrous_ffi_rename_gate_rename(
         // SAFETY: The caller guarantees `len` readable bytes at `data`.
         let blob = unsafe { input_bytes(data, len) }?;
         let request = tag_editor::parse_rename_request(blob).ok()?;
-        // A panic in the rename still finishes it in the gate, so imports
-        // waiting for it go on.
-        let response = gate.gate.rename_with_details(|| {
-            let (response, refresh) = tag_editor::rename_rows_with_refresh(request);
-            let renames = renamed_paths(&response);
-            let details = renamed_details(&renames, refresh);
-            (response, renames, details)
-        });
+        let response = rename_through_gate(&gate.gate, request);
         tag_editor::serialize_rename_response(&response).ok()
     };
     // SAFETY: The caller guarantees that `len_out` is null or writable.
     unsafe { tag_editor_call("ferrous_ffi_rename_gate_rename", len_out, request) }
+}
+
+/// Rename files for the tag editor, and tell the bridge through `gate` which
+/// files moved and what the rename read from them.
+pub(super) fn rename_through_gate(
+    gate: &ImportGate,
+    request: tag_editor::RenameRequest,
+) -> tag_editor::RenameResponse {
+    // A panic in the rename still finishes it in the gate, so imports
+    // waiting for it go on.
+    gate.rename_with_details(|| {
+        let (response, refresh) = tag_editor::rename_rows_with_refresh(request);
+        let renames = renamed_paths(&response);
+        let details = renamed_details(&renames, refresh);
+        (response, renames, details)
+    })
 }
 
 /// What the bridge needs to know about the files in `renames` at their new
