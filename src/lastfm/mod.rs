@@ -402,6 +402,10 @@ struct Service {
     queue: Vec<ScrobbleEntry>,
     /// Problem found while loading the queue file, shown for the session.
     queue_load_notice: Option<String>,
+    /// Why the queue file could not be read at startup. Saving stays off
+    /// while this is set, so that a file that may still hold scrobbles is
+    /// not replaced, and every queued scrobble exists only in memory.
+    queue_unreadable: Option<String>,
     /// Most recent failure to save the queue, until a save succeeds.
     queue_save_error: Option<String>,
     session: Option<Session>,
@@ -569,6 +573,7 @@ impl Service {
             queue_path: options.queue_path,
             queue: Vec::new(),
             queue_load_notice: None,
+            queue_unreadable: None,
             queue_save_error: None,
             session: None,
             pending_auth: None,
@@ -610,10 +615,10 @@ impl Service {
                     path.display()
                 );
                 // Saving now would replace a file that may still hold scrobbles.
-                self.queue_path = None;
+                self.queue_unreadable = Some(error.clone());
                 self.queue_load_notice = Some(format!(
                     "Saved scrobbles in {} could not be read ({error}). New scrobbles \
-                     will not be saved until Ferrous restarts.",
+                     are kept in memory only; Ferrous tries to save them again when it quits.",
                     path.display()
                 ));
             }
@@ -934,44 +939,103 @@ impl Service {
         self.state.status_text = message.to_string();
     }
 
-    /// Saves the queue if the last save failed. Every change to the queue
-    /// is saved, so it differs from the file only after a failed save.
+    /// Saves the queue if it is not on disk: after a failed save, or while
+    /// the queue file is unreadable. Every change to the queue is saved, so
+    /// it differs from the file only then. Fails with the number of
+    /// scrobbles that exist only in memory if they still cannot be saved.
     fn save_unsaved_queue(&mut self) -> Result<(), String> {
-        if self.queue_save_error.is_none() {
-            return Ok(());
+        if self.queue_unreadable.is_some() {
+            self.save_beside_unreadable_queue();
+        } else if self.queue_save_error.is_some() {
+            self.save_queue();
         }
-        self.save_queue();
-        match &self.queue_save_error {
-            None => Ok(()),
-            Some(error) => Err(format!(
-                "Last.fm: {} {} lost on quit. {error}",
-                self.queue.len(),
-                if self.queue.len() == 1 {
-                    "scrobble was"
-                } else {
-                    "scrobbles were"
-                }
-            )),
+        let problem = match (&self.queue_unreadable, &self.queue_save_error) {
+            (_, Some(error)) => error.clone(),
+            (Some(error), None) if !self.queue.is_empty() => format!(
+                "Saved scrobbles in {} could not be read ({error}), so new ones were not saved.",
+                self.queue_path
+                    .as_deref()
+                    .map_or_else(String::new, |path| path.display().to_string())
+            ),
+            _ => return Ok(()),
+        };
+        Err(format!(
+            "Last.fm: {} {} lost on quit. {problem}",
+            self.queue.len(),
+            if self.queue.len() == 1 {
+                "scrobble was"
+            } else {
+                "scrobbles were"
+            }
+        ))
+    }
+
+    /// Reads the queue file that could not be read at startup again, and
+    /// saves the scrobbles held in memory after the ones it holds. The file
+    /// is replaced only once its contents were read or moved aside, so
+    /// nothing in it is lost. While it is still unreadable, the scrobbles
+    /// stay in memory only.
+    fn save_beside_unreadable_queue(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let Some(path) = self.queue_path.clone() else {
+            return;
+        };
+        let mut merged = match queue_file::load(&path) {
+            LoadOutcome::Loaded(saved) => saved,
+            LoadOutcome::MovedAside { moved_to, reason } => {
+                eprintln!(
+                    "Last.fm: scrobble queue {} is not valid ({reason}); moved it to {}",
+                    path.display(),
+                    moved_to.display()
+                );
+                Vec::new()
+            }
+            LoadOutcome::Unavailable { error } => {
+                eprintln!(
+                    "Last.fm: still cannot load scrobble queue {}: {error}",
+                    path.display()
+                );
+                self.queue_unreadable = Some(error);
+                return;
+            }
+        };
+        merged.extend_from_slice(&self.queue);
+        match queue_file::save(&path, &merged) {
+            Ok(()) => {
+                self.queue = merged;
+                self.queue_unreadable = None;
+                self.queue_save_error = None;
+            }
+            // The file was read but not replaced, so only the scrobbles in
+            // memory are unsaved.
+            Err(err) => self.record_save_error(&path, &err),
         }
     }
 
     fn save_queue(&mut self) {
-        let Some(path) = self.queue_path.as_ref() else {
+        if self.queue_unreadable.is_some() {
+            return;
+        }
+        let Some(path) = self.queue_path.clone() else {
             return;
         };
-        match queue_file::save(path, &self.queue) {
+        match queue_file::save(&path, &self.queue) {
             Ok(()) => self.queue_save_error = None,
-            Err(err) => {
-                eprintln!(
-                    "Last.fm: failed to save scrobble queue {}: {err}",
-                    path.display()
-                );
-                self.queue_save_error = Some(format!(
-                    "Pending scrobbles could not be saved to {} ({err}).",
-                    path.display()
-                ));
-            }
+            Err(err) => self.record_save_error(&path, &err),
         }
+    }
+
+    fn record_save_error(&mut self, path: &Path, err: &std::io::Error) {
+        eprintln!(
+            "Last.fm: failed to save scrobble queue {}: {err}",
+            path.display()
+        );
+        self.queue_save_error = Some(format!(
+            "Pending scrobbles could not be saved to {} ({err}).",
+            path.display()
+        ));
     }
 }
 
@@ -2423,6 +2487,126 @@ mod tests {
             }
             other => panic!("expected a save failure, got {other:?}"),
         }
+    }
+
+    /// A directory in place of the queue file, which cannot be read,
+    /// parsed or replaced, holding a marker file.
+    fn unreadable_queue(dir: &Path) -> PathBuf {
+        let queue_path = dir.join("lastfm_queue.json");
+        fs::create_dir(&queue_path).expect("create directory at queue path");
+        fs::write(queue_path.join("keep.txt"), b"keep").expect("write marker");
+        queue_path
+    }
+
+    fn assert_unreadable_queue_kept(queue_path: &Path) {
+        assert!(queue_path.is_dir());
+        assert_eq!(
+            fs::read(queue_path.join("keep.txt")).expect("marker"),
+            b"keep"
+        );
+    }
+
+    /// Shuts `service` down through its loop and returns what it reported.
+    fn shut_down(service: Service) -> Result<(), String> {
+        let (cmd_tx, cmd_rx) = unbounded();
+        let (event_tx, _event_rx) = unbounded();
+        let (done_tx, done_rx) = bounded(1);
+        cmd_tx
+            .send(Command::Shutdown(done_tx))
+            .expect("queue shutdown");
+        run_service_loop(&cmd_rx, &event_tx, service);
+        done_rx.try_recv().expect("shutdown result")
+    }
+
+    fn service_with_unreadable_queue(queue_path: &Path) -> Service {
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: Some(queue_path.to_path_buf()),
+                initial_enabled: false,
+            },
+            backends(&ScriptedTransport::default(), MemorySessionKeys::default()),
+        );
+        service.handle_command(Command::QueueScrobble(entry(1)));
+        service
+    }
+
+    #[test]
+    fn shutdown_reports_scrobbles_held_in_memory_after_the_queue_failed_to_load() {
+        let dir = scratch_dir("shutdown-unreadable");
+        let queue_path = unreadable_queue(&dir);
+        let (handle, events) =
+            test_support::spawn_connected(test_support::OfflineTransport, queue_path.clone());
+        handle.command(Command::QueueScrobble(entry(0)));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut offline = false;
+        while let Ok(Event::State(state)) = events.recv_deadline(deadline) {
+            if state.status_text.contains("retrying in") {
+                // Saving stays visibly off.
+                assert!(
+                    state.status_text.contains("could not be read"),
+                    "{}",
+                    state.status_text
+                );
+                assert_eq!(state.pending_scrobble_count, 1);
+                offline = true;
+                break;
+            }
+        }
+        assert!(offline, "the scrobble was not attempted");
+
+        match handle.shutdown(Duration::from_secs(5)) {
+            ShutdownOutcome::SaveFailed(message) => {
+                assert!(message.contains("1 scrobble was lost"), "{message}");
+                assert!(message.contains("could not be read"), "{message}");
+            }
+            other => panic!("expected a save failure, got {other:?}"),
+        }
+        assert_unreadable_queue_kept(&queue_path);
+    }
+
+    #[test]
+    fn shutdown_without_scrobbles_leaves_an_unreadable_queue_alone() {
+        let dir = scratch_dir("shutdown-unreadable-empty");
+        let queue_path = unreadable_queue(&dir);
+        let service = Service::new(
+            ServiceOptions {
+                queue_path: Some(queue_path.clone()),
+                initial_enabled: false,
+            },
+            backends(&ScriptedTransport::default(), MemorySessionKeys::default()),
+        );
+
+        assert_eq!(shut_down(service), Ok(()));
+        assert_unreadable_queue_kept(&queue_path);
+    }
+
+    #[test]
+    fn shutdown_adds_scrobbles_held_in_memory_to_a_queue_file_readable_again() {
+        let dir = scratch_dir("shutdown-readable-again");
+        let queue_path = unreadable_queue(&dir);
+        let service = service_with_unreadable_queue(&queue_path);
+        // Fixed while Ferrous ran: the file holds an earlier scrobble.
+        fs::remove_dir_all(&queue_path).expect("remove the unreadable queue");
+        queue_file::save(&queue_path, &[entry(0)]).expect("write the earlier queue");
+
+        assert_eq!(shut_down(service), Ok(()));
+        assert_eq!(read_queue_file(&queue_path), entries(0..2));
+    }
+
+    #[test]
+    fn shutdown_moves_an_invalid_queue_file_aside_before_saving() {
+        let dir = scratch_dir("shutdown-invalid-again");
+        let queue_path = unreadable_queue(&dir);
+        let service = service_with_unreadable_queue(&queue_path);
+        fs::remove_dir_all(&queue_path).expect("remove the unreadable queue");
+        fs::write(&queue_path, b"not json").expect("write an invalid queue");
+
+        assert_eq!(shut_down(service), Ok(()));
+        assert_eq!(read_queue_file(&queue_path), vec![entry(1)]);
+        assert_eq!(
+            fs::read(dir.join("lastfm_queue.json.corrupt")).expect("kept copy"),
+            b"not json"
+        );
     }
 
     #[test]
