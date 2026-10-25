@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
+
+use crate::playback::{remap_path, PathRenames};
 
 pub(super) const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 pub(super) const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
@@ -233,6 +235,37 @@ pub(super) fn insert_waveform_cache_entry(
     }
 }
 
+/// Keep each cached waveform with its file when files are renamed. All
+/// entries move at once, so in a swap neither file takes the other's, and
+/// an entry at a path that another file was renamed to is dropped.
+pub(super) fn remap_waveform_cache_entries(
+    cache: &mut HashMap<PathBuf, WaveformCacheEntry>,
+    lru: &mut VecDeque<PathBuf>,
+    renames: &PathRenames,
+) {
+    let moved: Vec<_> = renames
+        .iter()
+        .filter_map(|(old, new)| Some((new.clone(), cache.remove(old)?)))
+        .collect();
+    for new in renames.values() {
+        cache.remove(new);
+    }
+    cache.extend(moved);
+    // Keep the latest use of each path that still has an entry.
+    let mut kept = HashSet::new();
+    let mut order: Vec<_> = lru
+        .drain(..)
+        .rev()
+        .map(|mut path| {
+            remap_path(&mut path, renames);
+            path
+        })
+        .filter(|path| cache.contains_key(path) && kept.insert(path.clone()))
+        .collect();
+    order.reverse();
+    lru.extend(order);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +284,45 @@ mod tests {
         conn.execute("UPDATE waveform_cache SET format_version = 1", [])
             .expect("legacy version");
         assert!(load_waveform_from_db(&conn, path, stamp).is_none());
+    }
+
+    #[test]
+    fn cached_waveforms_follow_their_files_through_renames() {
+        let (a, b, c, d) = (
+            PathBuf::from("/music/a.flac"),
+            PathBuf::from("/music/b.flac"),
+            PathBuf::from("/music/c.flac"),
+            PathBuf::from("/music/d.flac"),
+        );
+        // The same stamp, so only the path tells the entries apart.
+        let entry = |peak| WaveformCacheEntry {
+            stamp: Some(WaveformSourceStamp {
+                size_bytes: 10,
+                modified_secs: 1,
+                modified_nanos: 0,
+            }),
+            peaks: vec![peak],
+        };
+        let mut cache = HashMap::new();
+        let mut lru = VecDeque::new();
+        for (path, peak) in [(&a, 0.1), (&b, 0.2), (&c, 0.3), (&d, 0.4)] {
+            insert_waveform_cache_entry(&mut cache, &mut lru, path, entry(peak));
+        }
+
+        // A and B swap; D is renamed onto C, whose file it replaces.
+        let renames = PathRenames::from([
+            (a.clone(), b.clone()),
+            (b.clone(), a.clone()),
+            (d.clone(), c.clone()),
+        ]);
+        remap_waveform_cache_entries(&mut cache, &mut lru, &renames);
+
+        let peaks = |path: &PathBuf| cache.get(path).map(|entry| entry.peaks.clone());
+        assert_eq!(peaks(&a), Some(vec![0.2]));
+        assert_eq!(peaks(&b), Some(vec![0.1]));
+        assert_eq!(peaks(&c), Some(vec![0.4]));
+        assert_eq!(peaks(&d), None);
+        assert_eq!(lru, VecDeque::from([b, a, c]));
     }
 
     #[test]

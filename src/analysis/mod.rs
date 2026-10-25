@@ -35,9 +35,9 @@ use symphonia::core::audio::SampleBuffer;
 
 use cache::{
     insert_waveform_cache_entry, load_waveform_from_db, open_waveform_cache_db,
-    persist_waveform_to_db, prune_persistent_waveform_cache, touch_waveform_cache_lru,
-    usize_to_u64, WaveformCacheEntry, WaveformSourceStamp, PERSISTENT_WAVEFORM_CACHE_MAX_ROWS,
-    PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL,
+    persist_waveform_to_db, prune_persistent_waveform_cache, remap_waveform_cache_entries,
+    touch_waveform_cache_lru, usize_to_u64, WaveformCacheEntry, WaveformSourceStamp,
+    PERSISTENT_WAVEFORM_CACHE_MAX_ROWS, PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL,
 };
 use decoders::{open_symphonia_file, SymphoniaFile};
 use fft::{ensure_sample_buffer, peak_across_channels, WaveformAccumulator};
@@ -54,6 +54,7 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use crate::playback::{remap_path, PathRenames};
 use crate::profile_logging::heartbeat_trace_enabled;
 #[cfg(feature = "gst")]
 use crate::raw_audio::is_raw_surround_file;
@@ -119,6 +120,11 @@ pub enum AnalysisCommand {
     /// Used when a `SetTrack` or stop follows immediately, superseding
     /// the worker session via generation or stopping playback.
     ClearStagedContinuation,
+    /// Files were renamed on disk: each old path maps to its new one. The
+    /// audio is the same, so the analysis shown stays, and later decodes
+    /// open the files at their new paths. The whole map applies at once, so
+    /// a swap moves each path once.
+    RemapPaths(Arc<PathRenames>),
     /// Stop the analysis threads. Only the engine sends this, when it is
     /// dropped; commands sent after it are ignored.
     Shutdown,
@@ -461,6 +467,19 @@ impl AnalysisEngine {
             .count()
     }
 
+    /// An engine whose commands go to `tx` instead of analysis threads.
+    #[cfg(test)]
+    pub(crate) fn from_command_sender(tx: Sender<AnalysisCommand>) -> Self {
+        Self {
+            tx,
+            spectral_tx: unbounded().0,
+            pending_resets: Arc::new(AtomicUsize::new(0)),
+            closed: Arc::new(AtomicBool::new(false)),
+            spectrogram_decode_generation: Arc::new(AtomicU64::new(0)),
+            threads: Vec::new(),
+        }
+    }
+
     /// How many of the engine's threads are still running.
     #[cfg(test)]
     fn running_threads(&self) -> usize {
@@ -739,6 +758,7 @@ impl AnalysisRuntimeState {
                 self.clear_early_continuation(ctx);
                 self.cancel_centered_staging();
             }
+            AnalysisCommand::RemapPaths(renames) => self.remap_paths(renames, ctx),
             AnalysisCommand::Shutdown => {
                 // Ends any decode session a command before this one started.
                 ctx.spectrogram_decode_generation
@@ -746,6 +766,32 @@ impl AnalysisRuntimeState {
                 self.cancel_centered_staging();
             }
         }
+    }
+
+    /// Follow files renamed on disk without restarting anything: a later
+    /// restart of the current track, or a staged successor, opens the file
+    /// at its new path, and cached waveforms stay with their files.
+    fn remap_paths(&mut self, renames: Arc<PathRenames>, ctx: &AnalysisContext<'_>) {
+        for path in [
+            &mut self.active_track_path,
+            &mut self.staged_continuation_path,
+            &mut self.staged_centered_path,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            remap_path(path, &renames);
+        }
+        remap_waveform_cache_entries(
+            &mut self.waveform_cache,
+            &mut self.waveform_cache_lru,
+            &renames,
+        );
+        // The worker opens a gapless continuation, or a session it has not
+        // started yet, later.
+        let _ = ctx
+            .spectrogram_cmd_tx
+            .send(SpectrogramWorkerCommand::RemapPaths(renames));
     }
 
     fn set_spectrogram_active(&mut self, active: bool, ctx: &AnalysisContext<'_>) {
@@ -4434,5 +4480,361 @@ mod tests {
             state.spectrogram_position_offset, 0.0,
             "zoom restart should clear stale rolling gapless offset"
         );
+    }
+
+    /// Channels and counters for driving `AnalysisRuntimeState` directly.
+    struct TestChannels {
+        event_tx: Sender<AnalysisEvent>,
+        event_rx: Receiver<AnalysisEvent>,
+        spectrogram_cmd_tx: Sender<SpectrogramWorkerCommand>,
+        spectrogram_cmd_rx: Receiver<SpectrogramWorkerCommand>,
+        waveform_job_tx: Sender<WaveformDecodeJob>,
+        waveform_decode_active_token: AtomicU64,
+        generation: AtomicU64,
+        columns_produced: AtomicU64,
+        track_duration_ms: AtomicU64,
+    }
+
+    impl TestChannels {
+        fn new() -> Self {
+            let (event_tx, event_rx) = unbounded();
+            let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded();
+            Self {
+                event_tx,
+                event_rx,
+                spectrogram_cmd_tx,
+                spectrogram_cmd_rx,
+                waveform_job_tx: unbounded().0,
+                waveform_decode_active_token: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
+                columns_produced: AtomicU64::new(0),
+                track_duration_ms: AtomicU64::new(0),
+            }
+        }
+
+        fn ctx(&self) -> AnalysisContext<'_> {
+            AnalysisContext {
+                event_tx: &self.event_tx,
+                waveform_job_tx: &self.waveform_job_tx,
+                waveform_decode_active_token: &self.waveform_decode_active_token,
+                spectrogram_cmd_tx: &self.spectrogram_cmd_tx,
+                spectrogram_decode_generation: &self.generation,
+                spectrogram_decode_columns_produced: &self.columns_produced,
+                spectrogram_track_duration_ms: &self.track_duration_ms,
+            }
+        }
+
+        /// The files of the sessions sent to the worker since the last call.
+        fn opened_paths(&self) -> Vec<PathBuf> {
+            self.spectrogram_cmd_rx
+                .try_iter()
+                .filter_map(|cmd| match cmd {
+                    SpectrogramWorkerCommand::NewTrack { path, .. } => Some(path),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    /// Analysis of `path` playing as track 1, with its waveform shown.
+    fn playing_state(mode: SpectrogramDisplayMode, path: &Path) -> AnalysisRuntimeState {
+        let mut state = AnalysisRuntimeState::new();
+        state.waveform_db = None;
+        state.display_mode = mode;
+        state.active_track_path = Some(path.to_path_buf());
+        state.active_track_token = 1;
+        state.active_session_effective_rate = 48_000;
+        state.active_session_channel_count = 1;
+        state.snapshot.waveform_peaks = vec![0.5; 4];
+        state.snapshot.waveform_complete = true;
+        state
+    }
+
+    fn remap(pairs: &[(&Path, &Path)]) -> AnalysisCommand {
+        AnalysisCommand::RemapPaths(Arc::new(
+            pairs
+                .iter()
+                .map(|(old, new)| (old.to_path_buf(), new.to_path_buf()))
+                .collect(),
+        ))
+    }
+
+    const MODES: [SpectrogramDisplayMode; 2] = [
+        SpectrogramDisplayMode::Rolling,
+        SpectrogramDisplayMode::Centered,
+    ];
+
+    #[test]
+    fn a_renamed_current_track_keeps_its_analysis_and_restarts_from_its_new_path() {
+        let (old, new) = (Path::new("/music/old.flac"), Path::new("/music/new.flac"));
+        for mode in MODES {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            let mut state = playing_state(mode, old);
+
+            state.handle_command(remap(&[(old, new)]), &ctx);
+            // The audio is the same, so nothing restarts or clears.
+            assert!(matches!(
+                channels.spectrogram_cmd_rx.try_recv(),
+                Ok(SpectrogramWorkerCommand::RemapPaths(_))
+            ));
+            assert!(channels.spectrogram_cmd_rx.try_recv().is_err(), "{mode:?}");
+            assert!(channels.event_rx.try_recv().is_err(), "{mode:?}");
+            assert_eq!(channels.generation.load(Ordering::Relaxed), 0);
+            assert_eq!(state.active_track_token, 1);
+            assert_eq!(state.snapshot.waveform_peaks, vec![0.5; 4]);
+
+            // A seek out of the decoded window, a zoom change, and Stop
+            // then Play. A rolling seek stays in the open file.
+            state.handle_command(AnalysisCommand::SeekPosition(500.0), &ctx);
+            state.handle_command(AnalysisCommand::SetSpectrogramZoomLevel(2.0), &ctx);
+            state.handle_command(
+                AnalysisCommand::RestartCurrentTrack {
+                    position_seconds: 0.0,
+                    clear_history: true,
+                },
+                &ctx,
+            );
+            let restarts = if mode == SpectrogramDisplayMode::Centered {
+                3
+            } else {
+                2
+            };
+            assert_eq!(
+                channels.opened_paths(),
+                vec![new.to_path_buf(); restarts],
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn restarts_decode_a_renamed_current_track_from_its_new_path() {
+        for mode in MODES {
+            let old = write_engine_test_wave(4, 8_000);
+            let new = old.with_extension("renamed.wav");
+            let generation = Arc::new(AtomicU64::new(0));
+            let (spectral_tx, spectral_rx) = unbounded();
+            let (engine, _event_rx) =
+                AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
+                    sender: spectral_tx,
+                    generation: Arc::clone(&generation),
+                }));
+            let wait_for_columns = |after_generation: u64| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "{mode:?}: no columns after generation {after_generation}"
+                    );
+                    if let Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) =
+                        spectral_rx.recv_timeout(Duration::from_millis(20))
+                    {
+                        if chunk.generation > after_generation && chunk.column_count > 0 {
+                            assert_eq!(chunk.track_token, 1);
+                            return;
+                        }
+                    }
+                }
+            };
+            engine.command(AnalysisCommand::SetSpectrogramDisplayMode(mode));
+            engine.command(AnalysisCommand::SetTrack {
+                path: old.clone(),
+                reset_spectrogram: true,
+                track_token: 1,
+                gapless: false,
+            });
+            wait_for_columns(0);
+
+            std::fs::rename(&old, &new).unwrap();
+            engine.command(remap(&[(&old, &new)]));
+            for command in [
+                AnalysisCommand::SetSpectrogramZoomLevel(2.0),
+                AnalysisCommand::RestartCurrentTrack {
+                    position_seconds: 0.0,
+                    clear_history: true,
+                },
+            ] {
+                let previous = generation.load(Ordering::Relaxed);
+                engine.command(command);
+                wait_for_columns(previous);
+            }
+            drop(engine);
+            std::fs::remove_file(new).unwrap();
+        }
+    }
+
+    fn staged_chunk() -> PrecomputedSpectrogramChunk {
+        PrecomputedSpectrogramChunk {
+            track_token: 0,
+            generation: 0,
+            columns_u8: vec![0; 12],
+            bins_per_column: 4,
+            column_count: 3,
+            channel_count: 1,
+            start_column_index: 0,
+            total_columns_estimate: 100,
+            sample_rate_hz: 48_000,
+            hop_size: 1024,
+            coverage_seconds: 0.0,
+            complete: false,
+            buffer_reset: false,
+            clear_history: false,
+        }
+    }
+
+    /// Stage `path` as the successor, as `PrepareGaplessContinuation` does
+    /// in `state`'s display mode.
+    fn stage_successor(state: &mut AnalysisRuntimeState, path: &Path) {
+        if state.display_mode == SpectrogramDisplayMode::Rolling {
+            state.staged_continuation_path = Some(path.to_path_buf());
+        } else {
+            let (tx, rx) = unbounded();
+            tx.send(staged_chunk()).unwrap();
+            state.staged_centered_rx = Some(rx);
+            state.staged_centered_stop = Some(Arc::new(AtomicBool::new(false)));
+            state.staged_centered_path = Some(path.to_path_buf());
+        }
+    }
+
+    /// Check that the gapless switch to track 2 used what was staged, and
+    /// return the files of the sessions it started.
+    fn assert_successor_continued(
+        channels: &TestChannels,
+        mode: SpectrogramDisplayMode,
+    ) -> Vec<PathBuf> {
+        let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+        if mode == SpectrogramDisplayMode::Rolling {
+            assert!(
+                matches!(
+                    commands.as_slice(),
+                    [SpectrogramWorkerCommand::UpdateTrackToken { track_token: 2 }]
+                ),
+                "the continuation must not be sent again: {commands:?}"
+            );
+            return Vec::new();
+        }
+        let staged = channels
+            .event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                AnalysisEvent::PrecomputedSpectrogramChunk(chunk) if chunk.column_count > 0 => {
+                    Some(chunk)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(staged.as_slice(), [chunk] if chunk.track_token == 2 && chunk.buffer_reset),
+            "the staged columns must be shown: {staged:?}"
+        );
+        commands
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                SpectrogramWorkerCommand::NewTrack {
+                    path,
+                    emit_initial_reset,
+                    ..
+                } => {
+                    assert!(!emit_initial_reset, "the staged columns were reset");
+                    Some(path)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_renamed_successor_is_continued_at_its_new_path() {
+        let (a, a_new) = (Path::new("/music/a.flac"), Path::new("/music/01 a.flac"));
+        let (b, b_new) = (Path::new("/music/b.flac"), Path::new("/music/02 b.flac"));
+        for mode in MODES {
+            // The next track, and Repeat-One, which plays the same file.
+            for (successor, successor_new) in [(b, b_new), (a, a_new)] {
+                let channels = TestChannels::new();
+                let ctx = channels.ctx();
+                let mut state = playing_state(mode, a);
+                stage_successor(&mut state, successor);
+
+                state.handle_command(remap(&[(a, a_new), (b, b_new)]), &ctx);
+                assert!(matches!(
+                    channels.spectrogram_cmd_rx.try_recv(),
+                    Ok(SpectrogramWorkerCommand::RemapPaths(_))
+                ));
+                // The engine reports the switch at the new path.
+                state.handle_command(
+                    AnalysisCommand::SetTrack {
+                        path: successor_new.to_path_buf(),
+                        reset_spectrogram: false,
+                        track_token: 2,
+                        gapless: true,
+                    },
+                    &ctx,
+                );
+                let opened = assert_successor_continued(&channels, mode);
+                assert!(
+                    opened.iter().all(|path| path == successor_new),
+                    "{opened:?}"
+                );
+
+                state.handle_command(
+                    AnalysisCommand::RestartCurrentTrack {
+                        position_seconds: 0.0,
+                        clear_history: true,
+                    },
+                    &ctx,
+                );
+                assert_eq!(channels.opened_paths(), vec![successor_new.to_path_buf()]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_swap_keeps_each_file_with_its_own_analysis() {
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        // The same stamp, so only the path tells the files apart.
+        let stamp = WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+        };
+        for mode in MODES {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            // The file at A plays, and the file at B is staged after it.
+            let mut state = playing_state(mode, a);
+            state.active_track_stamp = Some(stamp);
+            for (path, peak) in [(a, 0.1), (b, 0.2)] {
+                insert_waveform_cache_entry(
+                    &mut state.waveform_cache,
+                    &mut state.waveform_cache_lru,
+                    path,
+                    WaveformCacheEntry {
+                        stamp: Some(stamp),
+                        peaks: vec![peak],
+                    },
+                );
+            }
+            stage_successor(&mut state, b);
+
+            state.handle_command(remap(&[(a, b), (b, a)]), &ctx);
+            assert_eq!(state.active_track_path.as_deref(), Some(b));
+            assert_eq!(state.load_cached_waveform(b), Some(vec![0.1]));
+            assert_eq!(state.load_cached_waveform(a), Some(vec![0.2]));
+            let _ = channels.spectrogram_cmd_rx.try_recv();
+
+            // The staged file is at A now.
+            state.handle_command(
+                AnalysisCommand::SetTrack {
+                    path: a.to_path_buf(),
+                    reset_spectrogram: false,
+                    track_token: 2,
+                    gapless: true,
+                },
+                &ctx,
+            );
+            let opened = assert_successor_continued(&channels, mode);
+            assert!(opened.iter().all(|path| path == a), "{mode:?}: {opened:?}");
+        }
     }
 }

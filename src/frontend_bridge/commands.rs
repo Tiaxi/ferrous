@@ -1189,13 +1189,15 @@ fn refresh_edited_paths(
     changed
 }
 
-/// Apply one map of files renamed on disk to the library, the queue, and the
-/// engine. The whole map applies at once, so a swap or renumbering, where a
-/// file takes another renamed file's old name, renames each file exactly once.
+/// Apply one map of files renamed on disk to the library, the queue, the
+/// engine, and analysis. The whole map applies at once, so a swap or
+/// renumbering, where a file takes another renamed file's old name, renames
+/// each file exactly once.
 pub(super) fn refresh_renamed_paths(
     state: &mut BridgeState,
     rename_map: Arc<PathRenames>,
     playback: &PlaybackEngine,
+    analysis: &AnalysisEngine,
     metadata: &MetadataService,
     external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     event_tx: &Sender<BridgeEvent>,
@@ -1219,6 +1221,8 @@ pub(super) fn refresh_renamed_paths(
     state
         .unacknowledged_engine_renames
         .push_back(Arc::clone(&rename_map));
+    // Analysis reopens the current and staged files on later restarts.
+    analysis.command(AnalysisCommand::RemapPaths(Arc::clone(&rename_map)));
     playback.command(PlaybackCommand::RemapPaths(rename_map));
     changed
 }
@@ -2297,7 +2301,8 @@ mod tests {
         use crate::analysis::AnalysisEngine;
         use crate::playback::{PlaybackEvent, PlaybackState};
 
-        let (analysis, _analysis_rx) = AnalysisEngine::new();
+        let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded();
+        let analysis = AnalysisEngine::from_command_sender(analysis_tx);
         let (metadata, _metadata_rx) = MetadataService::new();
         let (engine_tx, engine_rx) = crossbeam_channel::unbounded();
         let playback = PlaybackEngine::from_command_sender(engine_tx);
@@ -2330,6 +2335,7 @@ mod tests {
             &mut state,
             Arc::new(renames.clone()),
             &playback,
+            &analysis,
             &metadata,
             &details_tx,
             &event_tx,
@@ -2349,6 +2355,10 @@ mod tests {
                 assert_eq!(*sent, renames);
             }
             other => panic!("expected a path remap for the engine, got {other:?}"),
+        }
+        match analysis_rx.try_recv() {
+            Ok(AnalysisCommand::RemapPaths(sent)) => assert_eq!(*sent, renames),
+            other => panic!("expected a path remap for analysis, got {other:?}"),
         }
 
         // Events the engine sent before applying the renames carry old paths.
@@ -2373,6 +2383,11 @@ mod tests {
             &mut state,
         );
         assert_eq!(state.last_track_change.path.as_ref(), Some(&new_next));
+        // Analysis is told the successor's new path, after the renames.
+        assert!(analysis_rx.try_iter().any(|command| matches!(
+            command,
+            AnalysisCommand::SetTrack { path, track_token: 3, .. } if path == new_next
+        )));
         while event_rx.try_recv().is_ok() {}
         let _ = process_playback_event(
             PlaybackEvent::Error(crate::playback::PlaybackError {
@@ -2414,6 +2429,8 @@ mod tests {
 
     #[test]
     fn a_swap_moves_each_file_once() {
+        let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded();
+        let analysis = AnalysisEngine::from_command_sender(analysis_tx);
         let (metadata, _metadata_rx) = MetadataService::new();
         let (engine_tx, engine_rx) = crossbeam_channel::unbounded();
         let playback = PlaybackEngine::from_command_sender(engine_tx);
@@ -2437,6 +2454,7 @@ mod tests {
             &mut state,
             Arc::new(swap.clone()),
             &playback,
+            &analysis,
             &metadata,
             &details_tx,
             &event_tx,
@@ -2451,6 +2469,11 @@ mod tests {
             Ok(PlaybackCommand::RemapPaths(sent)) if *sent == swap
         ));
         assert!(engine_rx.try_recv().is_err(), "one remap for the whole map");
+        assert!(matches!(
+            analysis_rx.try_recv(),
+            Ok(AnalysisCommand::RemapPaths(sent)) if *sent == swap
+        ));
+        assert!(analysis_rx.try_recv().is_err(), "one remap for analysis");
     }
 
     #[test]

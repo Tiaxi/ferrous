@@ -1291,6 +1291,7 @@ impl BridgeLoopRuntime {
             &mut self.state,
             renames,
             &self.playback,
+            &self.analysis,
             &self.metadata,
             &self.external_queue_details_tx,
             event_tx,
