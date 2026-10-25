@@ -997,7 +997,7 @@ BridgeClient::~BridgeClient() {
                 QStringLiteral("bridge"),
                 QStringLiteral("the backend did not stop cleanly before exiting; recent "
                                "settings, the queue, or Last.fm scrobbles may be missing, or "
-                               "playback left a file open whose read had not returned"));
+                               "playback left a file open that it could not close"));
         }
         m_ffiBridge = nullptr;
     }

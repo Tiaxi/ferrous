@@ -405,31 +405,32 @@ struct GstPlaybackRuntime {
     /// Shared with the about-to-finish callback, which activates the
     /// successor's source in it; see `SourceActivation`.
     source_activation: Arc<SourceActivation>,
-    /// Shared with the pipeline's file sources, which leave a read that has
-    /// not returned behind when they stop; see `file_source`.
+    /// Shared with the pipeline's file sources, which leave their files to
+    /// their readers to close when they stop; see `file_source`.
     releases: Arc<Releases>,
-    /// How long such a read may take before the user is told:
+    /// How long such a file may stay open before the user is told:
     /// `RELEASE_REPORT_AFTER`, which tests shorten.
     release_report_after: Duration,
     #[cfg(test)]
     about_to_finish: Arc<AboutToFinishCalls>,
 }
 
-/// How long a read that a file source left behind when it stopped may take
-/// before the engine tells the user that the file cannot be released.
+/// How long the file of a file source that stopped may stay open, behind a
+/// read in progress or in its close, before the engine tells the user that
+/// the file cannot be released.
 ///
-/// The read waits for a drive or a network share that does not answer, and
-/// playback has gone on without it, so this decides only when to report it.
-/// A sleeping hard disk spins up within about 10 s, and the kernel's SCSI
-/// layer times a command out after 30 s, so a read that has taken 15 s
-/// waits for a drive that did not wake up, or for a share that stopped
-/// answering, and the user hears of it before the kernel retries.
+/// The read or close waits for a drive or a network share that does not
+/// answer, and playback has gone on without it, so this decides only when
+/// to report it. A sleeping hard disk spins up within about 10 s, and the
+/// kernel's SCSI layer times a command out after 30 s, so a file still open
+/// after 15 s waits for a drive that did not wake up, or for a share that
+/// stopped answering, and the user hears of it before the kernel retries.
 const RELEASE_REPORT_AFTER: Duration = Duration::from_secs(15);
 
-/// How long the engine waits, when it stops, for the reads that its file
-/// sources left behind, before it reports their files as not released. A
-/// read that the storage answers takes milliseconds; this only keeps such a
-/// read from counting, within the bounded shutdown of the bridge.
+/// How long the engine waits, when it stops, for its file sources' readers
+/// to close their files, before it reports the files as not released. A
+/// read and a close that the storage answers take milliseconds; this only
+/// keeps them from counting, within the bounded shutdown of the bridge.
 const EXIT_RELEASE_WAIT: Duration = Duration::from_millis(200);
 
 pub fn spawn_engine(
@@ -1875,21 +1876,21 @@ impl GstPlaybackRuntime {
         }
     }
 
-    /// Tell the user about each file whose read, left behind by a source
-    /// that stopped, has not returned for `release_report_after` at `now`.
-    /// Playback has gone on without it; the file stays open.
+    /// Tell the user about each file of a source that stopped which has not
+    /// been closed for `release_report_after` at `now`, behind a read or in
+    /// its close. Playback has gone on without it; the file stays open.
     fn report_unreleased(&self, now: Instant) {
         for path in self.releases.overdue(now, self.release_report_after) {
             eprintln!(
-                "[ferrous] a read of {} has not returned for {:.1} s",
+                "[ferrous] {} has not been closed for {:.1} s",
                 path.display(),
                 self.release_report_after.as_secs_f64()
             );
             self.report_failure(
                 Some(path),
                 format!(
-                    "a read has not returned for {} s, so its drive or network share may not \
-                     be responding",
+                    "reading or closing it has not finished for {} s, so its drive or network \
+                     share may not be responding",
                     self.release_report_after.as_secs()
                 ),
                 PlaybackErrorOutcome::NotReleased,
@@ -4805,7 +4806,7 @@ mod engine_tests {
 
     use super::*;
     use crate::playback::file_source::test_support::{
-        hold_reads, reader_runs, readers_started, ReadHold,
+        hold_reads, reader_runs, readers_started, Hold,
     };
     use crate::playback::pipeline_trace::PipelineTrace;
     use crate::playback::source_activation::race::{
@@ -9350,8 +9351,8 @@ mod engine_tests {
         engine.assert_fades_in_from_silence();
     }
 
-    /// How long a read that a stopped source left behind may take before
-    /// the engines of the tests of reads that do not return report it.
+    /// How long the file of a stopped source may stay open before the
+    /// engines of the tests of reads that do not return report it.
     const TEST_RELEASE_REPORT_AFTER: Duration = Duration::from_millis(300);
 
     impl Engine {
@@ -9366,7 +9367,7 @@ mod engine_tests {
         /// Play `queue` until its first track has played a moment, then
         /// hold the reads of the track's file, as a drive or network share
         /// that stopped answering would, until a read is held.
-        fn play_until_read_held(&mut self, queue: Vec<PathBuf>) -> Arc<ReadHold> {
+        fn play_until_read_held(&mut self, queue: Vec<PathBuf>) -> Arc<Hold> {
             let first = queue[0].clone();
             self.send(PlaybackCommand::LoadQueue(queue));
             self.send(PlaybackCommand::Play);
@@ -9463,7 +9464,7 @@ mod engine_tests {
         assert_eq!(reported[0].path.as_deref(), Some(a.as_path()));
         assert!(
             reported[0].message().starts_with(&format!(
-                "Can't release \u{201c}{}\u{201d}: a read has not returned",
+                "Can't release \u{201c}{}\u{201d}: reading or closing it has not finished",
                 a.display()
             )),
             "{}",
@@ -9625,6 +9626,39 @@ mod engine_tests {
             "{took:?}"
         );
         hold.release();
+        wait_until_reader_ends(&a);
+    }
+
+    #[test]
+    fn a_close_that_does_not_return_is_reported_and_leaves_the_file_open_at_quit() {
+        let fixtures = Fixtures::new("held-close");
+        let a = fixtures.wav("a.wav", 20_000);
+        let mut engine = Engine::start_reporting_releases_soon();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until_row_plays(0);
+        // The close waits for the drive, after any read has returned.
+        let closing = crate::playback::file_source::test_support::hold(
+            &a,
+            crate::playback::file_source::test_support::Point::Close,
+        );
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("stop did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        engine.wait_until("the close of A was not reported", |engine| {
+            !engine.not_released().is_empty()
+        });
+        assert_eq!(engine.not_released()[0].path.as_deref(), Some(a.as_path()));
+        assert!(closing.holds());
+
+        let (exit, took) = engine.quit();
+        assert_eq!(exit.unreleased, vec![a.clone()]);
+        assert!(
+            took < EXIT_RELEASE_WAIT + Duration::from_secs(1),
+            "{took:?}"
+        );
+        closing.release();
         wait_until_reader_ends(&a);
     }
 

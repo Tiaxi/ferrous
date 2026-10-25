@@ -167,8 +167,9 @@ pub enum PlaybackErrorOutcome {
     StoppedAfterFailures(u32),
     /// The engine is not running, so no command is carried out.
     EngineUnavailable,
-    /// Playback went on, but a read of the file has not returned since
-    /// playback stopped reading it, so the file stays open.
+    /// Playback went on, but the file has not been closed since playback
+    /// stopped reading it, behind a read or in a close that has not
+    /// returned, so it stays open.
     NotReleased,
 }
 
@@ -271,7 +272,8 @@ pub struct PlaybackEngine {
 /// What a playback engine that stopped left behind.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct EngineExit {
-    /// Files whose reads had not returned, so they stay open.
+    /// Files that were not closed yet, behind a read or in a close that
+    /// had not returned, so they stay open.
     pub(crate) unreleased: Vec<PathBuf>,
 }
 
@@ -292,8 +294,8 @@ impl PlaybackShutdown {
         match self {
             Self::Stopped => None,
             Self::Unreleased(paths) => Some(format!(
-                "Couldn't release {} before quitting: a read had not returned, so its drive or \
-                 network share may not be responding.",
+                "Couldn't release {} before quitting: reading or closing it had not finished, so \
+                 its drive or network share may not be responding.",
                 paths
                     .iter()
                     .map(|path| format!("\u{201c}{}\u{201d}", path.display()))
@@ -461,10 +463,11 @@ mod shared_tests {
         assert_eq!(
             error(
                 Some("/mnt/share/b.flac"),
-                "a read has not returned for 15 s",
+                "reading or closing it has not finished for 15 s",
                 PlaybackErrorOutcome::NotReleased
             ),
-            "Can't release \u{201c}/mnt/share/b.flac\u{201d}: a read has not returned for 15 s."
+            "Can't release \u{201c}/mnt/share/b.flac\u{201d}: reading or closing it has not \
+             finished for 15 s."
         );
     }
 
@@ -480,8 +483,8 @@ mod shared_tests {
             .as_deref(),
             Some(
                 "Couldn't release \u{201c}/mnt/share/a.flac\u{201d}, \u{201c}/mnt/share/b.flac\u{201d} \
-                 before quitting: a read had not returned, so its drive or network share may not \
-                 be responding."
+                 before quitting: reading or closing it had not finished, so its drive or network \
+                 share may not be responding."
             )
         );
         assert_eq!(

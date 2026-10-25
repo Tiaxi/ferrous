@@ -13,28 +13,39 @@
 //!
 //! This source, registered above `filesrc` for `file://` URIs, reads on a
 //! reader thread instead, and the streaming thread waits for the read. A
-//! flush ends that wait at once (`unlock`): the source returns `FLUSHING`,
-//! and the pipeline seeks, stops, or ends its run without the read. The
-//! reader finishes the read on its own and drops the data. The reader also
-//! closes the file, which on a network share can wait for the server too.
+//! flush ends that wait at once (`unlock`), and so does the source's stop:
+//! the source returns `FLUSHING`, and the pipeline seeks, stops, or ends its
+//! run without the read. The reader finishes the read on its own and drops
+//! the data.
 //!
-//! The sources of one file share its reader, which reads for them in turn,
+//! The reader owns the files that its sources opened, and only the reader
+//! touches them after the open: it reads them, asks for their size, and
+//! closes them, as closing a file on a network share can wait for the server
+//! too. A streaming thread asks for a read by the source's number, so it
+//! never holds the file, and never closes it.
+//!
+//! The sources of one file share its reader, which works for them in turn,
 //! so a file whose read does not return holds one thread, however often it
 //! is played again meanwhile. The reader ends once no source has the file
 //! open and it has nothing left to do.
 //!
-//! A source that stops while its read is in progress leaves the read behind.
-//! The pipeline's `Releases` keep track of such reads, so that the engine
-//! can tell the user about one that does not return, and at shutdown.
+//! A source that stops leaves its file to the reader to close, behind a read
+//! in progress. The pipeline's `Releases` keep track of such files until
+//! they are closed, so that the engine can tell the user about one that is
+//! not, and at shutdown.
 //!
 //! The source opens its file on the thread that starts it, as `filesrc`
-//! does, because the pipeline needs the file's size and type then.
+//! does, because the pipeline needs the file's size and type then. A file
+//! that grows while it plays, such as a download, is read on: when the
+//! pipeline reaches the end that the source knows, the source asks the
+//! reader for the size again, as `filesrc` asks the file system.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -77,12 +88,13 @@ glib::wrapper! {
         @implements gst::URIHandler;
 }
 
-/// The reads of stopped sources that have not returned yet, so that the
+/// The files of stopped sources that have not been closed yet, behind a
+/// read that has not returned or in a close that has not, so that the
 /// engine can name the files it cannot release.
 #[derive(Default)]
 pub(crate) struct Releases {
     state: Mutex<ReleasesState>,
-    /// Signalled when a read returns.
+    /// Signalled when a file is closed.
     released: Condvar,
 }
 
@@ -97,11 +109,11 @@ struct PendingRelease {
     path: PathBuf,
     /// When the source stopped.
     since: Instant,
-    /// Whether the engine reported the read.
+    /// Whether the engine reported the file.
     reported: bool,
 }
 
-/// A read that went on after its source stopped, pending until dropped.
+/// The file of a stopped source, pending until dropped once it is closed.
 struct Release {
     releases: Arc<Releases>,
     id: u64,
@@ -136,22 +148,33 @@ impl Releases {
         }
     }
 
-    /// The files of reads that have been pending for `after` at `now` and
-    /// were not reported yet. They count as reported from now on.
+    /// The files that have been pending for `after` at `now` and were not
+    /// reported yet, each once, also when several sources left it. They
+    /// count as reported from now on.
     pub(crate) fn overdue(&self, now: Instant, after: Duration) -> Vec<PathBuf> {
-        lock(&self.state)
+        let mut state = lock(&self.state);
+        let mut reported: HashSet<PathBuf> = state
+            .pending
+            .iter()
+            .filter(|pending| pending.reported)
+            .map(|pending| pending.path.clone())
+            .collect();
+        let mut overdue = Vec::new();
+        for pending in state
             .pending
             .iter_mut()
             .filter(|pending| !pending.reported && now.duration_since(pending.since) >= after)
-            .map(|pending| {
-                pending.reported = true;
-                pending.path.clone()
-            })
-            .collect()
+        {
+            pending.reported = true;
+            if reported.insert(pending.path.clone()) {
+                overdue.push(pending.path.clone());
+            }
+        }
+        overdue
     }
 
-    /// Wait until no read is pending, or until `deadline`. Returns the files
-    /// of the reads still pending then.
+    /// Wait until no file is pending, or until `deadline`. Returns the
+    /// files still pending then, each once.
     pub(crate) fn wait_released(&self, deadline: Instant) -> Vec<PathBuf> {
         let mut state = lock(&self.state);
         while !state.pending.is_empty() {
@@ -164,11 +187,13 @@ impl Releases {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
-        state
-            .pending
-            .iter()
-            .map(|pending| pending.path.clone())
-            .collect()
+        let mut files = Vec::new();
+        for pending in &state.pending {
+            if !files.contains(&pending.path) {
+                files.push(pending.path.clone());
+            }
+        }
+        files
     }
 }
 
@@ -183,7 +208,7 @@ impl Drop for Release {
             let pending = state.pending.swap_remove(index);
             if pending.reported {
                 eprintln!(
-                    "[ferrous] the read of {} returned after {:.1} s",
+                    "[ferrous] {} was closed after {:.1} s",
                     pending.path.display(),
                     pending.since.elapsed().as_secs_f64()
                 );
@@ -210,8 +235,10 @@ impl FileKey {
     }
 }
 
-/// The reader of each file that a source has open, or that has reads or a
-/// close left.
+/// Numbers each start of a source, which the reader holds its file under.
+static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+/// The reader of each file that a source has open, or that has work left.
 static READERS: LazyLock<Mutex<HashMap<FileKey, Arc<Reader>>>> = LazyLock::new(Mutex::default);
 
 /// Reads a file for its sources, on a thread of its own. Lock order: the
@@ -225,43 +252,62 @@ struct Reader {
 
 struct ReaderState {
     jobs: VecDeque<Job>,
-    /// Sources that have the file open.
-    users: usize,
+    /// The file that each started source opened, by its handle. Only the
+    /// reader's thread clones a file, for as long as it uses it, so the
+    /// last reference, which closes the file, is always dropped there.
+    files: HashMap<u64, Arc<File>>,
 }
 
 enum Job {
-    Read(ReadJob),
-    /// A source has stopped and drops its file, which this closes unless a
-    /// read still uses it.
-    Close(Arc<File>),
+    Ask(Request),
+    /// A source has stopped. Close its file, then end its release.
+    Close {
+        handle: u64,
+        path: Arc<Path>,
+        release: Option<Release>,
+    },
 }
 
-/// A read for a source, whose streaming thread waits for it.
-struct ReadJob {
-    file: Arc<File>,
+/// What the streaming thread of a source asks the reader for, and waits for.
+struct Request {
+    handle: u64,
+    /// The file's path, which test holds go by.
+    #[cfg(test)]
     path: Arc<Path>,
-    /// Whether the file is read at `offset`, or else in sequence.
+    /// Whether the file is read at an offset, or else in sequence.
     seekable: bool,
-    offset: u64,
-    length: u32,
+    op: Op,
     wait: Arc<Wait>,
     serial: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Op {
+    Read { offset: u64, length: u32 },
+    Size,
+}
+
+/// What the reader answered.
+enum Answer {
+    Read(io::Result<gst::Buffer>),
+    Size(io::Result<u64>),
+}
+
 impl Reader {
-    /// The reader of the file `key` for one more source, which starts its
-    /// thread if no reader reads the file. Returns whether it started one.
-    fn join(key: FileKey) -> io::Result<(Arc<Self>, bool)> {
+    /// The reader of the file `key`, which it gives `file`, opened by a
+    /// source as `handle`. Starts the reader's thread if no reader reads the
+    /// file. Returns whether it started one.
+    fn join(key: FileKey, handle: u64, file: File) -> io::Result<(Arc<Self>, bool)> {
         let mut readers = lock(&READERS);
         if let Some(reader) = readers.get(&key) {
-            lock(&reader.state).users += 1;
+            lock(&reader.state).files.insert(handle, Arc::new(file));
             return Ok((Arc::clone(reader), false));
         }
         let reader = Arc::new(Self {
             key,
             state: Mutex::new(ReaderState {
                 jobs: VecDeque::new(),
-                users: 1,
+                files: HashMap::from([(handle, Arc::new(file))]),
             }),
             work: Condvar::new(),
         });
@@ -286,7 +332,7 @@ impl Reader {
                     if let Some(job) = state.jobs.pop_front() {
                         break Some(job);
                     }
-                    if state.users == 0 {
+                    if state.files.is_empty() {
                         break None;
                     }
                     state = self
@@ -296,10 +342,20 @@ impl Reader {
                 }
             };
             match job {
-                Some(Job::Read(read)) => read.run(),
-                Some(Job::Close(file)) => {
+                Some(Job::Ask(request)) => request.run(&self),
+                Some(Job::Close {
+                    handle,
+                    path,
+                    release,
+                }) => {
+                    let file = lock(&self.state).files.remove(&handle);
+                    #[cfg(test)]
+                    test_support::wait_if_held(&path, test_support::Point::Close);
                     drop(file);
-                    lock(&self.state).users -= 1;
+                    #[cfg(test)]
+                    test_support::closed(&path);
+                    drop(path);
+                    drop(release);
                 }
                 None if self.retire() => return,
                 None => {}
@@ -312,7 +368,7 @@ impl Reader {
     fn retire(self: &Arc<Self>) -> bool {
         let mut readers = lock(&READERS);
         let state = lock(&self.state);
-        if state.users > 0 || !state.jobs.is_empty() {
+        if !state.files.is_empty() || !state.jobs.is_empty() {
             return false;
         }
         if readers
@@ -325,39 +381,37 @@ impl Reader {
     }
 }
 
-impl ReadJob {
-    /// Read for the source, unless it no longer waits for this read.
-    fn run(self) {
+impl Request {
+    /// Answer the request, unless the source no longer waits for it or has
+    /// closed its file.
+    fn run(self, reader: &Reader) {
+        if lock(&self.wait.state).wanted != self.serial {
+            return;
+        }
+        let Some(file) = lock(&reader.state).files.get(&self.handle).cloned() else {
+            return;
+        };
+        #[cfg(test)]
+        test_support::wait_if_held(&self.path, test_support::Point::Read);
+        let answer = match self.op {
+            Op::Read { offset, length } => Answer::Read(self.read(&file, offset, length)),
+            Op::Size => Answer::Size(file.metadata().map(|metadata| metadata.len())),
+        };
+        drop(file);
         {
             let mut wait = lock(&self.wait.state);
-            if wait.wanted != self.serial {
-                return;
-            }
-            wait.reading += 1;
-        }
-        #[cfg(test)]
-        test_support::wait_if_held(&self.path);
-        let result = self.read();
-        let release = {
-            let mut wait = lock(&self.wait.state);
-            wait.reading -= 1;
             if wait.wanted == self.serial {
-                wait.done = Some(result);
+                wait.answer = Some(answer);
             }
-            if wait.reading == 0 {
-                wait.release.take()
-            } else {
-                None
-            }
-        };
+        }
         self.wait.changed.notify_all();
-        drop(release);
     }
 
-    /// Read up to `length` bytes, fewer only at the end of the file.
-    fn read(&self) -> io::Result<gst::Buffer> {
-        let mut buffer = gst::Buffer::with_size(self.length as usize)
-            .map_err(|err| io::Error::other(err.message))?;
+    /// Read up to `length` bytes at `offset`, fewer only at the end of the
+    /// file.
+    fn read(&self, file: &File, offset: u64, length: u32) -> io::Result<gst::Buffer> {
+        let mut buffer =
+            gst::Buffer::with_size(length as usize).map_err(|err| io::Error::other(err.message))?;
         let buffer_mut = buffer
             .get_mut()
             .ok_or_else(|| io::Error::other("a new buffer is shared"))?;
@@ -369,12 +423,9 @@ impl ReadJob {
             let mut filled = 0;
             while filled < data.len() {
                 let read = if self.seekable {
-                    self.file.read_at(
-                        &mut data[filled..],
-                        self.offset.saturating_add(filled as u64),
-                    )
+                    file.read_at(&mut data[filled..], offset.saturating_add(filled as u64))
                 } else {
-                    (&*self.file).read(&mut data[filled..])
+                    (&*file).read(&mut data[filled..])
                 };
                 match read {
                     Ok(0) => break,
@@ -387,69 +438,75 @@ impl ReadJob {
         };
         buffer_mut.set_size(filled);
         // A file that is read in sequence may be given no offset.
-        if self.offset != u64::MAX {
-            buffer_mut.set_offset(self.offset);
-            buffer_mut.set_offset_end(self.offset.saturating_add(filled as u64));
+        if offset != u64::MAX {
+            buffer_mut.set_offset(offset);
+            buffer_mut.set_offset_end(offset.saturating_add(filled as u64));
         }
         Ok(buffer)
     }
 }
 
-/// Where the streaming thread of a source waits for its read.
+/// Where the streaming thread of a source waits for the reader.
 #[derive(Default)]
 struct Wait {
     state: Mutex<WaitState>,
-    /// Signalled when a read returns and when the source flushes.
+    /// Signalled when the reader answers, when the source flushes, and when
+    /// it stops.
     changed: Condvar,
 }
 
 #[derive(Default)]
 struct WaitState {
-    /// The source flushes: its streaming thread waits for no read.
+    /// The source flushes: its streaming thread waits for nothing.
     flushing: bool,
-    /// The source has stopped. The thread of a reader that pulls from it,
-    /// which `basesrc` lets in again once the flush of its stop has ended
-    /// and before it stops the source, waits for no read either.
-    stopped: bool,
-    /// Serial of the read that the streaming thread waits for, or 0.
+    /// The handle of the started source, or 0 once it has stopped. A
+    /// streaming thread that asks the stopped source for data, which
+    /// `basesrc` can let in after the flush of the stop has ended and before
+    /// it stops the source, waits for nothing either.
+    handle: u64,
+    /// Serial of the request that the streaming thread waits for, or 0.
     wanted: u64,
-    /// Serial of the latest read.
+    /// Serial of the latest request.
     serial: u64,
-    /// The result of the wanted read.
-    done: Option<io::Result<gst::Buffer>>,
-    /// Reads in progress for the source: one, or one per file when the
-    /// source was started again on another file while a read of the
-    /// previous one had not returned.
-    reading: usize,
-    /// The read that went on after the source stopped, until it returns.
-    release: Option<Release>,
+    /// The answer to the wanted request.
+    answer: Option<Answer>,
 }
 
-/// The file of a started source.
+/// The file of a started source, which its reader holds.
 struct Open {
-    /// Given to the reader to close when the source stops.
-    file: Option<Arc<File>>,
+    handle: u64,
     path: Arc<Path>,
     reader: Arc<Reader>,
     seekable: bool,
+    /// The size of the file when it was opened, or when the reader was
+    /// last asked.
     size: u64,
+    /// The pipeline has not asked for the size since the source started.
+    /// It asks right after, and is told the size the open found.
+    size_unasked: bool,
+    /// Given to the reader with the close, which ends it.
+    release: Option<Release>,
 }
 
 impl Drop for Open {
     fn drop(&mut self) {
-        if let Some(file) = self.file.take() {
-            self.reader.push(Job::Close(file));
-        }
+        self.reader.push(Job::Close {
+            handle: self.handle,
+            path: Arc::clone(&self.path),
+            release: self.release.take(),
+        });
     }
 }
 
 mod imp {
-    use super::{lock, FileKey, Job, Open, ReadJob, Reader, Releases, Wait, FACTORY_NAME};
+    use super::{lock, Answer, FileKey, Job, Op, Open, Reader, Releases, Request, Wait};
+    use super::{FACTORY_NAME, NEXT_HANDLE};
 
     use std::fs::File;
     use std::io;
     use std::os::unix::fs::FileTypeExt;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
     use gst::glib;
@@ -483,6 +540,7 @@ mod imp {
             Ok(())
         }
 
+        /// Open the file at `path`, and give it to its reader.
         fn open(path: &Path) -> Result<Open, gst::ErrorMessage> {
             let file = File::open(path).map_err(|err| match err.kind() {
                 io::ErrorKind::NotFound => gst::error_msg!(
@@ -515,13 +573,15 @@ mod imp {
                     ("File \"{}\" is a socket.", path.display())
                 ));
             }
-            let (reader, started) = Reader::join(FileKey::of(&metadata)).map_err(|err| {
-                gst::error_msg!(
-                    gst::ResourceError::OpenRead,
-                    ("Could not open file \"{}\" for reading.", path.display()),
-                    ["no thread to read it: {err}"]
-                )
-            })?;
+            let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+            let (reader, started) =
+                Reader::join(FileKey::of(&metadata), handle, file).map_err(|err| {
+                    gst::error_msg!(
+                        gst::ResourceError::OpenRead,
+                        ("Could not open file \"{}\" for reading.", path.display()),
+                        ["no thread to read it: {err}"]
+                    )
+                })?;
             #[cfg(test)]
             if started {
                 super::test_support::started(path);
@@ -529,76 +589,87 @@ mod imp {
             #[cfg(not(test))]
             let _ = started;
             Ok(Open {
-                file: Some(Arc::new(file)),
+                handle,
                 path: Arc::from(path),
                 reader,
                 // Only a regular file has a size and can be read anywhere.
                 seekable: kind.is_file(),
                 size: metadata.len(),
+                size_unasked: true,
+                release: None,
             })
         }
 
-        /// Read `length` bytes at `offset` on the reader, unless the source
-        /// flushes first.
-        fn read(&self, offset: u64, length: u32) -> Result<gst::Buffer, gst::FlowError> {
-            let (reader, mut job) = {
+        /// Ask the reader for `op` on the file, and wait for the answer,
+        /// unless the source flushes or stops first.
+        fn ask(&self, op: Op) -> Result<Answer, gst::FlowError> {
+            let (reader, mut request) = {
                 let open = lock(&self.open);
-                let Some((open, file)) = open
-                    .as_ref()
-                    .and_then(|open| Some((open, Arc::clone(open.file.as_ref()?))))
-                else {
+                let Some(open) = open.as_ref() else {
                     return Err(gst::FlowError::Flushing);
                 };
-                let job = ReadJob {
-                    file,
+                let request = Request {
+                    handle: open.handle,
+                    #[cfg(test)]
                     path: Arc::clone(&open.path),
                     seekable: open.seekable,
-                    offset,
-                    length,
+                    op,
                     wait: Arc::clone(&self.wait),
                     serial: 0,
                 };
-                (Arc::clone(&open.reader), job)
+                (Arc::clone(&open.reader), request)
             };
+            #[cfg(test)]
+            super::test_support::wait_if_held(&request.path, super::test_support::Point::Ask);
+            let handle = request.handle;
             {
                 let mut wait = lock(&self.wait.state);
-                if wait.flushing || wait.stopped {
+                if wait.flushing || wait.handle != handle {
                     return Err(gst::FlowError::Flushing);
                 }
                 wait.serial += 1;
                 wait.wanted = wait.serial;
-                wait.done = None;
-                job.serial = wait.serial;
+                wait.answer = None;
+                request.serial = wait.serial;
             }
-            let serial = job.serial;
-            let path = Arc::clone(&job.path);
-            reader.push(Job::Read(job));
-            let result = {
-                let mut wait = lock(&self.wait.state);
-                loop {
-                    if wait.flushing || wait.stopped {
-                        // The reader drops the read when it returns.
-                        wait.wanted = 0;
-                        return Err(gst::FlowError::Flushing);
-                    }
+            let serial = request.serial;
+            reader.push(Job::Ask(request));
+            let mut wait = lock(&self.wait.state);
+            loop {
+                // A stop also drops the request. The reader drops a request
+                // that it reads for when it returns.
+                if wait.flushing || wait.handle != handle || wait.wanted != serial {
                     if wait.wanted == serial {
-                        if let Some(done) = wait.done.take() {
-                            wait.wanted = 0;
-                            break done;
-                        }
+                        wait.wanted = 0;
                     }
-                    wait = self
-                        .wait
-                        .changed
-                        .wait(wait)
-                        .unwrap_or_else(PoisonError::into_inner);
+                    return Err(gst::FlowError::Flushing);
                 }
+                if let Some(answer) = wait.answer.take() {
+                    wait.wanted = 0;
+                    return Ok(answer);
+                }
+                wait = self
+                    .wait
+                    .changed
+                    .wait(wait)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+
+        /// Read `length` bytes at `offset` on the reader.
+        fn read(&self, offset: u64, length: u32) -> Result<gst::Buffer, gst::FlowError> {
+            let Answer::Read(result) = self.ask(Op::Read { offset, length })? else {
+                return Err(gst::FlowError::Error);
             };
             result.map_err(|err| {
+                let path = lock(&self.open)
+                    .as_ref()
+                    .map(|open| open.path.display().to_string())
+                    .unwrap_or_default();
                 gst::element_imp_error!(
                     self,
                     gst::ResourceError::Read,
-                    ["Could not read \"{}\": {err}", path.display()]
+                    ["Could not read \"{path}\": {err}"]
                 );
                 gst::FlowError::Error
             })
@@ -701,31 +772,32 @@ mod imp {
                 ));
             };
             let open = Self::open(&path)?;
-            // A file that grows is not followed, so a size query need not
-            // wait for the file system.
+            let handle = open.handle;
+            // The pipeline asks for the size again only when it reaches the
+            // end it knows, never for a duration query, which the engine's
+            // thread makes too.
             self.obj().set_dynamic_size(false);
             *lock(&self.open) = Some(open);
-            lock(&self.wait.state).stopped = false;
+            lock(&self.wait.state).handle = handle;
             Ok(())
         }
 
         fn stop(&self) -> Result<(), gst::ErrorMessage> {
-            let Some(open) = lock(&self.open).take() else {
+            let Some(mut open) = lock(&self.open).take() else {
                 return Ok(());
             };
-            let releases = lock(&self.releases).clone();
             {
                 let mut wait = lock(&self.wait.state);
-                wait.stopped = true;
+                wait.handle = 0;
                 wait.wanted = 0;
-                wait.done = None;
-                if let (true, None, Some(releases)) =
-                    (wait.reading > 0, wait.release.as_ref(), releases)
-                {
-                    wait.release = Some(releases.begin(&open.path));
-                }
+                wait.answer = None;
             }
             self.wait.changed.notify_all();
+            // The file is released once the reader has closed it, after a
+            // read in progress.
+            open.release = lock(&self.releases)
+                .as_ref()
+                .map(|releases| releases.begin(&open.path));
             drop(open);
             Ok(())
         }
@@ -735,10 +807,25 @@ mod imp {
         }
 
         fn size(&self) -> Option<u64> {
-            lock(&self.open)
-                .as_ref()
-                .filter(|open| open.seekable)
-                .map(|open| open.size)
+            let known = {
+                let mut open = lock(&self.open);
+                let open = open.as_mut().filter(|open| open.seekable)?;
+                if std::mem::take(&mut open.size_unasked) || open.size == 0 {
+                    // Right after the start, or of a file that held nothing
+                    // to play. A duration query asks then, on any thread.
+                    return Some(open.size);
+                }
+                open.size
+            };
+            // The pipeline has reached the end it knows, on its streaming
+            // thread: the file may have grown since.
+            let Ok(Answer::Size(Ok(size))) = self.ask(Op::Size) else {
+                return Some(known);
+            };
+            if let Some(open) = lock(&self.open).as_mut() {
+                open.size = size;
+            }
+            Some(size)
         }
 
         fn create(
@@ -809,8 +896,9 @@ mod imp {
     }
 }
 
-/// Holds reads in the reader, as a `read()` that the kernel does not return
-/// would, and tells which readers run.
+/// Holds the work of the reader where the kernel could, and the streaming
+/// thread before it asks the reader, and tells which readers ran and which
+/// threads closed files.
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::collections::HashMap;
@@ -819,9 +907,23 @@ pub(crate) mod test_support {
 
     use super::{lock, FileKey, READERS};
 
-    /// Holds every read of a file from when it is created until released.
-    pub(crate) struct ReadHold {
+    /// Where a hold holds.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Point {
+        /// A streaming thread that has found the source's file and is about
+        /// to ask the reader.
+        Ask,
+        /// The reader, about to read or to ask for the size.
+        Read,
+        /// The reader, about to close a file.
+        Close,
+    }
+
+    /// Holds the threads that reach `point` for a file, from its creation
+    /// until released.
+    pub(crate) struct Hold {
         path: PathBuf,
+        point: Point,
         state: Mutex<HoldState>,
         changed: Condvar,
     }
@@ -829,20 +931,24 @@ pub(crate) mod test_support {
     #[derive(Default)]
     struct HoldState {
         released: bool,
-        /// Reads held now.
+        /// Threads held now.
         waiting: usize,
     }
 
-    static HOLDS: LazyLock<Mutex<Vec<Arc<ReadHold>>>> = LazyLock::new(Mutex::default);
+    static HOLDS: LazyLock<Mutex<Vec<Arc<Hold>>>> = LazyLock::new(Mutex::default);
 
     /// Readers started for each file, by the path of the source that
     /// started it.
     static STARTED: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Mutex::default);
 
-    /// Hold every read of the file at `path` from now on.
-    pub(crate) fn hold_reads(path: &Path) -> Arc<ReadHold> {
-        let hold = Arc::new(ReadHold {
+    /// The threads that closed each file, by its path, in order.
+    static CLOSED: LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> = LazyLock::new(Mutex::default);
+
+    /// Hold the threads that reach `point` for the file at `path`.
+    pub(crate) fn hold(path: &Path, point: Point) -> Arc<Hold> {
+        let hold = Arc::new(Hold {
             path: path.to_path_buf(),
+            point,
             state: Mutex::default(),
             changed: Condvar::new(),
         });
@@ -850,13 +956,24 @@ pub(crate) mod test_support {
         hold
     }
 
-    impl ReadHold {
-        /// Whether a read is held now.
-        pub(crate) fn holds_a_read(&self) -> bool {
+    /// Hold every read of the file at `path`, as a drive or network share
+    /// that stopped answering would.
+    pub(crate) fn hold_reads(path: &Path) -> Arc<Hold> {
+        hold(path, Point::Read)
+    }
+
+    impl Hold {
+        /// Whether a thread is held now.
+        pub(crate) fn holds(&self) -> bool {
             lock(&self.state).waiting > 0
         }
 
-        /// Let the held reads, and every later one, return.
+        /// Whether a read is held now.
+        pub(crate) fn holds_a_read(&self) -> bool {
+            self.holds()
+        }
+
+        /// Let the held threads, and every later one, go.
         pub(crate) fn release(&self) {
             lock(&HOLDS).retain(|hold| !std::ptr::eq(&**hold, self));
             lock(&self.state).released = true;
@@ -864,22 +981,23 @@ pub(crate) mod test_support {
         }
     }
 
-    impl Drop for ReadHold {
+    impl Drop for Hold {
         fn drop(&mut self) {
             lock(&self.state).released = true;
             self.changed.notify_all();
         }
     }
 
-    pub(super) fn wait_if_held(path: &Path) {
+    pub(super) fn wait_if_held(path: &Path, point: Point) {
         let holds: Vec<_> = lock(&HOLDS)
             .iter()
-            .filter(|hold| hold.path == path)
+            .filter(|hold| hold.point == point && hold.path == path)
             .cloned()
             .collect();
         for hold in holds {
             let mut state = lock(&hold.state);
             state.waiting += 1;
+            hold.changed.notify_all();
             while !state.released {
                 state = hold.changed.wait(state).unwrap();
             }
@@ -891,8 +1009,12 @@ pub(crate) mod test_support {
         *lock(&STARTED).entry(path.to_path_buf()).or_default() += 1;
     }
 
-    fn key(path: &Path) -> FileKey {
-        FileKey::of(&std::fs::metadata(path).expect("file metadata"))
+    pub(super) fn closed(path: &Path) {
+        let thread = std::thread::current().name().unwrap_or("").to_string();
+        lock(&CLOSED)
+            .entry(path.to_path_buf())
+            .or_default()
+            .push(thread);
     }
 
     /// How many readers have been started for the file at `path`.
@@ -900,9 +1022,15 @@ pub(crate) mod test_support {
         lock(&STARTED).get(path).copied().unwrap_or(0)
     }
 
+    /// The names of the threads that closed the file at `path`.
+    pub(crate) fn closed_on(path: &Path) -> Vec<String> {
+        lock(&CLOSED).get(path).cloned().unwrap_or_default()
+    }
+
     /// Whether a reader reads the file at `path`.
     pub(crate) fn reader_runs(path: &Path) -> bool {
-        lock(&READERS).contains_key(&key(path))
+        let key = FileKey::of(&std::fs::metadata(path).expect("file metadata"));
+        lock(&READERS).contains_key(&key)
     }
 }
 
@@ -916,7 +1044,7 @@ mod tests {
     use gst::subclass::prelude::ObjectSubclassIsExt;
     use gstreamer as gst;
 
-    use super::test_support::{hold_reads, reader_runs, readers_started};
+    use super::test_support::{closed_on, hold, hold_reads, reader_runs, readers_started, Point};
     use super::{register, Releases, FACTORY_NAME};
 
     /// How long a test waits for a thread to get somewhere.
@@ -990,6 +1118,66 @@ mod tests {
         pipeline.add_many([&src, &sink]).unwrap();
         src.link(&sink).unwrap();
         (pipeline, src, received)
+    }
+
+    /// Give the source of `src` its own `Releases`.
+    fn track(src: &gst::Element) -> Arc<Releases> {
+        let releases = Arc::new(Releases::default());
+        src.downcast_ref::<super::FileSource>()
+            .unwrap()
+            .imp()
+            .set_releases(Arc::clone(&releases));
+        releases
+    }
+
+    /// Append `bytes` to the file at `path`, as a download would.
+    fn append(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    /// Pull `length` bytes at `offset` from `pad` on another thread.
+    fn pull(
+        pad: &gst::Pad,
+        offset: u64,
+        length: u32,
+    ) -> mpsc::Receiver<Result<gst::Buffer, gst::FlowError>> {
+        let (done_tx, done) = mpsc::channel();
+        let pad = pad.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(pad.range(offset, length));
+        });
+        done
+    }
+
+    /// The source of the file at `path`, started in pull mode.
+    fn pulled(path: &Path) -> (gst::Element, gst::Pad) {
+        let src = source(path);
+        src.set_state(gst::State::Ready).unwrap();
+        let pad = src.static_pad("src").unwrap();
+        pad.activate_mode(gst::PadMode::Pull, true).unwrap();
+        (src, pad)
+    }
+
+    fn stop_pulling(src: &gst::Element, pad: &gst::Pad) {
+        pad.activate_mode(gst::PadMode::Pull, false).unwrap();
+        src.set_state(gst::State::Null).unwrap();
+    }
+
+    /// Whether every close of the file at `path` ran on its reader.
+    #[track_caller]
+    fn assert_closed_by_the_reader(path: &Path, closes: usize) {
+        let threads = closed_on(path);
+        assert_eq!(threads.len(), closes, "{threads:?}");
+        assert!(
+            threads.iter().all(|thread| thread == "ferrous-read"),
+            "{threads:?}"
+        );
     }
 
     /// Set `pipeline` to `state` on another thread. Returns whether the
@@ -1124,6 +1312,7 @@ mod tests {
         hold.release();
         assert!(releases.wait_released(Instant::now() + TIMEOUT).is_empty());
         wait_until("the reader ends", || !reader_runs(&path));
+        assert_closed_by_the_reader(&path, 1);
         pipeline.set_state(gst::State::Playing).unwrap();
         pipeline
             .bus()
@@ -1141,20 +1330,9 @@ mod tests {
         let fixture = Fixture::new("stop-race");
         let (path, _) = fixture.file("a.bin", 10_000);
         let hold = hold_reads(&path);
-        let src = source(&path);
-        src.set_state(gst::State::Ready).unwrap();
-        let pad = src.static_pad("src").unwrap();
-        pad.activate_mode(gst::PadMode::Pull, true).unwrap();
-        let pull = |pad: &gst::Pad| {
-            let (done_tx, done) = mpsc::channel();
-            let pad = pad.clone();
-            std::thread::spawn(move || {
-                let _ = done_tx.send(pad.range(0, 100));
-            });
-            done
-        };
+        let (src, pad) = pulled(&path);
         let imp = src.downcast_ref::<super::FileSource>().unwrap().imp();
-        let first = pull(&pad);
+        let first = pull(&pad, 0, 100);
         wait_until("a read is held", || hold.holds_a_read());
         // `basesrc` stops a source in pull mode so: it flushes, which ends
         // the wait, and lets the readers in again before it stops it.
@@ -1164,7 +1342,7 @@ mod tests {
             Err(gst::FlowError::Flushing)
         );
         imp.unlock_stop().unwrap();
-        let second = pull(&pad);
+        let second = pull(&pad, 0, 100);
         assert!(second.recv_timeout(Duration::from_millis(50)).is_err());
         imp.stop().unwrap();
         assert_eq!(
@@ -1173,8 +1351,156 @@ mod tests {
         );
 
         hold.release();
-        pad.activate_mode(gst::PadMode::Pull, false).unwrap();
-        src.set_state(gst::State::Null).unwrap();
+        stop_pulling(&src, &pad);
+        wait_until("the reader ends", || !reader_runs(&path));
+        assert_closed_by_the_reader(&path, 1);
+    }
+
+    #[test]
+    fn a_pull_that_goes_on_after_its_source_stopped_leaves_the_close_to_the_reader() {
+        use gstreamer_base::subclass::prelude::BaseSrcImpl;
+
+        let fixture = Fixture::new("late-pull");
+        let (path, _) = fixture.file("a.bin", 10_000);
+        let (src, pad) = pulled(&path);
+        let imp = src.downcast_ref::<super::FileSource>().unwrap().imp();
+        // The streaming thread has found the source's file and is
+        // descheduled before it asks the reader.
+        let paused = hold(&path, Point::Ask);
+        let late = pull(&pad, 0, 100);
+        wait_until("the pull is held", || paused.holds());
+        // `basesrc` stops the source meanwhile.
+        imp.unlock().unwrap();
+        imp.unlock_stop().unwrap();
+        imp.stop().unwrap();
+        wait_until("the reader ends", || !reader_runs(&path));
+        assert_closed_by_the_reader(&path, 1);
+
+        paused.release();
+        assert_eq!(
+            late.recv_timeout(TIMEOUT).unwrap(),
+            Err(gst::FlowError::Flushing)
+        );
+        assert_closed_by_the_reader(&path, 1);
+        stop_pulling(&src, &pad);
+    }
+
+    #[test]
+    fn a_close_that_does_not_return_keeps_the_file_unreleased() {
+        let fixture = Fixture::new("held-close");
+        let (path, bytes) = fixture.file("a.bin", 10_000);
+        let (pipeline, src, received) = pushing(&path);
+        let releases = track(&src);
+        // The file plays to its end, so no read is in progress at the stop.
+        pipeline.set_state(gst::State::Playing).unwrap();
+        pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Eos])
+            .expect("end of stream");
+        assert_eq!(*received.lock().unwrap(), bytes);
+        let closing = hold(&path, Point::Close);
+        assert!(set_state_in_time(&pipeline, gst::State::Null));
+        wait_until("the close is held", || closing.holds());
+
+        assert_eq!(
+            releases.overdue(Instant::now(), Duration::ZERO),
+            vec![path.clone()]
+        );
+        assert_eq!(
+            releases.wait_released(Instant::now() + Duration::from_millis(50)),
+            vec![path.clone()]
+        );
+        closing.release();
+        assert!(releases.wait_released(Instant::now() + TIMEOUT).is_empty());
+        assert_closed_by_the_reader(&path, 1);
+    }
+
+    #[test]
+    fn a_file_whose_read_returned_stays_unreleased_until_it_is_closed() {
+        let fixture = Fixture::new("read-then-close");
+        let (path, _) = fixture.file("a.bin", 100_000);
+        let reads = hold_reads(&path);
+        let closing = hold(&path, Point::Close);
+        let (pipeline, src, _) = pushing(&path);
+        let releases = track(&src);
+        let _ = pipeline.set_state(gst::State::Playing);
+        wait_until("a read is held", || reads.holds());
+        assert!(set_state_in_time(&pipeline, gst::State::Null));
+
+        reads.release();
+        wait_until("the close is held", || closing.holds());
+        assert_eq!(
+            releases.wait_released(Instant::now() + Duration::from_millis(50)),
+            vec![path.clone()]
+        );
+        closing.release();
+        assert!(releases.wait_released(Instant::now() + TIMEOUT).is_empty());
+        wait_until("the reader ends", || !reader_runs(&path));
+        assert_closed_by_the_reader(&path, 1);
+    }
+
+    #[test]
+    fn a_file_that_grows_is_read_on() {
+        let fixture = Fixture::new("growing");
+        let (path, bytes) = fixture.file("a.bin", 8_192);
+        let more: Vec<u8> = bytes.iter().map(|byte| byte ^ 0xFF).collect();
+
+        // Pulled: past the end the source knew, and from it.
+        let (src, pad) = pulled(&path);
+        assert_eq!(
+            &*pad.range(0, 4_096).unwrap().map_readable().unwrap(),
+            &bytes[..4_096]
+        );
+        append(&path, &more[..4_096]);
+        let buffer = pad.range(4_096, 8_192).unwrap();
+        assert_eq!(buffer.size(), 8_192);
+        assert_eq!(&buffer.map_readable().unwrap()[4_096..], &more[..4_096]);
+        append(&path, &more[4_096..]);
+        assert_eq!(
+            &*pad.range(12_288, 8_192).unwrap().map_readable().unwrap(),
+            &more[4_096..]
+        );
+        assert_eq!(pad.range(16_384, 100), Err(gst::FlowError::Eos));
+        stop_pulling(&src, &pad);
+
+        // Pushed: the file grows after the source opened it.
+        let (path, bytes) = fixture.file("b.bin", 8_192);
+        let reads = hold_reads(&path);
+        let (pipeline, _, received) = pushing(&path);
+        let _ = pipeline.set_state(gst::State::Playing);
+        wait_until("a read is held", || reads.holds());
+        append(&path, &more);
+        reads.release();
+        pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Eos])
+            .expect("end of stream");
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert_eq!(*received.lock().unwrap(), [bytes, more].concat());
+    }
+
+    #[test]
+    fn asking_for_the_size_ends_with_a_flush() {
+        use gstreamer_base::subclass::prelude::BaseSrcImpl;
+
+        let fixture = Fixture::new("held-size");
+        let (path, _) = fixture.file("a.bin", 8_192);
+        let (src, pad) = pulled(&path);
+        let imp = src.downcast_ref::<super::FileSource>().unwrap().imp();
+        let reads = hold_reads(&path);
+        // A pull that reaches the end of the file asks for its size first.
+        let at_end = pull(&pad, 4_096, 4_096);
+        wait_until("the size is asked for", || reads.holds());
+        imp.unlock().unwrap();
+        assert_eq!(
+            at_end.recv_timeout(TIMEOUT).unwrap(),
+            Err(gst::FlowError::Flushing)
+        );
+        imp.unlock_stop().unwrap();
+        reads.release();
+        stop_pulling(&src, &pad);
         wait_until("the reader ends", || !reader_runs(&path));
     }
 
