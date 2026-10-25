@@ -3,10 +3,15 @@
 //! Byte filter that hands `GStreamer` only the audio frames of a raw AC3/DTS
 //! file: no leading partial frame and no appended `APEv2` tag.
 //!
-//! The filter is a pair of probes on the file source. The source offers only
+//! The filter is a set of probes on the file source. The source offers only
 //! push mode, so every reader, format detection included, receives the file
 //! through the buffer probe. That probe places each buffer by the byte
 //! offset `filesrc` stamps on it, because seeks restart reading anywhere.
+//!
+//! Downstream, byte positions count from the first frame, as if the file
+//! held only the audio: buffer offsets, segments, and the answers to byte
+//! queries. Parsers compute byte seeks in those positions, so the probes
+//! move them to the file's own positions before they reach `filesrc`.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -106,6 +111,16 @@ fn trim(offset: u64, len: usize, (audio_start, audio_end): (u64, u64), pulled: b
     Trim::Slice(to_index(keep_start)..to_index(keep_end))
 }
 
+/// Byte position in the audio of `file_position`, clamped to the audio.
+fn audio_position(file_position: u64, (audio_start, audio_end): (u64, u64)) -> u64 {
+    file_position.clamp(audio_start, audio_end) - audio_start
+}
+
+/// Byte position in the file of `audio_position`, clamped to the audio.
+fn file_position(audio_position: u64, (audio_start, audio_end): (u64, u64)) -> u64 {
+    audio_position.saturating_add(audio_start).min(audio_end)
+}
+
 #[cfg(feature = "gst")]
 fn filter_buffer(info: &mut gst::PadProbeInfo, range: (u64, u64)) -> gst::PadProbeReturn {
     let pulled = info.mask.contains(gst::PadProbeType::PULL);
@@ -118,22 +133,30 @@ fn filter_buffer(info: &mut gst::PadProbeInfo, range: (u64, u64)) -> gst::PadPro
     if offset == gst::format::Buffers::OFFSET_NONE {
         return gst::PadProbeReturn::Ok;
     }
-    match trim(offset, buffer.size(), range, pulled) {
-        Trim::Keep => gst::PadProbeReturn::Ok,
-        Trim::Drop => gst::PadProbeReturn::Drop,
-        Trim::Slice(kept) => {
-            slice_buffer(buffer, offset, kept);
-            gst::PadProbeReturn::Ok
-        }
-    }
+    let kept = match trim(offset, buffer.size(), range, pulled) {
+        Trim::Keep => 0..buffer.size(),
+        Trim::Drop => return gst::PadProbeReturn::Drop,
+        Trim::Slice(kept) => kept,
+    };
+    // A pulled buffer holds the bytes at the file offset that was asked for.
+    let shift = if pulled { 0 } else { range.0 };
+    place_buffer(buffer, offset, kept, shift);
+    gst::PadProbeReturn::Ok
 }
 
+/// Keep the `kept` bytes of a buffer read at `offset`, placed `shift` bytes
+/// earlier.
 #[cfg(feature = "gst")]
-fn slice_buffer(buffer: &mut gst::Buffer, offset: u64, kept: Range<usize>) {
-    let start = offset + kept.start as u64;
-    let end = offset + kept.end as u64;
+fn place_buffer(buffer: &mut gst::Buffer, offset: u64, kept: Range<usize>, shift: u64) {
+    let whole = kept.len() == buffer.size();
+    if whole && shift == 0 {
+        return;
+    }
+    // A kept byte of a pushed buffer lies at or after the first frame.
+    let start = offset + kept.start as u64 - shift;
+    let end = offset + kept.end as u64 - shift;
     let buffer = buffer.make_mut();
-    if buffer.resize(kept).is_ok() {
+    if whole || buffer.resize(kept).is_ok() {
         buffer.set_offset(start);
         buffer.set_offset_end(end);
     }
@@ -161,6 +184,10 @@ pub(crate) fn filter_raw_surround_source(source: &gst::Element) {
     pad.add_probe(gst::PadProbeType::QUERY_UPSTREAM, move |_pad, info| {
         answer_query(info, range)
     });
+    pad.add_probe(gst::PadProbeType::EVENT_BOTH, move |_pad, info| {
+        place_event(info, range);
+        gst::PadProbeReturn::Ok
+    });
     pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
         filter_buffer(info, range)
     });
@@ -175,14 +202,19 @@ pub(crate) fn filter_raw_surround_source(source: &gst::Element) {
 /// detection sees no tag and a stream that starts with a whole frame.
 ///
 /// The byte length leaves out the tag, which parsers would otherwise count
-/// as audio when they estimate the duration.
+/// as audio when they estimate the duration. Byte positions that `filesrc`
+/// answers with are moved into the audio once it has answered.
 #[cfg(feature = "gst")]
-fn answer_query(
-    info: &mut gst::PadProbeInfo,
-    (audio_start, audio_end): (u64, u64),
-) -> gst::PadProbeReturn {
+fn answer_query(info: &mut gst::PadProbeInfo, range: (u64, u64)) -> gst::PadProbeReturn {
+    let answered = info.mask.contains(gst::PadProbeType::PULL);
     let Some(query) = info.query_mut() else {
         return gst::PadProbeReturn::Ok;
+    };
+    let in_audio = |position: gst::GenericFormattedValue| match position {
+        gst::GenericFormattedValue::Bytes(position) => {
+            position.map(|position| gst::format::Bytes::from_u64(audio_position(*position, range)))
+        }
+        _ => None,
     };
     match query.view_mut() {
         gst::QueryViewMut::Scheduling(scheduling) => {
@@ -191,11 +223,105 @@ fn answer_query(
             gst::PadProbeReturn::Handled
         }
         gst::QueryViewMut::Duration(duration) if duration.format() == gst::Format::Bytes => {
-            duration.set(gst::format::Bytes::from_u64(audio_end - audio_start));
+            duration.set(gst::format::Bytes::from_u64(range.1 - range.0));
             gst::PadProbeReturn::Handled
+        }
+        gst::QueryViewMut::Position(position)
+            if answered && position.format() == gst::Format::Bytes =>
+        {
+            position.set(in_audio(position.result()));
+            gst::PadProbeReturn::Ok
+        }
+        gst::QueryViewMut::Seeking(seeking)
+            if answered && seeking.format() == gst::Format::Bytes =>
+        {
+            let (seekable, start, end) = seeking.result();
+            seeking.set(seekable, in_audio(start), in_audio(end));
+            gst::PadProbeReturn::Ok
         }
         _ => gst::PadProbeReturn::Ok,
     }
+}
+
+/// Move byte seeks on their way to `filesrc` into the file, and the byte
+/// segments it starts from into the audio.
+#[cfg(feature = "gst")]
+fn place_event(info: &mut gst::PadProbeInfo, range: (u64, u64)) {
+    let placed = match info.event().map(|event| event.view()) {
+        Some(gst::EventView::Seek(seek)) => seek_in_file(seek, range),
+        Some(gst::EventView::Segment(segment)) => segment_in_audio(segment, range),
+        _ => None,
+    };
+    if let Some(event) = placed {
+        info.data = Some(gst::PadProbeData::Event(event));
+    }
+}
+
+#[cfg(feature = "gst")]
+fn seek_in_file(seek: &gst::event::Seek, range: (u64, u64)) -> Option<gst::Event> {
+    let (rate, flags, start_type, start, stop_type, stop) = seek.get();
+    if start.format() != gst::Format::Bytes {
+        return None;
+    }
+    let (start_type, start) = file_seek_position(start_type, start.value(), range);
+    let (stop_type, stop) = file_seek_position(stop_type, stop.value(), range);
+    // Parsers seek by bytes without trick modes, so no interval is lost.
+    Some(
+        gst::event::Seek::builder(rate, flags, start_type, start, stop_type, stop)
+            .seqnum(seek.seqnum())
+            .running_time_offset(seek.running_time_offset())
+            .build(),
+    )
+}
+
+/// Where in the file a byte seek to `position` in the audio goes. Seeks from
+/// the end of the audio become seeks from the start of the file, which
+/// continues past the audio.
+#[cfg(feature = "gst")]
+fn file_seek_position(
+    seek_type: gst::SeekType,
+    position: i64,
+    range: (u64, u64),
+) -> (gst::SeekType, Option<gst::format::Bytes>) {
+    let in_audio = match seek_type {
+        gst::SeekType::Set => u64::try_from(position).ok(),
+        gst::SeekType::End => Some((range.1 - range.0).saturating_add_signed(position)),
+        // The seek leaves this position as it is.
+        gst::SeekType::None => return (seek_type, None),
+    };
+    match in_audio {
+        Some(position) => (
+            gst::SeekType::Set,
+            Some(gst::format::Bytes::from_u64(file_position(position, range))),
+        ),
+        None => (seek_type, None),
+    }
+}
+
+#[cfg(feature = "gst")]
+fn segment_in_audio(event: &gst::event::Segment, range: (u64, u64)) -> Option<gst::Event> {
+    let mut segment = event
+        .segment()
+        .downcast_ref::<gst::format::Bytes>()?
+        .clone();
+    let in_audio = |position: Option<gst::format::Bytes>| {
+        position.map(|position| gst::format::Bytes::from_u64(audio_position(*position, range)))
+    };
+    segment.set_start(in_audio(segment.start()));
+    segment.set_stop(in_audio(segment.stop()));
+    segment.set_time(in_audio(segment.time()));
+    segment.set_position(in_audio(segment.position()));
+    segment.set_duration(
+        segment
+            .duration()
+            .map(|_| gst::format::Bytes::from_u64(range.1 - range.0)),
+    );
+    Some(
+        gst::event::Segment::builder(&segment)
+            .seqnum(event.seqnum())
+            .running_time_offset(event.running_time_offset())
+            .build(),
+    )
 }
 
 /// Filter the source of every file that `playbin` opens.
@@ -214,7 +340,7 @@ pub(crate) fn install_raw_surround_source_probe(playbin: &gst::Element) {
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_byte_range, trim, Trim};
+    use super::{audio_byte_range, audio_position, file_position, trim, Trim};
     use crate::raw_audio::{ripped_surround_bytes, test_path, TEST_AC3, TEST_DTS};
     use std::path::Path;
 
@@ -298,22 +424,38 @@ mod tests {
             assert_eq!(trim(200, 300, RANGE, pulled), Trim::Keep);
         }
     }
+
+    #[test]
+    fn audio_positions_count_from_the_first_frame() {
+        assert_eq!(audio_position(0, RANGE), 0);
+        assert_eq!(audio_position(100, RANGE), 0);
+        assert_eq!(audio_position(600, RANGE), 500);
+        assert_eq!(audio_position(1000, RANGE), 900);
+        assert_eq!(audio_position(4000, RANGE), 900);
+
+        assert_eq!(file_position(0, RANGE), 100);
+        assert_eq!(file_position(500, RANGE), 600);
+        assert_eq!(file_position(900, RANGE), 1000);
+        assert_eq!(file_position(4000, RANGE), 1000);
+        assert_eq!(file_position(u64::MAX, RANGE), 1000);
+    }
 }
 
 #[cfg(all(test, feature = "gst"))]
 mod gst_tests {
-    use super::install_raw_surround_source_probe;
+    use super::{
+        file_seek_position, filter_raw_surround_source, install_raw_surround_source_probe,
+    };
     use crate::playback::pipeline_trace::PipelineTrace;
     use crate::playback::source_activation::race::{
         race_type_finding_with_activation, ActivationRace,
     };
     use crate::playback::source_activation::SourceActivation;
-    use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes, test_path};
-    use crate::raw_audio::{TEST_AC3, TEST_DTS};
+    use crate::raw_audio::{build_test_apev2_tag, test_path, TEST_AC3, TEST_DTS};
+    use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes_after_junk};
     use gst::prelude::*;
     use gstreamer as gst;
     use std::collections::VecDeque;
-    use std::ops::Range;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -326,11 +468,52 @@ mod gst_tests {
         bytes: Vec<u8>,
     }
 
+    impl Delivered {
+        fn end(&self) -> u64 {
+            self.offset + self.bytes.len() as u64
+        }
+
+        /// Check that the buffer holds the bytes of `audio` at its offset,
+        /// which counts from the first frame: no byte from before the first
+        /// frame or from the tag.
+        fn check_audio(&self, audio: &[u8]) -> Result<(), String> {
+            let (start, end) = (self.offset, self.end());
+            let expected = usize::try_from(start)
+                .ok()
+                .zip(usize::try_from(end).ok())
+                .and_then(|(start, end)| audio.get(start..end));
+            if expected == Some(self.bytes.as_slice()) {
+                return Ok(());
+            }
+            Err(format!(
+                "the bytes that left the source as {start}..{end} are not the audio there, of {} bytes",
+                audio.len()
+            ))
+        }
+    }
+
+    /// A decoded buffer.
+    #[derive(Debug, PartialEq)]
+    struct Decoded {
+        start: Duration,
+        length: Duration,
+    }
+
+    /// A compressed frame that left the parser, before the decoder.
+    #[derive(Debug, PartialEq)]
+    struct Parsed {
+        start: Option<gst::ClockTime>,
+        bytes: Vec<u8>,
+    }
+
+    /// The parsers of the formats under test.
+    const PARSERS: [&str; 2] = [AC3.elements[0], DTS.elements[0]];
+
     /// What playback from a seek target, or through a queue, produced.
     #[derive(Debug, Default)]
     struct Run {
-        /// Decoded buffers as (start, duration).
-        decoded: Vec<(Duration, Duration)>,
+        decoded: Vec<Decoded>,
+        parsed: Vec<Parsed>,
         delivered: Vec<Delivered>,
     }
 
@@ -338,53 +521,44 @@ mod gst_tests {
         fn first_start(&self) -> Duration {
             self.decoded
                 .first()
-                .map_or(Duration::MAX, |(start, _)| *start)
+                .map_or(Duration::MAX, |decoded| decoded.start)
         }
 
         fn last_end(&self) -> Duration {
             self.decoded
                 .last()
-                .map_or(Duration::ZERO, |(start, length)| *start + *length)
+                .map_or(Duration::ZERO, |decoded| decoded.start + decoded.length)
         }
 
         fn total_decoded(&self) -> Duration {
-            self.decoded.iter().map(|(_, length)| *length).sum()
+            self.decoded.iter().map(|decoded| decoded.length).sum()
         }
 
-        /// Assert that every file was read and that no byte outside its
-        /// audio left its source.
-        fn assert_only_audio_delivered(&self, files: &[(PathBuf, Range<usize>)]) {
+        /// Assert that every file, given with its audio, was read, and that
+        /// only its audio left its source, at offsets that count from the
+        /// first frame.
+        fn assert_only_audio_delivered(&self, files: &[(PathBuf, Vec<u8>)]) {
             for (path, audio) in files {
                 let name = path.display();
                 let delivered: Vec<_> = self.delivered.iter().filter(|d| d.path == *path).collect();
                 assert!(!delivered.is_empty(), "{name}: nothing left the source");
-                for Delivered { offset, bytes, .. } in delivered {
-                    let end = offset + bytes.len() as u64;
-                    assert!(
-                        *offset >= audio.start as u64,
-                        "{name}: bytes {offset}..{end} before the first frame at {} reached the parser",
-                        audio.start
-                    );
-                    assert!(
-                        end <= audio.end as u64,
-                        "{name}: bytes {offset}..{end} after the audio end {} reached the parser",
-                        audio.end
-                    );
-                    assert!(
-                        !bytes.windows(8).any(|window| window == b"APETAGEX"),
-                        "{name}: APEv2 tag bytes reached the parser"
-                    );
+                for buffer in delivered {
+                    if let Err(err) = buffer.check_audio(audio) {
+                        panic!("{name}: {err}");
+                    }
                 }
             }
         }
     }
 
     /// `playbin3` with the app's source filter, a fake audio sink, and
-    /// recorders for what the sources deliver and what is decoded. It
-    /// activates its sources as the playback backend does.
+    /// recorders for what the sources deliver, what the parser frames and
+    /// what is decoded. It activates its sources as the playback backend
+    /// does.
     struct Player {
         playbin: gst::Element,
-        decoded: Arc<Mutex<Vec<(Duration, Duration)>>>,
+        decoded: Arc<Mutex<Vec<Decoded>>>,
+        parsed: Arc<Mutex<Vec<Parsed>>>,
         delivered: Arc<Mutex<Vec<Delivered>>>,
         trace: PipelineTrace,
         activation: Arc<SourceActivation>,
@@ -403,10 +577,12 @@ mod gst_tests {
                 trace: PipelineTrace::new(&playbin),
                 playbin,
                 decoded: Arc::default(),
+                parsed: Arc::default(),
                 delivered: Arc::default(),
                 activation,
             };
             player.record_delivered_buffers();
+            player.record_parsed_frames();
             player
                 .playbin
                 .set_property("audio-sink", player.decoded_sink());
@@ -448,6 +624,45 @@ mod gst_tests {
             });
         }
 
+        /// Record the frames that leave the parser. A flushing seek starts a
+        /// new run once the end of the flush leaves the parser, before the
+        /// first frame from the seek target.
+        fn record_parsed_frames(&self) {
+            let parsed = Arc::clone(&self.parsed);
+            self.playbin
+                .connect("deep-element-added", false, move |values| {
+                    let element = values.get(2)?.get::<gst::Element>().ok()?;
+                    if element
+                        .factory()
+                        .is_none_or(|factory| !PARSERS.contains(&factory.name().as_str()))
+                    {
+                        return None;
+                    }
+                    let parsed = Arc::clone(&parsed);
+                    element.static_pad("src")?.add_probe(
+                        gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_FLUSH,
+                        move |_pad, info| {
+                            if is_flush_stop(info) {
+                                if let Ok(mut parsed) = parsed.lock() {
+                                    parsed.clear();
+                                }
+                            } else if let Some(buffer) = info.buffer() {
+                                if let (Ok(map), Ok(mut parsed)) =
+                                    (buffer.map_readable(), parsed.lock())
+                                {
+                                    parsed.push(Parsed {
+                                        start: buffer.pts(),
+                                        bytes: map.to_vec(),
+                                    });
+                                }
+                            }
+                            gst::PadProbeReturn::Ok
+                        },
+                    );
+                    None
+                });
+        }
+
         /// A sink that records what is decoded. A flushing seek starts a
         /// new run once the end of the flush reaches the sink, before the
         /// first buffer from the seek target.
@@ -468,10 +683,10 @@ mod gst_tests {
                         if let (Some(start), Some(length), Ok(mut decoded)) =
                             (buffer.pts(), buffer.duration(), decoded.lock())
                         {
-                            decoded.push((
-                                Duration::from_nanos(start.nseconds()),
-                                Duration::from_nanos(length.nseconds()),
-                            ));
+                            decoded.push(Decoded {
+                                start: Duration::from_nanos(start.nseconds()),
+                                length: Duration::from_nanos(length.nseconds()),
+                            });
                         }
                     }
                     gst::PadProbeReturn::Ok
@@ -509,9 +724,11 @@ mod gst_tests {
         /// for a wait for `what` that timed out.
         fn report(&self, what: &str) -> String {
             let decoded = self.decoded.lock().map_or(0, |decoded| decoded.len());
+            let parsed = self.parsed.lock().map_or(0, |parsed| parsed.len());
             let delivered = self.delivered.lock().map_or(0, |delivered| delivered.len());
             let details = format!(
-                "  since the last seek: {decoded} buffers decoded, {delivered} left the sources\n"
+                "  since the last seek: {decoded} buffers decoded, {parsed} frames parsed, \
+                 {delivered} left the sources\n"
             );
             self.trace.report(what, &details)
         }
@@ -519,6 +736,7 @@ mod gst_tests {
         fn take_run(&self) -> Run {
             Run {
                 decoded: std::mem::take(&mut *self.decoded.lock().expect("decoded")),
+                parsed: std::mem::take(&mut *self.parsed.lock().expect("parsed")),
                 delivered: std::mem::take(&mut *self.delivered.lock().expect("delivered")),
             }
         }
@@ -603,13 +821,31 @@ mod gst_tests {
     }
 
     /// A ripped file holding `fixture` repeated, long enough that a parser
-    /// reads it in several 64 KiB pulls, with the range of its audio.
-    fn write_ripped_file(name: &str, fixture: &[u8], repeats: usize) -> (PathBuf, Range<usize>) {
-        let (bytes, audio) = ripped_surround_bytes(&fixture.repeat(repeats));
+    /// reads it in several 64 KiB pulls, with its audio.
+    fn write_ripped_file(name: &str, fixture: &[u8], repeats: usize) -> (PathBuf, Vec<u8>) {
+        write_ripped_file_after_junk(name, 0, fixture, repeats)
+    }
+
+    /// [`write_ripped_file`] with `junk_len` bytes of junk before the
+    /// leading partial frame.
+    fn write_ripped_file_after_junk(
+        name: &str,
+        junk_len: usize,
+        fixture: &[u8],
+        repeats: usize,
+    ) -> (PathBuf, Vec<u8>) {
+        let audio = fixture.repeat(repeats);
+        let (bytes, range) = ripped_surround_bytes_after_junk(junk_len, &audio);
+        assert_eq!(bytes[range], audio[..]);
         let path = test_path(name, name);
         std::fs::write(&path, &bytes).expect("write fixture");
         (path, audio)
     }
+
+    /// Junk before the first frame, for the filter to trim: more than one
+    /// read of the file source, and neither whole frames nor whole fixtures,
+    /// so that playback from the wrong place plays other samples.
+    const LONG_JUNK: usize = 5000;
 
     struct Format {
         /// Also the extension; upper case gives the typefinders no hint.
@@ -643,6 +879,18 @@ mod gst_tests {
     impl Format {
         fn repeats(&self) -> usize {
             (256 * 1024_usize).div_ceil(self.fixture.len())
+        }
+
+        /// The frames of `parsed` from the one that plays `target` on.
+        fn frames_from<'a>(&self, target: Duration, parsed: &'a [Parsed]) -> Vec<&'a Parsed> {
+            parsed
+                .iter()
+                .skip_while(|frame| {
+                    frame.start.is_none_or(|start| {
+                        Duration::from_nanos(start.nseconds()) + self.frame_length <= target
+                    })
+                })
+                .collect()
         }
 
         fn length(&self, repeats: usize) -> Duration {
@@ -684,15 +932,103 @@ mod gst_tests {
         }
     }
 
+    /// Seeks in a ripped file must play what the same seeks play in a file
+    /// that starts with the first frame: the same compressed frames, from
+    /// the target to the end of the stream. That file ends with a tag, so
+    /// the filter reads it in push mode too, but moves no byte position.
+    ///
+    /// The frames are compared before the decoder, whose output depends on
+    /// what it decoded before, such as the dither of the AC3 decoder. For a
+    /// target it has indexed no frame near, the parser scans from the last
+    /// frame it indexed before the target, which depends on how the reads
+    /// split the file, and the decoder drops what comes before the target.
+    fn assert_seeks_play_what_they_play_without_the_junk(format: &Format) {
+        require_elements(format.elements);
+        let name = format.name;
+        let repeats = format.repeats();
+        let length = format.length(repeats);
+        let ripped = write_ripped_file_after_junk(name, LONG_JUNK, format.fixture, repeats);
+        let tagged = test_path("tagged", name);
+        let mut bytes = ripped.1.clone();
+        bytes.extend_from_slice(&build_test_apev2_tag(&[("Title", "Tone")], true));
+        std::fs::write(&tagged, &bytes).expect("write fixture");
+
+        let targets = [length * 3 / 5, length / 4];
+        let runs = play_from(&ripped.0, format.seek_flags, &targets);
+        let tagged_runs = play_from(&tagged, format.seek_flags, &targets);
+        for path in [&ripped.0, &tagged] {
+            let _ = std::fs::remove_file(path);
+        }
+
+        let slack = format.frame_length * 2;
+        for ((run, tagged_run), target) in runs.iter().zip(&tagged_runs).zip(targets) {
+            assert!(
+                run.first_start() <= target + slack && run.first_start() + slack >= target,
+                "{name}: playback after seeking to {target:?} starts at {:?}",
+                run.first_start()
+            );
+            // The decoders round the last timestamp or clip the last frame.
+            assert!(
+                run.last_end() <= length + Duration::from_micros(1)
+                    && run.last_end() + format.frame_length >= length,
+                "{name}: playback after seeking to {target:?} ends at {:?} of {length:?}",
+                run.last_end()
+            );
+            assert_same_frames(
+                &format.frames_from(target, &run.parsed),
+                &format.frames_from(target, &tagged_run.parsed),
+            )
+            .unwrap_or_else(|err| panic!("{name}: playback after seeking to {target:?} {err}"));
+            assert!(
+                run.decoded == tagged_run.decoded,
+                "{name}: playback after seeking to {target:?} decoded {} buffers from {:?} to {:?}, \
+                 without the junk {} buffers from {:?} to {:?}",
+                run.decoded.len(),
+                run.first_start(),
+                run.last_end(),
+                tagged_run.decoded.len(),
+                tagged_run.first_start(),
+                tagged_run.last_end()
+            );
+            run.assert_only_audio_delivered(std::slice::from_ref(&ripped));
+        }
+    }
+
+    /// Check that the parser framed the same compressed frames, with the
+    /// same timestamps, as it did without the junk.
+    fn assert_same_frames(parsed: &[&Parsed], without_junk: &[&Parsed]) -> Result<(), String> {
+        if parsed.is_empty() {
+            return Err("parsed no frames".to_owned());
+        }
+        if let Some(index) = (0..parsed.len().max(without_junk.len()))
+            .find(|&index| parsed.get(index) != without_junk.get(index))
+        {
+            let describe = |frame: Option<&&Parsed>| {
+                frame.map_or_else(
+                    || "nothing".to_owned(),
+                    |frame| format!("{} bytes at {:?}", frame.bytes.len(), frame.start),
+                )
+            };
+            return Err(format!(
+                "parsed {} frames, without the junk {}; frame {index} differs: {}, without the junk {}",
+                parsed.len(),
+                without_junk.len(),
+                describe(parsed.get(index)),
+                describe(without_junk.get(index)),
+            ));
+        }
+        Ok(())
+    }
+
     fn assert_gapless_queue_plays_every_frame(format: &Format) {
         require_elements(format.elements);
         let name = format.name;
         let repeats = format.repeats();
         let first = write_ripped_file(name, format.fixture, repeats);
         // A file with nothing to strip is read without the filter.
-        let clean = (test_path("clean", name), 0..format.fixture.len() * repeats);
-        std::fs::write(&clean.0, format.fixture.repeat(repeats)).expect("write fixture");
-        let last = write_ripped_file(name, format.fixture, repeats + 3);
+        let clean = (test_path("clean", name), format.fixture.repeat(repeats));
+        std::fs::write(&clean.0, &clean.1).expect("write fixture");
+        let last = write_ripped_file_after_junk(name, LONG_JUNK, format.fixture, repeats + 3);
         // The last track twice, as Repeat-One queues it.
         let paths = [&first, &clean, &last, &last].map(|(path, _)| path.clone());
         let run = play_gapless(&paths);
@@ -795,5 +1131,243 @@ mod gst_tests {
     #[test]
     fn ripped_dts_plays_every_frame_through_gapless_and_repeated_tracks() {
         assert_gapless_queue_plays_every_frame(&DTS);
+    }
+
+    #[test]
+    fn ripped_ac3_seeks_play_what_they_play_without_the_junk() {
+        assert_seeks_play_what_they_play_without_the_junk(&AC3);
+    }
+
+    #[test]
+    fn ripped_dts_seeks_play_what_they_play_without_the_junk() {
+        assert_seeks_play_what_they_play_without_the_junk(&DTS);
+    }
+
+    #[test]
+    fn byte_seeks_and_queries_count_from_the_first_frame() {
+        gst::init().expect("gst init");
+        for format in [&AC3, &DTS] {
+            let (path, audio) =
+                write_ripped_file_after_junk(format.name, LONG_JUNK, format.fixture, 4);
+            let reader = ByteReader::new(&path);
+            let result = reader.check(&audio);
+            let _ = reader.pipeline.set_state(gst::State::Null);
+            let _ = std::fs::remove_file(&path);
+            result.unwrap_or_else(|err| panic!("{}: {err}", format.name));
+        }
+    }
+
+    #[test]
+    fn byte_seeks_go_to_the_file_position_of_their_audio_position() {
+        let range = (100, 1000);
+        let seek = |seek_type, position| {
+            let (seek_type, position) = file_seek_position(seek_type, position, range);
+            (seek_type, position.map(|position| *position))
+        };
+        assert_eq!(seek(gst::SeekType::Set, 0), (gst::SeekType::Set, Some(100)));
+        assert_eq!(
+            seek(gst::SeekType::Set, 400),
+            (gst::SeekType::Set, Some(500))
+        );
+        assert_eq!(seek(gst::SeekType::Set, -1), (gst::SeekType::Set, None));
+        assert_eq!(
+            seek(gst::SeekType::End, 0),
+            (gst::SeekType::Set, Some(1000))
+        );
+        assert_eq!(
+            seek(gst::SeekType::End, -300),
+            (gst::SeekType::Set, Some(700))
+        );
+        assert_eq!(
+            seek(gst::SeekType::End, -5000),
+            (gst::SeekType::Set, Some(100))
+        );
+        assert_eq!(seek(gst::SeekType::None, -1), (gst::SeekType::None, None));
+    }
+
+    /// `filesrc` with the filter, read by a fake sink that records what
+    /// reaches it since the last flush.
+    struct ByteReader {
+        pipeline: gst::Pipeline,
+        sink_pad: gst::Pad,
+        delivered: Arc<Mutex<Vec<Delivered>>>,
+    }
+
+    impl ByteReader {
+        fn new(path: &Path) -> Self {
+            let source = gst::ElementFactory::make("filesrc")
+                .property("location", path.to_string_lossy().to_string())
+                .build()
+                .expect("filesrc");
+            filter_raw_surround_source(&source);
+            let sink = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .build()
+                .expect("fakesink");
+            let pipeline = gst::Pipeline::new();
+            pipeline.add_many([&source, &sink]).expect("add elements");
+            source.link(&sink).expect("link elements");
+            let sink_pad = sink.static_pad("sink").expect("fakesink pad");
+            let delivered: Arc<Mutex<Vec<Delivered>>> = Arc::default();
+            let recorded = Arc::clone(&delivered);
+            let path = path.to_owned();
+            sink_pad.add_probe(
+                gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_FLUSH,
+                move |_pad, info| {
+                    if is_flush_stop(info) {
+                        if let Ok(mut recorded) = recorded.lock() {
+                            recorded.clear();
+                        }
+                    } else if let Some(buffer) = info.buffer() {
+                        if let (Ok(map), Ok(mut recorded)) =
+                            (buffer.map_readable(), recorded.lock())
+                        {
+                            recorded.push(Delivered {
+                                path: path.clone(),
+                                offset: buffer.offset(),
+                                bytes: map.to_vec(),
+                            });
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+            Self {
+                pipeline,
+                sink_pad,
+                delivered,
+            }
+        }
+
+        fn wait_for(&self, wanted: gst::MessageType) -> Result<(), String> {
+            let bus = self.pipeline.bus().expect("bus");
+            let message = bus
+                .timed_pop_filtered(
+                    gst::ClockTime::from_seconds(10),
+                    &[wanted, gst::MessageType::Error],
+                )
+                .ok_or_else(|| format!("timed out waiting for {wanted:?}"))?;
+            match message.view() {
+                gst::MessageView::Error(err) => Err(format!("{} ({:?})", err.error(), err.debug())),
+                _ => Ok(()),
+            }
+        }
+
+        fn seek(&self, start_type: gst::SeekType, start: i64) -> Result<(), String> {
+            let seek = gst::event::Seek::new(
+                1.0,
+                gst::SeekFlags::FLUSH,
+                start_type,
+                gst::GenericFormattedValue::new(gst::Format::Bytes, start),
+                gst::SeekType::None,
+                gst::GenericFormattedValue::new(gst::Format::Bytes, -1),
+            );
+            self.pipeline
+                .send_event(seek)
+                .then_some(())
+                .ok_or_else(|| format!("seek to {start_type:?} {start} failed"))
+        }
+
+        fn position(&self) -> Option<u64> {
+            self.sink_pad
+                .peer_query_position::<gst::format::Bytes>()
+                .map(|position| *position)
+        }
+
+        /// What reached the sink since the last flush: the bytes, which must
+        /// be the audio at their offsets, as one range of the audio.
+        fn read(&self, audio: &[u8]) -> Result<std::ops::Range<u64>, String> {
+            let delivered = self.delivered.lock().map_err(|err| err.to_string())?;
+            let mut read: Option<std::ops::Range<u64>> = None;
+            for buffer in delivered.iter() {
+                buffer.check_audio(audio)?;
+                read = match read {
+                    None => Some(buffer.offset..buffer.end()),
+                    Some(read) if read.end == buffer.offset => Some(read.start..buffer.end()),
+                    Some(read) => {
+                        return Err(format!(
+                            "bytes {}..{} follow bytes {read:?}",
+                            buffer.offset,
+                            buffer.end()
+                        ))
+                    }
+                };
+            }
+            read.ok_or_else(|| "nothing reached the sink".to_string())
+        }
+
+        /// Answer byte queries and seek by bytes, from the start and from
+        /// the end of the audio, as a parser does.
+        fn check(&self, audio: &[u8]) -> Result<(), String> {
+            let len = audio.len() as u64;
+            self.pipeline
+                .set_state(gst::State::Paused)
+                .map_err(|err| err.to_string())?;
+            self.wait_for(gst::MessageType::AsyncDone)?;
+            let mut seeking = gst::query::Seeking::new(gst::Format::Bytes);
+            if !self.sink_pad.peer_query(&mut seeking) {
+                return Err("no seeking answer".to_string());
+            }
+            let seeking = seeking.result();
+            let bytes = |position| gst::GenericFormattedValue::Bytes(Some(position));
+            let wanted = (
+                true,
+                bytes(gst::format::Bytes::ZERO),
+                bytes(gst::format::Bytes::from_u64(len)),
+            );
+            if seeking != wanted {
+                return Err(format!("seeking answer {seeking:?}, not {wanted:?}"));
+            }
+            let duration = self
+                .sink_pad
+                .peer_query_duration::<gst::format::Bytes>()
+                .map(|duration| *duration);
+            if duration != Some(len) {
+                return Err(format!(
+                    "byte duration {duration:?} of {len} bytes of audio"
+                ));
+            }
+            let read = self.read(audio)?;
+            if read.start != 0 || self.position() != Some(read.end) {
+                return Err(format!(
+                    "prerolled bytes {read:?} at byte position {:?}",
+                    self.position()
+                ));
+            }
+
+            // Paused, the source stops after the first buffer from the target.
+            let target = len / 3;
+            self.seek(gst::SeekType::Set, i64::try_from(target).expect("target"))?;
+            self.wait_for(gst::MessageType::AsyncDone)?;
+            let read = self.read(audio)?;
+            if read.start != target || self.position() != Some(read.end) {
+                return Err(format!(
+                    "seeking to byte {target} prerolled bytes {read:?} at byte position {:?}",
+                    self.position()
+                ));
+            }
+            self.pipeline
+                .set_state(gst::State::Playing)
+                .map_err(|err| err.to_string())?;
+            self.wait_for(gst::MessageType::Eos)?;
+            let read = self.read(audio)?;
+            if read != (target..len) {
+                return Err(format!("seeking to byte {target} read bytes {read:?}"));
+            }
+
+            let from_end = len / 5;
+            self.seek(
+                gst::SeekType::End,
+                -i64::try_from(from_end).expect("target"),
+            )?;
+            self.wait_for(gst::MessageType::Eos)?;
+            let read = self.read(audio)?;
+            if read != (len - from_end..len) {
+                return Err(format!(
+                    "seeking to {from_end} bytes before the end read bytes {read:?}"
+                ));
+            }
+            Ok(())
+        }
     }
 }

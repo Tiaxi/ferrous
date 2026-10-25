@@ -67,11 +67,22 @@ pub(crate) const TEST_DTS: &[u8] = include_bytes!("../analysis/fixtures/raw-tone
 /// bytes and the range of the stream within them.
 #[cfg(test)]
 pub(crate) fn ripped_surround_bytes(stream: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
+    ripped_surround_bytes_after_junk(0, stream)
+}
+
+/// [`ripped_surround_bytes`] with `junk_len` zero bytes before the partial
+/// frame, which the filter trims with it.
+#[cfg(test)]
+pub(crate) fn ripped_surround_bytes_after_junk(
+    junk_len: usize,
+    stream: &[u8],
+) -> (Vec<u8>, std::ops::Range<usize>) {
     let partial_frame = &stream[stream.len() - 100..];
     let comment = "Ripped from disc. ".repeat(40);
-    let mut bytes = partial_frame.to_vec();
+    let mut bytes = vec![0; junk_len];
+    bytes.extend_from_slice(partial_frame);
     bytes.extend_from_slice(stream);
-    let audio = partial_frame.len()..bytes.len();
+    let audio = junk_len + partial_frame.len()..bytes.len();
     bytes.extend_from_slice(&build_test_apev2_tag(
         &[("Title", "Tone"), ("Comment", &comment)],
         true,
