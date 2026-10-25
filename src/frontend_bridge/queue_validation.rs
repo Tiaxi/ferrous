@@ -2,7 +2,8 @@
 
 use super::{commands::validate_queue_details, BridgeState};
 use crate::library::{
-    read_track_info, track_file_fingerprint, ExternalTrackCache, IndexedTrack, TrackFileFingerprint,
+    read_external_track, track_file_fingerprint, ExternalTrackCache, IndexedTrack,
+    TrackFileFingerprint,
 };
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::collections::HashMap;
@@ -62,14 +63,15 @@ impl QueueValidationWorker {
                     if active.load(Ordering::Relaxed) != state.queue_detail_generation {
                         break;
                     }
-                    let indexed = read_track_info(&request.path);
+                    let read = read_external_track(&request.path);
                     // Files may change while metadata is read; never cache or publish mismatched data.
                     if track_file_fingerprint(&request.path) != Some(request.fingerprint) {
                         continue;
                     }
-                    if let Some(cache) = &cache {
-                        cache.store(&request.path, request.fingerprint, &indexed);
-                    }
+                    let indexed = match &cache {
+                        Some(cache) => cache.store(&request.path, request.fingerprint, read),
+                        None => read.into_indexed(),
+                    };
                     state
                         .queue_detail_fingerprints
                         .insert(request.path.clone(), request.fingerprint);

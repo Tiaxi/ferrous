@@ -10,8 +10,9 @@ use crate::lastfm::{
     ServiceOptions as LastFmServiceOptions,
 };
 use crate::library::{
-    load_external_track_cache, read_track_info, refresh_cover_paths_for_tracks,
-    refresh_cover_paths_for_tracks_with_override, store_external_track_cache, IndexedTrack,
+    load_external_track_cache, read_external_track, read_track_info,
+    refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
+    store_external_track_cache, IndexedTrack,
 };
 
 use crate::worker_thread::spawn_worker;
@@ -84,9 +85,8 @@ fn run_external_queue_detail_worker(
     while let Ok(request) = req_rx.recv() {
         let indexed =
             load_external_track_cache(&request.path, request.fingerprint).unwrap_or_else(|| {
-                let indexed = read_track_info(&request.path);
-                let _ = store_external_track_cache(&request.path, request.fingerprint, &indexed);
-                indexed
+                let read = read_external_track(&request.path);
+                store_external_track_cache(&request.path, request.fingerprint, read)
             });
         let _ = event_tx.send(ExternalQueueDetailsEvent {
             path: request.path,
@@ -113,7 +113,8 @@ fn run_apply_album_art_worker(
                 {
                     let refresh_error =
                         refresh_cover_paths_for_tracks_with_override(&affected_paths, &cover_path)
-                            .err();
+                            .err()
+                            .map(|error| format!("failed to refresh cover paths: {error}"));
                     let cover_path_string = cover_path.to_string_lossy().to_string();
                     let indexed_by_path = affected_paths
                         .into_iter()
@@ -134,19 +135,26 @@ fn run_apply_album_art_worker(
                         .collect::<HashMap<_, _>>();
                     (refresh_error, indexed_by_path)
                 } else {
-                    let refresh_error = refresh_cover_paths_for_tracks(&affected_paths).err();
-                    let indexed_by_path = affected_paths
-                        .into_iter()
-                        .map(|path| {
-                            let indexed = read_track_info(&path);
-                            (path, indexed)
-                        })
-                        .collect::<HashMap<_, _>>();
-                    (refresh_error, indexed_by_path)
+                    match refresh_cover_paths_for_tracks(&affected_paths) {
+                        // Files that could not be read fully keep the covers
+                        // they had, which the problem tells the user.
+                        Ok(refresh) => (refresh.problem, refresh.indexed),
+                        Err(error) => {
+                            let indexed_by_path = affected_paths
+                                .into_iter()
+                                .map(|path| {
+                                    let indexed = read_track_info(&path);
+                                    (path, indexed)
+                                })
+                                .collect::<HashMap<_, _>>();
+                            (
+                                Some(format!("failed to refresh cover paths: {error}")),
+                                indexed_by_path,
+                            )
+                        }
+                    }
                 };
 
-                let refresh_error =
-                    refresh_error.map(|error| format!("failed to refresh cover paths: {error}"));
                 let error = match (failure_summary, refresh_error) {
                     (Some(failures), Some(refresh)) => Some(format!("{failures}; {refresh}")),
                     (failures, refresh) => failures.or(refresh),

@@ -15,9 +15,10 @@ use scan::{
 #[cfg(test)]
 pub(crate) use scan::{index_tracks_for_test, load_external_track_caches};
 pub(crate) use scan::{
-    is_supported_audio, load_external_track_cache, read_track_info, refresh_cover_paths_for_tracks,
-    refresh_cover_paths_for_tracks_with_override, refresh_indexed_metadata_for_paths,
-    rename_indexed_metadata_paths, store_external_track_cache, track_file_fingerprint,
+    is_supported_audio, load_external_track_cache, read_external_track, read_track_info,
+    refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
+    refresh_indexed_metadata_for_paths, rename_indexed_metadata_paths, store_external_track_cache,
+    track_file_fingerprint,
 };
 pub(crate) use scan::{read_library_snapshot_from_db, ExternalTrackCache};
 pub use schema::search_tracks_fts;
@@ -215,11 +216,9 @@ impl LibraryService {
                     // Publish the cached library first, then fill new tag columns on this
                     // library worker. Existing libraries need no manual rescan after upgrade.
                     if schema::needs_search_tag_backfill(&conn) {
-                        if let Err(err) =
+                        snapshot.last_error =
                             scan::backfill_search_tags(&conn, &mut snapshot, &event_tx)
-                        {
-                            snapshot.last_error = Some(err);
-                        }
+                                .unwrap_or_else(Some);
                         load_snapshot(&conn, &mut snapshot);
                         snapshot.bump_search_revision();
                         snapshot.scan_in_progress = false;
