@@ -11,6 +11,8 @@
 
 #include <functional>
 
+#include "CoverRevisionLinks.h"
+
 class BridgeClient;
 
 // QDBusContext lets the adaptors' slots answer D-Bus calls with errors.
@@ -105,6 +107,9 @@ private:
     void rebuildMetadata();
     QString currentTrackIdPath() const;
     QVariantMap buildMetadata() const;
+    // The art URL of the current track, which starts making its revision's
+    // link; see CoverRevisionLinks.
+    QString currentArtUrl();
     PublishedPlayerState currentPlayerState() const;
     bool replayedSameTrack(const PublishedPlayerState &nextState) const;
 
@@ -119,6 +124,10 @@ private:
     QVariantMap m_metadata;
     QString m_trackIdPath;
     qlonglong m_metadataLengthUs{0};
+    CoverRevisionLinks m_artLinks;
+    // The art in m_metadata, and the cover file it shows.
+    QString m_artUrl;
+    QString m_artCoverPath;
     // Tests capture the signals here instead of sending them on the session
     // bus.
     std::function<void(const QDBusMessage &)> m_signalSink;

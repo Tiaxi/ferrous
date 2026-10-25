@@ -60,9 +60,8 @@ pub(super) fn process_apply_album_art_event(
 
     if let Some(current_path) = state.playback.current.as_ref() {
         if let Some(indexed) = event.indexed_by_path.get(current_path) {
-            state.metadata.cover_art_path =
-                (!indexed.cover_path.is_empty()).then(|| indexed.cover_path.clone());
-            state.metadata.cover_art_stamp = indexed.cover_stamp;
+            let (cover_path, stamp) = (indexed.cover_path.clone(), indexed.cover_stamp);
+            set_metadata_cover(state, cover_path, stamp);
         }
     }
 
@@ -522,7 +521,8 @@ pub(super) fn process_metadata_event(
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     match event {
-        MetadataEvent::Loaded(metadata) => {
+        MetadataEvent::Loaded(mut metadata) => {
+            keep_newer_cover(state, &mut metadata);
             state.metadata = metadata;
             SnapshotUrgency::Immediate
         }
@@ -879,9 +879,47 @@ fn follow_current_track_cover(state: &mut BridgeState, upserted: &[Arc<LibraryTr
     let Some(track) = upserted.iter().rev().find(|track| &track.path == current) else {
         return;
     };
-    state.metadata.cover_art_path =
-        (!track.cover_path.is_empty()).then(|| track.cover_path.clone());
-    state.metadata.cover_art_stamp = track.cover_stamp;
+    set_metadata_cover(state, track.cover_path.clone(), track.cover_stamp);
+}
+
+/// Gives the current metadata a cover newer than the metadata worker's,
+/// which results it read before keep; see [`keep_newer_cover`].
+fn set_metadata_cover(state: &mut BridgeState, cover_path: String, stamp: u64) {
+    let cover_path = (!cover_path.is_empty()).then_some(cover_path);
+    state.metadata.cover_art_path.clone_from(&cover_path);
+    state.metadata.cover_art_stamp = stamp;
+    state.cover_override =
+        state
+            .metadata
+            .source_path
+            .clone()
+            .map(|source_path| super::CoverOverride {
+                source_path,
+                cover_path,
+                stamp,
+                at: Instant::now(),
+            });
+}
+
+/// Keeps the cover the bridge set for `metadata`'s track when `metadata`
+/// chose its cover before that; its other fields still apply. A result
+/// read since then is newer, and ends the override.
+fn keep_newer_cover(state: &mut BridgeState, metadata: &mut crate::metadata::TrackMetadata) {
+    let Some(cover) = &state.cover_override else {
+        return;
+    };
+    if metadata.source_path.as_ref() != Some(&cover.source_path) {
+        return;
+    }
+    if metadata
+        .cover_read_at
+        .is_some_and(|read_at| read_at >= cover.at)
+    {
+        state.cover_override = None;
+        return;
+    }
+    metadata.cover_art_path.clone_from(&cover.cover_path);
+    metadata.cover_art_stamp = cover.stamp;
 }
 
 #[cfg(test)]
@@ -1797,6 +1835,60 @@ mod tests {
                 Some(position)
             );
         }
+    }
+
+    #[test]
+    fn a_metadata_result_read_before_a_cover_refresh_does_not_undo_it() {
+        let current = p("/music/Artist/Album/01.flac");
+        let mut state = BridgeState::default();
+        state.playback.current = Some(current.clone());
+        let source = Some(current.to_string_lossy().into_owned());
+        let cover = "/music/Artist/Album/cover.jpg";
+        // The metadata worker chose the cover, then went on probing the
+        // file; its later results carry the cover it chose first.
+        let read = crate::metadata::TrackMetadata {
+            source_path: source.clone(),
+            cover_art_path: Some(cover.to_string()),
+            cover_art_stamp: 1,
+            cover_read_at: Instant::now().checked_sub(Duration::from_secs(1)),
+            ..crate::metadata::TrackMetadata::default()
+        };
+        process_metadata_event(MetadataEvent::Loaded(read.clone()), &mut state);
+        assert_eq!(state.metadata.cover_art_stamp, 1);
+
+        // The image is replaced, and the watcher's scan gives the row stamp 2.
+        let row = crate::library::LibraryTrack {
+            cover_path: cover.to_string(),
+            cover_stamp: 2,
+            ..library_track("/music/Artist/Album/01.flac", "Song")
+        };
+        apply_library_events([library_event(vec![row], Vec::new())], &mut state);
+        assert_eq!(state.metadata.cover_art_stamp, 2);
+
+        // The probe's result arrives: its details apply, its cover does not.
+        let probed = crate::metadata::TrackMetadata {
+            bitrate_kbps: Some(905),
+            ..read
+        };
+        process_metadata_event(MetadataEvent::Loaded(probed), &mut state);
+        assert_eq!(state.metadata.cover_art_path.as_deref(), Some(cover));
+        assert_eq!(state.metadata.cover_art_stamp, 2);
+        assert_eq!(state.metadata.bitrate_kbps, Some(905));
+
+        // A read made since then is newer than the scan's cover.
+        let reread = crate::metadata::TrackMetadata {
+            source_path: source,
+            cover_art_path: Some("/music/Artist/Album/front.jpg".to_string()),
+            cover_art_stamp: 3,
+            cover_read_at: Some(Instant::now() + Duration::from_secs(1)),
+            ..crate::metadata::TrackMetadata::default()
+        };
+        process_metadata_event(MetadataEvent::Loaded(reread), &mut state);
+        assert_eq!(state.metadata.cover_art_stamp, 3);
+        assert_eq!(
+            state.metadata.cover_art_path.as_deref(),
+            Some("/music/Artist/Album/front.jpg")
+        );
     }
 
     #[test]

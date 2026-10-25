@@ -71,6 +71,7 @@ qt_add_executable(ferrous
     src/GlobalSearchResultsModel.cpp
     src/LibraryTreeModel.cpp
     src/MprisController.cpp
+    src/CoverRevisionLinks.cpp
     src/PlaybackClock.cpp
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
@@ -239,6 +240,7 @@ if(BUILD_TESTING)
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
         src/MprisController.cpp
+        src/CoverRevisionLinks.cpp
         src/PlaybackClock.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -329,6 +331,7 @@ if(BUILD_TESTING)
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
         src/MprisController.cpp
+        src/CoverRevisionLinks.cpp
         src/PlaybackClock.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp

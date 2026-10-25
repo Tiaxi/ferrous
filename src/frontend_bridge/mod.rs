@@ -496,8 +496,20 @@ impl Default for BridgeSettings {
     }
 }
 
+/// A cover that the bridge gave the current track's metadata itself, after
+/// a scan checked it again or artwork was applied. The metadata worker may
+/// still deliver results that it read before; those keep this cover.
+#[derive(Debug, Clone)]
+pub(super) struct CoverOverride {
+    source_path: String,
+    cover_path: Option<String>,
+    stamp: u64,
+    at: Instant,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct BridgeState {
+    cover_override: Option<CoverOverride>,
     queue_detail_generation: u64,
     queue_detail_validation_requested: bool,
     playback: PlaybackSnapshot,
@@ -676,6 +688,7 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         bitrate_timeline_kbps: Vec::new(),
         cover_art_path: metadata.cover_art_path.clone(),
         cover_art_stamp: metadata.cover_art_stamp,
+        cover_read_at: metadata.cover_read_at,
     }
 }
 

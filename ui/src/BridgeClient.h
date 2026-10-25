@@ -198,6 +198,9 @@ public:
     explicit BridgeClient(QObject *parent = nullptr);
     ~BridgeClient() override;
 
+    // Adds a line to the diagnostics log (Help > Diagnostics).
+    void logDiagnostic(const QString &category, const QString &message);
+
     QString playbackState() const;
     PlaybackClock *playbackClock() const { return m_playbackClock; }
     QString durationText() const;
@@ -595,7 +598,6 @@ private:
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
     void logProfileDiagnostic(const QString &category, const QString &message) const;
-    void logDiagnostic(const QString &category, const QString &message);
     void appendDiagnosticLine(const QString &line);
     void flushPendingDiagnosticDiskLines();
     void rebuildDiagnosticsText();
