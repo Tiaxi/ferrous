@@ -33,6 +33,9 @@ const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const PRECOMPUTED_SPECTROGRAM_MAGIC: u8 = 0xA2;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
 const ANALYSIS_FLAG_WAVEFORM_COMPLETE: u8 = 0x08;
+/// Errors waiting for the UI past this many give way, oldest first, to one
+/// entry that counts them.
+const MAX_PENDING_ERRORS: usize = 32;
 const MAX_PENDING_ANALYSIS_FRAMES: usize = 24;
 const MAX_PENDING_PRECOMPUTED_SPECTROGRAM: usize = 64;
 const MAX_PENDING_LIBRARY_TREES: usize = 1;
@@ -149,14 +152,20 @@ struct PendingPrecomputedSpectrogramFrame {
 /// the order the UI reads them in.
 type SnapshotSections = Vec<(u16, Vec<u8>)>;
 
-/// An event waiting for the UI in the binary event queue.
+/// An event waiting for the UI in the binary event queue. Each holds the
+/// finished packet, so the UI's pop only hands it over.
 enum PendingBinaryEvent {
-    /// A packet the UI must receive, such as an error or the bridge's stop.
+    /// A packet the UI must receive, such as a save's answer or the
+    /// bridge's stop.
     Packet(Vec<u8>),
-    /// The newest snapshot. At most one waits at a time: a newer one
-    /// replaces it and takes over the sections only it had, such as the
-    /// queue.
-    Snapshot(SnapshotSections),
+    /// An error. Past [`MAX_PENDING_ERRORS`], the oldest give way to
+    /// [`PendingBinaryEvent::EarlierErrors`].
+    Error(Vec<u8>),
+    /// How many errors gave way to newer ones, and the packet that says so.
+    EarlierErrors { count: usize, packet: Vec<u8> },
+    /// The newest snapshot. At most one waits at a time: the relay takes it
+    /// back and merges it into the next one.
+    Snapshot(Vec<u8>),
 }
 
 struct FfiRuntime {
@@ -303,44 +312,83 @@ impl FfiRuntime {
         }
     }
 
-    /// Queue a packet the UI must receive. Nothing drops it: these are
-    /// errors, the answers to save requests, and the bridge's stop, which
-    /// are few.
-    fn push_binary_event(&mut self, payload: Vec<u8>) {
-        if payload.is_empty() {
-            return;
-        }
+    fn push_pending_binary_event(&mut self, event: PendingBinaryEvent) {
         let was_empty = !self.has_pending_queues();
-        self.pending_binary_events
-            .push_back(PendingBinaryEvent::Packet(payload));
+        self.pending_binary_events.push_back(event);
         if was_empty {
             self.signal_wakeup_if_needed();
         }
     }
 
-    /// Queue a snapshot in place of one the UI has not taken yet. The bridge
-    /// sends a section such as the queue only when it changed, so one the
-    /// older snapshot had and this one lacks is still current and is kept.
-    fn push_snapshot(&mut self, mut sections: SnapshotSections) {
-        let was_empty = !self.has_pending_queues();
-        let older = self
+    /// Queue a packet the UI must receive. Nothing drops it: these are the
+    /// answers to save requests and the bridge's stop, which are few.
+    fn push_binary_event(&mut self, payload: Vec<u8>) {
+        if payload.is_empty() {
+            return;
+        }
+        self.push_pending_binary_event(PendingBinaryEvent::Packet(payload));
+    }
+
+    /// Queue an error. If the UI has not taken the last
+    /// [`MAX_PENDING_ERRORS`], the oldest gives way to the count of earlier
+    /// errors, so the UI still hears that they happened.
+    fn push_error(&mut self, packet: Vec<u8>) {
+        let errors = self
             .pending_binary_events
             .iter()
-            .position(|event| matches!(event, PendingBinaryEvent::Snapshot(_)))
-            .and_then(|index| self.pending_binary_events.remove(index));
-        if let Some(PendingBinaryEvent::Snapshot(older)) = older {
-            for (bit, payload) in older {
-                if !sections.iter().any(|(newer_bit, _)| *newer_bit == bit) {
-                    sections.push((bit, payload));
-                }
+            .filter(|event| matches!(event, PendingBinaryEvent::Error(_)))
+            .count();
+        if errors >= MAX_PENDING_ERRORS {
+            self.collapse_oldest_error();
+        }
+        self.push_pending_binary_event(PendingBinaryEvent::Error(packet));
+    }
+
+    fn collapse_oldest_error(&mut self) {
+        let Some(oldest) = self
+            .pending_binary_events
+            .iter()
+            .position(|event| matches!(event, PendingBinaryEvent::Error(_)))
+        else {
+            return;
+        };
+        // The count takes the place of the first error it stands for, so it
+        // comes before the errors that are still shown.
+        let earlier = self.pending_binary_events.iter_mut().find_map(|event| {
+            if let PendingBinaryEvent::EarlierErrors { count, packet } = event {
+                Some((count, packet))
+            } else {
+                None
             }
-            sections.sort_by_key(|(bit, _)| *bit);
+        });
+        if let Some((count, packet)) = earlier {
+            *count += 1;
+            *packet = encode_earlier_errors_event(*count);
+            self.pending_binary_events.remove(oldest);
+        } else {
+            self.pending_binary_events[oldest] = PendingBinaryEvent::EarlierErrors {
+                count: 1,
+                packet: encode_earlier_errors_event(1),
+            };
         }
-        self.pending_binary_events
-            .push_back(PendingBinaryEvent::Snapshot(sections));
-        if was_empty {
-            self.signal_wakeup_if_needed();
+    }
+
+    /// Take back the snapshot the UI has not taken yet, for the relay to
+    /// merge into a newer one.
+    fn take_pending_snapshot(&mut self) -> Option<Vec<u8>> {
+        let index = self
+            .pending_binary_events
+            .iter()
+            .position(|event| matches!(event, PendingBinaryEvent::Snapshot(_)))?;
+        match self.pending_binary_events.remove(index)? {
+            PendingBinaryEvent::Snapshot(packet) => Some(packet),
+            _ => None,
         }
+    }
+
+    /// Queue a snapshot the relay has merged with the one it took back.
+    fn push_snapshot(&mut self, packet: Vec<u8>) {
+        self.push_pending_binary_event(PendingBinaryEvent::Snapshot(packet));
     }
 
     fn push_analysis_frame(&mut self, frame: Vec<u8>) {
@@ -461,7 +509,7 @@ impl FfiRuntime {
                 false
             }
             Err(message) => {
-                self.push_binary_event(encode_error_event(&message));
+                self.push_error(encode_error_event(&message));
                 false
             }
         }
@@ -498,14 +546,18 @@ impl FfiRuntime {
         I: IntoIterator<Item = BridgeEvent>,
     {
         let prepared = self.encoder.prepare(events);
-        self.publish(prepared);
+        let snapshot = prepared
+            .snapshot
+            .map(|sections| merge_snapshot(&sections, self.take_pending_snapshot().as_deref()));
+        self.publish(prepared.events, snapshot);
     }
 
-    fn publish(&mut self, events: Vec<PreparedEvent>) {
+    /// Queue the relay's finished buffers, the snapshot last.
+    fn publish(&mut self, events: Vec<PreparedEvent>, snapshot: Option<Vec<u8>>) {
         for event in events {
             match event {
                 PreparedEvent::Binary(bytes) => self.push_binary_event(bytes),
-                PreparedEvent::Snapshot(sections) => self.push_snapshot(sections),
+                PreparedEvent::Error(bytes) => self.push_error(bytes),
                 PreparedEvent::Analysis(bytes) => self.push_analysis_frame(bytes),
                 PreparedEvent::Tree(bytes) => self.push_library_tree_frame(bytes),
                 PreparedEvent::Search(seq, bytes) => self.push_search_results_frame(seq, bytes),
@@ -517,12 +569,17 @@ impl FfiRuntime {
                 }
             }
         }
+        if let Some(packet) = snapshot {
+            self.push_snapshot(packet);
+        }
     }
 
     fn pop_binary_event(&mut self) -> Option<Vec<u8>> {
         Some(match self.pending_binary_events.pop_front()? {
-            PendingBinaryEvent::Packet(bytes) => bytes,
-            PendingBinaryEvent::Snapshot(sections) => encode_packet(sections),
+            PendingBinaryEvent::Packet(packet)
+            | PendingBinaryEvent::Error(packet)
+            | PendingBinaryEvent::EarlierErrors { packet, .. }
+            | PendingBinaryEvent::Snapshot(packet) => packet,
         })
     }
 
@@ -539,9 +596,17 @@ impl FfiRuntime {
     }
 }
 
+/// What the relay prepared from a batch of bridge events.
+struct Prepared {
+    events: Vec<PreparedEvent>,
+    /// The batch's snapshot, which still has to be merged with the one
+    /// waiting for the UI.
+    snapshot: Option<SnapshotSections>,
+}
+
 enum PreparedEvent {
     Binary(Vec<u8>),
-    Snapshot(SnapshotSections),
+    Error(Vec<u8>),
     Analysis(Vec<u8>),
     Tree(Vec<u8>),
     Search(u32, Vec<u8>),
@@ -557,15 +622,18 @@ struct FfiEncoder {
 }
 
 impl FfiEncoder {
-    fn prepare<I>(&mut self, events: I) -> Vec<PreparedEvent>
+    fn prepare<I>(&mut self, events: I) -> Prepared
     where
         I: IntoIterator<Item = BridgeEvent>,
     {
+        let mut prepared = Vec::new();
         if self.stopped {
-            return Vec::new();
+            return Prepared {
+                events: prepared,
+                snapshot: None,
+            };
         }
 
-        let mut prepared = Vec::new();
         let mut latest_snapshot: Option<BridgeSnapshot> = None;
         let mut latest_queue_snapshot: Option<BridgeSnapshot> = None;
         let mut latest_tree_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
@@ -587,7 +655,7 @@ impl FfiEncoder {
                     ));
                 }
                 BridgeEvent::Error(message) => {
-                    prepared.push(PreparedEvent::Binary(encode_error_event(&message)));
+                    prepared.push(PreparedEvent::Error(encode_error_event(&message)));
                 }
                 BridgeEvent::SearchResults(frame) => {
                     prepared.push(PreparedEvent::Search(
@@ -616,6 +684,7 @@ impl FfiEncoder {
         if let Some(tree_bytes) = latest_tree_bytes.as_ref() {
             prepared.push(PreparedEvent::Tree(tree_bytes.as_ref().clone()));
         }
+        let mut sections = None;
         if let Some(mut snapshot) =
             latest_snapshot.map(|snapshot| merge_queue_snapshot(snapshot, latest_queue_snapshot))
         {
@@ -631,12 +700,12 @@ impl FfiEncoder {
             } else {
                 None
             };
-            prepared.push(PreparedEvent::Snapshot(snapshot_sections(
-                &snapshot,
-                queue_section.as_ref(),
-            )));
+            sections = Some(snapshot_sections(&snapshot, queue_section.as_ref()));
         }
-        prepared
+        Prepared {
+            events: prepared,
+            snapshot: sections,
+        }
     }
     fn queue_section_for_snapshot(&mut self, snapshot: &BridgeSnapshot) -> QueueSectionData {
         if snapshot.queue.is_empty() {
@@ -755,7 +824,7 @@ fn run_spectral_relay(shared: &FfiShared, event_rx: &crossbeam_channel::Receiver
         // Playback goes on; only the spectrogram stops updating.
         shared
             .lock_runtime()
-            .push_binary_event(encode_error_event(&format!(
+            .push_error(encode_error_event(&format!(
                 "The spectrogram stopped updating after an {message}."
             )));
     }
@@ -806,7 +875,14 @@ fn prepare_and_publish(
     // Serialization and metadata indexing belong exclusively to the relay thread.
     // The UI mutex protects only publication and removal of completed buffers.
     let prepared = encoder.prepare(events);
-    shared.lock_runtime().publish(prepared);
+    // Merging copies the sections of the snapshot the UI has not taken,
+    // which may hold a large queue, so it happens without the lock. Taken
+    // back, that snapshot cannot also reach the UI.
+    let snapshot = prepared.snapshot.map(|sections| {
+        let older = shared.lock_runtime().take_pending_snapshot();
+        merge_snapshot(&sections, older.as_deref())
+    });
+    shared.lock_runtime().publish(prepared.events, snapshot);
 }
 
 #[repr(C)]
@@ -2143,7 +2219,7 @@ fn encode_binary_snapshot(
     snapshot: &BridgeSnapshot,
     queue_section: Option<&QueueSectionData>,
 ) -> Vec<u8> {
-    encode_packet(snapshot_sections(snapshot, queue_section))
+    encode_packet(&snapshot_sections(snapshot, queue_section))
 }
 
 fn snapshot_sections(
@@ -2166,7 +2242,16 @@ fn snapshot_sections(
 fn encode_error_event(message: &str) -> Vec<u8> {
     let mut payload = Vec::new();
     push_string(&mut payload, message);
-    encode_packet(vec![(SECTION_ERROR, payload)])
+    encode_packet(&[(SECTION_ERROR, payload)])
+}
+
+/// The error that stands for `count` errors the UI did not take in time.
+fn encode_earlier_errors_event(count: usize) -> Vec<u8> {
+    encode_error_event(&if count == 1 {
+        "1 earlier error was not shown.".to_string()
+    } else {
+        format!("{count} earlier errors were not shown.")
+    })
 }
 
 fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec<u8> {
@@ -2177,21 +2262,18 @@ fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec
         &mut payload,
         result.as_ref().err().map_or("", String::as_str),
     );
-    encode_packet(vec![(SECTION_STATE_SAVED, payload)])
+    encode_packet(&[(SECTION_STATE_SAVED, payload)])
 }
 
 fn encode_stopped_event() -> Vec<u8> {
-    encode_packet(vec![(SECTION_STOPPED, Vec::new())])
+    encode_packet(&[(SECTION_STOPPED, Vec::new())])
 }
 
 /// A stop the UI did not ask for: the stopped section with the reason.
 fn encode_failure_event(message: &str) -> Vec<u8> {
     let mut payload = Vec::new();
     push_string(&mut payload, message);
-    encode_packet(vec![
-        (SECTION_ERROR, payload),
-        (SECTION_STOPPED, Vec::new()),
-    ])
+    encode_packet(&[(SECTION_ERROR, payload), (SECTION_STOPPED, Vec::new())])
 }
 
 fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
@@ -2231,10 +2313,27 @@ fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
     out
 }
 
-fn encode_packet(sections: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
+fn encode_packet(sections: &[(u16, Vec<u8>)]) -> Vec<u8> {
+    let sections: Vec<(u16, &[u8])> = sections
+        .iter()
+        .map(|(bit, payload)| (*bit, payload.as_slice()))
+        .collect();
+    encode_packet_sections(&sections)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many packets this thread has built.
+    static PACKETS_ENCODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Build a packet from sections in the order of their bits.
+fn encode_packet_sections(sections: &[(u16, &[u8])]) -> Vec<u8> {
+    #[cfg(test)]
+    PACKETS_ENCODED.with(|count| count.set(count.get() + 1));
     let mut section_mask = 0u16;
     let mut total_length = 12u32;
-    for (bit, payload) in &sections {
+    for (bit, payload) in sections {
         section_mask |= *bit;
         total_length = total_length
             .saturating_add(4)
@@ -2248,9 +2347,61 @@ fn encode_packet(sections: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
     push_u16(&mut out, 0);
     for (_, payload) in sections {
         push_u32(&mut out, clamp_u32(payload.len()));
-        out.extend_from_slice(&payload);
+        out.extend_from_slice(payload);
     }
     out
+}
+
+/// The sections of a packet built by [`encode_packet_sections`].
+fn split_packet(packet: &[u8]) -> Vec<(u16, &[u8])> {
+    let mut sections = Vec::new();
+    let Some(mask) = packet
+        .get(8..10)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+    else {
+        return sections;
+    };
+    let mut offset = 12;
+    for bit in (0..16).map(|shift| 1u16 << shift) {
+        if mask & bit == 0 {
+            continue;
+        }
+        let Some(len) = packet
+            .get(offset..offset + 4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(|bytes| usize_from_u32(u32::from_le_bytes(bytes)))
+        else {
+            break;
+        };
+        offset += 4;
+        let Some(payload) = packet.get(offset..offset + len) else {
+            break;
+        };
+        sections.push((bit, payload));
+        offset += len;
+    }
+    sections
+}
+
+/// The packet for a snapshot that replaces `older`, which the UI has not
+/// taken. The bridge sends a section such as the queue only when it
+/// changed, so one the older snapshot had and this one lacks is still
+/// current and is kept.
+fn merge_snapshot(newer: &[(u16, Vec<u8>)], older: Option<&[u8]>) -> Vec<u8> {
+    let Some(older) = older else {
+        return encode_packet(newer);
+    };
+    let mut sections: Vec<(u16, &[u8])> = newer
+        .iter()
+        .map(|(bit, payload)| (*bit, payload.as_slice()))
+        .collect();
+    for (bit, payload) in split_packet(older) {
+        if !sections.iter().any(|(newer_bit, _)| *newer_bit == bit) {
+            sections.push((bit, payload));
+        }
+    }
+    sections.sort_by_key(|(bit, _)| *bit);
+    encode_packet_sections(&sections)
 }
 
 fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
@@ -4501,6 +4652,135 @@ mod tests {
             ANALYSIS_FLAG_WAVEFORM_COMPLETE
         );
         assert!(runtime.pop_analysis_frame().is_none());
+    }
+
+    fn packets_encoded() -> usize {
+        PACKETS_ENCODED.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn the_ui_pop_hands_over_finished_packets() {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        // A queue waits for the UI when newer snapshots arrive, so each is
+        // merged with it, along with errors and a save's answer.
+        runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(snapshot_with_queue(
+            &["/music/a.flac"],
+            0,
+        )))]);
+        for second in 1..4 {
+            runtime.process_bridge_events([
+                BridgeEvent::Snapshot(Box::new(snapshot_without_queue(second))),
+                BridgeEvent::Error(format!("error {second}")),
+            ]);
+        }
+        runtime.process_bridge_events([BridgeEvent::StateSaved {
+            request_id: 1,
+            result: Ok(()),
+        }]);
+
+        let encoded = packets_encoded();
+        let packets = pending_packets(&mut runtime);
+        assert_eq!(packets_encoded(), encoded, "the pop built a packet");
+        assert_eq!(packets.len(), 5);
+        let snapshot = packets
+            .iter()
+            .find(|packet| section(packet, SECTION_PLAYBACK).is_some())
+            .expect("the snapshot");
+        let queue = section(snapshot, SECTION_QUEUE).expect("the queue section");
+        assert_eq!(queue_section_paths(&queue), ["/music/a.flac"]);
+    }
+
+    #[test]
+    fn the_relay_merges_snapshots_without_holding_the_ui_lock() {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let shared = FfiShared::new(
+            FfiRuntime::new(command_tx, -1, -1),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let mut encoder = FfiEncoder::default();
+        prepare_and_publish(
+            &shared,
+            &mut encoder,
+            [BridgeEvent::Snapshot(Box::new(snapshot_with_queue(
+                &["/music/a.flac"],
+                0,
+            )))],
+        );
+        let before_merge = packets_encoded();
+        prepare_and_publish(
+            &shared,
+            &mut encoder,
+            [BridgeEvent::Snapshot(Box::new(snapshot_without_queue(1)))],
+        );
+        // The relay built the merged packet, on its own thread here.
+        assert_eq!(packets_encoded(), before_merge + 1);
+
+        let before_pop = packets_encoded();
+        let packets = pending_packets(&mut shared.lock_runtime());
+        assert_eq!(packets_encoded(), before_pop);
+        assert_eq!(packets.len(), 1);
+        let decoded = decode_binary_snapshot_for_test(&packets[0]);
+        assert!((decoded.playback_position - 1.0).abs() < f64::EPSILON);
+        let queue = section(&packets[0], SECTION_QUEUE).expect("the queue section");
+        assert_eq!(queue_section_paths(&queue), ["/music/a.flac"]);
+    }
+
+    fn error_message(packet: &[u8]) -> Option<String> {
+        section(packet, SECTION_ERROR).map(|payload| read_string(&payload, &mut 0))
+    }
+
+    #[test]
+    fn errors_past_the_bound_give_way_to_a_count_of_earlier_ones() {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        let total = MAX_PENDING_ERRORS + 5;
+        for index in 0..total {
+            runtime.process_bridge_events([BridgeEvent::Error(format!("error {index}"))]);
+            // Save answers are never collapsed.
+            runtime.process_bridge_events([BridgeEvent::StateSaved {
+                request_id: u32::try_from(index).expect("small index"),
+                result: Ok(()),
+            }]);
+        }
+        // An error the UI's own command caused counts too.
+        assert!(!runtime.send_command(Err("bad command".to_string())));
+
+        let packets = pending_packets(&mut runtime);
+        let errors: Vec<String> = packets.iter().filter_map(|p| error_message(p)).collect();
+        let mut expected = vec!["6 earlier errors were not shown.".to_string()];
+        expected.extend((6..total).map(|index| format!("error {index}")));
+        expected.push("bad command".to_string());
+        assert_eq!(errors, expected);
+        let answers: Vec<u32> = packets
+            .iter()
+            .filter_map(|packet| section(packet, SECTION_STATE_SAVED))
+            .map(|payload| read_u32(&payload, &mut 0))
+            .collect();
+        let expected_answers: Vec<u32> = (0..u32::try_from(total).expect("small total")).collect();
+        assert_eq!(answers, expected_answers);
+
+        // Once the UI has caught up, errors are shown one by one again.
+        runtime.process_bridge_events([BridgeEvent::Error("later".to_string())]);
+        let packets = pending_packets(&mut runtime);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(error_message(&packets[0]).as_deref(), Some("later"));
+    }
+
+    #[test]
+    fn a_single_earlier_error_is_counted_in_the_singular() {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        for index in 0..=MAX_PENDING_ERRORS {
+            runtime.process_bridge_events([BridgeEvent::Error(format!("error {index}"))]);
+        }
+        let packets = pending_packets(&mut runtime);
+        assert_eq!(packets.len(), MAX_PENDING_ERRORS + 1);
+        assert_eq!(
+            error_message(&packets[0]).as_deref(),
+            Some("1 earlier error was not shown.")
+        );
+        assert_eq!(error_message(&packets[1]).as_deref(), Some("error 1"));
     }
 
     #[cfg(unix)]

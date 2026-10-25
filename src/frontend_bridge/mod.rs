@@ -705,8 +705,7 @@ impl FrontendBridgeHandle {
 
     fn spawn_with_options(options: BridgeRuntimeOptions) -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = unbounded::<BridgeCommand>();
-        // Keep snapshot/event queue bounded so a slow UI consumer cannot grow memory unbounded.
-        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        let (event_tx, event_rx) = event_channel();
         let (spectral_tx, spectral_rx) = bounded::<AnalysisEvent>(4);
         let spectral_generation = Arc::new(AtomicU64::new(0));
         let spectral_route = SpectrogramOutputRoute {
@@ -2038,8 +2037,7 @@ fn run_bridge_loop(
         runtime.run(cmd_rx, event_tx)
     });
     // The runtime was dropped while unwinding, which stopped its workers.
-    // The relay shows the UI this reason; if the event queue is full, it
-    // reports the closed channel instead.
+    // The relay shows the UI this reason.
     match ran {
         Ok(saved) => saved,
         Err(message) => {
@@ -2054,10 +2052,40 @@ fn run_bridge_loop(
     }
 }
 
+/// Events waiting for the relay past which the bridge holds back the ones a
+/// newer one replaces, so a relay that falls behind cannot grow memory.
+const MAX_RELAY_BACKLOG: usize = 32;
+
+/// The bridge's channel to the relay. It is unbounded, so the events the UI
+/// must receive, such as errors and the answers to save requests, never
+/// wait or drop; [`try_send_event`] bounds the rest.
+fn event_channel() -> (Sender<BridgeEvent>, Receiver<BridgeEvent>) {
+    unbounded()
+}
+
+/// Whether a newer event of the same kind replaces this one, so it can be
+/// held back while the relay is behind.
+fn replaced_by_newer(event: &BridgeEvent) -> bool {
+    matches!(
+        event,
+        BridgeEvent::Snapshot(_) | BridgeEvent::SearchResults(_)
+    )
+}
+
+fn relay_is_behind(event_tx: &Sender<BridgeEvent>) -> bool {
+    event_tx.is_full() || event_tx.len() >= MAX_RELAY_BACKLOG
+}
+
+/// Send an event to the relay without waiting: the bridge thread drives
+/// playback. An event a newer one replaces is refused while the relay is
+/// behind.
 pub(super) fn try_send_event(
     event_tx: &Sender<BridgeEvent>,
     event: BridgeEvent,
 ) -> Result<(), TrySendError<BridgeEvent>> {
+    if replaced_by_newer(&event) && relay_is_behind(event_tx) {
+        return Err(TrySendError::Full(event));
+    }
     event_tx.try_send(event)
 }
 
@@ -2068,7 +2096,7 @@ fn send_snapshot_event(
     include_queue: bool,
 ) -> bool {
     // Drop stale snapshot updates when the consumer is behind; next snapshot will replace it.
-    if event_tx.is_full() {
+    if relay_is_behind(event_tx) {
         return false;
     }
     try_send_event(
@@ -3390,6 +3418,46 @@ mod tests {
         assert!(snapshot.queue_included);
         assert_eq!(snapshot.queue.last(), Some(&p("/music/edit.flac")));
         assert!(!runtime.snapshot_plan.include_queue_in_next_snapshot);
+    }
+
+    #[test]
+    fn errors_and_save_answers_reach_a_relay_that_is_behind() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = event_channel();
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        // The relay falls behind: snapshots fill its backlog, and the bridge
+        // holds back the next one.
+        while runtime.emit_snapshot(&event_tx, false) {}
+        assert_eq!(event_rx.len(), MAX_RELAY_BACKLOG);
+
+        runtime.handle_wake(
+            BridgeLoopWake::Analysis(AnalysisEvent::WorkerFailed("worker failed".to_string())),
+            &event_tx,
+        );
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(7)),
+            &event_tx,
+        );
+
+        let events: Vec<BridgeEvent> = event_rx.try_iter().collect();
+        assert_eq!(events.len(), MAX_RELAY_BACKLOG + 2);
+        assert!(events[..MAX_RELAY_BACKLOG]
+            .iter()
+            .all(|event| matches!(event, BridgeEvent::Snapshot(_))));
+        assert!(matches!(
+            &events[MAX_RELAY_BACKLOG],
+            BridgeEvent::Error(message) if message == "worker failed"
+        ));
+        assert!(matches!(
+            events[MAX_RELAY_BACKLOG + 1],
+            BridgeEvent::StateSaved {
+                request_id: 7,
+                result: Ok(())
+            }
+        ));
+        // With the backlog gone, snapshots go again.
+        assert!(runtime.emit_snapshot(&event_tx, false));
     }
 
     #[test]

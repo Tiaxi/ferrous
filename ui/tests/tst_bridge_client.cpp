@@ -21,7 +21,6 @@
 #include <memory>
 #include <utility>
 #include <QTemporaryDir>
-#include <QThread>
 #include <QUrl>
 #include <QtTest/QtTest>
 
@@ -113,9 +112,9 @@ QByteArray makePrecomputedFrame(
 }
 
 // Whether `fd` would wake the client's notifier now.
-bool wakeFdIsReadable(int fd) {
+bool wakeFdIsReadable(int fd, int timeoutMs = 0) {
     pollfd target{fd, POLLIN, 0};
-    return ::poll(&target, 1, 0) > 0 && (target.revents & POLLIN) != 0;
+    return ::poll(&target, 1, timeoutMs) > 0 && (target.revents & POLLIN) != 0;
 }
 
 // A command the backend does not know, which it answers with an error event.
@@ -1155,16 +1154,24 @@ void BridgeClientTest::aStalledClientReceivesTheLatestQueueAndEveryError() {
     BridgeClient bridge;
     QVERIFY(bridge.m_ffiBridge != nullptr);
     QVERIFY(bridge.m_bridgeWakeNotifier != nullptr);
+    const int wakeFd = bridge.m_bridgeWakeFd;
     bridge.clearQueue();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    // The client has taken everything, so the next event published wakes it.
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !wakeFdIsReadable(wakeFd) && bridge.m_bridgeWakeNotifier->isEnabled()
+            && !bridge.m_bridgePollTimer.isActive(),
+        10000);
     QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
 
     // The UI thread stalls: the event loop does not run, so nothing drains
-    // the bridge. The queue changes, and the bridge sends it once.
+    // the bridge. The queue changes, and the bridge sends it once: with
+    // nothing playing, its snapshot is the first event published, and the
+    // wake fd says when it waits for the client.
     bridge.m_bridgePollTimer.stop();
     bridge.m_bridgeWakeNotifier->setEnabled(false);
     bridge.appendPaths(paths);
-    QThread::msleep(500);
+    QVERIFY(wakeFdIsReadable(wakeFd, 10000));
     // Far more events than the bridge used to keep follow the queue.
     constexpr int kErrors = 30;
     for (int i = 0; i < kErrors; ++i) {
