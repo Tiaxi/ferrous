@@ -104,6 +104,24 @@ QtObject {
         root.uiBridge.seek(value)
     }
 
+    // Play starts a stopped track from its beginning, so a stopped
+    // track is not seekable.
+    readonly property bool canSeek: (root.uiBridge.playbackState || "") !== "Stopped"
+        && (root.uiBridge.durationSeconds || 0) > 0
+
+    function seekBy(deltaSeconds) {
+        if (!root.canSeek) {
+            return
+        }
+        const duration = root.uiBridge.durationSeconds || 0
+        root.seekCommitted(Math.max(0, Math.min(duration, root.positionSeconds + deltaSeconds)))
+    }
+
+    function changeVolumeBy(delta) {
+        const base = root.volumeMuted ? 0.0 : root.normalizedVolumeValue(root.uiBridge.volume)
+        root.setAppVolume(base + delta)
+    }
+
     function playAt(index) {
         if (index < 0) {
             return

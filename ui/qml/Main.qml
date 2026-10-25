@@ -13,6 +13,7 @@ import "controllers" as Controllers
 import "dialogs" as Dialogs
 import "logic/FormatUtils.js" as FormatUtils
 import "logic/PathUtils.js" as PathUtils
+import "logic/WheelUtils.js" as WheelUtils
 import "panes" as Panes
 import "viewers" as Viewers
 
@@ -111,6 +112,7 @@ ApplicationWindow {
 
     Controllers.QueueController {
         id: queueController
+        objectName: "queueController"
         uiBridge: root.uiBridge
         tagEditorApi: root.tagEditorApi
         openTagEditorDialog: function() { tagEditorDialog.open() }
@@ -119,12 +121,14 @@ ApplicationWindow {
 
     Controllers.PlaybackController {
         id: playbackController
+        objectName: "playbackController"
         uiBridge: root.uiBridge
         visualFeedsEnabled: root.visualFeedsEnabled
     }
 
     Controllers.LibraryController {
         id: libraryController
+        objectName: "libraryController"
         uiBridge: root.uiBridge
         libraryModel: root.libraryTreeModel
         tryCaptureGlobalSearchPrefill: globalSearchController.tryCapturePrefill
@@ -290,8 +294,10 @@ ApplicationWindow {
         function stop() {}
         function next() {}
         function previous() {}
-        function seek(seconds) {}
-        function setVolume(value) {}
+        // Where the latest seek went, for tests; -1 before any.
+        property real lastSeekSeconds: -1
+        function seek(seconds) { lastSeekSeconds = seconds }
+        function setVolume(value) { volume = value }
         function setFftSize(value) {}
         function setSpectrogramViewMode(value) {}
         function setSpectrogramDisplayMode(value) {}
@@ -335,6 +341,7 @@ ApplicationWindow {
         function replaceWithPaths(paths) {}
         function appendPaths(paths) {}
         function libraryAlbumCoverAt(index) { return "" }
+        function libraryThumbnailSource(path) { return "" }
         function queueTrackNumberAt(index) { return null }
         function queuePathAt(index) { return "" }
         function addLibraryRoot(path, name) {}
@@ -420,7 +427,8 @@ ApplicationWindow {
         let maxPx = 0
         for (let i = 0; i < items.length; ++i) {
             const item = items[i]
-            const label = item.label || ""
+            // A mnemonic's "&" is not shown.
+            const label = (item.label || "").replace(/&(.)/g, "$1")
             const shortcut = item.shortcut || ""
             let px = menuFontMetrics.boundingRect(label).width + 72
             if (shortcut.length > 0) {
@@ -458,33 +466,31 @@ ApplicationWindow {
         onTriggered: root.transientBridgeError = ""
     }
 
+    // Scroll left over from earlier wheel events that the view has not
+    // shown yet: pixel-aligned views round each small touchpad or
+    // high-resolution wheel step away otherwise.
+    property var wheelScrollRemainder: ({ view: null, pixels: 0 })
+
     function stepScrollView(view, wheel, rowHeight, rowsPerStep) {
         if (!view || !wheel) {
             return
         }
-        const maxY = Math.max(0, view.contentHeight - view.height)
-        if (maxY <= 0) {
-            return
-        }
-        let deltaY = 0
-        if (wheel.angleDelta && wheel.angleDelta.y !== undefined && wheel.angleDelta.y !== 0) {
-            deltaY = wheel.angleDelta.y
-        } else if (wheel.pixelDelta && wheel.pixelDelta.y !== undefined && wheel.pixelDelta.y !== 0) {
-            deltaY = wheel.pixelDelta.y
-        }
-        if (deltaY === 0) {
-            return
-        }
         const rowPx = Math.max(8, rowHeight || 24)
-        const rows = Math.max(1, rowsPerStep || 1)
-        const stepPx = rowPx * rows
-        const notches = (wheel.angleDelta && wheel.angleDelta.y !== undefined && wheel.angleDelta.y !== 0)
-            ? Math.max(1, Math.round(Math.abs(wheel.angleDelta.y) / 120))
-            : Math.max(1, Math.round(Math.abs(deltaY) / stepPx))
-        const direction = deltaY > 0 ? -1 : 1
-        const targetY = view.contentY + (direction * notches * stepPx)
-        view.contentY = Math.max(0, Math.min(maxY, targetY))
+        const notchPx = rowPx * Math.max(1, rowsPerStep || 1)
+        const deltaPx = WheelUtils.verticalScrollPixels(wheel, notchPx)
+        if (deltaPx === 0) {
+            // Horizontal scrolling is for someone else.
+            wheel.accepted = false
+            return
+        }
         wheel.accepted = true
+        const minY = view.originY || 0
+        const maxY = minY + Math.max(0, view.contentHeight - view.height)
+        const remainder = root.wheelScrollRemainder
+        const carried = remainder.view === view ? remainder.pixels : 0
+        const targetY = Math.max(minY, Math.min(maxY, view.contentY + carried - deltaPx))
+        view.contentY = targetY
+        root.wheelScrollRemainder = { view: view, pixels: targetY - view.contentY }
     }
 
     function channelStatusIconSource(iconKey) {
@@ -557,24 +563,25 @@ ApplicationWindow {
 
     Action {
         id: openFilesAction
-        text: "Open File(s)"
+        text: "&Open File(s)..."
         shortcut: StandardKey.Open
+        enabled: !root.viewerOpen
         onTriggered: root.openExternalFiles()
     }
     Action {
         id: addFilesAction
-        text: "Add File(s)"
+        text: "&Add File(s)..."
         onTriggered: root.addExternalFiles()
     }
     Action {
         id: addFolderAction
-        text: "Add Folder(s)"
+        text: "Add &Folder(s)..."
         onTriggered: root.addExternalFolder()
     }
     Action {
         id: quitAction
         objectName: "quitAction"
-        text: "Quit"
+        text: "&Quit"
         shortcut: StandardKey.Quit
         // Closing the window, not quitting, runs onClosing, which saves the
         // settings and the queue and stops the backend.
@@ -582,25 +589,25 @@ ApplicationWindow {
     }
     Action {
         id: playLibrarySelectionAction
-        text: "Play Library Selection"
+        text: "&Play Library Selection"
         enabled: libraryController.canPlaySelection()
         onTriggered: libraryController.playSelection()
     }
     Action {
         id: appendLibrarySelectionAction
-        text: "Queue Library Selection"
+        text: "Q&ueue Library Selection"
         enabled: libraryController.canPlaySelection()
         onTriggered: libraryController.appendSelection()
     }
     Action {
         id: playAllLibraryTracksAction
-        text: "Play All Library Tracks"
+        text: "Play A&ll Library Tracks"
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.playAllTracks()
     }
     Action {
         id: appendAllLibraryTracksAction
-        text: "Queue All Library Tracks"
+        text: "Queue All Library &Tracks"
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.appendAllTracks()
     }
@@ -612,52 +619,54 @@ ApplicationWindow {
     }
     Action {
         id: preferencesAction
-        text: "Preferences..."
+        text: "P&references..."
         shortcut: StandardKey.Preferences
+        enabled: !root.viewerOpen
         onTriggered: preferencesDialog.open()
     }
     Action {
         id: removeSelectedTrackAction
-        text: "Remove Selected Track"
+        text: "&Remove Selected Track"
         shortcut: "Delete"
-        enabled: queueController.selectionCount() > 0
+        enabled: queueController.selectionCount() > 0 && !root.viewerOpen
         onTriggered: queueController.removeSelectedTrack()
     }
     Action {
         id: selectPreviousTrackAction
-        text: "Select Previous Track"
+        text: "Select Pre&vious Track"
         shortcut: "Ctrl+Up"
-        enabled: uiBridge.queueLength > 0
+        enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: queueController.selectRelative(-1)
     }
     Action {
         id: selectNextTrackAction
-        text: "Select Next Track"
+        text: "Select &Next Track"
         shortcut: "Ctrl+Down"
-        enabled: uiBridge.queueLength > 0
+        enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: queueController.selectRelative(1)
     }
     Action {
         id: globalSearchAction
-        text: "Global Search..."
+        text: "&Global Search..."
         shortcut: StandardKey.Find
+        enabled: !root.viewerOpen
         onTriggered: globalSearchController.openDialog()
     }
     Action {
         id: diagnosticsAction
-        text: "Diagnostics..."
+        text: "&Diagnostics..."
         onTriggered: root.openDiagnostics()
     }
     Action {
         id: autoCenterSelectionAction
-        text: "Follow Current Track in Playlist"
+        text: "&Follow Current Track in Playlist"
         checkable: true
         checked: queueController.autoCenterSelection
         onTriggered: queueController.autoCenterSelection = checked
     }
     Action {
         id: resetSpectrogramAction
-        text: "Reset Visualization View"
+        text: "&Reset Visualization View"
         onTriggered: {
             if (viewerController.visualizationMode === 0) {
                 spectrogramSurface.resetForCurrentMode()
@@ -668,47 +677,47 @@ ApplicationWindow {
     }
     Action {
         id: showFpsOverlayAction
-        text: "Show Visualization FPS"
+        text: "Show Visualization FP&S"
         checkable: true
         checked: uiBridge.showFps
         onTriggered: uiBridge.setShowFps(checked)
     }
     Action {
         id: shuffleAction
-        text: "Shuffle"
+        text: "S&huffle"
         checkable: true
         checked: uiBridge.shuffleEnabled
         onTriggered: uiBridge.setShuffleEnabled(checked)
     }
     Action {
         id: repeatOffAction
-        text: "Repeat Off"
+        text: "Repeat O&ff"
         checkable: true
         checked: uiBridge.repeatMode === 0
         onTriggered: uiBridge.setRepeatMode(0)
     }
     Action {
         id: repeatOneAction
-        text: "Repeat One"
+        text: "Repeat &One"
         checkable: true
         checked: uiBridge.repeatMode === 1
         onTriggered: uiBridge.setRepeatMode(1)
     }
     Action {
         id: repeatAllAction
-        text: "Repeat All"
+        text: "Repeat &All"
         checkable: true
         checked: uiBridge.repeatMode === 2
         onTriggered: uiBridge.setRepeatMode(2)
     }
     Action {
         id: aboutAction
-        text: "About Ferrous"
+        text: "&About Ferrous"
         onTriggered: aboutDialog.open()
     }
     Action {
         id: previousAction
-        text: "Previous"
+        text: "P&revious"
         icon.name: "media-skip-backward"
         shortcut: "Ctrl+Left"
         onTriggered: uiBridge.previous()
@@ -727,53 +736,134 @@ ApplicationWindow {
     }
     Action {
         id: stopAction
-        text: "Stop"
+        objectName: "stopAction"
+        text: "&Stop"
         icon.name: "media-playback-stop"
+        // Not Ctrl+Space, which switches input methods in Fcitx and IBus,
+        // nor Shift+Space, which toggles full-width input in Fcitx.
+        shortcut: "Ctrl+Shift+Space"
         onTriggered: uiBridge.stop()
     }
     Action {
         id: nextAction
-        text: "Next"
+        text: "&Next"
         icon.name: "media-skip-forward"
         shortcut: "Ctrl+Right"
         onTriggered: uiBridge.next()
     }
     Action {
         id: clearPlaylistAction
-        text: "Clear Playlist"
+        text: "&Clear Playlist"
         onTriggered: uiBridge.clearQueue()
     }
     Action {
         id: moveTrackUpAction
-        text: "Move Track Up"
+        text: "Move Track &Up"
         shortcut: "Ctrl+Shift+Up"
+        enabled: !root.viewerOpen
         onTriggered: queueController.moveSelected(-1)
     }
     Action {
         id: moveTrackDownAction
-        text: "Move Track Down"
+        text: "Move Track &Down"
         shortcut: "Ctrl+Shift+Down"
+        enabled: !root.viewerOpen
         onTriggered: queueController.moveSelected(1)
     }
 
-    Shortcut {
-        sequence: "Space"
-        enabled: !(libraryViewRef && libraryViewRef.activeFocus)
-            && !globalSearchController.dialogHasActiveInputFocus
-        onActivated: playbackController.togglePlayPause()
+    Action {
+        id: playPauseAction
+        objectName: "playPauseAction"
+        text: "&Play/Pause"
+        // Text fields take Space for typing before shortcuts see it.
+        shortcut: "Space"
+        onTriggered: playbackController.togglePlayPause()
     }
+    Action {
+        id: seekBackwardAction
+        objectName: "seekBackwardAction"
+        text: "Seek &Backward"
+        shortcut: "Shift+Left"
+        enabled: playbackController.canSeek
+        onTriggered: playbackController.seekBy(-root.keyboardSeekStepSeconds)
+    }
+    Action {
+        id: seekForwardAction
+        objectName: "seekForwardAction"
+        text: "Seek &Forward"
+        shortcut: "Shift+Right"
+        enabled: playbackController.canSeek
+        onTriggered: playbackController.seekBy(root.keyboardSeekStepSeconds)
+    }
+    Action {
+        id: volumeUpAction
+        objectName: "volumeUpAction"
+        text: "Volume &Up"
+        shortcut: "Alt+Up"
+        onTriggered: playbackController.changeVolumeBy(root.keyboardVolumeStep)
+    }
+    Action {
+        id: volumeDownAction
+        objectName: "volumeDownAction"
+        text: "Volume &Down"
+        shortcut: "Alt+Down"
+        onTriggered: playbackController.changeVolumeBy(-root.keyboardVolumeStep)
+    }
+    Action {
+        id: muteAction
+        objectName: "muteAction"
+        text: "&Mute"
+        // Not Ctrl+M, which KDE applications use to show the menu bar.
+        shortcut: "Ctrl+Shift+M"
+        checkable: true
+        checked: playbackController.volumeMuted
+        onTriggered: playbackController.toggleMutedVolume()
+    }
+    Action {
+        id: visualizationViewerAction
+        objectName: "visualizationViewerAction"
+        text: "&Visualization Viewer"
+        shortcut: "F11"
+        checkable: true
+        checked: viewerController.spectrogramViewerOpen
+        onTriggered: viewerController.toggleSpectrogramViewer()
+    }
+    Action {
+        id: albumArtViewerAction
+        objectName: "albumArtViewerAction"
+        text: "&Album Art Viewer"
+        shortcut: "Shift+F11"
+        checkable: true
+        checked: viewerController.albumArtViewerOpen
+        enabled: viewerController.albumArtViewerOpen
+            || (uiBridge.currentTrackCoverPath || "").length > 0
+        onTriggered: viewerController.toggleAlbumArtViewer()
+    }
+
+    readonly property real keyboardSeekStepSeconds: 5
+    readonly property real keyboardVolumeStep: 0.05
+    readonly property bool viewerOpen: viewerController.spectrogramViewerOpen
+        || viewerController.albumArtViewerOpen
+    // What works in the viewers too. Viewer popups are modal, which blocks
+    // the main window's shortcuts, so they repeat these.
+    readonly property var viewerActions: [
+        playPauseAction, stopAction, previousAction, nextAction,
+        seekBackwardAction, seekForwardAction,
+        volumeUpAction, volumeDownAction, muteAction,
+        visualizationViewerAction, albumArtViewerAction, quitAction
+    ]
     menuBar: MenuBar {
         Menu {
-            title: "File"
+            title: "&File"
             width: root.menuPopupWidth([
-                { label: openFilesAction.text, shortcut: String(openFilesAction.shortcut) },
-                { label: addFilesAction.text, shortcut: "" },
-                { label: addFolderAction.text, shortcut: "" },
-                { label: playLibrarySelectionAction.text, shortcut: "" },
-                { label: appendLibrarySelectionAction.text, shortcut: "" },
-                { label: playAllLibraryTracksAction.text, shortcut: "" },
-                { label: appendAllLibraryTracksAction.text, shortcut: "" },
-                { label: quitAction.text, shortcut: String(quitAction.shortcut) }
+                { label: openFilesAction.text, shortcut: String(openFilesAction.shortcut || "") },
+                { label: addFilesAction.text, shortcut: String(addFilesAction.shortcut || "") },
+                { label: addFolderAction.text, shortcut: String(addFolderAction.shortcut || "") },
+                { label: playLibrarySelectionAction.text, shortcut: String(playLibrarySelectionAction.shortcut || "") },
+                { label: appendLibrarySelectionAction.text, shortcut: String(appendLibrarySelectionAction.shortcut || "") },
+                { label: playAllLibraryTracksAction.text, shortcut: String(playAllLibraryTracksAction.shortcut || "") },
+                { label: appendAllLibraryTracksAction.text, shortcut: String(appendAllLibraryTracksAction.shortcut || "") },
+                { label: quitAction.text, shortcut: String(quitAction.shortcut || "") }
             ])
             enter: Transition {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
@@ -793,15 +883,15 @@ ApplicationWindow {
             MenuItem { action: quitAction }
         }
         Menu {
-            title: "Edit"
+            title: "&Edit"
             width: root.menuPopupWidth([
-                { label: removeSelectedTrackAction.text, shortcut: String(removeSelectedTrackAction.shortcut) },
-                { label: moveTrackUpAction.text, shortcut: String(moveTrackUpAction.shortcut) },
-                { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut) },
-                { label: selectPreviousTrackAction.text, shortcut: String(selectPreviousTrackAction.shortcut) },
-                { label: selectNextTrackAction.text, shortcut: String(selectNextTrackAction.shortcut) },
-                { label: clearPlaylistAction.text, shortcut: "" },
-                { label: preferencesAction.text, shortcut: String(preferencesAction.shortcut) }
+                { label: removeSelectedTrackAction.text, shortcut: String(removeSelectedTrackAction.shortcut || "") },
+                { label: moveTrackUpAction.text, shortcut: String(moveTrackUpAction.shortcut || "") },
+                { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut || "") },
+                { label: selectPreviousTrackAction.text, shortcut: String(selectPreviousTrackAction.shortcut || "") },
+                { label: selectNextTrackAction.text, shortcut: String(selectNextTrackAction.shortcut || "") },
+                { label: clearPlaylistAction.text, shortcut: String(clearPlaylistAction.shortcut || "") },
+                { label: preferencesAction.text, shortcut: String(preferencesAction.shortcut || "") }
             ])
             enter: Transition {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
@@ -821,12 +911,14 @@ ApplicationWindow {
             MenuItem { action: preferencesAction }
         }
         Menu {
-            title: "View"
+            title: "&View"
             width: root.menuPopupWidth([
-                { label: globalSearchAction.text, shortcut: String(globalSearchAction.shortcut) },
-                { label: autoCenterSelectionAction.text, shortcut: "" },
-                { label: resetSpectrogramAction.text, shortcut: "" },
-                { label: showFpsOverlayAction.text, shortcut: "" }
+                { label: globalSearchAction.text, shortcut: String(globalSearchAction.shortcut || "") },
+                { label: visualizationViewerAction.text, shortcut: String(visualizationViewerAction.shortcut || "") },
+                { label: albumArtViewerAction.text, shortcut: String(albumArtViewerAction.shortcut || "") },
+                { label: autoCenterSelectionAction.text, shortcut: String(autoCenterSelectionAction.shortcut || "") },
+                { label: resetSpectrogramAction.text, shortcut: String(resetSpectrogramAction.shortcut || "") },
+                { label: showFpsOverlayAction.text, shortcut: String(showFpsOverlayAction.shortcut || "") }
             ])
             enter: Transition {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
@@ -835,23 +927,31 @@ ApplicationWindow {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
             }
             MenuItem { action: globalSearchAction }
+            MenuSeparator {}
+            MenuItem { action: visualizationViewerAction }
+            MenuItem { action: albumArtViewerAction }
+            MenuSeparator {}
             MenuItem { action: autoCenterSelectionAction }
             MenuItem { action: resetSpectrogramAction }
             MenuItem { action: showFpsOverlayAction }
         }
         Menu {
-            title: "Playback"
+            title: "&Playback"
             width: root.menuPopupWidth([
-                { label: previousAction.text, shortcut: String(previousAction.shortcut) },
-                { label: playAction.text, shortcut: String(playAction.shortcut) },
-                { label: pauseAction.text, shortcut: String(pauseAction.shortcut) },
-                { label: stopAction.text, shortcut: String(stopAction.shortcut) },
-                { label: nextAction.text, shortcut: String(nextAction.shortcut) },
-                { label: shuffleAction.text, shortcut: "" },
-                { label: repeatOffAction.text, shortcut: "" },
-                { label: repeatOneAction.text, shortcut: "" },
-                { label: repeatAllAction.text, shortcut: "" },
-                { label: clearPlaylistAction.text, shortcut: "" }
+                { label: playPauseAction.text, shortcut: String(playPauseAction.shortcut || "") },
+                { label: stopAction.text, shortcut: String(stopAction.shortcut || "") },
+                { label: previousAction.text, shortcut: String(previousAction.shortcut || "") },
+                { label: nextAction.text, shortcut: String(nextAction.shortcut || "") },
+                { label: seekBackwardAction.text, shortcut: String(seekBackwardAction.shortcut || "") },
+                { label: seekForwardAction.text, shortcut: String(seekForwardAction.shortcut || "") },
+                { label: volumeUpAction.text, shortcut: String(volumeUpAction.shortcut || "") },
+                { label: volumeDownAction.text, shortcut: String(volumeDownAction.shortcut || "") },
+                { label: muteAction.text, shortcut: String(muteAction.shortcut || "") },
+                { label: shuffleAction.text, shortcut: String(shuffleAction.shortcut || "") },
+                { label: repeatOffAction.text, shortcut: String(repeatOffAction.shortcut || "") },
+                { label: repeatOneAction.text, shortcut: String(repeatOneAction.shortcut || "") },
+                { label: repeatAllAction.text, shortcut: String(repeatAllAction.shortcut || "") },
+                { label: clearPlaylistAction.text, shortcut: String(clearPlaylistAction.shortcut || "") }
             ])
             enter: Transition {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
@@ -859,11 +959,17 @@ ApplicationWindow {
             exit: Transition {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
             }
-            MenuItem { action: previousAction }
-            MenuItem { action: playAction }
-            MenuItem { action: pauseAction }
+            MenuItem { action: playPauseAction }
             MenuItem { action: stopAction }
+            MenuItem { action: previousAction }
             MenuItem { action: nextAction }
+            MenuSeparator {}
+            MenuItem { action: seekBackwardAction }
+            MenuItem { action: seekForwardAction }
+            MenuSeparator {}
+            MenuItem { action: volumeUpAction }
+            MenuItem { action: volumeDownAction }
+            MenuItem { action: muteAction }
             MenuSeparator {}
             MenuItem { action: shuffleAction }
             MenuItem { action: repeatOffAction }
@@ -873,10 +979,10 @@ ApplicationWindow {
             MenuItem { action: clearPlaylistAction }
         }
         Menu {
-            title: "Help"
+            title: "&Help"
             width: root.menuPopupWidth([
-                { label: diagnosticsAction.text, shortcut: "" },
-                { label: aboutAction.text, shortcut: "" }
+                { label: diagnosticsAction.text, shortcut: String(diagnosticsAction.shortcut || "") },
+                { label: aboutAction.text, shortcut: String(aboutAction.shortcut || "") }
             ])
             enter: Transition {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
@@ -1148,6 +1254,7 @@ ApplicationWindow {
         displaySleepInhibitor: root.displaySleepInhibitorApi
         displaySleepInhibitionEnabled: root.uiBridge.preventDisplaySleepInFullscreen
         playbackPlaying: root.uiBridge.playbackState === "Playing"
+        viewerActions: root.viewerActions
     }
 
     Dialogs.ItunesArtworkDialog {
@@ -1171,6 +1278,8 @@ ApplicationWindow {
             viewerController.toggleAlbumArtInfoVisible(albumArtViewerShell.focusFullscreen)
         }
         switchComparisonImage: viewerController.switchComparisonImage
+        openContextMenu: function() { albumArtSurface.openContextMenu() }
+        viewerActions: root.viewerActions
     }
 
     Viewers.AlbumArtSurface {

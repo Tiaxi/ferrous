@@ -84,6 +84,7 @@ Rectangle {
 
             ListView {
                 id: playlistView
+                objectName: "playlistView"
                 anchors.fill: parent
                 clip: true
                 activeFocusOnTab: true
@@ -101,7 +102,29 @@ Rectangle {
                 Component.onCompleted: root.controller.registerView(playlistView)
 
                 Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Menu
+                            || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                        playlistView.openContextMenuForSelection()
+                        event.accepted = true
+                        return
+                    }
                     root.controller.handlePlaylistKeyPress(event)
+                }
+
+                // Opens the context menu from the keyboard, for the selected track.
+                function openContextMenuForSelection() {
+                    const index = root.controller.primarySelectedIndex()
+                    if (index < 0) {
+                        return
+                    }
+                    playlistView.positionViewAtIndex(index, ListView.Contain)
+                    const row = playlistView.itemAtIndex(index)
+                    playlistContextMenu.rowIndex = index
+                    if (row) {
+                        playlistContextMenu.popup(row, 0, row.height)
+                    } else {
+                        playlistContextMenu.popup(playlistView, 0, 0)
+                    }
                 }
 
                 ScrollBar.vertical: ScrollBar {
@@ -272,6 +295,7 @@ Rectangle {
 
                 Menu {
                     id: playlistContextMenu
+                    objectName: "playlistContextMenu"
                     property int rowIndex: -1
                     enter: Components.PopupTransition { duration: root.popupTransitionMs }
                     exit: Components.PopupTransition { duration: root.popupTransitionMs }

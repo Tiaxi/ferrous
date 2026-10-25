@@ -11,9 +11,14 @@ Row {
     property bool controlsVisible: true
     property var pointerActivity: null
     property bool proximityHovered: false
+    // A button of the switch has keyboard focus.
+    property bool keyboardFocused: false
+    // Stays visible, dimmed until the pointer comes close or a button
+    // has keyboard focus.
+    readonly property real idleOpacity: 0.55
     spacing: 1
     visible: controlsVisible
-    opacity: controlsVisible && proximityHovered ? 1 : 0
+    opacity: !controlsVisible ? 0 : (proximityHovered || keyboardFocused ? 1 : idleOpacity)
     onControlsVisibleChanged: {
         if (!controlsVisible) {
             proximityHovered = false
@@ -45,19 +50,42 @@ Row {
             required property int index
             required property string modelData
             property bool hovered: false
+            objectName: "visualizationModeButton" + index
             width: 24
             height: 22
             radius: 2
+            activeFocusOnTab: true
             color: root.selectedMode === index
                 ? Qt.rgba(0.24, 0.27, 0.31, 0.94)
-                : (hovered ? Qt.rgba(0.12, 0.14, 0.16, 0.9)
-                           : Qt.rgba(0.03, 0.04, 0.05, 0.78))
-            border.color: root.selectedMode === index
-                ? Qt.rgba(1, 1, 1, 0.34)
-                : Qt.rgba(1, 1, 1, 0.16)
+                : (hovered || activeFocus ? Qt.rgba(0.12, 0.14, 0.16, 0.9)
+                                          : Qt.rgba(0.03, 0.04, 0.05, 0.78))
+            border.width: activeFocus ? 2 : 1
+            border.color: activeFocus
+                ? Qt.rgba(0.55, 0.75, 1, 0.95)
+                : (root.selectedMode === index
+                    ? Qt.rgba(1, 1, 1, 0.34)
+                    : Qt.rgba(1, 1, 1, 0.16))
 
-            Accessible.role: Accessible.Button
+            onActiveFocusChanged: root.keyboardFocused = activeFocus
+
+            // Space presses the focused button rather than playing or pausing.
+            Keys.onShortcutOverride: function(event) {
+                event.accepted = event.key === Qt.Key_Space
+            }
+            Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Space
+                        || event.key === Qt.Key_Return
+                        || event.key === Qt.Key_Enter) {
+                    root.setMode(button.index)
+                    event.accepted = true
+                }
+            }
+
+            Accessible.role: Accessible.RadioButton
             Accessible.name: modelData
+            Accessible.focusable: true
+            Accessible.checkable: true
+            Accessible.checked: root.selectedMode === index
             Accessible.onPressAction: root.setMode(index)
 
             Item {
@@ -105,7 +133,7 @@ Row {
 
             MouseArea {
                 anchors.fill: parent
-                enabled: root.opacity > 0.5
+                enabled: root.controlsVisible
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onEntered: button.hovered = true

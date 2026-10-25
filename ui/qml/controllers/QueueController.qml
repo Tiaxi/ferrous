@@ -460,6 +460,10 @@ QtObject {
             delta = -root.pageStep()
         } else if (event.key === Qt.Key_PageDown) {
             delta = root.pageStep()
+        } else if (event.key === Qt.Key_Home) {
+            delta = -root.uiBridge.queueLength
+        } else if (event.key === Qt.Key_End) {
+            delta = root.uiBridge.queueLength
         } else {
             return
         }

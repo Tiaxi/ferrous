@@ -1117,6 +1117,31 @@ pub extern "C" fn ferrous_ffi_spectrogram_ring_capacity(
     )
 }
 
+/// The column hop of spectrogram data for `fft_size` at `zoom`.
+#[no_mangle]
+pub extern "C" fn ferrous_ffi_spectrogram_column_hop(fft_size: u32, zoom: f32) -> u32 {
+    ffi_call(
+        "ferrous_ffi_spectrogram_column_hop",
+        |_| 0,
+        || {
+            let fft_size = usize::try_from(fft_size).unwrap_or(usize::MAX);
+            u32::try_from(crate::analysis::spectrogram_column_hop(fft_size, zoom))
+                .unwrap_or(u32::MAX)
+        },
+    )
+}
+
+/// The zoom the spectrogram moves to when `requested` is asked of it at
+/// `current`; `current` if it keeps its zoom.
+#[no_mangle]
+pub extern "C" fn ferrous_ffi_spectrogram_zoom_after_request(current: f32, requested: f32) -> f32 {
+    ffi_call(
+        "ferrous_ffi_spectrogram_zoom_after_request",
+        |_| current,
+        || crate::analysis::accepted_spectrogram_zoom(current, requested).unwrap_or(current),
+    )
+}
+
 /// Start the bridge. Returns null if it cannot start.
 #[no_mangle]
 pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
