@@ -44,3 +44,12 @@ bool activateMainWindow(const QString &activationToken) {
     window->requestActivate();
     return true;
 }
+
+bool closeMainWindow() {
+    QWindow *window = mainActivationWindow();
+    if (window == nullptr) {
+        return false;
+    }
+    window->close();
+    return true;
+}

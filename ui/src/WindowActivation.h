@@ -15,6 +15,10 @@ void setMainActivationWindow(QWindow *window);
 // lets the compositor grant focus. Returns false if no main window is set.
 bool activateMainWindow(const QString &activationToken = QString());
 
+// Closes the main window as its close button does, so its close handler runs
+// even while the window is minimized. Returns false if no main window is set.
+bool closeMainWindow();
+
 // Hands an xdg-activation token to Qt's Wayland integration, which uses and
 // clears it on the next QWindow::requestActivate(). Ignored on other platforms.
 void provideActivationToken(const QString &platformName, const QString &activationToken);
