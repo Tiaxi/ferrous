@@ -10,9 +10,19 @@ Dialog {
     required property var tagEditorApi
     required property var uiPalette
     required property var windowRoot
-    required property var closeEditor
-    required property var saveAndClose
+    // What the edits would be dropped for: "close" the editor, "quit"
+    // Ferrous, or "reload" the files.
+    property string purpose: "close"
+    readonly property bool forQuit: root.purpose === "quit"
+    readonly property bool forReload: root.purpose === "reload"
 
+    // The editor answers these. Saving keeps this dialog open until the save
+    // has finished, so its buttons stay disabled meanwhile.
+    signal saveRequested()
+    signal discardRequested()
+    signal keepEditingRequested()
+
+    objectName: "tagEditorCloseConfirmDialog"
     parent: Overlay.overlay
     modal: true
     x: Math.round((root.windowRoot.width - width) / 2)
@@ -20,7 +30,10 @@ Dialog {
     width: 400
     title: "Unsaved Changes"
     standardButtons: Dialog.NoButton
-    closePolicy: Popup.CloseOnEscape
+    // Escape keeps editing, except while a save is running.
+    closePolicy: root.tagEditorApi.saving ? Popup.NoAutoClose : Popup.CloseOnEscape
+
+    onRejected: root.keepEditingRequested()
 
     background: Rectangle {
         radius: 6
@@ -32,16 +45,25 @@ Dialog {
         spacing: 12
 
         Label {
+            objectName: "tagEditorCloseConfirmMessage"
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
-            text: "Save changes before closing the tag editor?"
+            text: root.forQuit
+                ? "Save tag changes before quitting Ferrous?"
+                : (root.forReload
+                    ? "Discard unsaved changes and reload the tags from the files?"
+                    : "Save changes before closing the tag editor?")
         }
 
         Label {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             color: root.uiPalette.uiMutedTextColor
-            text: "Save writes the current edits. Discard closes the dialog and drops every unsaved change."
+            text: root.forQuit
+                ? "Save writes the current edits and quits. Discard drops every unsaved change and quits. Cancel keeps Ferrous open."
+                : (root.forReload
+                    ? "Reloading drops every unsaved change. Cancel keeps editing."
+                    : "Save writes the current edits. Discard closes the dialog and drops every unsaved change.")
         }
 
         RowLayout {
@@ -51,21 +73,27 @@ Dialog {
             Item { Layout.fillWidth: true }
 
             Button {
-                text: "Keep Editing"
-                onClicked: root.close()
+                objectName: "tagEditorCloseConfirmKeepEditingButton"
+                text: root.forQuit || root.forReload ? "Cancel" : "Keep Editing"
+                enabled: !root.tagEditorApi.saving
+                onClicked: root.reject()
             }
             Button {
-                text: "Discard"
+                objectName: "tagEditorCloseConfirmDiscardButton"
+                text: root.forReload ? "Discard and Reload" : "Discard"
+                enabled: !root.tagEditorApi.saving
                 onClicked: {
                     root.close()
-                    root.closeEditor()
+                    root.discardRequested()
                 }
             }
             Button {
-                text: "Save"
+                objectName: "tagEditorCloseConfirmSaveButton"
+                visible: !root.forReload
+                text: root.tagEditorApi.saving ? "Saving..." : "Save"
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
                 highlighted: true
-                onClicked: root.saveAndClose()
+                onClicked: root.saveRequested()
             }
         }
     }

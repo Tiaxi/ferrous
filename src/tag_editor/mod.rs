@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -68,6 +68,15 @@ pub struct TagEditorRow {
     pub total_tracks: String,
     pub total_discs: String,
     pub comment: String,
+    /// The values after the first of a text field that holds several, such as
+    /// a second artist, by field name. Saving a changed field replaces them all
+    /// with its one value, so the editor shows them. Not read from requests.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        skip_deserializing
+    )]
+    pub extra_values: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -348,9 +357,41 @@ fn load_standard_row(path: &Path) -> Result<TagEditorRow, String> {
         row.total_discs = number_text_from_tag(tag, ItemKey::DiscTotal, tag.disk_total());
         row.track_no = padded_number_text(&row.track_no, &row.total_tracks, 2);
         row.disc_no = padded_number_text(&row.disc_no, &row.total_discs, 1);
+        for (field, key) in MULTI_VALUE_TEXT_FIELDS {
+            let extra: Vec<String> = tag.get_strings(key).skip(1).map(str::to_string).collect();
+            if !extra.is_empty() {
+                row.extra_values.insert(field.to_string(), extra);
+            }
+        }
     }
 
     Ok(row)
+}
+
+/// The text fields that can hold several values, by their request names.
+const MULTI_VALUE_TEXT_FIELDS: [(&str, ItemKey); 6] = [
+    ("title", ItemKey::TrackTitle),
+    ("artist", ItemKey::TrackArtist),
+    ("album", ItemKey::AlbumTitle),
+    ("albumArtist", ItemKey::AlbumArtist),
+    ("genre", ItemKey::Genre),
+    ("comment", ItemKey::Comment),
+];
+
+/// Splits an `APEv2` text value, whose values are separated by NUL, into the
+/// field's first value and the rest, which go to the row's extra values.
+fn split_ape_text(row: &mut TagEditorRow, field: &str, value: Option<String>) -> String {
+    let value = value.unwrap_or_default();
+    let mut values = value
+        .split('\0')
+        .map(str::trim)
+        .filter(|part| !part.is_empty());
+    let first = values.next().unwrap_or_default().to_string();
+    let extra: Vec<String> = values.map(str::to_string).collect();
+    if !extra.is_empty() {
+        row.extra_values.insert(field.to_string(), extra);
+    }
+    first
 }
 
 fn load_raw_row(path: &Path) -> Result<TagEditorRow, String> {
@@ -367,11 +408,6 @@ fn load_raw_row(path: &Path) -> Result<TagEditorRow, String> {
         file_name: file_name_for_path(path),
         directory: directory_for_path(path),
         format_kind: "APEv2".to_string(),
-        title: tagged.title.unwrap_or_default(),
-        artist: tagged.artist.unwrap_or_default(),
-        album: tagged.album.unwrap_or_default(),
-        album_artist: tagged.album_artist.unwrap_or_default(),
-        genre: tagged.genre.unwrap_or_default(),
         year: tagged.year_text.unwrap_or_default(),
         track_no: tagged
             .track_no
@@ -389,8 +425,14 @@ fn load_raw_row(path: &Path) -> Result<TagEditorRow, String> {
             .disc_total
             .map(|value| value.to_string())
             .unwrap_or_default(),
-        comment: tagged.comment.unwrap_or_default(),
+        ..TagEditorRow::default()
     };
+    row.title = split_ape_text(&mut row, "title", tagged.title);
+    row.artist = split_ape_text(&mut row, "artist", tagged.artist);
+    row.album = split_ape_text(&mut row, "album", tagged.album);
+    row.album_artist = split_ape_text(&mut row, "albumArtist", tagged.album_artist);
+    row.genre = split_ape_text(&mut row, "genre", tagged.genre);
+    row.comment = split_ape_text(&mut row, "comment", tagged.comment);
     row.track_no = padded_number_text(&row.track_no, &row.total_tracks, 2);
     row.disc_no = padded_number_text(&row.disc_no, &row.total_discs, 1);
     Ok(row)
@@ -1730,6 +1772,44 @@ mod tests {
     }
 
     #[test]
+    fn loads_report_the_values_after_the_first_until_an_edit_replaces_them() {
+        let dir = test_dir("vorbis-extra-values");
+        for path in vorbis_fixtures(&dir) {
+            let mut row = load_one(&path);
+            assert_eq!(row.artist, "A", "{path:?}");
+            let expected: BTreeMap<String, Vec<String>> =
+                [("artist".to_string(), vec!["B".to_string()])].into();
+            assert_eq!(row.extra_values, expected, "{path:?}");
+            let encoded = serde_json::to_value(&row).expect("encode row");
+            assert_eq!(encoded["extraValues"]["artist"], serde_json::json!(["B"]));
+
+            row.artist = "C".to_string();
+            assert_saved(&save_json(&[edited(&row, &["artist"])]));
+            assert!(load_one(&path).extra_values.is_empty(), "{path:?}");
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn raw_surround_loads_split_multi_value_ape_items() {
+        let dir = test_dir("raw-extra-values");
+        let path = dir.join("song.dts");
+        let mut bytes = b"stub".to_vec();
+        bytes.append(&mut crate::raw_audio::build_test_apev2_tag(
+            &[("Title", "Old"), ("Artist", "A\0B\0C"), ("Genre", "Rock")],
+            true,
+        ));
+        fs::write(&path, &bytes).expect("write file");
+
+        let row = load_one(&path);
+        assert_eq!((row.title.as_str(), row.artist.as_str()), ("Old", "A"));
+        let expected: BTreeMap<String, Vec<String>> =
+            [("artist".to_string(), vec!["B".to_string(), "C".to_string()])].into();
+        assert_eq!(row.extra_values, expected);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
     fn edited_vorbis_fields_replace_all_their_values() {
         let dir = test_dir("vorbis-edit");
         for path in vorbis_fixtures(&dir) {
@@ -2364,6 +2444,19 @@ mod tests {
             let mut expected = ape_fixture_items();
             expected[0] = ape_text("Title", "New", false);
             assert_eq!(read_ape_items(&path), expected, "{path:?}");
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn ape_loads_report_the_values_after_the_first() {
+        let dir = test_dir("ape-extra-values");
+        for path in ape_fixtures(&dir) {
+            let row = load_one(&path);
+            assert_eq!(row.artist, "A", "{path:?}");
+            let expected: BTreeMap<String, Vec<String>> =
+                [("artist".to_string(), vec!["B".to_string()])].into();
+            assert_eq!(row.extra_values, expected, "{path:?}");
         }
         fs::remove_dir_all(dir).expect("remove test dir");
     }

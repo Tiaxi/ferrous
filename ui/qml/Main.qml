@@ -388,6 +388,9 @@ ApplicationWindow {
         property bool dirty: false
         property string statusText: ""
         property string statusDetails: ""
+        property bool statusIsError: false
+        property int selectedCount: 0
+        property var operationFiles: []
         property var tableModel: []
         signal statusChanged()
         function openSelection(selections) { return false }
@@ -397,8 +400,13 @@ ApplicationWindow {
         function save() { return false }
         function renameSelectedFiles() { return false }
         function setSelectedRows(rows) {}
+        function selectedRows() { return [] }
+        function selectRange(first, last) {}
+        function toggleRowSelected(row) {}
+        function selectAllRows() {}
         function loadedPaths() { return [] }
         function bulkValue(field) { return "" }
+        function extraValuesNote(field) { return "" }
         function applyBulkField(field, value) {}
         function applyBulkFieldToRows(rows, field, value) {}
         function setCell(row, field, value) {}
@@ -1221,9 +1229,16 @@ ApplicationWindow {
             // Closes again once the save has answered, while the window can
             // still show a failure.
             close.accepted = false
-            if (root.quitStateRequestId === 0) {
-                root.saveStateBeforeClosing()
+            if (root.quitStateRequestId !== 0) {
+                return
             }
+            // Unsaved tag edits are saved or dropped first; the tag editor
+            // closes the window again once they are.
+            if (!tagEditorDialog.prepareToQuit()) {
+                root.bringWindowForward()
+                return
+            }
+            root.saveStateBeforeClosing()
             return
         }
         uiBridge.shutdown()
@@ -1254,10 +1269,14 @@ ApplicationWindow {
     function showQuitSaveFailedDialog(message) {
         quitSaveFailedDialog.message = message
         quitSaveFailedDialog.open()
-        // A quit from outside the window, such as from the desktop's media
-        // controls, can find it minimized or behind other windows. The
-        // dialog is drawn in the window, so the window comes forward too;
-        // window managers raise the window they activate.
+        root.bringWindowForward()
+    }
+
+    // A quit from outside the window, such as from the desktop's media
+    // controls, can find it minimized or behind other windows. Dialogs that
+    // quitting opens are drawn in the window, so the window comes forward
+    // too; window managers raise the window they activate.
+    function bringWindowForward() {
         if (root.visibility === Window.Minimized || !root.visible) {
             root.showNormal()
         }
@@ -1405,6 +1424,7 @@ ApplicationWindow {
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
         windowRoot: root
+        onQuitMayProceed: root.close()
     }
 
     Component.onCompleted: {

@@ -37,7 +37,11 @@ struct TagEditorRowState {
     QString originalTotalDiscs;
     QString originalComment;
     bool dirty{false};
+    bool selected{false};
     QString errorText;
+    // The values after the first of fields that hold several, by field name.
+    // Saving a changed field replaces them all with its one value.
+    QHash<QString, QStringList> extraValues;
 };
 
 class TagEditorTableModel final : public QAbstractListModel {
@@ -62,6 +66,8 @@ public:
         CommentRole,
         DirtyRole,
         ErrorRole,
+        SelectedRole,
+        ExtraValuesRole,
     };
 
     explicit TagEditorTableModel(QObject *parent = nullptr);
@@ -78,11 +84,20 @@ public:
     QString fieldValue(int row, const QString &field) const;
     QStringList loadedPaths() const;
     bool hasDirtyRows() const;
+    // Marks exactly `rows` selected, notifying only the rows that change.
+    void setSelection(const QSet<int> &rows);
+    // The extra values of `field` that a save would keep, which are those of
+    // an unchanged field.
+    static QStringList keptExtraValues(const TagEditorRowState &row, const QString &field);
     QVector<TagEditorRowState> rows() const;
     // Request names of the fields that differ from their loaded values.
     static QStringList changedFields(const TagEditorRowState &row);
     void clearErrors();
     void applySaveResults(const QHash<QString, QString> &errorsByPath, const QSet<QString> &successPaths);
+    // Moves renamed rows to their new paths and marks the rows that failed,
+    // in place, so the view keeps its rows and position.
+    void applyRenameResults(const QHash<QString, QString> &newPathsByPath,
+                            const QHash<QString, QString> &errorsByPath);
 
 signals:
     void rowsChanged();
@@ -95,6 +110,8 @@ private:
     static const QString *fieldRef(const TagEditorRowState &row, const QString &field);
     bool refreshDirtyState(TagEditorRowState &row);
     void emitRowChanged(int row);
+    void countDirtyRows();
 
     QVector<TagEditorRowState> m_rows;
+    int m_dirtyRowCount{0};
 };

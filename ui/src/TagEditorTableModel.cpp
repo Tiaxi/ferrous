@@ -2,6 +2,10 @@
 
 #include "TagEditorTableModel.h"
 
+#include <QFileInfo>
+#include <QDir>
+#include <QVariantMap>
+
 #include <algorithm>
 #include <iterator>
 #include <utility>
@@ -31,6 +35,15 @@ constexpr EditableField kEditableFields[] = {
 
 bool fieldChanged(const TagEditorRowState &row, const EditableField &field) {
     return row.*field.value != row.*field.original;
+}
+
+const EditableField *editableField(const QString &name) {
+    for (const EditableField &field : kEditableFields) {
+        if (name == QLatin1String(field.name)) {
+            return &field;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -75,12 +88,15 @@ QHash<int, QByteArray> TagEditorTableModel::roleNames() const {
         {CommentRole, "comment"},
         {DirtyRole, "dirty"},
         {ErrorRole, "errorText"},
+        {SelectedRole, "selected"},
+        {ExtraValuesRole, "extraValues"},
     };
 }
 
 void TagEditorTableModel::setRows(QVector<TagEditorRowState> rows) {
     beginResetModel();
     m_rows = std::move(rows);
+    countDirtyRows();
     endResetModel();
     emit rowsChanged();
     emit dirtyStateChanged();
@@ -92,6 +108,7 @@ void TagEditorTableModel::clear() {
     }
     beginResetModel();
     m_rows.clear();
+    m_dirtyRowCount = 0;
     endResetModel();
     emit rowsChanged();
     emit dirtyStateChanged();
@@ -125,8 +142,9 @@ bool TagEditorTableModel::setFieldValue(int row, const QString &field, const QSt
     *target = value;
     item->errorText.clear();
     refreshDirtyState(*item);
+    // The caller announces a batch of edits once it is done, so an edit of
+    // thousands of rows does not recompute summaries after every row.
     emitRowChanged(row);
-    emit rowsChanged();
     if (wasDirty != hasDirtyRows()) {
         emit dirtyStateChanged();
     }
@@ -137,6 +155,9 @@ QString TagEditorTableModel::fieldValue(int row, const QString &field) const {
     const TagEditorRowState *item = rowAt(row);
     if (!item) {
         return {};
+    }
+    if (normalizedFieldName(field) == QStringLiteral("directory")) {
+        return item->directory;
     }
     const QString *target = fieldRef(*item, field);
     return target ? *target : QString();
@@ -152,12 +173,45 @@ QStringList TagEditorTableModel::loadedPaths() const {
 }
 
 bool TagEditorTableModel::hasDirtyRows() const {
-    for (const TagEditorRowState &row : m_rows) {
-        if (row.dirty) {
-            return true;
+    return m_dirtyRowCount > 0;
+}
+
+void TagEditorTableModel::countDirtyRows() {
+    m_dirtyRowCount = static_cast<int>(std::count_if(
+        m_rows.cbegin(), m_rows.cend(), [](const TagEditorRowState &row) { return row.dirty; }));
+}
+
+void TagEditorTableModel::setSelection(const QSet<int> &rows) {
+    // Notify runs of changed rows, so selecting thousands of rows is a few
+    // signals rather than one per row.
+    int runStart = -1;
+    const auto flushRun = [this, &runStart](int end) {
+        if (runStart >= 0) {
+            emit dataChanged(createIndex(runStart, 0), createIndex(end - 1, 0), {SelectedRole});
+            runStart = -1;
+        }
+    };
+    for (int row = 0; row < static_cast<int>(m_rows.size()); ++row) {
+        TagEditorRowState &item = m_rows[static_cast<size_t>(row)];
+        const bool selected = rows.contains(row);
+        if (item.selected == selected) {
+            flushRun(row);
+            continue;
+        }
+        item.selected = selected;
+        if (runStart < 0) {
+            runStart = row;
         }
     }
-    return false;
+    flushRun(static_cast<int>(m_rows.size()));
+}
+
+QStringList TagEditorTableModel::keptExtraValues(const TagEditorRowState &row, const QString &field) {
+    const EditableField *editable = editableField(field);
+    if (editable == nullptr || fieldChanged(row, *editable)) {
+        return {};
+    }
+    return row.extraValues.value(field);
 }
 
 QVector<TagEditorRowState> TagEditorTableModel::rows() const {
@@ -197,6 +251,10 @@ void TagEditorTableModel::applySaveResults(
         const QString error = errorsByPath.value(item.path);
         if (success) {
             for (const EditableField &field : kEditableFields) {
+                if (fieldChanged(item, field)) {
+                    // The save wrote this field's one value over all of them.
+                    item.extraValues.remove(QLatin1String(field.name));
+                }
                 item.*field.original = item.*field.value;
             }
             item.errorText.clear();
@@ -212,6 +270,29 @@ void TagEditorTableModel::applySaveResults(
     if (wasDirty != hasDirtyRows()) {
         emit dirtyStateChanged();
     }
+}
+
+void TagEditorTableModel::applyRenameResults(
+    const QHash<QString, QString> &newPathsByPath,
+    const QHash<QString, QString> &errorsByPath)
+{
+    for (int row = 0; row < static_cast<int>(m_rows.size()); ++row) {
+        TagEditorRowState &item = m_rows[static_cast<size_t>(row)];
+        const auto renamed = newPathsByPath.constFind(item.path);
+        if (renamed != newPathsByPath.constEnd()) {
+            item.path = renamed.value();
+            const QFileInfo info(item.path);
+            item.fileName = info.fileName();
+            item.directory = info.dir().absolutePath();
+            item.errorText.clear();
+        } else if (errorsByPath.contains(item.path)) {
+            item.errorText = errorsByPath.value(item.path);
+        } else {
+            continue;
+        }
+        emitRowChanged(row);
+    }
+    emit rowsChanged();
 }
 
 QVariant TagEditorTableModel::fieldData(const TagEditorRowState &row, int role) const {
@@ -250,6 +331,18 @@ QVariant TagEditorTableModel::fieldData(const TagEditorRowState &row, int role) 
         return row.dirty;
     case ErrorRole:
         return row.errorText;
+    case SelectedRole:
+        return row.selected;
+    case ExtraValuesRole: {
+        QVariantMap shown;
+        for (auto it = row.extraValues.cbegin(); it != row.extraValues.cend(); ++it) {
+            const QStringList kept = keptExtraValues(row, it.key());
+            if (!kept.isEmpty()) {
+                shown.insert(it.key(), kept);
+            }
+        }
+        return shown;
+    }
     default:
         return {};
     }
@@ -311,6 +404,9 @@ bool TagEditorTableModel::refreshDirtyState(TagEditorRowState &row) {
         std::end(kEditableFields),
         [&row](const EditableField &field) { return fieldChanged(row, field); });
     const bool changed = row.dirty != nextDirty;
+    if (changed) {
+        m_dirtyRowCount += nextDirty ? 1 : -1;
+    }
     row.dirty = nextDirty;
     return changed;
 }

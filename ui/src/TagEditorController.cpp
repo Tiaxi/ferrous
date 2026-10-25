@@ -6,8 +6,9 @@
 #include "FerrousBridgeFfi.h"
 
 #include <algorithm>
-#include <QDir>
+#include <cstdio>
 #include <QFutureWatcher>
+#include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -77,6 +78,16 @@ TagEditorRowState rowFromJson(const QJsonObject &object) {
     row.originalTotalTracks = row.totalTracks;
     row.originalTotalDiscs = row.totalDiscs;
     row.originalComment = row.comment;
+    const QJsonObject extraValues = object.value(QStringLiteral("extraValues")).toObject();
+    for (auto it = extraValues.constBegin(); it != extraValues.constEnd(); ++it) {
+        QStringList values;
+        for (const QJsonValue &value : it.value().toArray()) {
+            values.push_back(value.toString());
+        }
+        if (!values.isEmpty()) {
+            row.extraValues.insert(it.key(), values);
+        }
+    }
     return row;
 }
 
@@ -349,6 +360,22 @@ TagEditorController::TagEditorController(BridgeClient *bridge, QObject *parent)
     , m_tableModel(this) {
     connect(&m_tableModel, &TagEditorTableModel::dirtyStateChanged, this, &TagEditorController::dirtyChanged);
     connect(&m_tableModel, &TagEditorTableModel::rowsChanged, this, &TagEditorController::bulkSummaryChanged);
+    m_workerPool = new QThreadPool();
+}
+
+TagEditorController::~TagEditorController() {
+    // Pending results are dropped with the watchers; only the workers remain.
+    ++m_operationGeneration;
+    if (m_workerPool->waitForDone(kExitWaitMs)) {
+        delete m_workerPool;
+        return;
+    }
+    // Deleting the pool would wait for the stalled operation, so it is left
+    // to end with the process. Tag saves and renames replace each file in one
+    // rename, so the file keeps its old tags or gets its new ones.
+    std::fprintf(stderr,
+                 "[ferrous] a tag editor file operation was still running at exit; "
+                 "its changes may not have been saved\n");
 }
 
 QByteArray TagEditorController::executeOperation(Operation operation, const QByteArray &payload,
@@ -387,7 +414,8 @@ void TagEditorController::runOperation(Operation operation, const QByteArray &pa
     });
     // The worker owns its input, function, and gate reference; it never accesses a
     // controller or bridge.
-    watcher->setFuture(QtConcurrent::run(m_executeOperation, operation, payload, renameGate));
+    watcher->setFuture(
+        QtConcurrent::run(m_workerPool, m_executeOperation, operation, payload, renameGate));
 }
 
 QObject *TagEditorController::tableModel() const {
@@ -416,6 +444,18 @@ QString TagEditorController::statusText() const {
 
 QString TagEditorController::statusDetails() const {
     return m_statusDetails;
+}
+
+bool TagEditorController::statusIsError() const {
+    return m_statusIsError;
+}
+
+int TagEditorController::selectedCount() const {
+    return static_cast<int>(m_selectedRows.size());
+}
+
+QStringList TagEditorController::operationFiles() const {
+    return m_operationFiles;
 }
 
 bool TagEditorController::openForPaths(const QStringList &paths) {
@@ -452,17 +492,29 @@ bool TagEditorController::openSelection(const QVariantList &selections) {
     m_loadedPaths.clear();
     setStatusText(QStringLiteral("Loading tags..."));
     emit openChanged();
-    runOperation(Operation::Load, buildSelectionBlob(selections), [this](const QByteArray &response) {
-        applyLoadResult(response);
-    });
+    runLoad(buildSelectionBlob(selections));
     return true;
 }
 
-void TagEditorController::applyLoadResult(const QByteArray &response) {
-    QVector<TagEditorRowState> rows;
-    QStringList resolvedPaths;
-    QString errorText;
-    QStringList failureLines;
+void TagEditorController::runLoad(const QByteArray &payload) {
+    const quint64 generation = ++m_operationGeneration;
+    auto *watcher = new QFutureWatcher<LoadResult>(this);
+    connect(watcher, &QFutureWatcher<LoadResult>::finished, this, [this, watcher, generation]() {
+        watcher->deleteLater();
+        if (generation == m_operationGeneration) applyLoadResult(watcher->result());
+    });
+    // Like runOperation, the worker owns its input and function.
+    watcher->setFuture(QtConcurrent::run(m_workerPool, [execute = m_executeOperation, payload]() {
+        return parseLoadResponse(execute(Operation::Load, payload, RenameGate()));
+    }));
+}
+
+TagEditorController::LoadResult TagEditorController::parseLoadResponse(const QByteArray &response) {
+    LoadResult result;
+    QVector<TagEditorRowState> &rows = result.rows;
+    QStringList &resolvedPaths = result.resolvedPaths;
+    QString &errorText = result.errorText;
+    QStringList &failureLines = result.failureLines;
     const QJsonDocument document = QJsonDocument::fromJson(response);
     if (document.isObject()) {
         const QJsonObject root = document.object();
@@ -497,16 +549,20 @@ void TagEditorController::applyLoadResult(const QByteArray &response) {
                         .arg(failureLines.size());
     }
     failureLines.sort();
+    return result;
+}
 
-    m_tableModel.setRows(std::move(rows));
-    m_loadedPaths = resolvedPaths;
+void TagEditorController::applyLoadResult(LoadResult result) {
+    const QString &errorText = result.errorText;
+    m_tableModel.setRows(std::move(result.rows));
+    m_loadedPaths = std::move(result.resolvedPaths);
     resetSelection();
     const bool wasOpen = m_open;
     m_open = !m_loadedPaths.isEmpty();
     if (wasOpen != m_open) {
         emit openChanged();
     }
-    setStatusText(errorText, buildActionDetails({}, failureLines));
+    setStatusText(errorText, buildActionDetails({}, result.failureLines), !errorText.isEmpty());
 
     m_loading = false;
     emit loadingChanged();
@@ -540,6 +596,12 @@ bool TagEditorController::save() {
         return false;
     }
 
+    m_operationFiles.clear();
+    for (const TagEditorRowState &row : m_tableModel.rows()) {
+        if (row.dirty) {
+            m_operationFiles.push_back(row.fileName);
+        }
+    }
     m_saving = true;
     emit savingChanged();
 
@@ -612,8 +674,9 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
     }
     successLines.sort();
     failureLines.sort();
-    setStatusText(status, buildActionDetails(successLines, failureLines));
+    setStatusText(status, buildActionDetails(successLines, failureLines), !success);
 
+    m_operationFiles.clear();
     m_saving = false;
     emit savingChanged();
     emit bulkSummaryChanged();
@@ -651,6 +714,10 @@ bool TagEditorController::renameSelectedFiles() {
 
     QJsonObject root;
     root.insert(QStringLiteral("rows"), rowArray);
+    m_operationFiles.clear();
+    for (int rowIndex : rows) {
+        m_operationFiles.push_back(m_tableModel.rowAt(rowIndex)->fileName);
+    }
     m_saving = true;
     emit savingChanged();
     runOperation(Operation::Rename, QJsonDocument(root).toJson(QJsonDocument::Compact), [this](const QByteArray &response) {
@@ -704,20 +771,8 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
         status = QStringLiteral("failed to parse file rename response");
     }
 
-    QVector<TagEditorRowState> updatedRows = m_tableModel.rows();
-    for (TagEditorRowState &row : updatedRows) {
-        const auto renamedIt = renamedPaths.constFind(row.path);
-        if (renamedIt != renamedPaths.constEnd()) {
-            row.path = renamedIt.value();
-            const QFileInfo info(row.path);
-            row.fileName = info.fileName();
-            row.directory = info.dir().absolutePath();
-            row.errorText.clear();
-        } else if (errorsByPath.contains(row.path)) {
-            row.errorText = errorsByPath.value(row.path);
-        }
-    }
-    m_tableModel.setRows(updatedRows);
+    const bool failed = !status.isEmpty() || !errorsByPath.isEmpty();
+    m_tableModel.applyRenameResults(renamedPaths, errorsByPath);
     m_loadedPaths = m_tableModel.loadedPaths();
 
     if (status.isEmpty()) {
@@ -731,8 +786,9 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
     }
     renamedLines.sort();
     failureLines.sort();
-    setStatusText(status, buildActionDetails(renamedLines, failureLines));
+    setStatusText(status, buildActionDetails(renamedLines, failureLines), failed);
     emit bulkSummaryChanged();
+    m_operationFiles.clear();
     m_saving = false;
     emit savingChanged();
     emit renameFinished();
@@ -747,12 +803,47 @@ void TagEditorController::setSelectedRows(const QVariantList &rows) {
             next.insert(row);
         }
     }
-    if (next == m_selectedRows) {
+    setSelection(std::move(next));
+}
+
+void TagEditorController::setSelection(QSet<int> rows) {
+    if (rows == m_selectedRows) {
         return;
     }
-    m_selectedRows = std::move(next);
+    m_selectedRows = std::move(rows);
+    m_tableModel.setSelection(m_selectedRows);
     emit selectionChanged();
     emit bulkSummaryChanged();
+}
+
+void TagEditorController::selectRange(int first, int last) {
+    const int rowCount = m_tableModel.rowCount();
+    if (rowCount == 0) {
+        return;
+    }
+    const int start = qBound(0, qMin(first, last), rowCount - 1);
+    const int end = qBound(0, qMax(first, last), rowCount - 1);
+    QSet<int> next;
+    next.reserve(end - start + 1);
+    for (int row = start; row <= end; ++row) {
+        next.insert(row);
+    }
+    setSelection(std::move(next));
+}
+
+void TagEditorController::toggleRowSelected(int row) {
+    if (row < 0 || row >= m_tableModel.rowCount()) {
+        return;
+    }
+    QSet<int> next = m_selectedRows;
+    if (!next.remove(row)) {
+        next.insert(row);
+    }
+    setSelection(std::move(next));
+}
+
+void TagEditorController::selectAllRows() {
+    selectRange(0, m_tableModel.rowCount() - 1);
 }
 
 QVariantList TagEditorController::selectedRows() const {
@@ -775,6 +866,35 @@ QString TagEditorController::bulkValue(const QString &field) const {
         }
     }
     return first;
+}
+
+QString TagEditorController::extraValuesNote(const QString &field) const {
+    const QVector<int> rows = targetRows();
+    int rowsWithExtras = 0;
+    QStringList firstExtras;
+    for (int rowIndex : rows) {
+        const TagEditorRowState *row = m_tableModel.rowAt(rowIndex);
+        const QStringList extras = row == nullptr
+            ? QStringList()
+            : TagEditorTableModel::keptExtraValues(*row, field);
+        if (extras.isEmpty()) {
+            continue;
+        }
+        if (rowsWithExtras == 0) {
+            firstExtras = extras;
+        }
+        ++rowsWithExtras;
+    }
+    if (rowsWithExtras == 0) {
+        return {};
+    }
+    if (rows.size() == 1) {
+        return QStringLiteral("Also: %1. Editing replaces every value with the one above.")
+            .arg(firstExtras.join(QStringLiteral("; ")));
+    }
+    return QStringLiteral("%1 of these files have more than one value. Editing replaces "
+                          "them all with the one above.")
+        .arg(rowsWithExtras);
 }
 
 void TagEditorController::applyBulkField(const QString &field, const QString &value) {
@@ -959,12 +1079,13 @@ QVector<int> TagEditorController::targetRows() const {
     return rows;
 }
 
-void TagEditorController::setStatusText(const QString &text, const QString &details) {
-    if (m_statusText == text && m_statusDetails == details) {
+void TagEditorController::setStatusText(const QString &text, const QString &details, bool isError) {
+    if (m_statusText == text && m_statusDetails == details && m_statusIsError == isError) {
         return;
     }
     m_statusText = text;
     m_statusDetails = details;
+    m_statusIsError = isError;
     emit statusChanged();
 }
 
@@ -973,6 +1094,7 @@ void TagEditorController::resetSelection() {
         return;
     }
     m_selectedRows.clear();
+    m_tableModel.setSelection(m_selectedRows);
     emit selectionChanged();
 }
 

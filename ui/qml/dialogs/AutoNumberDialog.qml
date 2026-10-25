@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import org.kde.kirigami 2.20 as Kirigami
 
 Dialog {
     id: root
@@ -11,6 +12,32 @@ Dialog {
     required property var uiPalette
     required property var windowRoot
 
+    readonly property int maximumNumber: 9999
+    readonly property bool startingTrackValid: startingTrackField.acceptableInput
+    readonly property bool startingDiscValid: !writeDiscCheck.checked || startingDiscField.acceptableInput
+    readonly property bool inputValid: root.startingTrackValid && root.startingDiscValid
+
+    function startingNumber(field) {
+        return Number.parseInt(field.text, 10)
+    }
+
+    // Applies only valid start numbers, so mistyped text never numbers from 0.
+    function apply() {
+        if (!root.inputValid) {
+            return false
+        }
+        root.tagEditorApi.autoNumber(
+            root.startingNumber(startingTrackField),
+            writeDiscCheck.checked ? root.startingNumber(startingDiscField) : 1,
+            writeDiscCheck.checked,
+            writeTotalsCheck.checked,
+            resetOnFolderCheck.checked,
+            resetOnDiscCheck.checked)
+        root.close()
+        return true
+    }
+
+    objectName: "autoNumberDialog"
     modal: true
     x: Math.round((root.windowRoot.width - width) / 2)
     y: Math.round((root.windowRoot.height - height) / 2)
@@ -31,7 +58,7 @@ Dialog {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             color: root.uiPalette.uiMutedTextColor
-            text: "Number checked rows, or all rows if none are checked, using the current table order."
+            text: "Number the selected rows, or all rows if none are selected, using the current table order."
         }
 
         GridLayout {
@@ -43,23 +70,46 @@ Dialog {
             Label { text: "Starting Track" }
             TextField {
                 id: startingTrackField
+                objectName: "autoNumberStartingTrackField"
                 Layout.fillWidth: true
                 text: "1"
                 inputMethodHints: Qt.ImhDigitsOnly
+                validator: IntValidator { bottom: 1; top: root.maximumNumber }
+            }
+            Label {
+                objectName: "autoNumberStartingTrackError"
+                Layout.columnSpan: 2
+                Layout.fillWidth: true
+                visible: !root.startingTrackValid
+                wrapMode: Text.WordWrap
+                color: Kirigami.Theme.negativeTextColor
+                text: "Enter a starting track from 1 to " + root.maximumNumber + "."
             }
 
             Label { text: "Starting Disc" }
             TextField {
                 id: startingDiscField
+                objectName: "autoNumberStartingDiscField"
                 Layout.fillWidth: true
                 text: "1"
                 enabled: writeDiscCheck.checked
                 inputMethodHints: Qt.ImhDigitsOnly
+                validator: IntValidator { bottom: 1; top: root.maximumNumber }
+            }
+            Label {
+                objectName: "autoNumberStartingDiscError"
+                Layout.columnSpan: 2
+                Layout.fillWidth: true
+                visible: !root.startingDiscValid
+                wrapMode: Text.WordWrap
+                color: Kirigami.Theme.negativeTextColor
+                text: "Enter a starting disc from 1 to " + root.maximumNumber + "."
             }
         }
 
         CheckBox {
             id: writeDiscCheck
+            objectName: "autoNumberWriteDiscCheck"
             checked: false
             text: "Write disc numbers"
         }
@@ -90,17 +140,10 @@ Dialog {
                 onClicked: root.close()
             }
             Button {
+                objectName: "autoNumberApplyButton"
                 text: "Apply"
-                onClicked: {
-                    root.tagEditorApi.autoNumber(
-                        Number(startingTrackField.text || "1"),
-                        Number(startingDiscField.text || "1"),
-                        writeDiscCheck.checked,
-                        writeTotalsCheck.checked,
-                        resetOnFolderCheck.checked,
-                        resetOnDiscCheck.checked)
-                    root.close()
-                }
+                enabled: root.inputValid
+                onClicked: root.apply()
             }
         }
     }
