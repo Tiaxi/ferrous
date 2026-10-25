@@ -1227,7 +1227,11 @@ mod tests {
     }
 }
 
+#[cfg(all(test, feature = "gst"))]
+pub(crate) mod pipeline_trace;
 mod queue;
+#[cfg(feature = "gst")]
+pub(crate) mod source_activation;
 
 #[cfg(not(feature = "gst"))]
 #[path = "backend_mock.rs"]

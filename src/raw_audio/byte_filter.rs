@@ -303,6 +303,11 @@ mod tests {
 #[cfg(all(test, feature = "gst"))]
 mod gst_tests {
     use super::install_raw_surround_source_probe;
+    use crate::playback::pipeline_trace::PipelineTrace;
+    use crate::playback::source_activation::race::{
+        race_type_finding_with_activation, ActivationRace,
+    };
+    use crate::playback::source_activation::{activate_sources, connect_type_finding_hold};
     use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes, test_path};
     use crate::raw_audio::{TEST_AC3, TEST_DTS};
     use gst::prelude::*;
@@ -375,11 +380,13 @@ mod gst_tests {
     }
 
     /// `playbin3` with the app's source filter, a fake audio sink, and
-    /// recorders for what the sources deliver and what is decoded.
+    /// recorders for what the sources deliver and what is decoded. It
+    /// activates its sources as the playback backend does.
     struct Player {
         playbin: gst::Element,
         decoded: Arc<Mutex<Vec<(Duration, Duration)>>>,
         delivered: Arc<Mutex<Vec<Delivered>>>,
+        trace: PipelineTrace,
     }
 
     impl Player {
@@ -390,7 +397,9 @@ mod gst_tests {
                 .build()
                 .expect("playbin3");
             install_raw_surround_source_probe(&playbin);
+            connect_type_finding_hold(&playbin);
             let player = Self {
+                trace: PipelineTrace::new(&playbin),
                 playbin,
                 decoded: Arc::default(),
                 delivered: Arc::default(),
@@ -402,6 +411,9 @@ mod gst_tests {
             player
         }
 
+        /// Record what leaves each source after the filter. A flushing seek
+        /// starts a new run: what its source delivered before is dropped
+        /// once the end of the flush leaves the source, in stream order.
         fn record_delivered_buffers(&self) {
             let delivered = Arc::clone(&self.delivered);
             // Connected after the filter, so this probe runs after the filter's.
@@ -410,9 +422,13 @@ mod gst_tests {
                 let path = PathBuf::from(source.property::<Option<String>>("location")?);
                 let delivered = Arc::clone(&delivered);
                 source.static_pad("src")?.add_probe(
-                    gst::PadProbeType::BUFFER,
+                    gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_FLUSH,
                     move |_pad, info| {
-                        if let Some(buffer) = info.buffer() {
+                        if is_flush_stop(info) {
+                            if let Ok(mut delivered) = delivered.lock() {
+                                delivered.retain(|buffer| buffer.path != path);
+                            }
+                        } else if let Some(buffer) = info.buffer() {
                             if let (Ok(map), Ok(mut delivered)) =
                                 (buffer.map_readable(), delivered.lock())
                             {
@@ -430,6 +446,9 @@ mod gst_tests {
             });
         }
 
+        /// A sink that records what is decoded. A flushing seek starts a
+        /// new run once the end of the flush reaches the sink, before the
+        /// first buffer from the seek target.
         fn decoded_sink(&self) -> gst::Element {
             let decoded = Arc::clone(&self.decoded);
             let sink = gst::ElementFactory::make("fakesink")
@@ -437,9 +456,13 @@ mod gst_tests {
                 .build()
                 .expect("fakesink");
             sink.static_pad("sink").expect("fakesink pad").add_probe(
-                gst::PadProbeType::BUFFER,
+                gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_FLUSH,
                 move |_pad, info| {
-                    if let Some(buffer) = info.buffer() {
+                    if is_flush_stop(info) {
+                        if let Ok(mut decoded) = decoded.lock() {
+                            decoded.clear();
+                        }
+                    } else if let Some(buffer) = info.buffer() {
                         if let (Some(start), Some(length), Ok(mut decoded)) =
                             (buffer.pts(), buffer.duration(), decoded.lock())
                         {
@@ -460,8 +483,7 @@ mod gst_tests {
         }
 
         fn set_state(&self, state: gst::State) -> Result<(), String> {
-            self.playbin
-                .set_state(state)
+            activate_sources(|| self.playbin.set_state(state))
                 .map(|_| ())
                 .map_err(|err| err.to_string())
         }
@@ -473,16 +495,22 @@ mod gst_tests {
                     gst::ClockTime::from_seconds(10),
                     &[wanted, gst::MessageType::Error],
                 )
-                .ok_or_else(|| format!("timed out waiting for {wanted:?}"))?;
+                .ok_or_else(|| self.report(&format!("timed out waiting for {wanted:?}")))?;
             match message.view() {
                 gst::MessageView::Error(err) => Err(format!("{} ({:?})", err.error(), err.debug())),
                 _ => Ok(()),
             }
         }
 
-        fn clear(&self) {
-            self.decoded.lock().expect("decoded").clear();
-            self.delivered.lock().expect("delivered").clear();
+        /// Describe what the player recorded and what its pipeline does,
+        /// for a wait for `what` that timed out.
+        fn report(&self, what: &str) -> String {
+            let decoded = self.decoded.lock().map_or(0, |decoded| decoded.len());
+            let delivered = self.delivered.lock().map_or(0, |delivered| delivered.len());
+            let details = format!(
+                "  since the last seek: {decoded} buffers decoded, {delivered} left the sources\n"
+            );
+            self.trace.report(what, &details)
         }
 
         fn take_run(&self) -> Run {
@@ -493,9 +521,14 @@ mod gst_tests {
         }
 
         fn finish<T>(self, name: &str, result: Result<T, String>) -> T {
-            let _ = self.playbin.set_state(gst::State::Null);
+            let _ = self.set_state(gst::State::Null);
             result.unwrap_or_else(|err| panic!("{name}: {err}"))
         }
+    }
+
+    fn is_flush_stop(info: &gst::PadProbeInfo) -> bool {
+        info.event()
+            .is_some_and(|event| event.type_() == gst::EventType::FlushStop)
     }
 
     fn file_uri(path: &Path) -> String {
@@ -519,9 +552,6 @@ mod gst_tests {
                     .playbin
                     .seek_simple(seek_flags, gst::ClockTime::from_nseconds(nanos))
                     .map_err(|err| err.to_string())?;
-                // The flushing seek has completed; anything recorded so far
-                // belongs to the preroll or the previous run.
-                player.clear();
                 if index == 0 {
                     player.set_state(gst::State::Playing)?;
                 }
@@ -536,7 +566,10 @@ mod gst_tests {
     /// Play `paths` back to back, switching on `about-to-finish` as the
     /// playback backend does for files with the same extension.
     fn play_gapless(paths: &[PathBuf]) -> Run {
-        let player = Player::new();
+        play_gapless_on(Player::new(), paths)
+    }
+
+    fn play_gapless_on(player: Player, paths: &[PathBuf]) -> Run {
         player.set_path(&paths[0]);
         let queue = Mutex::new(paths[1..].iter().cloned().collect::<VecDeque<_>>());
         player
@@ -544,7 +577,7 @@ mod gst_tests {
             .connect("about-to-finish", false, move |values| {
                 let playbin = values.first()?.get::<gst::Element>().ok()?;
                 let next = queue.lock().ok()?.pop_front()?;
-                playbin.set_property("uri", file_uri(&next));
+                activate_sources(|| playbin.set_property("uri", file_uri(&next)));
                 None
             });
         let result = (|| {
@@ -671,6 +704,73 @@ mod gst_tests {
             "{name}: decoded {decoded:?} of a {expected:?} queue"
         );
         run.assert_only_audio_delivered(&[first, clean, last]);
+    }
+
+    #[test]
+    fn a_flushing_seek_starts_a_new_run_of_what_is_decoded() {
+        // A run must not depend on when the test thread looks after the
+        // seek: under load, playback from the target can be well under way
+        // by then.
+        require_elements(AC3.elements);
+        let repeats = AC3.repeats();
+        let (path, _) = write_ripped_file(AC3.name, AC3.fixture, repeats);
+        let target = AC3.length(repeats) * 3 / 5;
+        let player = Player::new();
+        player.set_path(&path);
+        let result = (|| {
+            player.set_state(gst::State::Paused)?;
+            player.wait_for(gst::MessageType::AsyncDone)?;
+            let nanos = u64::try_from(target.as_nanos()).expect("target fits");
+            player
+                .playbin
+                .seek_simple(AC3.seek_flags, gst::ClockTime::from_nseconds(nanos))
+                .map_err(|err| err.to_string())?;
+            player.wait_for(gst::MessageType::AsyncDone)?;
+            Ok(player.take_run())
+        })();
+        let run = player.finish("seek while paused", result);
+        let _ = std::fs::remove_file(&path);
+
+        // Only the preroll from the target, not the one from the start.
+        let slack = AC3.frame_length * 2;
+        assert!(
+            !run.decoded.is_empty() && run.first_start() + slack >= target,
+            "decoded {:?} for a seek to {target:?}",
+            run.decoded
+        );
+    }
+
+    #[test]
+    fn ripped_files_find_their_type_only_once_their_sources_are_activated() {
+        // The filter offers the file in push mode only, so urisourcebin
+        // finds its type on the streaming thread of the file source. When
+        // that happens while the activating thread still changes the state
+        // of urisourcebin, the parsebin it then sets up can deadlock with
+        // that thread (GStreamer issue 4472). The hold must stop the
+        // streaming thread before: for the first file, activated by the
+        // state change, and for the successor, activated by the handover in
+        // about-to-finish.
+        require_elements(AC3.elements);
+        let repeats = AC3.repeats();
+        let first = write_ripped_file(AC3.name, AC3.fixture, repeats);
+        let second = write_ripped_file(AC3.name, AC3.fixture, repeats);
+        let player = Player::new();
+        let races = [&first, &second]
+            .map(|(path, _)| race_type_finding_with_activation(&player.playbin, path));
+        let run = play_gapless_on(player, &[first.0.clone(), second.0.clone()]);
+        for (path, _) in [&first, &second] {
+            let _ = std::fs::remove_file(path);
+        }
+
+        for (race, (path, _)) in races.iter().zip([&first, &second]) {
+            assert_eq!(
+                *race.lock().unwrap(),
+                Some(ActivationRace::TypeFindingHeld),
+                "{}",
+                path.display()
+            );
+        }
+        run.assert_only_audio_delivered(&[first, second]);
     }
 
     #[test]

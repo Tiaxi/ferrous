@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -25,6 +24,7 @@ use super::clock::{self, MonotonicClock, MonotonicTime};
 use super::queue::{
     same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff, ManualMove,
 };
+use super::source_activation::{activate_sources, connect_type_finding_hold};
 use super::{
     PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent, PlaybackSnapshot,
     PlaybackState, RepeatMode, TrackChangeKind,
@@ -352,6 +352,8 @@ impl GstPlaybackRuntime {
         stream_durations: Arc<Mutex<StreamDurations>>,
         stream_ends: Arc<Mutex<StreamEndHold>>,
     ) -> Self {
+        // The runtime activates sources only in `activate_sources`.
+        connect_type_finding_hold(&playbin);
         Self {
             playbin,
             queue_state,
@@ -2102,7 +2104,6 @@ fn start_gst_engine(
         stream_durations,
         stream_ends,
     );
-    connect_type_finding_hold(&runtime.playbin);
     runtime.input_switches.connect(&runtime.playbin);
     connect_about_to_finish(&runtime);
     runtime
@@ -2377,66 +2378,6 @@ impl StreamDurations {
     fn clear(&mut self) {
         self.streams.clear();
     }
-}
-
-thread_local! {
-    /// While the thread runs `activate_sources`, the probes that hold back
-    /// the type finding of the sources it activates.
-    static TYPE_FINDING_HOLDS: RefCell<Option<Vec<(gst::Pad, gst::PadProbeId)>>> =
-        const { RefCell::new(None) };
-}
-
-/// Run `activate`, which can activate sources of `playbin`: a state change
-/// of the pipeline, or a successor handed over. The sources find the type
-/// of their files only once it has returned.
-///
-/// `urisourcebin` starts to find the type of its file while it still changes
-/// state. Its streaming thread then adds a `parsebin` and changes its state,
-/// which deadlocks when the activating thread changes the state of the new
-/// `parsebin` too: each waits for a lock that the other holds. Under load
-/// the activating thread is slow enough for that to happen. See
-/// <https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/4472>, open
-/// in 1.28.
-fn activate_sources<R>(activate: impl FnOnce() -> R) -> R {
-    let outer = TYPE_FINDING_HOLDS.with(|holds| holds.replace(Some(Vec::new())));
-    let result = activate();
-    let holds = TYPE_FINDING_HOLDS.with(|holds| holds.replace(outer));
-    for (pad, probe) in holds.into_iter().flatten() {
-        pad.remove_probe(probe);
-    }
-    result
-}
-
-/// Hold back the type finding of every source that `urisourcebin` sets up
-/// in `activate_sources`, until that returns. The type finder of a source
-/// first announces the stream it starts, so the probe holds it there,
-/// before it reads the file.
-fn connect_type_finding_hold(playbin: &gst::Element) {
-    // Runs on the thread that adds the type finder, before it starts.
-    playbin.connect("deep-element-added", false, |values| {
-        let bin = values.get(1)?.get::<gst::Bin>().ok()?;
-        let element = values.get(2)?.get::<gst::Element>().ok()?;
-        let factory_is = |element: &gst::Element, name: &str| {
-            element
-                .factory()
-                .is_some_and(|factory| factory.name() == name)
-        };
-        if !factory_is(&element, "typefind") || !factory_is(bin.upcast_ref(), "urisourcebin") {
-            return None;
-        }
-        TYPE_FINDING_HOLDS.with(|holds| {
-            let mut holds = holds.borrow_mut();
-            let holds = holds.as_mut()?;
-            let pad = element.static_pad("src")?;
-            let probe = pad.add_probe(
-                gst::PadProbeType::BLOCK | gst::PadProbeType::DATA_DOWNSTREAM,
-                |_, _| gst::PadProbeReturn::Ok,
-            )?;
-            holds.push((pad, probe));
-            Some(())
-        });
-        None
-    });
 }
 
 /// Orders the state changes that end a pipeline run, to Ready or Null,
@@ -3656,9 +3597,17 @@ fn file_uri(path: &Path) -> Option<String> {
 #[cfg(all(test, feature = "gst"))]
 mod gst_integration_tests {
     use super::*;
+    use crate::playback::pipeline_trace::PipelineTrace;
+    use crate::playback::source_activation::race::{
+        race_type_finding_with_activation, ActivationRace,
+    };
     use crate::playback::PathRenames;
 
-    fn wait_for_playing_or_error(playbin: &gst::Element, timeout_secs: u64) -> Result<(), String> {
+    fn wait_for_playing_or_error(
+        playbin: &gst::Element,
+        trace: &PipelineTrace,
+        timeout_secs: u64,
+    ) -> Result<(), String> {
         let bus = playbin.bus().expect("bus");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         while std::time::Instant::now() < deadline {
@@ -3683,7 +3632,7 @@ mod gst_integration_tests {
                 _ => {}
             }
         }
-        Err("timeout waiting for Playing state".into())
+        Err(trace.report("timeout waiting for Playing state", ""))
     }
 
     #[test]
@@ -3753,6 +3702,7 @@ mod gst_integration_tests {
         bus: gst::Bus,
         events: Receiver<PlaybackEvent>,
         _analysis: Receiver<AnalysisCommand>,
+        trace: PipelineTrace,
     }
 
     impl TestEngine {
@@ -3779,6 +3729,7 @@ mod gst_integration_tests {
                 Arc::new(Mutex::new(StreamEndHold::default())),
             );
             Self {
+                trace: PipelineTrace::new(&runtime.playbin),
                 runtime,
                 bus,
                 events,
@@ -3808,7 +3759,14 @@ mod gst_integration_tests {
                     return Ok(());
                 }
             }
-            Err("timeout waiting for Playing state".into())
+            let snapshot = &self.runtime.snapshot;
+            let details = format!(
+                "  snapshot: {:?}, row {:?}, current {:?}\n",
+                snapshot.state, snapshot.current_queue_index, snapshot.current
+            );
+            Err(self
+                .trace
+                .report("timeout waiting for Playing state", &details))
         }
 
         fn current_uri(&self) -> Option<String> {
@@ -3925,6 +3883,23 @@ mod gst_integration_tests {
             })
             .collect();
         (dir, paths)
+    }
+
+    #[test]
+    fn a_runtime_built_without_the_engine_holds_back_type_finding() {
+        // The runtime connects the hold itself, so a pipeline run that a
+        // test engine starts cannot deadlock in GStreamer issue 4472 either.
+        let (dir, paths) = tone_fixtures("activation-hold", &["a.mp3"]);
+        let mut engine = TestEngine::new();
+        let race = race_type_finding_with_activation(&engine.runtime.playbin, &paths[0]);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(paths.clone()));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_until_playing().expect("track plays");
+        assert_eq!(*race.lock().unwrap(), Some(ActivationRace::TypeFindingHeld));
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4061,16 +4036,16 @@ mod gst_integration_tests {
             .expect("playbin3");
         configure_playbin_buffering(&playbin);
         install_raw_surround_source_probe(&playbin);
+        connect_type_finding_hold(&playbin);
         playbin.set_property("audio-sink", &make_full_analysis_sink());
+        let trace = PipelineTrace::new(&playbin);
 
         let _ = playbin.set_state(gst::State::Ready);
         let uri = file_uri(test_path).expect("file_uri");
         playbin.set_property("uri", &uri);
-        playbin
-            .set_state(gst::State::Playing)
-            .expect("set_state(Playing)");
+        activate_sources(|| playbin.set_state(gst::State::Playing)).expect("set_state(Playing)");
 
-        match wait_for_playing_or_error(&playbin, 5) {
+        match wait_for_playing_or_error(&playbin, &trace, 5) {
             Ok(()) => {}
             Err(e) => {
                 let _ = playbin.set_state(gst::State::Null);
@@ -4088,6 +4063,10 @@ mod gst_integration_tests {
 #[cfg(all(test, feature = "gst"))]
 mod engine_tests {
     use super::*;
+    use crate::playback::pipeline_trace::PipelineTrace;
+    use crate::playback::source_activation::race::{
+        race_type_finding_with_activation, ActivationRace,
+    };
     use crate::playback::PathRenames;
 
     const TIMEOUT: Duration = Duration::from_secs(10);
@@ -4108,10 +4087,12 @@ mod engine_tests {
 
         /// 16-bit mono PCM WAV of `millis` milliseconds. Tracks that start a
         /// pipeline run last at least 4 s, longer than the pipeline reads
-        /// ahead: a shorter one reaches about-to-finish while the pipeline
-        /// is still changing state, and a successor handed over then can
-        /// deadlock uridecodebin3 (seen with GStreamer 1.28), independent
-        /// of this engine.
+        /// ahead, so the run has started when about-to-finish hands over the
+        /// successor. A shorter one is handed over while the pipeline still
+        /// changes state. That once deadlocked uridecodebin3; the engine now
+        /// orders its state changes against the handover and the input
+        /// switch (see `InputSwitches`), and the tests of that ordering
+        /// force it on purpose.
         fn wav(&self, name: &str, millis: u32) -> PathBuf {
             let frames = WAV_RATE * millis / 1_000;
             let data_len = frames * 2;
@@ -4351,169 +4332,43 @@ mod engine_tests {
             .build()?)
     }
 
-    /// Bus messages that a report lists.
-    const TRACED_MESSAGES: usize = 24;
-    /// How long a report waits for the pipeline to answer its queries.
-    const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
-
-    /// Records what the pipeline of a test does, to report it when a wait
-    /// times out.
+    /// Records what the pipeline of a test does, to report it with the
+    /// engine's state when a wait times out.
     struct Trace {
-        started: Instant,
-        playbin: gst::Element,
+        pipeline: PipelineTrace,
         queue: Arc<Mutex<GaplessQueue>>,
         about_to_finish: Arc<AboutToFinishCalls>,
-        /// The latest bus messages as they were posted, with the time since
-        /// the test started, without the state changes of the pipeline's
-        /// elements and the status of its streaming threads.
-        messages: Arc<Mutex<VecDeque<(Duration, gst::Message)>>>,
     }
 
     impl Trace {
         fn new(runtime: &GstPlaybackRuntime) -> Self {
-            let started = Instant::now();
-            let messages = Arc::new(Mutex::new(VecDeque::new()));
-            let bus = runtime.playbin.bus().unwrap();
-            bus.enable_sync_message_emission();
-            let log = Arc::clone(&messages);
-            let playbin = runtime.playbin.downgrade();
-            // Runs on the posting thread, so it only stores the message.
-            bus.connect_sync_message(None, move |_, message| {
-                let noise = match message.view() {
-                    gst::MessageView::StreamStatus(_) => true,
-                    gst::MessageView::StateChanged(_) => playbin
-                        .upgrade()
-                        .is_none_or(|playbin| message.src() != Some(playbin.upcast_ref())),
-                    _ => false,
-                };
-                if noise {
-                    return;
-                }
-                if let Ok(mut log) = log.lock() {
-                    if log.len() == TRACED_MESSAGES {
-                        log.pop_front();
-                    }
-                    log.push_back((started.elapsed(), message.clone()));
-                }
-            });
             Self {
-                started,
-                playbin: runtime.playbin.clone(),
+                pipeline: PipelineTrace::new(&runtime.playbin),
                 queue: Arc::clone(&runtime.queue_state),
                 about_to_finish: Arc::clone(&runtime.about_to_finish),
-                messages,
             }
         }
 
         /// Report `what` the test waited for, `engine`, a description of
-        /// the engine, and what the pipeline does. The pipeline is queried
-        /// on another thread, so a pipeline that blocks is reported too.
+        /// the engine, the queue, and what the pipeline does.
         fn report(&self, what: &str, engine: &str) -> String {
-            let (tx, rx) = bounded(1);
-            let playbin = self.playbin.clone();
-            let messages = Arc::clone(&self.messages);
-            let queue = Arc::clone(&self.queue);
-            std::thread::spawn(move || {
-                let _ = tx.send(pipeline_report(&playbin, &messages, &queue));
-            });
-            let pipeline = rx.recv_timeout(REPORT_TIMEOUT).unwrap_or_else(|_| {
-                format!("the pipeline did not answer its queries within {REPORT_TIMEOUT:?}")
-            });
-            format!(
-                "{what}\n  waited until {:.3} s after the test started\n  \
-                 about-to-finish: emitted {} times, the handler returned {} times\n\
-                 {engine}{pipeline}",
-                self.started.elapsed().as_secs_f64(),
+            let queue = match self.queue.try_lock() {
+                Ok(queue) => format!(
+                    "free, current row {:?}, successor handed to the pipeline: {}",
+                    queue.current_index(),
+                    queue.successor_handed_to_pipeline()
+                ),
+                Err(std::sync::TryLockError::WouldBlock) => "held".to_string(),
+                Err(std::sync::TryLockError::Poisoned(_)) => "poisoned".to_string(),
+            };
+            let details = format!(
+                "  about-to-finish: emitted {} times, the handler returned {} times\n\
+                 {engine}  queue lock: {queue}\n",
                 self.about_to_finish.emitted.load(Ordering::SeqCst),
                 self.about_to_finish.returned.load(Ordering::SeqCst),
-            )
-        }
-    }
-
-    /// Describe the state of `playbin` and its elements, the queue, and the
-    /// latest bus `messages`.
-    fn pipeline_report(
-        playbin: &gst::Element,
-        messages: &Mutex<VecDeque<(Duration, gst::Message)>>,
-        queue: &Mutex<GaplessQueue>,
-    ) -> String {
-        use std::fmt::Write;
-
-        let mut report = String::new();
-        let (result, current, pending) = playbin.state(Some(gst::ClockTime::ZERO));
-        let _ = writeln!(
-            report,
-            "  pipeline: {current:?}, pending {pending:?} ({result:?}), position {:?}",
-            playbin.query_position::<gst::ClockTime>()
-        );
-        let queue = match queue.try_lock() {
-            Ok(queue) => format!(
-                "free, current row {:?}, successor handed to the pipeline: {}",
-                queue.current_index(),
-                queue.successor_handed_to_pipeline()
-            ),
-            Err(std::sync::TryLockError::WouldBlock) => "held".to_string(),
-            Err(std::sync::TryLockError::Poisoned(_)) => "poisoned".to_string(),
-        };
-        let _ = writeln!(report, "  queue lock: {queue}");
-        let unsettled: Vec<_> = playbin
-            .clone()
-            .downcast::<gst::Bin>()
-            .unwrap()
-            .iterate_recurse()
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter_map(|element| {
-                let (current, pending) = (element.current_state(), element.pending_state());
-                (pending != gst::State::VoidPending)
-                    .then(|| format!("{} {current:?} → {pending:?}", element.name()))
-            })
-            .collect();
-        let _ = writeln!(report, "  elements changing state: {unsettled:?}");
-        let _ = writeln!(report, "  latest bus messages:");
-        let messages: Vec<_> = messages
-            .lock()
-            .map(|log| log.clone())
-            .unwrap_or_default()
-            .into();
-        for (at, message) in messages {
-            let _ = writeln!(
-                report,
-                "    {:8.3} s {}",
-                at.as_secs_f64(),
-                describe_message(&message)
             );
+            self.pipeline.report(what, &details)
         }
-        report
-    }
-
-    fn describe_message(message: &gst::Message) -> String {
-        let detail = match message.view() {
-            gst::MessageView::StateChanged(change) => format!(
-                "{:?} → {:?}, pending {:?}",
-                change.old(),
-                change.current(),
-                change.pending()
-            ),
-            gst::MessageView::StreamStart(start) => format!("group {:?}", start.group_id()),
-            gst::MessageView::AsyncDone(done) => format!("running time {:?}", done.running_time()),
-            gst::MessageView::Error(error) => format!("{} ({:?})", error.error(), error.debug()),
-            gst::MessageView::Warning(warning) => {
-                format!("{} ({:?})", warning.error(), warning.debug())
-            }
-            gst::MessageView::Buffering(buffering) => format!("{} %", buffering.percent()),
-            _ => message
-                .structure()
-                .map(|structure| structure.name().to_string())
-                .unwrap_or_default(),
-        };
-        format!(
-            "{:?} from {}: {detail}",
-            message.type_(),
-            message
-                .src()
-                .map_or_else(|| "?".to_string(), |src| src.path_string().to_string())
-        )
     }
 
     #[derive(Debug, Clone)]
@@ -4671,11 +4526,12 @@ mod engine_tests {
             });
         }
 
-        /// Wait inside the window until the current track has played 1 s.
-        /// When about-to-finish fires, uridecodebin3 switches its input to
-        /// the successor; a state change at that moment can deadlock
-        /// uridecodebin3 (seen with GStreamer 1.28), independent of this
-        /// engine.
+        /// Wait inside the window until the current track has played 1 s,
+        /// so a command that the test sends next meets a settled pipeline
+        /// rather than uridecodebin3's switch of its input to the successor.
+        /// The engine orders its state changes against that switch (see
+        /// `InputSwitches`), and the tests that force the switch during a
+        /// state change cover that ordering (see `SwitchHold`).
         #[track_caller]
         fn wait_for_settled_window(&mut self, successor: &Path) {
             self.wait_for_window(successor);
@@ -6125,91 +5981,6 @@ mod engine_tests {
             "{}",
             engine.report("the renamed track did not start")
         );
-    }
-
-    /// What came first while the thread that activated the source of a file
-    /// was held in the source's state change.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum ActivationRace {
-        /// The type finding of the source was held back.
-        TypeFindingHeld,
-        /// `urisourcebin` found the type of the file and set up a
-        /// `parsebin`, which can deadlock with the activating thread.
-        ParsebinSetUp,
-        /// Neither happened within `TIMEOUT`.
-        Neither,
-    }
-
-    /// Hold the thread that activates the source of `file` when the source
-    /// becomes Paused, which is while its `urisourcebin` changes state,
-    /// until the type finding of the source is held back or `urisourcebin`
-    /// has set up a `parsebin` for it. Returns which came first.
-    fn race_type_finding_with_activation(
-        playbin: &gst::Element,
-        file: &Path,
-    ) -> Arc<Mutex<Option<ActivationRace>>> {
-        let outcome = Arc::new(Mutex::new(None));
-        let recorded = Arc::clone(&outcome);
-        let file = file.to_path_buf();
-        let bus = playbin.bus().unwrap();
-        bus.enable_sync_message_emission();
-        bus.connect_sync_message(None, move |_, message| {
-            let gst::MessageView::StateChanged(change) = message.view() else {
-                return;
-            };
-            let Some(source) = message
-                .src()
-                .and_then(|src| src.downcast_ref::<gst::Element>())
-                .filter(|source| {
-                    source
-                        .factory()
-                        .is_some_and(|factory| factory.name() == "filesrc")
-                })
-            else {
-                return;
-            };
-            let location = source.property::<Option<String>>("location");
-            if (change.old(), change.current()) != (gst::State::Ready, gst::State::Paused)
-                || location.as_deref().map(Path::new) != Some(file.as_path())
-                || recorded.lock().unwrap().is_some()
-            {
-                return;
-            }
-            let urisourcebin = source
-                .parent()
-                .and_downcast::<gst::Bin>()
-                .expect("urisourcebin");
-            let deadline = Instant::now() + TIMEOUT;
-            let race = loop {
-                let parsebin = urisourcebin
-                    .iterate_elements()
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .any(|element| {
-                        element
-                            .factory()
-                            .is_some_and(|factory| factory.name() == "parsebin")
-                    });
-                if parsebin {
-                    break ActivationRace::ParsebinSetUp;
-                }
-                let held = urisourcebin
-                    .iterate_elements()
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .filter_map(|element| element.static_pad("src"))
-                    .any(|pad| pad.is_blocking());
-                if held {
-                    break ActivationRace::TypeFindingHeld;
-                }
-                if Instant::now() >= deadline {
-                    break ActivationRace::Neither;
-                }
-                std::thread::sleep(millis(1));
-            };
-            *recorded.lock().unwrap() = Some(race);
-        });
-        outcome
     }
 
     #[test]
