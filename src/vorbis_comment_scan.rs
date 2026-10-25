@@ -5,7 +5,8 @@
 //! lofty 0.24 reads Vorbis comments leniently: it skips a comment it cannot
 //! represent, so writing back what it read deletes that comment. This module
 //! reads a file's own comment blocks and counts the comments lofty skips,
-//! using the rules lofty applies.
+//! using the rules lofty applies. FLAC `PICTURE` blocks are read and written
+//! with the comments, so the ones lofty skips are counted too.
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -17,10 +18,12 @@ use lofty::file::FileType;
 use lofty::picture::Picture;
 
 const FLAC_VORBIS_COMMENT_BLOCK: u8 = 4;
+const FLAC_PICTURE_BLOCK: u8 = 6;
 const VORBIS_COMMENT_HEADER: &[u8] = b"\x03vorbis";
 const OPUS_COMMENT_HEADER: &[u8] = b"OpusTags";
 
-/// The comments of a file that lofty does not read, by the reason.
+/// The comments of a file that lofty does not read, by the reason, and the
+/// FLAC picture blocks it does not read.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct SkippedComments {
     /// Names with a byte outside `0x20..=0x7D`, the range lofty allows.
@@ -34,6 +37,9 @@ pub(crate) struct SkippedComments {
     /// Comments in a FLAC `VORBIS_COMMENT` block other than the last one,
     /// which is the only one lofty reads.
     other_block: usize,
+    /// FLAC `PICTURE` blocks lofty cannot decode. Writing the comments
+    /// replaces every picture block with the pictures lofty read.
+    unreadable_picture_block: usize,
 }
 
 impl SkippedComments {
@@ -45,11 +51,22 @@ impl SkippedComments {
             + self.other_block
     }
 
-    /// Why saving would delete comments, when it would.
+    /// Why saving would delete comments or picture blocks, when it would.
     pub(crate) fn save_refusal(&self) -> Option<String> {
-        let total = self.total();
-        if total == 0 {
+        let comments = self.total();
+        let pictures = self.unreadable_picture_block;
+        if comments == 0 && pictures == 0 {
             return None;
+        }
+        let plural = |count: usize, one: &str, many: &str| {
+            format!("{count} {}", if count == 1 { one } else { many })
+        };
+        let mut lost = Vec::new();
+        if comments > 0 {
+            lost.push(plural(comments, "comment", "comments"));
+        }
+        if pictures > 0 {
+            lost.push(plural(pictures, "picture block", "picture blocks"));
         }
         let reasons = [
             (self.invalid_name, "with an invalid name"),
@@ -66,14 +83,19 @@ impl SkippedComments {
         .map(|(count, reason)| format!("{count} {reason}"))
         .collect::<Vec<_>>()
         .join(", ");
-        let (comments, them) = if total == 1 {
-            ("comment", "it")
+        let reasons = if reasons.is_empty() {
+            reasons
         } else {
-            ("comments", "them")
+            format!(" ({reasons})")
+        };
+        let them = if comments + pictures == 1 {
+            "it"
+        } else {
+            "them"
         };
         Some(format!(
-            "{total} {comments} in this file can't be read safely ({reasons}); \
-             saving would delete {them}"
+            "{} in this file can't be read safely{reasons}; saving would delete {them}",
+            lost.join(" and ")
         ))
     }
 
@@ -101,7 +123,8 @@ impl SkippedComments {
     }
 }
 
-/// Count the Vorbis comments of `path` that lofty does not read.
+/// Count the Vorbis comments and FLAC picture blocks of `path` that lofty
+/// does not read.
 ///
 /// The comment blocks are read in a stream, one comment at a time, so a
 /// large embedded picture is held once at most. Lengths are checked against
@@ -109,8 +132,8 @@ impl SkippedComments {
 ///
 /// # Errors
 ///
-/// Returns a message when the comment blocks cannot be read, such as when
-/// the file is truncated.
+/// Returns a message when the comment or picture blocks cannot be read,
+/// such as when the file is truncated.
 pub(crate) fn skipped_comments(
     path: &Path,
     file_type: FileType,
@@ -120,7 +143,7 @@ pub(crate) fn skipped_comments(
         let file_len = file.metadata()?.len();
         scan(&mut BufReader::new(file), file_len, file_type)
     };
-    scan_file().map_err(|err| format!("its Vorbis comments cannot be read: {err}"))
+    scan_file().map_err(|err| format!("its tags cannot be read: {err}"))
 }
 
 fn scan(
@@ -138,9 +161,11 @@ fn scan(
     }
 }
 
-/// Count the skipped comments of the FLAC stream `reader` holds. lofty reads
-/// only the last nonempty `VORBIS_COMMENT` block, and writing replaces all
-/// of them, so the comments of the others are lost too.
+/// Count the skipped comments and picture blocks of the FLAC stream `reader`
+/// holds. lofty reads only the last nonempty `VORBIS_COMMENT` block, and
+/// writing replaces all of them, so the comments of the others are lost too.
+/// Writing also replaces every `PICTURE` block with the pictures lofty read,
+/// so the blocks it skips are lost.
 fn scan_flac(reader: &mut (impl Read + Seek), file_len: u64) -> io::Result<SkippedComments> {
     skip_id3v2(reader)?;
     let mut marker = [0; 4];
@@ -152,18 +177,38 @@ fn scan_flac(reader: &mut (impl Read + Seek), file_len: u64) -> io::Result<Skipp
     // The comment count and skipped comments of the last block read.
     let mut last: Option<(u64, SkippedComments)> = None;
     let mut other_block = 0;
+    let mut unreadable_picture_block = 0;
     loop {
         let mut header = [0; 4];
         read_exact(reader, &mut header)?;
         position += 4;
         let size = u64::from(u32::from_be_bytes([0, header[1], header[2], header[3]]));
-        if header[0] & 0x7F == FLAC_VORBIS_COMMENT_BLOCK && size > 0 {
+        let block_type = header[0] & 0x7F;
+        if block_type == FLAC_VORBIS_COMMENT_BLOCK && size > 0 {
             if position + size > file_len {
                 return Err(invalid("a comment block runs past the end of the file"));
             }
             let block = scan_comments(&mut reader.by_ref().take(size), size)?;
             if let Some((count, _)) = last.replace(block) {
                 other_block += count;
+            }
+        } else if block_type == FLAC_PICTURE_BLOCK && size > 0 {
+            if position + size > file_len {
+                return Err(invalid("a picture block runs past the end of the file"));
+            }
+            // lofty skips empty blocks, so they hold nothing to lose. Others
+            // are read whole, as lofty does, and are under 16 MiB.
+            let mut content = Vec::new();
+            reader.by_ref().take(size).read_to_end(&mut content)?;
+            if u64::try_from(content.len()) != Ok(size) {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "a picture block is truncated",
+                ));
+            }
+            let mode = ParseOptions::DEFAULT_PARSING_MODE;
+            if Picture::from_flac_bytes(&content, false, mode).is_err() {
+                unreadable_picture_block += 1;
             }
         }
         position += size;
@@ -174,6 +219,7 @@ fn scan_flac(reader: &mut (impl Read + Seek), file_len: u64) -> io::Result<Skipp
     }
     let mut skipped = last.map(|(_, skipped)| skipped).unwrap_or_default();
     skipped.other_block = usize::try_from(other_block).unwrap_or(usize::MAX);
+    skipped.unreadable_picture_block = unreadable_picture_block;
     Ok(skipped)
 }
 
@@ -376,6 +422,16 @@ pub(crate) mod fixtures {
 
     /// A FLAC stream with these `VORBIS_COMMENT` blocks and no audio frames.
     pub(crate) fn flac(comment_blocks: &[&[u8]]) -> Vec<u8> {
+        let blocks = comment_blocks
+            .iter()
+            .map(|&block| (super::FLAC_VORBIS_COMMENT_BLOCK, block))
+            .collect::<Vec<_>>();
+        flac_blocks(&blocks)
+    }
+
+    /// A FLAC stream with these metadata blocks, given by their type, and no
+    /// audio frames.
+    pub(crate) fn flac_blocks(blocks: &[(u8, &[u8])]) -> Vec<u8> {
         let mut bytes = b"fLaC".to_vec();
         // STREAMINFO: 4096-sample blocks, no frame sizes, then the packed fields.
         bytes.extend_from_slice(&[0x00, 0, 0, 34]);
@@ -390,17 +446,39 @@ pub(crate) mod fixtures {
             | total_samples;
         bytes.extend_from_slice(&packed.to_be_bytes());
         bytes.extend_from_slice(&[0; 16]);
-        for (index, block) in comment_blocks.iter().enumerate() {
-            let last = if index + 1 == comment_blocks.len() {
-                0x80
-            } else {
-                0
-            };
-            bytes.push(last | super::FLAC_VORBIS_COMMENT_BLOCK);
+        for (index, &(block_type, block)) in blocks.iter().enumerate() {
+            let last = if index + 1 == blocks.len() { 0x80 } else { 0 };
+            bytes.push(last | block_type);
             bytes.extend_from_slice(&u32::try_from(block.len()).expect("block").to_be_bytes()[1..]);
             bytes.extend_from_slice(block);
         }
         bytes
+    }
+
+    /// The type of a FLAC `VORBIS_COMMENT` block, for [`flac_blocks`].
+    pub(crate) const VORBIS_COMMENT: u8 = super::FLAC_VORBIS_COMMENT_BLOCK;
+    /// The type of a FLAC `PICTURE` block, for [`flac_blocks`].
+    pub(crate) const PICTURE: u8 = super::FLAC_PICTURE_BLOCK;
+
+    /// The content of a FLAC `PICTURE` block holding `data` as a JPEG front
+    /// cover, which lofty reads.
+    pub(crate) fn picture_block(data: &[u8]) -> Vec<u8> {
+        use lofty::picture::{MimeType, Picture, PictureInformation, PictureType};
+
+        Picture::unchecked(data.to_vec())
+            .mime_type(MimeType::Jpeg)
+            .pic_type(PictureType::CoverFront)
+            .build()
+            .as_flac_bytes(PictureInformation::default(), false)
+    }
+
+    /// The content of a FLAC `PICTURE` block whose MIME type length runs past
+    /// the block, which lofty cannot read.
+    pub(crate) fn malformed_picture_block() -> Vec<u8> {
+        let mut block = picture_block(b"\xff\xd8\xff\xd9");
+        let len = u32::try_from(block.len()).expect("length");
+        block[4..8].copy_from_slice(&len.to_be_bytes());
+        block
     }
 
     /// The pages of an Ogg stream.
@@ -708,6 +786,45 @@ mod tests {
     }
 
     #[test]
+    fn counts_picture_blocks_lofty_cannot_read() {
+        let comments = comment_block(&[b"TITLE=Title"]);
+        let readable = fixtures::picture_block(b"\xff\xd8\xff\xd9");
+        let malformed = fixtures::malformed_picture_block();
+        // lofty needs at least 32 bytes for a picture.
+        let short = readable[..31].to_vec();
+        let bytes = fixtures::flac_blocks(&[
+            (fixtures::PICTURE, &readable),
+            (FLAC_VORBIS_COMMENT_BLOCK, &comments),
+            (fixtures::PICTURE, &malformed),
+            (fixtures::PICTURE, &[]),
+            (fixtures::PICTURE, &short),
+        ]);
+        let skipped = scan_bytes(FileType::Flac, &bytes).expect("scan");
+        assert_eq!(
+            skipped,
+            SkippedComments {
+                unreadable_picture_block: 2,
+                ..SkippedComments::default()
+            }
+        );
+        let options = ParseOptions::new().read_properties(false);
+        let file = FlacFile::read_from(&mut Cursor::new(&bytes), options).expect("read FLAC");
+        assert_eq!(file.pictures().len(), 1);
+    }
+
+    #[test]
+    fn readable_picture_blocks_are_not_counted() {
+        let readable = fixtures::picture_block(b"\xff\xd8\xff\xd9");
+        let bytes = fixtures::flac_blocks(&[
+            (fixtures::PICTURE, &readable),
+            (fixtures::PICTURE, &readable),
+        ]);
+        let skipped = scan_bytes(FileType::Flac, &bytes).expect("scan");
+        assert_eq!(skipped, SkippedComments::default());
+        assert_eq!(skipped.save_refusal(), None);
+    }
+
+    #[test]
     fn skips_an_id3v2_tag_before_a_flac_stream() {
         // An empty ID3v2.4 tag with a footer, then the stream.
         let mut bytes = b"ID3\x04\x00\x10\x00\x00\x00\x00".to_vec();
@@ -764,6 +881,8 @@ mod tests {
         wrong_signature[second_page + 28] = b'X';
         let mut missing_page = opus.clone();
         missing_page[second_page] = b'X';
+        let picture =
+            fixtures::flac_blocks(&[(fixtures::PICTURE, &fixtures::malformed_picture_block())]);
         let cases = [
             (
                 FileType::Flac,
@@ -782,6 +901,11 @@ mod tests {
                 "past the end",
             ),
             (FileType::Flac, flac[..10].to_vec(), "truncated"),
+            (
+                FileType::Flac,
+                picture[..picture.len() - 1].to_vec(),
+                "a picture block runs past the end",
+            ),
             (FileType::Flac, b"OggS".to_vec(), "marker is missing"),
             (
                 FileType::Opus,
@@ -822,10 +946,7 @@ mod tests {
     fn unreadable_files_are_errors() {
         let error = skipped_comments(Path::new("/nonexistent/song.flac"), FileType::Flac)
             .expect_err("missing file");
-        assert!(
-            error.starts_with("its Vorbis comments cannot be read: "),
-            "{error}"
-        );
+        assert!(error.starts_with("its tags cannot be read: "), "{error}");
     }
 
     #[test]
@@ -846,6 +967,26 @@ mod tests {
             Some(
                 "1 comment in this file can't be read safely (1 in an extra comment block); \
                  saving would delete it"
+            )
+        );
+        let picture = SkippedComments {
+            unreadable_picture_block: 1,
+            ..SkippedComments::default()
+        };
+        assert_eq!(
+            picture.save_refusal().as_deref(),
+            Some("1 picture block in this file can't be read safely; saving would delete it")
+        );
+        let both = SkippedComments {
+            no_separator: 1,
+            unreadable_picture_block: 2,
+            ..SkippedComments::default()
+        };
+        assert_eq!(
+            both.save_refusal().as_deref(),
+            Some(
+                "1 comment and 2 picture blocks in this file can't be read safely \
+                 (1 without \"=\"); saving would delete them"
             )
         );
         assert_eq!(SkippedComments::default().save_refusal(), None);

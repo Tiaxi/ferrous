@@ -813,6 +813,51 @@ mod tests {
         fs::remove_dir_all(root).expect("remove test dir");
     }
 
+    /// The front cover replaces every picture block, so a picture block
+    /// lofty cannot read, which may hold another picture type, would be lost.
+    #[test]
+    fn embedded_artwork_changes_nothing_when_saving_would_delete_a_picture_block() {
+        use crate::vorbis_comment_scan::fixtures;
+
+        let root = test_dir("unreadable-picture");
+        let album = root.join("Album");
+        fs::create_dir(&album).expect("create album dir");
+        let readable = album.join("01.flac");
+        write_test_flac(&readable, &[("ALBUM", "Album")]);
+        let refused = album.join("02.flac");
+        let comments = fixtures::comment_block(&[b"ALBUM=Album"]);
+        let malformed = fixtures::malformed_picture_block();
+        fs::write(
+            &refused,
+            fixtures::flac_blocks(&[
+                (fixtures::VORBIS_COMMENT, &comments),
+                (fixtures::PICTURE, &malformed),
+            ]),
+        )
+        .expect("write track");
+        let before = [&readable, &refused].map(|path| fs::read(path).expect("read track"));
+        let (artwork, _) = artwork_file(&root, ImageFormat::Png);
+
+        let error = apply_artwork_to_track(&refused, &artwork).expect_err("picture is kept");
+
+        let message = error.to_string();
+        assert!(
+            message.starts_with("1 of 2 album tracks cannot be updated, so none were changed"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "02.flac (1 picture block in this file can't be read safely; \
+                 saving would delete it)"
+            ),
+            "{message}"
+        );
+        let after = [&readable, &refused].map(|path| fs::read(path).expect("read track"));
+        assert_eq!(after, before);
+        assert_eq!(dir_entries(&album), ["01.flac", "02.flac"]);
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
     #[cfg(unix)]
     #[test]
     fn embedded_artwork_changes_nothing_when_a_track_in_the_folder_cannot_be_read() {
