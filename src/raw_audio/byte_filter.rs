@@ -307,7 +307,7 @@ mod gst_tests {
     use crate::playback::source_activation::race::{
         race_type_finding_with_activation, ActivationRace,
     };
-    use crate::playback::source_activation::{activate_sources, connect_type_finding_hold};
+    use crate::playback::source_activation::SourceActivation;
     use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes, test_path};
     use crate::raw_audio::{TEST_AC3, TEST_DTS};
     use gst::prelude::*;
@@ -387,6 +387,7 @@ mod gst_tests {
         decoded: Arc<Mutex<Vec<(Duration, Duration)>>>,
         delivered: Arc<Mutex<Vec<Delivered>>>,
         trace: PipelineTrace,
+        activation: Arc<SourceActivation>,
     }
 
     impl Player {
@@ -397,12 +398,13 @@ mod gst_tests {
                 .build()
                 .expect("playbin3");
             install_raw_surround_source_probe(&playbin);
-            connect_type_finding_hold(&playbin);
+            let activation = SourceActivation::connect(&playbin);
             let player = Self {
                 trace: PipelineTrace::new(&playbin),
                 playbin,
                 decoded: Arc::default(),
                 delivered: Arc::default(),
+                activation,
             };
             player.record_delivered_buffers();
             player
@@ -483,7 +485,8 @@ mod gst_tests {
         }
 
         fn set_state(&self, state: gst::State) -> Result<(), String> {
-            activate_sources(|| self.playbin.set_state(state))
+            self.activation
+                .set_state(&self.playbin, state)
                 .map(|_| ())
                 .map_err(|err| err.to_string())
         }
@@ -572,12 +575,13 @@ mod gst_tests {
     fn play_gapless_on(player: Player, paths: &[PathBuf]) -> Run {
         player.set_path(&paths[0]);
         let queue = Mutex::new(paths[1..].iter().cloned().collect::<VecDeque<_>>());
+        let activation = Arc::clone(&player.activation);
         player
             .playbin
             .connect("about-to-finish", false, move |values| {
                 let playbin = values.first()?.get::<gst::Element>().ok()?;
                 let next = queue.lock().ok()?.pop_front()?;
-                activate_sources(|| playbin.set_property("uri", file_uri(&next)));
+                activation.hand_over(|| playbin.set_property("uri", file_uri(&next)));
                 None
             });
         let result = (|| {
