@@ -995,8 +995,9 @@ BridgeClient::~BridgeClient() {
         if (!ferrous_ffi_bridge_destroy(m_ffiBridge)) {
             logDiagnostic(
                 QStringLiteral("bridge"),
-                QStringLiteral("the backend did not save everything before exiting; recent "
-                               "settings, the queue, or Last.fm scrobbles may be missing"));
+                QStringLiteral("the backend did not stop cleanly before exiting; recent "
+                               "settings, the queue, or Last.fm scrobbles may be missing, or "
+                               "playback left a file open whose read had not returned"));
         }
         m_ffiBridge = nullptr;
     }

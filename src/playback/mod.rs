@@ -167,6 +167,9 @@ pub enum PlaybackErrorOutcome {
     StoppedAfterFailures(u32),
     /// The engine is not running, so no command is carried out.
     EngineUnavailable,
+    /// Playback went on, but a read of the file has not returned since
+    /// playback stopped reading it, so the file stays open.
+    NotReleased,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +203,14 @@ impl PlaybackError {
             PlaybackErrorOutcome::EngineUnavailable => {
                 format!("Playback is unavailable: {detail}.")
             }
+            // The whole path, which names the drive or share that hangs.
+            PlaybackErrorOutcome::NotReleased => match self.path.as_deref() {
+                Some(path) => format!(
+                    "Can't release \u{201c}{}\u{201d}: {detail}.",
+                    path.display()
+                ),
+                None => format!("Can't release a file: {detail}."),
+            },
         }
     }
 }
@@ -253,6 +264,48 @@ pub struct PlaybackEngine {
     event_tx: Sender<PlaybackEvent>,
     /// Why the engine stopped, if it failed to start.
     failure: Arc<OnceLock<String>>,
+    /// What the engine left behind when it stopped.
+    exit: Receiver<EngineExit>,
+}
+
+/// What a playback engine that stopped left behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EngineExit {
+    /// Files whose reads had not returned, so they stay open.
+    pub(crate) unreleased: Vec<PathBuf>,
+}
+
+/// How a playback engine stopped; see [`PlaybackEngine::shutdown`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaybackShutdown {
+    Stopped,
+    /// The engine stopped, but reads of these files had not returned.
+    Unreleased(Vec<PathBuf>),
+    /// The engine did not confirm that it stopped in time.
+    Unconfirmed(Duration),
+}
+
+impl PlaybackShutdown {
+    /// What to tell the user about a shutdown that did not stop cleanly.
+    #[must_use]
+    pub fn problem(&self) -> Option<String> {
+        match self {
+            Self::Stopped => None,
+            Self::Unreleased(paths) => Some(format!(
+                "Couldn't release {} before quitting: a read had not returned, so its drive or \
+                 network share may not be responding.",
+                paths
+                    .iter()
+                    .map(|path| format!("\u{201c}{}\u{201d}", path.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Self::Unconfirmed(timeout) => Some(format!(
+                "Playback did not confirm that it stopped within {:.1} s.",
+                timeout.as_secs_f64()
+            )),
+        }
+    }
 }
 
 fn stop_snapshot_at_terminal_eos(snapshot: &mut PlaybackSnapshot, now: MonotonicTime) {
@@ -266,25 +319,54 @@ fn stop_snapshot_at_terminal_eos(snapshot: &mut PlaybackSnapshot, now: Monotonic
 impl PlaybackEngine {
     #[must_use]
     pub fn new(analysis_tx: Sender<AnalysisCommand>) -> (Self, Receiver<PlaybackEvent>) {
-        Self::spawn(|event_tx, failure| backend::spawn_engine(analysis_tx, event_tx, failure))
+        Self::spawn(|event_tx, failure, exit_tx| {
+            backend::spawn_engine(analysis_tx, event_tx, failure, exit_tx)
+        })
     }
 
-    /// Start an engine with `start`, which receives the event sender and
-    /// the slot for a start failure, and returns the command sender.
+    /// Start an engine with `start`, which receives the event sender, the
+    /// slot for a start failure, and the sender for what the engine leaves
+    /// behind when it stops, and returns the command sender.
     fn spawn(
-        start: impl FnOnce(Sender<PlaybackEvent>, &Arc<OnceLock<String>>) -> Sender<PlaybackCommand>,
+        start: impl FnOnce(
+            Sender<PlaybackEvent>,
+            &Arc<OnceLock<String>>,
+            Sender<EngineExit>,
+        ) -> Sender<PlaybackCommand>,
     ) -> (Self, Receiver<PlaybackEvent>) {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let failure = Arc::new(OnceLock::new());
-        let tx = start(event_tx.clone(), &failure);
+        let (exit_tx, exit) = crossbeam_channel::bounded(1);
+        let tx = start(event_tx.clone(), &failure, exit_tx);
         (
             Self {
                 tx,
                 event_tx,
                 failure,
+                exit,
             },
             event_rx,
         )
+    }
+
+    /// Stop the engine, and wait up to `timeout` for it to tell what it
+    /// left behind. Commands sent later are reported as failed.
+    pub fn shutdown(&mut self, timeout: Duration) -> PlaybackShutdown {
+        // The engine stops once its commands end.
+        self.tx = crossbeam_channel::unbounded().0;
+        match self.exit.recv_timeout(timeout) {
+            Ok(exit) if !exit.unreleased.is_empty() => {
+                PlaybackShutdown::Unreleased(exit.unreleased)
+            }
+            // An engine that could not start, or has stopped already, left
+            // nothing behind.
+            Ok(_) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                PlaybackShutdown::Stopped
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                PlaybackShutdown::Unconfirmed(timeout)
+            }
+        }
     }
 
     /// Send `cmd` to the engine. When the engine is not running, report an
@@ -316,6 +398,7 @@ impl PlaybackEngine {
             tx,
             event_tx: crossbeam_channel::unbounded().0,
             failure: Arc::new(OnceLock::new()),
+            exit: crossbeam_channel::never(),
         }
     }
 }
@@ -327,8 +410,9 @@ mod shared_tests {
 
     use super::{
         remove_queue_indices, stop_snapshot_at_terminal_eos, volume_gain_to_level,
-        volume_level_to_gain, MonotonicTime, PlaybackCommand, PlaybackEngine, PlaybackError,
-        PlaybackErrorOutcome, PlaybackEvent, PlaybackSnapshot, PlaybackState,
+        volume_level_to_gain, EngineExit, MonotonicTime, PlaybackCommand, PlaybackEngine,
+        PlaybackError, PlaybackErrorOutcome, PlaybackEvent, PlaybackShutdown, PlaybackSnapshot,
+        PlaybackState,
     };
 
     #[test]
@@ -374,11 +458,81 @@ mod shared_tests {
             ),
             "Playback is unavailable: no audio output."
         );
+        assert_eq!(
+            error(
+                Some("/mnt/share/b.flac"),
+                "a read has not returned for 15 s",
+                PlaybackErrorOutcome::NotReleased
+            ),
+            "Can't release \u{201c}/mnt/share/b.flac\u{201d}: a read has not returned for 15 s."
+        );
+    }
+
+    #[test]
+    fn shutdowns_that_left_files_open_or_were_not_confirmed_are_problems() {
+        assert_eq!(PlaybackShutdown::Stopped.problem(), None);
+        assert_eq!(
+            PlaybackShutdown::Unreleased(vec![
+                PathBuf::from("/mnt/share/a.flac"),
+                PathBuf::from("/mnt/share/b.flac")
+            ])
+            .problem()
+            .as_deref(),
+            Some(
+                "Couldn't release \u{201c}/mnt/share/a.flac\u{201d}, \u{201c}/mnt/share/b.flac\u{201d} \
+                 before quitting: a read had not returned, so its drive or network share may not \
+                 be responding."
+            )
+        );
+        assert_eq!(
+            PlaybackShutdown::Unconfirmed(Duration::from_millis(500))
+                .problem()
+                .as_deref(),
+            Some("Playback did not confirm that it stopped within 0.5 s.")
+        );
+    }
+
+    #[test]
+    fn shutdown_reports_what_the_engine_left_behind() {
+        let (mut engine, _events) = PlaybackEngine::spawn(|_, _, exit_tx| {
+            let (tx, commands) = crossbeam_channel::unbounded::<PlaybackCommand>();
+            std::thread::spawn(move || {
+                while commands.recv().is_ok() {}
+                let _ = exit_tx.send(EngineExit {
+                    unreleased: vec![PathBuf::from("/mnt/share/a.flac")],
+                });
+            });
+            tx
+        });
+        assert_eq!(
+            engine.shutdown(Duration::from_secs(10)),
+            PlaybackShutdown::Unreleased(vec![PathBuf::from("/mnt/share/a.flac")])
+        );
+
+        // An engine that does not stop in time.
+        let mut running = None;
+        let (mut engine, _events) = PlaybackEngine::spawn(|_, _, exit_tx| {
+            running = Some(exit_tx);
+            crossbeam_channel::unbounded().0
+        });
+        assert_eq!(
+            engine.shutdown(Duration::from_millis(10)),
+            PlaybackShutdown::Unconfirmed(Duration::from_millis(10))
+        );
+        drop(running);
+
+        // An engine that could not start left nothing behind.
+        let (mut engine, _events) =
+            PlaybackEngine::spawn(|_, _, _| crossbeam_channel::unbounded().0);
+        assert_eq!(
+            engine.shutdown(Duration::from_secs(10)),
+            PlaybackShutdown::Stopped
+        );
     }
 
     #[test]
     fn commands_to_a_stopped_engine_report_it() {
-        let (engine, events) = PlaybackEngine::spawn(|_, failure| {
+        let (engine, events) = PlaybackEngine::spawn(|_, failure, _| {
             failure.set("no audio output".to_string()).unwrap();
             // The engine is gone: nothing receives its commands.
             crossbeam_channel::unbounded().0
@@ -394,7 +548,7 @@ mod shared_tests {
             other => panic!("expected the engine failure, got {other:?}"),
         }
 
-        let (engine, events) = PlaybackEngine::spawn(|_, _| crossbeam_channel::unbounded().0);
+        let (engine, events) = PlaybackEngine::spawn(|_, _, _| crossbeam_channel::unbounded().0);
         engine.command(PlaybackCommand::Play);
         assert!(matches!(
             events.try_recv(),
@@ -1231,6 +1385,8 @@ mod tests {
 
 #[cfg(feature = "gst")]
 mod collection_order;
+#[cfg(feature = "gst")]
+pub(crate) mod file_source;
 #[cfg(feature = "gst")]
 pub(crate) mod parsebin_stall;
 #[cfg(all(test, feature = "gst"))]

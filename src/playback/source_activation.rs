@@ -36,9 +36,10 @@
 //! change the state of what the source sets up.
 //!
 //! Connecting also orders the stream collection of each stream that a
-//! source parses ahead of the stream's data; see `collection_order`. And it
-//! reports each stream that a `parsebin` holds after exposing it; see
-//! `parsebin_stall`.
+//! source parses ahead of the stream's data (see `collection_order`),
+//! reports each stream that a `parsebin` holds after exposing it (see
+//! `parsebin_stall`), and makes the sources read their files on a thread
+//! that a flush does not wait for (see `file_source`).
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
@@ -102,6 +103,7 @@ impl SourceActivation {
     pub(crate) fn connect(playbin: &gst::Element) -> Arc<Self> {
         super::collection_order::connect(playbin);
         super::parsebin_stall::connect(playbin);
+        super::file_source::register();
         let activation = Arc::new(Self {
             state: Mutex::default(),
             settled: Condvar::new(),
@@ -390,9 +392,9 @@ pub(crate) mod race {
                 .src()
                 .and_then(|src| src.downcast_ref::<gst::Element>())
                 .filter(|source| {
-                    source
-                        .factory()
-                        .is_some_and(|factory| factory.name() == "filesrc")
+                    source.factory().is_some_and(|factory| {
+                        factory.name() == crate::playback::file_source::FACTORY_NAME
+                    })
                 })
             else {
                 return;

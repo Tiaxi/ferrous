@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use super::queue::{same_audio_extension, CancelledAdvance, GaplessQueue, Handoff};
-use super::{PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind};
+use super::{
+    EngineExit, PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind,
+};
 use crate::analysis::AnalysisCommand;
 use crossbeam_channel::{unbounded, Sender};
 use std::path::PathBuf;
@@ -16,11 +18,12 @@ const TRACK_DURATION: Duration = Duration::from_secs(180);
 const ABOUT_TO_FINISH_LEAD: Duration = Duration::from_secs(2);
 
 /// Spawn the simulation. It cannot fail to start, so it leaves `_failure`
-/// unset.
+/// unset. It reads no files, so it leaves none open when it stops.
 pub fn spawn_engine(
     analysis_tx: Sender<AnalysisCommand>,
     event_tx: Sender<PlaybackEvent>,
     _failure: &Arc<OnceLock<String>>,
+    exit_tx: Sender<EngineExit>,
 ) -> Sender<PlaybackCommand> {
     let (cmd_tx, cmd_rx) = unbounded();
     crate::worker_thread::spawn_worker("ferrous-playback-sim", move || {
@@ -55,6 +58,7 @@ pub fn spawn_engine(
                 .event_tx
                 .send(PlaybackEvent::Snapshot(runtime.snapshot.clone()));
         }
+        let _ = exit_tx.send(EngineExit::default());
     });
     cmd_tx
 }
