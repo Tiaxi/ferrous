@@ -15,7 +15,8 @@
 //!   the reason, in [`super::LibraryStatus::unwatched_roots`].
 //! - When the mount table changes, a root whose folder is now another one,
 //!   such as a drive mounted there, or that is back, is watched again and
-//!   rescanned.
+//!   rescanned. So is a root with other mounts below it, at most once every
+//!   [`WatchTuning::mount_rescan`].
 
 mod inotify;
 mod mounts;
@@ -47,6 +48,9 @@ pub(super) struct WatchTuning {
     pub(super) periodic: Duration,
     /// Above this many changed paths, a root is rescanned instead.
     pub(super) max_paths: usize,
+    /// The shortest time between two rescans of a root for mount changes
+    /// below it.
+    pub(super) mount_rescan: Duration,
 }
 
 impl Default for WatchTuning {
@@ -60,12 +64,21 @@ impl Default for WatchTuning {
     ///   hour, or at once with Rescan.
     /// - `max_paths`, 2048: past that, scanning each path separately costs
     ///   about as much as one walk of the root.
+    /// - `mount_rescan`, 5 min: a mount change below a root rescans all of
+    ///   it, which for a large one on a slow disk takes a minute or more. A
+    ///   mount that keeps coming and going, such as a flaky automount, then
+    ///   rescans it at most once every 5 minutes instead of all the time.
+    ///   Its changes between are merged into the next rescan, not dropped,
+    ///   and the root's local changes are still scanned within seconds. A
+    ///   root whose own folder is replaced, such as a card swapped at a
+    ///   fixed mount point, is rescanned without this wait.
     fn default() -> Self {
         Self {
             quiet: Duration::from_millis(500),
             max_delay: Duration::from_secs(5),
             periodic: Duration::from_secs(30 * 60),
             max_paths: 2048,
+            mount_rescan: Duration::from_secs(5 * 60),
         }
     }
 }
@@ -359,6 +372,15 @@ impl Coalescer {
         self.roots.remove(root);
     }
 
+    /// Takes the changes of `root`, to [`Coalescer::restore`] them.
+    fn take(&mut self, root: &Path) -> Option<RootChanges> {
+        self.roots.remove(root)
+    }
+
+    fn restore(&mut self, root: PathBuf, changes: RootChanges) {
+        self.roots.insert(root, changes);
+    }
+
     fn due_at(changes: &RootChanges, tuning: &WatchTuning) -> Option<Instant> {
         let (first, last) = (changes.first?, changes.last?);
         Some((last + tuning.quiet).min(first + tuning.max_delay))
@@ -386,6 +408,67 @@ impl Coalescer {
         due.into_iter()
             .filter_map(|root| self.roots.remove_entry(&root))
             .collect()
+    }
+}
+
+/// The rescans of roots asked for by mount changes. For mounts below a
+/// root, at most one per root every [`WatchTuning::mount_rescan`]; see
+/// there. Changes until a rescan is sent merge into it.
+#[derive(Debug, Default)]
+struct MountRescans {
+    /// When each root was last rescanned for mount changes.
+    sent: HashMap<PathBuf, Instant>,
+    /// The roots waiting for a rescan, and when it is due.
+    due: BTreeMap<PathBuf, Instant>,
+}
+
+impl MountRescans {
+    /// Asks for a rescan of `root` after a mount change at `now`.
+    ///
+    /// - If the root's own folder was `replaced`, it is due `quiet` after
+    ///   the last replacement: a new card's files make no events, so its
+    ///   rescan must not wait, and a root that keeps changing is rescanned
+    ///   once it settles.
+    /// - Otherwise it is due `quiet` after the first change, so that mounts
+    ///   made together, such as several shares at login, are one rescan,
+    ///   but not before `mount_rescan` after the last one sent.
+    fn request(&mut self, root: &Path, now: Instant, tuning: &WatchTuning, replaced: bool) {
+        let at = now + tuning.quiet;
+        if replaced {
+            self.due.insert(root.to_path_buf(), at);
+            return;
+        }
+        let earliest = self.sent.get(root).map(|sent| *sent + tuning.mount_rescan);
+        let at = at.max(earliest.unwrap_or(now));
+        self.due.entry(root.to_path_buf()).or_insert(at);
+    }
+
+    fn forget(&mut self, root: &Path) {
+        self.sent.remove(root);
+        self.due.remove(root);
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.due.values().min().copied()
+    }
+
+    /// Takes the rescans due at `now`, and returns the roots of those that
+    /// can be sent then, as sent.
+    fn take_due(&mut self, now: Instant, can_send: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+        let due: Vec<PathBuf> = self
+            .due
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(root, _)| root.clone())
+            .collect();
+        for root in &due {
+            self.due.remove(root);
+        }
+        let sent: Vec<PathBuf> = due.into_iter().filter(|root| can_send(root)).collect();
+        for root in &sent {
+            self.sent.insert(root.clone(), now);
+        }
+        sent
     }
 }
 
@@ -441,6 +524,7 @@ struct Watcher {
     /// What the worker was last told about `unwatched`.
     reported: Vec<UnwatchedRoot>,
     pending: Coalescer,
+    mount_rescans: MountRescans,
     /// When the roots that are not watched are rescanned next.
     next_periodic: Option<Instant>,
 }
@@ -479,6 +563,7 @@ impl Watcher {
             unwatched_mounts: BTreeMap::new(),
             reported: Vec::new(),
             pending: Coalescer::default(),
+            mount_rescans: MountRescans::default(),
             next_periodic: None,
         }
     }
@@ -493,12 +578,17 @@ impl Watcher {
             self.read_events(&mut events);
             let now = Instant::now();
             self.flush_due(now);
+            self.rescan_for_mounts_if_due(now);
             self.rescan_unwatched_if_due(now);
             self.report();
-            let deadline = [self.pending.deadline(&self.tuning), self.next_periodic]
-                .into_iter()
-                .flatten()
-                .min();
+            let deadline = [
+                self.pending.deadline(&self.tuning),
+                self.mount_rescans.deadline(),
+                self.next_periodic,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             if let Some(message) = self.wait(deadline) {
                 self.handle(message);
             }
@@ -576,6 +666,7 @@ impl Watcher {
                 self.unwatch_root(&root);
             }
             self.pending = Coalescer::default();
+            self.mount_rescans = MountRescans::default();
             self.unwatched.clear();
             self.next_periodic = None;
         }
@@ -593,6 +684,7 @@ impl Watcher {
             .collect();
         for root in &removed {
             self.unwatch_root(root);
+            self.mount_rescans.forget(root);
         }
         for root in roots.iter().filter(|root| !old.contains(root)) {
             self.watch_root(root);
@@ -638,23 +730,43 @@ impl Watcher {
             return;
         }
         let table = mounts::mount_table();
+        let now = Instant::now();
         for root in self.roots.clone().unwrap_or_default() {
-            let now = RootFolder {
+            let folder = RootFolder {
                 identity: folder_identity(&root),
                 mounts: mounts::mounts_below(&table, &root),
             };
             let before = self.root_folders.get(&root).cloned().unwrap_or_default();
-            if before == now {
+            if before == folder {
                 continue;
             }
+            let pending = self.pending.take(&root);
             self.unwatch_root(&root);
             self.watch_root(&root);
-            if now.identity.is_none() {
+            if folder.identity.is_none() {
                 continue;
             }
-            // Rebuilding the watches dropped the root's pending changes, and
-            // events of the replaced watches may be lost: rescan all of it,
+            // The changes seen are still scanned when due, and those seen
+            // next through the new watches too.
+            if let Some(pending) = pending {
+                self.pending.restore(root.clone(), pending);
+            }
+            // Events of the replaced watches may be lost: rescan all of it,
             // as after lost events, not only where the mounts changed.
+            let replaced = folder.identity != before.identity;
+            self.mount_rescans
+                .request(&root, now, &self.tuning, replaced);
+        }
+    }
+
+    /// Sends the rescans that mount changes asked for, once due.
+    fn rescan_for_mounts_if_due(&mut self, now: Instant) {
+        let enabled = self.enabled;
+        // A root gone meanwhile is rescanned once it is back.
+        for root in self
+            .mount_rescans
+            .take_due(now, |root| enabled && root.is_dir())
+        {
             let _ = self.commands.send(LibraryCommand::RescanRoot(root));
         }
     }
@@ -707,9 +819,11 @@ impl Watcher {
         }
     }
 
-    /// Leaves out of the watches of `root` the mounts below `top`, one of
-    /// its folders, whose file systems miss changes; they are rescanned
-    /// instead. The outermost ones suffice.
+    /// Leaves out of the watches of `root` the mounts at or below `top`, one
+    /// of its folders, whose file systems miss changes; they are rescanned
+    /// instead. The outermost ones suffice. A mount at `top` matters when
+    /// `top` is a removed inner root's folder: one at `root` itself that
+    /// misses changes leaves the whole root unwatched before this.
     fn leave_out_unwatchable_mounts(
         &mut self,
         root: &Path,
@@ -717,7 +831,7 @@ impl Watcher {
         table: &[(PathBuf, String)],
     ) {
         let nested = self.nested_roots(root);
-        for (mount_point, fs_type) in mounts::mounts_below(table, top) {
+        for (mount_point, fs_type) in mounts::mounts_at_or_below(table, top) {
             if mounts::misses_changes(&fs_type)
                 && !nested.iter().any(|inner| mount_point.starts_with(inner))
                 && !self
