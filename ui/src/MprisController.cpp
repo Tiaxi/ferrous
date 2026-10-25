@@ -183,6 +183,10 @@ MprisController::MprisController(BridgeClient *bridge, QObject *parent)
 }
 
 MprisController::~MprisController() {
+    // A controller that never registered does not connect to the bus.
+    if (!m_serviceRegistered && !m_objectRegistered) {
+        return;
+    }
     QDBusConnection sessionBus = QDBusConnection::sessionBus();
     if (!sessionBus.isConnected()) {
         return;
@@ -344,6 +348,12 @@ void MprisController::raiseWindow() {
 }
 
 void MprisController::quitApplication() {
+    // The main window's close handler saves the settings and the queue, and
+    // shows the user a failure, before it stops the backend.
+    if (closeMainWindow()) {
+        return;
+    }
+    // Without a main window, nothing in the UI can report a failed save.
     if (m_bridge != nullptr) {
         m_bridge->shutdown();
     }

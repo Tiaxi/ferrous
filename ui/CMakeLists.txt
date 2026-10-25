@@ -235,10 +235,12 @@ if(BUILD_TESTING)
         src/DiagnosticsLog.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
+        src/MprisController.cpp
         src/PlaybackClock.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
+        src/WindowActivation.cpp
         src/WaveformItem.cpp
         src/WaveformSceneGraph.cpp
         src/WaveformSceneGraph.h
@@ -252,6 +254,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(ferrous_qml_smoke_tests PRIVATE
         Qt6::Core
+        Qt6::DBus
         Qt6::Gui
         Qt6::Qml
         Qt6::Quick

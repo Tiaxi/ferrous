@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <QCloseEvent>
 #include <QDBusAbstractAdaptor>
 #include <QWindow>
 #include <QtTest/QtTest>
@@ -77,6 +78,7 @@ private slots:
     void dbusOpenActivatesWithForwardedToken();
     void pendingRequestsKeepTheirActivationToken();
     void activationRaisesMainWindowNotHiddenViewer();
+    void closeMainWindowSendsTheMainWindowACloseEvent();
     void activationTokenReachesOnlyWayland();
 };
 
@@ -262,5 +264,34 @@ void AppInstanceControllerTest::activationTokenReachesOnlyWayland() {
 }
 
 QTEST_MAIN(AppInstanceControllerTest)
+
+void AppInstanceControllerTest::closeMainWindowSendsTheMainWindowACloseEvent() {
+    // Counts close events and refuses them, as a window still saving does.
+    class CloseCountingWindow final : public QWindow {
+    public:
+        int closeEvents{0};
+
+    protected:
+        void closeEvent(QCloseEvent *event) override {
+            ++closeEvents;
+            event->ignore();
+        }
+    };
+    QWindow viewer;
+    CloseCountingWindow mainWindow;
+    viewer.show();
+    mainWindow.showMinimized();
+
+    QVERIFY(!closeMainWindow());
+    QCOMPARE(mainWindow.closeEvents, 0);
+
+    setMainActivationWindow(&mainWindow);
+    QVERIFY(closeMainWindow());
+    QCOMPARE(mainWindow.closeEvents, 1);
+    QVERIFY(mainWindow.isVisible());
+    QVERIFY(viewer.isVisible());
+
+    setMainActivationWindow(nullptr);
+}
 
 #include "tst_app_instance_controller.moc"

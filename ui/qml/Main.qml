@@ -1244,8 +1244,22 @@ ApplicationWindow {
             quitSaveFailedDialog.close()
             root.closeNow()
         } else {
-            quitSaveFailedDialog.message = message
-            quitSaveFailedDialog.open()
+            root.showQuitSaveFailedDialog(message)
+        }
+    }
+
+    function showQuitSaveFailedDialog(message) {
+        quitSaveFailedDialog.message = message
+        quitSaveFailedDialog.open()
+        // A quit from outside the window, such as from the desktop's media
+        // controls, can find it minimized or behind other windows. The
+        // dialog is drawn in the window, so the window comes forward too;
+        // window managers raise the window they activate.
+        if (root.visibility === Window.Minimized || !root.visible) {
+            root.showNormal()
+        }
+        if (!root.active) {
+            root.requestActivate()
         }
     }
 
@@ -1267,11 +1281,8 @@ ApplicationWindow {
         // may be stuck, and the user decides whether to wait or quit. The
         // window still closes if the answer is a success that comes later.
         interval: 5000
-        onTriggered: {
-            quitSaveFailedDialog.message =
-                "The backend did not answer in time; settings and the queue may not have been saved."
-            quitSaveFailedDialog.open()
-        }
+        onTriggered: root.showQuitSaveFailedDialog(
+            "The backend did not answer in time; settings and the queue may not have been saved.")
     }
 
     Dialogs.QuitSaveFailedDialog {

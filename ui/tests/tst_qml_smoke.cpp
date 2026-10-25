@@ -44,8 +44,10 @@
 
 #include "../src/DiagnosticsLog.h"
 #include "../src/LibraryTreeModel.h"
+#include "../src/MprisController.h"
 #include "../src/SpectrogramSeekTrace.h"
 #include "../src/WaveformSceneGraph.h"
+#include "../src/WindowActivation.h"
 #define protected public
 #define private public
 #include "../src/SpectrogramItem.h"
@@ -536,6 +538,8 @@ private slots:
     void saveAnsweredAfterItsTimeoutStillClosesTheWindow();
     void answerToAnEarlierSaveAttemptDoesNotSettleARetry();
     void escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLate();
+    void mprisQuitSavesBeforeClosingTheWindow();
+    void failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow();
     void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
@@ -1922,6 +1926,19 @@ bool timeOutStateSave(QObject *window) {
 const QString kStateSaveTimeoutMessage = QStringLiteral(
     "The backend did not answer in time; settings and the queue may not have been saved.");
 
+// Makes `window` the one MPRIS Quit and Raise act on, until the guard ends.
+auto useAsMainWindow(QWindow *window) {
+    setMainActivationWindow(window);
+    return qScopeGuard([]() { setMainActivationWindow(nullptr); });
+}
+
+// Calls MPRIS Quit as the session bus would. The controller is gone before
+// the event loop runs, so it never registers on the session bus.
+void callMprisQuit() {
+    MprisController mpris(nullptr);
+    mpris.quitApplication();
+}
+
 } // namespace
 
 void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
@@ -2101,6 +2118,59 @@ void QmlSmokeTest::escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLa
     window->close();
     QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), requestId + 1);
     QVERIFY(answerStateSave(bridge, requestId + 1, true));
+    QTRY_VERIFY(!window->isVisible());
+}
+
+void QmlSmokeTest::mprisQuitSavesBeforeClosingTheWindow() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    const auto restoreMainWindow = useAsMainWindow(window);
+    QSignalSpy closing(window, &QQuickWindow::closing);
+    QSignalSpy quit(&engine, &QQmlEngine::quit);
+
+    callMprisQuit();
+
+    // MPRIS Quit closes the window as its close button does: the close
+    // handler keeps it open while the backend saves, and closes it after.
+    QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), 1);
+    QVERIFY(window->isVisible());
+    QTRY_VERIFY(!window->isVisible());
+    QCOMPARE(closing.count(), 2);
+    QCOMPARE(quit.count(), 0);
+}
+
+void QmlSmokeTest::failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QObject *message = window->findChild<QObject *>(QStringLiteral("quitSaveFailedMessage"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(message != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    const auto restoreMainWindow = useAsMainWindow(window);
+    const QString error = QStringLiteral("Settings could not be saved");
+    QVERIFY(bridge->setProperty("stateSaveError", error));
+    window->showMinimized();
+    QTRY_COMPARE(window->visibility(), QWindow::Minimized);
+
+    callMprisQuit();
+
+    // The dialog is drawn in the window, so the window comes forward with it.
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QCOMPARE(message->property("text").toString(), error);
+    QVERIFY(window->isVisible());
+    QTRY_VERIFY(window->visibility() != QWindow::Minimized);
+
+    QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedQuitButton")));
     QTRY_VERIFY(!window->isVisible());
 }
 
