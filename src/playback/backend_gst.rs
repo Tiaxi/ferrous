@@ -3656,6 +3656,7 @@ fn file_uri(path: &Path) -> Option<String> {
 #[cfg(all(test, feature = "gst"))]
 mod gst_integration_tests {
     use super::*;
+    use crate::playback::pipeline_trace::PipelineTrace;
     use crate::playback::PathRenames;
 
     fn wait_for_playing_or_error(playbin: &gst::Element, timeout_secs: u64) -> Result<(), String> {
@@ -3753,6 +3754,7 @@ mod gst_integration_tests {
         bus: gst::Bus,
         events: Receiver<PlaybackEvent>,
         _analysis: Receiver<AnalysisCommand>,
+        trace: PipelineTrace,
     }
 
     impl TestEngine {
@@ -3779,6 +3781,7 @@ mod gst_integration_tests {
                 Arc::new(Mutex::new(StreamEndHold::default())),
             );
             Self {
+                trace: PipelineTrace::new(&runtime.playbin),
                 runtime,
                 bus,
                 events,
@@ -3808,7 +3811,14 @@ mod gst_integration_tests {
                     return Ok(());
                 }
             }
-            Err("timeout waiting for Playing state".into())
+            let snapshot = &self.runtime.snapshot;
+            let details = format!(
+                "  snapshot: {:?}, row {:?}, current {:?}\n",
+                snapshot.state, snapshot.current_queue_index, snapshot.current
+            );
+            Err(self
+                .trace
+                .report("timeout waiting for Playing state", &details))
         }
 
         fn current_uri(&self) -> Option<String> {
