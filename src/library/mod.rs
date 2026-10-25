@@ -16,12 +16,14 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use crate::worker_thread::JoinableThread;
 
 #[cfg(test)]
+pub(crate) use scan::scan_test_hooks::hold_read;
+#[cfg(test)]
 pub(crate) use scan::{index_tracks_for_test, load_external_track_caches, write_test_apple_double};
 pub(crate) use scan::{
-    is_audio_track_file, is_supported_audio, load_external_track_cache, read_external_track,
-    read_track_info, refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
-    refresh_indexed_metadata_for_paths, rename_indexed_metadata_paths, store_external_track_cache,
-    track_file_fingerprint,
+    is_audio_track_file, is_supported_audio, read_external_track, read_track_info,
+    refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
+    refresh_indexed_metadata_for_paths, rename_indexed_metadata_paths, track_file_fingerprint,
+    TrackRefresh,
 };
 pub(crate) use scan::{read_library_snapshot_from_db, ExternalTrackCache};
 

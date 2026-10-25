@@ -30,9 +30,11 @@ use crate::worker_thread::{spawn_joinable, JoinableThread};
 
 mod commands;
 mod config;
+mod edit_refresh;
 mod events;
 pub mod ffi;
 mod imports;
+mod library_index;
 pub mod library_tree;
 mod queue;
 mod queue_relay;
@@ -49,19 +51,16 @@ use config::{
     save_settings, session_snapshot_for_state, SaveFailure, SessionSnapshot,
 };
 use events::{
-    drain_analysis_events, drain_apply_album_art_events, drain_external_queue_detail_events,
-    drain_lastfm_events, drain_library_events, drain_metadata_events, drain_playback_events,
-    finalize_lastfm_track, note_precomputed_spectrogram_chunk, process_analysis_event,
-    process_apply_album_art_event, process_external_queue_detail_event, process_lastfm_event,
-    process_library_event, process_metadata_event, process_playback_event, tick_lastfm_playback,
+    drain_analysis_events, drain_apply_album_art_events, drain_lastfm_events, drain_library_events,
+    drain_metadata_events, drain_playback_events, finalize_lastfm_track,
+    note_precomputed_spectrogram_chunk, process_analysis_event, process_apply_album_art_event,
+    process_lastfm_event, process_library_event, process_metadata_event, process_playback_event,
+    tick_lastfm_playback,
 };
 pub use queue_sync::{QueueEdit, QueueUpdate};
 pub(crate) use search::is_main_album_disc_section;
 use search::{drain_search_results, process_search_results, SearchWorkerQuery};
-use workers::{
-    spawn_apply_album_art_worker, spawn_lastfm_service, spawn_queue_detail_worker,
-    spawn_search_worker,
-};
+use workers::{spawn_apply_album_art_worker, spawn_lastfm_service, spawn_search_worker};
 
 #[cfg(feature = "profiling-logs")]
 macro_rules! profile_eprintln {
@@ -494,9 +493,10 @@ pub(super) struct BridgeState {
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
     library: Arc<LibrarySnapshot>,
+    /// Finds `library`'s tracks by path.
+    library_index: library_index::LibraryPathIndex,
     queue_details: Arc<HashMap<PathBuf, IndexedTrack>>,
     queue_detail_fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
-    pending_queue_detail_fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
     library_artist_count: usize,
     library_album_count: usize,
     pre_built_tree_bytes: Arc<Vec<u8>>,
@@ -537,6 +537,8 @@ struct LastFmPlaybackTracker {
     track: String,
     album: String,
     track_number: Option<u32>,
+    /// The library last found to have no number for the track.
+    library_without_track_number: std::sync::Weak<LibrarySnapshot>,
     duration_seconds: Option<u32>,
     started_at_utc: Option<i64>,
     listened_duration: Duration,
@@ -553,19 +555,6 @@ struct PendingWaveformTrack {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ExternalQueueDetailsRequest {
-    pub(super) path: PathBuf,
-    pub(super) fingerprint: TrackFileFingerprint,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ExternalQueueDetailsEvent {
-    pub(super) path: PathBuf,
-    pub(super) fingerprint: TrackFileFingerprint,
-    pub(super) indexed: IndexedTrack,
-}
-
-#[derive(Debug, Clone)]
 pub(super) struct ApplyAlbumArtRequest {
     pub(super) track_path: PathBuf,
     pub(super) artwork_path: PathBuf,
@@ -575,6 +564,8 @@ pub(super) struct ApplyAlbumArtRequest {
 pub(super) struct ApplyAlbumArtEvent {
     pub(super) track_path: PathBuf,
     pub(super) indexed_by_path: HashMap<PathBuf, IndexedTrack>,
+    /// The state of each file in `indexed_by_path` once its art was applied.
+    pub(super) fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
     pub(super) error: Option<String>,
 }
 
@@ -831,6 +822,7 @@ struct BridgeLoopRuntime {
     imports: imports::ImportWorker,
     tree_worker: tree_worker::TreeWorker,
     queue_validator: queue_validation::QueueValidationWorker,
+    edit_refreshes: edit_refresh::EditRefreshWorker,
     analysis: AnalysisEngine,
     analysis_rx: Receiver<AnalysisEvent>,
     playback: PlaybackEngine,
@@ -841,8 +833,6 @@ struct BridgeLoopRuntime {
     library_rx: Receiver<LibraryEvent>,
     search_query_tx: Sender<SearchWorkerQuery>,
     search_results_rx: Receiver<BridgeSearchResultsFrame>,
-    external_queue_details_tx: Sender<ExternalQueueDetailsRequest>,
-    external_queue_details_event_rx: Receiver<ExternalQueueDetailsEvent>,
     apply_album_art_tx: Sender<ApplyAlbumArtRequest>,
     apply_album_art_rx: Receiver<ApplyAlbumArtEvent>,
     lastfm: LastFmHandle,
@@ -864,8 +854,6 @@ struct BridgeLoopRuntime {
     paused_snapshot_interval: Duration,
     last_snapshot_emit: Instant,
     snapshot_plan: BridgeSnapshotPlan,
-    queue_detail_revalidate_interval: Duration,
-    last_queue_detail_revalidate: Instant,
     tree_emit_interval: Duration,
     tree_emit_min_track_delta: usize,
     last_tree_emit_at: Option<Instant>,
@@ -916,13 +904,13 @@ enum BridgeLoopWake {
     Import(imports::ImportMessage),
     Tree(tree_worker::TreeResult),
     QueueValidated(queue_validation::ValidationResult),
+    EditsRefreshed(edit_refresh::RefreshResult),
     Command(BridgeCommand),
     Playback(PlaybackEvent),
     Analysis(AnalysisEvent),
     Metadata(MetadataEvent),
     Library(LibraryEvent),
     SearchResults(BridgeSearchResultsFrame),
-    ExternalQueueDetails(ExternalQueueDetailsEvent),
     ApplyAlbumArt(ApplyAlbumArtEvent),
     LastFm(LastFmEvent),
     /// A worker's channel to the loop closed: the worker thread has ended.
@@ -937,12 +925,12 @@ enum Worker {
     Imports,
     LibraryTree,
     QueueValidation,
+    EditRefresh,
     Playback,
     Analysis,
     Metadata,
     Library,
     Search,
-    QueueDetails,
     ApplyAlbumArt,
     LastFm,
 }
@@ -954,12 +942,12 @@ impl Worker {
             Self::Imports => "Adding files to the queue",
             Self::LibraryTree => "The library view",
             Self::QueueValidation => "Checking the queue's files",
+            Self::EditRefresh => "Showing saved tag edits",
             Self::Playback => "Playback",
             Self::Analysis => "The waveform and spectrogram",
             Self::Metadata => "Track details",
             Self::Library => "The library",
             Self::Search => "Search",
-            Self::QueueDetails => "Reading details of queued files",
             Self::ApplyAlbumArt => "Applying album art",
             Self::LastFm => "Last.fm scrobbling",
         }
@@ -972,8 +960,8 @@ impl Worker {
             self,
             Self::LibraryTree
                 | Self::QueueValidation
+                | Self::EditRefresh
                 | Self::Search
-                | Self::QueueDetails
                 | Self::ApplyAlbumArt
         )
     }
@@ -1008,16 +996,10 @@ impl BridgeLoopRuntime {
         let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
         let (library, library_rx) = LibraryService::new();
         let (search_query_tx, search_results_rx) = spawn_search_worker();
-        let (external_queue_details_tx, external_queue_details_event_rx) =
-            spawn_queue_detail_worker();
         let (apply_album_art_tx, apply_album_art_event_rx) = spawn_apply_album_art_worker();
 
-        let (state, lastfm, lastfm_rx) = prepare_initial_bridge_state(
-            &mut options,
-            &analysis,
-            &playback,
-            &external_queue_details_tx,
-        );
+        let (state, lastfm, lastfm_rx) =
+            prepare_initial_bridge_state(&mut options, &analysis, &playback);
 
         let playing_poll_interval = env_duration_ms("FERROUS_PLAYBACK_POLL_MS", 40, 8, 500);
         let paused_poll_interval =
@@ -1032,6 +1014,7 @@ impl BridgeLoopRuntime {
             imports,
             tree_worker: tree_worker::TreeWorker::new(),
             queue_validator: queue_validation::QueueValidationWorker::new(),
+            edit_refreshes: edit_refresh::EditRefreshWorker::new(),
             analysis,
             analysis_rx,
             playback,
@@ -1042,8 +1025,6 @@ impl BridgeLoopRuntime {
             library_rx,
             search_query_tx,
             search_results_rx,
-            external_queue_details_tx,
-            external_queue_details_event_rx,
             apply_album_art_tx,
             apply_album_art_rx: apply_album_art_event_rx,
             lastfm,
@@ -1082,8 +1063,6 @@ impl BridgeLoopRuntime {
             snapshot_plan: BridgeSnapshotPlan {
                 include_tree_in_next_snapshot: true,
             },
-            queue_detail_revalidate_interval: Duration::from_secs(2),
-            last_queue_detail_revalidate: Instant::now(),
             tree_emit_interval: scan_tree_emit_interval(),
             tree_emit_min_track_delta: scan_tree_emit_min_track_delta(),
             last_tree_emit_at: None,
@@ -1121,6 +1100,7 @@ impl BridgeLoopRuntime {
             recv(&self.imports.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Imports), BridgeLoopWake::Import),
             recv(&self.tree_worker.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::LibraryTree), BridgeLoopWake::Tree),
             recv(&self.queue_validator.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::QueueValidation), BridgeLoopWake::QueueValidated),
+            recv(&self.edit_refreshes.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::EditRefresh), BridgeLoopWake::EditsRefreshed),
             recv(cmd_rx) -> msg => {
                 match msg {
                     Ok(cmd) => BridgeLoopWake::Command(cmd),
@@ -1132,7 +1112,6 @@ impl BridgeLoopRuntime {
             recv(&self.metadata_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Metadata), BridgeLoopWake::Metadata),
             recv(&self.library_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Library), BridgeLoopWake::Library),
             recv(&self.search_results_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Search), BridgeLoopWake::SearchResults),
-            recv(&self.external_queue_details_event_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::QueueDetails), BridgeLoopWake::ExternalQueueDetails),
             recv(&self.apply_album_art_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::ApplyAlbumArt), BridgeLoopWake::ApplyAlbumArt),
             recv(&self.lastfm_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::LastFm), BridgeLoopWake::LastFm),
             recv(after(wake_delay)) -> _ => BridgeLoopWake::Tick,
@@ -1187,7 +1166,6 @@ impl BridgeLoopRuntime {
             self.next_playback_poll_delay(),
             self.next_snapshot_emit_delay(),
             self.next_pending_search_retry_delay(),
-            self.next_queue_detail_revalidate_delay(),
             self.next_deferred_tree_rebuild_delay(),
             self.next_settings_save_delay(),
             self.next_session_save_delay(),
@@ -1205,16 +1183,6 @@ impl BridgeLoopRuntime {
             .pending_search_results
             .as_ref()
             .map(|_| Duration::from_millis(8))
-    }
-
-    fn next_queue_detail_revalidate_delay(&self) -> Option<Duration> {
-        if self.state.queue.is_empty() && self.state.pending_queue_detail_fingerprints.is_empty() {
-            return None;
-        }
-        Some(
-            self.queue_detail_revalidate_interval
-                .saturating_sub(self.last_queue_detail_revalidate.elapsed()),
-        )
     }
 
     fn next_deferred_tree_rebuild_delay(&self) -> Option<Duration> {
@@ -1239,9 +1207,11 @@ impl BridgeLoopRuntime {
             BridgeLoopWake::Import(imports::ImportMessage::Finished(result)) => {
                 self.apply_import_result(result, event_tx)
             }
-            BridgeLoopWake::Import(imports::ImportMessage::Renamed { number, renames }) => {
-                self.apply_renamed_paths(number, renames, event_tx)
-            }
+            BridgeLoopWake::Import(imports::ImportMessage::Renamed {
+                number,
+                renames,
+                details,
+            }) => self.apply_renamed_paths(number, renames, details, event_tx),
             BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
             BridgeLoopWake::QueueValidated(result) => {
                 if self.queue_validator.apply(result, &mut self.state) {
@@ -1252,15 +1222,13 @@ impl BridgeLoopRuntime {
                     SnapshotUrgency::None
                 }
             }
+            BridgeLoopWake::EditsRefreshed(result) => self.apply_edit_refresh(result, event_tx),
             BridgeLoopWake::Command(cmd) => self.handle_command(cmd, event_tx),
             BridgeLoopWake::Playback(event) => self.handle_playback_event(event, event_tx),
             BridgeLoopWake::Analysis(event) => self.handle_analysis_event(event, event_tx),
             BridgeLoopWake::Metadata(event) => self.handle_metadata_event(event),
             BridgeLoopWake::Library(event) => self.handle_library_event(event),
             BridgeLoopWake::SearchResults(frame) => self.handle_search_results(frame),
-            BridgeLoopWake::ExternalQueueDetails(event) => {
-                self.handle_external_queue_detail_event(event)
-            }
             BridgeLoopWake::ApplyAlbumArt(event) => {
                 self.handle_apply_album_art_event(event, event_tx)
             }
@@ -1296,17 +1264,19 @@ impl BridgeLoopRuntime {
         &mut self,
         number: u64,
         renames: Arc<PathRenames>,
+        details: imports::RenamedDetails,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         self.imports.remap_pending_paths(number, &renames);
+        self.edit_refreshes.renamed(&renames);
         let current = self.state.playback.current.clone();
         if commands::refresh_renamed_paths(
             &mut self.state,
             renames,
+            details,
             &self.playback,
             &self.analysis,
             &self.metadata,
-            &self.external_queue_details_tx,
             event_tx,
         ) {
             self.flags.session_dirty = true;
@@ -1324,6 +1294,46 @@ impl BridgeLoopRuntime {
         SnapshotUrgency::Immediate
     }
 
+    /// Ask the edit refresh worker to read the files the tag editor saved.
+    fn request_edit_refresh(&mut self, paths: Vec<PathBuf>, event_tx: &Sender<BridgeEvent>) {
+        if paths.is_empty() {
+            return;
+        }
+        if !self.edit_refreshes.request(paths) {
+            let _ = try_send_event(
+                event_tx,
+                BridgeEvent::Error(
+                    "The library could not be updated with the saved tag edits; \
+                     a rescan of the library will show them."
+                        .to_string(),
+                ),
+            );
+        }
+    }
+
+    fn apply_edit_refresh(
+        &mut self,
+        result: edit_refresh::RefreshResult,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
+        let refresh = self.edit_refreshes.accept(result);
+        if let Some(problem) = refresh.problem {
+            let _ = try_send_event(event_tx, BridgeEvent::Error(problem));
+        }
+        if !commands::apply_edited_details(
+            &mut self.state,
+            &refresh.indexed,
+            &refresh.fingerprints,
+            &self.metadata,
+        ) {
+            return SnapshotUrgency::None;
+        }
+        self.flags.session_dirty = true;
+        self.state.refresh_queue_rows();
+        self.request_tree();
+        SnapshotUrgency::Immediate
+    }
+
     fn apply_queue_changes(
         &mut self,
         changes: Vec<imports::QueueChange>,
@@ -1337,13 +1347,7 @@ impl BridgeLoopRuntime {
             let Some(command) = change.command else {
                 continue;
             };
-            if queue::handle_queue_command(
-                command,
-                &mut self.state,
-                &self.playback,
-                &self.external_queue_details_tx,
-                event_tx,
-            ) {
+            if queue::handle_queue_command(command, &mut self.state, &self.playback, event_tx) {
                 self.flags.session_dirty = true;
                 urgency = SnapshotUrgency::Immediate;
             }
@@ -1377,20 +1381,14 @@ impl BridgeLoopRuntime {
                 self.state.queue_detail_validation_requested = true;
             }
             Worker::QueueValidation => self.queue_validator.results = never(),
+            Worker::EditRefresh if restart => {
+                self.edit_refreshes = edit_refresh::EditRefreshWorker::new();
+            }
+            Worker::EditRefresh => self.edit_refreshes.results = never(),
             Worker::Search if restart => {
                 (self.search_query_tx, self.search_results_rx) = spawn_search_worker();
             }
             Worker::Search => self.search_results_rx = never(),
-            Worker::QueueDetails if restart => {
-                (
-                    self.external_queue_details_tx,
-                    self.external_queue_details_event_rx,
-                ) = spawn_queue_detail_worker();
-                // Requests the old worker never answered are asked again.
-                self.state.pending_queue_detail_fingerprints.clear();
-                self.state.queue_detail_validation_requested = true;
-            }
-            Worker::QueueDetails => self.external_queue_details_event_rx = never(),
             Worker::ApplyAlbumArt if restart => {
                 (self.apply_album_art_tx, self.apply_album_art_rx) = spawn_apply_album_art_worker();
             }
@@ -1470,6 +1468,13 @@ impl BridgeLoopRuntime {
                 }
             };
         }
+        let cmd = match cmd {
+            BridgeCommand::Library(BridgeLibraryCommand::RefreshEditedPaths(paths)) => {
+                self.request_edit_refresh(paths, event_tx);
+                return SnapshotUrgency::None;
+            }
+            cmd => cmd,
+        };
         match &cmd {
             BridgeCommand::Shutdown | BridgeCommand::Queue(BridgeQueueCommand::Clear) => {
                 self.imports.discard_pending();
@@ -1495,16 +1500,13 @@ impl BridgeLoopRuntime {
         let rebuild_tree =
             command_requires_tree_rebuild(&cmd, self.state.settings.library_sort_mode);
         let deferred_tree_rebuild = command_tree_rebuild_delay(&cmd);
-        let refresh_queue_rows = command_refreshes_queue_rows(&cmd);
         let force_snapshot = matches!(cmd, BridgeCommand::RequestSnapshot);
         let mut command_context = BridgeCommandContext {
             playback: &self.playback,
             analysis: &self.analysis,
-            metadata: &self.metadata,
             library: &self.library,
             lastfm: &self.lastfm,
             search_query_tx: &self.search_query_tx,
-            external_queue_details_tx: &self.external_queue_details_tx,
             apply_album_art_tx: &self.apply_album_art_tx,
             event_tx,
             running: &mut self.flags.running,
@@ -1524,9 +1526,6 @@ impl BridgeLoopRuntime {
             self.flags.session_dirty = true;
             if !session_only {
                 urgency = SnapshotUrgency::Immediate;
-            }
-            if refresh_queue_rows {
-                self.state.refresh_queue_rows();
             }
         }
         if force_snapshot && self.flags.running {
@@ -1592,8 +1591,7 @@ impl BridgeLoopRuntime {
     }
 
     fn handle_library_event(&mut self, event: LibraryEvent) -> SnapshotUrgency {
-        let urgency =
-            process_library_event(event, &self.external_queue_details_tx, &mut self.state);
+        let urgency = process_library_event(event, &mut self.state);
         if urgency.is_pending() {
             self.flags.session_dirty = true;
             self.handle_library_refresh(urgency);
@@ -1612,18 +1610,6 @@ impl BridgeLoopRuntime {
     fn handle_search_results(&mut self, frame: BridgeSearchResultsFrame) -> SnapshotUrgency {
         process_search_results(frame, &mut self.state);
         SnapshotUrgency::None
-    }
-
-    fn handle_external_queue_detail_event(
-        &mut self,
-        event: ExternalQueueDetailsEvent,
-    ) -> SnapshotUrgency {
-        let urgency = process_external_queue_detail_event(event, &mut self.state);
-        if urgency.is_pending() {
-            self.flags.session_dirty = true;
-            self.state.refresh_queue_rows();
-        }
-        urgency
     }
 
     fn handle_apply_album_art_event(
@@ -1687,19 +1673,11 @@ impl BridgeLoopRuntime {
         );
         let analysis_urgency = drain_analysis_events(&self.analysis_rx, event_tx, &mut self.state);
         let metadata_urgency = drain_metadata_events(&self.metadata_rx, &mut self.state);
-        let library_urgency = drain_library_events(
-            &self.library_rx,
-            &self.external_queue_details_tx,
-            &mut self.state,
-        );
+        let library_urgency = drain_library_events(&self.library_rx, &mut self.state);
         let apply_album_art_urgency = drain_apply_album_art_events(
             &self.apply_album_art_rx,
             &self.metadata,
             event_tx,
-            &mut self.state,
-        );
-        let external_queue_details_urgency = drain_external_queue_detail_events(
-            &self.external_queue_details_event_rx,
             &mut self.state,
         );
         let lastfm_urgency = drain_lastfm_events(
@@ -1709,7 +1687,6 @@ impl BridgeLoopRuntime {
         );
         drain_search_results(&self.search_results_rx, &mut self.state);
         tick_lastfm_playback(&self.state, &self.lastfm, &mut self.lastfm_tracker);
-        self.revalidate_queue_details();
         if self.state.queue_detail_validation_requested {
             self.state.queue_detail_validation_requested = false;
             self.queue_validator.request(&self.state);
@@ -1718,28 +1695,16 @@ impl BridgeLoopRuntime {
             self.deferred_tree_rebuild_at = Some(Instant::now() + Duration::from_millis(150));
         }
         self.handle_library_refresh(library_urgency);
-        if external_queue_details_urgency.is_pending() {
-            self.state.refresh_queue_rows();
-        }
         urgency = urgency
             .max(analysis_urgency)
             .max(metadata_urgency)
             .max(library_urgency)
             .max(apply_album_art_urgency)
-            .max(external_queue_details_urgency)
             .max(lastfm_urgency);
         if urgency.is_pending() {
             self.flags.session_dirty = true;
         }
         urgency
-    }
-
-    fn revalidate_queue_details(&mut self) {
-        if self.last_queue_detail_revalidate.elapsed() < self.queue_detail_revalidate_interval {
-            return;
-        }
-        self.state.queue_detail_validation_requested = true;
-        self.last_queue_detail_revalidate = Instant::now();
     }
 
     fn handle_library_refresh(&mut self, library_urgency: SnapshotUrgency) {
@@ -1990,7 +1955,6 @@ fn prepare_initial_bridge_state(
     options: &mut BridgeRuntimeOptions,
     analysis: &AnalysisEngine,
     playback: &PlaybackEngine,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
 ) -> (BridgeState, LastFmHandle, Receiver<LastFmEvent>) {
     let mut state = BridgeState::default();
     if options.persisted_state_enabled {
@@ -2008,7 +1972,6 @@ fn prepare_initial_bridge_state(
         &mut state,
         analysis,
         playback,
-        external_queue_details_tx,
         &lastfm,
         options.persisted_state_enabled,
     );
@@ -2019,7 +1982,6 @@ fn restore_initial_bridge_state(
     state: &mut BridgeState,
     analysis: &AnalysisEngine,
     playback: &PlaybackEngine,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     lastfm: &LastFmHandle,
     persisted_state_enabled: bool,
 ) {
@@ -2041,7 +2003,7 @@ fn restore_initial_bridge_state(
         apply_session_restore(state, playback, load_session_snapshot().as_ref());
     }
     if should_sync_queue_details_on_initial_restore(state) {
-        let _ = sync_queue_details(state, external_queue_details_tx);
+        sync_queue_details(state);
     }
 }
 
@@ -2176,8 +2138,7 @@ fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: Library
         BridgeCommand::Settings(BridgeSettingsCommand::LoadFromDisk)
         | BridgeCommand::Library(
             BridgeLibraryCommand::SetNodeExpanded { .. }
-            | BridgeLibraryCommand::ShowTrackInLibrary(_)
-            | BridgeLibraryCommand::RefreshEditedPaths(_),
+            | BridgeLibraryCommand::ShowTrackInLibrary(_),
         ) => true,
         _ => false,
     }
@@ -2190,15 +2151,6 @@ fn command_tree_rebuild_delay(cmd: &BridgeCommand) -> Option<Duration> {
         }
         _ => None,
     }
-}
-
-/// Whether `cmd` may change the details the queue's rows show. Queue
-/// commands note their own edits.
-fn command_refreshes_queue_rows(cmd: &BridgeCommand) -> bool {
-    matches!(
-        cmd,
-        BridgeCommand::Library(BridgeLibraryCommand::RefreshEditedPaths(_))
-    )
 }
 
 #[cfg(feature = "profiling-logs")]
@@ -2701,6 +2653,7 @@ mod tests {
         runtime.apply_renamed_paths(
             1,
             Arc::new(PathRenames::from([(old_path, new_path.clone())])),
+            imports::RenamedDetails::default(),
             &event_tx,
         );
         assert_eq!(runtime.state.playback.current.as_ref(), Some(&new_path));
@@ -3426,6 +3379,340 @@ mod tests {
             .collect();
         assert_eq!(remaps.len(), 1);
         assert_eq!(*remaps[0], renames);
+    }
+
+    /// Wait for the bridge to show `volume`, which it takes from the
+    /// playback engine after handling the user's command.
+    fn wait_for_volume(bridge: &FrontendBridgeHandle, volume: f32) -> bool {
+        wait_for_snapshot_matching(bridge, Duration::from_secs(10), |snapshot| {
+            (snapshot.playback.volume - volume).abs() < 1e-3
+        })
+        .is_some()
+    }
+
+    #[test]
+    fn a_bulk_tag_edit_refresh_does_not_hold_up_playback_commands() {
+        let _guard = test_guard();
+        let names = (0..200)
+            .map(|index| format!("{index:03}.flac"))
+            .collect::<Vec<_>>();
+        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (dir, edited) = rename_fixture("bulk-edit-refresh", &names);
+        // The first file's read waits, like a read from a stalled disk.
+        let (read_started, release_read) = crate::library::hold_read(&edited[0]);
+        let bridge = FrontendBridgeHandle::spawn().expect("spawn bridge");
+
+        bridge.command(BridgeCommand::Library(
+            BridgeLibraryCommand::RefreshEditedPaths(edited),
+        ));
+        read_started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the refresh reads the saved files");
+        bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
+            Duration::from_secs(30),
+        )));
+        bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(
+            0.25,
+        )));
+        let handled = wait_for_volume(&bridge, 0.25);
+        drop(release_read);
+
+        assert!(
+            handled,
+            "the bridge handled the playback commands during the read"
+        );
+        bridge.command(BridgeCommand::Shutdown);
+        std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_bulk_rename_does_not_make_the_bridge_read_the_files() {
+        let _guard = test_guard();
+        let names = (0..200)
+            .map(|index| format!("{index:03}.flac"))
+            .collect::<Vec<_>>();
+        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (dir, sources) = rename_fixture("bulk-rename-refresh", &names);
+        let targets = sources
+            .iter()
+            .map(|path| path.with_extension("renamed.flac"))
+            .collect::<Vec<_>>();
+        // Reading a renamed file would wait, like a read from a stalled disk.
+        let (_read_started, release_read) = crate::library::hold_read(&targets[0]);
+        let bridge = FrontendBridgeHandle::spawn().expect("spawn bridge");
+
+        // Rename the files as the tag editor does, which reads them once
+        // they are renamed.
+        bridge.import_gate().rename_with_details(|| {
+            let mut renames = PathRenames::new();
+            let mut details = imports::RenamedDetails::default();
+            for (source, target) in sources.iter().zip(&targets) {
+                std::fs::rename(source, target).expect("rename fixture");
+                renames.insert(source.clone(), target.clone());
+                details
+                    .indexed
+                    .insert(target.clone(), crate::library::read_track_info(target));
+            }
+            ((), renames, details)
+        });
+        bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(
+            0.25,
+        )));
+        let handled = wait_for_volume(&bridge, 0.25);
+        drop(release_read);
+
+        assert!(
+            handled,
+            "the bridge handled the playback command after the renames"
+        );
+        bridge.command(BridgeCommand::Shutdown);
+        std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
+    #[test]
+    fn queued_files_are_checked_after_events_and_never_while_idle() {
+        use crate::playback::{PlaybackEvent, TrackChangeKind};
+
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        // Events reach the loop only from the test.
+        let (library_tx, library_rx) = unbounded();
+        runtime.library_rx = library_rx;
+        let (_playback_tx, playback_rx) = unbounded();
+        runtime.playback_rx = playback_rx;
+        runtime.edit_refreshes = edit_refresh::EditRefreshWorker::with_refresh(|paths| {
+            Ok(crate::library::TrackRefresh {
+                indexed: paths
+                    .iter()
+                    .map(|path| (path.clone(), crate::library::read_track_info(path)))
+                    .collect(),
+                problem: None,
+            })
+        });
+        let (event_tx, _event_rx) = unbounded();
+        let (dir, files) = rename_fixture("idle-validation", &["a.flac", "b.flac"]);
+        let checks = |runtime: &BridgeLoopRuntime| runtime.queue_validator.requests;
+        let idle = |runtime: &mut BridgeLoopRuntime, event_tx: &Sender<BridgeEvent>| {
+            let before = checks(runtime);
+            // Saves and snapshots have timers of their own.
+            runtime.flags.session_dirty = false;
+            runtime.flags.settings_dirty = false;
+            runtime.flags.pending_snapshot = SnapshotUrgency::None;
+            assert!(
+                runtime.next_wake_delay() > Duration::from_secs(60),
+                "no timer wakes the loop to check the files"
+            );
+            for _ in 0..20 {
+                runtime.handle_wake(BridgeLoopWake::Tick, event_tx);
+            }
+            assert_eq!(checks(runtime), before, "nothing is checked while idle");
+        };
+
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                tracks: vec![files[0].clone()],
+                autoplay: false,
+            })),
+            &event_tx,
+        );
+        assert_eq!(checks(&runtime), 1, "a queue change");
+        let result = runtime
+            .queue_validator
+            .results
+            .recv_timeout(Duration::from_secs(10))
+            .expect("validation result");
+        runtime.handle_wake(BridgeLoopWake::QueueValidated(result), &event_tx);
+        idle(&mut runtime, &event_tx);
+
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(PlaybackEvent::TrackChanged {
+                path: files[0].clone(),
+                queue_index: 0,
+                kind: TrackChangeKind::Manual,
+                track_token: 1,
+            }),
+            &event_tx,
+        );
+        assert_eq!(checks(&runtime), 2, "a track change");
+
+        let playing = PlaybackSnapshot {
+            state: PlaybackState::Playing,
+            current: Some(files[0].clone()),
+            current_queue_index: Some(0),
+            ..runtime.state.playback.clone()
+        };
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(PlaybackEvent::Snapshot(playing.clone())),
+            &event_tx,
+        );
+        assert_eq!(checks(&runtime), 3, "playback starting");
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(PlaybackEvent::Snapshot(playing)),
+            &event_tx,
+        );
+        assert_eq!(checks(&runtime), 3, "playback going on");
+
+        library_tx
+            .send(LibraryEvent::Snapshot(LibrarySnapshot::default()))
+            .expect("library snapshot");
+        runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
+        assert_eq!(checks(&runtime), 4, "a library change");
+
+        let renamed = dir.join("renamed.flac");
+        std::fs::rename(&files[0], &renamed).expect("rename fixture");
+        let _ = runtime.apply_renamed_paths(
+            1,
+            Arc::new(PathRenames::from([(files[0].clone(), renamed.clone())])),
+            imports::RenamedDetails::default(),
+            &event_tx,
+        );
+        runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
+        assert_eq!(checks(&runtime), 5, "a rename");
+
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Library(
+                BridgeLibraryCommand::RefreshEditedPaths(vec![renamed.clone()]),
+            )),
+            &event_tx,
+        );
+        assert_eq!(checks(&runtime), 5, "a tag edit waits for its refresh");
+        let refreshed = runtime
+            .edit_refreshes
+            .results
+            .recv_timeout(Duration::from_secs(10))
+            .expect("refresh result");
+        runtime.handle_wake(BridgeLoopWake::EditsRefreshed(refreshed), &event_tx);
+        assert_eq!(checks(&runtime), 6, "a refreshed tag edit");
+
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Queue(BridgeQueueCommand::Append(vec![
+                files[1].clone(),
+            ]))),
+            &event_tx,
+        );
+        assert_eq!(checks(&runtime), 7, "an append");
+
+        let paused = PlaybackSnapshot {
+            state: PlaybackState::Paused,
+            ..runtime.state.playback.clone()
+        };
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(PlaybackEvent::Snapshot(paused.clone())),
+            &event_tx,
+        );
+        for _ in 0..20 {
+            runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
+        }
+        assert_eq!(checks(&runtime), 7, "nothing is checked while paused");
+        let stopped = PlaybackSnapshot {
+            state: PlaybackState::Stopped,
+            ..paused
+        };
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(PlaybackEvent::Snapshot(stopped)),
+            &event_tx,
+        );
+        idle(&mut runtime, &event_tx);
+
+        std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
+    #[test]
+    fn an_edit_refresh_read_before_a_rename_leaves_the_renamed_tracks_alone() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (_library_tx, library_rx) = unbounded();
+        runtime.library_rx = library_rx;
+        let (event_tx, _event_rx) = unbounded();
+        let root = p("/music/stale");
+        let (a, b) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/b.flac"));
+        let track = |path: &PathBuf, title: &str| LibraryTrack {
+            path: path.clone(),
+            root_path: root.clone(),
+            title: title.to_string(),
+            ..LibraryTrack::default()
+        };
+        runtime.state.library = Arc::new(LibrarySnapshot {
+            roots: vec![LibraryRoot {
+                path: root.clone(),
+                name: String::new(),
+            }],
+            tracks: vec![track(&a, "First"), track(&b, "Second")],
+            ..LibrarySnapshot::default()
+        });
+        let details = |title: &str| IndexedTrack {
+            search_tags: crate::library::SearchTags::default(),
+            title: title.to_string(),
+            artist: String::new(),
+            album: String::new(),
+            cover_path: String::new(),
+            genre: String::new(),
+            year: None,
+            track_no: None,
+            duration_secs: None,
+        };
+        let (read_started, started) = bounded(1);
+        let (release, release_read) = bounded::<()>(1);
+        let stale = details("First, edited");
+        runtime.edit_refreshes = edit_refresh::EditRefreshWorker::with_refresh(move |paths| {
+            read_started.send(()).expect("report the read");
+            release_read
+                .recv_timeout(Duration::from_secs(10))
+                .expect("release the read");
+            Ok(crate::library::TrackRefresh {
+                indexed: paths
+                    .iter()
+                    .map(|path| (path.clone(), stale.clone()))
+                    .collect(),
+                problem: None,
+            })
+        });
+
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Library(
+                BridgeLibraryCommand::RefreshEditedPaths(vec![a.clone()]),
+            )),
+            &event_tx,
+        );
+        started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the refresh reads a");
+        // The files swap names while a is read; the rename read both of
+        // them at their new names.
+        let _ = runtime.apply_renamed_paths(
+            1,
+            Arc::new(PathRenames::from([
+                (a.clone(), b.clone()),
+                (b.clone(), a.clone()),
+            ])),
+            imports::RenamedDetails {
+                indexed: HashMap::from([
+                    (a.clone(), details("Second")),
+                    (b.clone(), details("First, edited")),
+                ]),
+                ..imports::RenamedDetails::default()
+            },
+            &event_tx,
+        );
+        release.send(()).expect("release the read");
+        let result = runtime
+            .edit_refreshes
+            .results
+            .recv_timeout(Duration::from_secs(10))
+            .expect("refresh result");
+        runtime.handle_wake(BridgeLoopWake::EditsRefreshed(result), &event_tx);
+
+        let titles = runtime
+            .state
+            .library
+            .tracks
+            .iter()
+            .map(|track| (track.path.clone(), track.title.clone()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            titles,
+            HashMap::from([(a, "Second".to_string()), (b, "First, edited".to_string()),])
+        );
     }
 
     #[test]

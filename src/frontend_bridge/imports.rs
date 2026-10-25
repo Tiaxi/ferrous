@@ -19,9 +19,10 @@ use super::commands::{
     expand_import_paths_cancellable, format_import_warning, ImportExpandOutcome,
 };
 use super::BridgeQueueCommand;
+use crate::library::{IndexedTrack, TrackFileFingerprint};
 use crate::playback::{remap_path, PathRenames};
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::{
@@ -77,7 +78,20 @@ pub(super) enum ImportMessage {
     Renamed {
         number: u64,
         renames: Arc<PathRenames>,
+        details: RenamedDetails,
     },
+}
+
+/// What a rename read from the files it renamed, so that the bridge does
+/// not read them again.
+#[derive(Debug, Default)]
+pub(crate) struct RenamedDetails {
+    /// What the library index holds for each renamed file, by new path.
+    pub(crate) indexed: HashMap<PathBuf, IndexedTrack>,
+    /// The state of each renamed file at its new path.
+    pub(crate) fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
+    /// The files that could not be read fully, for the user.
+    pub(crate) problem: Option<String>,
 }
 
 /// Orders file renames against the import worker's reads of the filesystem,
@@ -167,24 +181,29 @@ enum ReadEnd {
 struct Renaming<'a> {
     gate: &'a ImportGate,
     number: u64,
-    renames: Option<PathRenames>,
+    renames: Option<(PathRenames, RenamedDetails)>,
 }
 
 impl Renaming<'_> {
-    /// Send `renames` to the bridge and finish.
-    fn finish(mut self, renames: PathRenames) {
-        self.renames = Some(renames);
+    /// Send `renames` and `details` to the bridge and finish.
+    fn finish(mut self, renames: PathRenames, details: RenamedDetails) {
+        self.renames = Some((renames, details));
     }
 }
 
 impl Drop for Renaming<'_> {
     fn drop(&mut self) {
         let mut sequence = self.gate.lock();
-        if let Some(renames) = self.renames.take().filter(|renames| !renames.is_empty()) {
+        if let Some((renames, details)) = self
+            .renames
+            .take()
+            .filter(|(renames, _)| !renames.is_empty())
+        {
             let renames = Arc::new(renames);
             let sent = self.gate.messages.send(ImportMessage::Renamed {
                 number: self.number,
                 renames: Arc::clone(&renames),
+                details,
             });
             // The bridge has shut down if this fails; the renames on disk
             // stand, and no import is left to follow them.
@@ -217,10 +236,23 @@ impl ImportGate {
     /// message. Imports that read the filesystem meanwhile read it again.
     /// Waits while another rename is in progress, and runs the rename itself
     /// on the calling thread, so it must not run on the UI or bridge thread.
+    #[cfg(test)]
     pub(crate) fn rename<R>(&self, rename: impl FnOnce() -> (R, PathRenames)) -> R {
+        self.rename_with_details(|| {
+            let (result, renames) = rename();
+            (result, renames, RenamedDetails::default())
+        })
+    }
+
+    /// [`Self::rename`], also sending what the rename read from the renamed
+    /// files.
+    pub(crate) fn rename_with_details<R>(
+        &self,
+        rename: impl FnOnce() -> (R, PathRenames, RenamedDetails),
+    ) -> R {
         let renaming = self.begin_rename();
-        let (result, renames) = rename();
-        renaming.finish(renames);
+        let (result, renames, details) = rename();
+        renaming.finish(renames, details);
         result
     }
 
@@ -625,7 +657,9 @@ mod tests {
         while let Ok(message) = worker.results.try_recv() {
             match message {
                 ImportMessage::Finished(result) => applied.extend(worker.complete(result)),
-                ImportMessage::Renamed { number, renames } => {
+                ImportMessage::Renamed {
+                    number, renames, ..
+                } => {
                     worker.remap_pending_paths(number, &renames);
                 }
             }
@@ -1020,7 +1054,7 @@ mod tests {
         // waits, and the rename needs that lock to finish.
         checked.recv().expect("the reader checked for cancellation");
         let map = renames(&[("/album/01.flac", "/album/02.flac")]);
-        renaming.finish(map.clone());
+        renaming.finish(map.clone(), RenamedDetails::default());
         let (read, logged) = reader
             .join()
             .expect("reader thread")

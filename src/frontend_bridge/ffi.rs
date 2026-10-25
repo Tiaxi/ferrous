@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::fd::RawFd;
 
-use super::imports::ImportGate;
+use super::imports::{ImportGate, RenamedDetails};
 use super::queue_relay::{QueueBatch, QueueRelay};
 use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
@@ -22,6 +22,7 @@ use super::{
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
 };
+use crate::library::{track_file_fingerprint, TrackRefresh};
 use crate::panic_guard;
 #[cfg(test)]
 use crate::panic_guard::test_hooks;
@@ -1569,15 +1570,31 @@ pub unsafe extern "C" fn ferrous_ffi_rename_gate_rename(
         let request = tag_editor::parse_rename_request(blob).ok()?;
         // A panic in the rename still finishes it in the gate, so imports
         // waiting for it go on.
-        let response = gate.gate.rename(|| {
-            let response = tag_editor::rename_rows(request);
+        let response = gate.gate.rename_with_details(|| {
+            let (response, refresh) = tag_editor::rename_rows_with_refresh(request);
             let renames = renamed_paths(&response);
-            (response, renames)
+            let details = renamed_details(&renames, refresh);
+            (response, renames, details)
         });
         tag_editor::serialize_rename_response(&response).ok()
     };
     // SAFETY: The caller guarantees that `len_out` is null or writable.
     unsafe { tag_editor_call("ferrous_ffi_rename_gate_rename", len_out, request) }
+}
+
+/// What the bridge needs to know about the files in `renames` at their new
+/// paths, read here so that the bridge thread does no file or database I/O.
+fn renamed_details(renames: &PathRenames, refresh: TrackRefresh) -> RenamedDetails {
+    let TrackRefresh { indexed, problem } = refresh;
+    let fingerprints = renames
+        .values()
+        .filter_map(|path| Some((path.clone(), track_file_fingerprint(path)?)))
+        .collect();
+    RenamedDetails {
+        indexed,
+        fingerprints,
+        problem,
+    }
 }
 
 /// The files `response` reports as moved to a new path.

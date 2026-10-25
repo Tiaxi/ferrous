@@ -829,15 +829,6 @@ pub(crate) fn track_file_fingerprint(path: &Path) -> Option<TrackFileFingerprint
     })
 }
 
-pub(crate) fn load_external_track_cache(
-    path: &Path,
-    fingerprint: TrackFileFingerprint,
-) -> Option<IndexedTrack> {
-    let conn = open_library_db().ok()?;
-    init_schema(&conn).ok()?;
-    load_external_track_cache_from_conn(&conn, path, fingerprint)
-}
-
 #[cfg(test)]
 pub(crate) fn load_external_track_caches(
     requests: &[(PathBuf, TrackFileFingerprint)],
@@ -1019,19 +1010,6 @@ fn leading_track_number(input: &str) -> Option<u32> {
     } else {
         None
     }
-}
-
-/// Caches `read` of `path` at `fingerprint` in the library database, and
-/// returns the details to show for the file; see [`cache_external_read`].
-pub(crate) fn store_external_track_cache(
-    path: &Path,
-    fingerprint: TrackFileFingerprint,
-    read: ExternalTrackRead,
-) -> IndexedTrack {
-    let conn = open_library_db()
-        .ok()
-        .filter(|conn| init_schema(conn).is_ok());
-    cache_external_read(conn.as_ref(), path, fingerprint, read.0)
 }
 
 fn store_external_track_cache_in_conn(

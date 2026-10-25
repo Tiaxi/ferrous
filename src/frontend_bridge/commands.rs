@@ -11,36 +11,30 @@ use walkdir::WalkDir;
 
 use crate::analysis::{AnalysisCommand, AnalysisEngine};
 use crate::lastfm::{self, Command as LastFmCommand, Handle as LastFmHandle};
-#[cfg(test)]
-use crate::library::load_external_track_caches;
 use crate::library::{
-    is_audio_track_file, is_supported_audio, refresh_indexed_metadata_for_paths,
-    track_file_fingerprint, IndexedTrack, LibraryCommand, LibraryService, LibraryTrack,
-    TrackFileFingerprint,
+    is_audio_track_file, is_supported_audio, track_file_fingerprint, IndexedTrack, LibraryCommand,
+    LibraryService, LibraryTrack, TrackFileFingerprint,
 };
 use crate::metadata::MetadataService;
 use crate::playback::{remap_path, PathRenames, PlaybackCommand, PlaybackEngine};
 
 use super::config::{load_settings_into, save_settings};
-use super::imports::QueueRequest;
+use super::imports::{QueueRequest, RenamedDetails};
 use super::queue::handle_queue_command;
 use super::queue_sync::QueueEdit;
-use super::search::derive_tree_path_context;
+use super::search::{keyed_roots, tree_key_is, tree_path_parts};
 use super::{
     library_tree, try_send_event, ApplyAlbumArtRequest, BridgeAnalysisCommand, BridgeCommand,
     BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
-    BridgeSettingsCommand, BridgeState, ExternalQueueDetailsRequest, LibrarySortMode,
-    SearchWorkerQuery,
+    BridgeSettingsCommand, BridgeState, LibrarySortMode, SearchWorkerQuery,
 };
 
 pub(super) struct BridgeCommandContext<'a> {
     pub(super) playback: &'a PlaybackEngine,
     pub(super) analysis: &'a AnalysisEngine,
-    pub(super) metadata: &'a MetadataService,
     pub(super) library: &'a LibraryService,
     pub(super) lastfm: &'a LastFmHandle,
     pub(super) search_query_tx: &'a Sender<SearchWorkerQuery>,
-    pub(super) external_queue_details_tx: &'a Sender<ExternalQueueDetailsRequest>,
     pub(super) apply_album_art_tx: &'a Sender<ApplyAlbumArtRequest>,
     pub(super) event_tx: &'a Sender<BridgeEvent>,
     pub(super) running: &'a mut bool,
@@ -48,9 +42,7 @@ pub(super) struct BridgeCommandContext<'a> {
 }
 
 struct LibraryCommandRuntime<'a> {
-    metadata: &'a MetadataService,
     library: &'a LibraryService,
-    external_queue_details_tx: &'a Sender<ExternalQueueDetailsRequest>,
     apply_album_art_tx: &'a Sender<ApplyAlbumArtRequest>,
     search_query_tx: &'a Sender<SearchWorkerQuery>,
     event_tx: &'a Sender<BridgeEvent>,
@@ -67,26 +59,23 @@ pub(super) fn handle_bridge_command(
             *context.running = false;
             false
         }
-        // The runtime answers or resolves these before commands get here.
-        BridgeCommand::SaveState(_) | BridgeCommand::QueueAt { .. } => false,
+        // The runtime answers, resolves, or hands these to its workers
+        // before commands get here.
+        BridgeCommand::SaveState(_)
+        | BridgeCommand::QueueAt { .. }
+        | BridgeCommand::Library(BridgeLibraryCommand::RefreshEditedPaths(_)) => false,
         BridgeCommand::Playback(cmd) => {
             handle_playback_bridge_command(&cmd, state, context);
             false
         }
-        BridgeCommand::Queue(cmd) => handle_queue_command(
-            cmd,
-            state,
-            context.playback,
-            context.external_queue_details_tx,
-            context.event_tx,
-        ),
+        BridgeCommand::Queue(cmd) => {
+            handle_queue_command(cmd, state, context.playback, context.event_tx)
+        }
         BridgeCommand::Library(cmd) => handle_library_command(
             cmd,
             state,
             &LibraryCommandRuntime {
-                metadata: context.metadata,
                 library: context.library,
-                external_queue_details_tx: context.external_queue_details_tx,
                 apply_album_art_tx: context.apply_album_art_tx,
                 search_query_tx: context.search_query_tx,
                 event_tx: context.event_tx,
@@ -343,10 +332,7 @@ fn handle_library_command(
     if let Some(outcome) = handle_library_root_command(&cmd, runtime.library) {
         return outcome;
     }
-    if let Some(outcome) = handle_library_view_command(cmd.clone(), state, runtime) {
-        return outcome;
-    }
-    handle_library_collection_command(cmd, state, runtime).unwrap_or(false)
+    handle_library_view_command(cmd, state, runtime).unwrap_or(false)
 }
 
 fn handle_library_root_command(
@@ -463,7 +449,11 @@ fn handle_library_view_command(
 }
 
 fn reveal_track_in_library(state: &mut BridgeState, path: &Path) -> bool {
-    let Some(track) = state.library.tracks.iter().find(|track| track.path == path) else {
+    let Some(track) = state
+        .library_index
+        .position(&state.library, path)
+        .map(|position| &state.library.tracks[position])
+    else {
         return false;
     };
     let Some(tree_context) =
@@ -487,23 +477,6 @@ fn reveal_track_in_library(state: &mut BridgeState, path: &Path) -> bool {
     state.library_view_anchor_offset = 0.0;
     state.library_reveal_generation = state.library_reveal_generation.wrapping_add(1);
     true
-}
-
-fn handle_library_collection_command(
-    cmd: BridgeLibraryCommand,
-    state: &mut BridgeState,
-    runtime: &LibraryCommandRuntime<'_>,
-) -> Option<bool> {
-    match cmd {
-        BridgeLibraryCommand::RefreshEditedPaths(paths) => Some(refresh_edited_paths(
-            state,
-            &paths,
-            runtime.metadata,
-            runtime.external_queue_details_tx,
-            runtime.event_tx,
-        )),
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +577,9 @@ fn normalized_library_album(track: &LibraryTrack) -> &str {
     }
 }
 
+/// The library tracks of the album selected by `artist` and `album`. Every
+/// library track is matched, so the match borrows from the tracks instead of
+/// building their tree keys.
 fn collect_album_paths_for_queue(
     library: &crate::library::LibrarySnapshot,
     artist: &str,
@@ -616,36 +592,44 @@ fn collect_album_paths_for_queue(
     }
     let artist_selector_is_key = artist_selector.starts_with("artist|");
     let album_selector_is_key = album_selector.starts_with("album|");
+    let roots = keyed_roots(&library.roots);
 
     library
         .tracks
         .iter()
         .filter(|track| {
-            let context = derive_tree_path_context(&track.path, &library.roots, &track.artist);
+            let parts = tree_path_parts(&track.path, &roots, &track.artist);
 
             if album_selector_is_key {
-                let Some(ctx) = context.as_ref() else {
+                let Some(parts) = parts else {
                     return false;
                 };
-                let key_matches = ctx
-                    .album_key
-                    .as_ref()
-                    .is_some_and(|key| key == album_selector);
-                if !key_matches {
+                let Some(album_folder) = parts.album_folder.as_deref() else {
+                    return false;
+                };
+                if !tree_key_is(
+                    album_selector,
+                    "album",
+                    &[parts.root_key, &parts.artist_name, album_folder],
+                ) {
                     return false;
                 }
                 // Only include root album tracks and recognised disc
                 // sections (Disc 1, CD 2, …).  Exclude bonus/extra
                 // subfolders so the queue represents the main album.
-                return ctx.is_main_level_album_track || ctx.is_disc_section_album_track;
+                return parts.is_main_level_album_track || parts.is_disc_section_album_track();
             }
 
             let artist_matches = if artist_selector_is_key {
-                context
-                    .as_ref()
-                    .is_some_and(|ctx| ctx.artist_key == artist_selector)
-            } else if let Some(ctx) = context.as_ref() {
-                ctx.artist_name == artist_selector
+                parts.as_ref().is_some_and(|parts| {
+                    tree_key_is(
+                        artist_selector,
+                        "artist",
+                        &[parts.root_key, &parts.artist_name],
+                    )
+                })
+            } else if let Some(parts) = parts.as_ref() {
+                parts.artist_name == artist_selector
             } else {
                 normalized_library_artist(track) == artist_selector
             };
@@ -653,14 +637,11 @@ fn collect_album_paths_for_queue(
                 return false;
             }
 
-            if let Some(ctx) = context {
-                let context_album = ctx
-                    .album_folder
-                    .unwrap_or_else(|| String::from("Unknown Album"));
-                if context_album != album_selector {
+            if let Some(parts) = parts {
+                if parts.album_folder.as_deref().unwrap_or("Unknown Album") != album_selector {
                     return false;
                 }
-                return ctx.is_main_level_album_track || ctx.is_disc_section_album_track;
+                return parts.is_main_level_album_track || parts.is_disc_section_album_track();
             }
             normalized_library_album(track) == album_selector
         })
@@ -922,29 +903,21 @@ pub(super) fn format_import_warning(action: &str, outcome: &ImportExpandOutcome)
 // Queue detail sync
 // ---------------------------------------------------------------------------
 
-pub(super) fn sync_queue_details(
-    state: &mut BridgeState,
-    _external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
-) -> bool {
+/// Have the validation worker check the queue's files again.
+pub(super) fn sync_queue_details(state: &mut BridgeState) {
     state.queue_detail_generation = state.queue_detail_generation.saturating_add(1);
     state.queue_detail_validation_requested = true;
-    false
 }
 
-#[cfg(test)]
-fn sync_queue_details_blocking(
-    state: &mut BridgeState,
-    tx: &Sender<ExternalQueueDetailsRequest>,
-) -> bool {
-    validate_queue_details(state, tx, &|| false, load_external_track_caches)
-}
-
+/// Bring the details of the queued files outside the library up to date
+/// with the files, taking them from `load_cached` where it has them. Returns
+/// the files to read, with the state they were found in. It looks at every
+/// queued file, so it runs on the validation worker, never the bridge thread.
 pub(super) fn validate_queue_details(
     state: &mut BridgeState,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     cancelled: &impl Fn() -> bool,
     mut load_cached: impl FnMut(&[(PathBuf, TrackFileFingerprint)]) -> HashMap<PathBuf, IndexedTrack>,
-) -> bool {
+) -> Vec<(PathBuf, TrackFileFingerprint)> {
     let queue_paths: HashSet<&Path> = state.queue.iter().map(PathBuf::as_path).collect();
     let library_paths: HashSet<&Path> = state
         .library
@@ -952,45 +925,27 @@ pub(super) fn validate_queue_details(
         .iter()
         .map(|track| track.path.as_path())
         .collect();
-    let mut changed = false;
 
-    let previous_len = state.queue_details.len();
     Arc::make_mut(&mut state.queue_details).retain(|path, _| queue_paths.contains(path.as_path()));
-    changed |= state.queue_details.len() != previous_len;
     state
         .queue_detail_fingerprints
         .retain(|path, _| queue_paths.contains(path.as_path()));
-    state
-        .pending_queue_detail_fingerprints
-        .retain(|path, _| queue_paths.contains(path.as_path()));
-    let mut pending_requests = Vec::<(PathBuf, TrackFileFingerprint)>::new();
+    let mut unknown = Vec::<(PathBuf, TrackFileFingerprint)>::new();
 
     for path in &state.queue {
         if cancelled() {
-            return changed;
+            return Vec::new();
         }
-        if library_paths.contains(path.as_path()) {
-            changed |= Arc::make_mut(&mut state.queue_details)
-                .remove(path)
-                .is_some();
+        let fingerprint = if library_paths.contains(path.as_path()) || !is_supported_audio(path) {
+            None
+        } else {
+            path.is_file()
+                .then(|| track_file_fingerprint(path))
+                .flatten()
+        };
+        let Some(fingerprint) = fingerprint else {
+            Arc::make_mut(&mut state.queue_details).remove(path);
             state.queue_detail_fingerprints.remove(path);
-            state.pending_queue_detail_fingerprints.remove(path);
-            continue;
-        }
-        if !path.is_file() || !is_supported_audio(path) {
-            changed |= Arc::make_mut(&mut state.queue_details)
-                .remove(path)
-                .is_some();
-            state.queue_detail_fingerprints.remove(path);
-            state.pending_queue_detail_fingerprints.remove(path);
-            continue;
-        }
-        let Some(fingerprint) = track_file_fingerprint(path) else {
-            changed |= Arc::make_mut(&mut state.queue_details)
-                .remove(path)
-                .is_some();
-            state.queue_detail_fingerprints.remove(path);
-            state.pending_queue_detail_fingerprints.remove(path);
             continue;
         };
 
@@ -998,128 +953,100 @@ pub(super) fn validate_queue_details(
         if cached_fingerprint == Some(fingerprint) && state.queue_details.contains_key(path) {
             continue;
         }
-
-        if cached_fingerprint.is_some() && cached_fingerprint != Some(fingerprint) {
-            changed |= Arc::make_mut(&mut state.queue_details)
-                .remove(path)
-                .is_some();
+        if cached_fingerprint.is_some_and(|cached| cached != fingerprint) {
+            Arc::make_mut(&mut state.queue_details).remove(path);
             state.queue_detail_fingerprints.remove(path);
         }
-
-        if state.pending_queue_detail_fingerprints.get(path) == Some(&fingerprint) {
-            continue;
-        }
-        pending_requests.push((path.clone(), fingerprint));
+        unknown.push((path.clone(), fingerprint));
     }
 
-    let cached_rows = load_cached(&pending_requests);
-    for (path, fingerprint) in pending_requests {
-        if let Some(indexed) = cached_rows.get(&path) {
-            let needs_update = state.queue_details.get(&path) != Some(indexed);
-            state
-                .queue_detail_fingerprints
-                .insert(path.clone(), fingerprint);
-            state.pending_queue_detail_fingerprints.remove(&path);
-            if needs_update {
-                Arc::make_mut(&mut state.queue_details).insert(path, indexed.clone());
-                changed = true;
-            }
-            continue;
-        }
-
+    let cached_rows = load_cached(&unknown);
+    unknown.retain(|(path, fingerprint)| {
+        let Some(indexed) = cached_rows.get(path) else {
+            return true;
+        };
         state
-            .pending_queue_detail_fingerprints
-            .insert(path.clone(), fingerprint);
-        if external_queue_details_tx
-            .send(ExternalQueueDetailsRequest {
-                path: path.clone(),
-                fingerprint,
-            })
-            .is_err()
-        {
-            state.pending_queue_detail_fingerprints.remove(&path);
+            .queue_detail_fingerprints
+            .insert(path.clone(), *fingerprint);
+        if state.queue_details.get(path) != Some(indexed) {
+            Arc::make_mut(&mut state.queue_details).insert(path.clone(), indexed.clone());
         }
-    }
-    changed
+        false
+    });
+    unknown
 }
 
 // ---------------------------------------------------------------------------
 // Track updates
 // ---------------------------------------------------------------------------
 
+fn track_details_differ(track: &LibraryTrack, indexed: &IndexedTrack) -> bool {
+    track.title != indexed.title
+        || track.artist != indexed.artist
+        || track.album != indexed.album
+        || track.cover_path != indexed.cover_path
+        || track.search_tags != indexed.search_tags
+        || track.genre != indexed.genre
+        || track.year != indexed.year
+        || track.track_no != indexed.track_no
+        || track.duration_secs != indexed.duration_secs
+}
+
+fn copy_track_details(track: &mut LibraryTrack, indexed: &IndexedTrack) {
+    track.title.clone_from(&indexed.title);
+    track.artist.clone_from(&indexed.artist);
+    track.album.clone_from(&indexed.album);
+    track.cover_path.clone_from(&indexed.cover_path);
+    track.search_tags.clone_from(&indexed.search_tags);
+    track.genre.clone_from(&indexed.genre);
+    track.year = indexed.year;
+    track.track_no = indexed.track_no;
+    track.duration_secs = indexed.duration_secs;
+}
+
+/// Give the library's tracks the details in `indexed_by_path`. The library is
+/// found through its path index and copied only if a track changes.
 fn update_library_track_details(
     state: &mut BridgeState,
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
 ) -> bool {
-    let mut next_library = (*state.library).clone();
-    let mut changed = false;
-    for track in &mut next_library.tracks {
-        let Some(indexed) = indexed_by_path.get(&track.path) else {
-            continue;
-        };
-        if track.title != indexed.title {
-            track.title.clone_from(&indexed.title);
-            changed = true;
-        }
-        if track.artist != indexed.artist {
-            track.artist.clone_from(&indexed.artist);
-            changed = true;
-        }
-        if track.album != indexed.album {
-            track.album.clone_from(&indexed.album);
-            changed = true;
-        }
-        if track.cover_path != indexed.cover_path {
-            track.cover_path.clone_from(&indexed.cover_path);
-            changed = true;
-        }
-        if track.search_tags != indexed.search_tags {
-            track.search_tags.clone_from(&indexed.search_tags);
-            changed = true;
-        }
-        if track.genre != indexed.genre {
-            track.genre.clone_from(&indexed.genre);
-            changed = true;
-        }
-        if track.year != indexed.year {
-            track.year = indexed.year;
-            changed = true;
-        }
-        if track.track_no != indexed.track_no {
-            track.track_no = indexed.track_no;
-            changed = true;
-        }
-        if track.duration_secs != indexed.duration_secs {
-            track.duration_secs = indexed.duration_secs;
-            changed = true;
+    let mut updates = Vec::new();
+    for (path, indexed) in indexed_by_path {
+        for position in state.library_index.positions(&state.library, path) {
+            if track_details_differ(&state.library.tracks[position], indexed) {
+                updates.push((position, indexed));
+            }
         }
     }
-    if changed {
-        next_library.search_revision = next_library.search_revision.saturating_add(1);
-        state.library = Arc::new(next_library);
+    if updates.is_empty() {
+        return false;
     }
-    changed
+    let previous = Arc::clone(&state.library);
+    let mut next_library = (*previous).clone();
+    for (position, indexed) in updates {
+        copy_track_details(&mut next_library.tracks[position], indexed);
+    }
+    next_library.search_revision = next_library.search_revision.saturating_add(1);
+    state.library = Arc::new(next_library);
+    // The paths stay as they were, so the index still holds.
+    state.library_index.carry_over(&previous, &state.library);
+    true
 }
 
+/// Give queued files outside the library the details in `indexed_by_path`,
+/// which were read when the files were in the states in `fingerprints`.
 fn update_queue_track_details(
     state: &mut BridgeState,
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
+    fingerprints: &HashMap<PathBuf, TrackFileFingerprint>,
 ) -> bool {
-    let library_paths: HashSet<&Path> = state
-        .library
-        .tracks
-        .iter()
-        .map(|track| track.path.as_path())
-        .collect();
     let mut changed = false;
-
     for (path, indexed) in indexed_by_path {
-        if library_paths.contains(path.as_path()) {
+        if state.library_index.contains(&state.library, path) {
             changed |= Arc::make_mut(&mut state.queue_details)
                 .remove(path)
                 .is_some();
             state.queue_detail_fingerprints.remove(path);
-            state.pending_queue_detail_fingerprints.remove(path);
             continue;
         }
         let needs_update = state
@@ -1130,93 +1057,65 @@ fn update_queue_track_details(
             Arc::make_mut(&mut state.queue_details).insert(path.clone(), indexed.clone());
             changed = true;
         }
-        if let Some(fingerprint) = track_file_fingerprint(path) {
+        if let Some(fingerprint) = fingerprints.get(path) {
             state
                 .queue_detail_fingerprints
-                .insert(path.clone(), fingerprint);
+                .insert(path.clone(), *fingerprint);
         }
-        state.pending_queue_detail_fingerprints.remove(path);
     }
-
     changed
 }
 
-/// Refresh the library rows of `paths` from their files, reporting the files
-/// that could not be read fully. `None` if the refresh failed as a whole.
-fn refresh_indexed_paths(
-    paths: &[PathBuf],
-    event_tx: &Sender<BridgeEvent>,
-) -> Option<HashMap<PathBuf, IndexedTrack>> {
-    let refresh = match refresh_indexed_metadata_for_paths(paths) {
-        Ok(refresh) => refresh,
-        Err(err) => {
-            let _ = try_send_event(event_tx, BridgeEvent::Error(err));
-            return None;
-        }
-    };
-    if let Some(problem) = refresh.problem {
-        let _ = try_send_event(event_tx, BridgeEvent::Error(problem));
-    }
-    Some(refresh.indexed)
-}
-
-fn refresh_edited_paths(
+/// Apply the details the edit refresh worker read again from files the tag
+/// editor saved.
+pub(super) fn apply_edited_details(
     state: &mut BridgeState,
-    paths: &[PathBuf],
+    indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
+    fingerprints: &HashMap<PathBuf, TrackFileFingerprint>,
     metadata: &MetadataService,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
-    event_tx: &Sender<BridgeEvent>,
 ) -> bool {
-    if paths.is_empty() {
+    if indexed_by_path.is_empty() {
         return false;
     }
-
-    let Some(indexed_by_path) = refresh_indexed_paths(paths, event_tx) else {
-        return false;
-    };
-
-    let mut changed = false;
-    changed |= update_library_track_details(state, &indexed_by_path);
-    changed |= update_queue_track_details(state, &indexed_by_path);
+    let mut changed = update_library_track_details(state, indexed_by_path);
+    changed |= update_queue_track_details(state, indexed_by_path, fingerprints);
 
     if let Some(current_path) = state.playback.current.as_ref() {
-        if paths.iter().any(|path| path == current_path) {
+        if indexed_by_path.contains_key(current_path) {
             metadata.request(current_path.clone());
             changed = true;
         }
     }
 
-    changed |= sync_queue_details(state, external_queue_details_tx);
+    sync_queue_details(state);
     changed
 }
 
 /// Apply one map of files renamed on disk to the library, the queue, the
-/// engine, and analysis. The whole map applies at once, so a swap or
-/// renumbering, where a file takes another renamed file's old name, renames
-/// each file exactly once.
+/// engine, and analysis, with the details the rename read from the files.
+/// The whole map applies at once, so a swap or renumbering, where a file
+/// takes another renamed file's old name, renames each file exactly once.
 pub(super) fn refresh_renamed_paths(
     state: &mut BridgeState,
     rename_map: Arc<PathRenames>,
+    details: RenamedDetails,
     playback: &PlaybackEngine,
     analysis: &AnalysisEngine,
     metadata: &MetadataService,
-    external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
     if rename_map.is_empty() {
         return false;
     }
-
-    let new_paths = rename_map.values().cloned().collect::<Vec<_>>();
-    let Some(indexed_by_path) = refresh_indexed_paths(&new_paths, event_tx) else {
-        return false;
-    };
+    if let Some(problem) = details.problem {
+        let _ = try_send_event(event_tx, BridgeEvent::Error(problem));
+    }
 
     let mut changed = false;
-    changed |= apply_renamed_library_paths(state, &rename_map, &indexed_by_path);
-    changed |= apply_renamed_queue_paths(state, &rename_map, &indexed_by_path, metadata);
-    changed |= update_queue_track_details(state, &indexed_by_path);
-    changed |= sync_queue_details(state, external_queue_details_tx);
+    changed |= apply_renamed_library_paths(state, &rename_map, &details.indexed);
+    changed |= apply_renamed_queue_paths(state, &rename_map, &details.indexed, metadata);
+    changed |= update_queue_track_details(state, &details.indexed, &details.fingerprints);
+    sync_queue_details(state);
     // The engine plays from its own copy of the queue. Until it acknowledges
     // the renames, its events are remapped so they cannot restore old paths.
     state
@@ -1228,65 +1127,40 @@ pub(super) fn refresh_renamed_paths(
     changed
 }
 
+/// Move the library's renamed tracks to their new paths, in one pass that
+/// finds them through the path index. The library is copied only if a track
+/// changes.
 fn apply_renamed_library_paths(
     state: &mut BridgeState,
     rename_map: &PathRenames,
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
 ) -> bool {
-    let mut changed = false;
+    let mut updates = Vec::new();
+    for (old_path, new_path) in rename_map {
+        let indexed = indexed_by_path.get(new_path);
+        for position in state.library_index.positions(&state.library, old_path) {
+            let track = &state.library.tracks[position];
+            if &track.path != new_path
+                || indexed.is_some_and(|indexed| track_details_differ(track, indexed))
+            {
+                updates.push((position, new_path, indexed));
+            }
+        }
+    }
+    if updates.is_empty() {
+        return false;
+    }
     let mut next_library = (*state.library).clone();
-    for track in &mut next_library.tracks {
-        let Some(new_path) = rename_map.get(&track.path) else {
-            continue;
-        };
-        if &track.path != new_path {
-            track.path.clone_from(new_path);
-            changed = true;
-        }
-        if let Some(indexed) = indexed_by_path.get(new_path) {
-            if track.title != indexed.title {
-                track.title.clone_from(&indexed.title);
-                changed = true;
-            }
-            if track.artist != indexed.artist {
-                track.artist.clone_from(&indexed.artist);
-                changed = true;
-            }
-            if track.album != indexed.album {
-                track.album.clone_from(&indexed.album);
-                changed = true;
-            }
-            if track.cover_path != indexed.cover_path {
-                track.cover_path.clone_from(&indexed.cover_path);
-                changed = true;
-            }
-            if track.search_tags != indexed.search_tags {
-                track.search_tags.clone_from(&indexed.search_tags);
-                changed = true;
-            }
-            if track.genre != indexed.genre {
-                track.genre.clone_from(&indexed.genre);
-                changed = true;
-            }
-            if track.year != indexed.year {
-                track.year = indexed.year;
-                changed = true;
-            }
-            if track.track_no != indexed.track_no {
-                track.track_no = indexed.track_no;
-                changed = true;
-            }
-            if track.duration_secs != indexed.duration_secs {
-                track.duration_secs = indexed.duration_secs;
-                changed = true;
-            }
+    for (position, new_path, indexed) in updates {
+        let track = &mut next_library.tracks[position];
+        track.path.clone_from(new_path);
+        if let Some(indexed) = indexed {
+            copy_track_details(track, indexed);
         }
     }
-    if changed {
-        next_library.search_revision = next_library.search_revision.saturating_add(1);
-        state.library = Arc::new(next_library);
-    }
-    changed
+    next_library.search_revision = next_library.search_revision.saturating_add(1);
+    state.library = Arc::new(next_library);
+    true
 }
 
 fn apply_renamed_queue_paths(
@@ -1326,23 +1200,13 @@ fn apply_renamed_queue_paths(
         take_renamed_entries(Arc::make_mut(&mut state.queue_details), rename_map)
     {
         changed = true;
-        if !state
-            .library
-            .tracks
-            .iter()
-            .any(|track| track.path == new_path)
-        {
+        if !state.library_index.contains(&state.library, &new_path) {
             let details = indexed_by_path.get(&new_path).cloned().unwrap_or(details);
             Arc::make_mut(&mut state.queue_details).insert(new_path, details);
         }
     }
-    for fingerprints in [
-        &mut state.queue_detail_fingerprints,
-        &mut state.pending_queue_detail_fingerprints,
-    ] {
-        let moved = take_renamed_entries(fingerprints, rename_map);
-        fingerprints.extend(moved);
-    }
+    let moved = take_renamed_entries(&mut state.queue_detail_fingerprints, rename_map);
+    state.queue_detail_fingerprints.extend(moved);
     changed
 }
 
@@ -1374,10 +1238,14 @@ mod tests {
     use std::time::Duration;
 
     use super::super::events::{
-        process_playback_event, pump_external_queue_detail_events, pump_library_events,
-        pump_metadata_events, pump_playback_events,
+        process_playback_event, pump_library_events, pump_metadata_events, pump_playback_events,
     };
-    use super::super::ExternalQueueDetailsEvent;
+    use crate::library::load_external_track_caches;
+
+    /// Validate the queue's details as the validation worker does.
+    fn validate_now(state: &mut BridgeState) -> Vec<(PathBuf, TrackFileFingerprint)> {
+        validate_queue_details(state, &|| false, load_external_track_caches)
+    }
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
@@ -1444,13 +1312,10 @@ mod tests {
     fn queue_sync_schedules_validation_without_file_or_database_work() {
         let mut state = BridgeState::default();
         state.queue = vec![p("/unavailable/queue-track.flac")];
-        let (tx, rx) = crossbeam_channel::unbounded();
-        assert!(!sync_queue_details(&mut state, &tx));
+        sync_queue_details(&mut state);
         assert!(state.queue_detail_validation_requested);
         assert_eq!(state.queue_detail_generation, 1);
-        assert!(rx.try_recv().is_err());
     }
-
     #[test]
     fn show_track_in_library_expands_ancestors_and_selects_track() {
         let root_path = p("/music");
@@ -1654,66 +1519,49 @@ mod tests {
     }
 
     #[test]
-    fn sync_queue_details_requests_external_tracks_and_prunes_removed_entries() {
+    fn validation_reads_external_tracks_and_prunes_removed_entries() {
         let root = test_dir("queue-details");
         fs::create_dir_all(&root).expect("mkdir root");
         let track = root.join("song.flac");
-        let cover = root.join("cover.jpg");
         write_stub(&track, b"not-real-audio");
-        write_stub(&cover, b"not-real-jpg");
-        let (request_tx, request_rx) = crossbeam_channel::unbounded();
-        let (event_tx, event_rx) = crossbeam_channel::unbounded();
 
         let mut state = BridgeState::default();
         state.queue = vec![track.clone()];
-        assert!(!sync_queue_details_blocking(&mut state, &request_tx));
-        let request = request_rx.try_recv().expect("external detail request");
-        assert_eq!(request.path, track);
-
-        event_tx
-            .send(ExternalQueueDetailsEvent {
-                path: request.path.clone(),
-                fingerprint: request.fingerprint,
-                indexed: IndexedTrack {
-                    search_tags: crate::library::SearchTags::default(),
-                    title: "song".to_string(),
-                    artist: String::new(),
-                    album: String::new(),
-                    cover_path: cover.to_string_lossy().to_string(),
-                    genre: String::new(),
-                    year: None,
-                    track_no: None,
-                    duration_secs: None,
-                },
-            })
-            .expect("send queue detail event");
-        assert!(pump_external_queue_detail_events(&event_rx, &mut state));
+        let reads = validate_now(&mut state);
         assert_eq!(
-            state
-                .queue_details
-                .get(&request.path)
-                .map(|details| details.title.as_str()),
-            Some("song")
+            reads.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+            vec![&track]
         );
-        assert_eq!(
-            state
-                .queue_details
-                .get(&request.path)
-                .map(|details| details.cover_path.as_str()),
-            Some(cover.to_string_lossy().as_ref())
+        // The worker reads the file and keeps what it found.
+        Arc::make_mut(&mut state.queue_details).insert(
+            track.clone(),
+            IndexedTrack {
+                search_tags: crate::library::SearchTags::default(),
+                title: "song".to_string(),
+                artist: String::new(),
+                album: String::new(),
+                cover_path: String::new(),
+                genre: String::new(),
+                year: None,
+                track_no: None,
+                duration_secs: None,
+            },
         );
+        state
+            .queue_detail_fingerprints
+            .insert(track.clone(), reads[0].1);
+        assert!(validate_now(&mut state).is_empty());
+        assert!(state.queue_details.contains_key(&track));
 
         state.queue.clear();
-        assert!(sync_queue_details_blocking(&mut state, &request_tx));
+        assert!(validate_now(&mut state).is_empty());
         assert!(state.queue_details.is_empty());
 
         let _ = fs::remove_dir_all(root);
     }
-
     #[test]
-    fn sync_queue_details_skips_library_tracks_in_queue() {
+    fn validation_skips_library_tracks_in_queue() {
         let track = p("/library/song.flac");
-        let (request_tx, request_rx) = crossbeam_channel::unbounded();
         let mut state = BridgeState::default();
         state.library = Arc::new(LibrarySnapshot {
             tracks: vec![LibraryTrack {
@@ -1725,12 +1573,9 @@ mod tests {
         });
         state.queue = vec![track.clone()];
 
-        assert!(!sync_queue_details_blocking(&mut state, &request_tx));
-
+        assert!(validate_now(&mut state).is_empty());
         assert!(!state.queue_details.contains_key(&track));
-        assert!(request_rx.try_recv().is_err());
     }
-
     #[test]
     fn apply_session_restore_does_not_eagerly_populate_queue_details() {
         use super::super::config::{apply_session_restore, SessionSnapshot};
@@ -1774,13 +1619,11 @@ mod tests {
         state.queue = vec![track.clone()];
 
         let (library_tx, library_rx) = crossbeam_channel::unbounded();
-        let (request_tx, request_rx) = crossbeam_channel::unbounded();
         library_tx
             .send(LibraryEvent::Snapshot(LibrarySnapshot::default()))
             .expect("send library snapshot");
 
-        assert!(pump_library_events(&library_rx, &request_tx, &mut state));
-        assert!(request_rx.try_recv().is_err());
+        assert!(pump_library_events(&library_rx, &mut state));
         assert!(state.queue_detail_validation_requested);
         assert!(state.queue_details.is_empty());
 
@@ -1795,7 +1638,6 @@ mod tests {
         write_stub(&track, b"version-a");
         let old_fingerprint = track_file_fingerprint(&track).expect("initial fingerprint");
         write_stub(&track, b"version-b-with-new-size");
-        let (request_tx, request_rx) = crossbeam_channel::unbounded();
 
         let mut state = BridgeState::default();
         state.queue = vec![track.clone()];
@@ -1817,63 +1659,11 @@ mod tests {
             .queue_detail_fingerprints
             .insert(track.clone(), old_fingerprint);
 
-        assert!(sync_queue_details_blocking(&mut state, &request_tx));
+        let reads = validate_now(&mut state);
         assert!(!state.queue_details.contains_key(&track));
-        let request = request_rx.try_recv().expect("replacement request");
-        assert_ne!(request.fingerprint, old_fingerprint);
-        assert_eq!(
-            state.pending_queue_detail_fingerprints.get(&track),
-            Some(&request.fingerprint)
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn external_queue_detail_event_is_ignored_when_track_is_in_library() {
-        let root = test_dir("queue-details-library-owned");
-        fs::create_dir_all(&root).expect("mkdir root");
-        let track = root.join("song.flac");
-        write_stub(&track, b"not-real-audio");
-        let fingerprint = track_file_fingerprint(&track).expect("track fingerprint");
-
-        let mut state = BridgeState::default();
-        state.queue = vec![track.clone()];
-        state.library = Arc::new(LibrarySnapshot {
-            tracks: vec![LibraryTrack {
-                search_tags: crate::library::SearchTags::default(),
-                path: track.clone(),
-                title: "Library Title".to_string(),
-                ..LibraryTrack::default()
-            }],
-            ..LibrarySnapshot::default()
-        });
-        state
-            .pending_queue_detail_fingerprints
-            .insert(track.clone(), fingerprint);
-
-        let (event_tx, event_rx) = crossbeam_channel::unbounded();
-        event_tx
-            .send(ExternalQueueDetailsEvent {
-                path: track.clone(),
-                fingerprint,
-                indexed: IndexedTrack {
-                    search_tags: crate::library::SearchTags::default(),
-                    title: "External Title".to_string(),
-                    artist: String::new(),
-                    album: String::new(),
-                    cover_path: String::new(),
-                    genre: String::new(),
-                    year: None,
-                    track_no: None,
-                    duration_secs: None,
-                },
-            })
-            .expect("send queue detail event");
-
-        assert!(!pump_external_queue_detail_events(&event_rx, &mut state));
-        assert!(!state.queue_details.contains_key(&track));
-        assert!(!state.pending_queue_detail_fingerprints.contains_key(&track));
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].0, track);
+        assert_ne!(reads[0].1, old_fingerprint);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2123,6 +1913,163 @@ mod tests {
         );
     }
 
+    /// How albums were collected before the match borrowed from the tracks:
+    /// through each track's full tree context.
+    fn album_paths_through_tree_contexts(
+        library: &LibrarySnapshot,
+        artist: &str,
+        album: &str,
+    ) -> Vec<PathBuf> {
+        use super::super::search::derive_tree_path_context;
+        let (artist, album) = (artist.trim(), album.trim());
+        if album.is_empty() {
+            return Vec::new();
+        }
+        library
+            .tracks
+            .iter()
+            .filter(|track| {
+                let context = derive_tree_path_context(&track.path, &library.roots, &track.artist);
+                let in_album = |ctx: &super::super::search::TreePathContext| {
+                    ctx.is_main_level_album_track || ctx.is_disc_section_album_track
+                };
+                if album.starts_with("album|") {
+                    return context.as_ref().is_some_and(|ctx| {
+                        ctx.album_key.as_deref() == Some(album) && in_album(ctx)
+                    });
+                }
+                let artist_matches = if artist.starts_with("artist|") {
+                    context.as_ref().is_some_and(|ctx| ctx.artist_key == artist)
+                } else if let Some(ctx) = context.as_ref() {
+                    ctx.artist_name == artist
+                } else {
+                    normalized_library_artist(track) == artist
+                };
+                if !artist_matches {
+                    return false;
+                }
+                match context {
+                    Some(ctx) => {
+                        ctx.album_folder.as_deref().unwrap_or("Unknown Album") == album
+                            && in_album(&ctx)
+                    }
+                    None => normalized_library_album(track) == album,
+                }
+            })
+            .map(|track| track.path.clone())
+            .collect()
+    }
+
+    /// Tracks at every depth below two roots, one inside the other, and
+    /// outside them.
+    fn album_layout_library() -> LibrarySnapshot {
+        let (outer, inner) = (p("/music"), p("/music/Live"));
+        let tracks = [
+            ("/music/A/Album/01.flac", "A", "Album"),
+            ("/music/A/Album/Disc 1/01.flac", "A", "Album"),
+            ("/music/A/Album/CD2/01.flac", "A", "Album"),
+            ("/music/A/Album/Bonus/01.flac", "A", "Album"),
+            ("/music/A/Album/Disc 1/Extra/01.flac", "A", "Album"),
+            ("/music/A/Other/01.flac", "A", "Other"),
+            ("/music/A/loose.flac", "A", ""),
+            ("/music/single.flac", "", "Unknown Album"),
+            ("/music/tagged.flac", " Tagged ", "Album"),
+            ("/music/B|C/Al|bum/01.flac", "B", "Al|bum"),
+            ("/music/Live/A/Album/01.flac", "A", "Album"),
+            ("/music/Live/A/Album/Disc 3/01.flac", "A", "Album"),
+            ("/elsewhere/A/Album/01.flac", "A", "Album"),
+            ("/elsewhere/loose.flac", "", ""),
+        ];
+        LibrarySnapshot {
+            roots: vec![library_root(&outer), library_root(&inner)],
+            tracks: tracks
+                .iter()
+                .map(|(path, artist, album)| library_track(path, &outer, artist, album, None, None))
+                .collect(),
+            ..LibrarySnapshot::default()
+        }
+    }
+
+    #[test]
+    fn collect_album_paths_for_queue_matches_the_tree_contexts() {
+        let library = album_layout_library();
+        let selections = [
+            ("artist|/music|A", "album|/music|A|Album"),
+            ("", "album|/music/Live|A|Album"),
+            ("", "album|/music|B|C|Al|bum"),
+            ("", "album|/music|B|C|Al"),
+            ("", "album|/music|A"),
+            ("", "album|/music|A|Album|"),
+            ("artist|/music|A", "Album"),
+            ("artist|/music/Live|A", "Album"),
+            ("artist|/music|A|", "Album"),
+            ("A", "Album"),
+            ("A", "Other"),
+            ("A", "Unknown Album"),
+            ("Unknown Artist", "Unknown Album"),
+            ("Tagged", "Unknown Album"),
+            ("Unknown Artist", "Album"),
+            ("B|C", "Al|bum"),
+            ("A", "  "),
+        ];
+        for (artist, album) in selections {
+            assert_eq!(
+                collect_album_paths_for_queue(&library, artist, album),
+                album_paths_through_tree_contexts(&library, artist, album),
+                "{artist:?} / {album:?}"
+            );
+        }
+        assert_eq!(
+            collect_album_paths_for_queue(&library, "artist|/music|A", "album|/music|A|Album"),
+            vec![
+                p("/music/A/Album/01.flac"),
+                p("/music/A/Album/Disc 1/01.flac"),
+                p("/music/A/Album/CD2/01.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn queueing_an_album_does_not_allocate_per_library_track() {
+        let root = p("/music");
+        let mut tracks = Vec::new();
+        for artist in 0..50 {
+            for album in 0..4 {
+                for number in 0..10 {
+                    tracks.push(library_track(
+                        &format!("/music/Artist {artist}/Album {album}/{number:02}.flac"),
+                        &root,
+                        &format!("Artist {artist}"),
+                        &format!("Album {album}"),
+                        None,
+                        Some(number),
+                    ));
+                }
+            }
+        }
+        let library = LibrarySnapshot {
+            roots: vec![library_root(&root)],
+            tracks,
+            ..LibrarySnapshot::default()
+        };
+
+        for (artist, album) in [
+            ("artist|/music|Artist 7", "album|/music|Artist 7|Album 2"),
+            ("Artist 7", "Album 2"),
+        ] {
+            let before = crate::test_alloc::allocations();
+            let paths = collect_album_paths_for_queue(&library, artist, album);
+            let allocations = crate::test_alloc::allocations() - before;
+            assert_eq!(paths.len(), 10);
+            // The paths of the album's tracks, the vector that holds them, and
+            // the root's key; nothing for the other 1,990 tracks.
+            assert!(
+                allocations <= paths.len() + 8,
+                "{allocations} allocations for {artist:?} / {album:?}"
+            );
+        }
+    }
+
     #[test]
     fn collect_album_paths_for_queue_excludes_bonus_by_name_selector() {
         // Test the name-based (non-key) album selector path: when both
@@ -2316,7 +2263,6 @@ mod tests {
         let (metadata, _metadata_rx) = MetadataService::new();
         let (engine_tx, engine_rx) = crossbeam_channel::unbounded();
         let playback = PlaybackEngine::from_command_sender(engine_tx);
-        let (details_tx, _details_rx) = crossbeam_channel::unbounded();
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (old_current, new_current) = (p("/music/old current.flac"), p("/music/current.flac"));
         let (old_next, new_next) = (p("/music/old next.flac"), p("/music/next.flac"));
@@ -2344,10 +2290,10 @@ mod tests {
         assert!(refresh_renamed_paths(
             &mut state,
             Arc::new(renames.clone()),
+            RenamedDetails::default(),
             &playback,
             &analysis,
             &metadata,
-            &details_tx,
             &event_tx,
         ));
         assert_eq!(
@@ -2444,7 +2390,6 @@ mod tests {
         let (metadata, _metadata_rx) = MetadataService::new();
         let (engine_tx, engine_rx) = crossbeam_channel::unbounded();
         let playback = PlaybackEngine::from_command_sender(engine_tx);
-        let (details_tx, _details_rx) = crossbeam_channel::unbounded();
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let (a, b, other) = (p("/music/a.flac"), p("/music/b.flac"), p("/music/c.flac"));
         let fingerprint = |size_bytes| crate::library::TrackFileFingerprint {
@@ -2463,10 +2408,10 @@ mod tests {
         assert!(refresh_renamed_paths(
             &mut state,
             Arc::new(swap.clone()),
+            RenamedDetails::default(),
             &playback,
             &analysis,
             &metadata,
-            &details_tx,
             &event_tx,
         ));
         assert_eq!(state.queue, vec![b.clone(), a.clone(), other]);
@@ -2484,6 +2429,70 @@ mod tests {
             Ok(AnalysisCommand::RemapPaths(sent)) if *sent == swap
         ));
         assert!(analysis_rx.try_recv().is_err(), "one remap for analysis");
+    }
+
+    #[test]
+    fn edits_and_renames_copy_the_library_only_for_a_track_they_change() {
+        let root = p("/music");
+        let library = LibrarySnapshot {
+            roots: vec![library_root(&root)],
+            tracks: (0..2000)
+                .map(|index| {
+                    library_track(
+                        &format!("/music/Artist/Album/{index:04}.flac"),
+                        &root,
+                        "Artist",
+                        "Album",
+                        None,
+                        None,
+                    )
+                })
+                .collect(),
+            ..LibrarySnapshot::default()
+        };
+        let mut state = BridgeState {
+            library: Arc::new(library),
+            ..BridgeState::default()
+        };
+        let details = |title: &str| IndexedTrack {
+            search_tags: crate::library::SearchTags::default(),
+            title: title.to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            cover_path: String::new(),
+            genre: String::new(),
+            year: None,
+            track_no: None,
+            duration_secs: None,
+        };
+        let outside = p("/elsewhere/song.flac");
+        let edits = HashMap::from([(outside.clone(), details("Outside"))]);
+        let renames = PathRenames::from([(outside.clone(), p("/elsewhere/renamed.flac"))]);
+        // The bridge finds tracks through the library's index, built once.
+        assert!(!state.library_index.contains(&state.library, &outside));
+
+        let before = crate::test_alloc::allocations();
+        assert!(!update_library_track_details(&mut state, &edits));
+        assert!(!apply_renamed_library_paths(
+            &mut state,
+            &renames,
+            &HashMap::new()
+        ));
+        let allocations = crate::test_alloc::allocations() - before;
+        assert!(allocations < 16, "{allocations} allocations");
+
+        let inside = p("/music/Artist/Album/1234.flac");
+        let library = Arc::clone(&state.library);
+        let edits = HashMap::from([(inside.clone(), details("Edited"))]);
+        assert!(update_library_track_details(&mut state, &edits));
+        assert!(!Arc::ptr_eq(&library, &state.library));
+        assert_eq!(state.library.tracks[1234].title, "Edited");
+        assert!(state
+            .library
+            .tracks
+            .iter()
+            .enumerate()
+            .all(|(index, track)| index == 1234 || track.title.is_empty()));
     }
 
     #[test]
@@ -2551,27 +2560,27 @@ mod tests {
             ..BridgeState::default()
         };
         let (metadata, _metadata_rx) = MetadataService::new();
-        let (details_tx, _details_rx) = crossbeam_channel::unbounded();
-        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut refreshes = super::super::edit_refresh::EditRefreshWorker::new();
 
-        refresh_edited_paths(
+        assert!(refreshes.request(vec![path.clone()]));
+        let result = refreshes
+            .results
+            .recv_timeout(Duration::from_secs(10))
+            .expect("refresh result");
+        let refresh = refreshes.accept(result);
+        apply_edited_details(
             &mut state,
-            std::slice::from_ref(&path),
+            &refresh.indexed,
+            &refresh.fingerprints,
             &metadata,
-            &details_tx,
-            &event_tx,
         );
 
-        match event_rx.try_recv() {
-            Ok(BridgeEvent::Error(message)) => {
-                assert!(
-                    message.contains("could not read the tags of 1 file")
-                        && message.contains(&path.display().to_string()),
-                    "{message}"
-                );
-            }
-            other => panic!("expected the unreadable file to be reported, got {other:?}"),
-        }
+        let message = refresh.problem.expect("the unreadable file is reported");
+        assert!(
+            message.contains("could not read the tags of 1 file")
+                && message.contains(&path.display().to_string()),
+            "{message}"
+        );
         let track = &state.library.tracks[0];
         assert_eq!(
             (

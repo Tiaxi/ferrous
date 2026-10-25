@@ -10,19 +10,15 @@ use crate::lastfm::{
     ServiceOptions as LastFmServiceOptions,
 };
 use crate::library::{
-    load_external_track_cache, read_external_track, read_track_info,
-    refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
-    store_external_track_cache, IndexedTrack,
+    read_track_info, refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
+    track_file_fingerprint, IndexedTrack,
 };
 
 use crate::worker_thread::spawn_worker;
 
 use super::config::config_base_path;
 use super::search::{run_search_worker, SearchWorkerQuery};
-use super::{
-    ApplyAlbumArtEvent, ApplyAlbumArtRequest, BridgeSearchResultsFrame, BridgeSettings,
-    ExternalQueueDetailsEvent, ExternalQueueDetailsRequest,
-};
+use super::{ApplyAlbumArtEvent, ApplyAlbumArtRequest, BridgeSearchResultsFrame, BridgeSettings};
 
 /// Start the search worker, and return its query and result channels.
 pub(super) fn spawn_search_worker() -> (
@@ -35,20 +31,6 @@ pub(super) fn spawn_search_worker() -> (
         run_search_worker(&query_rx, &results_tx);
     });
     (query_tx, results_rx)
-}
-
-/// Start the worker that reads queued files outside the library, and return
-/// its request and result channels.
-pub(super) fn spawn_queue_detail_worker() -> (
-    Sender<ExternalQueueDetailsRequest>,
-    Receiver<ExternalQueueDetailsEvent>,
-) {
-    let (request_tx, request_rx) = unbounded();
-    let (event_tx, event_rx) = unbounded();
-    spawn_worker("ferrous-queue-details", move || {
-        run_external_queue_detail_worker(&request_rx, &event_tx);
-    });
-    (request_tx, event_rx)
 }
 
 /// Start the album art worker, and return its request and result channels.
@@ -76,24 +58,6 @@ pub(super) fn spawn_lastfm_service(
         });
     }
     (lastfm, lastfm_rx)
-}
-
-fn run_external_queue_detail_worker(
-    req_rx: &Receiver<ExternalQueueDetailsRequest>,
-    event_tx: &Sender<ExternalQueueDetailsEvent>,
-) {
-    while let Ok(request) = req_rx.recv() {
-        let indexed =
-            load_external_track_cache(&request.path, request.fingerprint).unwrap_or_else(|| {
-                let read = read_external_track(&request.path);
-                store_external_track_cache(&request.path, request.fingerprint, read)
-            });
-        let _ = event_tx.send(ExternalQueueDetailsEvent {
-            path: request.path,
-            fingerprint: request.fingerprint,
-            indexed,
-        });
-    }
 }
 
 fn run_apply_album_art_worker(
@@ -159,15 +123,22 @@ fn run_apply_album_art_worker(
                     (Some(failures), Some(refresh)) => Some(format!("{failures}; {refresh}")),
                     (failures, refresh) => failures.or(refresh),
                 };
+                // Read here, so the bridge thread does not stat the files.
+                let fingerprints = indexed_by_path
+                    .keys()
+                    .filter_map(|path| Some((path.clone(), track_file_fingerprint(path)?)))
+                    .collect();
                 ApplyAlbumArtEvent {
                     track_path: request.track_path,
                     indexed_by_path,
+                    fingerprints,
                     error,
                 }
             }
             Err(error) => ApplyAlbumArtEvent {
                 track_path: request.track_path,
                 indexed_by_path: HashMap::new(),
+                fingerprints: HashMap::new(),
                 error: Some(format!("failed to apply album art: {error}")),
             },
         };
