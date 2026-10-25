@@ -455,7 +455,6 @@ mod gst_tests {
     use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes_after_junk};
     use gst::prelude::*;
     use gstreamer as gst;
-    use gstreamer_audio as gst_audio;
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -494,46 +493,27 @@ mod gst_tests {
     }
 
     /// A decoded buffer.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     struct Decoded {
         start: Duration,
         length: Duration,
-        /// Samples from across the buffer, if it holds mono `F32LE` audio.
-        samples: Vec<f32>,
     }
 
-    impl Decoded {
-        /// Samples spread across `bytes` of mono `F32LE` audio.
-        fn samples_of(bytes: &[u8]) -> Vec<f32> {
-            let samples: Vec<_> = bytes
-                .chunks_exact(4)
-                .map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
-                .collect();
-            let step = samples.len().div_ceil(16).max(1);
-            samples.into_iter().step_by(step).collect()
-        }
-
-        /// Whether this buffer holds the audio that `other` holds. The AC3
-        /// decoder dithers with a state that every frame it decodes
-        /// advances, so a frame decodes with other noise when decoding
-        /// started at another frame.
-        fn plays_like(&self, other: &Self) -> bool {
-            self.start == other.start
-                && self.length == other.length
-                && !self.samples.is_empty()
-                && self.samples.len() == other.samples.len()
-                && self
-                    .samples
-                    .iter()
-                    .zip(&other.samples)
-                    .all(|(sample, other)| (sample - other).abs() <= 0.01)
-        }
+    /// A compressed frame that left the parser, before the decoder.
+    #[derive(Debug, PartialEq)]
+    struct Parsed {
+        start: Option<gst::ClockTime>,
+        bytes: Vec<u8>,
     }
+
+    /// The parsers of the formats under test.
+    const PARSERS: [&str; 2] = [AC3.elements[0], DTS.elements[0]];
 
     /// What playback from a seek target, or through a queue, produced.
     #[derive(Debug, Default)]
     struct Run {
         decoded: Vec<Decoded>,
+        parsed: Vec<Parsed>,
         delivered: Vec<Delivered>,
     }
 
@@ -572,11 +552,13 @@ mod gst_tests {
     }
 
     /// `playbin3` with the app's source filter, a fake audio sink, and
-    /// recorders for what the sources deliver and what is decoded. It
-    /// activates its sources as the playback backend does.
+    /// recorders for what the sources deliver, what the parser frames and
+    /// what is decoded. It activates its sources as the playback backend
+    /// does.
     struct Player {
         playbin: gst::Element,
         decoded: Arc<Mutex<Vec<Decoded>>>,
+        parsed: Arc<Mutex<Vec<Parsed>>>,
         delivered: Arc<Mutex<Vec<Delivered>>>,
         trace: PipelineTrace,
         activation: Arc<SourceActivation>,
@@ -595,10 +577,12 @@ mod gst_tests {
                 trace: PipelineTrace::new(&playbin),
                 playbin,
                 decoded: Arc::default(),
+                parsed: Arc::default(),
                 delivered: Arc::default(),
                 activation,
             };
             player.record_delivered_buffers();
+            player.record_parsed_frames();
             player
                 .playbin
                 .set_property("audio-sink", player.decoded_sink());
@@ -640,6 +624,45 @@ mod gst_tests {
             });
         }
 
+        /// Record the frames that leave the parser. A flushing seek starts a
+        /// new run once the end of the flush leaves the parser, before the
+        /// first frame from the seek target.
+        fn record_parsed_frames(&self) {
+            let parsed = Arc::clone(&self.parsed);
+            self.playbin
+                .connect("deep-element-added", false, move |values| {
+                    let element = values.get(2)?.get::<gst::Element>().ok()?;
+                    if element
+                        .factory()
+                        .is_none_or(|factory| !PARSERS.contains(&factory.name().as_str()))
+                    {
+                        return None;
+                    }
+                    let parsed = Arc::clone(&parsed);
+                    element.static_pad("src")?.add_probe(
+                        gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_FLUSH,
+                        move |_pad, info| {
+                            if is_flush_stop(info) {
+                                if let Ok(mut parsed) = parsed.lock() {
+                                    parsed.clear();
+                                }
+                            } else if let Some(buffer) = info.buffer() {
+                                if let (Ok(map), Ok(mut parsed)) =
+                                    (buffer.map_readable(), parsed.lock())
+                                {
+                                    parsed.push(Parsed {
+                                        start: buffer.pts(),
+                                        bytes: map.to_vec(),
+                                    });
+                                }
+                            }
+                            gst::PadProbeReturn::Ok
+                        },
+                    );
+                    None
+                });
+        }
+
         /// A sink that records what is decoded. A flushing seek starts a
         /// new run once the end of the flush reaches the sink, before the
         /// first buffer from the seek target.
@@ -651,33 +674,18 @@ mod gst_tests {
                 .expect("fakesink");
             sink.static_pad("sink").expect("fakesink pad").add_probe(
                 gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_FLUSH,
-                move |pad, info| {
+                move |_pad, info| {
                     if is_flush_stop(info) {
                         if let Ok(mut decoded) = decoded.lock() {
                             decoded.clear();
                         }
                     } else if let Some(buffer) = info.buffer() {
-                        if let (Some(start), Some(length), Ok(map), Ok(mut decoded)) = (
-                            buffer.pts(),
-                            buffer.duration(),
-                            buffer.map_readable(),
-                            decoded.lock(),
-                        ) {
-                            let mono_f32 = pad
-                                .current_caps()
-                                .and_then(|caps| gst_audio::AudioInfo::from_caps(&caps).ok())
-                                .is_some_and(|audio| {
-                                    audio.format() == gst_audio::AudioFormat::F32le
-                                        && audio.channels() == 1
-                                });
+                        if let (Some(start), Some(length), Ok(mut decoded)) =
+                            (buffer.pts(), buffer.duration(), decoded.lock())
+                        {
                             decoded.push(Decoded {
                                 start: Duration::from_nanos(start.nseconds()),
                                 length: Duration::from_nanos(length.nseconds()),
-                                samples: if mono_f32 {
-                                    Decoded::samples_of(&map)
-                                } else {
-                                    Vec::new()
-                                },
                             });
                         }
                     }
@@ -716,9 +724,11 @@ mod gst_tests {
         /// for a wait for `what` that timed out.
         fn report(&self, what: &str) -> String {
             let decoded = self.decoded.lock().map_or(0, |decoded| decoded.len());
+            let parsed = self.parsed.lock().map_or(0, |parsed| parsed.len());
             let delivered = self.delivered.lock().map_or(0, |delivered| delivered.len());
             let details = format!(
-                "  since the last seek: {decoded} buffers decoded, {delivered} left the sources\n"
+                "  since the last seek: {decoded} buffers decoded, {parsed} frames parsed, \
+                 {delivered} left the sources\n"
             );
             self.trace.report(what, &details)
         }
@@ -726,6 +736,7 @@ mod gst_tests {
         fn take_run(&self) -> Run {
             Run {
                 decoded: std::mem::take(&mut *self.decoded.lock().expect("decoded")),
+                parsed: std::mem::take(&mut *self.parsed.lock().expect("parsed")),
                 delivered: std::mem::take(&mut *self.delivered.lock().expect("delivered")),
             }
         }
@@ -870,6 +881,18 @@ mod gst_tests {
             (256 * 1024_usize).div_ceil(self.fixture.len())
         }
 
+        /// The frames of `parsed` from the one that plays `target` on.
+        fn frames_from<'a>(&self, target: Duration, parsed: &'a [Parsed]) -> Vec<&'a Parsed> {
+            parsed
+                .iter()
+                .skip_while(|frame| {
+                    frame.start.is_none_or(|start| {
+                        Duration::from_nanos(start.nseconds()) + self.frame_length <= target
+                    })
+                })
+                .collect()
+        }
+
         fn length(&self, repeats: usize) -> Duration {
             self.frame_length * self.fixture_frames * u32::try_from(repeats).expect("repeat count")
         }
@@ -910,9 +933,15 @@ mod gst_tests {
     }
 
     /// Seeks in a ripped file must play what the same seeks play in a file
-    /// that starts with the first frame: from the target, with the target's
-    /// samples, to the end of the stream. That file ends with a tag, so the
-    /// filter reads it in push mode too, but moves no byte position.
+    /// that starts with the first frame: the same compressed frames, from
+    /// the target to the end of the stream. That file ends with a tag, so
+    /// the filter reads it in push mode too, but moves no byte position.
+    ///
+    /// The frames are compared before the decoder, whose output depends on
+    /// what it decoded before, such as the dither of the AC3 decoder. For a
+    /// target it has indexed no frame near, the parser scans from the last
+    /// frame it indexed before the target, which depends on how the reads
+    /// split the file, and the decoder drops what comes before the target.
     fn assert_seeks_play_what_they_play_without_the_junk(format: &Format) {
         require_elements(format.elements);
         let name = format.name;
@@ -945,15 +974,15 @@ mod gst_tests {
                 "{name}: playback after seeking to {target:?} ends at {:?} of {length:?}",
                 run.last_end()
             );
+            assert_same_frames(
+                &format.frames_from(target, &run.parsed),
+                &format.frames_from(target, &tagged_run.parsed),
+            )
+            .unwrap_or_else(|err| panic!("{name}: playback after seeking to {target:?} {err}"));
             assert!(
-                run.decoded.len() == tagged_run.decoded.len()
-                    && run
-                        .decoded
-                        .iter()
-                        .zip(&tagged_run.decoded)
-                        .all(|(decoded, tagged)| decoded.plays_like(tagged)),
+                run.decoded == tagged_run.decoded,
                 "{name}: playback after seeking to {target:?} decoded {} buffers from {:?} to {:?}, \
-                 without the junk {} buffers from {:?} to {:?}, or other samples",
+                 without the junk {} buffers from {:?} to {:?}",
                 run.decoded.len(),
                 run.first_start(),
                 run.last_end(),
@@ -963,6 +992,32 @@ mod gst_tests {
             );
             run.assert_only_audio_delivered(std::slice::from_ref(&ripped));
         }
+    }
+
+    /// Check that the parser framed the same compressed frames, with the
+    /// same timestamps, as it did without the junk.
+    fn assert_same_frames(parsed: &[&Parsed], without_junk: &[&Parsed]) -> Result<(), String> {
+        if parsed.is_empty() {
+            return Err("parsed no frames".to_owned());
+        }
+        if let Some(index) = (0..parsed.len().max(without_junk.len()))
+            .find(|&index| parsed.get(index) != without_junk.get(index))
+        {
+            let describe = |frame: Option<&&Parsed>| {
+                frame.map_or_else(
+                    || "nothing".to_owned(),
+                    |frame| format!("{} bytes at {:?}", frame.bytes.len(), frame.start),
+                )
+            };
+            return Err(format!(
+                "parsed {} frames, without the junk {}; frame {index} differs: {}, without the junk {}",
+                parsed.len(),
+                without_junk.len(),
+                describe(parsed.get(index)),
+                describe(without_junk.get(index)),
+            ));
+        }
+        Ok(())
     }
 
     fn assert_gapless_queue_plays_every_frame(format: &Format) {
