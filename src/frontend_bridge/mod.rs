@@ -4659,7 +4659,7 @@ mod tests {
         let first = p("/music/a.flac");
         let second = p("/music/b.flac");
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
-            tracks: crate::library::shared_tracks(vec![first.clone(), second.clone()]),
+            tracks: vec![first.clone(), second.clone()],
             autoplay: false,
         }));
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::PlayAt(1)));
@@ -4727,7 +4727,7 @@ mod tests {
         let first = p("/tmp/ferrous_gapless_case_a.flac");
         let second = p("/tmp/ferrous_gapless_case_b.flac");
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
-            tracks: crate::library::shared_tracks(vec![first.clone(), second.clone()]),
+            tracks: vec![first.clone(), second.clone()],
             autoplay: true,
         }));
         let loaded = {
@@ -4801,7 +4801,7 @@ mod tests {
             panic!("no matching snapshot");
         };
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
-            tracks: crate::library::shared_tracks(vec![track.clone(), track.clone()]),
+            tracks: vec![track.clone(), track.clone()],
             autoplay: true,
         }));
         let first = poll_for(&|s| {
@@ -4846,7 +4846,7 @@ mod tests {
         let second_title = "ferrous_metadata_case_b";
 
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
-            tracks: crate::library::shared_tracks(vec![first.clone(), second.clone()]),
+            tracks: vec![first.clone(), second.clone()],
             autoplay: true,
         }));
         let first_loaded = {
