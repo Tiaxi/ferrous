@@ -1491,7 +1491,10 @@ impl AnalysisRuntimeState {
                     && self.active_track_path.as_deref() == Some(path.as_path());
                 self.formats.insert(path, format, stamp);
                 if active {
+                    // The worker decodes the file: a continued timeline it
+                    // accepted fits, so the helper's reply need not confirm it.
                     self.worker_format_track = Some(track_token);
+                    self.unconfirmed_continuation = None;
                     self.apply_track_format(format);
                 }
             }
@@ -1511,6 +1514,10 @@ impl AnalysisRuntimeState {
                 } else if self.active_track_path.as_deref() == Some(path.as_path())
                     && self.display_mode == SpectrogramDisplayMode::Rolling
                 {
+                    if let Some(format) = format {
+                        self.worker_format_track = Some(self.active_track_token);
+                        self.apply_track_format(format);
+                    }
                     self.restart_changed_format(ctx);
                 }
             }
@@ -5719,5 +5726,448 @@ mod tests {
                 assert!((state.spectrogram_position_offset - 200.0).abs() < 0.001);
             }
         }
+    }
+
+    /// A tone encoded by `encoder` at `rate` Hz with `channels` channels.
+    #[cfg(feature = "gst")]
+    fn encode_tone(extension: &str, encoder: &str, seconds: u32, rate: u32, channels: u32) -> PathBuf {
+        use gstreamer as gst;
+        use gstreamer::prelude::*;
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+        gst::init().expect("gstreamer initialization");
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-analysis-tone-{}-{}.{extension}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let buffers = (seconds * rate).div_ceil(1024);
+        let pipeline = gst::parse::launch(&format!(
+            "audiotestsrc num-buffers={buffers} samplesperbuffer=1024 freq=440 ! audioconvert \
+             ! audio/x-raw,rate={rate},channels={channels} ! audioconvert ! {encoder} \
+             ! filesink location={}",
+            path.display()
+        ))
+        .expect("encoder pipeline");
+        pipeline.set_state(gst::State::Playing).expect("encode");
+        let message = pipeline.bus().expect("bus").timed_pop_filtered(
+            gst::ClockTime::from_seconds(30),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        pipeline.set_state(gst::State::Null).expect("stop encoder");
+        assert!(
+            matches!(message.as_ref().map(|message| message.view()), Some(gst::MessageView::Eos(_))),
+            "{encoder}: {message:?}"
+        );
+        path
+    }
+
+    /// Events until one is a chunk that `done` accepts, calling `tick`
+    /// every 50 ms, as playback publishes its position.
+    fn events_until(
+        rx: &Receiver<AnalysisEvent>,
+        tick: impl Fn(),
+        done: impl Fn(&PrecomputedSpectrogramChunk) -> bool,
+    ) -> Vec<AnalysisEvent> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut events = Vec::new();
+        let mut next_tick = std::time::Instant::now();
+        loop {
+            let now = std::time::Instant::now();
+            assert!(now < deadline, "timed out after:\n{}", summarize(&events));
+            if now >= next_tick {
+                tick();
+                next_tick = now + Duration::from_millis(50);
+            }
+            let Ok(event) = rx.recv_timeout(next_tick.saturating_duration_since(now)) else {
+                continue;
+            };
+            let finished =
+                matches!(&event, AnalysisEvent::PrecomputedSpectrogramChunk(chunk) if done(chunk));
+            events.push(event);
+            if finished {
+                return events;
+            }
+        }
+    }
+
+    /// One file of a gapless pair with different formats.
+    #[cfg(feature = "gst")]
+    struct Tone {
+        rate: u32,
+        channels: u32,
+        seconds: u32,
+    }
+
+    /// Play `first` to its end and switch gaplessly to `second`, whose format
+    /// differs, in `mode`, and check that the switch restarts cleanly.
+    #[cfg(feature = "gst")]
+    fn assert_format_change_restarts_cleanly(
+        encoded: (&str, &str),
+        view: SpectrogramViewMode,
+        mode: SpectrogramDisplayMode,
+        (first, second): (Tone, Tone),
+    ) {
+        let (extension, encoder) = encoded;
+        let a = encode_tone(extension, encoder, first.seconds, first.rate, first.channels);
+        let b = encode_tone(extension, encoder, second.seconds, second.rate, second.channels);
+        let case = format!("{extension} {view:?} {mode:?}");
+        let (engine, events) = AnalysisEngine::new();
+        engine.command(AnalysisCommand::SetSpectrogramViewMode(view));
+        engine.command(AnalysisCommand::SetSpectrogramDisplayMode(mode));
+        let set_track = |path: &Path, track_token, gapless: bool| AnalysisCommand::SetTrack {
+            path: path.to_path_buf(),
+            reset_spectrogram: !gapless,
+            track_token,
+            gapless,
+        };
+        // Symphonia cannot read WavPack, so its format is known only from
+        // playing it, once the file helper's probe has failed.
+        let play_at = |position: f64| {
+            let engine = &engine;
+            move || engine.command(AnalysisCommand::PositionUpdate(position))
+        };
+        if extension == "wv" {
+            engine.command(set_track(&b, 1, false));
+            events_until(&events, || {}, |chunk| {
+                chunk.track_token == 1 && chunk.column_count > 0
+            });
+        }
+        engine.command(set_track(&a, 2, false));
+        // Near its end; the worker decodes it to the end.
+        events_until(&events, play_at(f64::from(first.seconds) - 0.5), |chunk| {
+            chunk.track_token == 2 && chunk.complete
+        });
+
+        // About to finish, then the switch, and playback in the new track.
+        engine.command(AnalysisCommand::PrepareGaplessContinuation { path: b.clone() });
+        engine.command(set_track(&b, 3, true));
+        engine.command(AnalysisCommand::PositionUpdate(0.5));
+        let after = events_until(&events, play_at(f64::from(second.seconds) - 0.5), |chunk| {
+            chunk.track_token == 3 && chunk.complete
+        });
+        assert!(
+            !after
+                .iter()
+                .any(|event| matches!(event, AnalysisEvent::WorkerFailed(_))),
+            "{case}:\n{}",
+            summarize(&after)
+        );
+        let chunks: Vec<_> = after
+            .iter()
+            .filter_map(|event| match event {
+                AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => Some(chunk),
+                _ => None,
+            })
+            .collect();
+        let channels = match view {
+            SpectrogramViewMode::Downmix => 1,
+            SpectrogramViewMode::PerChannel => u8::try_from(second.channels).unwrap(),
+        };
+        let is_second_format =
+            |chunk: &PrecomputedSpectrogramChunk| {
+                chunk.sample_rate_hz == second.rate && chunk.channel_count == channels
+            };
+        // The outgoing track's token never labels the new file's columns.
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| chunk.track_token != 3 && chunk.bins_per_column > 0 && is_second_format(chunk)),
+            "{case}:\n{}",
+            summarize(&after)
+        );
+        let new_track: Vec<_> = chunks.iter().filter(|chunk| chunk.track_token == 3).collect();
+        let reset = new_track[0];
+        assert!(
+            reset.buffer_reset && reset.bins_per_column > 0 && is_second_format(reset),
+            "{case}: the new track starts without its reset:\n{}",
+            summarize(&after)
+        );
+        if mode == SpectrogramDisplayMode::Rolling {
+            assert!(!reset.clear_history, "{case}: the rolling history is cleared");
+        }
+        for chunk in &new_track {
+            // Positions are in the new track's timeline, not the continued
+            // one, so no seek lands past its end.
+            assert!(
+                is_second_format(chunk)
+                    && chunk.start_column_index <= reset.total_columns_estimate,
+                "{case}:\n{}",
+                summarize(&after)
+            );
+        }
+        drop(engine);
+        std::fs::remove_file(a).expect("remove fixture");
+        std::fs::remove_file(b).expect("remove fixture");
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_gapless_switch_to_another_sample_rate_restarts_cleanly() {
+        for mode in MODES {
+            assert_format_change_restarts_cleanly(
+                ("wv", "wavpackenc"),
+                SpectrogramViewMode::Downmix,
+                mode,
+                (
+                    Tone { rate: 44_100, channels: 1, seconds: 20 },
+                    Tone { rate: 96_000, channels: 1, seconds: 3 },
+                ),
+            );
+            assert_format_change_restarts_cleanly(
+                ("ac3", "avenc_ac3"),
+                SpectrogramViewMode::Downmix,
+                mode,
+                (
+                    Tone { rate: 44_100, channels: 2, seconds: 10 },
+                    Tone { rate: 48_000, channels: 2, seconds: 3 },
+                ),
+            );
+        }
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_gapless_switch_to_another_channel_count_restarts_cleanly() {
+        for mode in MODES {
+            assert_format_change_restarts_cleanly(
+                ("wv", "wavpackenc"),
+                SpectrogramViewMode::PerChannel,
+                mode,
+                (
+                    Tone { rate: 44_100, channels: 1, seconds: 20 },
+                    Tone { rate: 44_100, channels: 2, seconds: 3 },
+                ),
+            );
+            assert_format_change_restarts_cleanly(
+                ("ac3", "avenc_ac3"),
+                SpectrogramViewMode::PerChannel,
+                mode,
+                (
+                    Tone { rate: 48_000, channels: 2, seconds: 10 },
+                    Tone { rate: 48_000, channels: 6, seconds: 3 },
+                ),
+            );
+        }
+    }
+    #[test]
+    fn a_file_the_spectrogram_cannot_read_is_reported_and_the_next_track_analyses() {
+        let broken = write_fixture("broken.flac", b"fLaC but not really audio");
+        let good = write_engine_test_wave(1, 16_000);
+        for mode in MODES {
+            let (engine, events) = AnalysisEngine::new();
+            engine.command(AnalysisCommand::SetSpectrogramDisplayMode(mode));
+            engine.command(AnalysisCommand::SetTrack {
+                path: broken.clone(),
+                reset_spectrogram: true,
+                track_token: 1,
+                gapless: false,
+            });
+            // The worker clears what the UI shows, as a far seek does.
+            events_until(&events, || {}, |chunk| {
+                chunk.track_token == 1 && chunk.buffer_reset && chunk.bins_per_column == 0
+            });
+            let message = loop {
+                match events.recv_timeout(Duration::from_secs(10)) {
+                    Ok(AnalysisEvent::WorkerFailed(message)) => break message,
+                    Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) => {
+                        assert_ne!(chunk.track_token, 1, "{mode:?}: {chunk:?}");
+                    }
+                    Ok(AnalysisEvent::Snapshot(_)) => {}
+                    Err(error) => panic!("{mode:?}: the failure is not reported: {error}"),
+                }
+            };
+            let name = broken.file_name().unwrap().to_string_lossy().into_owned();
+            assert_eq!(
+                message,
+                format!("The spectrogram cannot show {name}: its audio could not be read."),
+                "{mode:?}"
+            );
+
+            // The worker is still there for the next track.
+            engine.command(AnalysisCommand::SetTrack {
+                path: good.clone(),
+                reset_spectrogram: true,
+                track_token: 2,
+                gapless: false,
+            });
+            let next = events_until(&events, || {}, |chunk| {
+                chunk.track_token == 2 && chunk.column_count > 0
+            });
+            assert!(
+                !next
+                    .iter()
+                    .any(|event| matches!(event, AnalysisEvent::WorkerFailed(_))),
+                "{mode:?}:\n{}",
+                summarize(&next)
+            );
+        }
+        std::fs::remove_file(broken).expect("remove fixture");
+        std::fs::remove_file(good).expect("remove fixture");
+    }
+
+    fn opened(generation: u64, track_token: u64, path: &Path, format: TrackFormat) -> SessionReport {
+        SessionReport::Opened {
+            generation,
+            track_token,
+            path: path.to_path_buf(),
+            stamp: None,
+            format,
+        }
+    }
+
+    #[test]
+    fn the_format_the_worker_opened_replaces_a_failed_probe_in_both_modes() {
+        let (a, b) = (Path::new("/music/a.wv"), Path::new("/music/b.wv"));
+        let hi_res = TrackFormat::Known {
+            sample_rate: 96_000,
+            channels: 2,
+        };
+        for mode in MODES {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            let mut state = playing_state(mode, a);
+            state.active_session_effective_rate = 44_100;
+            state.spectrogram_view_mode = SpectrogramViewMode::PerChannel;
+            state.active_session_channel_count = 1;
+            // The helper could not read B before; the switch cannot know.
+            state.formats.insert(b.to_path_buf(), TrackFormat::Unknown, None);
+            state.handle_track_change(b.to_path_buf(), false, true, 2, &ctx);
+            let _ = only_track_io_request(&state);
+            let generation = channels.generation.load(Ordering::Relaxed);
+            channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+
+            // A report from a session since superseded changes nothing.
+            state.handle_session_report(opened(generation + 1, 2, b, hi_res), &ctx);
+            assert_eq!(state.active_session_effective_rate, 44_100, "{mode:?}");
+            state.handle_session_report(opened(generation, 2, b, hi_res), &ctx);
+            assert_eq!(state.active_session_effective_rate, 96_000, "{mode:?}");
+            assert_eq!(state.active_session_channel_count, 2, "{mode:?}");
+            // The helper's failed probe, answered later, does not undo it.
+            state.handle_track_io_reply(
+                TrackIoReply::TrackLoaded {
+                    track_token: 2,
+                    stamp: None,
+                    format: Some(TrackFormat::Unknown),
+                    peaks: None,
+                },
+                &ctx,
+            );
+            assert_eq!(state.active_session_effective_rate, 96_000, "{mode:?}");
+            assert_eq!(state.formats.get(b).map(|probed| probed.format), Some(hi_res));
+            let cols_per_second = state.current_centered_cols_per_second().expect("rate");
+            assert!((cols_per_second - 96_000.0 / 1024.0).abs() < 0.001, "{mode:?}");
+
+            // A is judged from what the worker read of B when it follows.
+            state.handle_session_report(
+                opened(
+                    generation,
+                    2,
+                    a,
+                    TrackFormat::Known {
+                        sample_rate: 44_100,
+                        channels: 1,
+                    },
+                ),
+                &ctx,
+            );
+            assert_eq!(state.active_session_effective_rate, 96_000, "{mode:?}");
+            state.last_spectrogram_position = 100.0;
+            state.handle_track_change(a.to_path_buf(), false, true, 3, &ctx);
+            let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+            assert!(
+                matches!(commands.as_slice(), [SpectrogramWorkerCommand::NewTrack {
+                    track_token: 3, start_seconds, emit_initial_reset: true, ..
+                }] if *start_seconds == 0.0),
+                "{mode:?}: {commands:?}"
+            );
+            assert_eq!(state.spectrogram_position_offset, 0.0);
+        }
+    }
+
+    #[test]
+    fn a_rolling_continuation_the_worker_rejects_starts_afresh_at_the_playback_position() {
+        let (a, b) = (Path::new("/music/a.ac3"), Path::new("/music/b.ac3"));
+        let surround = TrackFormat::Known {
+            sample_rate: 48_000,
+            channels: 6,
+        };
+        let rejected = |generation, path: &Path| SessionReport::ContinuationRejected {
+            generation,
+            path: path.to_path_buf(),
+            stamp: None,
+            format: Some(surround),
+        };
+        // Rejected before the switch, or after it.
+        for rejected_first in [true, false] {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+            state.spectrogram_view_mode = SpectrogramViewMode::PerChannel;
+            state.active_session_channel_count = 2;
+            state.last_spectrogram_position = 200.0;
+            state.handle_prepare_gapless_continuation(b.to_path_buf(), &ctx);
+            assert!(matches!(
+                channels.spectrogram_cmd_rx.try_recv(),
+                Ok(SpectrogramWorkerCommand::ContinueWithFile { .. })
+            ));
+            let generation = channels.generation.load(Ordering::Relaxed);
+            if rejected_first {
+                state.handle_session_report(rejected(generation, b), &ctx);
+                assert!(state.staged_continuation_path.is_none());
+                assert!(channels.spectrogram_cmd_rx.try_recv().is_err());
+            }
+            state.handle_track_change(b.to_path_buf(), false, true, 2, &ctx);
+            if !rejected_first {
+                assert!(matches!(
+                    channels.spectrogram_cmd_rx.try_recv(),
+                    Ok(SpectrogramWorkerCommand::UpdateTrackToken { track_token: 2 })
+                ));
+                assert!((state.spectrogram_position_offset - 200.0).abs() < 0.001);
+                state.handle_command(AnalysisCommand::PositionUpdate(0.4), &ctx);
+                channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+                state.handle_session_report(rejected(generation, b), &ctx);
+            }
+            let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+            let start = if rejected_first { 0.0 } else { 0.4 };
+            assert!(
+                matches!(commands.as_slice(), [SpectrogramWorkerCommand::NewTrack {
+                    track_token: 2, start_seconds, emit_initial_reset: true,
+                    clear_history_on_reset: false, channel_count: 6, generation: g, ..
+                }] if (*start_seconds - start).abs() < 0.001 && *g > generation),
+                "rejected_first={rejected_first}: {commands:?}"
+            );
+            assert_eq!(state.spectrogram_position_offset, 0.0);
+            state.handle_command(AnalysisCommand::PositionUpdate(0.5), &ctx);
+            assert!(matches!(
+                channels.spectrogram_cmd_rx.try_recv(),
+                Ok(SpectrogramWorkerCommand::PositionUpdate { position_seconds }) if position_seconds == 0.5
+            ));
+            // A rejection the restart superseded changes nothing.
+            state.handle_session_report(rejected(generation, b), &ctx);
+            assert!(channels.spectrogram_cmd_rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn only_a_failure_of_the_current_session_is_reported() {
+        let path = Path::new("/music/broken.flac");
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = playing_state(SpectrogramDisplayMode::Rolling, path);
+        let failed = |generation, track_token| SessionReport::Failed {
+            generation,
+            track_token,
+            path: path.to_path_buf(),
+            error: "decoding failed (bad data)".to_string(),
+        };
+        state.handle_session_report(failed(1, 1), &ctx);
+        state.handle_session_report(failed(0, 7), &ctx);
+        assert!(channels.event_rx.try_recv().is_err());
+        state.handle_session_report(failed(0, 1), &ctx);
+        assert!(matches!(
+            channels.event_rx.try_recv(),
+            Ok(AnalysisEvent::WorkerFailed(message))
+                if message == "The spectrogram cannot show broken.flac: decoding failed (bad data)."
+        ));
     }
 }
