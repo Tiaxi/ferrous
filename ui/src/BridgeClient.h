@@ -147,29 +147,29 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int lastFmAuthState READ lastFmAuthState NOTIFY snapshotChanged)
     Q_PROPERTY(int lastFmPendingScrobbleCount READ lastFmPendingScrobbleCount NOTIFY snapshotChanged)
     Q_PROPERTY(QString lastFmStatusText READ lastFmStatusText NOTIFY snapshotChanged)
-    Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY snapshotChanged)
-    Q_PROPERTY(QByteArray libraryTreeBinary READ libraryTreeBinary NOTIFY snapshotChanged)
-    Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY snapshotChanged)
-    Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY snapshotChanged)
-    Q_PROPERTY(int libraryRootCount READ libraryRootCount NOTIFY snapshotChanged)
-    Q_PROPERTY(int libraryTrackCount READ libraryTrackCount NOTIFY snapshotChanged)
-    Q_PROPERTY(int libraryArtistCount READ libraryArtistCount NOTIFY snapshotChanged)
-    Q_PROPERTY(int libraryAlbumCount READ libraryAlbumCount NOTIFY snapshotChanged)
-    Q_PROPERTY(QStringList libraryExpandedKeys READ libraryExpandedKeys NOTIFY snapshotChanged)
-    Q_PROPERTY(bool libraryViewStateAvailable READ libraryViewStateAvailable NOTIFY snapshotChanged)
-    Q_PROPERTY(QString libraryViewSelectionKey READ libraryViewSelectionKey NOTIFY snapshotChanged)
-    Q_PROPERTY(QString libraryViewAnchorKey READ libraryViewAnchorKey NOTIFY snapshotChanged)
-    Q_PROPERTY(double libraryViewAnchorOffset READ libraryViewAnchorOffset NOTIFY snapshotChanged)
-    Q_PROPERTY(QStringList libraryRoots READ libraryRoots NOTIFY snapshotChanged)
-    Q_PROPERTY(QVariantList libraryRootEntries READ libraryRootEntries NOTIFY snapshotChanged)
-    Q_PROPERTY(int librarySortMode READ librarySortMode NOTIFY snapshotChanged)
+    Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY libraryChanged)
+    Q_PROPERTY(QByteArray libraryTreeBinary READ libraryTreeBinary NOTIFY libraryChanged)
+    Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY libraryChanged)
+    Q_PROPERTY(bool libraryScanInProgress READ libraryScanInProgress NOTIFY libraryScanChanged)
+    Q_PROPERTY(int libraryRootCount READ libraryRootCount NOTIFY libraryChanged)
+    Q_PROPERTY(int libraryTrackCount READ libraryTrackCount NOTIFY libraryChanged)
+    Q_PROPERTY(int libraryArtistCount READ libraryArtistCount NOTIFY libraryChanged)
+    Q_PROPERTY(int libraryAlbumCount READ libraryAlbumCount NOTIFY libraryChanged)
+    Q_PROPERTY(QStringList libraryExpandedKeys READ libraryExpandedKeys NOTIFY libraryChanged)
+    Q_PROPERTY(bool libraryViewStateAvailable READ libraryViewStateAvailable NOTIFY libraryChanged)
+    Q_PROPERTY(QString libraryViewSelectionKey READ libraryViewSelectionKey NOTIFY libraryChanged)
+    Q_PROPERTY(QString libraryViewAnchorKey READ libraryViewAnchorKey NOTIFY libraryChanged)
+    Q_PROPERTY(double libraryViewAnchorOffset READ libraryViewAnchorOffset NOTIFY libraryChanged)
+    Q_PROPERTY(QStringList libraryRoots READ libraryRoots NOTIFY libraryChanged)
+    Q_PROPERTY(QVariantList libraryRootEntries READ libraryRootEntries NOTIFY libraryChanged)
+    Q_PROPERTY(int librarySortMode READ librarySortMode NOTIFY libraryChanged)
     Q_PROPERTY(QString fileBrowserName READ fileBrowserName NOTIFY snapshotChanged)
-    Q_PROPERTY(int libraryScanRootsCompleted READ libraryScanRootsCompleted NOTIFY snapshotChanged)
-    Q_PROPERTY(int libraryScanRootsTotal READ libraryScanRootsTotal NOTIFY snapshotChanged)
-    Q_PROPERTY(int libraryScanDiscovered READ libraryScanDiscovered NOTIFY snapshotChanged)
-    Q_PROPERTY(int libraryScanProcessed READ libraryScanProcessed NOTIFY snapshotChanged)
-    Q_PROPERTY(double libraryScanFilesPerSecond READ libraryScanFilesPerSecond NOTIFY snapshotChanged)
-    Q_PROPERTY(double libraryScanEtaSeconds READ libraryScanEtaSeconds NOTIFY snapshotChanged)
+    Q_PROPERTY(int libraryScanRootsCompleted READ libraryScanRootsCompleted NOTIFY libraryScanChanged)
+    Q_PROPERTY(int libraryScanRootsTotal READ libraryScanRootsTotal NOTIFY libraryScanChanged)
+    Q_PROPERTY(int libraryScanDiscovered READ libraryScanDiscovered NOTIFY libraryScanChanged)
+    Q_PROPERTY(int libraryScanProcessed READ libraryScanProcessed NOTIFY libraryScanChanged)
+    Q_PROPERTY(double libraryScanFilesPerSecond READ libraryScanFilesPerSecond NOTIFY libraryScanChanged)
+    Q_PROPERTY(double libraryScanEtaSeconds READ libraryScanEtaSeconds NOTIFY libraryScanChanged)
     Q_PROPERTY(QVariantList globalSearchArtistResults READ globalSearchArtistResults NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QVariantList globalSearchAlbumResults READ globalSearchAlbumResults NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QVariantList globalSearchTrackResults READ globalSearchTrackResults NOTIFY globalSearchResultsChanged)
@@ -399,6 +399,10 @@ signals:
     void trackIdentityChanged();
     void trackMetadataChanged();
     void snapshotChanged();
+    // The library's rows, roots, counts, view state and sort mode changed.
+    void libraryChanged();
+    // A scan's progress changed; it changes many times a second.
+    void libraryScanChanged();
     void analysisChanged();
     void precomputedSpectrogramChunkReady(
         const QByteArray &data, int bins, int channelCount, int columns,
@@ -602,6 +606,8 @@ private:
     void scheduleTrackIdentityChanged();
     void scheduleTrackMetadataChanged();
     void scheduleSnapshotChanged();
+    void scheduleLibraryChanged();
+    void scheduleLibraryScanChanged();
     void scheduleAnalysisChanged();
     void shutdownBridgeGracefully();
     void setBackendFailure(const QString &message);
@@ -778,11 +784,15 @@ private:
     bool m_trackIdentityChangedPending{false};
     bool m_trackMetadataChangedPending{false};
     bool m_snapshotChangedPending{false};
+    bool m_libraryChangedPending{false};
+    bool m_libraryScanChangedPending{false};
     bool m_analysisChangedPending{false};
     bool m_pollPlaybackChanged{false};
     bool m_pollTrackIdentityChanged{false};
     bool m_pollTrackMetadataChanged{false};
     bool m_pollSnapshotChanged{false};
+    bool m_pollLibraryChanged{false};
+    bool m_pollLibraryScanChanged{false};
     // The playback clock holds the target of the seek with serial
     // m_pendingSeekSerial until the engine is done with that seek, and
     // ignores the samples from before it. The engine numbers seeks in the

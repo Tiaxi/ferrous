@@ -270,6 +270,8 @@ ApplicationWindow {
         signal trackIdentityChanged()
         signal trackMetadataChanged()
         signal snapshotChanged()
+        signal libraryChanged()
+        signal libraryScanChanged()
         signal analysisChanged()
         signal libraryTreeFrameReceived(int version, var treeBytes)
         signal libraryRevealRequested(var expandKeys, string selectionKey)
@@ -1299,8 +1301,10 @@ ApplicationWindow {
         function onStateSaveFinished(requestId, saved, message) {
             root.finishStateSaveBeforeClosing(requestId, saved, message)
         }
-        function onSnapshotChanged() {
+        function onLibraryChanged() {
             libraryController.tryApplyPersistedViewState()
+        }
+        function onSnapshotChanged() {
             if (uiBridge.profileLogsEnabled) {
                 const t0 = Date.now()
                 playbackController.handleSnapshotChanged(

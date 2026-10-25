@@ -2,10 +2,11 @@
 
 #include "LibraryTreeModel.h"
 
-#include <cmath>
+#include <algorithm>
+#include <climits>
 #include <functional>
+#include <vector>
 
-#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QHash>
 #include <QSet>
@@ -154,15 +155,15 @@ bool parseRows(const QByteArray &treeBytes, QVector<ParsedBinaryRow> *rowsOut) {
         ParsedBinaryRow row;
         quint16 depth = 0;
         qint32 sourceIndex = -1;
-        quint16 trackNumber = 0;
-        quint16 childCount = 0;
+        quint32 trackNumber = 0;
+        quint32 childCount = 0;
         quint32 playPathCount = 0;
 
         if (!reader.readU8(&row.rowType)
             || !reader.readU16(&depth)
             || !reader.readI32(&sourceIndex)
-            || !reader.readU16(&trackNumber)
-            || !reader.readU16(&childCount)
+            || !reader.readU32(&trackNumber)
+            || !reader.readU32(&childCount)
             || !reader.readUtf8(&row.title)
             || !reader.readUtf8(&row.key)
             || !reader.readUtf8(&row.artist)
@@ -175,8 +176,8 @@ bool parseRows(const QByteArray &treeBytes, QVector<ParsedBinaryRow> *rowsOut) {
 
         row.depth = static_cast<int>(depth);
         row.sourceIndex = static_cast<int>(sourceIndex);
-        row.trackNumber = static_cast<int>(trackNumber);
-        row.childCount = static_cast<int>(childCount);
+        row.trackNumber = static_cast<int>(std::min<quint32>(trackNumber, INT_MAX));
+        row.childCount = static_cast<int>(std::min<quint32>(childCount, INT_MAX));
         // Each path takes at least its 4-byte length, which bounds the count.
         if (playPathCount > reader.remaining() / 4) {
             return false;
@@ -242,7 +243,24 @@ int LibraryTreeModel::rowCount(const QModelIndex &parent) const {
     if (parent.isValid()) {
         return 0;
     }
+    return rowTotal();
+}
+
+int LibraryTreeModel::rowTotal() const {
+    if (m_stagedNext != nullptr) {
+        return m_stagedPrefix + static_cast<int>(m_rows.size()) - m_stagedOldStart;
+    }
     return static_cast<int>(m_rows.size());
+}
+
+const LibraryTreeModel::FlatRow &LibraryTreeModel::rowAt(int row) const {
+    if (m_stagedNext != nullptr) {
+        if (row < m_stagedPrefix) {
+            return (*m_stagedNext)[row];
+        }
+        return m_rows[m_stagedOldStart + row - m_stagedPrefix];
+    }
+    return m_rows[row];
 }
 
 QVariant LibraryTreeModel::data(const QModelIndex &index, int role) const {
@@ -250,11 +268,11 @@ QVariant LibraryTreeModel::data(const QModelIndex &index, int role) const {
         return {};
     }
     const int row = index.row();
-    if (row < 0 || row >= static_cast<int>(m_rows.size())) {
+    if (row < 0 || row >= rowTotal()) {
         return {};
     }
 
-    const FlatRow &item = m_rows[static_cast<size_t>(row)];
+    const FlatRow &item = rowAt(row);
     if (role == RowTypeRole) {
         return item.rowType;
     }
@@ -324,7 +342,7 @@ QHash<int, QByteArray> LibraryTreeModel::roleNames() const {
 }
 
 int LibraryTreeModel::count() const {
-    return static_cast<int>(m_rows.size());
+    return rowTotal();
 }
 
 bool LibraryTreeModel::parsing() const {
@@ -412,7 +430,8 @@ void LibraryTreeModel::toggleKey(const QString &key) {
         return;
     }
 
-    for (const FlatRow &row : m_rows) {
+    for (int i = 0; i < rowTotal(); ++i) {
+        const FlatRow &row = rowAt(i);
         if (row.key == key && row.hasChildren) {
             const bool nextExpanded = !row.expanded;
             m_expandedByKey.insert(key, nextExpanded);
@@ -426,7 +445,8 @@ void LibraryTreeModel::toggleKey(const QString &key) {
 }
 
 void LibraryTreeModel::toggleArtist(const QString &artist) {
-    for (const FlatRow &row : m_rows) {
+    for (int i = 0; i < rowTotal(); ++i) {
+        const FlatRow &row = rowAt(i);
         if (row.rowType == QStringLiteral("artist") && row.artist == artist) {
             toggleKey(row.key);
             return;
@@ -442,20 +462,15 @@ bool LibraryTreeModel::hasSelectionKey(const QString &selectionKey) const {
     if (selectionKey.isEmpty()) {
         return true;
     }
-    for (const FlatRow &row : m_rows) {
-        if (row.selectionKey == selectionKey) {
-            return true;
-        }
-    }
-    return false;
+    return indexForSelectionKey(selectionKey) >= 0;
 }
 
 int LibraryTreeModel::indexForSelectionKey(const QString &selectionKey) const {
     if (selectionKey.isEmpty()) {
         return -1;
     }
-    for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
-        if (m_rows[static_cast<size_t>(i)].selectionKey == selectionKey) {
+    for (int i = 0; i < rowTotal(); ++i) {
+        if (rowAt(i).selectionKey == selectionKey) {
             return i;
         }
     }
@@ -463,30 +478,30 @@ int LibraryTreeModel::indexForSelectionKey(const QString &selectionKey) const {
 }
 
 int LibraryTreeModel::sourceIndexForRow(int row) const {
-    if (row < 0 || row >= static_cast<int>(m_rows.size())) {
+    if (row < 0 || row >= rowTotal()) {
         return -1;
     }
-    return m_rows[static_cast<size_t>(row)].sourceIndex;
+    return rowAt(row).sourceIndex;
 }
 
 QString LibraryTreeModel::selectionKeyForRow(int row) const {
-    if (row < 0 || row >= static_cast<int>(m_rows.size())) {
+    if (row < 0 || row >= rowTotal()) {
         return {};
     }
-    return m_rows[static_cast<size_t>(row)].selectionKey;
+    return rowAt(row).selectionKey;
 }
 
 int LibraryTreeModel::findArtistRowByPrefix(const QString &prefix, int startRow) const {
     const QString loweredPrefix = toLower(prefix.trimmed());
-    if (loweredPrefix.isEmpty() || m_rows.isEmpty()) {
+    const int rowCount = rowTotal();
+    if (loweredPrefix.isEmpty() || rowCount == 0) {
         return -1;
     }
 
-    const int rowCount = static_cast<int>(m_rows.size());
     const int normalizedStart = std::clamp(startRow, 0, rowCount);
     for (int offset = 0; offset < rowCount; ++offset) {
         const int row = (normalizedStart + offset) % rowCount;
-        const FlatRow &item = m_rows[static_cast<size_t>(row)];
+        const FlatRow &item = rowAt(row);
         if (item.rowType != QStringLiteral("artist")) {
             continue;
         }
@@ -499,11 +514,11 @@ int LibraryTreeModel::findArtistRowByPrefix(const QString &prefix, int startRow)
 
 QVariantMap LibraryTreeModel::rowDataForRow(int row) const {
     QVariantMap out;
-    if (row < 0 || row >= static_cast<int>(m_rows.size())) {
+    if (row < 0 || row >= rowTotal()) {
         return out;
     }
 
-    const FlatRow &item = m_rows[static_cast<size_t>(row)];
+    const FlatRow &item = rowAt(row);
     out.insert(QStringLiteral("rowType"), item.rowType);
     out.insert(QStringLiteral("selectionKey"), item.selectionKey);
     out.insert(QStringLiteral("sourceIndex"), item.sourceIndex);
@@ -542,18 +557,6 @@ bool LibraryTreeModel::rowsEqual(const FlatRow &a, const FlatRow &b) {
         && a.playPaths == b.playPaths
         && a.depth == b.depth
         && a.hasChildren == b.hasChildren;
-}
-
-bool LibraryTreeModel::hasDuplicateSelectionKeys(const QVector<FlatRow> &rows) {
-    QSet<QString> seen;
-    seen.reserve(rows.size());
-    for (const FlatRow &row : rows) {
-        if (row.selectionKey.isEmpty() || seen.contains(row.selectionKey)) {
-            return true;
-        }
-        seen.insert(row.selectionKey);
-    }
-    return false;
 }
 
 QVector<LibraryTreeModel::TreeNode> LibraryTreeModel::parseTreeNodesFromBinary(const QByteArray &treeBytes) {
@@ -724,147 +727,158 @@ QVector<LibraryTreeModel::FlatRow> LibraryTreeModel::buildFlatRows() const {
     return rows;
 }
 
-bool LibraryTreeModel::hasDetectedMove(const QVector<FlatRow> &nextRows) const {
-    QHash<QString, int> oldPositions;
-    oldPositions.reserve(m_rows.size());
-    for (int i = 0; i < m_rows.size(); ++i) {
-        oldPositions.insert(m_rows[i].selectionKey, i);
-    }
+namespace {
 
-    int lastPos = -1;
-    for (const FlatRow &row : nextRows) {
-        const auto it = oldPositions.constFind(row.selectionKey);
-        if (it == oldPositions.constEnd()) {
-            continue;
+// The positions in `sequence` of a longest strictly increasing subsequence.
+std::vector<bool> longestIncreasingRun(const std::vector<int> &sequence) {
+    const int size = static_cast<int>(sequence.size());
+    std::vector<int> tails;
+    std::vector<int> tailPositions;
+    std::vector<int> previous(static_cast<size_t>(size), -1);
+    for (int i = 0; i < size; ++i) {
+        const int value = sequence[static_cast<size_t>(i)];
+        const auto at = std::lower_bound(tails.begin(), tails.end(), value);
+        const auto length = static_cast<size_t>(at - tails.begin());
+        if (length > 0) {
+            previous[static_cast<size_t>(i)] = tailPositions[length - 1];
         }
-        const int pos = it.value();
-        if (pos < lastPos) {
-            return true;
+        if (at == tails.end()) {
+            tails.push_back(value);
+            tailPositions.push_back(i);
+        } else {
+            *at = value;
+            tailPositions[length] = i;
         }
-        lastPos = pos;
     }
-    return false;
+    std::vector<bool> inRun(static_cast<size_t>(size), false);
+    for (int i = tailPositions.empty() ? -1 : tailPositions.back(); i >= 0;
+         i = previous[static_cast<size_t>(i)]) {
+        inRun[static_cast<size_t>(i)] = true;
+    }
+    return inRun;
 }
 
-bool LibraryTreeModel::shouldUseResetForRows(const QVector<FlatRow> &nextRows) const {
-    if (m_rows.isEmpty() || nextRows.isEmpty()) {
-        return true;
-    }
-    if (hasDuplicateSelectionKeys(m_rows) || hasDuplicateSelectionKeys(nextRows)) {
-        return true;
-    }
+} // namespace
 
-    const int oldCount = m_rows.size();
-    const int newCount = nextRows.size();
-    const int delta = std::abs(newCount - oldCount);
-    const int maxCount = std::max(oldCount, newCount);
-    if (delta > 2000) {
-        return true;
-    }
-    if (maxCount > 0 && (static_cast<double>(delta) / static_cast<double>(maxCount)) > 0.25) {
-        return true;
-    }
-    if (hasDetectedMove(nextRows)) {
-        return true;
-    }
-    return false;
-}
-
+// Applies `nextRows` as row insertions, removals and data changes, matched by
+// selection key, so that views keep their items, current index and position.
+// A row that moved is removed and inserted again. Only when no row can be
+// matched, because the keys are not unique or no key is kept, is the model
+// reset.
 bool LibraryTreeModel::applyRowsIncremental(const QVector<FlatRow> &nextRows) {
-    QSet<QString> oldKeys;
-    oldKeys.reserve(m_rows.size());
-    for (const FlatRow &row : m_rows) {
-        oldKeys.insert(row.selectionKey);
+    const int oldCount = static_cast<int>(m_rows.size());
+    const int newCount = static_cast<int>(nextRows.size());
+
+    QHash<QString, int> oldPositions;
+    oldPositions.reserve(oldCount);
+    for (int i = 0; i < oldCount; ++i) {
+        const QString &key = m_rows[i].selectionKey;
+        if (key.isEmpty() || oldPositions.contains(key)) {
+            return false;
+        }
+        oldPositions.insert(key, i);
     }
 
+    // For each new row, its old position, if it had one.
+    std::vector<int> matchedOld(static_cast<size_t>(newCount), -1);
+    std::vector<int> sequence;
+    sequence.reserve(static_cast<size_t>(newCount));
     QSet<QString> newKeys;
-    newKeys.reserve(nextRows.size());
-    for (const FlatRow &row : nextRows) {
-        newKeys.insert(row.selectionKey);
+    newKeys.reserve(newCount);
+    for (int i = 0; i < newCount; ++i) {
+        const QString &key = nextRows[i].selectionKey;
+        if (key.isEmpty() || newKeys.contains(key)) {
+            return false;
+        }
+        newKeys.insert(key);
+        const auto found = oldPositions.constFind(key);
+        if (found != oldPositions.constEnd()) {
+            matchedOld[static_cast<size_t>(i)] = found.value();
+            sequence.push_back(found.value());
+        }
     }
-
-    int row = 0;
-    int nextIdx = 0;
-    while (row < m_rows.size() || nextIdx < nextRows.size()) {
-        if (row < m_rows.size()
-            && nextIdx < nextRows.size()
-            && m_rows[row].selectionKey == nextRows[nextIdx].selectionKey) {
-            if (!rowsEqual(m_rows[row], nextRows[nextIdx])) {
-                m_rows[row] = nextRows[nextIdx];
-                const QModelIndex modelIndex = index(row);
-                emit dataChanged(modelIndex, modelIndex);
-            }
-            row++;
-            nextIdx++;
-            continue;
-        }
-
-        if (row < m_rows.size() && !newKeys.contains(m_rows[row].selectionKey)) {
-            const int removeStart = row;
-            int removeCount = 0;
-            while (row + removeCount < m_rows.size()
-                && !newKeys.contains(m_rows[row + removeCount].selectionKey)) {
-                removeCount++;
-            }
-            if (removeCount <= 0) {
-                return false;
-            }
-            beginRemoveRows(QModelIndex{}, removeStart, removeStart + removeCount - 1);
-            m_rows.remove(removeStart, removeCount);
-            endRemoveRows();
-            continue;
-        }
-
-        if (nextIdx < nextRows.size() && !oldKeys.contains(nextRows[nextIdx].selectionKey)) {
-            const int insertStart = row;
-            int insertEnd = nextIdx;
-            while (insertEnd < nextRows.size()
-                && !oldKeys.contains(nextRows[insertEnd].selectionKey)) {
-                insertEnd++;
-            }
-            const int insertCount = insertEnd - nextIdx;
-            if (insertCount <= 0) {
-                return false;
-            }
-            beginInsertRows(QModelIndex{}, insertStart, insertStart + insertCount - 1);
-            for (int i = 0; i < insertCount; ++i) {
-                m_rows.insert(insertStart + i, nextRows[nextIdx + i]);
-            }
-            endInsertRows();
-            row += insertCount;
-            nextIdx += insertCount;
-            continue;
-        }
-
+    if (sequence.empty() && oldCount > 0 && newCount > 0) {
+        // Nothing is kept: a reset says the same with one signal.
         return false;
     }
 
-    return m_rows.size() == nextRows.size();
+    // Rows kept in place are a longest run of matched rows in the same
+    // order; the other matched rows moved.
+    const std::vector<bool> inRun = longestIncreasingRun(sequence);
+    std::vector<bool> oldKept(static_cast<size_t>(oldCount), false);
+    std::vector<bool> newKept(static_cast<size_t>(newCount), false);
+    for (int i = 0, matched = 0; i < newCount; ++i) {
+        const int old = matchedOld[static_cast<size_t>(i)];
+        if (old < 0) {
+            continue;
+        }
+        if (inRun[static_cast<size_t>(matched)]) {
+            oldKept[static_cast<size_t>(old)] = true;
+            newKept[static_cast<size_t>(i)] = true;
+        }
+        ++matched;
+    }
+
+    // Views see the new rows before m_stagedPrefix and the old ones from
+    // m_stagedOldStart on, so each change costs only its own rows.
+    m_stagedNext = &nextRows;
+    m_stagedPrefix = 0;
+    m_stagedOldStart = 0;
+    std::vector<int> changedRows;
+    while (m_stagedOldStart < oldCount || m_stagedPrefix < newCount) {
+        if (m_stagedOldStart < oldCount && !oldKept[static_cast<size_t>(m_stagedOldStart)]) {
+            int end = m_stagedOldStart;
+            while (end < oldCount && !oldKept[static_cast<size_t>(end)]) {
+                ++end;
+            }
+            beginRemoveRows(QModelIndex{}, m_stagedPrefix, m_stagedPrefix + end - m_stagedOldStart - 1);
+            m_stagedOldStart = end;
+            endRemoveRows();
+            continue;
+        }
+        if (m_stagedPrefix < newCount && !newKept[static_cast<size_t>(m_stagedPrefix)]) {
+            int end = m_stagedPrefix;
+            while (end < newCount && !newKept[static_cast<size_t>(end)]) {
+                ++end;
+            }
+            beginInsertRows(QModelIndex{}, m_stagedPrefix, end - 1);
+            m_stagedPrefix = end;
+            endInsertRows();
+            continue;
+        }
+        // Both rows are kept, and the run keeps them in the same order.
+        if (!rowsEqual(m_rows[m_stagedOldStart], nextRows[m_stagedPrefix])) {
+            changedRows.push_back(m_stagedPrefix);
+        }
+        ++m_stagedPrefix;
+        ++m_stagedOldStart;
+    }
+    m_stagedNext = nullptr;
+    m_rows = nextRows;
+
+    for (size_t i = 0; i < changedRows.size();) {
+        size_t end = i + 1;
+        while (end < changedRows.size() && changedRows[end] == changedRows[end - 1] + 1) {
+            ++end;
+        }
+        emit dataChanged(index(changedRows[i]), index(changedRows[end - 1]));
+        i = end;
+    }
+    return true;
 }
 
-void LibraryTreeModel::applyRowsReset(const QVector<FlatRow> &nextRows) {
+void LibraryTreeModel::applyRows(QVector<FlatRow> nextRows) {
+    if (applyRowsIncremental(nextRows)) {
+        return;
+    }
     beginResetModel();
-    m_rows = nextRows;
+    m_rows = std::move(nextRows);
     endResetModel();
 }
 
 void LibraryTreeModel::rebuildRows() {
     const int oldCount = count();
-    const QVector<FlatRow> nextRows = buildFlatRows();
-
-    bool usedReset = shouldUseResetForRows(nextRows);
-    if (usedReset) {
-        applyRowsReset(nextRows);
-    } else {
-        QElapsedTimer timer;
-        timer.start();
-        if (!applyRowsIncremental(nextRows) || timer.elapsed() > 8) {
-            applyRowsReset(nextRows);
-            usedReset = true;
-        }
-    }
-
-    Q_UNUSED(usedReset);
+    applyRows(buildFlatRows());
     if (oldCount != count()) {
         emit countChanged();
     }

@@ -288,6 +288,7 @@ private slots:
     void testPlaybackTrackTokenDecoding();
     void testChannelButtonsVisibilityDecoding();
     void libraryViewStateAvailabilityFollowsSnapshot();
+    void libraryChangesNotifyOnlyLibraryProperties();
     void searchExtendedMatchDetailsDecodeAndHighlight();
     void searchResultsRankFilterAndHighlight();
     void searchProtocolTotalsAndExpansion();
@@ -3569,6 +3570,44 @@ void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {
     QCOMPARE(client.libraryViewAnchorOffset(), 5.0);
 }
 
+
+void BridgeClientTest::libraryChangesNotifyOnlyLibraryProperties() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.library.present = true;
+    snapshot.library.scanInProgress = true;
+    snapshot.library.filesDiscovered = 100;
+    snapshot.library.filesProcessed = 10;
+
+    // Scan progress: only the scan's properties are notified.
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.m_pollLibraryScanChanged);
+    QVERIFY(!client.m_pollLibraryChanged);
+    QVERIFY(!client.m_pollSnapshotChanged);
+
+    // New tracks: the library's properties, not the rest of the snapshot.
+    client.m_pollLibraryScanChanged = false;
+    snapshot.library.trackCount = 5;
+    snapshot.library.artistCount = 1;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.m_pollLibraryChanged);
+    QVERIFY(!client.m_pollLibraryScanChanged);
+    QVERIFY(!client.m_pollSnapshotChanged);
+
+    QSignalSpy library(&client, &BridgeClient::libraryChanged);
+    QSignalSpy scan(&client, &BridgeClient::libraryScanChanged);
+    QSignalSpy other(&client, &BridgeClient::snapshotChanged);
+    client.scheduleLibraryScanChanged();
+    QTRY_COMPARE(scan.count(), 1);
+    QCOMPARE(library.count(), 0);
+    QCOMPARE(other.count(), 0);
+    client.scheduleLibraryChanged();
+    QTRY_COMPARE(library.count(), 1);
+    QCOMPARE(other.count(), 0);
+    QCOMPARE(client.libraryTrackCount(), 5);
+    QCOMPARE(client.libraryScanProcessed(), 10);
+}
 
 void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {
     QByteArray bytes;
