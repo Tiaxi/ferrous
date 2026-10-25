@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
-use crate::library::LibrarySnapshot;
+use crate::library::{AppliedChanges, LibrarySnapshot};
 
 type PathHasher = BuildHasherDefault<DefaultHasher>;
 
@@ -121,35 +121,43 @@ impl LibraryPathIndex {
         }
     }
 
-    /// Keep the index for `next`, a copy of `previous` whose tracks before
-    /// `appended_from` have the same paths in the same order, adding the
-    /// tracks from `appended_from` on.
-    pub(super) fn extend(
+    /// Keep the index for `next`, which `applied` made from `previous`:
+    /// the kept tracks' positions are moved, and the added tracks' paths
+    /// are hashed. Nothing else is hashed again.
+    pub(super) fn follow(
         &self,
         previous: &Arc<LibrarySnapshot>,
         next: &Arc<LibrarySnapshot>,
-        appended_from: usize,
+        applied: &AppliedChanges,
     ) {
         let mut built = self.built.borrow_mut();
         let Some(index) = built.as_mut().filter(|built| built.indexes(previous)) else {
             return;
         };
         index.library = Arc::downgrade(next);
-        let Some(appended) = next.tracks.get(appended_from..) else {
+        let Some(moved) = applied.moved.as_ref() else {
             return;
         };
-        if appended.is_empty() {
-            return;
-        }
-        let mut added = appended
+        // The kept tracks keep their order, so entries of one hash stay in
+        // position order.
+        let existing =
+            std::mem::take(&mut index.by_hash)
+                .into_iter()
+                .filter_map(|(hash, position)| {
+                    moved
+                        .get(position)
+                        .copied()
+                        .flatten()
+                        .map(|position| (hash, position))
+                });
+        let mut added = applied
+            .inserted
             .iter()
-            .enumerate()
-            .map(|(offset, track)| (hash_path(&track.path), appended_from + offset))
+            .map(|&position| (hash_path(&next.tracks[position].path), position))
             .collect::<Vec<_>>();
         added.sort_unstable();
-        let existing = std::mem::take(&mut index.by_hash);
-        let mut merged = Vec::with_capacity(existing.len() + added.len());
-        let mut existing = existing.into_iter().peekable();
+        let mut merged = Vec::with_capacity(next.tracks.len());
+        let mut existing = existing.peekable();
         for entry in added {
             while let Some(old) = existing.next_if(|old| *old <= entry) {
                 merged.push(old);

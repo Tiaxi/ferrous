@@ -4,6 +4,7 @@
 //! since its previous event, never a copy of the whole library, and nothing
 //! at all when neither the rows nor the status changed.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -80,23 +81,48 @@ impl LibraryChanges {
     }
 }
 
+/// The order of a library's tracks: the order the database reads them in,
+/// by root and then path, compared as `SQLite`'s `NOCASE` collation does
+/// (ASCII letters folded to lower case, then bytes). Paths that `NOCASE`
+/// finds equal are ordered by their exact bytes.
+#[must_use]
+pub fn track_order(a: &LibraryTrack, b: &LibraryTrack) -> Ordering {
+    nocase(&a.root_path, &b.root_path)
+        .then_with(|| nocase(&a.path, &b.path))
+        .then_with(|| a.root_path.as_os_str().cmp(b.root_path.as_os_str()))
+        .then_with(|| a.path.as_os_str().cmp(b.path.as_os_str()))
+}
+
+fn nocase(a: &Path, b: &Path) -> Ordering {
+    let a = a.as_os_str().as_encoded_bytes();
+    let b = b.as_os_str().as_encoded_bytes();
+    a.iter()
+        .map(u8::to_ascii_lowercase)
+        .cmp(b.iter().map(u8::to_ascii_lowercase))
+}
+
 /// What [`LibrarySnapshot::apply_changes`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppliedChanges {
     /// Whether the roots or any track changed.
     pub changed: bool,
-    /// Whether every track that was kept is where it was, so that an index
-    /// of positions only needs the tracks appended from `appended_from`.
-    pub positions_kept: bool,
-    pub appended_from: usize,
+    /// Where each track from before the changes is now, `None` for a track
+    /// that was removed. `None` as a whole when no track moved.
+    pub moved: Option<Vec<Option<usize>>>,
+    /// The positions of the tracks that were added.
+    pub inserted: Vec<usize>,
 }
 
 impl LibrarySnapshot {
-    /// Applies `changes`. `positions` returns the positions of the tracks at
-    /// a path as they were before the changes. An upserted track replaces
-    /// the first track at its path, and the others at that path are removed,
-    /// so a path that a copy got twice by applying changes out of order is
-    /// left once.
+    /// Applies `changes`, keeping the tracks in [`track_order`], the order a
+    /// full read of the database has them in. `positions` returns the
+    /// positions of the tracks at a path as they were before the changes.
+    ///
+    /// An upserted track replaces the first track at its path, and the
+    /// others at that path are removed, so a path that a copy got twice by
+    /// applying changes out of order is left once. A track that changes
+    /// root moves to its new place, and added tracks are merged in at
+    /// theirs; the tracks are never sorted as a whole.
     pub fn apply_changes(
         &mut self,
         changes: &LibraryChanges,
@@ -110,52 +136,72 @@ impl LibrarySnapshot {
             }
         }
         let mut dropped = Vec::new();
-        let mut appended = Vec::new();
+        let mut added = Vec::new();
         for track in &changes.upserted {
             let found = positions(&track.path);
             match found.split_first() {
                 Some((&first, rest)) => {
                     let existing = &mut self.tracks[first];
                     if !Arc::ptr_eq(existing, track) && **existing != **track {
-                        *existing = Arc::clone(track);
-                        any_change = true;
+                        if existing.root_path == track.root_path {
+                            // Same path and root: the same place.
+                            *existing = Arc::clone(track);
+                            any_change = true;
+                        } else {
+                            dropped.push(first);
+                            added.push(Arc::clone(track));
+                        }
                     }
                     dropped.extend_from_slice(rest);
                 }
-                None => appended.push(Arc::clone(track)),
+                None => added.push(Arc::clone(track)),
             }
         }
         for path in &changes.removed {
             dropped.extend(positions(path));
         }
-        let positions_kept = dropped.is_empty();
-        if !positions_kept {
-            dropped.sort_unstable();
-            dropped.dedup();
-            let mut dropped = dropped.into_iter().peekable();
-            let mut index = 0;
-            self.tracks.retain(|_| {
-                let keep = dropped.peek() != Some(&index);
-                if !keep {
-                    dropped.next();
-                }
-                index += 1;
-                keep
-            });
-            any_change = true;
+        if dropped.is_empty() && added.is_empty() {
+            if any_change {
+                self.bump_search_revision();
+            }
+            return AppliedChanges {
+                changed: any_change,
+                moved: None,
+                inserted: Vec::new(),
+            };
         }
-        let appended_from = self.tracks.len();
-        if !appended.is_empty() {
-            self.tracks.extend(appended);
-            any_change = true;
+
+        dropped.sort_unstable();
+        dropped.dedup();
+        added.sort_by(|a, b| track_order(a, b));
+        let previous = std::mem::take(&mut self.tracks);
+        let mut moved = vec![None; previous.len()];
+        let mut inserted = Vec::with_capacity(added.len());
+        let mut tracks =
+            Vec::with_capacity(previous.len() + added.len() - dropped.len().min(previous.len()));
+        let mut dropped = dropped.into_iter().peekable();
+        let mut added = added.into_iter().peekable();
+        for (index, track) in previous.into_iter().enumerate() {
+            if dropped.next_if_eq(&index).is_some() {
+                continue;
+            }
+            while let Some(new) = added.next_if(|new| track_order(new, &track) == Ordering::Less) {
+                inserted.push(tracks.len());
+                tracks.push(new);
+            }
+            moved[index] = Some(tracks.len());
+            tracks.push(track);
         }
-        if any_change {
-            self.bump_search_revision();
+        for new in added {
+            inserted.push(tracks.len());
+            tracks.push(new);
         }
+        self.tracks = tracks;
+        self.bump_search_revision();
         AppliedChanges {
-            changed: any_change,
-            positions_kept,
-            appended_from,
+            changed: true,
+            moved: Some(moved),
+            inserted,
         }
     }
 }

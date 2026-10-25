@@ -70,23 +70,38 @@ fn applying_changes_replaces_in_place_appends_and_removes() {
             removed: Vec::new(),
         },
     );
-    assert!(first.changed && first.positions_kept);
-    assert_eq!(first.appended_from, 0);
+    assert!(first.changed);
+    assert_eq!(first.inserted, [0, 1, 2]);
     let kept = Arc::clone(&snapshot.tracks[0]);
 
-    // An edit and an addition keep every position.
+    // An edit stays in place.
     let edit = apply(
         &mut snapshot,
         &LibraryChanges {
-            roots: None,
-            upserted: vec![shared("/m/b", "B2"), shared("/m/d", "D")],
-            removed: Vec::new(),
+            upserted: vec![shared("/m/b", "B2")],
+            ..LibraryChanges::default()
         },
     );
-    assert!(edit.changed && edit.positions_kept);
-    assert_eq!(edit.appended_from, 3);
+    assert_eq!(
+        edit,
+        AppliedChanges {
+            changed: true,
+            moved: None,
+            inserted: Vec::new()
+        }
+    );
     assert_eq!(snapshot.tracks[1].title, "B2");
-    assert_eq!(snapshot.tracks[3].path, PathBuf::from("/m/d"));
+    // An addition goes to its place, and the tracks after it move.
+    let addition = apply(
+        &mut snapshot,
+        &LibraryChanges {
+            upserted: vec![shared("/m/bb", "BB"), shared("/m/d", "D")],
+            ..LibraryChanges::default()
+        },
+    );
+    assert_eq!(addition.inserted, [2, 4]);
+    assert_eq!(addition.moved, Some(vec![Some(0), Some(1), Some(3)]));
+    assert_eq!(snapshot.tracks[2].path, PathBuf::from("/m/bb"));
     assert!(
         Arc::ptr_eq(&snapshot.tracks[0], &kept),
         "unchanged tracks are shared"
@@ -100,11 +115,20 @@ fn applying_changes_replaces_in_place_appends_and_removes() {
             removed: vec![PathBuf::from("/m/a"), PathBuf::from("/m/missing")],
         },
     );
-    assert!(removal.changed && !removal.positions_kept);
+    assert!(removal.changed);
+    assert_eq!(
+        removal.moved,
+        Some(vec![None, Some(0), Some(1), Some(2), Some(3)])
+    );
     assert_eq!(
         titles(&snapshot),
-        [("/m/b", "B2"), ("/m/c", "C"), ("/m/d", "D")]
-            .map(|(path, title)| (path.to_string(), title.to_string()))
+        [
+            ("/m/b", "B2"),
+            ("/m/bb", "BB"),
+            ("/m/c", "C"),
+            ("/m/d", "D")
+        ]
+        .map(|(path, title)| (path.to_string(), title.to_string()))
     );
 }
 
@@ -308,5 +332,96 @@ fn reading_rows_publishes_them_even_when_the_worker_had_them() {
         changes.removed,
         [PathBuf::from("/music/renamed-away.flac")],
         "a path the database lacks is removed from any copy that has it"
+    );
+}
+
+fn paths(snapshot: &LibrarySnapshot) -> Vec<String> {
+    snapshot
+        .tracks
+        .iter()
+        .map(|track| track.path.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn changes_keep_the_order_a_database_read_has() {
+    let conn = memory_db();
+    let rows = [
+        ("/Music", "/Music/b/02.flac"),
+        ("/Music", "/Music/B/01.flac"),
+        ("/Music", "/Music/a/Ä.flac"),
+        ("/Music", "/Music/a/z.flac"),
+        ("/music-2", "/music-2/x.flac"),
+        ("/Archive", "/Archive/c.flac"),
+        ("/Music", "/Music/a/10.flac"),
+        ("/Music", "/Music/a/9.flac"),
+    ];
+    let mut snapshot = LibrarySnapshot::default();
+    let mut tracks = Vec::new();
+    for (root, path) in rows {
+        conn.execute(
+            "INSERT INTO tracks(path, root_path, title, artist, album, mtime_ns, size_bytes, indexed_at) \
+             VALUES (?1, ?2, '', '', '', 0, 0, 0)",
+            params![path, root],
+        )
+        .expect("insert track");
+        tracks.push(Arc::new(LibraryTrack {
+            path: PathBuf::from(path),
+            root_path: PathBuf::from(root),
+            ..LibraryTrack::default()
+        }));
+        // One change per track, as a scan adds them.
+        apply(
+            &mut snapshot,
+            &LibraryChanges {
+                upserted: vec![Arc::clone(tracks.last().expect("track"))],
+                ..LibraryChanges::default()
+            },
+        );
+    }
+    let mut read = LibrarySnapshot::default();
+    crate::library::schema::load_snapshot(&conn, &mut read);
+
+    assert_eq!(paths(&snapshot), paths(&read));
+    assert!(snapshot
+        .tracks
+        .windows(2)
+        .all(|pair| track_order(&pair[0], &pair[1]).is_lt()));
+}
+
+#[test]
+fn a_track_that_changes_root_moves_to_its_place() {
+    let mut snapshot = LibrarySnapshot::default();
+    let at = |root: &str, path: &str| {
+        Arc::new(LibraryTrack {
+            path: PathBuf::from(path),
+            root_path: PathBuf::from(root),
+            ..LibraryTrack::default()
+        })
+    };
+    apply(
+        &mut snapshot,
+        &LibraryChanges {
+            upserted: vec![
+                at("/a", "/a/inner/1.flac"),
+                at("/b", "/b/1.flac"),
+                at("/c", "/c/1.flac"),
+            ],
+            ..LibraryChanges::default()
+        },
+    );
+
+    // An inner root claims the track: it now sorts after /b.
+    apply(
+        &mut snapshot,
+        &LibraryChanges {
+            upserted: vec![at("/bz", "/a/inner/1.flac")],
+            ..LibraryChanges::default()
+        },
+    );
+
+    assert_eq!(
+        paths(&snapshot),
+        ["/b/1.flac", "/a/inner/1.flac", "/c/1.flac"]
     );
 }

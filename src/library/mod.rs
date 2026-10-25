@@ -17,9 +17,9 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::worker_thread::JoinableThread;
 
-pub(crate) use publish::LibraryChanges;
 #[cfg(test)]
 pub(crate) use publish::LibraryMirror;
+pub(crate) use publish::{AppliedChanges, LibraryChanges};
 #[cfg(test)]
 pub(crate) use scan::scan_test_hooks::hold_read;
 #[cfg(test)]
@@ -132,6 +132,16 @@ impl LibrarySnapshot {
     }
 }
 
+/// The library in the database at `path`, as the worker reads it, for tests.
+#[cfg(test)]
+pub(crate) fn schema_load_snapshot_for_test(
+    path: &std::path::Path,
+    snapshot: &mut LibrarySnapshot,
+) {
+    let conn = rusqlite::Connection::open(path).expect("open the test library");
+    schema::load_snapshot(&conn, snapshot);
+}
+
 /// `tracks` as a snapshot holds them, for tests.
 #[cfg(test)]
 pub(crate) fn shared_tracks(tracks: Vec<LibraryTrack>) -> Vec<Arc<LibraryTrack>> {
@@ -224,6 +234,12 @@ impl LibraryService {
         let db_path = crate::paths::library_db_path()
             .map_err(|err| format!("could not open the library database: {err}"));
         Self::spawn(db_path, schema::BUSY_TIMEOUT, || {})
+    }
+
+    /// A service on the database at `path`, scanning as the app does.
+    #[cfg(test)]
+    pub(crate) fn at_database(path: PathBuf) -> (Self, Receiver<LibraryEvent>) {
+        Self::spawn(Ok(path), schema::BUSY_TIMEOUT, || {})
     }
 
     /// A service on the database at `path`, whose scans use `tuning`.

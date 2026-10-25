@@ -851,22 +851,11 @@ pub(super) fn apply_library_events(
         return applied;
     }
 
-    let previous = Arc::clone(&state.library);
-    let mut next = (*previous).clone();
-    let result = next.apply_changes(&changes, |path| {
-        state.library_index.positions(&previous, path)
-    });
-    if !result.changed {
+    if !state.apply_library_changes(&changes).changed {
         return applied;
     }
     applied.rows_changed =
         changes.upserted.len() + changes.removed.len() + usize::from(changes.roots.is_some());
-    state.library = Arc::new(next);
-    if result.positions_kept {
-        state
-            .library_index
-            .extend(&previous, &state.library, result.appended_from);
-    }
     if !state.queue.is_empty() {
         super::sync_queue_details(state);
     }

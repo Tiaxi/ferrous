@@ -1130,42 +1130,45 @@ pub(super) fn refresh_renamed_paths(
 }
 
 /// Move the library's renamed tracks to their new paths, in one pass that
-/// finds them through the path index. The library is copied only if a track
-/// changes.
+/// finds them through the path index. A renamed track goes to its new
+/// path's place in the library's order. The library is copied only if a
+/// track changes.
 fn apply_renamed_library_paths(
     state: &mut BridgeState,
     rename_map: &PathRenames,
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
 ) -> bool {
-    let mut updates = Vec::new();
+    let new_paths: HashSet<&PathBuf> = rename_map.values().collect();
+    let mut changes = crate::library::LibraryChanges::default();
     for (old_path, new_path) in rename_map {
         let indexed = indexed_by_path.get(new_path);
-        for position in state.library_index.positions(&state.library, old_path) {
-            let track = &state.library.tracks[position];
-            if &track.path != new_path
-                || indexed.is_some_and(|indexed| track_details_differ(track, indexed))
-            {
-                updates.push((position, new_path, indexed));
-            }
+        let Some(position) = state.library_index.position(&state.library, old_path) else {
+            continue;
+        };
+        let track = &state.library.tracks[position];
+        if &track.path == new_path
+            && !indexed.is_some_and(|indexed| track_details_differ(track, indexed))
+        {
+            continue;
         }
-    }
-    if updates.is_empty() {
-        return false;
-    }
-    let mut next_library = (*state.library).clone();
-    for (position, new_path, indexed) in updates {
-        let track = Arc::make_mut(&mut next_library.tracks[position]);
+        let mut renamed = (**track).clone();
+        renamed.path.clone_from(new_path);
+        if let Some(indexed) = indexed {
+            copy_track_details(&mut renamed, indexed);
+        }
+        changes.upserted.push(Arc::new(renamed));
+        // A path another file was renamed to is replaced, not removed.
+        if !new_paths.contains(old_path) {
+            changes.removed.push(old_path.clone());
+        }
         state
             .library_rows_to_read
-            .extend([track.path.clone(), new_path.clone()]);
-        track.path.clone_from(new_path);
-        if let Some(indexed) = indexed {
-            copy_track_details(track, indexed);
-        }
+            .extend([old_path.clone(), new_path.clone()]);
     }
-    next_library.search_revision = next_library.search_revision.saturating_add(1);
-    state.library = Arc::new(next_library);
-    true
+    if changes.upserted.is_empty() {
+        return false;
+    }
+    state.apply_library_changes(&changes).changed
 }
 
 fn apply_renamed_queue_paths(
