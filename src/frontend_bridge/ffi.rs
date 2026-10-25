@@ -1135,9 +1135,10 @@ pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
 
 #[no_mangle]
 /// Stop the bridge and free it. Blocks until the bridge has saved the
-/// settings, the session, and Last.fm's queue, or for at most
-/// [`BRIDGE_SHUTDOWN_TIMEOUT`]. Returns false if one of them was not saved,
-/// or if the bridge was still shutting down then, so they may be missing.
+/// settings, the session, and Last.fm's queue, and stopped playback, or for
+/// at most [`BRIDGE_SHUTDOWN_TIMEOUT`]. Returns false if one of them was not
+/// saved, if playback left a file open that it could not close, or if
+/// the bridge was still shutting down then, so they may be missing.
 ///
 /// # Safety
 ///

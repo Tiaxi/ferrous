@@ -17,6 +17,7 @@ libc = "0.2"
 gstreamer = { version = "0.25", optional = true }
 gstreamer-app = { version = "0.25", optional = true }
 gstreamer-audio = { version = "0.25", optional = true }
+gstreamer-base = { version = "0.25", optional = true }
 gstreamer-pbutils = { version = "0.25", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native-sync-persistent", "windows-native", "vendored"] }
@@ -39,7 +40,7 @@ walkdir = "2"
 
 [features]
 default = []
-gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-audio", "dep:gstreamer-pbutils"]
+gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-audio", "dep:gstreamer-base", "dep:gstreamer-pbutils"]
 profiling-logs = []
 
 [lints.rust]

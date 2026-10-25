@@ -784,8 +784,9 @@ impl FrontendBridgeHandle {
     }
 
     /// Stop the bridge and wait, up to [`BRIDGE_SHUTDOWN_TIMEOUT`], for it
-    /// to save the settings, the session, and Last.fm's queue. Returns
-    /// false if it is still running then, or if one of them was not saved.
+    /// to save the settings, the session, and Last.fm's queue, and to stop
+    /// playback. Returns false if it is still running then, if one of them
+    /// was not saved, or if playback left a file open.
     #[must_use]
     pub fn shutdown(self) -> bool {
         let _ = self.tx.send(BridgeCommand::Shutdown);
@@ -844,6 +845,11 @@ impl FrontendBridgeHandle {
 /// How long shutdown waits for the Last.fm service to save its queue.
 const LASTFM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long shutdown waits for the playback engine to stop and tell which
+/// files it could not release. Stopping takes milliseconds, as the engine
+/// does not wait for reads that do not return.
+const PLAYBACK_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// How long stopping the bridge waits for its thread to end.
 ///
 /// Its shutdown waits up to [`LASTFM_SHUTDOWN_TIMEOUT`] for Last.fm, which
@@ -851,8 +857,9 @@ const LASTFM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// [`ANALYSIS_SHUTDOWN_TIMEOUT`] for the analysis threads, and up to
 /// [`LIBRARY_SHUTDOWN_TIMEOUT`] for the library worker to stop a scan and
 /// close its database. The second left covers the settings and session
-/// saves, a few small files, and stopping playback. A normal shutdown takes milliseconds; the bound only keeps a
-/// stuck one from holding the app open.
+/// saves, a few small files, and stopping playback, which waits up to
+/// [`PLAYBACK_SHUTDOWN_TIMEOUT`]. A normal shutdown takes milliseconds; the
+/// bound only keeps a stuck one from holding the app open.
 pub(crate) const BRIDGE_SHUTDOWN_TIMEOUT: Duration = LASTFM_SHUTDOWN_TIMEOUT
     .saturating_add(ANALYSIS_SHUTDOWN_TIMEOUT)
     .saturating_add(LIBRARY_SHUTDOWN_TIMEOUT)
@@ -1146,7 +1153,7 @@ impl BridgeLoopRuntime {
     }
 
     /// Run until shutdown. Returns whether the settings, the session, and
-    /// Last.fm's queue were saved then.
+    /// Last.fm's queue were saved then, and playback released its files.
     fn run(&mut self, cmd_rx: &Receiver<BridgeCommand>, event_tx: &Sender<BridgeEvent>) -> bool {
         self.emit_initial_snapshot(event_tx);
         while self.flags.running {
@@ -2019,7 +2026,8 @@ impl BridgeLoopRuntime {
     }
 
     /// Save the state and stop the workers. Returns whether the settings,
-    /// the session, and Last.fm's queue were saved.
+    /// the session, and Last.fm's queue were saved, and playback stopped
+    /// with every file released.
     fn shutdown(&mut self, event_tx: &Sender<BridgeEvent>) -> bool {
         let mut saved = true;
         if self.persisted_state_enabled {
@@ -2036,6 +2044,12 @@ impl BridgeLoopRuntime {
             &mut self.lastfm_tracker,
             Instant::now(),
         );
+        // A file whose read has not returned stays open after the app quits.
+        if let Some(message) = self.playback.shutdown(PLAYBACK_SHUTDOWN_TIMEOUT).problem() {
+            eprintln!("[ferrous] {message}");
+            let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+            saved = false;
+        }
         let lastfm_problem = match self.lastfm.shutdown(LASTFM_SHUTDOWN_TIMEOUT) {
             LastFmShutdownOutcome::Stopped => None,
             LastFmShutdownOutcome::SaveFailed(message) => Some(message),

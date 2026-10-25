@@ -21,13 +21,14 @@ use crate::raw_audio::{
 };
 
 use super::clock::{self, MonotonicClock, MonotonicTime};
+use super::file_source::Releases;
 use super::parsebin_stall;
 use super::queue::{
     same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff, ManualMove,
 };
 use super::source_activation::SourceActivation;
 use super::{
-    PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
+    EngineExit, PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
     PlaybackSnapshot, PlaybackState, RepeatMode, TrackChangeKind,
 };
 use crate::file_identity::{self, file_id, FileId, ResolvedPath, WatchedFile};
@@ -404,26 +405,53 @@ struct GstPlaybackRuntime {
     /// Shared with the about-to-finish callback, which activates the
     /// successor's source in it; see `SourceActivation`.
     source_activation: Arc<SourceActivation>,
+    /// Shared with the pipeline's file sources, which leave their files to
+    /// their readers to close when they stop; see `file_source`.
+    releases: Arc<Releases>,
+    /// How long such a file may stay open before the user is told:
+    /// `RELEASE_REPORT_AFTER`, which tests shorten.
+    release_report_after: Duration,
     #[cfg(test)]
     about_to_finish: Arc<AboutToFinishCalls>,
 }
+
+/// How long the file of a file source that stopped may stay open, behind a
+/// read in progress or in its close, before the engine tells the user that
+/// the file cannot be released.
+///
+/// The read or close waits for a drive or a network share that does not
+/// answer, and playback has gone on without it, so this decides only when
+/// to report it. A sleeping hard disk spins up within about 10 s, and the
+/// kernel's SCSI layer times a command out after 30 s, so a file still open
+/// after 15 s waits for a drive that did not wake up, or for a share that
+/// stopped answering, and the user hears of it before the kernel retries.
+const RELEASE_REPORT_AFTER: Duration = Duration::from_secs(15);
+
+/// How long the engine waits, when it stops, for its file sources' readers
+/// to close their files, before it reports the files as not released. A
+/// read and a close that the storage answers take milliseconds; this only
+/// keeps them from counting, within the bounded shutdown of the bridge.
+const EXIT_RELEASE_WAIT: Duration = Duration::from_millis(200);
 
 pub fn spawn_engine(
     analysis_tx: Sender<AnalysisCommand>,
     event_tx: Sender<PlaybackEvent>,
     failure: &Arc<OnceLock<String>>,
+    exit_tx: Sender<EngineExit>,
 ) -> Sender<PlaybackCommand> {
-    spawn_engine_with_output(analysis_tx, event_tx, failure, build_output_sink)
+    spawn_engine_with_output(analysis_tx, event_tx, failure, exit_tx, build_output_sink)
 }
 
 /// Spawn the engine with the audio output that `build_output` creates
 /// after `GStreamer` is initialized. When the engine cannot start, the
 /// thread records why in `failure`, reports it, and exits, so that later
-/// commands fail.
+/// commands fail. When the engine stops, it sends what it left behind to
+/// `exit_tx`.
 fn spawn_engine_with_output(
     analysis_tx: Sender<AnalysisCommand>,
     event_tx: Sender<PlaybackEvent>,
     failure: &Arc<OnceLock<String>>,
+    exit_tx: Sender<EngineExit>,
     build_output: fn() -> anyhow::Result<gst::Element>,
 ) -> Sender<PlaybackCommand> {
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
@@ -433,7 +461,9 @@ fn spawn_engine_with_output(
         .name("ferrous-playback-gst".to_string())
         .spawn(move || {
             match start_gst_engine(event_tx.clone(), analysis_tx, build_output) {
-                Ok((runtime, bus)) => run_gst_engine(runtime, &bus, &cmd_rx),
+                Ok((runtime, bus)) => {
+                    let _ = exit_tx.send(run_gst_engine(runtime, &bus, &cmd_rx));
+                }
                 Err(err) => {
                     // Commands fail from now on, before the failure is
                     // reported.
@@ -487,6 +517,8 @@ impl GstPlaybackRuntime {
         // The runtime changes the pipeline's state only in
         // `set_pipeline_state`, which orders it against the type finding.
         let source_activation = SourceActivation::connect(&playbin);
+        let releases = Arc::new(Releases::default());
+        releases.track(&playbin);
         Self {
             playbin,
             queue_state,
@@ -528,6 +560,8 @@ impl GstPlaybackRuntime {
             stalled_file: None,
             input_switches: Arc::default(),
             source_activation,
+            releases,
+            release_report_after: RELEASE_REPORT_AFTER,
             #[cfg(test)]
             about_to_finish: Arc::default(),
         }
@@ -1842,6 +1876,28 @@ impl GstPlaybackRuntime {
         }
     }
 
+    /// Tell the user about each file of a source that stopped which has not
+    /// been closed for `release_report_after` at `now`, behind a read or in
+    /// its close. Playback has gone on without it; the file stays open.
+    fn report_unreleased(&self, now: Instant) {
+        for path in self.releases.overdue(now, self.release_report_after) {
+            eprintln!(
+                "[ferrous] {} has not been closed for {:.1} s",
+                path.display(),
+                self.release_report_after.as_secs_f64()
+            );
+            self.report_failure(
+                Some(path),
+                format!(
+                    "reading or closing it has not finished for {} s, so its drive or network \
+                     share may not be responding",
+                    self.release_report_after.as_secs()
+                ),
+                PlaybackErrorOutcome::NotReleased,
+            );
+        }
+    }
+
     fn report_failure(&self, path: Option<PathBuf>, detail: String, outcome: PlaybackErrorOutcome) {
         let _ = self.event_tx.send(PlaybackEvent::Error(PlaybackError {
             path,
@@ -2475,11 +2531,12 @@ struct AboutToFinishCalls {
     returned: AtomicU64,
 }
 
+/// Run the engine until its commands end. Returns what it left behind.
 fn run_gst_engine(
     mut runtime: GstPlaybackRuntime,
     bus: &gst::Bus,
     cmd_rx: &Receiver<PlaybackCommand>,
-) {
+) -> EngineExit {
     // Wake for bus messages, such as the async-done that tells where a seek
     // landed, instead of finding them at the next timeout.
     let (bus_wake_tx, bus_wake_rx) = bounded::<()>(1);
@@ -2507,11 +2564,18 @@ fn run_gst_engine(
             default(runtime.command_wait_timeout()) => {}
         }
         runtime.drain_bus(bus);
-        runtime.poll_volume_ramp(Instant::now());
+        let now = Instant::now();
+        runtime.poll_volume_ramp(now);
+        runtime.report_unreleased(now);
     }
 
     bus.unset_sync_handler();
     let _ = runtime.set_pipeline_state(gst::State::Null);
+    EngineExit {
+        unreleased: runtime
+            .releases
+            .wait_released(Instant::now() + EXIT_RELEASE_WAIT),
+    }
 }
 
 /// A step of the engine: a command, or a burst of commands merged into one.
@@ -4741,6 +4805,9 @@ mod engine_tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
+    use crate::playback::file_source::test_support::{
+        hold_reads, reader_runs, readers_started, Hold,
+    };
     use crate::playback::pipeline_trace::PipelineTrace;
     use crate::playback::source_activation::race::{
         race_type_finding_with_activation, ActivationRace,
@@ -5146,6 +5213,8 @@ mod engine_tests {
         trace: Trace,
         /// When the engine last reported an event.
         last_event_at: Option<Instant>,
+        /// The engine's thread, which returns what it left behind.
+        thread: std::thread::JoinHandle<EngineExit>,
     }
 
     impl Engine {
@@ -5155,18 +5224,23 @@ mod engine_tests {
 
         /// Start an engine that stamps its position samples with `clock`.
         fn start_with_clock(clock: MonotonicClock) -> Self {
+            Self::start_configured(|runtime| runtime.clock = clock)
+        }
+
+        /// Start an engine whose runtime `configure` sets up.
+        fn start_configured(configure: impl FnOnce(&mut GstPlaybackRuntime)) -> Self {
             gst::init().unwrap();
             let (analysis_tx, analysis) = unbounded();
             let (event_tx, events) = unbounded();
             let (mut runtime, bus) =
                 start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
-            runtime.clock = clock;
+            configure(&mut runtime);
             let playbin = runtime.playbin.clone();
             let queue = Arc::clone(&runtime.queue_state);
             let activation = Arc::clone(&runtime.source_activation);
             let trace = Trace::new(&runtime);
             let (commands, command_rx) = unbounded();
-            std::thread::spawn(move || run_gst_engine(runtime, &bus, &command_rx));
+            let thread = std::thread::spawn(move || run_gst_engine(runtime, &bus, &command_rx));
             Self {
                 commands,
                 events,
@@ -5183,6 +5257,7 @@ mod engine_tests {
                 cancelled_staging: 0,
                 trace,
                 last_event_at: None,
+                thread,
             }
         }
 
@@ -6924,10 +6999,9 @@ mod engine_tests {
                 .into_iter()
                 .filter_map(Result::ok)
                 .find(|element| {
-                    element
-                        .factory()
-                        .is_some_and(|factory| factory.name() == "filesrc")
-                        && input_file(Some(element.upcast_ref())).as_deref() == Some(file)
+                    element.factory().is_some_and(|factory| {
+                        factory.name() == crate::playback::file_source::FACTORY_NAME
+                    }) && input_file(Some(element.upcast_ref())).as_deref() == Some(file)
                 })
                 .expect("file source")
         }
@@ -8030,7 +8104,9 @@ mod engine_tests {
                 .src()
                 .and_then(|src| src.downcast_ref::<gst::Element>())
                 .filter(|element| {
-                    element.factory().is_some_and(|f| f.name() == "filesrc")
+                    element
+                        .factory()
+                        .is_some_and(|f| f.name() == crate::playback::file_source::FACTORY_NAME)
                         && input_file(Some(element.upcast_ref())).as_deref() == Some(file.as_path())
                 });
             if source.is_none()
@@ -8980,9 +9056,10 @@ mod engine_tests {
             Err(anyhow!("no audio output in this test"))
         }
         let (analysis_tx, _analysis) = unbounded();
-        let (engine, events) = crate::playback::PlaybackEngine::spawn(|event_tx, failure| {
-            spawn_engine_with_output(analysis_tx, event_tx, failure, no_output)
-        });
+        let (engine, events) =
+            crate::playback::PlaybackEngine::spawn(|event_tx, failure, exit_tx| {
+                spawn_engine_with_output(analysis_tx, event_tx, failure, exit_tx, no_output)
+            });
         let unavailable = |event: Option<PlaybackEvent>| match event {
             Some(PlaybackEvent::Error(error)) => {
                 assert_eq!(error.outcome, PlaybackErrorOutcome::EngineUnavailable);
@@ -9272,5 +9349,368 @@ mod engine_tests {
         });
         assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
         engine.assert_fades_in_from_silence();
+    }
+
+    /// How long the file of a stopped source may stay open before the
+    /// engines of the tests of reads that do not return report it.
+    const TEST_RELEASE_REPORT_AFTER: Duration = Duration::from_millis(300);
+
+    impl Engine {
+        /// Start an engine that reports a read left behind once it has
+        /// taken `TEST_RELEASE_REPORT_AFTER`.
+        fn start_reporting_releases_soon() -> Self {
+            Self::start_configured(|runtime| {
+                runtime.release_report_after = TEST_RELEASE_REPORT_AFTER;
+            })
+        }
+
+        /// Play `queue` until its first track has played a moment, then
+        /// hold the reads of the track's file, as a drive or network share
+        /// that stopped answering would, until a read is held.
+        fn play_until_read_held(&mut self, queue: Vec<PathBuf>) -> Arc<Hold> {
+            let first = queue[0].clone();
+            self.send(PlaybackCommand::LoadQueue(queue));
+            self.send(PlaybackCommand::Play);
+            self.wait_until("the first track did not play", |engine| {
+                engine.snapshot.state == PlaybackState::Playing
+                    && engine.snapshot.current_queue_index == Some(0)
+                    && engine.snapshot.position >= millis(300)
+            });
+            let hold = hold_reads(&first);
+            self.wait_until("no read of the first track was held", |_| {
+                hold.holds_a_read()
+            });
+            hold
+        }
+
+        /// Wait until the engine plays the row `index` from its start.
+        #[track_caller]
+        fn wait_until_row_plays(&mut self, index: usize) {
+            self.wait_until(&format!("row {index} did not play"), |engine| {
+                engine.snapshot.state == PlaybackState::Playing
+                    && engine.snapshot.current_queue_index == Some(index)
+                    && engine.snapshot.position >= millis(300)
+            });
+        }
+
+        /// The errors that report a file whose read did not return.
+        fn not_released(&self) -> Vec<&PlaybackError> {
+            self.errors
+                .iter()
+                .filter(|error| error.outcome == PlaybackErrorOutcome::NotReleased)
+                .collect()
+        }
+
+        /// Stop the engine, as the bridge does when the app quits, and wait
+        /// for what it left behind. Returns that and how long it took.
+        fn quit(self) -> (EngineExit, Duration) {
+            let started = Instant::now();
+            drop(self.commands);
+            let (exit_tx, exit) = bounded(1);
+            let thread = self.thread;
+            std::thread::spawn(move || {
+                let _ = exit_tx.send(thread.join());
+            });
+            let exit = exit
+                .recv_timeout(TIMEOUT)
+                .expect("the engine stopped")
+                .expect("the engine did not panic");
+            (exit, started.elapsed())
+        }
+    }
+
+    #[track_caller]
+    fn wait_until_reader_ends(file: &Path) {
+        let deadline = Instant::now() + TIMEOUT;
+        while reader_runs(file) {
+            assert!(
+                Instant::now() < deadline,
+                "the reader of {} did not end",
+                file.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn next_while_a_read_does_not_return_plays_the_next_track() {
+        let fixtures = Fixtures::new("held-read-next");
+        let a = fixtures.wav("a.wav", 20_000);
+        let b = fixtures.wav("b.wav", 4_000);
+        let mut engine = Engine::start_reporting_releases_soon();
+        let hold = engine.play_until_read_held(vec![a.clone(), b.clone()]);
+        let readers = readers_started(&a);
+
+        engine.send(PlaybackCommand::Next);
+        engine.wait_until_row_plays(1);
+        assert_eq!(engine.snapshot.current.as_deref(), Some(b.as_path()));
+        assert!(hold.holds_a_read(), "B played while the read of A was held");
+        // Commands go on taking effect.
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("pause did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("play did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Playing && engine.snapshot.position_advancing
+        });
+
+        // The user hears of the file that stays open, once.
+        engine.wait_until("the read of A was not reported", |engine| {
+            !engine.not_released().is_empty()
+        });
+        let reported = engine.not_released();
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert_eq!(reported[0].path.as_deref(), Some(a.as_path()));
+        assert!(
+            reported[0].message().starts_with(&format!(
+                "Can't release \u{201c}{}\u{201d}: reading or closing it has not finished",
+                a.display()
+            )),
+            "{}",
+            reported[0].message()
+        );
+        assert!(
+            !engine
+                .errors
+                .iter()
+                .any(|error| error.outcome != PlaybackErrorOutcome::NotReleased),
+            "{:?}",
+            engine.errors
+        );
+
+        // Once the read returns, the file is closed and its reader ends.
+        hold.release();
+        wait_until_reader_ends(&a);
+        assert_eq!(readers_started(&a), readers);
+        assert_eq!(engine.snapshot.current_queue_index, Some(1));
+        let (exit, _) = engine.quit();
+        assert_eq!(exit, EngineExit::default());
+    }
+
+    #[test]
+    fn switch_while_a_successors_read_does_not_return_plays_the_chosen_track() {
+        let fixtures = Fixtures::new("held-read-successor");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_000);
+        let c = fixtures.wav("c.wav", 4_000);
+        let mut engine = Engine::start();
+        // The successor's source finds the type of its file in a read that
+        // does not return.
+        let hold = hold_reads(&b);
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone(), c.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_window(&b);
+        engine.wait_until("no read of the successor was held", |_| hold.holds_a_read());
+        engine.wait_until("the current track did not near its end", |engine| {
+            engine.snapshot.position >= millis(3_000)
+        });
+
+        engine.send(PlaybackCommand::PlayAt(2));
+        engine.wait_until_row_plays(2);
+        assert_eq!(engine.snapshot.current.as_deref(), Some(c.as_path()));
+        assert!(hold.holds_a_read(), "C played while the read of B was held");
+
+        hold.release();
+        wait_until_reader_ends(&b);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    #[test]
+    fn stop_while_a_read_does_not_return_stops_and_plays_another_track() {
+        let fixtures = Fixtures::new("held-read-stop");
+        let a = fixtures.wav("a.wav", 20_000);
+        let b = fixtures.wav("b.wav", 4_000);
+        let mut engine = Engine::start();
+        let hold = engine.play_until_read_held(vec![a.clone(), b.clone()]);
+
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("stop did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        assert!(hold.holds_a_read());
+        engine.send(PlaybackCommand::PlayAt(1));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until_row_plays(1);
+        assert!(hold.holds_a_read(), "B played while the read of A was held");
+
+        hold.release();
+        wait_until_reader_ends(&a);
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("stop did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        wait_until_reader_ends(&b);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    #[test]
+    fn seek_while_a_read_does_not_return_lands_once_it_returns() {
+        let fixtures = Fixtures::new("held-read-seek");
+        let a = fixtures.wav("a.wav", 20_000);
+        let mut engine = Engine::start();
+        let hold = engine.play_until_read_held(vec![a.clone()]);
+
+        // The seek flushes the source, which waits for the read no longer,
+        // and its next read waits behind the held one.
+        engine.send(PlaybackCommand::Seek(millis(10_000)));
+        engine.send(PlaybackCommand::SetVolume(0.5));
+        engine.wait_until("the volume did not change", |engine| {
+            (engine.snapshot.volume - 0.5).abs() < f32::EPSILON
+        });
+        assert!(engine.seeked.is_empty(), "{:?}", engine.seeked);
+        assert!(hold.holds_a_read());
+
+        hold.release();
+        engine.wait_until("the seek did not land", |engine| !engine.seeked.is_empty());
+        assert!(
+            engine.seeked[0].abs_diff(millis(10_000)) < millis(100),
+            "{:?}",
+            engine.seeked
+        );
+        engine.wait_until("playback did not go on after the seek", |engine| {
+            engine.snapshot.position_advancing && engine.snapshot.position >= millis(10_300)
+        });
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    #[test]
+    fn presses_while_a_read_does_not_return_keep_one_reader_for_its_file() {
+        let fixtures = Fixtures::new("held-read-presses");
+        let a = fixtures.wav("a.wav", 20_000);
+        let b = fixtures.wav("b.wav", 4_000);
+        let mut engine = Engine::start();
+        let hold = engine.play_until_read_held(vec![a.clone(), b.clone()]);
+        let readers = readers_started(&a);
+
+        // Each press starts a new run. The runs of A wait behind the held
+        // read, in the reader that A's file already has.
+        for _ in 0..6 {
+            for (command, row) in [(PlaybackCommand::Next, 1), (PlaybackCommand::Previous, 0)] {
+                let changes = engine.changes.len();
+                engine.send(command);
+                engine.wait_until("the press did not switch tracks", |engine| {
+                    engine.changes.len() > changes
+                        && engine.changes.last().map(|change| change.index) == Some(row)
+                });
+                assert_eq!(readers_started(&a), readers);
+            }
+        }
+        engine.send(PlaybackCommand::Next);
+        engine.wait_until_row_plays(1);
+        assert!(hold.holds_a_read());
+        assert_eq!(readers_started(&a), readers);
+        assert!(reader_runs(&b));
+
+        hold.release();
+        wait_until_reader_ends(&a);
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("stop did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        wait_until_reader_ends(&b);
+        assert_eq!(readers_started(&a), readers);
+    }
+
+    #[test]
+    fn quitting_while_a_read_does_not_return_reports_the_file_left_open() {
+        let fixtures = Fixtures::new("held-read-quit");
+        let a = fixtures.wav("a.wav", 20_000);
+        let mut engine = Engine::start();
+        let hold = engine.play_until_read_held(vec![a.clone()]);
+        let (exit, took) = engine.quit();
+        assert_eq!(exit.unreleased, vec![a.clone()]);
+        // The engine waits for the read only briefly.
+        assert!(
+            took < EXIT_RELEASE_WAIT + Duration::from_secs(1),
+            "{took:?}"
+        );
+        hold.release();
+        wait_until_reader_ends(&a);
+    }
+
+    #[test]
+    fn a_close_that_does_not_return_is_reported_and_leaves_the_file_open_at_quit() {
+        let fixtures = Fixtures::new("held-close");
+        let a = fixtures.wav("a.wav", 20_000);
+        let mut engine = Engine::start_reporting_releases_soon();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until_row_plays(0);
+        // The close waits for the drive, after any read has returned.
+        let closing = crate::playback::file_source::test_support::hold(
+            &a,
+            crate::playback::file_source::test_support::Point::Close,
+        );
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("stop did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        engine.wait_until("the close of A was not reported", |engine| {
+            !engine.not_released().is_empty()
+        });
+        assert_eq!(engine.not_released()[0].path.as_deref(), Some(a.as_path()));
+        assert!(closing.holds());
+
+        let (exit, took) = engine.quit();
+        assert_eq!(exit.unreleased, vec![a.clone()]);
+        assert!(
+            took < EXIT_RELEASE_WAIT + Duration::from_secs(1),
+            "{took:?}"
+        );
+        closing.release();
+        wait_until_reader_ends(&a);
+    }
+
+    #[test]
+    fn shutdown_tells_whether_playback_released_its_files() {
+        let fixtures = Fixtures::new("held-read-shutdown");
+        let a = fixtures.wav("a.wav", 20_000);
+        let start = || {
+            let (analysis_tx, analysis) = unbounded();
+            let (engine, events) =
+                crate::playback::PlaybackEngine::spawn(|event_tx, failure, exit_tx| {
+                    spawn_engine_with_output(analysis_tx, event_tx, failure, exit_tx, fake_output)
+                });
+            engine.command(PlaybackCommand::LoadQueue(vec![a.clone()]));
+            engine.command(PlaybackCommand::Play);
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                assert!(Instant::now() < deadline, "playback did not start");
+                engine.command(PlaybackCommand::Poll);
+                if let Ok(PlaybackEvent::Snapshot(snapshot)) =
+                    events.recv_timeout(Duration::from_millis(20))
+                {
+                    if snapshot.position_advancing && snapshot.position >= millis(300) {
+                        break;
+                    }
+                }
+            }
+            (engine, events, analysis)
+        };
+        let shutdown_timeout = Duration::from_secs(2);
+
+        let (mut engine, _events, _analysis) = start();
+        assert_eq!(
+            engine.shutdown(shutdown_timeout),
+            crate::playback::PlaybackShutdown::Stopped
+        );
+
+        let (mut engine, _events, _analysis) = start();
+        let hold = hold_reads(&a);
+        let deadline = Instant::now() + TIMEOUT;
+        while !hold.holds_a_read() {
+            assert!(Instant::now() < deadline, "no read was held");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let outcome = engine.shutdown(shutdown_timeout);
+        assert_eq!(
+            outcome,
+            crate::playback::PlaybackShutdown::Unreleased(vec![a.clone()])
+        );
+        let problem = outcome.problem().expect("a problem to report");
+        assert!(problem.contains(&a.display().to_string()), "{problem}");
+        hold.release();
+        wait_until_reader_ends(&a);
     }
 }
