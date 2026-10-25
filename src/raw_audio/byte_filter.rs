@@ -304,6 +304,10 @@ mod tests {
 mod gst_tests {
     use super::install_raw_surround_source_probe;
     use crate::playback::pipeline_trace::PipelineTrace;
+    use crate::playback::source_activation::race::{
+        race_type_finding_with_activation, ActivationRace,
+    };
+    use crate::playback::source_activation::{activate_sources, connect_type_finding_hold};
     use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes, test_path};
     use crate::raw_audio::{TEST_AC3, TEST_DTS};
     use gst::prelude::*;
@@ -376,7 +380,8 @@ mod gst_tests {
     }
 
     /// `playbin3` with the app's source filter, a fake audio sink, and
-    /// recorders for what the sources deliver and what is decoded.
+    /// recorders for what the sources deliver and what is decoded. It
+    /// activates its sources as the playback backend does.
     struct Player {
         playbin: gst::Element,
         decoded: Arc<Mutex<Vec<(Duration, Duration)>>>,
@@ -392,6 +397,7 @@ mod gst_tests {
                 .build()
                 .expect("playbin3");
             install_raw_surround_source_probe(&playbin);
+            connect_type_finding_hold(&playbin);
             let player = Self {
                 trace: PipelineTrace::new(&playbin),
                 playbin,
@@ -463,8 +469,7 @@ mod gst_tests {
         }
 
         fn set_state(&self, state: gst::State) -> Result<(), String> {
-            self.playbin
-                .set_state(state)
+            activate_sources(|| self.playbin.set_state(state))
                 .map(|_| ())
                 .map_err(|err| err.to_string())
         }
@@ -507,7 +512,7 @@ mod gst_tests {
         }
 
         fn finish<T>(self, name: &str, result: Result<T, String>) -> T {
-            let _ = self.playbin.set_state(gst::State::Null);
+            let _ = self.set_state(gst::State::Null);
             result.unwrap_or_else(|err| panic!("{name}: {err}"))
         }
     }
@@ -550,7 +555,10 @@ mod gst_tests {
     /// Play `paths` back to back, switching on `about-to-finish` as the
     /// playback backend does for files with the same extension.
     fn play_gapless(paths: &[PathBuf]) -> Run {
-        let player = Player::new();
+        play_gapless_on(Player::new(), paths)
+    }
+
+    fn play_gapless_on(player: Player, paths: &[PathBuf]) -> Run {
         player.set_path(&paths[0]);
         let queue = Mutex::new(paths[1..].iter().cloned().collect::<VecDeque<_>>());
         player
@@ -558,7 +566,7 @@ mod gst_tests {
             .connect("about-to-finish", false, move |values| {
                 let playbin = values.first()?.get::<gst::Element>().ok()?;
                 let next = queue.lock().ok()?.pop_front()?;
-                playbin.set_property("uri", file_uri(&next));
+                activate_sources(|| playbin.set_property("uri", file_uri(&next)));
                 None
             });
         let result = (|| {
@@ -685,6 +693,39 @@ mod gst_tests {
             "{name}: decoded {decoded:?} of a {expected:?} queue"
         );
         run.assert_only_audio_delivered(&[first, clean, last]);
+    }
+
+    #[test]
+    fn ripped_files_find_their_type_only_once_their_sources_are_activated() {
+        // The filter offers the file in push mode only, so urisourcebin
+        // finds its type on the streaming thread of the file source. When
+        // that happens while the activating thread still changes the state
+        // of urisourcebin, the parsebin it then sets up can deadlock with
+        // that thread (GStreamer issue 4472). The hold must stop the
+        // streaming thread before: for the first file, activated by the
+        // state change, and for the successor, activated by the handover in
+        // about-to-finish.
+        require_elements(AC3.elements);
+        let repeats = AC3.repeats();
+        let first = write_ripped_file(AC3.name, AC3.fixture, repeats);
+        let second = write_ripped_file(AC3.name, AC3.fixture, repeats);
+        let player = Player::new();
+        let races = [&first, &second]
+            .map(|(path, _)| race_type_finding_with_activation(&player.playbin, path));
+        let run = play_gapless_on(player, &[first.0.clone(), second.0.clone()]);
+        for (path, _) in [&first, &second] {
+            let _ = std::fs::remove_file(path);
+        }
+
+        for (race, (path, _)) in races.iter().zip([&first, &second]) {
+            assert_eq!(
+                *race.lock().unwrap(),
+                Some(ActivationRace::TypeFindingHeld),
+                "{}",
+                path.display()
+            );
+        }
+        run.assert_only_audio_delivered(&[first, second]);
     }
 
     #[test]
