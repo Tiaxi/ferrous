@@ -601,18 +601,35 @@ impl GstPlaybackRuntime {
     /// tell where it is keeps the last position, which no longer advances.
     /// Returns whether the snapshot changed.
     fn sample_pipeline_position(&mut self) -> bool {
+        let Some((position, current_stream)) = self.query_pipeline_position() else {
+            return self.set_position_sample(self.snapshot.position, false);
+        };
+        let now = (self.clock)();
+        let advancing = self.pipeline_advancing();
+        self.apply_position_read(position, now, advancing, current_stream)
+    }
+
+    /// The pipeline position, and whether the output answered it from the
+    /// segment of the current track's stream.
+    fn query_pipeline_position(&self) -> Option<(Duration, bool)> {
         // The output never goes back to a stream it has left, so a query
         // between two checks that both find the current stream's segment
         // answers from it.
         let applied_before = self.output_applies_current_stream();
-        let Some(position) = self.playbin.query_position::<gst::ClockTime>() else {
-            return self.set_position_sample(self.snapshot.position, false);
-        };
+        let position = self.playbin.query_position::<gst::ClockTime>()?;
         let current_stream = applied_before && self.output_applies_current_stream();
-        let position = Duration::from_nanos(position.nseconds());
-        let now = (self.clock)();
-        let advancing = self.pipeline_advancing();
-        self.apply_position_read(position, now, advancing, current_stream)
+        Some((Duration::from_nanos(position.nseconds()), current_stream))
+    }
+
+    /// Where the current track is now: the pipeline position, unless the
+    /// output answers it from another stream's segment, or the pipeline
+    /// cannot tell; then where the snapshot's sample has reached.
+    fn current_track_position(&self) -> Duration {
+        match self.query_pipeline_position() {
+            Some((position, true)) => position,
+            Some((_, false)) => self.sampled_position_at((self.clock)()),
+            None => self.snapshot.position,
+        }
     }
 
     /// Whether the output applies the segment of the stream that the
@@ -1166,12 +1183,7 @@ impl GstPlaybackRuntime {
         // Positions are not sampled until the seek lands, and the position
         // does not advance meanwhile.
         if self.snapshot.position_advancing {
-            let position = self
-                .playbin
-                .query_position::<gst::ClockTime>()
-                .map_or(self.snapshot.position, |position| {
-                    Duration::from_nanos(position.nseconds())
-                });
+            let position = self.current_track_position();
             self.set_position_sample(position, false);
             self.emit_snapshot();
         }
@@ -1365,12 +1377,7 @@ impl GstPlaybackRuntime {
             self.issue_queued_seek();
             return;
         }
-        let position = self
-            .playbin
-            .query_position::<gst::ClockTime>()
-            .map_or(self.snapshot.position, |position| {
-                Duration::from_nanos(position.nseconds())
-            });
+        let position = self.current_track_position();
         self.queue_seek(SeekTarget {
             position,
             serial: 0,
@@ -1579,14 +1586,10 @@ impl GstPlaybackRuntime {
         // Until the output applies the successor's segment, the pipeline
         // reports the previous track's position, and the successor is at
         // its start.
-        let applied_before = self.output_applies_current_stream();
         let position = self
-            .playbin
-            .query_position::<gst::ClockTime>()
-            .filter(|_| applied_before && self.output_applies_current_stream())
-            .map_or(Duration::ZERO, |position| {
-                Duration::from_nanos(position.nseconds())
-            });
+            .query_pipeline_position()
+            .filter(|(_, current_stream)| *current_stream)
+            .map_or(Duration::ZERO, |(position, _)| position);
         let mut sampled_at = (self.clock)();
         // The successor's stream starts while the end of the previous track
         // is still to be heard, and its position stays at its start until
@@ -6350,6 +6353,14 @@ mod engine_tests {
             moved.is_empty(),
             "the successor left its start at {switched:?} before its segment applied: {moved:#?}"
         );
+        // A seek or a restart of the run starts from where the successor's
+        // sample has reached, not from the previous stream's position.
+        let since_start = clock().saturating_duration_since(switched.position_sampled_at);
+        let position = engine.runtime.current_track_position();
+        assert!(
+            position.abs_diff(since_start) < SAMPLE_SLACK,
+            "the successor is at {position:?}, {since_start:?} after its start"
+        );
 
         // Once its segment applies, the successor goes on from its start.
         hold.release();
@@ -6430,6 +6441,12 @@ mod engine_tests {
         assert!(
             moved.is_empty(),
             "the previous track went back before the successor started: {moved:#?}"
+        );
+        let reached = polled.last().unwrap().position;
+        let position = engine.runtime.current_track_position();
+        assert!(
+            position >= reached,
+            "a seek would start the previous track at {position:?}, not past {reached:?}"
         );
 
         engine.runtime.handle_bus_message(&stream_start);
