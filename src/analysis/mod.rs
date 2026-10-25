@@ -37,8 +37,8 @@ use fft::{ensure_sample_buffer, peak_across_channels, WaveformAccumulator};
 #[cfg(feature = "gst")]
 use gst_waveform::decode_waveform_peaks_stream_gst;
 use session::{
-    spawn_centered_staging_worker, spawn_spectrogram_decode_worker, SessionHandoff,
-    SessionReport, SpectrogramWorkerCommand, SpectrogramWorkerHandles, SpectrogramWorkerStatus,
+    spawn_centered_staging_worker, spawn_spectrogram_decode_worker, SessionHandoff, SessionReport,
+    SpectrogramWorkerCommand, SpectrogramWorkerHandles, SpectrogramWorkerStatus,
 };
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -1530,10 +1530,9 @@ impl AnalysisRuntimeState {
                 if track_token != self.active_track_token {
                     return;
                 }
-                let name = path.file_name().map_or_else(
-                    || path.to_string_lossy(),
-                    |name| name.to_string_lossy(),
-                );
+                let name = path
+                    .file_name()
+                    .map_or_else(|| path.to_string_lossy(), |name| name.to_string_lossy());
                 let message = format!("The spectrogram cannot show {name}: {error}.");
                 let _ = ctx.event_tx.send(AnalysisEvent::WorkerFailed(message));
             }
@@ -2476,7 +2475,10 @@ mod tests {
         unsized_wave[40..44].copy_from_slice(&0_u32.to_le_bytes());
         std::fs::remove_file(wave).expect("remove fixture");
         for (name, bytes) in [
-            ("tone.opus", include_bytes!("fixtures/tag-tone.opus").to_vec()),
+            (
+                "tone.opus",
+                include_bytes!("fixtures/tag-tone.opus").to_vec(),
+            ),
             ("tone.wv", include_bytes!("fixtures/tag-tone.wv").to_vec()),
             ("unsized.wav", unsized_wave),
         ] {
@@ -5730,7 +5732,13 @@ mod tests {
 
     /// A tone encoded by `encoder` at `rate` Hz with `channels` channels.
     #[cfg(feature = "gst")]
-    fn encode_tone(extension: &str, encoder: &str, seconds: u32, rate: u32, channels: u32) -> PathBuf {
+    fn encode_tone(
+        extension: &str,
+        encoder: &str,
+        seconds: u32,
+        rate: u32,
+        channels: u32,
+    ) -> PathBuf {
         use gstreamer as gst;
         use gstreamer::prelude::*;
         static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -5755,7 +5763,10 @@ mod tests {
         );
         pipeline.set_state(gst::State::Null).expect("stop encoder");
         assert!(
-            matches!(message.as_ref().map(|message| message.view()), Some(gst::MessageView::Eos(_))),
+            matches!(
+                message.as_ref().map(|message| message.view()),
+                Some(gst::MessageView::Eos(_))
+            ),
             "{encoder}: {message:?}"
         );
         path
@@ -5808,8 +5819,20 @@ mod tests {
         (first, second): (Tone, Tone),
     ) {
         let (extension, encoder) = encoded;
-        let a = encode_tone(extension, encoder, first.seconds, first.rate, first.channels);
-        let b = encode_tone(extension, encoder, second.seconds, second.rate, second.channels);
+        let a = encode_tone(
+            extension,
+            encoder,
+            first.seconds,
+            first.rate,
+            first.channels,
+        );
+        let b = encode_tone(
+            extension,
+            encoder,
+            second.seconds,
+            second.rate,
+            second.channels,
+        );
         let case = format!("{extension} {view:?} {mode:?}");
         let (engine, events) = AnalysisEngine::new();
         engine.command(AnalysisCommand::SetSpectrogramViewMode(view));
@@ -5828,9 +5851,11 @@ mod tests {
         };
         if extension == "wv" {
             engine.command(set_track(&b, 1, false));
-            events_until(&events, || {}, |chunk| {
-                chunk.track_token == 1 && chunk.column_count > 0
-            });
+            events_until(
+                &events,
+                || {},
+                |chunk| chunk.track_token == 1 && chunk.column_count > 0,
+            );
         }
         engine.command(set_track(&a, 2, false));
         // Near its end; the worker decodes it to the end.
@@ -5863,19 +5888,21 @@ mod tests {
             SpectrogramViewMode::Downmix => 1,
             SpectrogramViewMode::PerChannel => u8::try_from(second.channels).unwrap(),
         };
-        let is_second_format =
-            |chunk: &PrecomputedSpectrogramChunk| {
-                chunk.sample_rate_hz == second.rate && chunk.channel_count == channels
-            };
+        let is_second_format = |chunk: &PrecomputedSpectrogramChunk| {
+            chunk.sample_rate_hz == second.rate && chunk.channel_count == channels
+        };
         // The outgoing track's token never labels the new file's columns.
         assert!(
-            !chunks
-                .iter()
-                .any(|chunk| chunk.track_token != 3 && chunk.bins_per_column > 0 && is_second_format(chunk)),
+            !chunks.iter().any(|chunk| chunk.track_token != 3
+                && chunk.bins_per_column > 0
+                && is_second_format(chunk)),
             "{case}:\n{}",
             summarize(&after)
         );
-        let new_track: Vec<_> = chunks.iter().filter(|chunk| chunk.track_token == 3).collect();
+        let new_track: Vec<_> = chunks
+            .iter()
+            .filter(|chunk| chunk.track_token == 3)
+            .collect();
         let reset = new_track[0];
         assert!(
             reset.buffer_reset && reset.bins_per_column > 0 && is_second_format(reset),
@@ -5883,14 +5910,16 @@ mod tests {
             summarize(&after)
         );
         if mode == SpectrogramDisplayMode::Rolling {
-            assert!(!reset.clear_history, "{case}: the rolling history is cleared");
+            assert!(
+                !reset.clear_history,
+                "{case}: the rolling history is cleared"
+            );
         }
         for chunk in &new_track {
             // Positions are in the new track's timeline, not the continued
             // one, so no seek lands past its end.
             assert!(
-                is_second_format(chunk)
-                    && chunk.start_column_index <= reset.total_columns_estimate,
+                is_second_format(chunk) && chunk.start_column_index <= reset.total_columns_estimate,
                 "{case}:\n{}",
                 summarize(&after)
             );
@@ -5909,8 +5938,16 @@ mod tests {
                 SpectrogramViewMode::Downmix,
                 mode,
                 (
-                    Tone { rate: 44_100, channels: 1, seconds: 20 },
-                    Tone { rate: 96_000, channels: 1, seconds: 3 },
+                    Tone {
+                        rate: 44_100,
+                        channels: 1,
+                        seconds: 20,
+                    },
+                    Tone {
+                        rate: 96_000,
+                        channels: 1,
+                        seconds: 3,
+                    },
                 ),
             );
             assert_format_change_restarts_cleanly(
@@ -5918,8 +5955,16 @@ mod tests {
                 SpectrogramViewMode::Downmix,
                 mode,
                 (
-                    Tone { rate: 44_100, channels: 2, seconds: 10 },
-                    Tone { rate: 48_000, channels: 2, seconds: 3 },
+                    Tone {
+                        rate: 44_100,
+                        channels: 2,
+                        seconds: 10,
+                    },
+                    Tone {
+                        rate: 48_000,
+                        channels: 2,
+                        seconds: 3,
+                    },
                 ),
             );
         }
@@ -5934,8 +5979,16 @@ mod tests {
                 SpectrogramViewMode::PerChannel,
                 mode,
                 (
-                    Tone { rate: 44_100, channels: 1, seconds: 20 },
-                    Tone { rate: 44_100, channels: 2, seconds: 3 },
+                    Tone {
+                        rate: 44_100,
+                        channels: 1,
+                        seconds: 20,
+                    },
+                    Tone {
+                        rate: 44_100,
+                        channels: 2,
+                        seconds: 3,
+                    },
                 ),
             );
             assert_format_change_restarts_cleanly(
@@ -5943,8 +5996,16 @@ mod tests {
                 SpectrogramViewMode::PerChannel,
                 mode,
                 (
-                    Tone { rate: 48_000, channels: 2, seconds: 10 },
-                    Tone { rate: 48_000, channels: 6, seconds: 3 },
+                    Tone {
+                        rate: 48_000,
+                        channels: 2,
+                        seconds: 10,
+                    },
+                    Tone {
+                        rate: 48_000,
+                        channels: 6,
+                        seconds: 3,
+                    },
                 ),
             );
         }
@@ -5963,9 +6024,11 @@ mod tests {
                 gapless: false,
             });
             // The worker clears what the UI shows, as a far seek does.
-            events_until(&events, || {}, |chunk| {
-                chunk.track_token == 1 && chunk.buffer_reset && chunk.bins_per_column == 0
-            });
+            events_until(
+                &events,
+                || {},
+                |chunk| chunk.track_token == 1 && chunk.buffer_reset && chunk.bins_per_column == 0,
+            );
             let message = loop {
                 match events.recv_timeout(Duration::from_secs(10)) {
                     Ok(AnalysisEvent::WorkerFailed(message)) => break message,
@@ -5990,9 +6053,11 @@ mod tests {
                 track_token: 2,
                 gapless: false,
             });
-            let next = events_until(&events, || {}, |chunk| {
-                chunk.track_token == 2 && chunk.column_count > 0
-            });
+            let next = events_until(
+                &events,
+                || {},
+                |chunk| chunk.track_token == 2 && chunk.column_count > 0,
+            );
             assert!(
                 !next
                     .iter()
@@ -6005,7 +6070,12 @@ mod tests {
         std::fs::remove_file(good).expect("remove fixture");
     }
 
-    fn opened(generation: u64, track_token: u64, path: &Path, format: TrackFormat) -> SessionReport {
+    fn opened(
+        generation: u64,
+        track_token: u64,
+        path: &Path,
+        format: TrackFormat,
+    ) -> SessionReport {
         SessionReport::Opened {
             generation,
             track_token,
@@ -6030,7 +6100,9 @@ mod tests {
             state.spectrogram_view_mode = SpectrogramViewMode::PerChannel;
             state.active_session_channel_count = 1;
             // The helper could not read B before; the switch cannot know.
-            state.formats.insert(b.to_path_buf(), TrackFormat::Unknown, None);
+            state
+                .formats
+                .insert(b.to_path_buf(), TrackFormat::Unknown, None);
             state.handle_track_change(b.to_path_buf(), false, true, 2, &ctx);
             let _ = only_track_io_request(&state);
             let generation = channels.generation.load(Ordering::Relaxed);
@@ -6053,9 +6125,15 @@ mod tests {
                 &ctx,
             );
             assert_eq!(state.active_session_effective_rate, 96_000, "{mode:?}");
-            assert_eq!(state.formats.get(b).map(|probed| probed.format), Some(hi_res));
+            assert_eq!(
+                state.formats.get(b).map(|probed| probed.format),
+                Some(hi_res)
+            );
             let cols_per_second = state.current_centered_cols_per_second().expect("rate");
-            assert!((cols_per_second - 96_000.0 / 1024.0).abs() < 0.001, "{mode:?}");
+            assert!(
+                (cols_per_second - 96_000.0 / 1024.0).abs() < 0.001,
+                "{mode:?}"
+            );
 
             // A is judged from what the worker read of B when it follows.
             state.handle_session_report(

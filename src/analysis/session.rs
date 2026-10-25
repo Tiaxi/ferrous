@@ -1991,7 +1991,10 @@ fn throttle_wait(
     let columns = session.columns_produced.saturating_sub(origin_column);
     #[allow(clippy::cast_precision_loss)]
     let expected_elapsed = columns as f64 / max_cols_per_wall_sec;
-    Some(Duration::from_secs_f64((expected_elapsed - elapsed).max(0.0))).filter(|wait| !wait.is_zero())
+    Some(Duration::from_secs_f64(
+        (expected_elapsed - elapsed).max(0.0),
+    ))
+    .filter(|wait| !wait.is_zero())
 }
 
 // ---------------------------------------------------------------------------
@@ -2411,7 +2414,8 @@ mod tests {
         let mut now = 0.0;
         while now < seconds {
             session.target_position_seconds = resumed_at + now;
-            let playhead = f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
+            let playhead =
+                f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
             let lead = session.columns_produced.saturating_sub(playhead);
             let at = start + Duration::from_secs_f64(now);
             if lead >= session.lookahead_columns && !post_reset_window_active(session) {
@@ -2454,7 +2458,10 @@ mod tests {
         // Within the rate limit, it does not wait for the time the refill
         // would have taken at the limit, and stays ahead of playback.
         assert!(longest_wait < 0.05, "waited {longest_wait} s");
-        assert!(least_lead > 0, "playback overtook the decoded columns by {least_lead}");
+        assert!(
+            least_lead > 0,
+            "playback overtook the decoded columns by {least_lead}"
+        );
         // It still decodes at twice the playback rate, up to its lookahead.
         assert!(session.columns_produced > start_column + 1_400);
 
@@ -2468,7 +2475,10 @@ mod tests {
         apply_display_mode(&mut session, SpectrogramDisplayMode::Rolling);
         let (least_lead, longest_wait) = simulate_rolling_resume(&mut session, 5.0);
         assert!(longest_wait < 0.05, "waited {longest_wait} s");
-        assert!(least_lead > 0, "playback overtook the decoded columns by {least_lead}");
+        assert!(
+            least_lead > 0,
+            "playback overtook the decoded columns by {least_lead}"
+        );
     }
 
     #[test]
