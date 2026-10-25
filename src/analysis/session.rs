@@ -1991,7 +1991,7 @@ fn throttle_wait(
     let columns = session.columns_produced.saturating_sub(origin_column);
     #[allow(clippy::cast_precision_loss)]
     let expected_elapsed = columns as f64 / max_cols_per_wall_sec;
-    (expected_elapsed > elapsed).then(|| Duration::from_secs_f64(expected_elapsed - elapsed))
+    Some(Duration::from_secs_f64((expected_elapsed - elapsed).max(0.0))).filter(|wait| !wait.is_zero())
 }
 
 // ---------------------------------------------------------------------------
@@ -2395,6 +2395,97 @@ mod tests {
         assert_eq!(
             initial_unthrottled_columns(SpectrogramDisplayMode::Centered, 100, 5.0, 100.0),
             0
+        );
+    }
+
+    /// Decode a rolling session's columns as the decode loop does, on a
+    /// simulated clock, while playback advances from where the session was
+    /// resumed; returns the least lead of the decoded right edge over the
+    /// playhead after the refill, and the longest the session waited at once.
+    fn simulate_rolling_resume(session: &mut SpectrogramSessionState, seconds: f64) -> (i64, f64) {
+        let start = std::time::Instant::now();
+        let resumed_at = session.target_position_seconds;
+        let step = 0.002;
+        let mut least_lead = i64::MAX;
+        let mut longest_wait = 0.0_f64;
+        let mut now = 0.0;
+        while now < seconds {
+            session.target_position_seconds = resumed_at + now;
+            let playhead = f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
+            let lead = session.columns_produced.saturating_sub(playhead);
+            let at = start + Duration::from_secs_f64(now);
+            if lead >= session.lookahead_columns && !post_reset_window_active(session) {
+                now += step;
+            } else if let Some(wait) = throttle_wait(session, at) {
+                longest_wait = longest_wait.max(wait.as_secs_f64());
+                now += wait.as_secs_f64().min(0.5);
+                // The clock the wait is measured on counts nanoseconds.
+                now += 1e-9;
+            } else {
+                // Decoding takes no time on the simulated clock.
+                session.columns_produced += 1;
+            }
+            // The refill decodes the history up to the playhead first.
+            if !post_reset_window_active(session) {
+                #[allow(clippy::cast_possible_wrap)]
+                let lead = session.columns_produced as i64 - playhead as i64;
+                least_lead = least_lead.min(lead);
+            }
+        }
+        (least_lead, longest_wait)
+    }
+
+    #[test]
+    fn a_resumed_rolling_session_keeps_its_right_edge_ahead_of_playback() {
+        // Shown again 30 s into a track: the session restarts a viewport
+        // back and refills that history at full speed.
+        let mut session = make_test_session();
+        let (start_column, _) = stft_seek_grid(10.0, session.effective_rate, 256, 1_024);
+        session.columns_produced = start_column;
+        session.session_start_column = start_column;
+        session.target_position_seconds = 30.0;
+        session.post_reset_unthrottled_columns = initial_unthrottled_columns(
+            SpectrogramDisplayMode::Rolling,
+            start_column,
+            30.0,
+            session.cols_per_second,
+        );
+        let (least_lead, longest_wait) = simulate_rolling_resume(&mut session, 20.0);
+        // Within the rate limit, it does not wait for the time the refill
+        // would have taken at the limit, and stays ahead of playback.
+        assert!(longest_wait < 0.05, "waited {longest_wait} s");
+        assert!(least_lead > 0, "playback overtook the decoded columns by {least_lead}");
+        // It still decodes at twice the playback rate, up to its lookahead.
+        assert!(session.columns_produced > start_column + 1_400);
+
+        // A centered session that switches to rolling does not count its
+        // unlimited decode against the limit either.
+        let mut session = make_test_session();
+        session.target_position_seconds = 30.0;
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Centered);
+        session.columns_produced = 1_406 + 300;
+        assert_eq!(throttle_wait(&mut session, std::time::Instant::now()), None);
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Rolling);
+        let (least_lead, longest_wait) = simulate_rolling_resume(&mut session, 5.0);
+        assert!(longest_wait < 0.05, "waited {longest_wait} s");
+        assert!(least_lead > 0, "playback overtook the decoded columns by {least_lead}");
+    }
+
+    #[test]
+    fn rolling_sessions_decode_at_the_rate_limit_after_their_window() {
+        let mut session = make_test_session();
+        session.post_reset_unthrottled_columns = 0;
+        session.columns_produced = session.session_start_column;
+        let start = std::time::Instant::now();
+        assert_eq!(throttle_wait(&mut session, start), None);
+        // 94 columns are two seconds of audio, a second at twice realtime.
+        session.columns_produced += 94;
+        let wait = throttle_wait(&mut session, start + Duration::from_millis(250))
+            .expect("ahead of the limit");
+        assert!((wait.as_secs_f64() - 0.752).abs() < 0.01, "{wait:?}");
+        assert_eq!(
+            throttle_wait(&mut session, start + Duration::from_millis(1_010)),
+            None
         );
     }
 

@@ -2384,6 +2384,112 @@ mod tests {
         }
     }
 
+    /// A temporary copy of `bytes` named `name`.
+    fn write_fixture(name: &str, bytes: &[u8]) -> PathBuf {
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-analysis-{}-{}-{name}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, bytes).expect("write fixture");
+        path
+    }
+
+    /// A 0.1 s mono 440 Hz tone at 8 kHz as 16-bit AIFF.
+    fn aiff_tone() -> Vec<u8> {
+        let rate: u32 = 8_000;
+        let frames = rate / 10;
+        let mut samples = Vec::new();
+        for frame in 0..frames {
+            let t = f64::from(frame) / f64::from(rate);
+            let value = ((t * 440.0 * std::f64::consts::TAU).sin() * 16_000.0) as i16;
+            samples.extend_from_slice(&value.to_be_bytes());
+        }
+        // The rate as an 80-bit extended float: 8000 = 1.953125 × 2^12.
+        let mut rate_bytes = (16_383_u16 + 12).to_be_bytes().to_vec();
+        rate_bytes.extend_from_slice(&(u64::from(rate) << (63 - 12)).to_be_bytes());
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&1_u16.to_be_bytes());
+        comm.extend_from_slice(&frames.to_be_bytes());
+        comm.extend_from_slice(&16_u16.to_be_bytes());
+        comm.extend_from_slice(&rate_bytes);
+        let ssnd_size = u32::try_from(8 + samples.len()).unwrap();
+        let mut body = b"AIFFCOMM".to_vec();
+        body.extend_from_slice(&u32::try_from(comm.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(&comm);
+        body.extend_from_slice(b"SSND");
+        body.extend_from_slice(&ssnd_size.to_be_bytes());
+        body.extend_from_slice(&[0; 8]);
+        body.extend_from_slice(&samples);
+        let mut bytes = b"FORM".to_vec();
+        bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    /// The overview the waveform worker publishes for `path`, if any.
+    fn overview(path: &Path) -> Option<Vec<f32>> {
+        let mut overview = None;
+        let _ = decode_waveform_peaks_stream(
+            path,
+            1024,
+            |peaks, _, complete| {
+                if complete {
+                    overview = Some(peaks);
+                }
+                true
+            },
+            || false,
+        );
+        overview
+    }
+
+    #[test]
+    fn overviews_cover_alac_and_aiff() {
+        for (name, bytes) in [
+            ("tone.m4a", include_bytes!("fixtures/tag-tone.m4a").to_vec()),
+            ("tone.aiff", aiff_tone()),
+        ] {
+            let path = write_fixture(name, &bytes);
+            let peaks = overview(&path).unwrap_or_else(|| panic!("no overview of {name}"));
+            let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+            assert!(loudest > 0.05, "{name}: {loudest}");
+            std::fs::remove_file(path).expect("remove fixture");
+        }
+    }
+
+    /// Symphonia has no Opus or WavPack decoder, and reads nothing from a
+    /// WAV whose data chunk claims no data, which GStreamer reads to the end.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn overviews_fall_back_to_gstreamer_for_files_symphonia_cannot_decode() {
+        let wave = write_engine_test_wave(1, 8_000);
+        let mut unsized_wave = std::fs::read(&wave).expect("read fixture");
+        unsized_wave[40..44].copy_from_slice(&0_u32.to_le_bytes());
+        std::fs::remove_file(wave).expect("remove fixture");
+        for (name, bytes) in [
+            ("tone.opus", include_bytes!("fixtures/tag-tone.opus").to_vec()),
+            ("tone.wv", include_bytes!("fixtures/tag-tone.wv").to_vec()),
+            ("unsized.wav", unsized_wave),
+        ] {
+            let path = write_fixture(name, &bytes);
+            let peaks = overview(&path).unwrap_or_else(|| panic!("no overview of {name}"));
+            let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+            assert!(loudest > 0.05, "{name}: {loudest}");
+
+            // The detail view and level meter decode it as well.
+            let window = decode_waveform_window_cancellable(&path, 0.0, 0.1, 64, &|| false)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(
+                window.extrema.iter().any(|&value| value > 0.05),
+                "{name}: {:?}",
+                window.extrema
+            );
+            std::fs::remove_file(path).expect("remove fixture");
+        }
+    }
+
     /// Write a mono 16-bit PCM WAV and return its path.  Used by the
     /// end-to-end engine tests below to drive the real decode worker.
     fn write_engine_test_wave(seconds: u32, sample_rate: u32) -> std::path::PathBuf {
