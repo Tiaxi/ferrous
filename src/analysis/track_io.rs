@@ -69,11 +69,12 @@ fn probe_format(path: &Path) -> TrackFormat {
 #[derive(Debug)]
 pub(super) enum TrackIoRequest {
     /// Read the stamp and saved waveform of the track now playing, and its
-    /// format when `probe` is set.
+    /// format unless the file still has `probed_at`, the stamp it had when
+    /// the format the analysis thread knows was read.
     LoadTrack {
         track_token: u64,
         path: PathBuf,
-        probe: bool,
+        probed_at: Option<WaveformSourceStamp>,
     },
     /// Read the format of a likely gapless successor.
     ProbeCandidate {
@@ -94,13 +95,14 @@ pub(super) enum TrackIoReply {
     TrackLoaded {
         track_token: u64,
         stamp: Option<WaveformSourceStamp>,
-        /// `None` unless a probe was asked for.
+        /// `None` when the file is unchanged since it was probed.
         format: Option<TrackFormat>,
         /// The saved waveform, if the file has not changed since.
         peaks: Option<Vec<f32>>,
     },
     CandidateProbed {
         request: u64,
+        stamp: Option<WaveformSourceStamp>,
         format: TrackFormat,
     },
 }
@@ -128,10 +130,11 @@ impl TrackIo {
             TrackIoRequest::LoadTrack {
                 track_token,
                 path,
-                probe,
+                probed_at,
             } => {
                 let stamp = source_stamp(&path);
-                let format = probe.then(|| probe_format(&path));
+                let unchanged = probed_at.is_some() && probed_at == stamp;
+                let format = (!unchanged).then(|| probe_format(&path));
                 let peaks = self.saved_waveform(&path, stamp);
                 Some(TrackIoReply::TrackLoaded {
                     track_token,
@@ -143,6 +146,7 @@ impl TrackIo {
             TrackIoRequest::ProbeCandidate { request, path } => {
                 Some(TrackIoReply::CandidateProbed {
                     request,
+                    stamp: source_stamp(&path),
                     format: probe_format(&path),
                 })
             }
@@ -257,30 +261,43 @@ pub(super) fn source_stamp(path: &Path) -> Option<WaveformSourceStamp> {
     })
 }
 
+/// A format the file helper found, with the file's stamp at the time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProbedFormat {
+    pub(super) format: TrackFormat,
+    pub(super) stamp: Option<WaveformSourceStamp>,
+}
+
 /// Formats of recently seen files, so a gapless successor that was probed
-/// before it plays, or a track played again, is not probed again.
+/// before it plays, or a track played again, is not probed again while its
+/// file is unchanged.
 #[derive(Default)]
 pub(super) struct FormatCache {
     /// Oldest first.
-    entries: Vec<(PathBuf, TrackFormat)>,
+    entries: Vec<(PathBuf, ProbedFormat)>,
 }
 
 const FORMAT_CACHE_ENTRIES: usize = 16;
 
 impl FormatCache {
-    pub(super) fn get(&self, path: &Path) -> Option<TrackFormat> {
+    pub(super) fn get(&self, path: &Path) -> Option<ProbedFormat> {
         self.entries
             .iter()
             .find(|(cached, _)| cached == path)
-            .map(|&(_, format)| format)
+            .map(|&(_, probed)| probed)
     }
 
-    pub(super) fn insert(&mut self, path: PathBuf, format: TrackFormat) {
+    pub(super) fn insert(
+        &mut self,
+        path: PathBuf,
+        format: TrackFormat,
+        stamp: Option<WaveformSourceStamp>,
+    ) {
         self.entries.retain(|(cached, _)| *cached != path);
         if self.entries.len() >= FORMAT_CACHE_ENTRIES {
             self.entries.remove(0);
         }
-        self.entries.push((path, format));
+        self.entries.push((path, ProbedFormat { format, stamp }));
     }
 
     /// Keep each format with its file. A file renamed onto another's path
@@ -348,27 +365,33 @@ mod tests {
     }
 
     #[test]
-    fn a_load_reads_the_stamp_and_probes_only_when_asked() {
+    fn a_load_probes_the_file_unless_it_is_unchanged() {
         let path =
             std::env::temp_dir().join(format!("ferrous-track-io-{}.mp3", std::process::id()));
         std::fs::write(&path, include_bytes!("fixtures/seek-tone.mp3")).expect("fixture");
         let mut io = TrackIo::new(None);
-        for probe in [false, true] {
+        let current = source_stamp(&path).expect("stamp");
+        let older = WaveformSourceStamp {
+            modified_secs: current.modified_secs.saturating_sub(1),
+            ..current
+        };
+        for (probed_at, probes) in [(None, true), (Some(older), true), (Some(current), false)] {
             let reply = io.handle(TrackIoRequest::LoadTrack {
                 track_token: 3,
                 path: path.clone(),
-                probe,
+                probed_at,
             });
             let Some(TrackIoReply::TrackLoaded {
                 track_token: 3,
-                stamp: Some(_),
+                stamp: Some(stamp),
                 format,
                 peaks: None,
             }) = reply
             else {
                 panic!("unexpected reply {reply:?}");
             };
-            assert_eq!(format.is_some(), probe);
+            assert_eq!(stamp, current);
+            assert_eq!(format.is_some(), probes, "{probed_at:?}");
             if let Some(format) = format {
                 assert!(matches!(format, TrackFormat::Known { channels: 1, .. }));
             }
@@ -381,7 +404,7 @@ mod tests {
         let load = |track_token| TrackIoRequest::LoadTrack {
             track_token,
             path: PathBuf::from("/music/a.flac"),
-            probe: true,
+            probed_at: None,
         };
         let probe = |request| TrackIoRequest::ProbeCandidate {
             request,
@@ -416,21 +439,26 @@ mod tests {
             PathBuf::from("/music/b.flac"),
             PathBuf::from("/music/c.flac"),
         );
-        cache.insert(a.clone(), known(1));
-        cache.insert(b.clone(), known(2));
-        cache.insert(c.clone(), known(6));
+        cache.insert(a.clone(), known(1), None);
+        cache.insert(b.clone(), known(2), Some(stamp(10)));
+        cache.insert(c.clone(), known(6), None);
         // A and B swap; C is replaced by the file renamed from D.
         cache.remap(&PathRenames::from([
             (a.clone(), b.clone()),
             (b.clone(), a.clone()),
             (PathBuf::from("/music/d.flac"), c.clone()),
         ]));
-        assert_eq!(cache.get(&a), Some(known(2)));
-        assert_eq!(cache.get(&b), Some(known(1)));
+        let probed = |format, stamp| Some(ProbedFormat { format, stamp });
+        assert_eq!(cache.get(&a), probed(known(2), Some(stamp(10))));
+        assert_eq!(cache.get(&b), probed(known(1), None));
         assert_eq!(cache.get(&c), None);
 
         for index in 0..FORMAT_CACHE_ENTRIES {
-            cache.insert(PathBuf::from(format!("/music/{index}.flac")), known(2));
+            cache.insert(
+                PathBuf::from(format!("/music/{index}.flac")),
+                known(2),
+                None,
+            );
         }
         assert_eq!(cache.entries.len(), FORMAT_CACHE_ENTRIES);
         assert_eq!(cache.get(&a), None, "the oldest entries are dropped");

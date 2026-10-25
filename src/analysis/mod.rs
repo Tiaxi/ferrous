@@ -905,7 +905,8 @@ impl AnalysisRuntimeState {
             return;
         }
 
-        if let Some(format) = format_from_name(&path).or_else(|| self.formats.get(&path)) {
+        let cached = self.formats.get(&path).map(|probed| probed.format);
+        if let Some(format) = format_from_name(&path).or(cached) {
             self.stage_successor_if_compatible(path, format, ctx);
             return;
         }
@@ -923,6 +924,7 @@ impl AnalysisRuntimeState {
     fn handle_candidate_probed(
         &mut self,
         request: u64,
+        stamp: Option<WaveformSourceStamp>,
         format: TrackFormat,
         ctx: &AnalysisContext<'_>,
     ) {
@@ -933,7 +935,7 @@ impl AnalysisRuntimeState {
         else {
             return;
         };
-        self.formats.insert(path.clone(), format);
+        self.formats.insert(path.clone(), format, stamp);
         if self.spectrogram_active {
             self.stage_successor_if_compatible(path, format, ctx);
         }
@@ -1154,9 +1156,11 @@ impl AnalysisRuntimeState {
         let prev_channel_count = self.active_session_channel_count;
 
         // A gapless successor's format was probed when it was staged, and a
-        // track played again was probed before. Otherwise the file helper
-        // probes it below, and the compatibility is not known yet.
-        let format = format_from_name(&path).or_else(|| self.formats.get(&path));
+        // track played again was probed before; the file helper probes it
+        // again if the file has changed since. Otherwise the helper probes
+        // it below, and the compatibility is not known yet.
+        let cached = self.formats.get(&path);
+        let format = format_from_name(&path).or(cached.map(|probed| probed.format));
         if let Some(format) = format {
             self.apply_track_format(format);
         }
@@ -1227,7 +1231,8 @@ impl AnalysisRuntimeState {
         // Subsequent settings/visibility restarts belong to the new track.
         self.last_spectrogram_position = 0.0;
 
-        self.request_track_load(track_token, path, format.is_none(), ctx);
+        let probed_at = cached.and_then(|probed| probed.stamp);
+        self.request_track_load(track_token, path, probed_at, ctx);
 
         profile_eprintln!(
             "[analysis] handle_track_change: completed in {:.2}ms",
@@ -1299,20 +1304,20 @@ impl AnalysisRuntimeState {
     }
 
     /// Ask the file helper for the new track's stamp, its saved waveform,
-    /// and its format when `probe` is set. The waveform is decoded when the
-    /// helper has none.
+    /// and its format unless the file still has `probed_at`. The waveform is
+    /// decoded when the helper has none.
     fn request_track_load(
         &mut self,
         track_token: u64,
         path: PathBuf,
-        probe: bool,
+        probed_at: Option<WaveformSourceStamp>,
         ctx: &AnalysisContext<'_>,
     ) {
         self.pending_track_load = Some(track_token);
         let request = TrackIoRequest::LoadTrack {
             track_token,
             path,
-            probe,
+            probed_at,
         };
         if self.track_io_lost || self.track_io.send(request).is_err() {
             self.handle_track_io_lost(ctx);
@@ -1327,9 +1332,11 @@ impl AnalysisRuntimeState {
                 format,
                 peaks,
             } => self.handle_track_loaded(track_token, stamp, format, peaks, ctx),
-            TrackIoReply::CandidateProbed { request, format } => {
-                self.handle_candidate_probed(request, format, ctx);
-            }
+            TrackIoReply::CandidateProbed {
+                request,
+                stamp,
+                format,
+            } => self.handle_candidate_probed(request, stamp, format, ctx),
         }
     }
 
@@ -1351,7 +1358,7 @@ impl AnalysisRuntimeState {
             return;
         };
         if let Some(format) = format {
-            self.formats.insert(path.clone(), format);
+            self.formats.insert(path.clone(), format, stamp);
             self.apply_track_format(format);
         }
         if let Some(peaks) = peaks {
@@ -4579,6 +4586,7 @@ mod tests {
                 sample_rate: 48_000,
                 channels: 2,
             },
+            None,
         );
     }
 
@@ -4822,6 +4830,7 @@ mod tests {
                 sample_rate: state.active_session_effective_rate,
                 channels: state.active_session_channel_count,
             },
+            None,
         );
         if state.display_mode == SpectrogramDisplayMode::Rolling {
             state.staged_continuation_path = Some(path.to_path_buf());
@@ -5071,7 +5080,7 @@ mod tests {
                 only_track_io_request(&state),
                 TrackIoRequest::LoadTrack {
                     track_token: 4,
-                    probe: true,
+                    probed_at: None,
                     ..
                 }
             ));
@@ -5110,15 +5119,15 @@ mod tests {
                 ));
             }
 
-            // Playing it again needs no probe.
+            // Playing it again probes it only if the file has changed.
             state.handle_track_change(path.to_path_buf(), true, false, 5, &ctx);
             assert!(matches!(
                 only_track_io_request(&state),
                 TrackIoRequest::LoadTrack {
                     track_token: 5,
-                    probe: false,
+                    probed_at: Some(probed_at),
                     ..
-                }
+                } if probed_at == stamp
             ));
         }
     }
@@ -5145,6 +5154,7 @@ mod tests {
         state.handle_track_io_reply(
             TrackIoReply::CandidateProbed {
                 request: stale,
+                stamp: None,
                 format: compatible,
             },
             &ctx,
@@ -5159,6 +5169,11 @@ mod tests {
         state.handle_track_io_reply(
             TrackIoReply::CandidateProbed {
                 request,
+                stamp: Some(WaveformSourceStamp {
+                    size_bytes: 10,
+                    modified_secs: 1,
+                    modified_nanos: 0,
+                }),
                 format: compatible,
             },
             &ctx,
@@ -5176,7 +5191,10 @@ mod tests {
         ));
         assert!(matches!(
             only_track_io_request(&state),
-            TrackIoRequest::LoadTrack { probe: false, .. }
+            TrackIoRequest::LoadTrack {
+                probed_at: Some(_),
+                ..
+            }
         ));
         assert!((state.spectrogram_position_offset - 200.0).abs() < 0.001);
     }
@@ -5251,7 +5269,11 @@ mod tests {
             state.handle_track_io_reply(
                 TrackIoReply::TrackLoaded {
                     track_token: 1,
-                    stamp: None,
+                    stamp: Some(WaveformSourceStamp {
+                        size_bytes: 10,
+                        modified_secs: 1,
+                        modified_nanos: 0,
+                    }),
                     format: Some(TrackFormat::Known {
                         sample_rate: 44_100,
                         channels: 2,
@@ -5299,7 +5321,7 @@ mod tests {
                 only_track_io_request(&state),
                 TrackIoRequest::LoadTrack {
                     track_token: 2,
-                    probe: false,
+                    probed_at: Some(_),
                     ..
                 }
             ));
