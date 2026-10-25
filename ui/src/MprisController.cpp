@@ -3,6 +3,7 @@
 #include "MprisController.h"
 
 #include "BridgeClient.h"
+#include "CoverImageProvider.h"
 #include "WindowActivation.h"
 
 #include <algorithm>
@@ -709,14 +710,19 @@ QVariantMap MprisController::buildMetadata() const {
     // currentTrackCoverPath() may return an internal image://covers/ URL
     // (from the async QML image provider). MPRIS consumers need file:// URLs.
     QString artUrl = m_bridge->currentTrackCoverPath().trimmed();
-    if (artUrl.startsWith(QStringLiteral("image://covers/"))) {
-        QString localPath = artUrl.mid(QStringLiteral("image://covers/").size());
-        // Strip any fragment (nonce for QML cache busting)
-        const int hashPos = localPath.indexOf(QLatin1Char('#'));
-        if (hashPos >= 0) {
-            localPath.truncate(hashPos);
+    constexpr QLatin1StringView coversPrefix("image://covers/");
+    if (artUrl.startsWith(coversPrefix)) {
+        const QString id = artUrl.mid(coversPrefix.size());
+        const QString localPath = CoverImageProvider::pathForId(id);
+        QUrl url = QUrl::fromLocalFile(localPath);
+        // The cover stamp changes when the image is replaced at the same
+        // path. As a query it changes the URL, so the metadata comparison
+        // publishes it and consumers that cache art by URL load the new
+        // image; GLib and Qt drop the query when they open a file URL.
+        if (const quint64 stamp = CoverImageProvider::stampForId(id); stamp != 0) {
+            url.setQuery(QStringLiteral("v=%1").arg(stamp));
         }
-        artUrl = QUrl::fromLocalFile(localPath).toString(QUrl::FullyEncoded);
+        artUrl = url.toString(QUrl::FullyEncoded);
     }
     if (!artUrl.isEmpty()) {
         out.insert(QStringLiteral("mpris:artUrl"), artUrl);

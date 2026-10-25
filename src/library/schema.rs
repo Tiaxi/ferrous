@@ -15,7 +15,10 @@ use super::LibraryTrack;
 /// - 0: every database from before schema versions. It may lack columns
 ///   added since, and has the full-text index `tracks_fts`.
 /// - 1: every column, and no full-text index, which nothing queried.
-pub(super) const SCHEMA_VERSION: i32 = 1;
+/// - 2: `tracks.cover_stamp`, the stamp of the folder images a row's cover
+///   was chosen from. Rows from before have none, so the next scan checks
+///   their covers again, once, by the current rule.
+pub(super) const SCHEMA_VERSION: i32 = 2;
 
 /// How long a connection waits for another connection's write lock.
 pub(super) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -74,7 +77,8 @@ const CREATE_TABLES: &str = r"
         mtime_ns INTEGER NOT NULL,
         size_bytes INTEGER NOT NULL,
         indexed_at INTEGER NOT NULL,
-        search_tags TEXT
+        search_tags TEXT,
+        cover_stamp INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS external_tracks (
@@ -106,6 +110,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("tracks", "track_no", "INTEGER"),
     ("tracks", "duration_secs", "REAL"),
     ("tracks", "search_tags", "TEXT"),
+    ("tracks", "cover_stamp", "INTEGER"),
     ("external_tracks", "cover_path", "TEXT NOT NULL DEFAULT ''"),
     ("external_tracks", "genre", "TEXT NOT NULL DEFAULT ''"),
     ("external_tracks", "year", "INTEGER"),
@@ -160,6 +165,9 @@ pub(super) fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     if version < 1 {
         migrate_to_version_1(&tx)?;
     }
+    if version < 2 {
+        migrate_to_version_2(&tx)?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -191,6 +199,14 @@ fn migrate_to_version_1(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Version 1 to 2: add `tracks.cover_stamp`, NULL in every row, which makes
+/// the next scan check each row's cover again; see
+/// [`super::LibraryTrack::cover_stamp`]. A database from version 0 already
+/// has the column from [`migrate_to_version_1`].
+fn migrate_to_version_2(conn: &Connection) -> anyhow::Result<()> {
+    add_missing_columns(conn)
+}
+
 fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
     for (table, column, definition) in ADDED_COLUMNS {
         if !table_columns(conn, table)?.contains(*column) {
@@ -220,7 +236,7 @@ pub(super) fn needs_search_tag_backfill(conn: &Connection) -> bool {
 }
 
 const TRACK_COLUMNS: &str = "path, root_path, title, artist, album, cover_path, genre, year, \
-     track_no, duration_secs, search_tags";
+     track_no, duration_secs, search_tags, cover_stamp";
 
 fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack> {
     Ok(LibraryTrack {
@@ -232,6 +248,7 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack> {
         artist: row.get::<_, String>(3)?,
         album: row.get::<_, String>(4)?,
         cover_path: row.get::<_, String>(5)?,
+        cover_stamp: stamp_from_column(row.get(11)?),
         genre: row.get::<_, String>(6)?,
         year: row
             .get::<_, Option<i64>>(7)?
@@ -241,6 +258,16 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack> {
             .and_then(|v| u32::try_from(v).ok()),
         duration_secs: row.get::<_, Option<f32>>(9)?,
     })
+}
+
+/// A `cover_stamp` column value as a stamp; NULL is "not known", zero.
+pub(super) fn stamp_from_column(value: Option<i64>) -> u64 {
+    value.map_or(0, i64::cast_unsigned)
+}
+
+/// A stamp as a `cover_stamp` column value; zero, "not known", is NULL.
+pub(super) fn stamp_to_column(stamp: u64) -> Option<i64> {
+    (stamp != 0).then(|| stamp.cast_signed())
 }
 
 pub(super) fn load_snapshot(conn: &Connection, snapshot: &mut super::LibrarySnapshot) {
@@ -350,5 +377,35 @@ mod tests {
             has_root_path,
             "tracks.root_path should exist after migration"
         );
+    }
+
+    #[test]
+    fn version_1_rows_get_an_unknown_cover_stamp_so_the_next_scan_checks_them() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        // Version 1 is the same schema without `tracks.cover_stamp`.
+        conn.execute_batch("ALTER TABLE tracks DROP COLUMN cover_stamp; PRAGMA user_version = 1;")
+            .expect("version 1 schema");
+        conn.execute(
+            "INSERT INTO tracks(path, title, artist, album, cover_path, cover_checked, \
+             mtime_ns, size_bytes, indexed_at) \
+             VALUES ('/music/a.flac', 'A', 'Artist', 'Album', '/music/back.jpg', 1, 1, 2, 3)",
+            [],
+        )
+        .expect("version 1 row");
+
+        init_schema(&conn).expect("migration");
+
+        assert_eq!(user_version(&conn).expect("version"), 2);
+        let (cover, stamp): (String, Option<i64>) = conn
+            .query_row("SELECT cover_path, cover_stamp FROM tracks", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .expect("migrated row");
+        assert_eq!(cover, "/music/back.jpg", "the cover stays until a scan");
+        assert_eq!(stamp, None);
+        let mut snapshot = super::super::LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        assert_eq!(snapshot.tracks[0].cover_stamp, 0, "a stamp no folder has");
     }
 }

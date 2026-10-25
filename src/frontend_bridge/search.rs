@@ -66,10 +66,14 @@ struct SearchResultLimits {
 
 type SearchGroupMap = HashMap<String, (f32, String, String)>;
 
+/// A cover path and its stamp; see
+/// [`crate::library::LibraryTrack::cover_stamp`].
+type SearchCover = (String, u64);
+
 struct SearchRowBuckets {
     track_count: u32,
     track_rows: Vec<BridgeSearchResultRow>,
-    album_cover_paths: HashMap<String, String>,
+    album_cover_paths: HashMap<String, SearchCover>,
     artist_groups: SearchGroupMap,
     album_groups: SearchGroupMap,
     album_hit_stats: HashMap<String, HitAlbumAcc>,
@@ -79,7 +83,7 @@ struct SearchRowAccumulator {
     track_count: u32,
     roots: Vec<LibraryRoot>,
     roots_by_path: HashMap<PathBuf, PreparedSearchRoot>,
-    album_cover_paths: HashMap<String, String>,
+    album_cover_paths: HashMap<String, SearchCover>,
     artist_groups: SearchGroupMap,
     album_groups: SearchGroupMap,
     album_hit_stats: HashMap<String, HitAlbumAcc>,
@@ -144,18 +148,19 @@ impl SearchRowAccumulator {
             }
         }
         self.push_album(hit, &context, &hit_artist, &hit_album, query, fields);
-        let row_cover_path = if let Some(album_key_value) = album_key.clone() {
+        let hit_cover = || (hit.cover_path.clone(), hit.cover_stamp);
+        let row_cover = if let Some(album_key_value) = album_key.clone() {
             if !hit.cover_path.is_empty() {
                 self.album_cover_paths
                     .entry(album_key_value.clone())
-                    .or_insert_with(|| hit.cover_path.clone());
+                    .or_insert_with(hit_cover);
             }
             self.album_cover_paths
                 .get(&album_key_value)
                 .cloned()
-                .unwrap_or_else(|| hit.cover_path.clone())
+                .unwrap_or_else(hit_cover)
         } else {
-            hit.cover_path.clone()
+            hit_cover()
         };
         if !query.allows_type("track") {
             return None;
@@ -168,7 +173,7 @@ impl SearchRowAccumulator {
             &hit_album,
             album_key,
             hit_path_string,
-            row_cover_path,
+            row_cover,
         ))
     }
 
@@ -263,6 +268,7 @@ struct PreparedSearchTrack {
     artist: String,
     album: String,
     cover_path: String,
+    cover_stamp: u64,
     genre: String,
     year: Option<i32>,
     track_no: Option<u32>,
@@ -795,7 +801,7 @@ fn build_track_search_result_row(
     hit_album: &str,
     album_key: Option<String>,
     hit_path_string: String,
-    cover_path: String,
+    (cover_path, cover_stamp): SearchCover,
 ) -> BridgeSearchResultRow {
     BridgeSearchResultRow {
         match_detail: String::new(),
@@ -817,6 +823,7 @@ fn build_track_search_result_row(
         root_label: context.root_label.clone(),
         genre: hit.genre.trim().to_string(),
         cover_path,
+        cover_stamp,
         artist_key: context.artist_key.clone(),
         album_key: album_key.unwrap_or_default(),
         section_key: context.section_key.clone().unwrap_or_default(),
@@ -890,7 +897,7 @@ fn choose_most_common_genre(counts: &HashMap<String, usize>) -> String {
 fn finalize_search_rows(
     prepared: &PreparedSearchLibrary,
     limits: &SearchResultLimits,
-    album_cover_paths: &HashMap<String, String>,
+    album_cover_paths: &HashMap<String, SearchCover>,
     artist_groups: SearchGroupMap,
     album_groups: SearchGroupMap,
     album_hit_stats: &HashMap<String, HitAlbumAcc>,
@@ -917,6 +924,7 @@ fn finalize_search_rows(
                 root_label,
                 genre: String::new(),
                 cover_path: String::new(),
+                cover_stamp: 0,
                 artist_key,
                 album_key: String::new(),
                 section_key: String::new(),
@@ -931,6 +939,10 @@ fn finalize_search_rows(
         .filter_map(|(album_key, (score, fallback_title, root_label))| {
             let stats = album_hit_stats.get(&album_key)?;
             let inventory = prepared.album_inventory.get(&album_key);
+            let (cover_path, cover_stamp) = album_cover_paths
+                .get(&album_key)
+                .cloned()
+                .unwrap_or_default();
             Some(BridgeSearchResultRow {
                 match_detail: stats.match_detail.clone(),
                 row_type: BridgeSearchResultRowType::Album,
@@ -957,10 +969,8 @@ fn finalize_search_rows(
                     stats.root_label.clone()
                 },
                 genre: choose_most_common_genre(&stats.genre_counts),
-                cover_path: album_cover_paths
-                    .get(&album_key)
-                    .cloned()
-                    .unwrap_or_default(),
+                cover_path,
+                cover_stamp,
                 artist_key: stats.artist_key.clone(),
                 album_key,
                 section_key: String::new(),
@@ -1177,6 +1187,7 @@ fn prepare_search_track(
             artist,
             album,
             cover_path: track.cover_path.clone(),
+            cover_stamp: track.cover_stamp,
             genre,
             year: track.year,
             track_no: track.track_no,
@@ -1426,6 +1437,7 @@ fn search_tracks_prepared(
             artist: track.artist.clone(),
             album: track.album.clone(),
             cover_path: track.cover_path.clone(),
+            cover_stamp: track.cover_stamp,
             genre: track.genre.clone(),
             year: track.year,
             track_no: track.track_no,
@@ -1673,6 +1685,7 @@ mod tests {
             artist: artist.to_string(),
             album: album.to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: String::new(),
             year,
             track_no,
@@ -1706,6 +1719,7 @@ mod tests {
                     artist: "Artist".to_string(),
                     album: "Album".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
                     genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
@@ -1719,6 +1733,7 @@ mod tests {
                     artist: "Artist".to_string(),
                     album: "Album".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
                     genre: String::new(),
                     year: Some(2020),
                     track_no: Some(2),
@@ -1732,6 +1747,7 @@ mod tests {
                     artist: "Artist".to_string(),
                     album: "Album".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
                     genre: String::new(),
                     year: Some(2020),
                     track_no: Some(3),
@@ -1765,6 +1781,7 @@ mod tests {
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
                 cover_path: String::new(),
+                cover_stamp: 0,
                 genre: String::new(),
                 year: Some(2020),
                 track_no: Some(1),
@@ -1959,6 +1976,7 @@ mod tests {
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
                 cover_path: cover.to_string_lossy().to_string(),
+                cover_stamp: 0,
                 genre: "Rock".to_string(),
                 year: Some(2020),
                 track_no: Some(1),

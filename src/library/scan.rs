@@ -18,7 +18,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use walkdir::WalkDir;
 
 use crate::file_edit_lock;
-use crate::folder_cover::find_folder_cover;
+use crate::folder_cover::{CoverStamp, FolderImages};
 use crate::metadata::EmbeddedCoverCache;
 use crate::no_replace::rename_no_replace;
 use crate::raw_audio::{
@@ -27,8 +27,8 @@ use crate::raw_audio::{
 
 use super::publish::WorkerLibrary;
 use super::schema::{
-    init_schema, load_roots, load_snapshot, normalize_root_name, open_library_db, u128_to_i64,
-    u64_to_i64, usize_to_f32,
+    init_schema, load_roots, load_snapshot, normalize_root_name, open_library_db,
+    stamp_from_column, stamp_to_column, u128_to_i64, u64_to_i64, usize_to_f32,
 };
 use super::{
     IndexedTrack, LibraryEvent, LibraryScanProgress, LibrarySnapshot, LibraryTrack,
@@ -904,6 +904,7 @@ impl ScanSink for SnapshotSink<'_> {
                 artist: indexed.artist,
                 album: indexed.album,
                 cover_path: indexed.cover_path,
+                cover_stamp: indexed.cover_stamp,
                 genre: indexed.genre,
                 year: indexed.year,
                 track_no: indexed.track_no,
@@ -1062,7 +1063,8 @@ fn load_external_track_cache_from_conn(
 ) -> Option<IndexedTrack> {
     conn.query_row(
         r"
-        SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags
+        SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags,
+               NULL
         FROM external_tracks
         WHERE path = ?1
           AND mtime_ns = ?2
@@ -1096,26 +1098,33 @@ struct ExistingTrackScanState {
     row: RowState,
     has_cover_path: bool,
     suspicious_metadata: bool,
+    /// The stamp of the folder images the row's cover was chosen from; zero
+    /// if not known.
+    cover_stamp: CoverStamp,
+    /// Whether the row's cover is an image in the track's own folder, not
+    /// an embedded picture's cache entry or none.
+    cover_in_folder: bool,
 }
 
 /// What tells a scan that another connection wrote a library row since the
 /// scan read it: an edit's refresh writes the file's new state, and a cover
-/// refresh writes a new cover.
+/// refresh writes a new cover or stamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RowState {
     mtime_ns: i64,
     size_bytes: i64,
-    cover_path_hash: u64,
+    cover_hash: u64,
 }
 
 impl RowState {
-    fn new(mtime_ns: i64, size_bytes: i64, cover_path: &str) -> Self {
+    fn new(mtime_ns: i64, size_bytes: i64, cover_path: &str, cover_stamp: CoverStamp) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(cover_path, &mut hasher);
+        std::hash::Hash::hash(&cover_stamp, &mut hasher);
         Self {
             mtime_ns,
             size_bytes,
-            cover_path_hash: std::hash::Hasher::finish(&hasher),
+            cover_hash: std::hash::Hasher::finish(&hasher),
         }
     }
 }
@@ -1266,7 +1275,8 @@ fn refresh_indexed_metadata_in_conn(
                     mtime_ns = COALESCE(?11, mtime_ns),
                     size_bytes = COALESCE(?12, size_bytes),
                     indexed_at = ?13,
-                    search_tags = ?14
+                    search_tags = ?14,
+                    cover_stamp = ?15
                 WHERE path = ?1
                 ",
                 params![
@@ -1284,6 +1294,7 @@ fn refresh_indexed_metadata_in_conn(
                     fingerprint.map(|value| value.size_bytes),
                     now,
                     serde_json::to_string(&indexed.search_tags).ok(),
+                    stamp_to_column(indexed.cover_stamp),
                 ],
             )
             .map_err(|e| format!("failed to refresh indexed track metadata: {e}"))?;
@@ -1867,53 +1878,8 @@ fn update_renamed_track_rows(
             external,
             ..
         } = row;
-        match &update {
-            RowUpdate::Keep(_) => tx.execute(
-                "UPDATE tracks SET path = ?2 WHERE path = ?1",
-                params![current_key, new_key],
-            ),
-            RowUpdate::Write {
-                indexed,
-                cover_checked,
-            } => tx.execute(
-                r"
-                UPDATE tracks
-                SET path = ?2,
-                    title = ?3,
-                    artist = ?4,
-                    album = ?5,
-                    cover_path = ?6,
-                    cover_checked = ?7,
-                    genre = ?8,
-                    year = ?9,
-                    track_no = ?10,
-                    duration_secs = ?11,
-                    mtime_ns = ?12,
-                    size_bytes = ?13,
-                    indexed_at = ?14,
-                    search_tags = ?15
-                WHERE path = ?1
-                ",
-                params![
-                    current_key,
-                    new_key,
-                    indexed.title.as_str(),
-                    indexed.artist.as_str(),
-                    indexed.album.as_str(),
-                    indexed.cover_path.as_str(),
-                    i64::from(*cover_checked),
-                    indexed.genre.as_str(),
-                    indexed.year.map(i64::from),
-                    indexed.track_no.map(i64::from),
-                    indexed.duration_secs,
-                    fingerprint.mtime_ns,
-                    fingerprint.size_bytes,
-                    now,
-                    serde_json::to_string(&indexed.search_tags).ok(),
-                ],
-            ),
-        }
-        .map_err(|e| format!("failed to update renamed track row: {e}"))?;
+        move_renamed_track_row(tx, &current_key, &new_key, &update, fingerprint, now)
+            .map_err(|e| format!("failed to update renamed track row: {e}"))?;
         let indexed = update.into_indexed();
         // A cache row that the file could not be read for moves as it is.
         match external {
@@ -1929,6 +1895,66 @@ fn update_renamed_track_rows(
     }
     refreshed.problem = failures.refresh_problem();
     Ok(refreshed)
+}
+
+/// Moves the row at `current_key` to `new_key`, with the file's new state
+/// and, unless the file could not be read, what was read from it.
+fn move_renamed_track_row(
+    tx: &Connection,
+    current_key: &str,
+    new_key: &str,
+    update: &RowUpdate,
+    fingerprint: TrackFileFingerprint,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    match update {
+        RowUpdate::Keep(_) => tx.execute(
+            "UPDATE tracks SET path = ?2 WHERE path = ?1",
+            params![current_key, new_key],
+        ),
+        RowUpdate::Write {
+            indexed,
+            cover_checked,
+        } => tx.execute(
+            r"
+            UPDATE tracks
+            SET path = ?2,
+                title = ?3,
+                artist = ?4,
+                album = ?5,
+                cover_path = ?6,
+                cover_checked = ?7,
+                genre = ?8,
+                year = ?9,
+                track_no = ?10,
+                duration_secs = ?11,
+                mtime_ns = ?12,
+                size_bytes = ?13,
+                indexed_at = ?14,
+                search_tags = ?15,
+                cover_stamp = ?16
+            WHERE path = ?1
+            ",
+            params![
+                current_key,
+                new_key,
+                indexed.title.as_str(),
+                indexed.artist.as_str(),
+                indexed.album.as_str(),
+                indexed.cover_path.as_str(),
+                i64::from(*cover_checked),
+                indexed.genre.as_str(),
+                indexed.year.map(i64::from),
+                indexed.track_no.map(i64::from),
+                indexed.duration_secs,
+                fingerprint.mtime_ns,
+                fingerprint.size_bytes,
+                now,
+                serde_json::to_string(&indexed.search_tags).ok(),
+                stamp_to_column(indexed.cover_stamp),
+            ],
+        ),
+    }
 }
 
 /// Adds `paths` to the test process's library database the way a scan of
@@ -2386,7 +2412,7 @@ fn load_existing_tracks_in_scope(
 }
 
 const EXISTING_TRACK_COLUMNS: &str = "path, title, track_no, mtime_ns, size_bytes, \
-    cover_checked, duration_secs, search_tags IS NULL, cover_path";
+    cover_checked, duration_secs, search_tags IS NULL, cover_path, cover_stamp";
 
 /// The rows of root `?1`, whose descendants start with `?2`, including rows
 /// from before tracks had a root.
@@ -2403,6 +2429,7 @@ type ExistingTrackRow = (
     Option<f64>,
     bool,
     String,
+    Option<i64>,
 );
 
 fn existing_track_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExistingTrackRow> {
@@ -2416,6 +2443,7 @@ fn existing_track_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExistingTrack
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        row.get(9)?,
     ))
 }
 
@@ -2430,10 +2458,13 @@ fn existing_track_state(item: ExistingTrackRow) -> (String, ExistingTrackScanSta
         || item.1.trim().is_empty()
         || (item.2.is_none() && filename_fallback && leading_track_number(&file_stem).is_some())
         || (missing_duration && is_raw_surround_file(path));
+    let cover_stamp = stamp_from_column(item.9);
     let state = ExistingTrackScanState {
-        row: RowState::new(item.3, item.4, &item.8),
+        row: RowState::new(item.3, item.4, &item.8, cover_stamp),
         has_cover_path: item.5 != 0,
         suspicious_metadata,
+        cover_stamp,
+        cover_in_folder: !item.8.is_empty() && Path::new(&item.8).parent() == path.parent(),
     };
     (item.0, state)
 }
@@ -2458,9 +2489,10 @@ fn prepare_track_upsert_statement<'conn>(
             mtime_ns,
             size_bytes,
             indexed_at,
-            search_tags
+            search_tags,
+            cover_stamp
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
         ON CONFLICT(path) DO UPDATE SET
             root_path=excluded.root_path,
             title=excluded.title,
@@ -2475,7 +2507,8 @@ fn prepare_track_upsert_statement<'conn>(
             mtime_ns=excluded.mtime_ns,
             size_bytes=excluded.size_bytes,
             indexed_at=excluded.indexed_at,
-            search_tags=excluded.search_tags
+            search_tags=excluded.search_tags,
+            cover_stamp=excluded.cover_stamp
         ",
     )
     .map_err(|e| format!("failed to prepare track upsert statement: {e}"))
@@ -2486,6 +2519,7 @@ struct TrackWriter<'conn> {
     upsert: rusqlite::CachedStatement<'conn>,
     stored: rusqlite::CachedStatement<'conn>,
     state: rusqlite::CachedStatement<'conn>,
+    cover: rusqlite::CachedStatement<'conn>,
 }
 
 impl<'conn> TrackWriter<'conn> {
@@ -2495,9 +2529,16 @@ impl<'conn> TrackWriter<'conn> {
             stored: prepare_library_row_statement(tx)?,
             state: tx
                 .prepare_cached(
-                    "SELECT mtime_ns, size_bytes, cover_path FROM tracks WHERE path = ?1",
+                    "SELECT mtime_ns, size_bytes, cover_path, cover_stamp FROM tracks \
+                     WHERE path = ?1",
                 )
                 .map_err(|e| format!("failed to prepare track state statement: {e}"))?,
+            cover: tx
+                .prepare_cached(
+                    "UPDATE tracks SET cover_path = COALESCE(?2, cover_path), \
+                     cover_checked = 1, cover_stamp = ?3 WHERE path = ?1",
+                )
+                .map_err(|e| format!("failed to prepare track cover statement: {e}"))?,
         })
     }
 
@@ -2530,6 +2571,7 @@ impl<'conn> TrackWriter<'conn> {
                     row.get(0)?,
                     row.get(1)?,
                     &row.get::<_, String>(2)?,
+                    stamp_from_column(row.get(3)?),
                 ))
             })
             .optional()
@@ -2593,9 +2635,53 @@ fn apply_metadata_result(
             task.size_bytes,
             now,
             serde_json::to_string(&indexed.search_tags).ok(),
+            stamp_to_column(indexed.cover_stamp),
         ])
         .map_err(|e| format!("failed to index '{}': {e}", task.path.display()))?;
     Ok(Some((task, indexed)))
+}
+
+/// A cover a scan checked again for an unchanged file, because the images
+/// in its folder changed; see [`RootScan::check_cover`].
+#[derive(Debug)]
+struct CoverUpdate {
+    task: MetadataTask,
+    /// The new cover, or `None` to keep the row's: an embedded picture, or
+    /// none, stays right while the folder has no image.
+    cover_path: Option<String>,
+    stamp: CoverStamp,
+}
+
+/// Writes the cover of `update` unless the row or file changed since the
+/// scan saw them (see [`TrackWriter::still_current`]). Returns the row
+/// written.
+fn apply_cover_update(
+    writer: &mut TrackWriter<'_>,
+    existing: &HashMap<String, ExistingTrackScanState>,
+    update: CoverUpdate,
+) -> Result<Option<(MetadataTask, IndexedTrack)>, String> {
+    let CoverUpdate {
+        task,
+        cover_path,
+        stamp,
+    } = update;
+    if !writer.still_current(&task, existing.get(&task.path_string))? {
+        return Ok(None);
+    }
+    writer
+        .cover
+        .execute(params![
+            task.path_string.as_str(),
+            cover_path,
+            stamp_to_column(stamp)
+        ])
+        .map_err(|e| {
+            format!(
+                "failed to update the cover of '{}': {e}",
+                task.path.display()
+            )
+        })?;
+    Ok(writer.stored(&task)?.map(|indexed| (task, indexed)))
 }
 
 /// Identity of a file independent of the path that reached it.
@@ -2976,9 +3062,12 @@ struct RootScan<'a> {
     existing: &'a HashMap<String, ExistingTrackScanState>,
     now: i64,
     tuning: ScanTuning,
-    /// Rows read and not yet written.
-    batch: Vec<MetadataResult>,
+    /// Rows read or covers checked, and not yet written.
+    batch: Vec<ScanRow>,
     batch_started: Option<Instant>,
+    /// The cover choice and image stamp of each folder whose unchanged
+    /// tracks the scan checked; `None` for a folder it could not read.
+    folders: HashMap<PathBuf, Option<FolderCover>>,
     discovered: usize,
     processed: usize,
     progress: ScanProgressReporter,
@@ -3001,8 +3090,50 @@ impl RootScan<'_> {
     /// Adds a file read to the batch, and writes the batch if it is due.
     fn accept(&mut self, result: MetadataResult, sink: &mut dyn ScanSink) -> Result<(), String> {
         self.read_failures.note(&result.task.path, &result.read);
+        self.push(ScanRow::Read(result), sink)
+    }
+
+    /// Adds a cover checked again to the batch, and writes the batch if it
+    /// is due.
+    fn accept_cover(&mut self, update: CoverUpdate, sink: &mut dyn ScanSink) -> Result<(), String> {
+        self.push(ScanRow::Cover(update), sink)
+    }
+
+    /// How the row of an unchanged file at `path` needs its cover checked
+    /// again, now that its folder may have other images than the cover was
+    /// chosen from. A folder that cannot be read now keeps its covers.
+    fn check_cover(&mut self, path: &Path, seen: &ExistingTrackScanState) -> CoverCheck {
+        let Some(dir) = path.parent() else {
+            return CoverCheck::Current;
+        };
+        let folder = self
+            .folders
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| FolderCover::read(dir));
+        let Some(folder) = folder else {
+            return CoverCheck::Current;
+        };
+        if folder.stamp == seen.cover_stamp {
+            return CoverCheck::Current;
+        }
+        match &folder.cover {
+            Some(cover) => CoverCheck::Update {
+                cover_path: Some(cover.clone()),
+                stamp: folder.stamp,
+            },
+            // The folder lost the image the row shows, so only the file can
+            // tell whether it has a picture of its own.
+            None if seen.cover_in_folder => CoverCheck::Read,
+            None => CoverCheck::Update {
+                cover_path: None,
+                stamp: folder.stamp,
+            },
+        }
+    }
+
+    fn push(&mut self, row: ScanRow, sink: &mut dyn ScanSink) -> Result<(), String> {
         self.batch_started.get_or_insert_with(Instant::now);
-        self.batch.push(result);
+        self.batch.push(row);
         self.processed = self.processed.saturating_add(1);
         if self.batch.len() >= self.tuning.batch_rows {
             self.flush(sink)?;
@@ -3036,14 +3167,57 @@ impl RootScan<'_> {
     }
 }
 
+/// A row a scan writes.
+#[derive(Debug)]
+enum ScanRow {
+    /// A file it read.
+    Read(MetadataResult),
+    /// The cover of a file it did not need to read.
+    Cover(CoverUpdate),
+}
+
+/// A folder's cover choice and the stamp of its images.
+#[derive(Debug)]
+struct FolderCover {
+    cover: Option<String>,
+    stamp: CoverStamp,
+}
+
+impl FolderCover {
+    /// `None` if `dir` cannot be read.
+    fn read(dir: &Path) -> Option<Self> {
+        let images = FolderImages::read(dir).ok()?;
+        Some(Self {
+            cover: images
+                .cover()
+                .map(|cover| cover.to_string_lossy().into_owned()),
+            stamp: images.stamp(),
+        })
+    }
+}
+
+/// What a scan does about the cover of an unchanged file.
+#[derive(Debug, PartialEq, Eq)]
+enum CoverCheck {
+    /// The cover was chosen from the folder's current images.
+    Current,
+    /// Write this cover and stamp; see [`CoverUpdate`].
+    Update {
+        cover_path: Option<String>,
+        stamp: CoverStamp,
+    },
+    /// Read the file again.
+    Read,
+}
+
 /// Writes the rows of `results` in one transaction, and returns those
-/// written; see [`apply_metadata_result`].
+/// written; see [`apply_metadata_result`] and [`apply_cover_update`].
 fn write_batch(
     conn: &Connection,
     root_str: &str,
     now: i64,
     existing: &HashMap<String, ExistingTrackScanState>,
-    results: Vec<MetadataResult>,
+    results: Vec<ScanRow>,
 ) -> Result<Vec<(MetadataTask, IndexedTrack)>, String> {
     // Take the write lock up front: a deferred transaction that reads before
     // it writes cannot wait for another writer, and fails at once.
@@ -3053,13 +3227,12 @@ fn write_batch(
     {
         let mut writer = TrackWriter::new(&tx)?;
         for result in results {
-            written.extend(apply_metadata_result(
-                &mut writer,
-                root_str,
-                now,
-                existing,
-                result,
-            )?);
+            written.extend(match result {
+                ScanRow::Read(result) => {
+                    apply_metadata_result(&mut writer, root_str, now, existing, result)?
+                }
+                ScanRow::Cover(update) => apply_cover_update(&mut writer, existing, update)?,
+            });
         }
     }
     tx.commit()
@@ -3154,6 +3327,7 @@ fn scan_root_in(
         tuning,
         batch: Vec::new(),
         batch_started: None,
+        folders: HashMap::new(),
         discovered: 0,
         processed: 0,
         progress: ScanProgressReporter::new(previous_index_count),
@@ -3189,8 +3363,27 @@ fn scan_root_in(
                     || !existing_state.has_cover_path
                     || existing_state.suspicious_metadata
             });
+            let cover_check = match existing_state {
+                Some(existing_state) if !needs_update => scan.check_cover(&path, existing_state),
+                _ => CoverCheck::Current,
+            };
 
-            if needs_update {
+            if let CoverCheck::Update { cover_path, stamp } = cover_check {
+                let task = MetadataTask {
+                    path,
+                    path_string,
+                    mtime_ns,
+                    size_bytes,
+                };
+                scan.accept_cover(
+                    CoverUpdate {
+                        task,
+                        cover_path,
+                        stamp,
+                    },
+                    sink,
+                )?;
+            } else if needs_update || cover_check == CoverCheck::Read {
                 let task = MetadataTask {
                     path,
                     path_string,
@@ -3467,7 +3660,9 @@ fn row_update<E>(
     let mut indexed = read.indexed;
     let cover_checked = read.cover_failure.is_none();
     if !cover_checked {
-        indexed.cover_path = stored.map(|stored| stored.cover_path).unwrap_or_default();
+        (indexed.cover_path, indexed.cover_stamp) = stored
+            .map(|stored| (stored.cover_path, stored.cover_stamp))
+            .unwrap_or_default();
     }
     Ok(RowUpdate::Write {
         indexed,
@@ -3480,7 +3675,8 @@ fn prepare_library_row_statement(
 ) -> Result<rusqlite::CachedStatement<'_>, String> {
     conn.prepare_cached(
         r"
-        SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags
+        SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags,
+               cover_stamp
         FROM tracks
         WHERE path = ?1
         ",
@@ -3512,15 +3708,15 @@ fn external_row(
     conn.query_row(
         r"
         SELECT title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags,
-               mtime_ns, size_bytes
+               NULL, mtime_ns, size_bytes
         FROM external_tracks
         WHERE path = ?1
         ",
         params![key],
         |row| {
             let fingerprint = TrackFileFingerprint {
-                mtime_ns: row.get(9)?,
-                size_bytes: row.get(10)?,
+                mtime_ns: row.get(10)?,
+                size_bytes: row.get(11)?,
             };
             Ok((indexed_track_from_row(row)?, fingerprint))
         },
@@ -3539,7 +3735,8 @@ fn stored_track(conn: &Connection, key: &str) -> Result<Option<IndexedTrack>, St
 }
 
 /// An [`IndexedTrack`] from the columns `title, artist, album, cover_path,
-/// genre, year, track_no, duration_secs, search_tags`, in that order.
+/// genre, year, track_no, duration_secs, search_tags, cover_stamp`, in that
+/// order.
 fn indexed_track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedTrack> {
     Ok(IndexedTrack {
         search_tags: serde_json::from_str(&row.get::<_, Option<String>>(8)?.unwrap_or_default())
@@ -3548,6 +3745,7 @@ fn indexed_track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedTr
         artist: row.get::<_, String>(1)?,
         album: row.get::<_, String>(2)?,
         cover_path: row.get::<_, String>(3)?,
+        cover_stamp: stamp_from_column(row.get(9)?),
         genre: row.get::<_, String>(4)?,
         year: row
             .get::<_, Option<i64>>(5)?
@@ -3637,7 +3835,7 @@ fn read_track_info_with_cover_cache(path: &Path, covers: Option<&EmbeddedCoverCa
         }
     }
 
-    out.cover_path = find_cover_path_for_track(path);
+    (out.cover_path, out.cover_stamp) = folder_cover_for_track(path);
     let mut cover_failure = None;
     // A reader that panicked read no picture.
     if let (true, Some(cache), Some(tagged)) = (out.cover_path.is_empty(), covers, &tagged) {
@@ -3669,6 +3867,7 @@ fn untagged_track(path: &Path) -> IndexedTrack {
         artist: String::new(),
         album: String::new(),
         cover_path: String::new(),
+        cover_stamp: 0,
         genre: String::new(),
         year: None,
         track_no: None,
@@ -3677,10 +3876,23 @@ fn untagged_track(path: &Path) -> IndexedTrack {
 }
 
 pub(super) fn find_cover_path_for_track(path: &Path) -> String {
-    path.parent()
-        .and_then(find_folder_cover)
-        .map(|cover| cover.to_string_lossy().into_owned())
-        .unwrap_or_default()
+    folder_cover_for_track(path).0
+}
+
+/// The folder image shown as the cover of the track at `path`, empty for
+/// none, and the stamp of its folder's images; zero if the folder cannot be
+/// read, so that the next scan checks the cover again.
+fn folder_cover_for_track(path: &Path) -> (String, CoverStamp) {
+    match path.parent().map(FolderImages::read) {
+        Some(Ok(images)) => (
+            images
+                .cover()
+                .map(|cover| cover.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            images.stamp(),
+        ),
+        _ => (String::new(), 0),
+    }
 }
 
 fn unix_ts_i64() -> i64 {
@@ -3724,7 +3936,8 @@ fn refresh_cover_paths_in_conn(
                 UPDATE tracks
                 SET cover_path = ?2,
                     cover_checked = ?3,
-                    indexed_at = ?4
+                    indexed_at = ?4,
+                    cover_stamp = ?5
                 WHERE path = ?1
                 ",
                 params![
@@ -3732,6 +3945,7 @@ fn refresh_cover_paths_in_conn(
                     indexed.cover_path.as_str(),
                     i64::from(*cover_checked),
                     now,
+                    stamp_to_column(indexed.cover_stamp),
                 ],
             )
             .map_err(|e| format!("failed to refresh track cover path: {e}"))?;
@@ -3750,9 +3964,12 @@ fn refresh_cover_paths_in_conn(
     Ok(refreshed)
 }
 
+/// Gives `paths` the folder image `cover_path` as their cover, chosen from
+/// folder images with the stamp `cover_stamp`.
 pub(crate) fn refresh_cover_paths_for_tracks_with_override(
     paths: &[PathBuf],
     cover_path: &Path,
+    cover_stamp: CoverStamp,
 ) -> Result<(), String> {
     let conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
     init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
@@ -3766,10 +3983,16 @@ pub(crate) fn refresh_cover_paths_for_tracks_with_override(
             UPDATE tracks
             SET cover_path = ?2,
                 cover_checked = 1,
-                indexed_at = ?3
+                indexed_at = ?3,
+                cover_stamp = ?4
             WHERE path = ?1
             ",
-            params![path_string, cover_path_string.as_str(), now],
+            params![
+                path_string,
+                cover_path_string.as_str(),
+                now,
+                stamp_to_column(cover_stamp)
+            ],
         )
         .map_err(|e| format!("failed to refresh track cover path: {e}"))?;
 
@@ -3856,6 +4079,8 @@ where
 #[cfg(test)]
 mod batch_tests;
 #[cfg(test)]
+mod cover_tests;
+#[cfg(test)]
 mod refresh_tests;
 #[cfg(test)]
 mod scope_tests;
@@ -3904,6 +4129,7 @@ mod tests {
             artist: "Artist".to_string(),
             album: "Album".to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: "Ambient".to_string(),
             year: Some(2024),
             track_no: Some(3),
@@ -3985,6 +4211,7 @@ mod tests {
             artist: "Outside Artist".to_string(),
             album: "Outside Album".to_string(),
             cover_path: "/outside/cover.jpg".to_string(),
+            cover_stamp: 0,
             genre: "Ambient".to_string(),
             year: Some(2024),
             track_no: Some(7),
@@ -4010,6 +4237,7 @@ mod tests {
             artist: "Outside Artist".to_string(),
             album: "Outside Album".to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: String::new(),
             year: None,
             track_no: None,
@@ -4058,6 +4286,7 @@ mod tests {
             artist: "Artist A".to_string(),
             album: "Album A".to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: String::new(),
             year: None,
             track_no: Some(1),

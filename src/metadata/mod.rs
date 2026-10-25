@@ -29,7 +29,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::TimeBase;
 
-use crate::folder_cover::find_folder_cover;
+use crate::folder_cover::FolderImages;
 use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, raw_surround_format_label,
     read_appended_apev2_text_metadata,
@@ -59,7 +59,11 @@ pub struct TrackMetadata {
     pub format_label: String,
     pub current_bitrate_kbps: Option<u32>,
     pub bitrate_timeline_kbps: Vec<u16>,
+    /// The folder's cover image, or else the file's embedded picture, as
+    /// the library chooses it.
     pub cover_art_path: Option<String>,
+    /// See [`crate::library::LibraryTrack::cover_stamp`].
+    pub cover_art_stamp: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -148,12 +152,16 @@ fn load_metadata_for_path(path: &Path) -> TrackMetadata {
             .to_owned(),
         ..TrackMetadata::default()
     };
+    // The folder image comes first, as in the library, so that artwork
+    // applied to the folder shows in both.
+    if let Some(Ok(images)) = path.parent().map(FolderImages::read) {
+        metadata.cover_art_stamp = images.stamp();
+        metadata.cover_art_path = images
+            .into_cover()
+            .map(|cover_path| cover_path.to_string_lossy().into_owned());
+    }
     apply_lofty_metadata(path, &mut metadata);
     apply_raw_surround_tags(path, &mut metadata);
-    if metadata.cover_art_path.is_none() {
-        metadata.cover_art_path =
-            find_folder_cover_path(path).map(|cover_path| cover_path.to_string_lossy().to_string());
-    }
     if metadata.format_label.is_empty() {
         metadata.format_label =
             format_label_from_extension(path.extension().and_then(|value| value.to_str()));
@@ -200,7 +208,7 @@ fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
     metadata.year = tag.date().map(|value| i32::from(value.year));
     metadata.track_number = tag.track();
 
-    if let Some(pic) = tag.pictures().first() {
+    if let (None, Some(pic)) = (&metadata.cover_art_path, tag.pictures().first()) {
         if let Some(cover_path) =
             EmbeddedCoverCache::shared().and_then(|cache| cache.store(pic.data()))
         {
@@ -739,6 +747,31 @@ mod tests {
     }
 
     #[test]
+    fn now_playing_prefers_the_folder_image_over_the_embedded_picture_like_the_library() {
+        let dir = metadata_test_path("folder-first", "d");
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let track = dir.join("01.wav");
+        write_wav_with_picture(&track, &encoded_picture(40, image::ImageFormat::Png));
+        let cover = dir.join("cover.jpg");
+        std::fs::write(&cover, encoded_picture(41, image::ImageFormat::Jpeg))
+            .expect("write folder cover");
+
+        let metadata = load_metadata_for_path(&track);
+
+        assert_eq!(metadata.cover_art_path.as_deref(), cover.to_str());
+        let indexed = crate::library::read_track_info(&track);
+        assert_eq!(
+            (
+                metadata.cover_art_path.unwrap_or_default(),
+                metadata.cover_art_stamp
+            ),
+            (indexed.cover_path, indexed.cover_stamp),
+            "now-playing and the library choose the same cover"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn embedded_cover_is_cached_with_its_original_bytes() {
         let dir = metadata_test_path("embedded-cover", "d");
         std::fs::create_dir_all(&dir).expect("create fixture dir");
@@ -778,8 +811,11 @@ mod tests {
         let picture = cursor.into_inner();
 
         let dir = metadata_test_path("no-cover-decode", "d");
-        std::fs::create_dir_all(&dir).expect("create fixture dir");
-        let embedded = dir.join("01.wav");
+        // A folder image comes before an embedded picture, so the embedded
+        // track has a folder of its own.
+        let embedded_dir = dir.join("embedded");
+        std::fs::create_dir_all(&embedded_dir).expect("create fixture dir");
+        let embedded = embedded_dir.join("01.wav");
         write_wav_with_picture(&embedded, &picture);
         let folder_only = dir.join("02.flac");
         std::fs::write(&folder_only, b"not audio").expect("write track fixture");
@@ -836,8 +872,4 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
-}
-
-fn find_folder_cover_path(track_path: &Path) -> Option<PathBuf> {
-    track_path.parent().and_then(find_folder_cover)
 }

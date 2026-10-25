@@ -148,6 +148,9 @@ struct DecodedQueueTrack {
     int trackNumber{0};
     float lengthSeconds{-1.0f};
     QString path;
+    // Changes when the image at coverPath is replaced; see
+    // CoverImageProvider::urlForPath. Encoded after coverPath.
+    quint64 coverStamp{0};
 };
 
 // The queue section: the whole queue, the row operations since an earlier
@@ -245,6 +248,7 @@ struct DecodedMetadata {
     QString formatLabel;
     int currentBitrateKbps{0};
     QString coverPath;
+    quint64 coverStamp{0};
     int trackNumber{0};
 };
 
@@ -316,6 +320,7 @@ struct DecodedSearchRow {
     QString rootLabel;
     QString genre;
     QString coverPath;
+    quint64 coverStamp{0};
     QString artistKey;
     QString albumKey;
     QString sectionKey;

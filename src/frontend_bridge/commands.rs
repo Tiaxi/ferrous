@@ -1001,6 +1001,7 @@ fn track_details_differ(track: &LibraryTrack, indexed: &IndexedTrack) -> bool {
         || track.artist != indexed.artist
         || track.album != indexed.album
         || track.cover_path != indexed.cover_path
+        || track.cover_stamp != indexed.cover_stamp
         || track.search_tags != indexed.search_tags
         || track.genre != indexed.genre
         || track.year != indexed.year
@@ -1013,6 +1014,7 @@ fn copy_track_details(track: &mut LibraryTrack, indexed: &IndexedTrack) {
     track.artist.clone_from(&indexed.artist);
     track.album.clone_from(&indexed.album);
     track.cover_path.clone_from(&indexed.cover_path);
+    track.cover_stamp = indexed.cover_stamp;
     track.search_tags.clone_from(&indexed.search_tags);
     track.genre.clone_from(&indexed.genre);
     track.year = indexed.year;
@@ -1418,6 +1420,7 @@ mod tests {
             artist: artist.to_string(),
             album: album.to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: String::new(),
             year,
             track_no,
@@ -1579,6 +1582,7 @@ mod tests {
                 artist: String::new(),
                 album: String::new(),
                 cover_path: String::new(),
+                cover_stamp: 0,
                 genre: String::new(),
                 year: None,
                 track_no: None,
@@ -1691,6 +1695,7 @@ mod tests {
                 artist: String::new(),
                 album: String::new(),
                 cover_path: String::new(),
+                cover_stamp: 0,
                 genre: String::new(),
                 year: None,
                 track_no: None,
@@ -2619,6 +2624,7 @@ mod tests {
             artist: "Artist".to_string(),
             album: "Album".to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: String::new(),
             year: None,
             track_no: None,
@@ -2691,6 +2697,7 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: String::new(),
             year: None,
             track_no: None,

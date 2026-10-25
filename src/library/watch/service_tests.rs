@@ -258,6 +258,42 @@ fn files_added_changed_removed_and_renamed_reach_the_library_without_a_rescan() 
     assert!(running.mirror.status.unwatched_roots.is_empty());
 }
 
+fn cover_of(mirror: &LibraryMirror, track: &Path) -> Option<String> {
+    mirror
+        .snapshot
+        .tracks
+        .iter()
+        .find(|t| t.path == track)
+        .map(|t| t.cover_path.clone())
+}
+
+#[test]
+fn image_changes_in_a_folder_give_its_tracks_their_cover_without_a_rescan() {
+    let fixture = Fixture::new("cover-images");
+    fixture.write("Album/song.mp3");
+    let mut running = fixture.start_watching(tuning(Duration::from_secs(3600)));
+    let track = fixture.path("Album/song.mp3");
+    assert_eq!(cover_of(&running.mirror, &track).as_deref(), Some(""));
+
+    let cover = fixture.path("Album/cover.jpg");
+    fs::write(&cover, b"not-real-jpg").expect("add image");
+    running.wait_for("an added image", |mirror| {
+        cover_of(mirror, &track) == Some(cover.to_string_lossy().into_owned())
+    });
+
+    let renamed = fixture.path("Album/folder.png");
+    fs::rename(&cover, &renamed).expect("rename image");
+    running.wait_for("a renamed image", |mirror| {
+        cover_of(mirror, &track) == Some(renamed.to_string_lossy().into_owned())
+    });
+
+    fs::remove_file(&renamed).expect("remove image");
+    running.wait_for("a removed image", |mirror| {
+        cover_of(mirror, &track).as_deref() == Some("")
+    });
+    assert_eq!(running.mirror.status.last_error, None);
+}
+
 #[test]
 fn a_burst_of_changes_is_scanned_once() {
     const FILES: usize = 20;

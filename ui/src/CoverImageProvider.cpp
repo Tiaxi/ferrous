@@ -5,6 +5,8 @@
 #include <QImageReader>
 #include <QQuickTextureFactory>
 
+#include <algorithm>
+
 // --- CoverImageResponse ---
 
 CoverImageResponse::CoverImageResponse(
@@ -67,7 +69,7 @@ CoverImageProvider::CoverImageProvider(int maxThreads)
 
 QQuickImageResponse *CoverImageProvider::requestImageResponse(
     const QString &id, const QSize &requestedSize) {
-    auto *response = new CoverImageResponse(id, requestedSize);
+    auto *response = new CoverImageResponse(pathForId(id), requestedSize);
     m_pool.start(response);
     return response;
 }
@@ -76,9 +78,45 @@ void CoverImageProvider::waitForDone() {
     m_pool.waitForDone();
 }
 
-QString CoverImageProvider::urlForPath(const QString &filePath) {
+namespace {
+constexpr QLatin1StringView kStampMarker("#v=");
+}
+
+QString CoverImageProvider::urlForPath(const QString &filePath, quint64 stamp) {
     if (filePath.isEmpty()) {
         return {};
     }
-    return QStringLiteral("image://covers/") + filePath;
+    QString url = QStringLiteral("image://covers/") + filePath;
+    if (stamp != 0) {
+        url += kStampMarker + QString::number(stamp);
+    }
+    return url;
+}
+
+namespace {
+// Where the stamp suffix of a provider image id starts, or -1. A cover file
+// name ends in an image extension, so a trailing "#v=<digits>" is always the
+// stamp, even in a path that has '#' elsewhere.
+qsizetype stampMarkerIndex(const QString &id) {
+    const qsizetype marker = id.lastIndexOf(kStampMarker);
+    if (marker < 0) {
+        return -1;
+    }
+    const QStringView digits = QStringView(id).mid(marker + kStampMarker.size());
+    const bool allDigits = !digits.isEmpty()
+        && std::all_of(digits.begin(), digits.end(), [](QChar c) {
+               return c >= u'0' && c <= u'9';
+           });
+    return allDigits ? marker : -1;
+}
+} // namespace
+
+QString CoverImageProvider::pathForId(const QString &id) {
+    const qsizetype marker = stampMarkerIndex(id);
+    return marker < 0 ? id : id.left(marker);
+}
+
+quint64 CoverImageProvider::stampForId(const QString &id) {
+    const qsizetype marker = stampMarkerIndex(id);
+    return marker < 0 ? 0 : id.mid(marker + kStampMarker.size()).toULongLong();
 }

@@ -387,6 +387,8 @@ pub struct BridgeSearchResultRow {
     pub root_label: String,
     pub genre: String,
     pub cover_path: String,
+    /// See [`crate::library::LibraryTrack::cover_stamp`].
+    pub cover_stamp: u64,
     pub artist_key: String,
     pub album_key: String,
     pub section_key: String,
@@ -673,6 +675,7 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         current_bitrate_kbps: metadata.current_bitrate_kbps,
         bitrate_timeline_kbps: Vec::new(),
         cover_art_path: metadata.cover_art_path.clone(),
+        cover_art_stamp: metadata.cover_art_stamp,
     }
 }
 
@@ -2380,6 +2383,7 @@ mod tests {
             artist: artist.to_string(),
             album: album.to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: String::new(),
             year,
             track_no,
@@ -2599,6 +2603,7 @@ mod tests {
                 artist: String::new(),
                 album: String::new(),
                 cover_path: String::new(),
+                cover_stamp: 0,
                 genre: String::new(),
                 year: None,
                 track_no: None,
@@ -3930,6 +3935,7 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: String::new(),
             year: None,
             track_no: None,

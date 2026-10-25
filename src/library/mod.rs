@@ -46,6 +46,10 @@ pub struct LibraryTrack {
     pub artist: String,
     pub album: String,
     pub cover_path: String,
+    /// The stamp of the folder images `cover_path` was chosen from; see
+    /// [`crate::folder_cover::FolderImages::stamp`]. It changes when the
+    /// image at `cover_path` is replaced, so views key cached images on it.
+    pub cover_stamp: u64,
     pub genre: String,
     pub year: Option<i32>,
     pub track_no: Option<u32>,
@@ -90,6 +94,7 @@ pub struct LibrarySearchTrack {
     pub artist: String,
     pub album: String,
     pub cover_path: String,
+    pub cover_stamp: u64,
     pub genre: String,
     pub year: Option<i32>,
     pub track_no: Option<u32>,
@@ -250,6 +255,8 @@ pub(crate) struct IndexedTrack {
     pub(crate) artist: String,
     pub(crate) album: String,
     pub(crate) cover_path: String,
+    /// See [`LibraryTrack::cover_stamp`].
+    pub(crate) cover_stamp: u64,
     pub(crate) genre: String,
     pub(crate) year: Option<i32>,
     pub(crate) track_no: Option<u32>,
@@ -264,6 +271,7 @@ impl From<&LibraryTrack> for IndexedTrack {
             artist: track.artist.clone(),
             album: track.album.clone(),
             cover_path: track.cover_path.clone(),
+            cover_stamp: track.cover_stamp,
             genre: track.genre.clone(),
             year: track.year,
             track_no: track.track_no,

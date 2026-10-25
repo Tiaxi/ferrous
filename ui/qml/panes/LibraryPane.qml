@@ -215,7 +215,7 @@ Rectangle {
                         Image {
                             anchors.fill: parent
                             source: albumCoverInViewport
-                                ? root.uiBridge.libraryThumbnailSource(coverPath || "")
+                                ? root.uiBridge.libraryThumbnailSource(coverPath || "", coverStamp || "")
                                 : ""
                             fillMode: Image.PreserveAspectFit
                             smooth: false

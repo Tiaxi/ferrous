@@ -311,6 +311,7 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             cover_path: String::new(),
+            cover_stamp: 0,
             genre: String::new(),
             year: None,
             track_no: None,

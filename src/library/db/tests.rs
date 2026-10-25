@@ -84,6 +84,12 @@ fn a_version_0_library_migrates_without_losing_a_row_and_a_second_run_changes_no
     assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
     assert_eq!(journal_mode(&conn), "wal");
     assert_eq!(full_text_objects(&conn), Vec::<String>::new());
+    // Every track gets a cover stamp, unknown until the next scan checks
+    // its cover; see `migrate_to_version_2`.
+    let mut before = before;
+    for row in &mut before[1] {
+        row.push(Value::Null);
+    }
     assert_eq!(library_rows(&conn), before, "every row and cover is kept");
     let indexes: Vec<String> = schema_objects(&conn)
         .into_iter()

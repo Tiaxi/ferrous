@@ -58,6 +58,7 @@ pub(super) struct EncodedQueueTrack {
     pub(super) artist: String,
     pub(super) album: String,
     pub(super) cover_path: String,
+    pub(super) cover_stamp: u64,
     pub(super) genre: String,
     pub(super) year: Option<i32>,
     pub(super) track_number: Option<u32>,
@@ -71,6 +72,7 @@ impl EncodedQueueTrack {
         push_string(out, &self.artist);
         push_string(out, &self.album);
         push_string(out, &self.cover_path);
+        push_u64(out, self.cover_stamp);
         push_string(out, &self.genre);
         push_i32(out, self.year.unwrap_or(i32::MIN));
         push_u16(out, self.track_number.map_or(0, clamp_u32_to_u16));
@@ -86,6 +88,7 @@ impl EncodedQueueTrack {
             + self.cover_path.len()
             + self.genre.len()
             + self.path.len()
+            + 8
             + 4
             + 2
             + 4
@@ -309,6 +312,7 @@ impl QueueRelay {
                 artist: &track.artist,
                 album: &track.album,
                 cover_path: &track.cover_path,
+                cover_stamp: track.cover_stamp,
                 genre: &track.genre,
                 year: track.year,
                 track_number: track.track_no,
@@ -332,6 +336,7 @@ impl QueueRelay {
             artist: track.artist.to_string(),
             album: track.album.to_string(),
             cover_path: track.cover_path.to_string(),
+            cover_stamp: track.cover_stamp,
             genre: track.genre.to_string(),
             year: track.year,
             track_number: track.track_number,
@@ -452,6 +457,7 @@ struct TrackDetails<'a> {
     artist: &'a str,
     album: &'a str,
     cover_path: &'a str,
+    cover_stamp: u64,
     genre: &'a str,
     year: Option<i32>,
     track_number: Option<u32>,
@@ -465,6 +471,7 @@ impl<'a> TrackDetails<'a> {
             artist: &track.artist,
             album: &track.album,
             cover_path: &track.cover_path,
+            cover_stamp: track.cover_stamp,
             genre: &track.genre,
             year: track.year,
             track_number: track.track_no,
