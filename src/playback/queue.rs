@@ -354,7 +354,7 @@ impl GaplessQueue {
     }
 
     /// Path of the row at `index`.
-    #[cfg(any(test, feature = "gst"))]
+    #[cfg(feature = "gst")]
     pub(crate) fn path_at(&self, index: usize) -> Option<&Path> {
         self.queue.get(index).map(PathBuf::as_path)
     }
