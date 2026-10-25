@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crossbeam_channel::{unbounded, Receiver};
+
 use super::inotify::{parse_events, RawEvent};
 use super::mounts::{misses_changes, mount_type_of};
 use super::*;
@@ -195,4 +197,90 @@ fn unwatched_roots_say_why_and_what_happens_instead() {
     let reason = Fallback::WatchLimit.describe(periodic);
     assert!(reason.contains("fs.inotify.max_user_watches"), "{reason}");
     assert_eq!(describe_interval(Duration::from_secs(1)), "1 second");
+}
+
+/// A watcher run by the test itself, and the commands it sends.
+fn watcher() -> (Watcher, Receiver<LibraryCommand>) {
+    let (commands_tx, commands) = unbounded();
+    let (_messages_tx, messages) = unbounded();
+    let watcher = Watcher::new(
+        WatchTuning::default(),
+        messages,
+        commands_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    (watcher, commands)
+}
+
+fn test_folder(name: &str) -> PathBuf {
+    let folder = crate::paths::test_root().join(format!("watch-{name}"));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).expect("test folder");
+    folder.canonicalize().expect("canonical test folder")
+}
+
+#[test]
+fn watching_starts_with_a_rescan_of_the_roots_that_are_there() {
+    let folder = test_folder("catch-up");
+    let present = folder.join("present");
+    std::fs::create_dir(&present).expect("root");
+    let gone = folder.join("gone");
+    let (mut watcher, commands) = watcher();
+    watcher.handle(WatchMessage::Enabled(true));
+    assert!(commands.try_recv().is_err(), "the roots are not known yet");
+
+    watcher.handle(WatchMessage::Roots(vec![present.clone(), gone.clone()]));
+
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![LibraryCommand::RescanRoot(present.clone())]
+    );
+    assert_eq!(watcher.unwatched.get(&gone), Some(&Fallback::Missing));
+    assert!(watcher.table.count_below(&present) > 0);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_root_whose_folder_is_replaced_when_mounts_change_is_watched_again_and_rescanned() {
+    let folder = test_folder("remount");
+    let root = folder.join("drive");
+    std::fs::create_dir(&root).expect("root");
+    let (mut watcher, commands) = watcher();
+    watcher.handle(WatchMessage::Roots(vec![root.clone()]));
+    watcher.handle(WatchMessage::Enabled(true));
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![LibraryCommand::RescanRoot(root.clone())]
+    );
+    let first = watcher.table.wds.get(&root).copied();
+
+    // Nothing changed for this root.
+    watcher.recheck_root_folders();
+    assert!(commands.try_recv().is_err());
+
+    // Another folder at the root's path, as when a drive is mounted there.
+    std::fs::rename(&root, folder.join("underneath")).expect("move aside");
+    std::fs::create_dir(&root).expect("mounted");
+    watcher.recheck_root_folders();
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![LibraryCommand::RescanRoot(root.clone())]
+    );
+    assert_ne!(watcher.table.wds.get(&root).copied(), first);
+    assert!(watcher.unwatched.is_empty());
+
+    // Gone, as when unmounted with no folder underneath: not rescanned.
+    std::fs::remove_dir(&root).expect("unmounted");
+    watcher.recheck_root_folders();
+    assert!(commands.try_recv().is_err());
+    assert_eq!(watcher.unwatched.get(&root), Some(&Fallback::Missing));
+    // Back.
+    std::fs::create_dir(&root).expect("mounted again");
+    watcher.recheck_root_folders();
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![LibraryCommand::RescanRoot(root.clone())]
+    );
+    assert!(watcher.unwatched.is_empty());
+    let _ = std::fs::remove_dir_all(folder);
 }

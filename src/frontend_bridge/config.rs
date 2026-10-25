@@ -220,6 +220,14 @@ pub(super) fn load_settings_into(settings: &mut BridgeSettings) {
     parse_settings_text(settings, &text);
 }
 
+/// Parse a flag saved as `0` or `1` into `flag`, leaving it as it is if the
+/// value is not a number.
+fn parse_flag(value: &str, flag: &mut bool) {
+    if let Ok(x) = value.parse::<i32>() {
+        *flag = x != 0;
+    }
+}
+
 /// Parse a settings value in the unit interval, rejecting NaN and infinities.
 fn parse_unit_f32(value: &str) -> Option<f32> {
     value
@@ -270,35 +278,18 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                     settings.db_range = x.clamp(50.0, 150.0);
                 }
             }
-            "log_scale" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.display.log_scale = x != 0;
-                }
-            }
-            "show_level_meter" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.display.show_level_meter = x != 0;
-                }
-            }
-            "show_fps" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.display.show_fps = x != 0;
-                }
-            }
-            "prevent_display_sleep_in_fullscreen" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.display.prevent_display_sleep_in_fullscreen = x != 0;
-                }
-            }
+            "log_scale" => parse_flag(value, &mut settings.display.log_scale),
+            "show_level_meter" => parse_flag(value, &mut settings.display.show_level_meter),
+            "show_fps" => parse_flag(value, &mut settings.display.show_fps),
+            "prevent_display_sleep_in_fullscreen" => parse_flag(
+                value,
+                &mut settings.display.prevent_display_sleep_in_fullscreen,
+            ),
             "show_spectrogram_crosshair" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.display.show_spectrogram_crosshair = x != 0;
-                }
+                parse_flag(value, &mut settings.display.show_spectrogram_crosshair);
             }
             "show_spectrogram_scale" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.display.show_spectrogram_scale = x != 0;
-                }
+                parse_flag(value, &mut settings.display.show_spectrogram_scale);
             }
             "channel_buttons_visibility" => {
                 if let Ok(x) = value.parse::<u8>() {
@@ -306,33 +297,24 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                 }
             }
             "spectrogram_zoom_enabled" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.display.spectrogram_zoom_enabled = x != 0;
-                }
+                parse_flag(value, &mut settings.display.spectrogram_zoom_enabled);
             }
-            "system_media_controls_enabled" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.integrations.system_media_controls_enabled = x != 0;
-                }
-            }
+            "system_media_controls_enabled" => parse_flag(
+                value,
+                &mut settings.integrations.system_media_controls_enabled,
+            ),
             "library_sort_mode" => {
                 if let Ok(x) = value.parse::<i32>() {
                     settings.library_sort_mode = LibrarySortMode::from_i32(x);
                 }
             }
             "lastfm_scrobbling_enabled" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.integrations.lastfm_scrobbling_enabled = x != 0;
-                }
+                parse_flag(value, &mut settings.integrations.lastfm_scrobbling_enabled);
             }
             "lastfm_username" => {
                 settings.integrations.lastfm_username = value.to_string();
             }
-            "library_watch_enabled" => {
-                if let Ok(x) = value.parse::<i32>() {
-                    settings.library_watch_enabled = x != 0;
-                }
-            }
+            "library_watch_enabled" => parse_flag(value, &mut settings.library_watch_enabled),
             // Kept for the build that wrote it.
             _ => settings.unknown_lines.push(line.to_string()),
         }

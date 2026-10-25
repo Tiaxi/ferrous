@@ -5259,7 +5259,7 @@ mod tests {
         );
         assert!(runtime.state.settings.library_watch_enabled);
         let (event_tx, _event_rx) = unbounded();
-        let mut run = |runtime: &mut BridgeLoopRuntime, command| {
+        let run = |runtime: &mut BridgeLoopRuntime, command| {
             runtime.handle_wake(BridgeLoopWake::Command(command), &event_tx);
         };
         let wait_for = |runtime: &mut BridgeLoopRuntime, count: usize| {

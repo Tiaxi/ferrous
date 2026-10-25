@@ -6,7 +6,7 @@
 use std::ffi::{CString, OsString};
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd as _, OwnedFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::Path;
 use std::time::Duration;
@@ -63,8 +63,15 @@ impl Inotify {
         }
     }
 
-    /// Waits until there are events, `waker` is woken, or `timeout` passes.
-    pub(super) fn wait(&self, waker: &Waker, timeout: Option<Duration>) -> io::Result<()> {
+    /// Waits until there are events, `waker` is woken, the mount table
+    /// changes (with `mounts`, `/proc/self/mountinfo` open for reading), or
+    /// `timeout` passes. Returns whether the mount table changed.
+    pub(super) fn wait(
+        &self,
+        waker: &Waker,
+        mounts: Option<&File>,
+        timeout: Option<Duration>,
+    ) -> io::Result<bool> {
         let mut fds = [
             libc::pollfd {
                 fd: self.file.as_raw_fd(),
@@ -76,23 +83,32 @@ impl Inotify {
                 events: libc::POLLIN,
                 revents: 0,
             },
+            // The kernel marks the mount table changed with POLLPRI, and
+            // clears the mark as it reports it.
+            libc::pollfd {
+                fd: mounts.map_or(-1, AsRawFd::as_raw_fd),
+                events: libc::POLLPRI,
+                revents: 0,
+            },
         ];
         let timeout_ms = timeout.map_or(-1, |timeout| {
             // Rounded up, so that a wait for a deadline never ends before it.
             let ms = timeout.as_nanos().div_ceil(1_000_000);
             i32::try_from(ms).unwrap_or(i32::MAX)
         });
-        // SAFETY: `fds` is an array of two initialized pollfd structures that
-        // lives until the call returns, and its length is passed with it.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout_ms) };
+        // SAFETY: `fds` is an array of initialized pollfd structures that
+        // lives until the call returns, and its length is passed with it. A
+        // negative descriptor is ignored.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout_ms) };
         if ready < 0 {
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
                 return Err(error);
             }
+            return Ok(false);
         }
         waker.reset();
-        Ok(())
+        Ok(fds[2].revents & (libc::POLLPRI | libc::POLLERR) != 0)
     }
 
     /// Appends the events waiting to `out`.

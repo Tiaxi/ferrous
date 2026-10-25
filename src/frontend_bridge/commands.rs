@@ -203,6 +203,16 @@ fn set_display_sleep_prevention(
     *context.settings_dirty = true;
 }
 
+fn set_library_watching(
+    state: &mut BridgeState,
+    context: &mut BridgeCommandContext<'_>,
+    enabled: bool,
+) {
+    state.settings.library_watch_enabled = enabled;
+    context.library.set_watching(enabled);
+    *context.settings_dirty = true;
+}
+
 fn set_fft_size(state: &mut BridgeState, context: &mut BridgeCommandContext<'_>, size: usize) {
     let fft = size.clamp(512, 8192).next_power_of_two();
     state.settings.fft_size = fft;
@@ -299,9 +309,7 @@ fn handle_settings_bridge_command(
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetLibraryWatchEnabled(enabled) => {
-            state.settings.library_watch_enabled = *enabled;
-            context.library.set_watching(*enabled);
-            *context.settings_dirty = true;
+            set_library_watching(state, context, *enabled);
         }
         BridgeSettingsCommand::SetLastFmScrobblingEnabled(enabled) => {
             state.settings.integrations.lastfm_scrobbling_enabled = *enabled;

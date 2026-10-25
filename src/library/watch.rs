@@ -13,12 +13,17 @@
 //!   inotify watch limit, a folder that is gone) is rescanned every
 //!   [`WatchTuning::periodic`] instead, and the worker publishes it, with
 //!   the reason, in [`super::LibraryStatus::unwatched_roots`].
+//! - When the mount table changes, a root whose folder is now another one,
+//!   such as a drive mounted there, or that is back, is watched again and
+//!   rescanned.
 
 mod inotify;
 mod mounts;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs::File;
 use std::io;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -111,31 +116,8 @@ impl WatchService {
         let (commands_tx, commands_rx) = unbounded();
         let (tx, messages) = unbounded();
         let stop = Arc::new(AtomicBool::new(false));
-        let (inotify, waker, unavailable) = match Inotify::new().and_then(|inotify| {
-            let waker = Waker::new()?;
-            Ok((inotify, waker))
-        }) {
-            Ok((inotify, waker)) => (Some(inotify), Some(Arc::new(waker)), None),
-            Err(error) => (None, None, Some(error.to_string())),
-        };
-        let watcher = Watcher {
-            inotify,
-            unavailable,
-            waker: waker.clone(),
-            messages,
-            stop: Arc::clone(&stop),
-            stopped: false,
-            commands: commands_tx,
-            tuning,
-            enabled: false,
-            roots: None,
-            caught_up: false,
-            table: WatchTable::default(),
-            unwatched: BTreeMap::new(),
-            reported: Vec::new(),
-            pending: Coalescer::default(),
-            next_periodic: None,
-        };
+        let watcher = Watcher::new(tuning, messages, commands_tx, Arc::clone(&stop));
+        let waker = watcher.waker.clone();
         let thread =
             crate::worker_thread::spawn_worker("ferrous-library-watch", move || watcher.run());
         (
@@ -412,6 +394,8 @@ struct Watcher {
     /// Why inotify cannot be used, once it cannot.
     unavailable: Option<String>,
     waker: Option<Arc<Waker>>,
+    /// `/proc/self/mountinfo`, which tells when the mount table changes.
+    mounts: Option<File>,
     messages: Receiver<WatchMessage>,
     stop: Arc<AtomicBool>,
     stopped: bool,
@@ -423,6 +407,9 @@ struct Watcher {
     /// Whether every root was rescanned since watching was turned on.
     caught_up: bool,
     table: WatchTable,
+    /// The folder each root was when it was last watched, `None` if it was
+    /// gone; see [`folder_identity`].
+    root_folders: HashMap<PathBuf, Option<(u64, u64)>>,
     /// The roots that are not watched while watching is on, and why.
     unwatched: BTreeMap<PathBuf, Fallback>,
     /// What the worker was last told about `unwatched`.
@@ -433,6 +420,42 @@ struct Watcher {
 }
 
 impl Watcher {
+    fn new(
+        tuning: WatchTuning,
+        messages: Receiver<WatchMessage>,
+        commands: Sender<LibraryCommand>,
+        stop: Arc<AtomicBool>,
+    ) -> Self {
+        let (inotify, waker, unavailable) = match Inotify::new().and_then(|inotify| {
+            let waker = Waker::new()?;
+            Ok((inotify, waker))
+        }) {
+            Ok((inotify, waker)) => (Some(inotify), Some(Arc::new(waker)), None),
+            Err(error) => (None, None, Some(error.to_string())),
+        };
+        Self {
+            inotify,
+            unavailable,
+            waker,
+            // Without it, mounts are noticed by the periodic checks only.
+            mounts: File::open("/proc/self/mountinfo").ok(),
+            messages,
+            stop,
+            stopped: false,
+            commands,
+            tuning,
+            enabled: false,
+            roots: None,
+            caught_up: false,
+            table: WatchTable::default(),
+            root_folders: HashMap::new(),
+            unwatched: BTreeMap::new(),
+            reported: Vec::new(),
+            pending: Coalescer::default(),
+            next_periodic: None,
+        }
+    }
+
     fn run(mut self) {
         let mut events = Vec::new();
         loop {
@@ -478,8 +501,10 @@ impl Watcher {
         if let (Some(inotify), Some(waker)) = (&self.inotify, &self.waker) {
             let timeout =
                 deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-            if let Err(error) = inotify.wait(waker, timeout) {
-                self.lose_inotify(&error);
+            match inotify.wait(waker, self.mounts.as_ref(), timeout) {
+                Ok(true) => self.recheck_root_folders(),
+                Ok(false) => {}
+                Err(error) => self.lose_inotify(&error),
             }
             return None;
         }
@@ -550,8 +575,29 @@ impl Watcher {
             return;
         }
         self.caught_up = true;
-        if self.roots.as_ref().is_some_and(|roots| !roots.is_empty()) {
-            let _ = self.commands.send(LibraryCommand::RescanAll);
+        // A root that is gone is rescanned once it is back.
+        for root in self.roots.iter().flatten().filter(|root| root.is_dir()) {
+            let _ = self.commands.send(LibraryCommand::RescanRoot(root.clone()));
+        }
+    }
+
+    /// After the mount table changed: watches again, and rescans, the roots
+    /// whose folder is another one now, such as a drive mounted there, or
+    /// that are back or gone.
+    fn recheck_root_folders(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        for root in self.roots.clone().unwrap_or_default() {
+            let folder = folder_identity(&root);
+            if self.root_folders.get(&root) == Some(&folder) {
+                continue;
+            }
+            self.unwatch_root(&root);
+            self.watch_root(&root);
+            if folder.is_some() {
+                let _ = self.commands.send(LibraryCommand::RescanRoot(root));
+            }
         }
     }
 
@@ -559,6 +605,8 @@ impl Watcher {
     fn watch_root(&mut self, root: &Path) {
         self.unwatched.remove(root);
         let fallback = self.try_watch_root(root);
+        self.root_folders
+            .insert(root.to_path_buf(), folder_identity(root));
         #[cfg(test)]
         watch_test_hooks::note_watched(root, self.table.count_below(root));
         if let Some(fallback) = fallback {
@@ -644,6 +692,7 @@ impl Watcher {
         }
         self.pending.forget(root);
         self.unwatched.remove(root);
+        self.root_folders.remove(root);
         #[cfg(test)]
         watch_test_hooks::note_watched(root, 0);
     }
@@ -834,6 +883,15 @@ impl Watcher {
             self.reported = unwatched;
         }
     }
+}
+
+/// The device and inode of the folder at `path`, which change when another
+/// file system is mounted there.
+fn folder_identity(path: &Path) -> Option<(u64, u64)> {
+    std::fs::metadata(path)
+        .ok()
+        .filter(std::fs::Metadata::is_dir)
+        .map(|metadata| (metadata.dev(), metadata.ino()))
 }
 
 fn add_watch(inotify: &Inotify, path: &Path) -> io::Result<i32> {
