@@ -572,7 +572,7 @@ impl TempSibling {
         let result = self.persist(target);
         if let Some((old, new)) = replacement.filter(|_| self.persisted) {
             // Replaced, even when flushing the directory failed after.
-            file_identity::replaced(old, new);
+            file_identity::replaced(target, old, new);
         }
         result.map_err(|(step, err)| match step {
             WriteStep::Flush => format!("failed to flush {}: {err}", self.path.display()),
@@ -1148,13 +1148,33 @@ mod tests {
         let dir = test_dir("watched");
         let path = dir.join("song.flac");
         fs::write(&path, b"original").expect("write original");
+        let link = dir.join("link.flac");
+        std::os::unix::fs::symlink(&path, &link).expect("symlink");
+        let hard_link = dir.join("hard-link.flac");
+        fs::hard_link(&path, &hard_link).expect("hard link");
+        let watch = |path: &Path| {
+            let found = file_identity::file_id(path).expect("identity");
+            let resolved = file_identity::ResolvedPath::of(path);
+            file_identity::WatchedFile::new(resolved, found, file_identity::since_now())
+        };
         let opened = file_identity::file_id(&path).expect("identity");
-        let watched = file_identity::WatchedFile::new(opened, file_identity::since_now());
+        let (watched, through_link, through_hard_link) =
+            (watch(&path), watch(&link), watch(&hard_link));
 
         rewrite_via_temp_copy(&path, |file| replace_contents(file, b"edited")).expect("rewrite");
         let rewritten = file_identity::file_id(&path);
         assert_ne!(rewritten, Some(opened));
         assert_eq!(watched.current(), rewritten);
+        assert_eq!(through_link.current(), rewritten);
+        // The other link keeps the file it named, which its reader reads.
+        assert_eq!(through_hard_link.current(), Some(opened));
+        assert_eq!(file_identity::file_id(&hard_link), Some(opened));
+        // A save through the symbolic link replaces the file it points to.
+        rewrite_via_temp_copy(&link, |file| replace_contents(file, b"again")).expect("rewrite");
+        let rewritten = file_identity::file_id(&path);
+        assert_eq!(watched.current(), rewritten);
+        assert_eq!(through_link.current(), rewritten);
+        assert_eq!(through_hard_link.current(), Some(opened));
         replace_file(&path, b"replaced").expect("replace");
         let replaced = file_identity::file_id(&path);
         assert_ne!(replaced, rewritten);
