@@ -1334,9 +1334,9 @@ impl GstPlaybackRuntime {
         self.applied_volume = 0.0;
         self.playbin.set_property("volume", 0.0_f64);
         self.startup_gain_ramp = true;
-        // The fade-in starts its own clock. A fade that was running would
-        // count the time since its last step, such as a track switch, and
-        // skip the fade-in.
+        // The fade-in starts its own clock. Otherwise the first step would
+        // count the time since a running fade last stepped, which can span
+        // a track switch, and jump to the target.
         self.volume_ramp_tick_at = None;
         // AC3/DTS decoders produce garbage frames during startup: hold
         // silence until the decoder has stabilised. Other codecs produce
@@ -4007,6 +4007,9 @@ mod gst_integration_tests {
             assert!(!factories
                 .iter()
                 .any(|name| name == "appsink" || name == "tee"));
+            // A queue would delay the volume that playsink applies before
+            // the bin.
+            assert!(!factories.iter().any(|name| name == "queue"));
             assert_eq!(
                 factories
                     .iter()
