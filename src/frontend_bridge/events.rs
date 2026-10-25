@@ -24,7 +24,7 @@ use crate::playback::{
 use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
-    library_tree, try_send_event, ApplyAlbumArtEvent, BridgeEvent, BridgeState,
+    library_tree, try_send_event, ApplyAlbumArtEvent, BridgeEvent, BridgeLoopFlags, BridgeState,
     LastFmPlaybackTracker, PendingWaveformTrack, SnapshotUrgency,
 };
 
@@ -552,7 +552,7 @@ pub(super) fn pump_metadata_events(
 pub(super) fn process_lastfm_event(
     event: LastFmEvent,
     state: &mut BridgeState,
-    settings_dirty: &mut bool,
+    flags: &mut BridgeLoopFlags,
 ) -> SnapshotUrgency {
     match event {
         LastFmEvent::State(runtime) => {
@@ -563,13 +563,11 @@ pub(super) fn process_lastfm_event(
             }
             if state.settings.integrations.lastfm_username != runtime.username {
                 state.settings.integrations.lastfm_username = runtime.username;
-                *settings_dirty = true;
-                // Flush immediately — the username is the lookup key for the
-                // session in the keyring.  Losing it (e.g. Ctrl+C before the
+                flags.settings_dirty = true;
+                // Save now — the username is the lookup key for the session
+                // in the keyring.  Losing it (e.g. Ctrl+C before the
                 // periodic 2 s save) makes the session irrecoverable.
-                // The settings stay dirty, so the periodic save tries again
-                // and shows the user a failure.
-                let _ = super::config::save_settings(&state.settings);
+                flags.settings_save_now = true;
                 urgency = SnapshotUrgency::Immediate;
             }
             urgency
@@ -580,14 +578,14 @@ pub(super) fn process_lastfm_event(
 pub(super) fn drain_lastfm_events(
     lastfm_rx: &Receiver<LastFmEvent>,
     state: &mut BridgeState,
-    settings_dirty: &mut bool,
+    flags: &mut BridgeLoopFlags,
 ) -> SnapshotUrgency {
     let mut urgency = SnapshotUrgency::None;
     for _ in 0..8 {
         let Ok(event) = lastfm_rx.try_recv() else {
             break;
         };
-        urgency = urgency.max(process_lastfm_event(event, state, settings_dirty));
+        urgency = urgency.max(process_lastfm_event(event, state, flags));
     }
     urgency
 }
@@ -597,9 +595,9 @@ pub(super) fn drain_lastfm_events(
 pub(super) fn pump_lastfm_events(
     lastfm_rx: &Receiver<LastFmEvent>,
     state: &mut BridgeState,
-    settings_dirty: &mut bool,
+    flags: &mut BridgeLoopFlags,
 ) -> bool {
-    drain_lastfm_events(lastfm_rx, state, settings_dirty).is_pending()
+    drain_lastfm_events(lastfm_rx, state, flags).is_pending()
 }
 
 pub(super) fn tick_lastfm_playback(

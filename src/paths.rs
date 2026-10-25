@@ -4,7 +4,9 @@
 //!
 //! Every config, data, and cache path is resolved here. Test builds resolve
 //! them under a per-process temporary root instead, so unit tests never read
-//! or write the real user directories.
+//! or write the real user directories. A test that checks saved files can
+//! also give its thread a config directory of its own with
+//! [`TestConfigDir`], so other tests' saves cannot reach it.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -62,6 +64,12 @@ impl BaseDir {
 
 fn app_dir(kind: BaseDir) -> Option<PathBuf> {
     #[cfg(test)]
+    if matches!(kind, BaseDir::Config) {
+        if let Some(dir) = config_dir_override() {
+            return Some(dir);
+        }
+    }
+    #[cfg(test)]
     let base = Some(test_root().join(kind.home_relative()));
     #[cfg(not(test))]
     let base = resolve_base(
@@ -95,6 +103,59 @@ pub(crate) fn test_root() -> PathBuf {
 }
 
 #[cfg(test)]
+thread_local! {
+    static CONFIG_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The config directory this thread uses instead of the one under
+/// [`test_root`], if it has one.
+#[cfg(test)]
+pub(crate) fn config_dir_override() -> Option<PathBuf> {
+    CONFIG_DIR_OVERRIDE.with(|dir| dir.borrow().clone())
+}
+
+/// Make this thread resolve the config directory to `dir`, or to the one
+/// under [`test_root`] for `None`. A thread that saves on a test's behalf,
+/// such as the bridge thread, takes the override of the thread that
+/// started it.
+#[cfg(test)]
+pub(crate) fn set_config_dir_override(dir: Option<PathBuf>) -> Option<PathBuf> {
+    CONFIG_DIR_OVERRIDE.with(|current| current.replace(dir))
+}
+
+/// A config directory of the current thread's own, under [`test_root`],
+/// until this is dropped. Dropping it removes the directory.
+#[cfg(test)]
+pub(crate) struct TestConfigDir {
+    dir: PathBuf,
+    previous: Option<PathBuf>,
+}
+
+#[cfg(test)]
+impl TestConfigDir {
+    pub(crate) fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = test_root()
+            .join("isolated-config")
+            .join(id.to_string())
+            .join(APP_DIR_NAME);
+        let _ = std::fs::remove_dir_all(&dir);
+        let previous = set_config_dir_override(Some(dir.clone()));
+        Self { dir, previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestConfigDir {
+    fn drop(&mut self) {
+        set_config_dir_override(self.previous.take());
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
@@ -122,6 +183,28 @@ mod tests {
             library_db_path().ok(),
             Some(root.join(".local/share/ferrous/library.sqlite3"))
         );
+    }
+
+    #[test]
+    fn a_test_config_dir_is_the_threads_own_until_dropped() {
+        let shared = config_dir().expect("config dir");
+        let first = TestConfigDir::new();
+        let own = config_dir().expect("config dir");
+        assert_ne!(own, shared);
+        assert!(own.starts_with(test_root()));
+        assert_eq!(data_dir(), Some(test_root().join(".local/share/ferrous")));
+        let other_thread = std::thread::spawn(config_dir).join().expect("other thread");
+        assert_eq!(other_thread, Some(shared.clone()));
+
+        let second = TestConfigDir::new();
+        let nested = config_dir().expect("config dir");
+        assert_ne!(nested, own);
+        std::fs::create_dir_all(&nested).expect("create the config dir");
+        drop(second);
+        assert!(!nested.exists());
+        assert_eq!(config_dir(), Some(own));
+        drop(first);
+        assert_eq!(config_dir(), Some(shared));
     }
 
     #[test]
