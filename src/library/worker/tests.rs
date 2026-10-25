@@ -54,23 +54,29 @@ fn repeated_rescans_of_a_queued_root_merge() {
 }
 
 #[test]
-fn rescans_of_a_root_that_a_running_scan_has_yet_to_finish_merge_with_it() {
+fn rescans_merge_with_a_running_scan_only_of_roots_it_has_yet_to_start() {
     let mut queue = CommandQueue::default();
     let remaining = [root("/c")];
     let running = RunningScan {
-        all: true,
-        paths: false,
-        scanning: Path::new("/b"),
         remaining: &remaining,
     };
-    queue.push(rescan("/b"), Some(running));
     queue.push(rescan("/c"), Some(running));
-    queue.push(LibraryCommand::RescanAll, Some(running));
     assert_eq!(queued(&queue), (vec![], vec![]));
 
+    // The scan may have walked past the change: /b is scanned again after it,
+    // once however often it is asked for.
+    queue.push(rescan("/b"), Some(running));
+    queue.push(rescan("/b"), Some(running));
     // A root the scan has finished is scanned again.
     queue.push(rescan("/a"), Some(running));
-    assert_eq!(queued(&queue), (vec![], vec![rescan("/a")]));
+    assert_eq!(queued(&queue), (vec![], vec![rescan("/b"), rescan("/a")]));
+
+    // So is every root, for a rescan of every root, which the queued rescans
+    // merge into.
+    queue.push(LibraryCommand::RescanAll, Some(running));
+    queue.push(LibraryCommand::RescanAll, Some(running));
+    queue.push(rescan("/b"), Some(running));
+    assert_eq!(queued(&queue), (vec![], vec![LibraryCommand::RescanAll]));
 }
 
 #[test]
@@ -200,9 +206,6 @@ fn a_queued_scan_of_the_whole_root_covers_its_changed_paths() {
 fn only_a_running_scan_that_has_yet_to_start_a_root_covers_its_changed_paths() {
     let remaining = [root("/c")];
     let full = RunningScan {
-        all: true,
-        paths: false,
-        scanning: Path::new("/b"),
         remaining: &remaining,
     };
     let mut queue = CommandQueue::default();
@@ -213,12 +216,7 @@ fn only_a_running_scan_that_has_yet_to_start_a_root_covers_its_changed_paths() {
     assert_eq!(queued(&queue), (vec![], vec![changed("/b", &["/b/1"])]));
 
     // A scan of changed paths does not cover a rescan of their root.
-    let partial = RunningScan {
-        all: false,
-        paths: true,
-        scanning: Path::new("/b"),
-        remaining: &[],
-    };
+    let partial = RunningScan { remaining: &[] };
     let mut queue = CommandQueue::default();
     queue.push(rescan("/b"), Some(partial));
     queue.push(changed("/b", &["/b/2"]), Some(partial));
@@ -477,7 +475,58 @@ fn rescans_requested_during_a_scan_of_the_root_merge_with_it() {
             .is_some_and(|error| error.contains("is not configured"))
     });
     assert_eq!(done.tracks.len(), 3);
-    assert_eq!(scans_of(&fixture.root), 2, "the add and one rescan");
+    assert_eq!(
+        scans_of(&fixture.root),
+        3,
+        "the add, the rescan, and one more for the rescans asked for during it"
+    );
+}
+
+#[test]
+fn a_rescan_asked_for_after_a_running_scan_passed_the_change_finds_it() {
+    let fixture = Fixture::new("passed", &[]);
+    fs::create_dir_all(fixture.root.join("a")).expect("folder");
+    fs::create_dir_all(fixture.root.join("z")).expect("folder");
+    fs::write(fixture.track("a/1.mp3"), b"a1").expect("track");
+    fs::write(fixture.track("z/2.mp3"), b"z2").expect("track");
+    let (service, mut events) = fixture.start();
+    service.command(LibraryCommand::AddRoot {
+        path: fixture.root.clone(),
+        name: String::new(),
+    });
+    next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 2));
+    // The rescan reads z/2.mp3 after walking past a/.
+    fs::write(fixture.track("z/2.mp3"), b"z2 changed").expect("change");
+    let (started, release) = hold_read(&fixture.track("z/2.mp3"));
+    service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
+    started
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the rescan reads the changed file");
+
+    // Added where the running scan has been, and a rescan asked for, as the
+    // watcher does when it lost track of the changes.
+    fs::write(fixture.track("a/new.mp3"), b"new").expect("track");
+    service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
+    // Applied while the scan runs, so the rescan before it was received then
+    // too.
+    service.command(LibraryCommand::RenameRoot {
+        path: fixture.root.clone(),
+        name: "Seen".to_string(),
+    });
+    next_snapshot(&mut events, |snapshot| {
+        snapshot.scan_in_progress
+            && snapshot
+                .roots
+                .first()
+                .is_some_and(|root| root.name == "Seen")
+    });
+    drop(release);
+
+    let done = next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 3));
+    assert!(done
+        .tracks
+        .iter()
+        .any(|track| track.path == fixture.track("a/new.mp3")));
 }
 
 #[test]

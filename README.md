@@ -10,7 +10,7 @@ Ferrous is a personal project built for my own daily listening. It pairs a Rust 
 
 **Playback** — GStreamer-backed engine with seeking, gapless queue transitions, repeat, shuffle, and volume control.
 
-**Library** — Folder-first browsing that mirrors your filesystem. Add one or more root directories, and Ferrous indexes them into a navigable tree with artist, album, and track grouping. It watches the roots, so files added, changed, or removed by other programs appear without a rescan, and it rescans them at startup. Roots on network or FUSE file systems, or with more folders than `fs.inotify.max_user_watches` allows, are rescanned every 30 minutes instead, and Preferences > Library marks them. Watching can be turned off there. [Global search](docs/SEARCH.md) spans the entire library, with ranked results and artist/album/track filters.
+**Library** — Folder-first browsing that mirrors your filesystem. Add one or more root directories, and Ferrous indexes them into a navigable tree with artist, album, and track grouping. It watches the roots, so files added, changed, or removed by other programs appear without a rescan, and it rescans them at startup. Roots on network or FUSE file systems, network or FUSE mounts inside a root, and roots with more folders than `fs.inotify.max_user_watches` allows are rescanned every 30 minutes instead, and Preferences > Library marks them. Watching can be turned off there. [Global search](docs/SEARCH.md) spans the entire library, with ranked results and artist/album/track filters.
 
 **Queue** — Open files, add folders, import M3U playlists, drag-to-reorder, and automatic session restore on launch.
 

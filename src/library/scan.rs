@@ -707,6 +707,20 @@ impl ScanRun<'_> {
         };
         match result {
             Ok(outcome) => {
+                // A removed name of a file with other names: only a scan of
+                // the root finds the name to index now.
+                end.needs_full_scan = outcome.needs_full_scan
+                    || (scope.is_some()
+                        && outcome
+                            .removed
+                            .iter()
+                            .any(|path| self.library.hard_linked.contains(Path::new(path))));
+                if let Some(hard_linked) = outcome.hard_linked {
+                    self.library
+                        .hard_linked
+                        .retain(|path| !path.starts_with(root));
+                    self.library.hard_linked.extend(hard_linked);
+                }
                 if !outcome.removed.is_empty() {
                     end.changed = true;
                     let stale_set: HashSet<String> = outcome.removed.into_iter().collect();
@@ -714,7 +728,6 @@ impl ScanRun<'_> {
                         stale_set.contains(track.path.to_string_lossy().as_ref())
                     });
                 }
-                end.needs_full_scan = outcome.needs_full_scan;
                 self.problems.extend(outcome.problem);
             }
             Err(err) => {
@@ -2635,6 +2648,9 @@ struct LibraryWalk {
     /// Supported audio files encountered, including unreadable and duplicate ones.
     found: usize,
     kept: HashSet<PathBuf>,
+    /// The files found that have other names; see
+    /// [`WorkerLibrary::hard_linked`].
+    hard_linked: HashSet<PathBuf>,
     read_errors: usize,
     first_read_error: Option<String>,
 }
@@ -2654,6 +2670,7 @@ impl LibraryWalk {
             linked: VecDeque::new(),
             found: 0,
             kept: HashSet::new(),
+            hard_linked: HashSet::new(),
             read_errors: 0,
             first_read_error: None,
         }
@@ -2770,9 +2787,12 @@ impl LibraryWalk {
             size_bytes: u64_to_i64(metadata.len()),
         };
         #[cfg(unix)]
-        if self.scoped && metadata.nlink() > 1 {
-            self.defer_to_full_scan(path);
-            return WalkStep::Continue;
+        if metadata.nlink() > 1 {
+            if self.scoped {
+                self.defer_to_full_scan(path);
+                return WalkStep::Continue;
+            }
+            self.hard_linked.insert(path.to_path_buf());
         }
         let identity = file_identity(path, &metadata);
         if via_link {
@@ -2893,6 +2913,9 @@ struct RootScanOutcome {
     /// Whether a scoped scan kept paths that only a scan of the whole root
     /// can index correctly; see [`LibraryWalk`].
     needs_full_scan: bool,
+    /// After a complete scan of the whole root, the files found that have
+    /// other names.
+    hard_linked: Option<HashSet<PathBuf>>,
 }
 
 pub(super) fn count_label(count: usize, singular: &str, plural: &str) -> String {
@@ -3204,6 +3227,7 @@ fn scan_root_in(
             removed: Vec::new(),
             problem: None,
             needs_full_scan: false,
+            hard_linked: None,
         });
     }
 
@@ -3248,6 +3272,7 @@ fn scan_root_in(
         removed,
         problem: (!problems.is_empty()).then(|| problems.join("; ")),
         needs_full_scan: walk.needs_full_scan,
+        hard_linked: scope.is_none().then_some(walk.hard_linked),
     })
 }
 

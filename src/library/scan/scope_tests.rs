@@ -224,3 +224,23 @@ fn changed_paths_keep_only_the_outermost_below_the_root() {
         ]
     );
 }
+
+#[test]
+fn removing_the_indexed_name_of_a_hard_linked_file_indexes_its_other_name() {
+    let root = test_root("hard-link");
+    write(&root.join("a.mp3"));
+    fs::hard_link(root.join("a.mp3"), root.join("b.mp3")).expect("hard link");
+    let (conn, mut library, _rx, tx) = scanned(&root);
+    assert_eq!(
+        indexed(&conn),
+        vec![root.join("a.mp3")],
+        "one name per file"
+    );
+
+    fs::remove_file(root.join("a.mp3")).expect("remove");
+    scan_paths(&conn, &mut library, &tx, &root, &[root.join("a.mp3")]);
+
+    assert_eq!(indexed(&conn), vec![root.join("b.mp3")]);
+    assert_eq!(library.paths(), vec![root.join("b.mp3")]);
+    assert_eq!(library.status.last_error, None);
+}

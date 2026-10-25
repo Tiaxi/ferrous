@@ -155,7 +155,7 @@ pub(super) fn handle_command(
         return;
     }
     library.status.last_error = None;
-    control.begin(&cmd);
+    control.begin();
     let reload = matches!(&cmd, LibraryCommand::RemoveRoot(_));
     let result = match cmd {
         LibraryCommand::ScanRoot(root) => {
@@ -205,10 +205,6 @@ pub(super) struct Control {
     /// Set once the service is gone: scans stop, and the worker ends after
     /// the commands that do not scan.
     shutting_down: bool,
-    /// Whether the command running scans every root.
-    running_all: bool,
-    /// Whether the command running scans only some paths of its root.
-    running_paths: bool,
     /// Told the roots when they change.
     watcher: Option<WatchHandle>,
     /// The roots the watcher was last told.
@@ -230,8 +226,6 @@ impl Control {
             _sender: None,
             queue: CommandQueue::default(),
             shutting_down: false,
-            running_all: false,
-            running_paths: false,
             watcher: None,
             watched_roots: None,
             removed: HashSet::new(),
@@ -250,17 +244,13 @@ impl Control {
         }
     }
 
-    fn begin(&mut self, cmd: &LibraryCommand) {
-        self.running_all = matches!(cmd, LibraryCommand::RescanAll);
-        self.running_paths = matches!(cmd, LibraryCommand::ScanPaths { .. });
+    fn begin(&mut self) {
         self.removed.clear();
         self.errors.clear();
     }
 
     /// The failures of the commands run during the command that ended.
     fn finish(&mut self) -> Vec<String> {
-        self.running_all = false;
-        self.running_paths = false;
         self.removed.clear();
         std::mem::take(&mut self.errors)
     }
@@ -369,12 +359,7 @@ impl ScanControl for Control {
         scanning: &Path,
         remaining: &[PathBuf],
     ) -> ScanDirective {
-        self.receive(Some(RunningScan {
-            all: self.running_all,
-            paths: self.running_paths,
-            scanning,
-            remaining,
-        }));
+        self.receive(Some(RunningScan { remaining }));
         if !self.queue.priority.is_empty() {
             let mut removed_any = false;
             while let Some(cmd) = self.queue.priority.pop_front() {
@@ -434,22 +419,14 @@ fn resolve_command(cmd: LibraryCommand) -> LibraryCommand {
 /// The scan running when a command arrives.
 #[derive(Debug, Clone, Copy)]
 struct RunningScan<'a> {
-    /// Whether it scans every root.
-    all: bool,
-    /// Whether it scans only some paths of `scanning`.
-    paths: bool,
-    scanning: &'a Path,
-    /// The roots it scans after `scanning`.
+    /// The roots it scans after the one it scans now.
     remaining: &'a [PathBuf],
 }
 
 impl RunningScan<'_> {
-    /// Whether the scan has yet to finish all of `root`.
-    fn covers(&self, root: &Path) -> bool {
-        (!self.paths && self.scanning == root) || self.has_yet_to_start(root)
-    }
-
-    /// Whether the scan has yet to start scanning `root`.
+    /// Whether the scan has yet to start scanning `root`. Only then does it
+    /// see every change made to the root since: a scan of the root under way
+    /// may have walked past the changed files already.
     fn has_yet_to_start(&self, root: &Path) -> bool {
         self.remaining.iter().any(|queued| queued == root)
     }
@@ -565,7 +542,7 @@ impl CommandQueue {
                 }
             }
             LibraryCommand::RescanRoot(path) => {
-                let covered = running.is_some_and(|running| running.covers(&path))
+                let covered = running.is_some_and(|running| running.has_yet_to_start(&path))
                     || self.normal.iter().any(|queued| {
                         matches!(queued, LibraryCommand::RescanAll)
                             || scanned_root(queued) == Some(&path)
@@ -578,11 +555,12 @@ impl CommandQueue {
                 }
             }
             LibraryCommand::RescanAll => {
-                if running.is_some_and(|running| running.all)
-                    || self
-                        .normal
-                        .iter()
-                        .any(|queued| matches!(queued, LibraryCommand::RescanAll))
+                // A running rescan of every root has passed some of them, so
+                // only a queued one covers this one.
+                if self
+                    .normal
+                    .iter()
+                    .any(|queued| matches!(queued, LibraryCommand::RescanAll))
                 {
                     return;
                 }

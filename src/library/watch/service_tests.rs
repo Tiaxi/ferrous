@@ -456,3 +456,35 @@ fn stopping_the_service_stops_the_watcher_at_once() {
         stopping.elapsed()
     );
 }
+
+#[test]
+fn links_to_folders_made_and_removed_while_watching_are_followed() {
+    let fixture = Fixture::new("links");
+    let elsewhere = fixture.folder.join("elsewhere/Album");
+    fs::create_dir_all(&elsewhere).expect("linked folder");
+    fs::write(elsewhere.join("1.mp3"), b"1").expect("track");
+    // A root left empty would look unmounted, and keep its tracks.
+    fixture.write("a.mp3");
+    let mut running = fixture.start_watching(tuning(Duration::from_secs(3600)));
+
+    std::os::unix::fs::symlink(&elsewhere, fixture.path("Album")).expect("link");
+    running.wait_for("the linked folder's track", |mirror| {
+        mirror.paths() == vec![fixture.path("Album/1.mp3"), fixture.path("a.mp3")]
+    });
+    // The folder it links to is watched.
+    fs::write(elsewhere.join("2.mp3"), b"2").expect("track");
+    running.wait_for("a track added to the linked folder", |mirror| {
+        mirror.paths()
+            == vec![
+                fixture.path("Album/1.mp3"),
+                fixture.path("Album/2.mp3"),
+                fixture.path("a.mp3"),
+            ]
+    });
+
+    fs::remove_file(fixture.path("Album")).expect("remove the link");
+    running.wait_for("the link's tracks removed", |mirror| {
+        mirror.paths() == vec![fixture.path("a.mp3")] && !mirror.status.scan_in_progress
+    });
+    assert_eq!(running.mirror.status.last_error, None);
+}

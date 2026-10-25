@@ -3716,7 +3716,7 @@ void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
              QStringLiteral("it is on nfs4"));
     QCOMPARE(errors.count(), 1);
     QCOMPARE(errors[0][0].toString(),
-             QStringLiteral("Library folder NAS is not watched for changes: it is on nfs4"));
+             QStringLiteral("Not watched for changes in library folder NAS: it is on nfs4"));
 
     // The same roots again: nothing changed, and they were told once.
     QVERIFY(!client.processBinarySnapshot(snapshot));

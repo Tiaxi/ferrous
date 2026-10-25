@@ -4,34 +4,48 @@
 
 use std::path::{Path, PathBuf};
 
-/// The type of the file system that `path`, a canonical folder, is on, from
-/// `/proc/self/mountinfo`. `None` if it cannot be read.
-pub(super) fn file_system_type(path: &Path) -> Option<String> {
+/// The mounts, as mount point and file system type, in the order they were
+/// mounted, from `/proc/self/mountinfo`. Empty if it cannot be read.
+pub(super) fn mount_table() -> Vec<(PathBuf, String)> {
+    let table = std::fs::read_to_string("/proc/self/mountinfo")
+        .map(|mountinfo| parse_mountinfo(&mountinfo))
+        .unwrap_or_default();
+    // Tests mount file systems of their own.
     #[cfg(test)]
-    if let Some(fs_type) = super::watch_test_hooks::fs_type(path) {
-        return Some(fs_type);
-    }
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    mount_type_of(&mountinfo, path)
+    let table = [table, super::watch_test_hooks::fake_mounts()].concat();
+    table
 }
 
-/// The type of the mount in `mountinfo` that `path` is on: the one at the
+pub(super) fn parse_mountinfo(mountinfo: &str) -> Vec<(PathBuf, String)> {
+    mountinfo.lines().filter_map(parse_mount).collect()
+}
+
+/// The type of the file system that `path` is on: the one mounted at the
 /// longest mount point above it, the last one there if mounts are stacked.
-pub(super) fn mount_type_of(mountinfo: &str, path: &Path) -> Option<String> {
-    let mut best: Option<(usize, String)> = None;
-    for line in mountinfo.lines() {
-        let Some((mount_point, fs_type)) = parse_mount(line) else {
-            continue;
-        };
-        if !path.starts_with(&mount_point) {
+pub(super) fn mount_type_of(table: &[(PathBuf, String)], path: &Path) -> Option<String> {
+    let mut best: Option<(usize, &str)> = None;
+    for (mount_point, fs_type) in table {
+        if !path.starts_with(mount_point) {
             continue;
         }
         let depth = mount_point.components().count();
-        if best.as_ref().is_none_or(|(best, _)| depth >= *best) {
+        if best.is_none_or(|(best, _)| depth >= best) {
             best = Some((depth, fs_type));
         }
     }
-    best.map(|(_, fs_type)| fs_type)
+    best.map(|(_, fs_type)| fs_type.to_string())
+}
+
+/// The mounts strictly below `root`, sorted by mount point, with the type
+/// of the last one mounted at each.
+pub(super) fn mounts_below(table: &[(PathBuf, String)], root: &Path) -> Vec<(PathBuf, String)> {
+    let mut below = std::collections::BTreeMap::new();
+    for (mount_point, fs_type) in table {
+        if mount_point != root && mount_point.starts_with(root) {
+            below.insert(mount_point.clone(), fs_type.clone());
+        }
+    }
+    below.into_iter().collect()
 }
 
 /// The mount point and file system type of a `mountinfo` line:

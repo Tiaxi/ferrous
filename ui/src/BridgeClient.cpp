@@ -5834,7 +5834,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             const QString reported = root.path + QLatin1Char('\n') + root.unwatchedReason;
             if (!root.unwatchedReason.isEmpty() && !m_reportedUnwatchedRoots.contains(reported)) {
                 m_reportedUnwatchedRoots.insert(reported);
-                emit bridgeError(QStringLiteral("Library folder %1 is not watched for changes: %2")
+                emit bridgeError(QStringLiteral("Not watched for changes in library folder %1: %2")
                                      .arg(trimmedName.isEmpty() ? root.path : trimmedName,
                                           root.unwatchedReason));
             }

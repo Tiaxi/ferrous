@@ -261,10 +261,24 @@ impl WatchTable {
     /// Forgets `top` and the folders below it, returning the descriptors
     /// no other path uses.
     fn remove_below(&mut self, top: &Path) -> Vec<i32> {
+        self.remove_below_except(top, &[])
+    }
+
+    /// Whether `top` or a folder below it is watched.
+    fn has_below(&self, top: &Path) -> bool {
+        self.wds
+            .range(top.to_path_buf()..)
+            .next()
+            .is_some_and(|(path, _)| path.starts_with(top))
+    }
+
+    /// [`WatchTable::remove_below`], keeping the folders below `kept`.
+    fn remove_below_except(&mut self, top: &Path, kept: &[PathBuf]) -> Vec<i32> {
         let below: Vec<(PathBuf, i32)> = self
             .wds
             .range(top.to_path_buf()..)
             .take_while(|(path, _)| path.starts_with(top))
+            .filter(|(path, _)| !kept.iter().any(|kept| path.starts_with(kept)))
             .map(|(path, wd)| (path.clone(), *wd))
             .collect();
         let mut unused = Vec::new();
@@ -388,6 +402,15 @@ fn held(root: &Path) -> bool {
     }
 }
 
+/// What a root was when it was last watched.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RootFolder {
+    /// See [`folder_identity`]; `None` if it was gone.
+    identity: Option<(u64, u64)>,
+    /// The mounts below it, with their types.
+    mounts: Vec<(PathBuf, String)>,
+}
+
 /// The watcher's state, on its thread.
 struct Watcher {
     inotify: Option<Inotify>,
@@ -407,11 +430,14 @@ struct Watcher {
     /// Whether every root was rescanned since watching was turned on.
     caught_up: bool,
     table: WatchTable,
-    /// The folder each root was when it was last watched, `None` if it was
-    /// gone; see [`folder_identity`].
-    root_folders: HashMap<PathBuf, Option<(u64, u64)>>,
+    /// What each root was when it was last watched.
+    root_folders: HashMap<PathBuf, RootFolder>,
     /// The roots that are not watched while watching is on, and why.
     unwatched: BTreeMap<PathBuf, Fallback>,
+    /// The mounts below watched roots whose file systems miss changes, by
+    /// mount point: their root, and their type. They are not watched, and
+    /// are rescanned with the roots that are not watched.
+    unwatched_mounts: BTreeMap<PathBuf, (PathBuf, String)>,
     /// What the worker was last told about `unwatched`.
     reported: Vec<UnwatchedRoot>,
     pending: Coalescer,
@@ -450,6 +476,7 @@ impl Watcher {
             table: WatchTable::default(),
             root_folders: HashMap::new(),
             unwatched: BTreeMap::new(),
+            unwatched_mounts: BTreeMap::new(),
             reported: Vec::new(),
             pending: Coalescer::default(),
             next_periodic: None,
@@ -502,7 +529,7 @@ impl Watcher {
             let timeout =
                 deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
             match inotify.wait(waker, self.mounts.as_ref(), timeout) {
-                Ok(true) => self.recheck_root_folders(),
+                Ok(true) => self.recheck_mounts(),
                 Ok(false) => {}
                 Err(error) => self.lose_inotify(&error),
             }
@@ -559,11 +586,28 @@ impl Watcher {
         if !self.enabled {
             return;
         }
-        for root in old.iter().filter(|root| !roots.contains(root)) {
+        let removed: Vec<PathBuf> = old
+            .iter()
+            .filter(|root| !roots.contains(root))
+            .cloned()
+            .collect();
+        for root in &removed {
             self.unwatch_root(root);
         }
         for root in roots.iter().filter(|root| !old.contains(root)) {
             self.watch_root(root);
+        }
+        // A root removed from inside another, from before nested roots were
+        // refused, leaves its folders to the outer root.
+        for root in roots {
+            for inner in removed.iter().filter(|inner| inner.starts_with(root)) {
+                if self.watched_root_of(inner).as_deref() == Some(root.as_path()) {
+                    let now = Instant::now();
+                    if let Err(fallback) = self.watch_tree(root, inner) {
+                        self.fall_back(root, fallback, now);
+                    }
+                }
+            }
         }
     }
 
@@ -581,46 +625,81 @@ impl Watcher {
         }
     }
 
-    /// After the mount table changed: watches again, and rescans, the roots
-    /// whose folder is another one now, such as a drive mounted there, or
-    /// that are back or gone.
-    fn recheck_root_folders(&mut self) {
+    /// After the mount table changed: watches again the roots whose folder
+    /// is another one now, such as a drive mounted there, that are back or
+    /// gone, or that have other mounts below them, and rescans what changed.
+    fn recheck_mounts(&mut self) {
         if !self.enabled {
             return;
         }
+        let table = mounts::mount_table();
         for root in self.roots.clone().unwrap_or_default() {
-            let folder = folder_identity(&root);
-            if self.root_folders.get(&root) == Some(&folder) {
+            let now = RootFolder {
+                identity: folder_identity(&root),
+                mounts: mounts::mounts_below(&table, &root),
+            };
+            let before = self.root_folders.get(&root).cloned().unwrap_or_default();
+            if before == now {
                 continue;
             }
             self.unwatch_root(&root);
             self.watch_root(&root);
-            if folder.is_some() {
-                let _ = self.commands.send(LibraryCommand::RescanRoot(root));
+            if now.identity.is_none() {
+                continue;
             }
+            let command = if before.identity == now.identity {
+                // Only the mounts below the root changed: scan where they did.
+                let paths: BTreeSet<PathBuf> = before
+                    .mounts
+                    .iter()
+                    .filter(|mount| !now.mounts.contains(mount))
+                    .chain(
+                        now.mounts
+                            .iter()
+                            .filter(|mount| !before.mounts.contains(mount)),
+                    )
+                    .map(|(mount_point, _)| mount_point.clone())
+                    .collect();
+                LibraryCommand::ScanPaths {
+                    root,
+                    paths: paths.into_iter().collect(),
+                }
+            } else {
+                LibraryCommand::RescanRoot(root)
+            };
+            let _ = self.commands.send(command);
         }
     }
 
     /// Watches `root` and the folders below it, or notes why it cannot be.
     fn watch_root(&mut self, root: &Path) {
         self.unwatched.remove(root);
-        let fallback = self.try_watch_root(root);
-        self.root_folders
-            .insert(root.to_path_buf(), folder_identity(root));
+        let table = mounts::mount_table();
+        let fallback = self.try_watch_root(root, &table);
+        self.root_folders.insert(
+            root.to_path_buf(),
+            RootFolder {
+                identity: folder_identity(root),
+                mounts: mounts::mounts_below(&table, root),
+            },
+        );
         #[cfg(test)]
         watch_test_hooks::note_watched(root, self.table.count_below(root));
+        let unwatched_mounts = self.unwatched_mounts.values().any(|(of, _)| of == root);
         if let Some(fallback) = fallback {
             self.unwatched.insert(root.to_path_buf(), fallback);
+        }
+        if self.unwatched.contains_key(root) || unwatched_mounts {
             self.next_periodic
                 .get_or_insert_with(|| Instant::now() + self.tuning.periodic);
         }
     }
 
-    fn try_watch_root(&mut self, root: &Path) -> Option<Fallback> {
+    fn try_watch_root(&mut self, root: &Path, table: &[(PathBuf, String)]) -> Option<Fallback> {
         if !root.is_dir() {
             return Some(Fallback::Missing);
         }
-        if let Some(fs_type) = mounts::file_system_type(root) {
+        if let Some(fs_type) = mounts::mount_type_of(table, root) {
             if mounts::misses_changes(&fs_type) {
                 return Some(Fallback::FileSystem(fs_type));
             }
@@ -629,6 +708,21 @@ impl Watcher {
             return Some(Fallback::Unavailable(
                 self.unavailable.clone().unwrap_or_default(),
             ));
+        }
+        // Mounts below the root whose file systems miss changes are left out
+        // of the watches, and rescanned instead; the outermost ones suffice.
+        let nested = self.nested_roots(root);
+        for (mount_point, fs_type) in mounts::mounts_below(table, root) {
+            if mounts::misses_changes(&fs_type)
+                && !nested.iter().any(|inner| mount_point.starts_with(inner))
+                && !self
+                    .unwatched_mounts
+                    .keys()
+                    .any(|outer| mount_point.starts_with(outer))
+            {
+                self.unwatched_mounts
+                    .insert(mount_point, (root.to_path_buf(), fs_type));
+            }
         }
         match self.watch_tree(root, root) {
             Ok(()) => None,
@@ -639,21 +733,32 @@ impl Watcher {
         }
     }
 
-    /// Watches `top`, a folder of `root`, and the folders below it. Folders
-    /// that cannot be read or are gone are skipped, as scans skip them.
-    fn watch_tree(&mut self, root: &Path, top: &Path) -> Result<(), Fallback> {
-        let other_roots: Vec<PathBuf> = self
-            .roots
+    /// The configured roots inside `root`, from before nested roots were
+    /// refused. Their folders are theirs, not `root`'s.
+    fn nested_roots(&self, root: &Path) -> Vec<PathBuf> {
+        self.roots
             .iter()
             .flatten()
             .filter(|other| *other != root && other.starts_with(root))
             .cloned()
+            .collect()
+    }
+
+    /// Watches `top`, a folder of `root`, and the folders below it, through
+    /// links as scans follow them. Folders that cannot be read or are gone
+    /// are skipped, as scans skip them, and so are other roots and mounts
+    /// that are not watched.
+    fn watch_tree(&mut self, root: &Path, top: &Path) -> Result<(), Fallback> {
+        let skipped: Vec<PathBuf> = self
+            .nested_roots(root)
+            .into_iter()
+            .chain(self.unwatched_mounts.keys().cloned())
             .collect();
         let walk = WalkDir::new(top)
             .follow_links(true)
             .into_iter()
             .filter_entry(|entry| {
-                entry.file_type().is_dir() && !other_roots.iter().any(|other| entry.path() == other)
+                entry.file_type().is_dir() && !skipped.iter().any(|other| entry.path() == other)
             });
         for entry in walk {
             if self.stop.load(Ordering::Relaxed) {
@@ -684,17 +789,60 @@ impl Watcher {
         Ok(())
     }
 
+    /// Stops watching `root`, but not the roots inside it.
     fn unwatch_root(&mut self, root: &Path) {
-        for wd in self.table.remove_below(root) {
+        let nested = self.nested_roots(root);
+        for wd in self.table.remove_below_except(root, &nested) {
             if let Some(inotify) = &self.inotify {
                 inotify.remove_watch(wd);
             }
         }
         self.pending.forget(root);
         self.unwatched.remove(root);
+        self.unwatched_mounts.retain(|_, (of, _)| of != root);
         self.root_folders.remove(root);
         #[cfg(test)]
         watch_test_hooks::note_watched(root, 0);
+    }
+
+    /// Falls back for `root`, whose watches cannot be completed, and
+    /// rescans what they missed.
+    fn fall_back(&mut self, root: &Path, fallback: Fallback, now: Instant) {
+        self.unwatch_root(root);
+        self.unwatched.insert(root.to_path_buf(), fallback);
+        self.next_periodic
+            .get_or_insert_with(|| now + self.tuning.periodic);
+        self.pending.add_whole(root, now);
+    }
+
+    /// After events were lost: watches the folders made meanwhile, forgets
+    /// those gone, and rescans the root.
+    fn resync_root(&mut self, root: &Path, now: Instant) {
+        let nested = self.nested_roots(root);
+        let before = self.table.remove_below_except(root, &nested);
+        match self.watch_tree(root, root) {
+            Ok(()) => {
+                for wd in before {
+                    // Watched again, the folder has the same descriptor.
+                    if !self.table.paths.contains_key(&wd) {
+                        if let Some(inotify) = &self.inotify {
+                            inotify.remove_watch(wd);
+                        }
+                    }
+                }
+                self.pending.add_whole(root, now);
+            }
+            Err(fallback) => {
+                for wd in before {
+                    if let Some(inotify) = &self.inotify {
+                        inotify.remove_watch(wd);
+                    }
+                }
+                self.fall_back(root, fallback, now);
+            }
+        }
+        #[cfg(test)]
+        watch_test_hooks::note_watched(root, self.table.count_below(root));
     }
 
     /// Gives up on inotify after it failed: every root falls back.
@@ -703,6 +851,7 @@ impl Watcher {
         self.inotify = None;
         self.unavailable = Some(error.to_string());
         self.table = WatchTable::default();
+        self.unwatched_mounts.clear();
         if self.enabled {
             for root in self.roots.clone().unwrap_or_default() {
                 self.unwatched
@@ -745,10 +894,10 @@ impl Watcher {
             return;
         }
         if event.mask & libc::IN_Q_OVERFLOW != 0 {
-            // Events were lost: rescan every watched root.
+            // Events were lost, those of new folders too.
             for root in self.roots.clone().unwrap_or_default() {
                 if !self.unwatched.contains_key(&root) {
-                    self.pending.add_whole(&root, now);
+                    self.resync_root(&root, now);
                 }
             }
             return;
@@ -793,35 +942,53 @@ impl Watcher {
         let Some(root) = self.watched_root_of(&path) else {
             return;
         };
+        let made = mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0;
+        let gone = mask & (libc::IN_DELETE | libc::IN_MOVED_FROM) != 0;
         if mask & libc::IN_ISDIR != 0 {
             if mask & libc::IN_MOVED_FROM != 0 {
-                for wd in self.table.remove_below(&path) {
-                    if let Some(inotify) = &self.inotify {
-                        inotify.remove_watch(wd);
-                    }
-                }
+                self.forget_watches_below(&path);
             }
-            if mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0 {
+            if made {
                 if let Err(fallback) = self.watch_tree(&root, &path) {
-                    self.unwatch_root(&root);
-                    self.unwatched.insert(root.clone(), fallback);
-                    self.next_periodic
-                        .get_or_insert_with(|| now + self.tuning.periodic);
-                    // Rescan what the watches missed.
-                    self.pending.add_whole(&root, now);
+                    self.fall_back(&root, fallback, now);
                     return;
                 }
             }
             self.pending.add(&root, path, now, self.tuning.max_paths);
             return;
         }
-        // A link, possibly to a folder, made or moved here.
-        let new_link = mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0
+        if made
             && path
                 .symlink_metadata()
-                .is_ok_and(|meta| meta.file_type().is_symlink());
-        if is_supported_audio(&path) || new_link {
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            // A link, which scans follow: one to a folder is watched as the
+            // folder.
+            if path.is_dir() {
+                if let Err(fallback) = self.watch_tree(&root, &path) {
+                    self.fall_back(&root, fallback, now);
+                    return;
+                }
+            }
             self.pending.add(&root, path, now, self.tuning.max_paths);
+            return;
+        }
+        if gone && self.table.has_below(&path) {
+            // A link to a folder, gone with the tracks reached through it.
+            self.forget_watches_below(&path);
+            self.pending.add(&root, path, now, self.tuning.max_paths);
+            return;
+        }
+        if is_supported_audio(&path) {
+            self.pending.add(&root, path, now, self.tuning.max_paths);
+        }
+    }
+
+    fn forget_watches_below(&mut self, path: &Path) {
+        for wd in self.table.remove_below(path) {
+            if let Some(inotify) = &self.inotify {
+                inotify.remove_watch(wd);
+            }
         }
     }
 
@@ -839,8 +1006,8 @@ impl Watcher {
         }
     }
 
-    /// Rescans the roots that are not watched, and watches again those that
-    /// were gone and are back.
+    /// Rescans the roots and mounts that are not watched, and watches again
+    /// the roots that were gone and are back.
     fn rescan_unwatched_if_due(&mut self, now: Instant) {
         if self.next_periodic.is_none_or(|at| at > now) {
             return;
@@ -861,20 +1028,44 @@ impl Watcher {
             }
             let _ = self.commands.send(LibraryCommand::RescanRoot(root));
         }
-        if !self.unwatched.is_empty() {
+        let mut mounts: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+        for (mount_point, (root, _)) in &self.unwatched_mounts {
+            mounts
+                .entry(root.clone())
+                .or_default()
+                .push(mount_point.clone());
+        }
+        for (root, paths) in mounts {
+            let _ = self
+                .commands
+                .send(LibraryCommand::ScanPaths { root, paths });
+        }
+        if !self.unwatched.is_empty() || !self.unwatched_mounts.is_empty() {
             self.next_periodic.get_or_insert(now + self.tuning.periodic);
         }
     }
 
-    /// Tells the worker the roots that are not watched, when they change.
+    /// Tells the worker the roots that are not watched, or have mounts that
+    /// are not, when they change.
     fn report(&mut self) {
-        let unwatched: Vec<UnwatchedRoot> = self
+        let periodic = self.tuning.periodic;
+        let mut reasons: BTreeMap<PathBuf, String> = self
             .unwatched
             .iter()
-            .map(|(root, fallback)| UnwatchedRoot {
-                path: root.clone(),
-                reason: fallback.describe(self.tuning.periodic),
-            })
+            .map(|(root, fallback)| (root.clone(), fallback.describe(periodic)))
+            .collect();
+        let mut mounts: BTreeMap<&Path, Vec<(&Path, &str)>> = BTreeMap::new();
+        for (mount_point, (root, fs_type)) in &self.unwatched_mounts {
+            mounts.entry(root).or_default().push((mount_point, fs_type));
+        }
+        for (root, mounts) in mounts {
+            reasons
+                .entry(root.to_path_buf())
+                .or_insert_with(|| describe_mounts(&mounts, periodic));
+        }
+        let unwatched: Vec<UnwatchedRoot> = reasons
+            .into_iter()
+            .map(|(path, reason)| UnwatchedRoot { path, reason })
             .collect();
         if unwatched != self.reported {
             let _ = self
@@ -882,6 +1073,27 @@ impl Watcher {
                 .send(LibraryCommand::SetUnwatchedRoots(unwatched.clone()));
             self.reported = unwatched;
         }
+    }
+}
+
+/// Why the mounts `mounts` below a root are not watched.
+fn describe_mounts(mounts: &[(&Path, &str)], periodic: Duration) -> String {
+    let list = mounts
+        .iter()
+        .map(|(mount_point, fs_type)| format!("{} ({fs_type})", mount_point.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let interval = describe_interval(periodic);
+    if mounts.len() == 1 {
+        format!(
+            "{list} is on a network or FUSE file system, which does not report every change; \
+             Ferrous rescans it at startup and every {interval}"
+        )
+    } else {
+        format!(
+            "{list} are on network or FUSE file systems, which do not report every change; \
+             Ferrous rescans them at startup and every {interval}"
+        )
     }
 }
 
@@ -912,7 +1124,7 @@ pub(crate) mod watch_test_hooks {
     use crossbeam_channel::{unbounded, Receiver, Sender};
 
     static FAILURES: Mutex<Vec<(PathBuf, i32)>> = Mutex::new(Vec::new());
-    static FS_TYPES: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+    static MOUNTS: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
     static HELD: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     static PENDING: Mutex<Vec<(PathBuf, Sender<usize>)>> = Mutex::new(Vec::new());
     static WATCHED: Mutex<Vec<(PathBuf, Sender<usize>)>> = Mutex::new(Vec::new());
@@ -933,16 +1145,19 @@ pub(crate) mod watch_test_hooks {
             .map(|(_, errno)| *errno)
     }
 
-    /// `path`, and the folders below it, are on a file system of `fs_type`.
+    /// A file system of `fs_type` is mounted at `path`, as far as watchers
+    /// can tell.
     pub(crate) fn set_fs_type(path: &Path, fs_type: &str) {
-        lock(&FS_TYPES).push((path.to_path_buf(), fs_type.to_string()));
+        lock(&MOUNTS).push((path.to_path_buf(), fs_type.to_string()));
     }
 
-    pub(super) fn fs_type(path: &Path) -> Option<String> {
-        lock(&FS_TYPES)
-            .iter()
-            .find(|(top, _)| path.starts_with(top))
-            .map(|(_, fs_type)| fs_type.clone())
+    /// Unmounts what [`set_fs_type`] mounted at `path`.
+    pub(crate) fn unmount_fake(path: &Path) {
+        lock(&MOUNTS).retain(|(mount_point, _)| mount_point != path);
+    }
+
+    pub(super) fn fake_mounts() -> Vec<(PathBuf, String)> {
+        lock(&MOUNTS).clone()
     }
 
     /// Keeps the changes of `root` from being scanned until the guard is
