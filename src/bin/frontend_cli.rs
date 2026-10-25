@@ -23,6 +23,12 @@ fn main() {
         }
     };
     run_interactive_cli(&bridge);
+    if !bridge.shutdown() {
+        eprintln!(
+            "The backend did not finish shutting down in time; recent settings, the queue, \
+             or Last.fm scrobbles may not have been saved."
+        );
+    }
 }
 
 enum CliCommandOutcome {
@@ -59,7 +65,6 @@ fn run_interactive_cli(bridge: &FrontendBridgeHandle) {
 
 fn handle_cli_command(bridge: &FrontendBridgeHandle, line: &str) -> CliCommandOutcome {
     if line == "quit" || line == "exit" {
-        bridge.command(BridgeCommand::Shutdown);
         return CliCommandOutcome::Quit;
     }
 

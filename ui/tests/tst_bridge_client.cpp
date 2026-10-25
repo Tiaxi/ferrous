@@ -242,6 +242,7 @@ private slots:
     void backendFailurePacketShowsStoppedState();
     void requestedStopIsNotABackendFailure();
     void commandsToAStoppedBackendFailVisibly();
+    void destroyingTheClientWaitsForTheBackendsFinalSave();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
@@ -2507,6 +2508,26 @@ void BridgeClientTest::commandsToAStoppedBackendFailVisibly() {
     QCOMPARE(
         errors.constLast().at(0).toString(),
         QStringLiteral("command not sent: the backend has stopped"));
+}
+
+void BridgeClientTest::destroyingTheClientWaitsForTheBackendsFinalSave() {
+    const QDir configDir(QDir(qEnvironmentVariable("XDG_CONFIG_HOME")).filePath(QStringLiteral("ferrous")));
+    // Back to back, as consecutive tests and app runs save the same file.
+    for (const double dbRange : {111.0, 117.0}) {
+        auto client = std::make_unique<BridgeClient>();
+        QVERIFY(client->m_ffiBridge != nullptr);
+        client->setDbRange(dbRange);
+        client.reset();
+
+        QFile settings(configDir.filePath(QStringLiteral("settings.txt")));
+        QVERIFY(settings.open(QIODevice::ReadOnly));
+        const QByteArray saved = settings.readAll();
+        QVERIFY2(saved.contains(QStringLiteral("db_range=%1\n").arg(dbRange, 0, 'f', 2).toUtf8()),
+            saved.constData());
+    }
+    const QStringList leftovers = configDir.entryList(
+        {QStringLiteral("*.tmp")}, QDir::Files | QDir::Hidden);
+    QVERIFY2(leftovers.isEmpty(), qPrintable(leftovers.join(QStringLiteral(", "))));
 }
 
 void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {

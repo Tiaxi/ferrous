@@ -545,9 +545,12 @@ ApplicationWindow {
     }
     Action {
         id: quitAction
+        objectName: "quitAction"
         text: "Quit"
         shortcut: StandardKey.Quit
-        onTriggered: Qt.quit()
+        // Closing the window, not quitting, runs onClosing, which saves the
+        // library view and stops the backend.
+        onTriggered: root.close()
     }
     Action {
         id: playLibrarySelectionAction

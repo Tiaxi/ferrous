@@ -898,8 +898,6 @@ BridgeClient::BridgeClient(QObject *parent)
 
 BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
-    m_diagnosticsFlushTimer.stop();
-    flushPendingDiagnosticDiskLines();
     if (m_bridgeWakeNotifier != nullptr) {
         m_bridgeWakeNotifier->setEnabled(false);
         delete m_bridgeWakeNotifier;
@@ -915,9 +913,18 @@ BridgeClient::~BridgeClient() {
     stopCoverLookupWorker();
     stopSearchApplyWorker();
     if (m_ffiBridge != nullptr) {
-        ferrous_ffi_bridge_destroy(m_ffiBridge);
+        // The app's window is gone by now, so waiting for the backend's
+        // final saves holds up only the exit.
+        if (!ferrous_ffi_bridge_destroy(m_ffiBridge)) {
+            logDiagnostic(
+                QStringLiteral("bridge"),
+                QStringLiteral("the backend did not finish shutting down in time; recent "
+                               "settings, the queue, or Last.fm scrobbles may not have been saved"));
+        }
         m_ffiBridge = nullptr;
     }
+    m_diagnosticsFlushTimer.stop();
+    flushPendingDiagnosticDiskLines();
 }
 
 void BridgeClient::startFileBrowserNameDetection() {

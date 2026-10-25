@@ -530,6 +530,7 @@ private slots:
     void mainWindowContentStartsBelowMenuBar();
     void playbackErrorShowsInStatusBar();
     void stoppedBackendShowsMessageAndDisablesControls();
+    void quitActionClosesTheWindowThroughItsCloseHandler();
     void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
@@ -1864,6 +1865,44 @@ void QmlSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
     QVERIFY(statusLabel->property("visible").toBool());
     QVERIFY(!transportBar->property("enabled").toBool());
     QVERIFY(!mainSplit->property("enabled").toBool());
+}
+
+void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
+    engine.load(QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
+    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QObject *quitAction = window->findChild<QObject *>(QStringLiteral("quitAction"));
+    QVERIFY(quitAction != nullptr);
+    QCOMPARE(quitAction->property("shortcut").toInt(), static_cast<int>(QKeySequence::Quit));
+
+    // Keep the test process running when its only window closes.
+    const bool quitOnLastWindowClosed = QGuiApplication::quitOnLastWindowClosed();
+    QGuiApplication::setQuitOnLastWindowClosed(false);
+    const auto restoreQuit = qScopeGuard([quitOnLastWindowClosed]() {
+        QGuiApplication::setQuitOnLastWindowClosed(quitOnLastWindowClosed);
+    });
+    QSignalSpy closing(window, &QQuickWindow::closing);
+    QSignalSpy quit(&engine, &QQmlEngine::quit);
+
+    // Ctrl+Q triggers this action. The offscreen platform binds no key to
+    // the standard Quit sequence, so the test triggers the action itself.
+    QVERIFY(QMetaObject::invokeMethod(quitAction, "trigger"));
+
+    // `closing` runs onClosing, which stops the backend, as closing the
+    // window from its title bar does.
+    QTRY_COMPARE(closing.count(), 1);
+    QTRY_VERIFY(!window->isVisible());
+    QCOMPARE(quit.count(), 0);
 }
 
 void QmlSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {

@@ -59,6 +59,7 @@ use crate::profile_logging::heartbeat_trace_enabled;
 use crate::raw_audio::is_raw_surround_file;
 #[cfg(feature = "gst")]
 use crate::raw_audio::same_surround_extension;
+use crate::worker_thread::JoinableThread;
 
 #[cfg(feature = "profiling-logs")]
 macro_rules! profile_eprintln {
@@ -118,6 +119,9 @@ pub enum AnalysisCommand {
     /// Used when a `SetTrack` or stop follows immediately, superseding
     /// the worker session via generation or stopping playback.
     ClearStagedContinuation,
+    /// Stop the analysis threads. Only the engine sends this, when it is
+    /// dropped; commands sent after it are ignored.
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -205,7 +209,17 @@ pub struct AnalysisEngine {
     tx: Sender<AnalysisCommand>,
     spectral_tx: Sender<AnalysisEvent>,
     pending_resets: Arc<AtomicUsize>,
+    /// Tells the threads to stop waiting on their output and decodes.
+    closed: Arc<AtomicBool>,
+    spectrogram_decode_generation: Arc<AtomicU64>,
+    /// The analysis, waveform decode, and spectrogram decode threads.
+    threads: Vec<JoinableThread>,
 }
+
+/// How long dropping the engine waits for its threads. Each checks for
+/// shutdown between decoded chunks, which take milliseconds; the rest
+/// covers closing a `GStreamer` pipeline and the waveform database.
+pub(crate) const ANALYSIS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 const REFERENCE_HOP: usize = 1024;
 
@@ -337,11 +351,14 @@ impl AnalysisEngine {
         let waveform_tx = cmd_tx.clone();
         let (waveform_job_tx, waveform_job_rx) = unbounded::<WaveformDecodeJob>();
         let waveform_decode_active_token = Arc::new(AtomicU64::new(0));
-        spawn_waveform_decode_worker(
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut threads = Vec::with_capacity(3);
+        threads.extend(spawn_waveform_decode_worker(
             waveform_job_rx,
             waveform_tx,
             Arc::clone(&waveform_decode_active_token),
-        );
+            Arc::clone(&closed),
+        ));
 
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
         let route = spectral_route.unwrap_or_else(|| SpectrogramOutputRoute {
@@ -356,38 +373,42 @@ impl AnalysisEngine {
             snapshots: event_tx,
             generation: Arc::clone(&spectrogram_decode_generation),
             pending_resets: Arc::clone(&pending_resets),
+            closed: Arc::clone(&closed),
         };
         let worker_columns_produced = Arc::new(AtomicU64::new(0));
         let worker_track_duration_ms = Arc::new(AtomicU64::new(0));
         let spectrogram_status = SpectrogramWorkerStatus::default();
-        spawn_spectrogram_decode_worker(
+        threads.extend(spawn_spectrogram_decode_worker(
             spectrogram_cmd_rx,
             event_tx.clone(),
             Arc::clone(&spectrogram_decode_generation),
             Arc::clone(&worker_columns_produced),
             Arc::clone(&worker_track_duration_ms),
             &spectrogram_status,
-        );
+        ));
 
-        spawn_analysis_worker(
+        threads.extend(spawn_analysis_worker(
             cmd_rx,
             event_tx,
             waveform_job_tx,
             waveform_decode_active_token,
             SpectrogramWorkerHandles {
                 cmd_tx: spectrogram_cmd_tx,
-                decode_generation: spectrogram_decode_generation,
+                decode_generation: Arc::clone(&spectrogram_decode_generation),
                 columns_produced: worker_columns_produced,
                 track_duration_ms: worker_track_duration_ms,
                 status: spectrogram_status,
             },
-        );
+        ));
 
         (
             Self {
                 tx: cmd_tx,
                 spectral_tx,
                 pending_resets,
+                closed,
+                spectrogram_decode_generation,
+                threads,
             },
             event_rx,
         )
@@ -416,6 +437,49 @@ impl AnalysisEngine {
     #[must_use]
     pub fn sender(&self) -> Sender<AnalysisCommand> {
         self.tx.clone()
+    }
+
+    /// Stop the threads and wait for them, up to a bound. Returns how many
+    /// are still running.
+    ///
+    /// Other senders, such as the playback engine, keep the command channel
+    /// open, and the threads hold each other's channels, so none of them
+    /// would see a disconnect. The analysis thread stops on `Shutdown`,
+    /// which closes the waveform and spectrogram workers' channels.
+    fn stop_threads(&mut self) -> usize {
+        // Free a send blocked on a full spectral stream, and end the
+        // current decodes, before the analysis thread gets to `Shutdown`.
+        self.closed.store(true, Ordering::Relaxed);
+        self.spectrogram_decode_generation
+            .fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(AnalysisCommand::Shutdown);
+        let deadline = std::time::Instant::now() + ANALYSIS_SHUTDOWN_TIMEOUT;
+        self.threads
+            .drain(..)
+            .map(|thread| thread.join_by(deadline))
+            .filter(|joined| !joined)
+            .count()
+    }
+
+    /// How many of the engine's threads are still running.
+    #[cfg(test)]
+    fn running_threads(&self) -> usize {
+        self.threads
+            .iter()
+            .filter(|thread| thread.is_running())
+            .count()
+    }
+}
+
+impl Drop for AnalysisEngine {
+    fn drop(&mut self) {
+        let running = self.stop_threads();
+        if running > 0 {
+            eprintln!(
+                "[ferrous] {running} analysis thread(s) did not stop within {} s",
+                ANALYSIS_SHUTDOWN_TIMEOUT.as_secs()
+            );
+        }
     }
 }
 
@@ -673,6 +737,12 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::ClearStagedContinuation => {
                 self.clear_early_continuation(ctx);
+                self.cancel_centered_staging();
+            }
+            AnalysisCommand::Shutdown => {
+                // Ends any decode session a command before this one started.
+                ctx.spectrogram_decode_generation
+                    .fetch_add(1, Ordering::Relaxed);
                 self.cancel_centered_staging();
             }
         }
@@ -1602,18 +1672,23 @@ fn spawn_waveform_decode_worker(
     waveform_job_rx: Receiver<WaveformDecodeJob>,
     waveform_tx: Sender<AnalysisCommand>,
     waveform_decode_active_token: Arc<AtomicU64>,
-) {
+    closed: Arc<AtomicBool>,
+) -> Option<JoinableThread> {
     crate::worker_thread::spawn_worker("ferrous-waveform-decode", move || {
         while let Ok(mut job) = waveform_job_rx.recv() {
             while let Ok(next_job) = waveform_job_rx.try_recv() {
                 job = next_job;
             }
             let track_token = job.track_token;
+            let superseded = || {
+                closed.load(Ordering::Relaxed)
+                    || waveform_decode_active_token.load(Ordering::Relaxed) != track_token
+            };
             let _ = decode_waveform_peaks_stream(
                 &job.path,
                 1024,
                 |peaks, coverage_seconds, done| {
-                    if waveform_decode_active_token.load(Ordering::Relaxed) != track_token {
+                    if superseded() {
                         return false;
                     }
                     let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
@@ -1625,10 +1700,10 @@ fn spawn_waveform_decode_worker(
                     });
                     true
                 },
-                || waveform_decode_active_token.load(Ordering::Relaxed) != track_token,
+                &superseded,
             );
         }
-    });
+    })
 }
 
 /// Saturating conversion from `f64` to `u64`, clamping to `[0, u64::MAX]`.
@@ -1661,7 +1736,7 @@ fn spawn_analysis_worker(
     waveform_job_tx: Sender<WaveformDecodeJob>,
     waveform_decode_active_token: Arc<AtomicU64>,
     spectrogram: SpectrogramWorkerHandles,
-) {
+) -> Option<JoinableThread> {
     crate::worker_thread::spawn_worker("ferrous-analysis", move || {
         let mut state = AnalysisRuntimeState::new();
         let mut spectrogram_loss_reported = false;
@@ -1681,14 +1756,21 @@ fn spawn_analysis_worker(
                 spectrogram_decode_columns_produced: spectrogram.columns_produced.as_ref(),
                 spectrogram_track_duration_ms: spectrogram.track_duration_ms.as_ref(),
             };
+            let shutdown = matches!(cmd, AnalysisCommand::Shutdown);
             state.handle_command(cmd, &ctx);
+            if shutdown {
+                // Returning drops the senders the other workers wait on.
+                // The spectrogram worker ends with them, so its status is
+                // not checked again: that is not a failure.
+                return;
+            }
             report_lost_spectrogram_worker(
                 &spectrogram.status,
                 &mut spectrogram_loss_reported,
                 &event_tx,
             );
         }
-    });
+    })
 }
 
 /// Tell the user, once, that the spectrogram decode worker is gone: the
@@ -1989,6 +2071,81 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Every event left in `rx`. Fails if a sender remains, which means a
+    /// thread holding one is still running.
+    fn events_after_threads_ended<T>(rx: &Receiver<T>) -> Vec<T> {
+        let events: Vec<_> = rx.try_iter().collect();
+        assert_eq!(
+            rx.try_recv().err(),
+            Some(crossbeam_channel::TryRecvError::Disconnected),
+            "a thread still holds the channel"
+        );
+        events
+    }
+
+    fn assert_no_worker_failure(events: &[AnalysisEvent]) {
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AnalysisEvent::WorkerFailed(_))),
+            "shutdown reported a failure:\n{}",
+            summarize(events)
+        );
+    }
+
+    #[test]
+    fn dropping_the_engine_stops_its_threads_while_others_hold_its_sender() {
+        let (mut engine, event_rx) = AnalysisEngine::new();
+        // The playback engine holds one of these for as long as it runs.
+        let playback_sender = engine.sender();
+        assert_eq!(engine.running_threads(), 3);
+
+        assert_eq!(engine.stop_threads(), 0);
+        drop(engine);
+
+        assert_no_worker_failure(&events_after_threads_ended(&event_rx));
+        assert!(
+            playback_sender
+                .send(AnalysisCommand::PositionUpdate(1.0))
+                .is_err(),
+            "the analysis thread still takes commands"
+        );
+    }
+
+    #[test]
+    fn dropping_a_busy_engine_stops_its_decodes_and_blocked_sends() {
+        let path = write_engine_test_wave(10, 16_000);
+        // Nothing drains this, so the spectrogram worker blocks on its
+        // output, as when the UI stops reading during shutdown.
+        let (spectral_tx, spectral_rx) = crossbeam_channel::bounded(1);
+        let (mut engine, event_rx) =
+            AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
+                sender: spectral_tx,
+                generation: Arc::new(AtomicU64::new(0)),
+            }));
+        engine.command(AnalysisCommand::SetTrack {
+            path: path.clone(),
+            reset_spectrogram: true,
+            track_token: 1,
+            gapless: false,
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !spectral_rx.is_full() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the spectrogram produced no output"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(engine.running_threads(), 3);
+        assert_eq!(engine.stop_threads(), 0);
+        drop(engine);
+
+        events_after_threads_ended(&spectral_rx);
+        assert_no_worker_failure(&events_after_threads_ended(&event_rx));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

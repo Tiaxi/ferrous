@@ -3,7 +3,7 @@
 use super::{AnalysisCommand, AnalysisEvent};
 use crossbeam_channel::{SendTimeoutError, Sender};
 use std::sync::{
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -25,6 +25,9 @@ pub(super) struct AnalysisOutputs {
     pub spectra: Sender<AnalysisEvent>,
     pub generation: Arc<AtomicU64>,
     pub pending_resets: Arc<AtomicUsize>,
+    /// Set when the engine shuts down, so a send waiting for the spectral
+    /// stream gives up instead of holding the thread past shutdown.
+    pub closed: Arc<AtomicBool>,
 }
 
 impl AnalysisEventOutput for AnalysisOutputs {
@@ -36,6 +39,9 @@ impl AnalysisEventOutput for AnalysisOutputs {
             AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => chunk.generation,
         };
         loop {
+            if self.closed.load(Ordering::Relaxed) {
+                return Err(());
+            }
             if self.pending_resets.load(Ordering::Relaxed) > 0 {
                 return Err(());
             }

@@ -554,7 +554,9 @@ pub(super) fn process_lastfm_event(
                 // Flush immediately — the username is the lookup key for the
                 // session in the keyring.  Losing it (e.g. Ctrl+C before the
                 // periodic 2 s save) makes the session irrecoverable.
-                super::config::save_settings(&state.settings);
+                // The settings stay dirty, so the periodic save tries again
+                // and shows the user a failure.
+                let _ = super::config::save_settings(&state.settings);
                 urgency = SnapshotUrgency::Immediate;
             }
             urgency

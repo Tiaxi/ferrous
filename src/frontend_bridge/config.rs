@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
@@ -195,20 +195,17 @@ pub(super) fn format_session_text(session: &SessionSnapshot) -> String {
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
 }
 
-pub(super) fn save_session_snapshot(session: &SessionSnapshot) {
+/// Save the queue and library view for the next start.
+///
+/// # Errors
+///
+/// Returns a message for the user when the session cannot be saved.
+pub(super) fn save_session_snapshot(session: &SessionSnapshot) -> Result<(), String> {
     let Some(path) = session_path() else {
-        return;
+        return Err(NO_CONFIG_DIR.to_string());
     };
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let text = format_session_text(session);
-    let tmp_path = path.with_extension("json.tmp");
-    if fs::write(&tmp_path, text).is_ok() {
-        let _ = fs::rename(&tmp_path, &path);
-    } else {
-        let _ = fs::remove_file(&tmp_path);
-    }
+    write_config_file(&path, format_session_text(session).as_bytes())
+        .map_err(|error| format!("The queue could not be saved for the next start: {error}"))
 }
 
 pub(super) fn load_settings_into(settings: &mut BridgeSettings) {
@@ -336,26 +333,29 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
     }
 }
 
-pub(super) fn save_settings(settings: &BridgeSettings) {
+/// Save the settings.
+///
+/// # Errors
+///
+/// Returns a message for the user when the settings cannot be saved.
+pub(super) fn save_settings(settings: &BridgeSettings) -> Result<(), String> {
     let Some(path) = settings_path() else {
-        return;
+        return Err(NO_CONFIG_DIR.to_string());
     };
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let _ = fs::create_dir_all(parent);
-    let text = format_settings_text(settings);
+    write_config_file(&path, format_settings_text(settings).as_bytes())
+        .map_err(|error| format!("Settings could not be saved: {error}"))
+}
 
-    // Atomic write: write to a temp file in the same directory, then rename.
-    // This prevents a crash during write from truncating/corrupting the settings file.
-    let tmp_path = path.with_extension("tmp");
-    if let Err(err) = fs::write(&tmp_path, &text) {
-        eprintln!("Failed to write settings temp file: {err}");
-        return;
+const NO_CONFIG_DIR: &str = "Settings and the queue cannot be saved: set HOME or XDG_CONFIG_HOME.";
+
+/// Write a file in the config directory without a crash or a concurrent
+/// save leaving it truncated; see [`crate::safe_save::write_file`].
+fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
-    if let Err(err) = fs::rename(&tmp_path, &path) {
-        eprintln!("Failed to rename settings temp file: {err}");
-    }
+    crate::safe_save::write_file(path, bytes)
 }
 
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {

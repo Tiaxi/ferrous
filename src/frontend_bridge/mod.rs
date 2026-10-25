@@ -10,7 +10,7 @@ use crossbeam_channel::{after, bounded, never, select, unbounded, Receiver, Send
 
 use crate::analysis::{
     AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot, SpectrogramDisplayMode,
-    SpectrogramViewMode,
+    SpectrogramViewMode, ANALYSIS_SHUTDOWN_TIMEOUT,
 };
 use crate::lastfm::{
     Command as LastFmCommand, Event as LastFmEvent, Handle as LastFmHandle,
@@ -24,6 +24,7 @@ use crate::playback::{
     PathRenames, PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState,
     RepeatMode,
 };
+use crate::worker_thread::{spawn_joinable, JoinableThread};
 
 mod commands;
 mod config;
@@ -619,18 +620,34 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
     }
 }
 
+/// The bridge thread and its channels. Stop it with [`Self::shutdown`];
+/// dropping the handle leaves the thread running on its own until it sees
+/// the command channel close.
 pub struct FrontendBridgeHandle {
     tx: Sender<BridgeCommand>,
     rx: Receiver<BridgeEvent>,
     spectral_rx: Receiver<AnalysisEvent>,
     spectral_generation: Arc<AtomicU64>,
     import_gate: Arc<imports::ImportGate>,
+    thread: JoinableThread,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// The parts of a [`FrontendBridgeHandle`], for a frontend that drives them
+/// itself.
+pub(crate) struct BridgeParts {
+    pub(crate) commands: Sender<BridgeCommand>,
+    pub(crate) events: Receiver<BridgeEvent>,
+    pub(crate) spectra: Receiver<AnalysisEvent>,
+    pub(crate) spectral_generation: Arc<AtomicU64>,
+    pub(crate) thread: JoinableThread,
+}
+
 struct BridgeRuntimeOptions {
     metadata_delay: Duration,
     persisted_state_enabled: bool,
+    /// A Last.fm service to use instead of starting one.
+    #[cfg(test)]
+    lastfm: Option<(LastFmHandle, Receiver<LastFmEvent>)>,
 }
 
 impl Default for BridgeRuntimeOptions {
@@ -638,6 +655,8 @@ impl Default for BridgeRuntimeOptions {
         Self {
             metadata_delay: Duration::ZERO,
             persisted_state_enabled: cfg!(not(test)),
+            #[cfg(test)]
+            lastfm: None,
         }
     }
 }
@@ -673,17 +692,28 @@ impl FrontendBridgeHandle {
 
         let imports = imports::ImportWorker::new();
         let import_gate = imports.gate();
-        std::thread::Builder::new()
-            .name("ferrous-bridge".to_string())
-            .spawn(move || run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route, imports))
-            .map_err(|error| format!("failed to start the bridge thread: {error}"))?;
+        let thread = spawn_joinable("ferrous-bridge", move || {
+            run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route, imports);
+        })
+        .map_err(|error| format!("failed to start the bridge thread: {error}"))?;
         Ok(Self {
             tx: cmd_tx,
             rx: event_rx,
             spectral_rx,
             spectral_generation,
             import_gate,
+            thread,
         })
+    }
+
+    /// Stop the bridge and wait, up to [`BRIDGE_SHUTDOWN_TIMEOUT`], for it
+    /// to save the settings, the session, and Last.fm's queue. Returns
+    /// false if it is still running then.
+    #[must_use]
+    pub fn shutdown(self) -> bool {
+        let _ = self.tx.send(BridgeCommand::Shutdown);
+        self.thread
+            .join_by(Instant::now() + BRIDGE_SHUTDOWN_TIMEOUT)
     }
 
     pub fn command(&self, cmd: BridgeCommand) {
@@ -723,20 +753,31 @@ impl FrontendBridgeHandle {
         Arc::clone(&self.import_gate)
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Sender<BridgeCommand>,
-        Receiver<BridgeEvent>,
-        Receiver<AnalysisEvent>,
-        Arc<AtomicU64>,
-    ) {
-        (self.tx, self.rx, self.spectral_rx, self.spectral_generation)
+    pub(crate) fn into_parts(self) -> BridgeParts {
+        BridgeParts {
+            commands: self.tx,
+            events: self.rx,
+            spectra: self.spectral_rx,
+            spectral_generation: self.spectral_generation,
+            thread: self.thread,
+        }
     }
 }
 
 /// How long shutdown waits for the Last.fm service to save its queue.
 const LASTFM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long stopping the bridge waits for its thread to end.
+///
+/// Its shutdown waits up to [`LASTFM_SHUTDOWN_TIMEOUT`] for Last.fm, which
+/// may be in the middle of a request, and then up to
+/// [`ANALYSIS_SHUTDOWN_TIMEOUT`] for the analysis threads. The second left
+/// covers the settings and session saves, a few small files, and stopping
+/// playback. A normal shutdown takes milliseconds; the bound only keeps a
+/// stuck one from holding the app open.
+pub(crate) const BRIDGE_SHUTDOWN_TIMEOUT: Duration = LASTFM_SHUTDOWN_TIMEOUT
+    .saturating_add(ANALYSIS_SHUTDOWN_TIMEOUT)
+    .saturating_add(Duration::from_secs(1));
 
 struct BridgeLoopRuntime {
     imports: imports::ImportWorker,
@@ -764,6 +805,7 @@ struct BridgeLoopRuntime {
     last_settings_save: Instant,
     last_session_save: Instant,
     last_saved_session: Option<SessionSnapshot>,
+    save_errors: SaveErrors,
     playing_poll_interval: Duration,
     last_playing_poll: Instant,
     paused_poll_interval: Duration,
@@ -910,7 +952,7 @@ impl BridgeLoopRuntime {
     }
 
     fn with_imports(
-        options: BridgeRuntimeOptions,
+        mut options: BridgeRuntimeOptions,
         spectral_tx: Option<SpectrogramOutputRoute>,
         imports: imports::ImportWorker,
     ) -> Self {
@@ -923,8 +965,12 @@ impl BridgeLoopRuntime {
             spawn_queue_detail_worker();
         let (apply_album_art_tx, apply_album_art_event_rx) = spawn_apply_album_art_worker();
 
-        let (state, lastfm, lastfm_rx) =
-            prepare_initial_bridge_state(options, &analysis, &playback, &external_queue_details_tx);
+        let (state, lastfm, lastfm_rx) = prepare_initial_bridge_state(
+            &mut options,
+            &analysis,
+            &playback,
+            &external_queue_details_tx,
+        );
 
         let playing_poll_interval = env_duration_ms("FERROUS_PLAYBACK_POLL_MS", 40, 8, 500);
         let paused_poll_interval =
@@ -966,6 +1012,7 @@ impl BridgeLoopRuntime {
             last_settings_save: Instant::now(),
             last_session_save: Instant::now(),
             last_saved_session: None,
+            save_errors: SaveErrors::default(),
             playing_poll_interval,
             last_playing_poll: Instant::now()
                 .checked_sub(playing_poll_interval)
@@ -1009,7 +1056,7 @@ impl BridgeLoopRuntime {
             let wake = self.wait_for_wake(cmd_rx);
             self.handle_wake(wake, event_tx);
             self.maybe_log_profile();
-            self.maybe_persist();
+            self.maybe_persist(event_tx);
         }
         self.shutdown(event_tx);
     }
@@ -1745,34 +1792,54 @@ impl BridgeLoopRuntime {
         self.diagnostics.profile_last = Instant::now();
     }
 
-    fn maybe_persist(&mut self) {
+    fn maybe_persist(&mut self, event_tx: &Sender<BridgeEvent>) {
         if !self.persisted_state_enabled {
             self.flags.settings_dirty = false;
             self.flags.session_dirty = false;
             return;
         }
+        // A failed save stays dirty, so it is tried again.
         if self.flags.settings_dirty && self.last_settings_save.elapsed() >= Duration::from_secs(2)
         {
-            save_settings(&self.state.settings);
-            self.flags.settings_dirty = false;
+            let saved = report_save(
+                save_settings(&self.state.settings),
+                &mut self.save_errors.settings,
+                event_tx,
+            );
+            self.flags.settings_dirty = !saved;
             self.last_settings_save = Instant::now();
         }
         if !self.flags.session_dirty || self.last_session_save.elapsed() < Duration::from_secs(2) {
             return;
         }
         let session = session_snapshot_for_state(&self.state);
+        let mut saved = true;
         if self.last_saved_session.as_ref() != Some(&session) {
-            save_session_snapshot(&session);
-            self.last_saved_session = Some(session);
+            saved = report_save(
+                save_session_snapshot(&session),
+                &mut self.save_errors.session,
+                event_tx,
+            );
+            if saved {
+                self.last_saved_session = Some(session);
+            }
         }
-        self.flags.session_dirty = false;
+        self.flags.session_dirty = !saved;
         self.last_session_save = Instant::now();
     }
 
     fn shutdown(&mut self, event_tx: &Sender<BridgeEvent>) {
         if self.persisted_state_enabled {
-            save_settings(&self.state.settings);
-            save_session_snapshot(&session_snapshot_for_state(&self.state));
+            report_save(
+                save_settings(&self.state.settings),
+                &mut self.save_errors.settings,
+                event_tx,
+            );
+            report_save(
+                save_session_snapshot(&session_snapshot_for_state(&self.state)),
+                &mut self.save_errors.session,
+                event_tx,
+            );
         }
         finalize_lastfm_track(
             &self.state,
@@ -1796,8 +1863,36 @@ impl BridgeLoopRuntime {
     }
 }
 
+/// The save failures last shown to the user, so a save that keeps failing
+/// the same way is shown once.
+#[derive(Default)]
+struct SaveErrors {
+    settings: Option<String>,
+    session: Option<String>,
+}
+
+/// Show the user a failed save, unless `reported` says it was the last one
+/// shown. Returns whether the save succeeded.
+fn report_save(
+    result: Result<(), String>,
+    reported: &mut Option<String>,
+    event_tx: &Sender<BridgeEvent>,
+) -> bool {
+    let Err(message) = result else {
+        *reported = None;
+        return true;
+    };
+    if reported.as_deref() != Some(message.as_str()) {
+        eprintln!("[ferrous] {message}");
+        if try_send_event(event_tx, BridgeEvent::Error(message.clone())).is_ok() {
+            *reported = Some(message);
+        }
+    }
+    false
+}
+
 fn prepare_initial_bridge_state(
-    options: BridgeRuntimeOptions,
+    options: &mut BridgeRuntimeOptions,
     analysis: &AnalysisEngine,
     playback: &PlaybackEngine,
     external_queue_details_tx: &Sender<ExternalQueueDetailsRequest>,
@@ -1807,6 +1902,12 @@ fn prepare_initial_bridge_state(
         load_settings_into(&mut state.settings);
     }
     state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
+    #[cfg(test)]
+    let (lastfm, lastfm_rx) = options
+        .lastfm
+        .take()
+        .unwrap_or_else(|| spawn_lastfm_service(&state.settings));
+    #[cfg(not(test))]
     let (lastfm, lastfm_rx) = spawn_lastfm_service(&state.settings);
     restore_initial_bridge_state(
         &mut state,
@@ -2050,7 +2151,7 @@ mod tests {
         }
     }
 
-    fn test_guard() -> MutexGuard<'static, ()> {
+    pub(super) fn test_guard() -> MutexGuard<'static, ()> {
         static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
         TEST_MUTEX
             .get_or_init(|| Mutex::new(()))
@@ -2263,7 +2364,8 @@ mod tests {
             current_queue_index: Some(0),
             current_path: Some(p("/music/a.flac")),
             ..SessionSnapshot::default()
-        });
+        })
+        .expect("save the session");
 
         let runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
 

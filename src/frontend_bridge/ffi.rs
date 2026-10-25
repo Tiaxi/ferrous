@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::fd::RawFd;
@@ -17,6 +17,7 @@ use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
     BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand,
     BridgeSnapshot, FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
+    BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
@@ -27,6 +28,7 @@ use crate::panic_guard;
 use crate::panic_guard::test_hooks;
 use crate::playback::{PathRenames, PlaybackState, RepeatMode};
 use crate::tag_editor;
+use crate::worker_thread::JoinableThread;
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const PRECOMPUTED_SPECTROGRAM_MAGIC: u8 = 0xA2;
@@ -794,18 +796,31 @@ impl FfiShared {
 pub struct FerrousFfiBridge {
     shared: Arc<FfiShared>,
     import_gate: Arc<ImportGate>,
+    bridge_thread: Option<JoinableThread>,
+    /// How long [`Self::shutdown`] waits for the bridge thread.
+    shutdown_timeout: Duration,
     relay_thread: Option<JoinHandle<()>>,
     spectral_relay_thread: Option<JoinHandle<()>>,
 }
 
-impl Drop for FerrousFfiBridge {
-    fn drop(&mut self) {
-        self.shared.request_stop();
+impl FerrousFfiBridge {
+    /// Stop the bridge, waiting up to `shutdown_timeout` for it to save
+    /// the settings, the session, and Last.fm's queue, and then stop the
+    /// relays. Returns false if the bridge thread was still running at the
+    /// bound; it is left running then, so the app's exit is not held up.
+    fn shutdown(&mut self) -> bool {
+        // The relays keep draining the bridge's output meanwhile, so it
+        // never waits on a full channel.
         let _ = self
             .shared
             .lock_runtime()
             .command_tx
             .send(BridgeCommand::Shutdown);
+        let finished = self
+            .bridge_thread
+            .take()
+            .is_none_or(|thread| thread.join_by(Instant::now() + self.shutdown_timeout));
+        self.shared.request_stop();
         for thread in [self.relay_thread.take(), self.spectral_relay_thread.take()]
             .into_iter()
             .flatten()
@@ -813,18 +828,31 @@ impl Drop for FerrousFfiBridge {
             let _ = thread.join();
         }
         self.shared.lock_runtime().close_wakeup_pipe();
+        finished
+    }
+}
+
+impl Drop for FerrousFfiBridge {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
 /// Start the bridge thread and the threads that relay its output to the UI.
 fn create_bridge() -> Result<FerrousFfiBridge, String> {
-    let handle = FrontendBridgeHandle::spawn()?;
+    connect_bridge(FrontendBridgeHandle::spawn()?)
+}
+
+/// Start the threads that relay the output of the bridge behind `handle`
+/// to the UI.
+fn connect_bridge(handle: FrontendBridgeHandle) -> Result<FerrousFfiBridge, String> {
     let import_gate = handle.import_gate();
-    let (command_tx, event_rx, spectral_rx, spectral_generation) = handle.into_parts();
+    let parts = handle.into_parts();
+    let (event_rx, spectral_rx) = (parts.events, parts.spectra);
     let (wake_read_fd, wake_write_fd) = create_nonblocking_pipe().unwrap_or((-1, -1));
     let shared = Arc::new(FfiShared::new(
-        FfiRuntime::new(command_tx, wake_read_fd, wake_write_fd),
-        spectral_generation,
+        FfiRuntime::new(parts.commands, wake_read_fd, wake_write_fd),
+        parts.spectral_generation,
     ));
     let _ = shared
         .lock_runtime()
@@ -835,6 +863,8 @@ fn create_bridge() -> Result<FerrousFfiBridge, String> {
     let mut bridge = FerrousFfiBridge {
         shared: Arc::clone(&shared),
         import_gate,
+        bridge_thread: Some(parts.thread),
+        shutdown_timeout: BRIDGE_SHUTDOWN_TIMEOUT,
         relay_thread: None,
         spectral_relay_thread: None,
     };
@@ -1047,22 +1077,29 @@ pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
 }
 
 #[no_mangle]
+/// Stop the bridge and free it. Blocks until the bridge has saved the
+/// settings, the session, and Last.fm's queue, or for at most
+/// [`BRIDGE_SHUTDOWN_TIMEOUT`]. Returns false if the bridge was still
+/// shutting down then, so those saves may be missing.
+///
 /// # Safety
 ///
 /// `handle` must be null or a pointer previously returned by
 /// [`ferrous_ffi_bridge_create`], and must not be used again after this call.
-pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridge) {
+pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridge) -> bool {
     ffi_call(
         "ferrous_ffi_bridge_destroy",
-        |_| (),
+        |_| false,
         || {
-            if !handle.is_null() {
-                // SAFETY: The caller hands over the pointer `Box::into_raw`
-                // made in `ferrous_ffi_bridge_create` and never uses it again.
-                drop(unsafe { Box::from_raw(handle) });
+            if handle.is_null() {
+                return true;
             }
+            // SAFETY: The caller hands over the pointer `Box::into_raw`
+            // made in `ferrous_ffi_bridge_create` and never uses it again.
+            let mut bridge = unsafe { Box::from_raw(handle) };
+            bridge.shutdown()
         },
-    );
+    )
 }
 
 #[no_mangle]
@@ -2827,6 +2864,7 @@ mod error_packet_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{config, BridgeRuntimeOptions};
     use super::*;
     use crate::analysis::AnalysisSnapshot;
     use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
@@ -4430,6 +4468,150 @@ mod tests {
         let _ = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
         // SAFETY: `handle` came from `ferrous_ffi_bridge_create` and is not used again.
         unsafe { ferrous_ffi_bridge_destroy(handle) };
+    }
+
+    /// Start a bridge with `options` behind the same handle the UI gets.
+    fn ffi_bridge_with(options: BridgeRuntimeOptions) -> *mut FerrousFfiBridge {
+        let handle = FrontendBridgeHandle::spawn_with_options(options).expect("spawn bridge");
+        Box::into_raw(Box::new(connect_bridge(handle).expect("connect bridge")))
+    }
+
+    /// A bridge that saves its state, as the app's does, starting from no
+    /// saved state.
+    fn ffi_bridge_saving_state() -> *mut FerrousFfiBridge {
+        for path in [config::settings_path(), config::session_path()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        ffi_bridge_with(BridgeRuntimeOptions {
+            persisted_state_enabled: true,
+            ..BridgeRuntimeOptions::default()
+        })
+    }
+
+    fn ffi_set_db_range(handle: *mut FerrousFfiBridge, value: f32) {
+        assert!(ffi_send_binary(
+            handle,
+            &encode_command(27, &value.to_le_bytes())
+        ));
+    }
+
+    fn saved_settings() -> String {
+        std::fs::read_to_string(config::settings_path().expect("settings path"))
+            .expect("read the saved settings")
+    }
+
+    /// Files in the config directory that a save left behind.
+    fn leftover_temporary_files() -> Vec<String> {
+        let dir = config::config_base_path().expect("config dir");
+        std::fs::read_dir(dir)
+            .expect("read the config dir")
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| std::path::Path::new(name).extension() == Some("tmp".as_ref()))
+            .collect()
+    }
+
+    #[test]
+    fn destroy_returns_after_saving_settings_changed_just_before() {
+        let _guard = super::super::tests::test_guard();
+        let handle = ffi_bridge_saving_state();
+        ffi_set_db_range(handle, 123.0);
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        assert!(
+            saved_settings().contains("db_range=123.00"),
+            "{}",
+            saved_settings()
+        );
+        assert!(config::session_path().expect("session path").exists());
+    }
+
+    #[test]
+    fn bridges_saving_settings_back_to_back_keep_the_last_ones() {
+        let _guard = super::super::tests::test_guard();
+        for value in [111.0_f32, 122.0, 133.0] {
+            let handle = ffi_bridge_saving_state();
+            ffi_set_db_range(handle, value);
+            // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+            assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+        }
+
+        assert!(
+            saved_settings().contains("db_range=133.00"),
+            "{}",
+            saved_settings()
+        );
+        assert_eq!(leftover_temporary_files(), Vec::<String>::new());
+    }
+
+    /// A Last.fm service that waits for `release` before it confirms
+    /// shutdown, as if it were saving its queue, and then sets `saved`.
+    fn slow_lastfm(
+        release: crossbeam_channel::Receiver<()>,
+        saved: Arc<AtomicBool>,
+    ) -> (
+        crate::lastfm::Handle,
+        crossbeam_channel::Receiver<crate::lastfm::Event>,
+    ) {
+        let (handle, commands) = crate::lastfm::test_support::command_handle();
+        thread::spawn(move || {
+            while let Ok(command) = commands.recv() {
+                if let crate::lastfm::Command::Shutdown(done) = command {
+                    let _ = release.recv();
+                    saved.store(true, Ordering::SeqCst);
+                    let _ = done.send(Ok(()));
+                    return;
+                }
+            }
+        });
+        let (_event_tx, events) = crossbeam_channel::unbounded();
+        (handle, events)
+    }
+
+    #[test]
+    fn destroy_returns_after_lastfm_has_saved_its_queue() {
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let saved = Arc::new(AtomicBool::new(false));
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            lastfm: Some(slow_lastfm(release_rx, Arc::clone(&saved))),
+            ..BridgeRuntimeOptions::default()
+        });
+        // The save finishes while destroy waits.
+        release_tx.send(()).expect("release the save");
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        assert!(saved.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn destroy_gives_up_on_a_bridge_that_does_not_stop_in_time() {
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let saved = Arc::new(AtomicBool::new(false));
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            lastfm: Some(slow_lastfm(release_rx, Arc::clone(&saved))),
+            ..BridgeRuntimeOptions::default()
+        });
+        // SAFETY: `handle` is live until it is destroyed below.
+        unsafe { (*handle).shutdown_timeout = Duration::from_millis(50) };
+
+        // The Last.fm save is held until destroy has returned.
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(!unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        assert!(!saved.load(Ordering::SeqCst));
+        release_tx.send(()).expect("release the save");
     }
 
     /// The reason in a packet that reports a stop the UI did not ask for.

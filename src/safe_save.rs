@@ -158,6 +158,28 @@ fn create_file_with(path: &Path, bytes: &[u8], before_rename: impl FnOnce()) -> 
         .map_err(|err| format!("failed to flush directory {}: {err}", parent.display()))
 }
 
+/// Write `bytes` to `path`, an app-owned file that may not exist yet, so
+/// that readers see either the previous file or the complete new one.
+///
+/// The bytes go to a uniquely named file in the same directory, which is
+/// flushed and renamed over `path`, so concurrent writers never share a
+/// temporary file: the last rename wins with a complete file. A symbolic
+/// link at `path` is followed, so the file it points to is replaced and
+/// the link survives. The replacement gets the permissions new files get,
+/// not the old file's, so this is meant for the app's own state, not the
+/// user's files; see [`replace_file`] for those.
+///
+/// # Errors
+///
+/// Returns a message naming the failed step. `path` is unchanged then, and
+/// the temporary file is removed.
+pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut temp = TempSibling::create(&target)?;
+    temp.write_all(bytes)?;
+    temp.commit(&target, None)
+}
+
 /// Check, without changing anything, that [`rewrite_via_temp_copy`] could
 /// replace `path` now: the file opens for writing, its metadata can be read,
 /// and its directory accepts the temporary copy.
@@ -1200,6 +1222,66 @@ mod tests {
         assert!(error.contains("for writing"), "{error}");
         assert_eq!(fs::read(&path).expect("read original"), b"original");
         assert_eq!(dir_entries(&dir), vec!["song.flac".to_string()]);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn write_file_creates_and_replaces_app_state() {
+        let dir = test_dir("write");
+        let path = dir.join("settings.txt");
+
+        write_file(&path, b"first").expect("create");
+        write_file(&path, b"second").expect("replace");
+
+        assert_eq!(fs::read(&path).expect("read"), b"second");
+        assert_eq!(dir_entries(&dir), vec!["settings.txt".to_string()]);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_replaces_the_file_a_link_points_to() {
+        let dir = test_dir("write-link");
+        let target = dir.join("dotfiles-settings.txt");
+        let link = dir.join("settings.txt");
+        fs::write(&target, b"old").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+
+        write_file(&link, b"new").expect("write through the link");
+
+        assert!(fs::symlink_metadata(&link)
+            .expect("link metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).expect("read target"), b"new");
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn concurrent_writers_never_share_a_temporary_file() {
+        let dir = test_dir("write-concurrent");
+        let path = dir.join("settings.txt");
+        let contents: Vec<Vec<u8>> = (0..4u8)
+            .map(|writer| vec![b'a' + writer; 64 * 1024])
+            .collect();
+
+        std::thread::scope(|scope| {
+            for bytes in &contents {
+                let path = &path;
+                scope.spawn(move || {
+                    for _ in 0..25 {
+                        write_file(path, bytes).expect("every write succeeds");
+                    }
+                });
+            }
+        });
+
+        let saved = fs::read(&path).expect("read");
+        assert!(
+            contents.contains(&saved),
+            "the file mixes writers' contents"
+        );
+        assert_eq!(dir_entries(&dir), vec!["settings.txt".to_string()]);
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 }
