@@ -13,9 +13,10 @@
 //! stream again and blocks the output once more, after the exposing thread
 //! has let it go. The exposure that follows finds every stream exposed and
 //! lets nothing go, so the parser's first buffer waits there until the run
-//! ends. `GStreamer` 1.24 and 1.28 have that race. Upstream commit 51cb58de,
-//! on `main` only, exposes such a stream only once the parser has pushed,
-//! from the parser's thread, which closes it.
+//! ends. `GStreamer` 1.24 and 1.28.8 have that race. Upstream commit
+//! 51cb58de (on `main`, and on the 1.28 branch after 1.28.8) closes it: it
+//! exposes such a stream only once the parser has pushed, from the block on
+//! the parser's thread.
 //!
 //! So every source pad of an element of a `parsebin` is watched. After
 //! `parsebin`'s own handler for new caps, which is where the block comes
@@ -103,9 +104,12 @@ impl Reporter {
             return false;
         };
         // The peer of the pad is the internal pad of the stream's ghost
-        // pad, which belongs to the `parsebin` once it is exposed.
+        // pad, which belongs to the `parsebin` once it is exposed. The peer
+        // of a pad that feeds another element of the `parsebin` is no
+        // internal pad.
         pad.peer()
             .and_then(|internal| internal.parent())
+            .and_then(|output| output.downcast::<gst::GhostPad>().ok())
             .and_then(|output| output.parent())
             .is_some_and(|parent| parent == *parsebin.upcast_ref::<gst::Object>())
     }
@@ -511,6 +515,43 @@ mod tests {
         assert_eq!(buffer.join().unwrap(), Ok(gst::FlowSuccess::Ok));
         assert_eq!(output.items(), [Item::Caps, Item::Segment, Item::Buffer]);
         assert!(output.report().is_none());
+    }
+
+    #[test]
+    fn a_pad_that_feeds_another_element_of_parsebin_is_not_reported() {
+        // Such as a demuxer's pad that feeds a parser.
+        let output = Output::new(true);
+        let parser = gst::ElementFactory::make("identity").build().unwrap();
+        output.parsebin.add(&parser).unwrap();
+        parser.set_state(gst::State::Playing).unwrap();
+        let pad = gst::Pad::builder(gst::PadDirection::Src).build();
+        pad.link(&parser.static_pad("sink").unwrap()).unwrap();
+        pad.set_active(true).unwrap();
+        watch(
+            &pad,
+            Reporter {
+                parsebin: output.parsebin.upcast_ref::<gst::Element>().downgrade(),
+                bus: output.pipeline.bus().unwrap(),
+            },
+        );
+        pad.add_probe(
+            gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+            |_, _| gst::PadProbeReturn::Ok,
+        )
+        .unwrap();
+        assert!(pad.push_event(gst::event::StreamStart::new("stream")));
+        assert!(pad.push_event(gst::event::Caps::new(
+            &gst::Caps::builder("audio/mpeg").build()
+        )));
+        let buffer = {
+            let pad = pad.clone();
+            std::thread::spawn(move || pad.push(gst::Buffer::new()))
+        };
+        wait_until("the buffer did not wait", || pad.is_blocking());
+        assert!(output.report().is_none());
+        pad.set_active(false).unwrap();
+        assert_eq!(buffer.join().unwrap(), Err(gst::FlowError::Flushing));
+        parser.set_state(gst::State::Null).unwrap();
     }
 
     #[test]
