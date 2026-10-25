@@ -22,6 +22,8 @@ bool ferrous_ffi_bridge_send_binary(
     const std::uint8_t *cmd_ptr,
     std::size_t cmd_len);
 int ferrous_ffi_bridge_wakeup_fd(FerrousFfiBridge *handle);
+// Call after draining the queues: the wake fd is ready again at once if
+// anything is still queued.
 void ferrous_ffi_bridge_ack_wakeup(FerrousFfiBridge *handle);
 std::uint8_t *ferrous_ffi_bridge_pop_binary_event(FerrousFfiBridge *handle, std::size_t *len_out);
 void ferrous_ffi_bridge_free_binary_event(std::uint8_t *ptr, std::size_t len);

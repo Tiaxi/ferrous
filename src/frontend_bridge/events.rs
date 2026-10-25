@@ -247,9 +247,8 @@ pub(super) fn process_playback_event(
                     gapless: is_gapless,
                 });
             }
-            if is_gapless {
-                state.skip_queue_for_gapless = true;
-            }
+            // The playing index travels in the playback section, so a track
+            // change asks for no queue section; one already asked for stays.
             SnapshotUrgency::Immediate
         }
         PlaybackEvent::Seeked { position } => {

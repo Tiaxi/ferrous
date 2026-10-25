@@ -988,7 +988,6 @@ bool BridgeClient::startInProcessBridge() {
                     return;
                 }
                 m_bridgeWakeNotifier->setEnabled(false);
-                ferrous_ffi_bridge_ack_wakeup(m_ffiBridge);
                 pollInProcessBridge();
             });
         m_bridgeWakeNotifier->setEnabled(true);
@@ -1954,6 +1953,9 @@ void BridgeClient::pollInProcessBridge() {
     m_pollTrackMetadataChanged = false;
     m_pollSnapshotChanged = false;
     const BridgePollRunResult run = drainBridgeQueues(m_bridgePollBudgetMs);
+    // After the drain, so the wake fd is ready again only for what is still
+    // queued, which the next poll takes.
+    ferrous_ffi_bridge_ack_wakeup(m_ffiBridge);
 
     if (m_pollPlaybackChanged) {
         schedulePlaybackChanged();
