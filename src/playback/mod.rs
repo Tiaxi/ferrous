@@ -1229,6 +1229,8 @@ mod tests {
     }
 }
 
+#[cfg(feature = "gst")]
+mod collection_order;
 #[cfg(all(test, feature = "gst"))]
 pub(crate) mod pipeline_trace;
 mod queue;

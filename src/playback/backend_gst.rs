@@ -4531,6 +4531,101 @@ mod gst_integration_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// How an output of the `parsebin` of a source was exposed, and what
+    /// reached the output's peer first.
+    #[derive(Debug, Default)]
+    struct ParsedOutput {
+        /// The output had its stream collection when it was exposed.
+        had_collection: bool,
+        /// The output held its data when it was exposed.
+        held: bool,
+        /// The collection reached the peer before any buffer, if either
+        /// has reached it.
+        collection_first: Option<bool>,
+    }
+
+    /// Record how `parsebin` exposes each output in the sources of
+    /// `playbin`. Connected after the runtime, so it sees each output as
+    /// the runtime has left it.
+    fn watch_parsed_outputs(playbin: &gst::Element) -> Arc<Mutex<Vec<Arc<Mutex<ParsedOutput>>>>> {
+        let outputs = Arc::new(Mutex::new(Vec::new()));
+        let added = Arc::clone(&outputs);
+        playbin.connect("deep-element-added", false, move |values| {
+            let bin = values.get(1)?.get::<gst::Element>().ok()?;
+            let element = values.get(2)?.get::<gst::Element>().ok()?;
+            let factory = |element: &gst::Element| element.factory().map(|f| f.name().to_string());
+            if factory(&element).as_deref() != Some("parsebin")
+                || factory(&bin).as_deref() != Some("urisourcebin")
+            {
+                return None;
+            }
+            let added = Arc::clone(&added);
+            element.connect_pad_added(move |_, pad| {
+                let output = Arc::new(Mutex::new(ParsedOutput {
+                    had_collection: pad
+                        .sticky_event::<gst::event::StreamCollection>(0)
+                        .is_some(),
+                    held: pad.is_blocked(),
+                    collection_first: None,
+                }));
+                added.lock().unwrap().push(Arc::clone(&output));
+                pad.connect_linked(move |_, peer| {
+                    let output = Arc::clone(&output);
+                    peer.add_probe(
+                        gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+                        move |_, info| {
+                            let collection = match &info.data {
+                                Some(gst::PadProbeData::Buffer(_)) => false,
+                                Some(gst::PadProbeData::Event(event))
+                                    if event.type_() == gst::EventType::StreamCollection =>
+                                {
+                                    true
+                                }
+                                _ => return gst::PadProbeReturn::Ok,
+                            };
+                            output.lock().unwrap().collection_first = Some(collection);
+                            gst::PadProbeReturn::Remove
+                        },
+                    );
+                });
+            });
+            None
+        });
+        outputs
+    }
+
+    #[test]
+    fn parsed_streams_reach_decodebin3_after_their_collection_also_after_stop() {
+        // GStreamer 1.24's parsebin sends the collection of a stream only
+        // after letting its data through, and decodebin3 links a parsed
+        // input only once the collection has arrived. A first buffer that
+        // went ahead failed the run with not-linked (#207).
+        let (dir, paths) = tone_fixtures("collection-order", &["a.mp3"]);
+        let mut engine = TestEngine::new();
+        let outputs = watch_parsed_outputs(&engine.runtime.playbin);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(paths.clone()));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_until_playing().expect("track plays");
+        engine.runtime.apply_command(PlaybackCommand::Stop);
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_until_playing().expect("track replays");
+
+        let outputs = outputs.lock().unwrap();
+        assert_eq!(outputs.len(), 2, "one parsed output in each run");
+        for output in outputs.iter() {
+            let output = output.lock().unwrap();
+            // An output exposed without its collection, as in 1.24, holds
+            // its data; from 1.25.1 the output has it.
+            assert_eq!(output.held, !output.had_collection, "{output:?}");
+            assert_eq!(output.collection_first, Some(true), "{output:?}");
+        }
+        drop(outputs);
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn make_full_analysis_sink() -> gst::Bin {
         let (analysis_tx, _) = unbounded();
         let sink = gst::ElementFactory::make("fakesink")
