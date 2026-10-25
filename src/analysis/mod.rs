@@ -5234,4 +5234,78 @@ mod tests {
             Ok(WaveformDecodeJob { track_token: 6, .. })
         ));
     }
+
+    #[test]
+    fn repeat_one_stages_the_playing_file_without_probing_it_again() {
+        let a = Path::new("/music/a.flac");
+        for mode in MODES {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            let mut state = AnalysisRuntimeState::new();
+            state.display_mode = mode;
+            // Held, so the centered staging thread never opens the file.
+            let (release_staging, staging_gate) = crossbeam_channel::bounded::<()>(0);
+            state.staging_open_gate = Some(staging_gate);
+            state.handle_track_change(a.to_path_buf(), true, false, 1, &ctx);
+            let _ = only_track_io_request(&state);
+            state.handle_track_io_reply(
+                TrackIoReply::TrackLoaded {
+                    track_token: 1,
+                    stamp: None,
+                    format: Some(TrackFormat::Known {
+                        sample_rate: 44_100,
+                        channels: 2,
+                    }),
+                    peaks: Some(vec![0.5; 4]),
+                },
+                &ctx,
+            );
+            channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+            let generation = channels.generation.load(Ordering::Relaxed);
+
+            // About to finish: the same file follows.
+            state.handle_prepare_gapless_continuation(a.to_path_buf(), &ctx);
+            assert!(state.track_io_requests.try_recv().is_err(), "{mode:?}");
+            if mode == SpectrogramDisplayMode::Rolling {
+                assert!(matches!(
+                    channels.spectrogram_cmd_rx.try_recv(),
+                    Ok(SpectrogramWorkerCommand::ContinueWithFile { track_token: 1, .. })
+                ));
+            } else {
+                assert!(state.staged_centered_thread.is_some());
+            }
+
+            state.handle_track_change(a.to_path_buf(), false, true, 2, &ctx);
+            let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+            if mode == SpectrogramDisplayMode::Rolling {
+                assert!(
+                    matches!(
+                        commands.as_slice(),
+                        [SpectrogramWorkerCommand::UpdateTrackToken { track_token: 2 }]
+                    ),
+                    "{commands:?}"
+                );
+            } else {
+                // Nothing was staged yet: a reset in the same generation,
+                // after the outgoing track's extent.
+                assert!(
+                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::NewTrack {
+                        track_token: 2, generation: g, emit_initial_reset: true, handoff, ..
+                    }] if *g == generation && handoff.finalize_previous),
+                    "{commands:?}"
+                );
+            }
+            assert!(matches!(
+                only_track_io_request(&state),
+                TrackIoRequest::LoadTrack {
+                    track_token: 2,
+                    probe: false,
+                    ..
+                }
+            ));
+            drop(release_staging);
+            state.handle_command(AnalysisCommand::Shutdown, &ctx);
+            assert!(state.retired_staging.is_empty());
+        }
+    }
 }
