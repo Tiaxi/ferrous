@@ -329,6 +329,52 @@ pub(super) fn handle_rescan_root(
     )
 }
 
+/// Scans `paths`, which changed on disk below `root`; see
+/// [`run_scoped_scan`]. A root removed since then is not scanned.
+pub(super) fn handle_scan_paths(
+    conn: &Connection,
+    root: &Path,
+    paths: &[PathBuf],
+    library: &mut WorkerLibrary,
+    event_tx: &Sender<LibraryEvent>,
+    control: &mut dyn ScanControl,
+) -> Result<(), String> {
+    let root = resolve_root_path(root);
+    if !load_roots(conn).iter().any(|known| known.path == root) {
+        return Ok(());
+    }
+    let covers = EmbeddedCoverCache::shared();
+    if paths.contains(&root) {
+        return run_scans_with(conn, &[root], covers, library, event_tx, control);
+    }
+    let scope = outermost_paths_below(&root, paths);
+    if scope.is_empty() {
+        return Ok(());
+    }
+    run_scoped_scan(conn, &root, &scope, covers, library, event_tx, control)
+}
+
+/// The paths of `paths` strictly below `root` that are not below another of
+/// them, sorted.
+pub(super) fn outermost_paths_below(root: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut below: Vec<&PathBuf> = paths
+        .iter()
+        .filter(|path| *path != root && path.starts_with(root))
+        .collect();
+    // Paths sort by component, so a path's descendants follow it.
+    below.sort();
+    let mut outermost: Vec<PathBuf> = Vec::with_capacity(below.len());
+    for path in below {
+        if outermost
+            .last()
+            .is_none_or(|kept: &PathBuf| !path.starts_with(kept))
+        {
+            outermost.push(path.clone());
+        }
+    }
+    outermost
+}
+
 pub(super) fn handle_rescan_all(
     conn: &Connection,
     library: &mut WorkerLibrary,
@@ -540,39 +586,159 @@ pub(super) fn run_scans_with(
         return Ok(());
     }
 
-    let roots_total = roots.len();
-    let mut problems = Vec::new();
+    let mut run = ScanRun {
+        conn,
+        covers,
+        library,
+        event_tx,
+        control,
+        problems: Vec::new(),
+    };
     for (idx, root) in roots.iter().enumerate() {
-        let remaining = &roots[idx + 1..];
-        match control.poll(conn, library, event_tx, root, remaining) {
+        let end = run.scan(root, None, (idx, roots.len()), &roots[idx + 1..]);
+        if end.stopped_all {
+            return scan_result(&run.problems);
+        }
+    }
+    run.remove_unreferenced_covers();
+    scan_result(&run.problems)
+}
+
+/// Scans the files and folders `scope` of `root`, a configured root, as
+/// [`run_scans_with`] scans a whole root: rows of files found there are
+/// read again if they changed, and rows of files gone from there are
+/// removed. A scope that only a walk of the whole root can scan, because
+/// links or hard links reach its files, is scanned by scanning the root.
+pub(super) fn run_scoped_scan(
+    conn: &Connection,
+    root: &Path,
+    scope: &[PathBuf],
+    covers: Option<&'static EmbeddedCoverCache>,
+    library: &mut WorkerLibrary,
+    event_tx: &Sender<LibraryEvent>,
+    control: &mut dyn ScanControl,
+) -> Result<(), String> {
+    let mut run = ScanRun {
+        conn,
+        covers,
+        library,
+        event_tx,
+        control,
+        problems: Vec::new(),
+    };
+    let mut end = run.scan(root, Some(scope), (0, 1), &[]);
+    if end.needs_full_scan && !end.stopped_all {
+        end = run.scan(root, None, (0, 1), &[]);
+        end.changed = true;
+    }
+    if end.stopped_all {
+        return scan_result(&run.problems);
+    }
+    // Only a scan that wrote or removed rows can leave a cover unreferenced.
+    if end.changed {
+        run.remove_unreferenced_covers();
+    }
+    scan_result(&run.problems)
+}
+
+/// The scans of one command, and the problems they found.
+struct ScanRun<'a> {
+    conn: &'a Connection,
+    covers: Option<&'static EmbeddedCoverCache>,
+    library: &'a mut WorkerLibrary,
+    event_tx: &'a Sender<LibraryEvent>,
+    control: &'a mut dyn ScanControl,
+    problems: Vec<String>,
+}
+
+/// How the scan of one root in a [`ScanRun`] ended.
+#[derive(Debug, Default)]
+struct RootScanEnd {
+    /// The worker is shutting down: no other scan runs.
+    stopped_all: bool,
+    /// See [`RootScanOutcome::needs_full_scan`].
+    needs_full_scan: bool,
+    /// Whether rows were written or removed.
+    changed: bool,
+}
+
+impl ScanRun<'_> {
+    /// Scans `scope` of `root`, or all of it, as root `position.0` of
+    /// `position.1`; `remaining` are the roots scanned after it.
+    fn scan(
+        &mut self,
+        root: &Path,
+        scope: Option<&[PathBuf]>,
+        position: (usize, usize),
+        remaining: &[PathBuf],
+    ) -> RootScanEnd {
+        let conn = self.conn;
+        match self
+            .control
+            .poll(conn, self.library, self.event_tx, root, remaining)
+        {
             ScanDirective::Continue => {}
-            ScanDirective::SkipRoot => continue,
-            ScanDirective::StopAll => return scan_result(&problems),
+            ScanDirective::SkipRoot => return RootScanEnd::default(),
+            ScanDirective::StopAll => {
+                return RootScanEnd {
+                    stopped_all: true,
+                    ..RootScanEnd::default()
+                }
+            }
         }
         let mut sink = SnapshotSink::new(
-            library,
-            event_tx,
-            &mut *control,
+            self.library,
+            self.event_tx,
+            &mut *self.control,
             root,
             remaining,
-            (idx, roots_total),
+            position,
         );
 
         // Roots are independent: a root that fails or cannot be fully read is
         // reported without stopping the remaining scans.
-        let result = scan_root(conn, root, covers, &mut sink);
+        let result = scan_root_in(conn, root, scope, self.covers, &mut sink);
         let stopped = sink.stopped;
         let committed_any = sink.committed_any;
         let final_progress = sink.final_progress.clone();
+        let mut end = RootScanEnd {
+            changed: committed_any,
+            ..RootScanEnd::default()
+        };
         match result {
             Ok(outcome) => {
+                // A removed name of a file with other names: only a scan of
+                // the root finds the name to index now.
+                end.needs_full_scan = outcome.needs_full_scan
+                    || (scope.is_some()
+                        && outcome
+                            .removed
+                            .iter()
+                            .any(|path| self.library.hard_linked.contains(Path::new(path))));
+                if let Some(hard_linked) = outcome.hard_linked {
+                    // The roots inside this one, from before nested roots
+                    // were refused, are theirs; the scan skipped them.
+                    let nested: Vec<PathBuf> = self
+                        .library
+                        .roots()
+                        .iter()
+                        .map(|known| known.path.clone())
+                        .filter(|known| known != root && known.starts_with(root))
+                        .collect();
+                    self.library.hard_linked.retain(|path| {
+                        !path.starts_with(root)
+                            || nested.iter().any(|inner| path.starts_with(inner))
+                    });
+                    self.library.hard_linked.extend(hard_linked);
+                }
                 if !outcome.removed.is_empty() {
+                    end.changed = true;
                     let stale_set: HashSet<String> = outcome.removed.into_iter().collect();
-                    library.remove_where(|track| {
+                    self.library.remove_where(|track| {
                         stale_set.contains(track.path.to_string_lossy().as_ref())
                     });
                 }
-                problems.extend(outcome.problem);
+                self.problems.extend(outcome.problem);
             }
             Err(err) => {
                 // The batches committed before the failure stay, and the
@@ -580,22 +746,25 @@ pub(super) fn run_scans_with(
                 // Read the library again so it matches the database
                 // whatever the failure left.
                 if committed_any {
-                    control.external_writes(conn);
-                    library.reload(conn);
+                    self.control.external_writes(conn);
+                    self.library.reload(conn);
                 }
-                problems.push(format!("failed to scan '{}': {err}", root.display()));
+                self.problems
+                    .push(format!("failed to scan '{}': {err}", root.display()));
             }
         }
         if stopped == Some(ScanDirective::StopAll) {
-            return scan_result(&problems);
+            end.stopped_all = true;
+            return end;
         }
 
-        if control.external_writes(conn) {
-            library.reload(conn);
+        if self.control.external_writes(conn) {
+            self.library.reload(conn);
         }
-        library.status.scan_in_progress = true;
-        library.status.scan_progress = Some(LibraryScanProgress {
-            current_root: Some(root.clone()),
+        let (idx, roots_total) = position;
+        self.library.status.scan_in_progress = true;
+        self.library.status.scan_progress = Some(LibraryScanProgress {
+            current_root: Some(root.to_path_buf()),
             roots_completed: idx + 1,
             roots_total,
             supported_files_discovered: final_progress.discovered,
@@ -603,16 +772,19 @@ pub(super) fn run_scans_with(
             files_per_second: final_progress.files_per_second,
             eta_seconds: None,
         });
-        library.publish(event_tx);
+        self.library.publish(self.event_tx);
+        end
     }
 
-    // Tracks that a scan kept or could not finish still reference their
-    // covers, so the cache cleanup is safe even when a root had problems.
-    if let Err(err) = super::cover_cache::remove_unreferenced_embedded_covers(conn, covers) {
-        problems.push(err);
+    /// Tracks that a scan kept or could not finish still reference their
+    /// covers, so the cache cleanup is safe even when a root had problems.
+    fn remove_unreferenced_covers(&mut self) {
+        if let Err(err) =
+            super::cover_cache::remove_unreferenced_embedded_covers(self.conn, self.covers)
+        {
+            self.problems.push(err);
+        }
     }
-
-    scan_result(&problems)
 }
 
 fn scan_result(problems: &[String]) -> Result<(), String> {
@@ -2159,53 +2331,108 @@ fn load_existing_tracks_for_root(
     root_str: &str,
 ) -> HashMap<String, ExistingTrackScanState> {
     let mut existing = HashMap::new();
-    if let Ok(mut stmt) = conn.prepare(
-        r"
-        SELECT path, title, track_no, mtime_ns, size_bytes, cover_checked, duration_secs, search_tags IS NULL,
-               cover_path
-        FROM tracks
-        WHERE root_path = ?1
-           OR (root_path = '' AND (path = ?1 OR substr(path, 1, length(?2)) = ?2))
-        ",
-    ) {
-        let mapped = stmt.query_map(params![root_str, descendant_prefix(root_str)], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<f64>>(6)?,
-                row.get::<_, bool>(7)?,
-                row.get::<_, String>(8)?,
-            ))
-        });
+    if let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT {EXISTING_TRACK_COLUMNS} FROM tracks WHERE {ROOT_TRACKS_FILTER}"
+    )) {
+        let mapped = stmt.query_map(
+            params![root_str, descendant_prefix(root_str)],
+            existing_track_row,
+        );
         if let Ok(rows) = mapped {
-            for item in rows.flatten() {
-                let path = Path::new(&item.0);
-                let file_stem = path
-                    .file_stem()
-                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-                let filename_fallback = !item.1.trim().is_empty() && item.1 == file_stem;
-                let missing_duration = item.6.is_none() || item.6.is_some_and(|d| d <= 0.0);
-                let suspicious_metadata = item.7 || item.1.trim().is_empty()
-                    || (item.2.is_none()
-                        && filename_fallback
-                        && leading_track_number(&file_stem).is_some())
-                    || (missing_duration && is_raw_surround_file(path));
-                existing.insert(
-                    item.0,
-                    ExistingTrackScanState {
-                        row: RowState::new(item.3, item.4, &item.8),
-                        has_cover_path: item.5 != 0,
-                        suspicious_metadata,
-                    },
-                );
-            }
+            existing.extend(rows.flatten().map(existing_track_state));
         }
     }
     existing
+}
+
+/// The rows of `root_str` at the paths of `scope` and below them.
+fn load_existing_tracks_in_scope(
+    conn: &Connection,
+    root_str: &str,
+    scope: &[PathBuf],
+) -> Result<HashMap<String, ExistingTrackScanState>, String> {
+    // A range of the primary key: the paths that start with the scope
+    // path, followed by a byte below '0', the byte after '/'. The rows of
+    // siblings that the range also has, such as `a b` for `a`, are dropped
+    // below.
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT {EXISTING_TRACK_COLUMNS} FROM tracks \
+             WHERE path >= ?3 AND path < ?4 AND ({ROOT_TRACKS_FILTER})"
+        ))
+        .map_err(|e| format!("failed to read the indexed tracks: {e}"))?;
+    let root_prefix = descendant_prefix(root_str);
+    let mut existing = HashMap::new();
+    for path in scope {
+        let path_str = path.to_string_lossy();
+        let below = descendant_prefix(&path_str);
+        let rows = stmt
+            .query_map(
+                params![root_str, root_prefix, path_str, format!("{path_str}0")],
+                existing_track_row,
+            )
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .map_err(|e| format!("failed to read the indexed tracks: {e}"))?;
+        existing.extend(
+            rows.into_iter()
+                .filter(|row| row.0 == path_str || row.0.starts_with(&below))
+                .map(existing_track_state),
+        );
+    }
+    Ok(existing)
+}
+
+const EXISTING_TRACK_COLUMNS: &str = "path, title, track_no, mtime_ns, size_bytes, \
+    cover_checked, duration_secs, search_tags IS NULL, cover_path";
+
+/// The rows of root `?1`, whose descendants start with `?2`, including rows
+/// from before tracks had a root.
+const ROOT_TRACKS_FILTER: &str = "root_path = ?1 \
+    OR (root_path = '' AND (path = ?1 OR substr(path, 1, length(?2)) = ?2))";
+
+type ExistingTrackRow = (
+    String,
+    String,
+    Option<i64>,
+    i64,
+    i64,
+    i64,
+    Option<f64>,
+    bool,
+    String,
+);
+
+fn existing_track_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExistingTrackRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+    ))
+}
+
+fn existing_track_state(item: ExistingTrackRow) -> (String, ExistingTrackScanState) {
+    let path = Path::new(&item.0);
+    let file_stem = path
+        .file_stem()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let filename_fallback = !item.1.trim().is_empty() && item.1 == file_stem;
+    let missing_duration = item.6.is_none() || item.6.is_some_and(|d| d <= 0.0);
+    let suspicious_metadata = item.7
+        || item.1.trim().is_empty()
+        || (item.2.is_none() && filename_fallback && leading_track_number(&file_stem).is_some())
+        || (missing_duration && is_raw_surround_file(path));
+    let state = ExistingTrackScanState {
+        row: RowState::new(item.3, item.4, &item.8),
+        has_cover_path: item.5 != 0,
+        suspicious_metadata,
+    };
+    (item.0, state)
 }
 
 fn prepare_track_upsert_statement<'conn>(
@@ -2410,9 +2637,20 @@ enum WalkStep {
 /// when no path without links reached the same file, so the indexed path
 /// stays the same across scans. Paths that could not be read are recorded in
 /// `kept`: their tracks may still exist and must not be treated as deleted.
+///
+/// A scoped walk covers only some files and folders of the root. It cannot
+/// tell which of the paths that reach a file through links, or through
+/// hard links, a walk of the whole root indexes, so it keeps such paths and
+/// sets `needs_full_scan` instead.
 struct LibraryWalk {
-    walk: walkdir::IntoIter,
+    walk: Option<walkdir::IntoIter>,
     root: PathBuf,
+    /// The paths a scoped walk has yet to walk.
+    starts: VecDeque<PathBuf>,
+    /// The path the current walk started at.
+    start: PathBuf,
+    scoped: bool,
+    needs_full_scan: bool,
     nested_roots: HashSet<PathBuf>,
     ancestors: Vec<WalkAncestor>,
     claimed: HashSet<FileIdentity>,
@@ -2420,6 +2658,9 @@ struct LibraryWalk {
     /// Supported audio files encountered, including unreadable and duplicate ones.
     found: usize,
     kept: HashSet<PathBuf>,
+    /// The files found that have other names; see
+    /// [`WorkerLibrary::hard_linked`].
+    hard_linked: HashSet<PathBuf>,
     read_errors: usize,
     first_read_error: Option<String>,
 }
@@ -2427,24 +2668,93 @@ struct LibraryWalk {
 impl LibraryWalk {
     fn new(root: &Path, nested_roots: HashSet<PathBuf>) -> Self {
         Self {
-            walk: WalkDir::new(root)
-                .follow_links(true)
-                .sort_by_file_name()
-                .into_iter(),
+            walk: Some(walk_from(root)),
             root: root.to_path_buf(),
+            starts: VecDeque::new(),
+            start: root.to_path_buf(),
+            scoped: false,
+            needs_full_scan: false,
             nested_roots,
             ancestors: Vec::new(),
             claimed: HashSet::new(),
             linked: VecDeque::new(),
             found: 0,
             kept: HashSet::new(),
+            hard_linked: HashSet::new(),
             read_errors: 0,
             first_read_error: None,
         }
     }
 
+    /// A walk of the files and folders `scope` of `root`.
+    fn scoped(root: &Path, scope: &[PathBuf], nested_roots: HashSet<PathBuf>) -> Self {
+        Self {
+            walk: None,
+            starts: scope.iter().cloned().collect(),
+            scoped: true,
+            ..Self::new(root, nested_roots)
+        }
+    }
+
+    /// Starts the walk of the next path of a scoped walk. Returns false when
+    /// none is left.
+    fn next_walk(&mut self) -> bool {
+        self.walk = None;
+        while let Some(start) = self.starts.pop_front() {
+            if self
+                .nested_roots
+                .iter()
+                .any(|nested| start.starts_with(nested))
+            {
+                self.kept.insert(start);
+                continue;
+            }
+            if !self.reached_without_links(&start) {
+                self.needs_full_scan = true;
+                self.kept.insert(start);
+                continue;
+            }
+            self.ancestors.clear();
+            self.walk = Some(walk_from(&start));
+            self.start = start;
+            return true;
+        }
+        false
+    }
+
+    /// Whether `path`, below the canonical root, is reached without links:
+    /// it is its own canonical path, or, once it is gone, the closest folder
+    /// above it that exists is.
+    fn reached_without_links(&self, path: &Path) -> bool {
+        let mut path = path;
+        loop {
+            match path.canonicalize() {
+                Ok(canonical) => return canonical == path,
+                Err(_) if path != self.root => match path.parent() {
+                    Some(parent) => path = parent,
+                    None => return false,
+                },
+                Err(_) => return false,
+            }
+        }
+    }
+
+    /// Keeps the rows at `path` for a scan of the whole root to resolve.
+    fn defer_to_full_scan(&mut self, path: &Path) {
+        self.needs_full_scan = true;
+        self.kept.insert(path.to_path_buf());
+    }
+
     fn visit(&mut self, entry: &walkdir::DirEntry) -> WalkStep {
         let depth = entry.depth();
+        if self.scoped && entry.path_is_symlink() {
+            self.defer_to_full_scan(entry.path());
+            return if entry.file_type().is_dir() {
+                WalkStep::SkipDir
+            } else {
+                WalkStep::Continue
+            };
+        }
         let via_link = entry.path_is_symlink()
             || depth
                 .checked_sub(1)
@@ -2486,6 +2796,14 @@ impl LibraryWalk {
                 .map_or(0, |duration| u128_to_i64(duration.as_nanos())),
             size_bytes: u64_to_i64(metadata.len()),
         };
+        #[cfg(unix)]
+        if metadata.nlink() > 1 {
+            if self.scoped {
+                self.defer_to_full_scan(path);
+                return WalkStep::Continue;
+            }
+            self.hard_linked.insert(path.to_path_buf());
+        }
         let identity = file_identity(path, &metadata);
         if via_link {
             self.linked.push_back((candidate, identity));
@@ -2508,6 +2826,15 @@ impl LibraryWalk {
             // A link back to an ancestor: the walk already covers its files.
             return;
         }
+        if self.scoped
+            && err.depth() == 0
+            && err
+                .io_error()
+                .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound)
+        {
+            // A changed path that is gone: its tracks were deleted.
+            return;
+        }
         let path = err.path().map_or_else(
             || {
                 // Without a path, the error came from reading the directory
@@ -2515,7 +2842,7 @@ impl LibraryWalk {
                 err.depth()
                     .checked_sub(1)
                     .and_then(|parent| self.ancestors.get(parent))
-                    .map_or_else(|| self.root.clone(), |parent| parent.path.clone())
+                    .map_or_else(|| self.start.clone(), |parent| parent.path.clone())
             },
             Path::to_path_buf,
         );
@@ -2545,11 +2872,21 @@ impl Iterator for LibraryWalk {
     type Item = ScanCandidate;
 
     fn next(&mut self) -> Option<ScanCandidate> {
-        while let Some(entry) = self.walk.next() {
+        loop {
+            let Some(entry) = self.walk.as_mut().and_then(Iterator::next) else {
+                if self.next_walk() {
+                    continue;
+                }
+                break;
+            };
             match entry {
                 Ok(entry) => match self.visit(&entry) {
                     WalkStep::Continue => {}
-                    WalkStep::SkipDir => self.walk.skip_current_dir(),
+                    WalkStep::SkipDir => {
+                        if let Some(walk) = self.walk.as_mut() {
+                            walk.skip_current_dir();
+                        }
+                    }
                     WalkStep::Yield(candidate) => return Some(candidate),
                 },
                 Err(err) => self.record_walk_error(&err),
@@ -2564,12 +2901,31 @@ impl Iterator for LibraryWalk {
     }
 }
 
+fn walk_from(path: &Path) -> walkdir::IntoIter {
+    WalkDir::new(path)
+        .follow_links(true)
+        .sort_by_file_name()
+        .into_iter()
+}
+
+/// Whether `root` looks like a folder whose drive or share is not mounted:
+/// it is gone or empty.
+fn root_looks_offline(root: &Path) -> bool {
+    fs::read_dir(root).map_or(true, |mut entries| entries.next().is_none())
+}
+
 /// Result of scanning one root.
 struct RootScanOutcome {
     /// Tracks removed from the index because their files are gone.
     removed: Vec<String>,
     /// A condition that kept the scan from verifying tracks, for the user.
     problem: Option<String>,
+    /// Whether a scoped scan kept paths that only a scan of the whole root
+    /// can index correctly; see [`LibraryWalk`].
+    needs_full_scan: bool,
+    /// After a complete scan of the whole root, the files found that have
+    /// other names.
+    hard_linked: Option<HashSet<PathBuf>>,
 }
 
 pub(super) fn count_label(count: usize, singular: &str, plural: &str) -> String {
@@ -2741,17 +3097,30 @@ fn delete_stale_rows(
     Ok(removed)
 }
 
-/// Scans one root: walks it, reads the files that changed on worker
-/// threads, and writes their rows in batches of short transactions.
+/// Scans one root; see [`scan_root_in`].
+#[cfg(test)]
+fn scan_root(
+    conn: &Connection,
+    root: &Path,
+    covers: Option<&'static EmbeddedCoverCache>,
+    sink: &mut dyn ScanSink,
+) -> Result<RootScanOutcome, String> {
+    scan_root_in(conn, root, None, covers, sink)
+}
+
+/// Scans one root, or the files and folders `scope` of it: walks it, reads
+/// the files that changed on worker threads, and writes their rows in
+/// batches of short transactions.
 ///
 /// Other connections can write between batches, and a scan that stops early
 /// or fails keeps every batch it committed. Rows of files that are gone are
 /// removed only after a complete walk. A scan that `sink` stops returns an
 /// outcome with nothing removed and no problem.
 #[allow(clippy::too_many_lines)]
-fn scan_root(
+fn scan_root_in(
     conn: &Connection,
     root: &Path,
+    scope: Option<&[PathBuf]>,
     covers: Option<&'static EmbeddedCoverCache>,
     sink: &mut dyn ScanSink,
 ) -> Result<RootScanOutcome, String> {
@@ -2761,7 +3130,10 @@ fn scan_root(
     scan_test_hooks::note_scan(&root);
 
     let root_str = root.to_string_lossy().to_string();
-    let existing = load_existing_tracks_for_root(conn, &root_str);
+    let existing = match scope {
+        Some(scope) => load_existing_tracks_in_scope(conn, &root_str, scope)?,
+        None => load_existing_tracks_for_root(conn, &root_str),
+    };
     let previous_index_count = existing.len();
     let nested_roots = load_roots(conn)
         .into_iter()
@@ -2787,7 +3159,10 @@ fn scan_root(
     scan.report(sink, true);
 
     let mut workers = MetadataWorkerPool::new(tuning.workers, covers);
-    let mut walk = LibraryWalk::new(&root, nested_roots);
+    let mut walk = match scope {
+        Some(scope) => LibraryWalk::scoped(&root, scope, nested_roots),
+        None => LibraryWalk::new(&root, nested_roots),
+    };
 
     let complete = 'scan: {
         for ScanCandidate {
@@ -2861,12 +3236,17 @@ fn scan_root(
         return Ok(RootScanOutcome {
             removed: Vec::new(),
             problem: None,
+            needs_full_scan: false,
+            hard_linked: None,
         });
     }
 
     // A root that previously had tracks but now has no audio files at all is
-    // most likely an unmounted or offline folder, not an emptied library.
-    let keep_all = walk.found == 0 && previous_index_count > 0;
+    // most likely an unmounted or offline folder, not an emptied library. A
+    // scoped walk does not see the whole root, so it looks at the folder.
+    let keep_all = walk.found == 0
+        && previous_index_count > 0
+        && (scope.is_none() || root_looks_offline(&root));
     let stale: Vec<String> = if keep_all {
         Vec::new()
     } else {
@@ -2901,6 +3281,8 @@ fn scan_root(
     Ok(RootScanOutcome {
         removed,
         problem: (!problems.is_empty()).then(|| problems.join("; ")),
+        needs_full_scan: walk.needs_full_scan,
+        hard_linked: scope.is_none().then_some(walk.hard_linked),
     })
 }
 
@@ -3472,6 +3854,8 @@ where
 mod batch_tests;
 #[cfg(test)]
 mod refresh_tests;
+#[cfg(test)]
+mod scope_tests;
 
 #[cfg(test)]
 mod tests {

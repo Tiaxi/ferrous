@@ -2040,6 +2040,7 @@ fn parse_settings_command(
             i32::from(reader.read_u8()?),
         )),
         59 => BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(reader.read_u8()? != 0),
+        67 => BridgeSettingsCommand::SetLibraryWatchEnabled(reader.read_u8()? != 0),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -2441,6 +2442,16 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         let root_str = root.path.to_string_lossy().to_string();
         push_string(&mut out, &root_str);
         push_string(&mut out, &root.name);
+        // Why the root is not watched for changes; empty if it is.
+        let unwatched = snapshot
+            .library_status
+            .unwatched_roots
+            .iter()
+            .find(|unwatched| unwatched.path == root.path);
+        push_string(
+            &mut out,
+            unwatched.map_or("", |unwatched| unwatched.reason.as_str()),
+        );
     }
     if snapshot.pre_built_tree_bytes.is_some() {
         push_u16(&mut out, clamp_u16(snapshot.library_expanded_keys.len()));
@@ -2559,6 +2570,7 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         u8::from(snapshot.settings.display.show_level_meter),
     );
+    push_u8(&mut out, u8::from(snapshot.settings.library_watch_enabled));
     out
 }
 
@@ -2988,11 +3000,13 @@ mod tests {
                     spectrogram_zoom_enabled: true,
                 },
                 library_sort_mode: LibrarySortMode::Year,
+                library_watch_enabled: true,
                 integrations: super::super::BridgeIntegrationSettings {
                     system_media_controls_enabled: true,
                     lastfm_scrobbling_enabled: true,
                     lastfm_username: "tester".to_string(),
                 },
+                unknown_lines: Vec::new(),
             },
             lastfm: crate::lastfm::RuntimeState {
                 enabled: true,
@@ -4281,13 +4295,62 @@ mod tests {
                 if value == enabled));
             let mut snapshot = sample_snapshot();
             snapshot.settings.display.show_level_meter = enabled;
+            let settings = encode_settings_section(&snapshot);
+            // Followed by library watching.
+            assert_eq!(settings[settings.len() - 2], u8::from(enabled));
+        }
+        assert!(parse_binary_command(&encode_command(65, &[])).is_err());
+        assert!(parse_binary_command(&encode_command(65, &[1, 0])).is_err());
+    }
+
+    #[test]
+    fn library_watching_command_and_snapshot_share_protocol() {
+        for enabled in [false, true] {
+            let cmd = parse_binary_command(&encode_command(67, &[u8::from(enabled)]))
+                .expect("parse library watching setting")
+                .expect("library watching setting command");
+            assert!(matches!(cmd,
+                BridgeCommand::Settings(BridgeSettingsCommand::SetLibraryWatchEnabled(value))
+                if value == enabled));
+            let mut snapshot = sample_snapshot();
+            snapshot.settings.library_watch_enabled = enabled;
             assert_eq!(
                 encode_settings_section(&snapshot).last(),
                 Some(&u8::from(enabled))
             );
         }
-        assert!(parse_binary_command(&encode_command(65, &[])).is_err());
-        assert!(parse_binary_command(&encode_command(65, &[1, 0])).is_err());
+        assert!(parse_binary_command(&encode_command(67, &[])).is_err());
+    }
+
+    #[test]
+    fn library_roots_carry_why_they_are_not_watched() {
+        let mut snapshot = sample_snapshot();
+        let mut library = (*snapshot.library).clone();
+        library.roots = vec![
+            crate::library::LibraryRoot {
+                path: PathBuf::from("/music"),
+                name: "Music".to_string(),
+            },
+            crate::library::LibraryRoot {
+                path: PathBuf::from("/nas"),
+                name: String::new(),
+            },
+        ];
+        snapshot.library = Arc::new(library);
+        snapshot.library_status.unwatched_roots = vec![crate::library::UnwatchedRoot {
+            path: PathBuf::from("/nas"),
+            reason: "it is on nfs4".to_string(),
+        }];
+        snapshot.pre_built_tree_bytes = None;
+
+        let section = encode_library_meta_section(&snapshot);
+
+        let mut tail = Vec::new();
+        push_u16(&mut tail, 2);
+        for value in ["/music", "Music", "", "/nas", "", "it is on nfs4"] {
+            push_string(&mut tail, value);
+        }
+        assert!(section.ends_with(&tail), "path, name and reason per root");
     }
 
     #[test]
@@ -4312,10 +4375,11 @@ mod tests {
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
         // Settings tail: system media controls, fullscreen mode, display mode,
-        // crosshair, scale, channel buttons, zoom, display sleep, level meter.
+        // crosshair, scale, channel buttons, zoom, display sleep, level meter,
+        // library watching.
         assert_eq!(
-            &settings[settings.len() - 9..],
-            &[0, 1, 0, 0, 0, 1, 1, 0, 1]
+            &settings[settings.len() - 10..],
+            &[0, 1, 0, 0, 0, 1, 1, 0, 1, 1]
         );
     }
 
@@ -4336,8 +4400,9 @@ mod tests {
         offset += metadata_len;
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
-        // Crosshair, scale, channel buttons, zoom, display sleep, level meter.
-        assert_eq!(&settings[settings.len() - 6..], &[1, 1, 1, 1, 1, 1]);
+        // Crosshair, scale, channel buttons, zoom, display sleep, level meter,
+        // library watching.
+        assert_eq!(&settings[settings.len() - 7..], &[1, 1, 1, 1, 1, 1, 1]);
     }
 
     #[test]

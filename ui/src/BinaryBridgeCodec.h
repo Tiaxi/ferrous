@@ -108,6 +108,7 @@ enum CommandId : quint16 {
     CmdSetShowLevelMeter = 65,
     // Payload: a u32 request ID, echoed in SectionStateSaved.
     CmdSaveState = 66,
+    CmdSetLibraryWatchEnabled = 67,
 };
 
 struct DecodedPlayback {
@@ -198,6 +199,8 @@ struct DecodedQueue {
 struct DecodedLibraryRoot {
     QString path;
     QString name;
+    // Why the library does not watch the root for changes; empty if it does.
+    QString unwatchedReason;
 };
 
 struct DecodedLibraryMeta {
@@ -263,6 +266,7 @@ struct DecodedSettings {
     bool showSpectrogramScale{false};
     int channelButtonsVisibility{1};
     bool spectrogramZoomEnabled{true};
+    bool libraryWatchEnabled{true};
 };
 
 struct DecodedLastFm {

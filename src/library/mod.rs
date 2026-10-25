@@ -7,6 +7,7 @@ mod scan;
 mod schema;
 #[cfg(test)]
 mod test_fixtures;
+mod watch;
 mod worker;
 
 use std::path::PathBuf;
@@ -155,6 +156,17 @@ pub struct LibraryStatus {
     pub scan_in_progress: bool,
     pub scan_progress: Option<LibraryScanProgress>,
     pub last_error: Option<String>,
+    /// The roots that changes on disk are not watched for, sorted by path.
+    pub unwatched_roots: Vec<UnwatchedRoot>,
+}
+
+/// A library root whose changes on disk the library does not see as they
+/// happen, and that it rescans instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnwatchedRoot {
+    pub path: PathBuf,
+    /// Why, and what the library does instead, for the user.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +193,15 @@ pub enum LibraryCommand {
     /// worker last published, so that a copy of the library that applied
     /// changes out of order matches the database again.
     ReadRows(Vec<PathBuf>),
+    /// Scan these files and folders below `root` again: they changed on
+    /// disk. Sent by the library's watcher.
+    ScanPaths {
+        root: PathBuf,
+        paths: Vec<PathBuf>,
+    },
+    /// The roots the watcher does not watch; published as
+    /// [`LibraryStatus::unwatched_roots`].
+    SetUnwatchedRoots(Vec<UnwatchedRoot>),
 }
 
 static FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -252,26 +273,39 @@ impl From<&LibraryTrack> for IndexedTrack {
 }
 
 /// How long dropping the [`LibraryService`] waits for its worker to stop a
-/// scan, checkpoint the database, and close it.
+/// scan, checkpoint the database, and close it, and for its watcher to end.
 pub(crate) const LIBRARY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct LibraryService {
     tx: Option<Sender<LibraryCommand>>,
     thread: Option<JoinableThread>,
+    watcher: watch::WatchService,
 }
 
 impl LibraryService {
+    /// The library service, which watches its roots for changes once
+    /// [`LibraryService::set_watching`] turns watching on.
     #[must_use]
     pub fn new() -> (Self, Receiver<LibraryEvent>) {
         let db_path = crate::paths::library_db_path()
             .map_err(|err| format!("could not open the library database: {err}"));
-        Self::spawn(db_path, schema::BUSY_TIMEOUT, || {})
+        Self::spawn(
+            db_path,
+            schema::BUSY_TIMEOUT,
+            watch::WatchTuning::default(),
+            || {},
+        )
     }
 
     /// A service on the database at `path`, scanning as the app does.
     #[cfg(test)]
     pub(crate) fn at_database(path: PathBuf) -> (Self, Receiver<LibraryEvent>) {
-        Self::spawn(Ok(path), schema::BUSY_TIMEOUT, || {})
+        Self::spawn(
+            Ok(path),
+            schema::BUSY_TIMEOUT,
+            watch::WatchTuning::default(),
+            || {},
+        )
     }
 
     /// A service on the database at `path`, whose scans use `tuning`.
@@ -281,29 +315,54 @@ impl LibraryService {
         busy_timeout: Duration,
         tuning: scan::ScanTuning,
     ) -> (Self, Receiver<LibraryEvent>) {
-        Self::spawn(Ok(path), busy_timeout, move || {
+        Self::with_watch_tuning(path, busy_timeout, tuning, watch::WatchTuning::default())
+    }
+
+    /// A service on the database at `path`, whose scans use `tuning` and
+    /// whose watcher uses `watching`.
+    #[cfg(test)]
+    fn with_watch_tuning(
+        path: PathBuf,
+        busy_timeout: Duration,
+        tuning: scan::ScanTuning,
+        watching: watch::WatchTuning,
+    ) -> (Self, Receiver<LibraryEvent>) {
+        Self::spawn(Ok(path), busy_timeout, watching, move || {
             scan::scan_test_hooks::set_tuning(tuning);
         })
     }
 
-    /// Starts the worker, which runs `configure` first.
+    /// Starts the worker, which runs `configure` first, and the watcher.
     fn spawn(
         db_path: Result<PathBuf, String>,
         busy_timeout: Duration,
+        watching: watch::WatchTuning,
         configure: impl FnOnce() + Send + 'static,
     ) -> (Self, Receiver<LibraryEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<LibraryCommand>();
         let (event_tx, event_rx) = unbounded::<LibraryEvent>();
+        let (watcher, changes) = watch::WatchService::spawn(watching);
+        let roots = watcher.handle();
 
         let thread = crate::worker_thread::spawn_worker("ferrous-library", move || {
             configure();
-            worker::run(db_path, busy_timeout, cmd_rx, &event_tx);
+            worker::run(
+                db_path,
+                busy_timeout,
+                worker::Inputs {
+                    commands: cmd_rx,
+                    changes,
+                    roots,
+                },
+                &event_tx,
+            );
         });
 
         (
             Self {
                 tx: Some(cmd_tx),
                 thread,
+                watcher,
             },
             event_rx,
         )
@@ -314,21 +373,36 @@ impl LibraryService {
             let _ = tx.send(cmd);
         }
     }
+
+    /// Turns watching the roots for changes on or off. Turning it on, the
+    /// first time too, also rescans every root, so that changes made while
+    /// it was off appear.
+    pub fn set_watching(&self, enabled: bool) {
+        self.watcher.set_enabled(enabled);
+    }
 }
 
 impl Drop for LibraryService {
-    /// Closes the command channel, which stops a running scan between
-    /// files, and waits a bounded time for the worker to checkpoint and
-    /// close the database.
+    /// Stops the watcher and closes the command channel, which stops a
+    /// running scan between files, and waits a bounded time for the worker
+    /// to checkpoint and close the database, and for the watcher to end.
     fn drop(&mut self) {
+        self.watcher.stop();
         self.tx = None;
+        let deadline = Instant::now() + LIBRARY_SHUTDOWN_TIMEOUT;
         if let Some(thread) = self.thread.take() {
-            if !thread.join_by(Instant::now() + LIBRARY_SHUTDOWN_TIMEOUT) {
+            if !thread.join_by(deadline) {
                 eprintln!(
                     "[ferrous] the library worker did not stop within {} s",
                     LIBRARY_SHUTDOWN_TIMEOUT.as_secs()
                 );
             }
+        }
+        if !self.watcher.join_by(deadline) {
+            eprintln!(
+                "[ferrous] the library watcher did not stop within {} s",
+                LIBRARY_SHUTDOWN_TIMEOUT.as_secs()
+            );
         }
     }
 }

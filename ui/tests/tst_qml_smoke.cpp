@@ -618,6 +618,7 @@ private slots:
     void failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow();
     void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void albumArtTileKeepsHeightInsideColumnLayout();
+    void libraryPreferencesToggleWatchingAndShowUnwatchedRoots();
     void albumArtViewerInfoUsesImageProviderLocalPath();
     void tagEditorLibrarySupportGateMatchesSupportedRows();
     void libraryTreeStartsCollapsedByDefault();
@@ -991,6 +992,7 @@ Item {
         property int lastFmPendingScrobbleCount: 0
         property string lastFmUsername: ""
         property bool systemMediaControlsEnabled: true
+        property bool libraryWatchEnabled: true
         property var mutedChannelsMask: 0
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
@@ -1037,6 +1039,7 @@ Item {
         function completeLastFmAuth() {}
         function disconnectLastFm() {}
         function setSystemMediaControlsEnabled(value) {}
+        function setLibraryWatchEnabled(value) { libraryWatchEnabled = value }
         function openContainingFolder(path) {}
         function setGlobalSearchQuery(query) {}
         function searchCurrentTrackArtworkSuggestions() {}
@@ -2387,6 +2390,101 @@ void QmlSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
             QTRY_COMPARE(meter->height(), 20.0);
         }
     }
+}
+
+void QmlSmokeTest::libraryPreferencesToggleWatchingAndShowUnwatchedRoots() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "preferences" as Preferences
+
+ApplicationWindow {
+    id: harness
+    width: 720
+    height: 640
+    visible: true
+
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property bool libraryWatchEnabled: true
+        property int watchToggles: 0
+        property int librarySortMode: 0
+        property var libraryRootEntries: [
+            { path: "/music", name: "", displayName: "/music", unwatchedReason: "" },
+            { path: "/nas", name: "NAS", displayName: "NAS", unwatchedReason: "it is on nfs4" }
+        ]
+        function setLibraryWatchEnabled(value) {
+            libraryWatchEnabled = value
+            watchToggles += 1
+        }
+        function setLibrarySortMode(mode) {}
+        function rescanAllLibraryRoots() {}
+        function openInFileBrowser(path) {}
+        function rescanLibraryRoot(path) {}
+        function removeLibraryRoot(path) {}
+    }
+
+    Components.UiPalette {
+        id: palette
+        windowRoot: harness
+    }
+
+    Preferences.LibraryPage {
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: harness
+        promptAddLibraryRoot: function(context) {}
+        openLibraryRootNameDialog: function(mode, path, name) {}
+        stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
+        snappyScrollFlickDeceleration: 18000
+        snappyScrollMaxFlickVelocity: 1400
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr);
+    QQuickItem *harness = window->contentItem();
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(bridge != nullptr);
+
+    QQuickItem *checkBox = findQuickItemByObjectName(harness, QStringLiteral("libraryWatchCheckBox"));
+    QVERIFY(checkBox != nullptr);
+    QVERIFY(checkBox->property("checked").toBool());
+    bridge->setProperty("libraryWatchEnabled", false);
+    QTRY_VERIFY(!checkBox->property("checked").toBool());
+    bridge->setProperty("libraryWatchEnabled", true);
+    QTRY_VERIFY(checkBox->property("checked").toBool());
+    checkBox->setProperty("checked", false);
+    QVERIFY(QMetaObject::invokeMethod(checkBox, "toggled"));
+    QTRY_COMPARE(bridge->property("watchToggles").toInt(), 1);
+    QVERIFY(!bridge->property("libraryWatchEnabled").toBool());
+
+    // Only the root that is not watched says so, and why.
+    QList<QQuickItem *> labels;
+    std::function<void(QQuickItem *)> collect = [&](QQuickItem *item) {
+        if (item->objectName() == QStringLiteral("libraryRootUnwatchedLabel")) {
+            labels.append(item);
+        }
+        for (QQuickItem *child : item->childItems()) {
+            collect(child);
+        }
+    };
+    QTRY_VERIFY((labels.clear(), collect(harness), labels.size() == 2));
+    QStringList shown;
+    for (QQuickItem *label : labels) {
+        if (label->isVisible()) {
+            shown.append(label->property("text").toString());
+        }
+    }
+    QCOMPARE(shown, QStringList{QStringLiteral("Not watched for changes: it is on nfs4")});
 }
 
 void QmlSmokeTest::albumArtTileKeepsHeightInsideColumnLayout() {

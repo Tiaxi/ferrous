@@ -141,6 +141,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool showSpectrogramScale READ showSpectrogramScale NOTIFY snapshotChanged)
     Q_PROPERTY(bool spectrogramZoomEnabled READ spectrogramZoomEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool systemMediaControlsEnabled READ systemMediaControlsEnabled NOTIFY snapshotChanged)
+    Q_PROPERTY(bool libraryWatchEnabled READ libraryWatchEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool lastFmScrobblingEnabled READ lastFmScrobblingEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool lastFmBuildConfigured READ lastFmBuildConfigured NOTIFY snapshotChanged)
     Q_PROPERTY(QString lastFmUsername READ lastFmUsername NOTIFY snapshotChanged)
@@ -247,6 +248,7 @@ public:
     bool showSpectrogramScale() const;
     bool spectrogramZoomEnabled() const;
     bool systemMediaControlsEnabled() const;
+    bool libraryWatchEnabled() const;
     bool lastFmScrobblingEnabled() const;
     bool lastFmBuildConfigured() const;
     QString lastFmUsername() const;
@@ -324,6 +326,7 @@ public:
     Q_INVOKABLE void registerSpectrogramItem(QObject *item, int channelIndex);
     Q_INVOKABLE void unregisterSpectrogramItem(QObject *item);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
+    Q_INVOKABLE void setLibraryWatchEnabled(bool value);
     Q_INVOKABLE void setLastFmScrobblingEnabled(bool value);
     Q_INVOKABLE void beginLastFmAuth();
     Q_INVOKABLE void completeLastFmAuth();
@@ -771,6 +774,9 @@ private:
     QStringList m_diagnosticsLines;
     QStringList m_pendingDiagnosticsDiskLines;
     QString m_libraryLastError;
+    // The roots, with their reasons, already reported as not watched.
+    QSet<QString> m_reportedUnwatchedRoots;
+    bool m_libraryWatchEnabled{true};
     QString m_pendingAddRootPath;
     qint64 m_pendingAddRootIssuedMs{0};
     bool m_connected{false};

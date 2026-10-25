@@ -289,6 +289,8 @@ private slots:
     void testChannelButtonsVisibilityDecoding();
     void libraryViewStateAvailabilityFollowsSnapshot();
     void libraryChangesNotifyOnlyLibraryProperties();
+    void libraryWatchingDecodesFromBinaryPayload();
+    void unwatchedLibraryRootsAreShownAndReportedOnce();
     void searchExtendedMatchDetailsDecodeAndHighlight();
     void searchResultsRankFilterAndHighlight();
     void searchProtocolTotalsAndExpansion();
@@ -3607,6 +3609,129 @@ void BridgeClientTest::libraryChangesNotifyOnlyLibraryProperties() {
     QCOMPARE(other.count(), 0);
     QCOMPARE(client.libraryTrackCount(), 5);
     QCOMPARE(client.libraryScanProcessed(), 10);
+}
+
+void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
+    QByteArray bytes;
+    const auto append = [&bytes](auto value) {
+        const auto le = qToLittleEndian(value);
+        bytes.append(reinterpret_cast<const char *>(&le), sizeof(le));
+    };
+    const auto text = [&bytes, &append](const QString &value) {
+        const QByteArray utf8 = value.toUtf8();
+        append(quint32(utf8.size()));
+        bytes.append(utf8);
+    };
+    const auto section = [&bytes](quint16 mask) {
+        QByteArray packet;
+        const auto le = [&packet](auto value) {
+            const auto v = qToLittleEndian(value);
+            packet.append(reinterpret_cast<const char *>(&v), sizeof(v));
+        };
+        le(quint32(0xFE550001u));
+        le(quint32(12 + 4 + bytes.size()));
+        le(mask);
+        le(quint16(0));
+        le(quint32(bytes.size()));
+        packet.append(bytes);
+        return packet;
+    };
+
+    // The library meta section as Rust encodes it: path, name and the reason
+    // a root is not watched, per root.
+    for (quint32 value : {2u, 0u, 0u, 0u}) append(value); // roots, tracks, artists, albums
+    append(quint8(0));                                       // scan in progress
+    append(qint32(0));                                       // sort mode
+    text(QString());                                         // last error
+    for (quint32 value : {0u, 0u, 0u, 0u}) append(value);    // scan progress
+    append(float(0.0f));
+    append(float(-1.0f));
+    append(quint16(2));
+    for (const QString &value : {QStringLiteral("/music"), QStringLiteral("Music"), QString(),
+                                 QStringLiteral("/nas"), QString(), QStringLiteral("it is on nfs4")}) {
+        text(value);
+    }
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionLibraryMeta),
+                                                     &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.library.rootEntries.size(), 2);
+    QCOMPARE(decoded.library.rootEntries[0].name, QStringLiteral("Music"));
+    QVERIFY(decoded.library.rootEntries[0].unwatchedReason.isEmpty());
+    QCOMPARE(decoded.library.rootEntries[1].path, QStringLiteral("/nas"));
+    QCOMPARE(decoded.library.rootEntries[1].unwatchedReason, QStringLiteral("it is on nfs4"));
+
+    // The settings section ends with library watching, and older payloads
+    // without it default on.
+    bytes.clear();
+    append(float(1.0f));
+    append(quint32(8192));
+    append(quint8(0));
+    append(float(132.0f));
+    append(quint8(0));
+    append(quint8(0));
+    append(qint32(0));
+    for (int field = 0; field < 9; ++field) append(quint8(1));
+    decoded = {};
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionSettings),
+                                                     &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.settings.libraryWatchEnabled, true);
+    append(quint8(0));
+    decoded = {};
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionSettings),
+                                                     &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.settings.libraryWatchEnabled, false);
+    QCOMPARE(decoded.settings.showLevelMeter, true);
+
+    QCOMPARE(BinaryBridgeCodec::encodeCommandU8(BinaryBridgeCodec::CmdSetLibraryWatchEnabled, 1),
+             QByteArray::fromHex("43000100000001"));
+}
+
+void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.libraryWatchEnabled = false;
+    snapshot.library.present = true;
+    BinaryBridgeCodec::DecodedLibraryRoot watched;
+    watched.path = QStringLiteral("/music");
+    BinaryBridgeCodec::DecodedLibraryRoot share;
+    share.path = QStringLiteral("/nas");
+    share.name = QStringLiteral("NAS");
+    share.unwatchedReason = QStringLiteral("it is on nfs4");
+    snapshot.library.rootEntries = {watched, share};
+    snapshot.library.rootPaths = {watched.path, share.path};
+
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.libraryWatchEnabled(), false);
+    const QVariantList entries = client.libraryRootEntries();
+    QCOMPARE(entries.size(), 2);
+    QVERIFY(entries[0].toMap().value(QStringLiteral("unwatchedReason")).toString().isEmpty());
+    QCOMPARE(entries[1].toMap().value(QStringLiteral("unwatchedReason")).toString(),
+             QStringLiteral("it is on nfs4"));
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(errors[0][0].toString(),
+             QStringLiteral("Not watched for changes in library folder NAS: it is on nfs4"));
+
+    // The same roots again: nothing changed, and they were told once.
+    QVERIFY(!client.processBinarySnapshot(snapshot));
+    QCOMPARE(errors.count(), 1);
+    // A new reason is told.
+    snapshot.library.rootEntries[1].unwatchedReason = QStringLiteral("the folder is not available");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(errors.count(), 2);
+
+    // The setting is sent, and shown before the backend answers.
+    snapshot.settings.libraryWatchEnabled = true;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.libraryWatchEnabled(), true);
+    client.setLibraryWatchEnabled(false);
+    QCOMPARE(client.libraryWatchEnabled(), false);
 }
 
 void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {

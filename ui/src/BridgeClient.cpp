@@ -2283,6 +2283,10 @@ bool BridgeClient::systemMediaControlsEnabled() const {
     return m_systemMediaControlsEnabled;
 }
 
+bool BridgeClient::libraryWatchEnabled() const {
+    return m_libraryWatchEnabled;
+}
+
 bool BridgeClient::lastFmScrobblingEnabled() const {
     return m_lastFmScrobblingEnabled;
 }
@@ -2865,6 +2869,16 @@ void BridgeClient::setSystemMediaControlsEnabled(bool value) {
     }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSystemMediaControls,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::setLibraryWatchEnabled(bool value) {
+    if (m_libraryWatchEnabled != value) {
+        m_libraryWatchEnabled = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetLibraryWatchEnabled,
         static_cast<quint8>(value ? 1 : 0)));
 }
 
@@ -5589,6 +5603,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_showLevelMeter = showLevelMeter;
         changed = true;
     }
+    const bool libraryWatchEnabled =
+        snapshot.settings.present ? snapshot.settings.libraryWatchEnabled : m_libraryWatchEnabled;
+    if (m_libraryWatchEnabled != libraryWatchEnabled) {
+        m_libraryWatchEnabled = libraryWatchEnabled;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
     const bool showFps = snapshot.settings.present ? snapshot.settings.showFps : m_showFps;
     if (m_showFps != showFps) {
         m_showFps = showFps;
@@ -5808,7 +5829,16 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                 QStringLiteral("displayName"),
                 trimmedName.isEmpty() ? root.path : trimmedName);
             entry.insert(QStringLiteral("searchLabel"), rootSearchLabel(root.path, trimmedName));
+            entry.insert(QStringLiteral("unwatchedReason"), root.unwatchedReason);
             rootEntries.push_back(entry);
+            // Told once per root and reason; the preferences show it while it lasts.
+            const QString reported = root.path + QLatin1Char('\n') + root.unwatchedReason;
+            if (!root.unwatchedReason.isEmpty() && !m_reportedUnwatchedRoots.contains(reported)) {
+                m_reportedUnwatchedRoots.insert(reported);
+                emit bridgeError(QStringLiteral("Not watched for changes in library folder %1: %2")
+                                     .arg(trimmedName.isEmpty() ? root.path : trimmedName,
+                                          root.unwatchedReason));
+            }
         }
     }
     if (m_libraryRootEntries != rootEntries) {

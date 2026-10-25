@@ -2,30 +2,42 @@
 
 //! The library worker: runs library commands one at a time on its own
 //! connection, merges repeated scans, and runs the commands that must not
-//! wait between the files of a running scan.
+//! wait between the files of a running scan. It tells the watcher which
+//! roots to watch, and takes the changes the watcher saw as scans.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use crossbeam_channel::{never, select, Receiver, Sender, TryRecvError};
 use rusqlite::Connection;
 
 use super::db::{checkpoint, open_worker_db, OpenedLibrary};
 use super::publish::WorkerLibrary;
 use super::scan::{
     backfill_search_tags, handle_add_root, handle_rescan_all, handle_rescan_root,
-    remove_root_and_purge, rename_root, resolve_root_path, ExternalWrites, ScanControl,
-    ScanDirective,
+    handle_scan_paths, remove_root_and_purge, rename_root, resolve_root_path, ExternalWrites,
+    ScanControl, ScanDirective,
 };
 use super::schema::{load_roots, needs_search_tag_backfill};
+use super::watch::WatchHandle;
 use super::{cover_cache, LibraryCommand, LibraryEvent};
 
-/// Runs the library worker until `commands` closes.
+/// What the library worker receives, and whom it tells about its roots.
+pub(super) struct Inputs {
+    /// The service's commands; the worker ends once they close.
+    pub(super) commands: Receiver<LibraryCommand>,
+    /// The watcher's scans of changed paths, and its status.
+    pub(super) changes: Receiver<LibraryCommand>,
+    /// Told the roots, once the library is ready and whenever they change.
+    pub(super) roots: WatchHandle,
+}
+
+/// Runs the library worker until its commands close.
 pub(super) fn run(
     db_path: Result<PathBuf, String>,
     busy_timeout: Duration,
-    commands: Receiver<LibraryCommand>,
+    inputs: Inputs,
     event_tx: &Sender<LibraryEvent>,
 ) {
     let mut library = WorkerLibrary::default();
@@ -38,10 +50,15 @@ pub(super) fn run(
             return;
         }
     };
-    let mut control = Control::new(commands);
+    let mut control = Control::new(inputs.commands);
+    control.changes = inputs.changes;
+    control.watcher = Some(inputs.roots);
     prepare_library(&conn, &mut library, event_tx, &mut control, notice);
+    // The watcher starts watching, and rescans the roots, only now.
+    control.tell_watcher_roots(&library);
     while let Some(cmd) = control.next_command() {
         handle_command(&conn, cmd, &mut library, event_tx, &mut control);
+        control.tell_watcher_roots(&library);
     }
     // Nobody is left to show a failure to; the log stays in the database
     // directory and is applied at the next start.
@@ -132,8 +149,13 @@ pub(super) fn handle_command(
         library.publish(event_tx);
         return;
     }
+    if let LibraryCommand::SetUnwatchedRoots(roots) = cmd {
+        library.status.unwatched_roots = roots;
+        library.publish(event_tx);
+        return;
+    }
     library.status.last_error = None;
-    control.begin(&cmd);
+    control.begin();
     let reload = matches!(&cmd, LibraryCommand::RemoveRoot(_));
     let result = match cmd {
         LibraryCommand::ScanRoot(root) => {
@@ -148,7 +170,10 @@ pub(super) fn handle_command(
             handle_rescan_root(conn, &root, library, event_tx, control)
         }
         LibraryCommand::RescanAll => handle_rescan_all(conn, library, event_tx, control),
-        LibraryCommand::ReadRows(_) => Ok(()),
+        LibraryCommand::ScanPaths { root, paths } => {
+            handle_scan_paths(conn, &root, &paths, library, event_tx, control)
+        }
+        LibraryCommand::ReadRows(_) | LibraryCommand::SetUnwatchedRoots(_) => Ok(()),
     };
     let errors: Vec<String> = result.err().into_iter().chain(control.finish()).collect();
     library.status.last_error = joined(&errors);
@@ -171,6 +196,8 @@ pub(super) fn handle_command(
 /// runs.
 pub(super) struct Control {
     commands: Receiver<LibraryCommand>,
+    /// The watcher's commands; `never` once the watcher is gone.
+    changes: Receiver<LibraryCommand>,
     /// Keeps the channel of a test's control open.
     #[cfg(test)]
     _sender: Option<Sender<LibraryCommand>>,
@@ -178,8 +205,10 @@ pub(super) struct Control {
     /// Set once the service is gone: scans stop, and the worker ends after
     /// the commands that do not scan.
     shutting_down: bool,
-    /// Whether the command running scans every root.
-    running_all: bool,
+    /// Told the roots when they change.
+    watcher: Option<WatchHandle>,
+    /// The roots the watcher was last told.
+    watched_roots: Option<Vec<PathBuf>>,
     /// Roots removed while the command ran, which its scans skip.
     removed: HashSet<PathBuf>,
     /// Failures of the commands run during the command.
@@ -192,11 +221,13 @@ impl Control {
     fn new(commands: Receiver<LibraryCommand>) -> Self {
         Self {
             commands,
+            changes: never(),
             #[cfg(test)]
             _sender: None,
             queue: CommandQueue::default(),
             shutting_down: false,
-            running_all: false,
+            watcher: None,
+            watched_roots: None,
             removed: HashSet::new(),
             errors: Vec::new(),
             external: ExternalWrites::default(),
@@ -213,17 +244,32 @@ impl Control {
         }
     }
 
-    fn begin(&mut self, cmd: &LibraryCommand) {
-        self.running_all = matches!(cmd, LibraryCommand::RescanAll);
+    fn begin(&mut self) {
         self.removed.clear();
         self.errors.clear();
     }
 
     /// The failures of the commands run during the command that ended.
     fn finish(&mut self) -> Vec<String> {
-        self.running_all = false;
         self.removed.clear();
         std::mem::take(&mut self.errors)
+    }
+
+    /// Tells the watcher the roots of `library` if they changed since it
+    /// was last told, and the first time.
+    fn tell_watcher_roots(&mut self, library: &WorkerLibrary) {
+        let Some(watcher) = &self.watcher else {
+            return;
+        };
+        let roots = library.roots();
+        if self.watched_roots.as_ref().is_some_and(|told| {
+            told.len() == roots.len() && told.iter().zip(roots).all(|(a, b)| *a == b.path)
+        }) {
+            return;
+        }
+        let paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
+        watcher.set_roots(paths.clone());
+        self.watched_roots = Some(paths);
     }
 
     /// Queues the commands that have arrived, merging them with those
@@ -235,6 +281,16 @@ impl Control {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.shutting_down = true;
+                    break;
+                }
+            }
+        }
+        loop {
+            match self.changes.try_recv() {
+                Ok(cmd) => self.queue.push(cmd, running),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.changes = never();
                     break;
                 }
             }
@@ -252,9 +308,15 @@ impl Control {
             if self.shutting_down {
                 return None;
             }
-            match self.commands.recv() {
-                Ok(cmd) => self.queue.push(resolve_command(cmd), None),
-                Err(_) => self.shutting_down = true,
+            select! {
+                recv(self.commands) -> cmd => match cmd {
+                    Ok(cmd) => self.queue.push(resolve_command(cmd), None),
+                    Err(_) => self.shutting_down = true,
+                },
+                recv(self.changes) -> cmd => match cmd {
+                    Ok(cmd) => self.queue.push(cmd, None),
+                    Err(_) => self.changes = never(),
+                },
             }
         }
     }
@@ -271,9 +333,13 @@ impl Control {
             }),
             LibraryCommand::RenameRoot { path, name } => rename_root(conn, &path, &name),
             LibraryCommand::ReadRows(paths) => library.read_rows(conn, &paths),
+            LibraryCommand::SetUnwatchedRoots(roots) => {
+                library.status.unwatched_roots = roots;
+                Ok(())
+            }
             other => {
-                // Only removals, renames and row reads are queued as priority
-                // commands.
+                // Only removals, renames, row reads and the watcher's status
+                // are queued as priority commands.
                 self.queue.normal.push_front(other);
                 Ok(())
             }
@@ -293,11 +359,7 @@ impl ScanControl for Control {
         scanning: &Path,
         remaining: &[PathBuf],
     ) -> ScanDirective {
-        self.receive(Some(RunningScan {
-            all: self.running_all,
-            scanning,
-            remaining,
-        }));
+        self.receive(Some(RunningScan { remaining }));
         if !self.queue.priority.is_empty() {
             let mut removed_any = false;
             while let Some(cmd) = self.queue.priority.pop_front() {
@@ -313,6 +375,8 @@ impl ScanControl for Control {
             library.status.last_error = joined(&self.errors);
             library.publish(event_tx);
         }
+        // An added root is watched while it is scanned.
+        self.tell_watcher_roots(library);
         if self.shutting_down {
             ScanDirective::StopAll
         } else if self.removed.contains(scanning) {
@@ -345,25 +409,26 @@ fn resolve_command(cmd: LibraryCommand) -> LibraryCommand {
         },
         LibraryCommand::RemoveRoot(path) => LibraryCommand::RemoveRoot(resolve_root_path(&path)),
         LibraryCommand::RescanRoot(path) => LibraryCommand::RescanRoot(resolve_root_path(&path)),
-        LibraryCommand::RescanAll => LibraryCommand::RescanAll,
-        LibraryCommand::ReadRows(paths) => LibraryCommand::ReadRows(paths),
+        other @ (LibraryCommand::RescanAll
+        | LibraryCommand::ReadRows(_)
+        | LibraryCommand::ScanPaths { .. }
+        | LibraryCommand::SetUnwatchedRoots(_)) => other,
     }
 }
 
 /// The scan running when a command arrives.
 #[derive(Debug, Clone, Copy)]
 struct RunningScan<'a> {
-    /// Whether it scans every root.
-    all: bool,
-    scanning: &'a Path,
-    /// The roots it scans after `scanning`.
+    /// The roots it scans after the one it scans now.
     remaining: &'a [PathBuf],
 }
 
 impl RunningScan<'_> {
-    /// Whether the scan has yet to finish `root`.
-    fn covers(&self, root: &Path) -> bool {
-        self.scanning == root || self.remaining.iter().any(|queued| queued == root)
+    /// Whether the scan has yet to start scanning `root`. Only then does it
+    /// see every change made to the root since: a scan of the root under way
+    /// may have walked past the changed files already.
+    fn has_yet_to_start(&self, root: &Path) -> bool {
+        self.remaining.iter().any(|queued| queued == root)
     }
 }
 
@@ -376,7 +441,17 @@ fn scanned_root(cmd: &LibraryCommand) -> Option<&Path> {
         LibraryCommand::RenameRoot { .. }
         | LibraryCommand::RemoveRoot(_)
         | LibraryCommand::ReadRows(_)
+        | LibraryCommand::ScanPaths { .. }
+        | LibraryCommand::SetUnwatchedRoots(_)
         | LibraryCommand::RescanAll => None,
+    }
+}
+
+/// The root of the changed paths that a command scans.
+fn changed_paths_root(cmd: &LibraryCommand) -> Option<&Path> {
+    match cmd {
+        LibraryCommand::ScanPaths { root, .. } => Some(root),
+        _ => None,
     }
 }
 
@@ -444,11 +519,17 @@ impl CommandQueue {
                     None => self.priority.push_back(LibraryCommand::ReadRows(paths)),
                 }
             }
+            LibraryCommand::SetUnwatchedRoots(roots) => self.push_watch_status(roots),
+            LibraryCommand::ScanPaths { root, paths } => {
+                self.push_changed_paths(root, paths, running);
+            }
             LibraryCommand::RemoveRoot(path) => {
                 // Scans and renames of the root before its removal would be
                 // lost with it.
                 self.normal.retain(|queued| {
-                    scanned_root(queued) != Some(&path) && renamed_root(queued) != Some(&path)
+                    scanned_root(queued) != Some(&path)
+                        && changed_paths_root(queued) != Some(&path)
+                        && renamed_root(queued) != Some(&path)
                 });
                 self.priority
                     .retain(|queued| renamed_root(queued) != Some(&path));
@@ -461,28 +542,82 @@ impl CommandQueue {
                 }
             }
             LibraryCommand::RescanRoot(path) => {
-                let covered = running.is_some_and(|running| running.covers(&path))
+                let covered = running.is_some_and(|running| running.has_yet_to_start(&path))
                     || self.normal.iter().any(|queued| {
                         matches!(queued, LibraryCommand::RescanAll)
                             || scanned_root(queued) == Some(&path)
                     });
                 if !covered {
+                    // The rescan scans the changed paths too.
+                    self.normal
+                        .retain(|queued| changed_paths_root(queued) != Some(&path));
                     self.normal.push_back(LibraryCommand::RescanRoot(path));
                 }
             }
             LibraryCommand::RescanAll => {
-                if running.is_some_and(|running| running.all)
-                    || self
-                        .normal
-                        .iter()
-                        .any(|queued| matches!(queued, LibraryCommand::RescanAll))
+                // A running rescan of every root has passed some of them, so
+                // only a queued one covers this one.
+                if self
+                    .normal
+                    .iter()
+                    .any(|queued| matches!(queued, LibraryCommand::RescanAll))
                 {
                     return;
                 }
-                self.normal
-                    .retain(|queued| !matches!(queued, LibraryCommand::RescanRoot(_)));
+                self.normal.retain(|queued| {
+                    !matches!(
+                        queued,
+                        LibraryCommand::RescanRoot(_) | LibraryCommand::ScanPaths { .. }
+                    )
+                });
                 self.normal.push_back(LibraryCommand::RescanAll);
             }
+        }
+    }
+
+    /// Queues the watcher's status, which runs between the files of a scan.
+    /// Only the newest matters.
+    fn push_watch_status(&mut self, roots: Vec<super::UnwatchedRoot>) {
+        self.priority
+            .retain(|queued| !matches!(queued, LibraryCommand::SetUnwatchedRoots(_)));
+        self.priority
+            .push_back(LibraryCommand::SetUnwatchedRoots(roots));
+    }
+
+    /// Queues a scan of `paths` below `root`, unless a queued scan, or the
+    /// running one, has yet to scan all of `root`. Scans of changed paths
+    /// of a root merge.
+    fn push_changed_paths(
+        &mut self,
+        root: PathBuf,
+        paths: Vec<PathBuf>,
+        running: Option<RunningScan<'_>>,
+    ) {
+        // A running scan of the root may have walked past the paths already;
+        // only one that has yet to start the root covers them.
+        let covered = running.is_some_and(|running| running.has_yet_to_start(&root))
+            || self.normal.iter().any(|queued| {
+                matches!(queued, LibraryCommand::RescanAll)
+                    || scanned_root(queued) == Some(root.as_path())
+            });
+        if covered {
+            return;
+        }
+        let queued = self.normal.iter_mut().find_map(|queued| match queued {
+            LibraryCommand::ScanPaths {
+                root: queued_root,
+                paths: queued_paths,
+            } if *queued_root == root => Some(queued_paths),
+            _ => None,
+        });
+        match queued {
+            Some(queued) => {
+                let known: HashSet<PathBuf> = queued.iter().cloned().collect();
+                queued.extend(paths.into_iter().filter(|path| !known.contains(path)));
+            }
+            None => self
+                .normal
+                .push_back(LibraryCommand::ScanPaths { root, paths }),
         }
     }
 
@@ -495,7 +630,9 @@ impl CommandQueue {
             if shutting_down
                 && matches!(
                     cmd,
-                    LibraryCommand::RescanRoot(_) | LibraryCommand::RescanAll
+                    LibraryCommand::RescanRoot(_)
+                        | LibraryCommand::RescanAll
+                        | LibraryCommand::ScanPaths { .. }
                 )
             {
                 continue;

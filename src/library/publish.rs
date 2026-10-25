@@ -249,6 +249,10 @@ pub(super) struct WorkerLibrary {
     /// The [`next_file_sequence`] number taken before the reads of the
     /// command running began; see [`Self::begin_reads`].
     reads_after: u64,
+    /// The tracks whose files had other names, hard links, when their root
+    /// was last scanned whole. A scan of changed paths that removes one
+    /// scans the root, so that one of the other names is indexed.
+    pub(super) hard_linked: HashSet<PathBuf>,
 }
 
 impl WorkerLibrary {

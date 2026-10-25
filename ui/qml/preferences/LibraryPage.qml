@@ -61,6 +61,21 @@ ScrollView {
                     Item { Layout.fillWidth: true }
                 }
 
+                CheckBox {
+                    objectName: "libraryWatchCheckBox"
+                    text: "Watch library folders for changes"
+                    focusPolicy: Qt.NoFocus
+                    checked: root.uiBridge.libraryWatchEnabled
+                    onToggled: root.uiBridge.setLibraryWatchEnabled(checked)
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    color: Kirigami.Theme.disabledTextColor
+                    text: "When enabled, files added, changed, or removed in the library folders appear in the library without a rescan, and the folders are rescanned at startup. Folders that cannot be watched, such as network shares, are rescanned periodically instead and are marked below."
+                }
+
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 12
@@ -90,15 +105,14 @@ ScrollView {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.min(
-                        260,
-                        (60 * Math.max(1, root.uiBridge.libraryRootEntries.length)) + 12)
+                    Layout.preferredHeight: Math.min(260, rootList.contentHeight + 16)
                     color: root.uiPalette.uiSurfaceAltColor
                     border.color: root.uiPalette.uiBorderColor
                     radius: 8
                     visible: root.uiBridge.libraryRootEntries.length > 0
 
                     ListView {
+                        id: rootList
                         anchors.fill: parent
                         anchors.margins: 8
                         clip: true
@@ -124,14 +138,16 @@ ScrollView {
                             readonly property string rootPath: rootEntry.path || ""
                             readonly property string rootName: rootEntry.name || ""
                             readonly property string rootDisplayName: rootEntry.displayName || rootPath
+                            readonly property string unwatchedReason: rootEntry.unwatchedReason || ""
 
                             width: ListView.view.width
-                            height: 52
+                            height: Math.max(52, rootRow.implicitHeight + 12)
                             radius: 6
                             color: root.uiPalette.uiPaneColor
                             border.color: Qt.rgba(0, 0, 0, 0.06)
 
                             RowLayout {
+                                id: rootRow
                                 anchors.fill: parent
                                 anchors.leftMargin: 10
                                 anchors.rightMargin: 10
@@ -153,6 +169,16 @@ ScrollView {
                                         text: rootPath
                                         elide: Text.ElideMiddle
                                         color: root.uiPalette.uiMutedTextColor
+                                        font.pixelSize: Math.max(11, root.windowRoot.font.pixelSize - 1)
+                                    }
+
+                                    Label {
+                                        objectName: "libraryRootUnwatchedLabel"
+                                        Layout.fillWidth: true
+                                        visible: unwatchedReason.length > 0
+                                        text: "Not watched for changes: " + unwatchedReason
+                                        wrapMode: Text.Wrap
+                                        color: Kirigami.Theme.neutralTextColor
                                         font.pixelSize: Math.max(11, root.windowRoot.font.pixelSize - 1)
                                     }
                                 }
