@@ -531,6 +531,8 @@ private slots:
     void playbackErrorShowsInStatusBar();
     void stoppedBackendShowsMessageAndDisablesControls();
     void quitActionClosesTheWindowThroughItsCloseHandler();
+    void failedSaveBeforeQuitShowsTheErrorAndRetrySaves();
+    void quitAnywayClosesAfterAFailedSave();
     void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void albumArtTileKeepsHeightInsideColumnLayout();
     void albumArtViewerInfoUsesImageProviderLocalPath();
@@ -1867,30 +1869,52 @@ void QmlSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
     QVERIFY(!mainSplit->property("enabled").toBool());
 }
 
-void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
+namespace {
+
+// Loads and shows Main.qml without a backend, so it uses its fallback bridge.
+QQuickWindow *loadMainWindowForQuit(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
     engine.load(QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
-    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+    if (engine.rootObjects().isEmpty()) {
+        return nullptr;
+    }
     auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
-    QVERIFY(window != nullptr);
-    QVERIFY(QTest::qWaitForWindowExposed(window));
+    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
+        return nullptr;
+    }
+    return window;
+}
+
+auto keepRunningWhenTheWindowCloses() {
+    const bool quitOnLastWindowClosed = QGuiApplication::quitOnLastWindowClosed();
+    QGuiApplication::setQuitOnLastWindowClosed(false);
+    return qScopeGuard([quitOnLastWindowClosed]() {
+        QGuiApplication::setQuitOnLastWindowClosed(quitOnLastWindowClosed);
+    });
+}
+
+bool clickButton(QObject *window, const QString &objectName) {
+    QObject *button = window->findChild<QObject *>(objectName);
+    return button != nullptr && QMetaObject::invokeMethod(button, "clicked");
+}
+
+} // namespace
+
+void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *quitAction = window->findChild<QObject *>(QStringLiteral("quitAction"));
     QVERIFY(quitAction != nullptr);
     QCOMPARE(quitAction->property("shortcut").toInt(), static_cast<int>(QKeySequence::Quit));
-
-    // Keep the test process running when its only window closes.
-    const bool quitOnLastWindowClosed = QGuiApplication::quitOnLastWindowClosed();
-    QGuiApplication::setQuitOnLastWindowClosed(false);
-    const auto restoreQuit = qScopeGuard([quitOnLastWindowClosed]() {
-        QGuiApplication::setQuitOnLastWindowClosed(quitOnLastWindowClosed);
-    });
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(dialog != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
     QSignalSpy closing(window, &QQuickWindow::closing);
     QSignalSpy quit(&engine, &QQmlEngine::quit);
 
@@ -1898,11 +1922,63 @@ void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
     // the standard Quit sequence, so the test triggers the action itself.
     QVERIFY(QMetaObject::invokeMethod(quitAction, "trigger"));
 
-    // `closing` runs onClosing, which stops the backend, as closing the
-    // window from its title bar does.
-    QTRY_COMPARE(closing.count(), 1);
+    // `closing` runs onClosing, as closing the window from its title bar
+    // does. It keeps the window open until the backend has saved the
+    // settings and the queue, and then closes it again.
     QTRY_VERIFY(!window->isVisible());
+    QCOMPARE(closing.count(), 2);
+    QVERIFY(!dialog->property("visible").toBool());
     QCOMPARE(quit.count(), 0);
+}
+
+void QmlSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QObject *message = window->findChild<QObject *>(QStringLiteral("quitSaveFailedMessage"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(message != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    const QString error = QStringLiteral(
+        "Settings could not be saved: failed to write /config/ferrous/settings.txt: "
+        "No space left on device (os error 28)");
+    QVERIFY(bridge->setProperty("stateSaveError", error));
+
+    window->close();
+
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QCOMPARE(message->property("text").toString(), error);
+    QVERIFY(window->isVisible());
+
+    // The disk has room again.
+    QVERIFY(bridge->setProperty("stateSaveError", QString()));
+    QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedRetryButton")));
+
+    QTRY_VERIFY(!window->isVisible());
+    QVERIFY(!dialog->property("visible").toBool());
+}
+
+void QmlSmokeTest::quitAnywayClosesAfterAFailedSave() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(dialog != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(bridge->setProperty("stateSaveError", QStringLiteral("Settings could not be saved")));
+
+    window->close();
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedQuitButton")));
+
+    QTRY_VERIFY(!window->isVisible());
 }
 
 void QmlSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {

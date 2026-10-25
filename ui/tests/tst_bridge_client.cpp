@@ -243,6 +243,8 @@ private slots:
     void requestedStopIsNotABackendFailure();
     void commandsToAStoppedBackendFailVisibly();
     void destroyingTheClientWaitsForTheBackendsFinalSave();
+    void saveBeforeQuitReportsAFailedSaveAndSavesOnRetry();
+    void saveBeforeQuitFailsWhenTheBackendHasStopped();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
@@ -2528,6 +2530,60 @@ void BridgeClientTest::destroyingTheClientWaitsForTheBackendsFinalSave() {
     const QStringList leftovers = configDir.entryList(
         {QStringLiteral("*.tmp")}, QDir::Files | QDir::Hidden);
     QVERIFY2(leftovers.isEmpty(), qPrintable(leftovers.join(QStringLiteral(", "))));
+}
+
+void BridgeClientTest::saveBeforeQuitReportsAFailedSaveAndSavesOnRetry() {
+    QDir configDir(QDir(qEnvironmentVariable("XDG_CONFIG_HOME")).filePath(QStringLiteral("ferrous")));
+    const QString settingsPath = configDir.filePath(QStringLiteral("settings.txt"));
+    BridgeClient client;
+    QVERIFY(client.m_ffiBridge != nullptr);
+    QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
+
+    client.saveStateBeforeQuit();
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY2(finished.at(0).at(0).toBool(), qPrintable(finished.at(0).at(1).toString()));
+    QVERIFY(QFileInfo(settingsPath).isFile());
+
+    // Nothing can be renamed over a directory, as when the disk is full.
+    QVERIFY(QFile::remove(settingsPath));
+    QVERIFY(configDir.mkdir(QStringLiteral("settings.txt")));
+    const auto unblock = qScopeGuard([&configDir]() {
+        configDir.rmdir(QStringLiteral("settings.txt"));
+    });
+    client.setDbRange(103.0);
+    client.saveStateBeforeQuit();
+    QTRY_COMPARE(finished.count(), 2);
+    QVERIFY(!finished.at(1).at(0).toBool());
+    const QString message = finished.at(1).at(1).toString();
+    QVERIFY2(message.startsWith(QStringLiteral("Settings could not be saved")), qPrintable(message));
+    QVERIFY2(message.contains(settingsPath), qPrintable(message));
+
+    // Retry once the cause is gone.
+    QVERIFY(configDir.rmdir(QStringLiteral("settings.txt")));
+    client.saveStateBeforeQuit();
+    QTRY_COMPARE(finished.count(), 3);
+    QVERIFY2(finished.at(2).at(0).toBool(), qPrintable(finished.at(2).at(1).toString()));
+    QFile settings(settingsPath);
+    QVERIFY(settings.open(QIODevice::ReadOnly));
+    const QByteArray saved = settings.readAll();
+    QVERIFY2(saved.contains("db_range=103.00\n"), saved.constData());
+}
+
+void BridgeClientTest::saveBeforeQuitFailsWhenTheBackendHasStopped() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    acceptCommands(client);
+    client.setBackendFailure(QStringLiteral("The Ferrous backend stopped unexpectedly."));
+    QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
+
+    client.saveStateBeforeQuit();
+
+    // Answered later, as the backend would answer.
+    QCOMPARE(finished.count(), 0);
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(!finished.at(0).at(0).toBool());
+    QCOMPARE(finished.at(0).at(1).toString(),
+        QStringLiteral("Settings and the queue could not be saved: the backend has stopped."));
 }
 
 void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {

@@ -31,6 +31,9 @@ enum SnapshotSection : quint16 {
     SectionError = 1u << 6,
     SectionStopped = 1u << 7,
     SectionLastFm = 1u << 8,
+    // The answer to CmdSaveState: a u8, 1 if the save succeeded, and a
+    // string with what to show the user otherwise.
+    SectionStateSaved = 1u << 9,
 };
 
 enum CommandId : quint16 {
@@ -99,6 +102,7 @@ enum CommandId : quint16 {
     CmdRemoveMany = 63,
     CmdSetSpectrogramActive = 64,
     CmdSetShowLevelMeter = 65,
+    CmdSaveState = 66,
 };
 
 struct DecodedPlayback {
@@ -234,6 +238,9 @@ struct DecodedSnapshot {
     quint16 sectionMask{0};
     bool hasStopped{false};
     QString errorMessage;
+    bool hasStateSaved{false};
+    bool stateSaved{false};
+    QString stateSaveError;
     DecodedPlayback playback;
     DecodedQueue queue;
     DecodedLibraryMeta library;

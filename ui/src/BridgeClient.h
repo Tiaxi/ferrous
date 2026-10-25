@@ -376,6 +376,9 @@ public:
     Q_INVOKABLE void scanDefaultMusicRoot();
     Q_INVOKABLE void requestSnapshot();
     Q_INVOKABLE void shutdown();
+    // Ask the backend to save the settings and the queue now. Answers with
+    // stateSaveFinished, so the window can close once they are on disk.
+    Q_INVOKABLE void saveStateBeforeQuit();
     Q_INVOKABLE void clearDiagnostics();
     Q_INVOKABLE void reloadDiagnosticsFromDisk();
     // Tag editor renames go through this gate so the bridge applies them in
@@ -405,6 +408,9 @@ signals:
     void connectedChanged();
     void backendFailureChanged();
     void bridgeError(const QString &message);
+    // The answer to saveStateBeforeQuit: whether the settings and the queue
+    // were saved, and what to show the user if not.
+    void stateSaveFinished(bool saved, const QString &message);
 
 private:
     struct SearchWorkerInputFrame {

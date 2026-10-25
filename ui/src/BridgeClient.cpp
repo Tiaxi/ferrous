@@ -914,12 +914,14 @@ BridgeClient::~BridgeClient() {
     stopSearchApplyWorker();
     if (m_ffiBridge != nullptr) {
         // The app's window is gone by now, so waiting for the backend's
-        // final saves holds up only the exit.
+        // final saves holds up only the exit. The window closed only after
+        // saveStateBeforeQuit saved the settings and the queue, or after the
+        // user chose to quit without them.
         if (!ferrous_ffi_bridge_destroy(m_ffiBridge)) {
             logDiagnostic(
                 QStringLiteral("bridge"),
-                QStringLiteral("the backend did not finish shutting down in time; recent "
-                               "settings, the queue, or Last.fm scrobbles may not have been saved"));
+                QStringLiteral("the backend did not save everything before exiting; recent "
+                               "settings, the queue, or Last.fm scrobbles may be missing"));
         }
         m_ffiBridge = nullptr;
     }
@@ -3763,6 +3765,23 @@ void BridgeClient::requestSnapshot() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot));
 }
 
+void BridgeClient::saveStateBeforeQuit() {
+    if (m_backendFailure.isEmpty()
+        && sendBinaryCommand(
+            BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdSaveState))) {
+        return;
+    }
+    // Answer after the caller has returned, as the backend would.
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            emit stateSaveFinished(
+                false,
+                QStringLiteral("Settings and the queue could not be saved: the backend has stopped."));
+        },
+        Qt::QueuedConnection);
+}
+
 void BridgeClient::shutdown() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown));
 }
@@ -4791,6 +4810,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                                      "Restart Ferrous to continue.")
                     : reason);
         }
+        return false;
+    }
+
+    if (snapshot.hasStateSaved) {
+        emit stateSaveFinished(snapshot.stateSaved, snapshot.stateSaveError);
         return false;
     }
 

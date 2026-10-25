@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -199,13 +200,13 @@ pub(super) fn format_session_text(session: &SessionSnapshot) -> String {
 ///
 /// # Errors
 ///
-/// Returns a message for the user when the session cannot be saved.
-pub(super) fn save_session_snapshot(session: &SessionSnapshot) -> Result<(), String> {
+/// Returns why the session cannot be saved.
+pub(super) fn save_session_snapshot(session: &SessionSnapshot) -> Result<(), SaveFailure> {
     let Some(path) = session_path() else {
-        return Err(NO_CONFIG_DIR.to_string());
+        return Err(SaveFailure::no_config_dir());
     };
     write_config_file(&path, format_session_text(session).as_bytes())
-        .map_err(|error| format!("The queue could not be saved for the next start: {error}"))
+        .map_err(|failure| failure.explained("The queue could not be saved for the next start"))
 }
 
 pub(super) fn load_settings_into(settings: &mut BridgeSettings) {
@@ -337,25 +338,55 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
 ///
 /// # Errors
 ///
-/// Returns a message for the user when the settings cannot be saved.
-pub(super) fn save_settings(settings: &BridgeSettings) -> Result<(), String> {
+/// Returns why the settings cannot be saved.
+pub(super) fn save_settings(settings: &BridgeSettings) -> Result<(), SaveFailure> {
     let Some(path) = settings_path() else {
-        return Err(NO_CONFIG_DIR.to_string());
+        return Err(SaveFailure::no_config_dir());
     };
     write_config_file(&path, format_settings_text(settings).as_bytes())
-        .map_err(|error| format!("Settings could not be saved: {error}"))
+        .map_err(|failure| failure.explained("Settings could not be saved"))
 }
 
-const NO_CONFIG_DIR: &str = "Settings and the queue cannot be saved: set HOME or XDG_CONFIG_HOME.";
+/// Why a file in the config directory could not be saved.
+#[derive(Debug)]
+pub(super) struct SaveFailure {
+    /// What the user is shown.
+    pub(super) message: String,
+    /// The file and the kind of error, which stay the same while a save
+    /// keeps failing the same way.
+    pub(super) identity: (PathBuf, io::ErrorKind),
+}
+
+impl SaveFailure {
+    fn no_config_dir() -> Self {
+        Self {
+            message: "Settings and the queue cannot be saved: set HOME or XDG_CONFIG_HOME."
+                .to_string(),
+            identity: (PathBuf::new(), io::ErrorKind::NotFound),
+        }
+    }
+
+    fn explained(self, what: &str) -> Self {
+        Self {
+            message: format!("{what}: {}", self.message),
+            ..self
+        }
+    }
+}
 
 /// Write a file in the config directory without a crash or a concurrent
 /// save leaving it truncated; see [`crate::safe_save::write_file`].
-fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), SaveFailure> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|error| SaveFailure {
+            message: format!("failed to create {}: {error}", parent.display()),
+            identity: (parent.to_path_buf(), error.kind()),
+        })?;
     }
-    crate::safe_save::write_file(path, bytes)
+    crate::safe_save::write_file(path, bytes).map_err(|failure| SaveFailure {
+        message: failure.to_string(),
+        identity: (failure.path, failure.error.kind()),
+    })
 }
 
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {

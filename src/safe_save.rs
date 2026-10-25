@@ -171,13 +171,64 @@ fn create_file_with(path: &Path, bytes: &[u8], before_rename: impl FnOnce()) -> 
 ///
 /// # Errors
 ///
-/// Returns a message naming the failed step. `path` is unchanged then, and
-/// the temporary file is removed.
-pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Returns the failed step and its error. `path` is unchanged then, and the
+/// temporary file is removed.
+pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<(), WriteFileError> {
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut temp = TempSibling::create(&target)?;
-    temp.write_all(bytes)?;
-    temp.commit(&target, None)
+    let failed = |step, error| WriteFileError {
+        path: target.clone(),
+        step,
+        error,
+    };
+    let parent = target.parent().ok_or_else(|| {
+        failed(
+            WriteStep::CreateTemporary,
+            io::Error::new(io::ErrorKind::InvalidInput, "the path has no directory"),
+        )
+    })?;
+    let mut temp = TempSibling::open(parent, &target, 0o666)
+        .map_err(|error| failed(WriteStep::CreateTemporary, error))?;
+    temp.file
+        .write_all(bytes)
+        .map_err(|error| failed(WriteStep::Write, error))?;
+    temp.persist(&target)
+        .map_err(|(step, error)| failed(step, error))
+}
+
+/// A step of [`write_file`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteStep {
+    CreateTemporary,
+    Write,
+    Flush,
+    Replace,
+    FlushDirectory,
+}
+
+/// Why [`write_file`] failed. The message names the file being saved, not
+/// the temporary file, so a save that keeps failing the same way gives the
+/// same message every time.
+#[derive(Debug)]
+pub(crate) struct WriteFileError {
+    pub(crate) path: PathBuf,
+    pub(crate) step: WriteStep,
+    pub(crate) error: io::Error,
+}
+
+impl std::fmt::Display for WriteFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path = self.path.display();
+        match self.step {
+            WriteStep::CreateTemporary => {
+                write!(f, "failed to create a temporary file for {path}")?;
+            }
+            WriteStep::Write => write!(f, "failed to write {path}")?,
+            WriteStep::Flush => write!(f, "failed to flush {path}")?,
+            WriteStep::Replace => write!(f, "failed to replace {path}")?,
+            WriteStep::FlushDirectory => write!(f, "failed to flush the directory of {path}")?,
+        }
+        write!(f, ": {}", self.error)
+    }
 }
 
 /// Check, without changing anything, that [`rewrite_via_temp_copy`] could
@@ -457,6 +508,16 @@ impl TempSibling {
         let parent = target
             .parent()
             .ok_or_else(|| format!("missing parent directory for {}", target.display()))?;
+        Self::open(parent, target, mode).map_err(|err| {
+            format!(
+                "failed to create temporary file in {}: {err}",
+                parent.display()
+            )
+        })
+    }
+
+    /// Create a uniquely named file for `target` in `parent`, its directory.
+    fn open(parent: &Path, target: &Path, mode: u32) -> io::Result<Self> {
         let name = target
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -476,13 +537,7 @@ impl TempSibling {
             .write(true)
             .create_new(true)
             .mode(mode)
-            .open(&path)
-            .map_err(|err| {
-                format!(
-                    "failed to create temporary file in {}: {err}",
-                    parent.display()
-                )
-            })?;
+            .open(&path)?;
         Ok(Self {
             path,
             file,
@@ -502,23 +557,37 @@ impl TempSibling {
         if let Some(replaced) = replaced {
             replaced.apply(&self.file, target, &System)?;
         }
-        self.file
-            .sync_all()
-            .map_err(|err| format!("failed to flush {}: {err}", self.path.display()))?;
-        fs::rename(&self.path, target).map_err(|err| {
-            format!(
+        self.persist(target).map_err(|(step, err)| match step {
+            WriteStep::Flush => format!("failed to flush {}: {err}", self.path.display()),
+            WriteStep::Replace => format!(
                 "failed to replace {} with {}: {err}",
                 target.display(),
                 self.path.display()
+            ),
+            _ => format!(
+                "failed to flush directory {}: {err}",
+                target.parent().unwrap_or(target).display()
+            ),
+        })
+    }
+
+    /// Flush the file, rename it to `target`, and flush the directory so
+    /// the rename survives a crash.
+    fn persist(&mut self, target: &Path) -> Result<(), (WriteStep, io::Error)> {
+        self.file
+            .sync_all()
+            .map_err(|err| (WriteStep::Flush, err))?;
+        fs::rename(&self.path, target).map_err(|err| (WriteStep::Replace, err))?;
+        self.persisted = true;
+        let parent = target.parent().ok_or_else(|| {
+            (
+                WriteStep::FlushDirectory,
+                io::Error::new(io::ErrorKind::InvalidInput, "the path has no directory"),
             )
         })?;
-        self.persisted = true;
-        let parent = target
-            .parent()
-            .ok_or_else(|| format!("missing parent directory for {}", target.display()))?;
         File::open(parent)
             .and_then(|dir| dir.sync_all())
-            .map_err(|err| format!("failed to flush directory {}: {err}", parent.display()))
+            .map_err(|err| (WriteStep::FlushDirectory, err))
     }
 }
 
@@ -1254,6 +1323,24 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(fs::read(&target).expect("read target"), b"new");
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn write_file_failures_name_the_target_not_the_temporary_file() {
+        let dir = test_dir("write-fails");
+        let path = dir.join("settings.txt");
+        // Nothing can be renamed over a directory.
+        fs::create_dir(&path).expect("block the target");
+
+        let first = write_file(&path, b"first").expect_err("the rename fails");
+        let second = write_file(&path, b"second").expect_err("the rename fails");
+
+        assert_eq!(first.step, WriteStep::Replace);
+        assert_eq!(first.path, path);
+        assert_eq!(first.to_string(), second.to_string());
+        assert!(!first.to_string().contains(".tmp"), "{first}");
+        assert_eq!(dir_entries(&dir), vec!["settings.txt".to_string()]);
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 

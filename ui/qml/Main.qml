@@ -261,6 +261,8 @@ ApplicationWindow {
         property string diagnosticsLogPath: ""
         property bool connected: false
         property string backendFailure: ""
+        // What saveStateBeforeQuit fails with; empty for a save that succeeds.
+        property string stateSaveError: ""
         signal playbackChanged()
         signal trackIdentityChanged()
         signal trackMetadataChanged()
@@ -352,6 +354,13 @@ ApplicationWindow {
         function scanDefaultMusicRoot() {}
         function requestSnapshot() {}
         function shutdown() {}
+        signal stateSaveFinished(bool saved, string message)
+        function saveStateBeforeQuit() {
+            const error = bridgeFallback.stateSaveError
+            Qt.callLater(function() {
+                bridgeFallback.stateSaveFinished(error.length === 0, error)
+            })
+        }
         function clearDiagnostics() {}
         function reloadDiagnosticsFromDisk() {}
         function toggleChannelMute(channelIndex) {}
@@ -549,7 +558,7 @@ ApplicationWindow {
         text: "Quit"
         shortcut: StandardKey.Quit
         // Closing the window, not quitting, runs onClosing, which saves the
-        // library view and stops the backend.
+        // settings and the queue and stops the backend.
         onTriggered: root.close()
     }
     Action {
@@ -1188,13 +1197,75 @@ ApplicationWindow {
         sourceSize.height: root.albumArtViewerDecodeHeight
     }
 
+    // Set once the settings and the queue are saved for quitting, or the
+    // user chose to quit without them, so that the window may close.
+    property bool quitStateSettled: false
+    property bool quitStateSaving: false
+
     onClosing: function(close) {
-        libraryController.persistLibraryViewState()
+        if (!root.quitStateSettled) {
+            // Closes again once the save has answered, while the window can
+            // still show a failure.
+            close.accepted = false
+            root.saveStateBeforeClosing()
+            return
+        }
         uiBridge.shutdown()
+    }
+
+    function saveStateBeforeClosing() {
+        if (root.quitStateSaving) {
+            return
+        }
+        root.quitStateSaving = true
+        // The library view is saved with the queue.
+        libraryController.persistLibraryViewState()
+        quitStateSaveTimeout.restart()
+        uiBridge.saveStateBeforeQuit()
+    }
+
+    function finishStateSaveBeforeClosing(saved, message) {
+        if (!root.quitStateSaving) {
+            return
+        }
+        root.quitStateSaving = false
+        quitStateSaveTimeout.stop()
+        if (saved) {
+            root.closeNow()
+        } else {
+            quitSaveFailedDialog.message = message
+            quitSaveFailedDialog.open()
+        }
+    }
+
+    function closeNow() {
+        root.quitStateSettled = true
+        root.close()
+    }
+
+    Timer {
+        id: quitStateSaveTimeout
+        // Saving takes milliseconds. A backend that has not answered by then
+        // is stuck, and the user decides whether to wait or quit.
+        interval: 5000
+        onTriggered: root.finishStateSaveBeforeClosing(
+            false,
+            "The backend did not answer in time; settings and the queue may not have been saved.")
+    }
+
+    Dialogs.QuitSaveFailedDialog {
+        id: quitSaveFailedDialog
+        uiPalette: root.uiPalette
+        windowRoot: root
+        onRetryRequested: root.saveStateBeforeClosing()
+        onQuitRequested: root.closeNow()
     }
 
     Connections {
         target: uiBridge
+        function onStateSaveFinished(saved, message) {
+            root.finishStateSaveBeforeClosing(saved, message)
+        }
         function onSnapshotChanged() {
             libraryController.tryApplyPersistedViewState()
             if (uiBridge.profileLogsEnabled) {

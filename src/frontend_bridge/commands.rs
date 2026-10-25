@@ -65,6 +65,8 @@ pub(super) fn handle_bridge_command(
             *context.running = false;
             false
         }
+        // The runtime answers it before commands get here.
+        BridgeCommand::SaveState => false,
         BridgeCommand::Playback(cmd) => {
             handle_playback_bridge_command(&cmd, state, context);
             false
@@ -218,8 +220,8 @@ fn set_fft_size(state: &mut BridgeState, context: &mut BridgeCommandContext<'_>,
 fn save_settings_now(state: &BridgeState, context: &mut BridgeCommandContext<'_>) {
     match save_settings(&state.settings) {
         Ok(()) => *context.settings_dirty = false,
-        Err(message) => {
-            let _ = try_send_event(context.event_tx, BridgeEvent::Error(message));
+        Err(failure) => {
+            let _ = try_send_event(context.event_tx, BridgeEvent::Error(failure.message));
         }
     }
 }

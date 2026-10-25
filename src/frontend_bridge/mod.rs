@@ -3,7 +3,8 @@
 use crate::analysis::SpectrogramOutputRoute;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{after, bounded, never, select, unbounded, Receiver, Sender, TrySendError};
@@ -42,7 +43,7 @@ mod workers;
 use commands::{handle_bridge_command, sync_queue_details, BridgeCommandContext};
 use config::{
     apply_session_restore, load_session_snapshot, load_settings_into, save_session_snapshot,
-    save_settings, session_snapshot_for_state, SessionSnapshot,
+    save_settings, session_snapshot_for_state, SaveFailure, SessionSnapshot,
 };
 use events::{
     drain_analysis_events, drain_apply_album_art_events, drain_external_queue_detail_events,
@@ -103,6 +104,10 @@ pub enum BridgeCommand {
     Library(BridgeLibraryCommand),
     Analysis(BridgeAnalysisCommand),
     Settings(BridgeSettingsCommand),
+    /// Save the settings and the session now, and answer with
+    /// [`BridgeEvent::StateSaved`], so the UI can close the window only once
+    /// they are on disk, or tell the user they are not.
+    SaveState,
     Shutdown,
 }
 
@@ -334,6 +339,9 @@ pub enum BridgeEvent {
     Stopped,
     /// The bridge stopped without being asked to, for this reason.
     Failed(String),
+    /// The answer to [`BridgeCommand::SaveState`]: what to show the user if
+    /// a save failed.
+    StateSaved(Result<(), String>),
 }
 
 #[derive(Debug, Clone)]
@@ -629,7 +637,24 @@ pub struct FrontendBridgeHandle {
     spectral_rx: Receiver<AnalysisEvent>,
     spectral_generation: Arc<AtomicU64>,
     import_gate: Arc<imports::ImportGate>,
+    thread: BridgeThread,
+}
+
+/// The thread running the bridge loop.
+pub(crate) struct BridgeThread {
     thread: JoinableThread,
+    /// Set when the loop has stopped with the settings, the session, and
+    /// Last.fm's queue saved.
+    saved: Arc<AtomicBool>,
+}
+
+impl BridgeThread {
+    /// Wait until `deadline` for the bridge loop to stop. Returns false if
+    /// a save failed, or if the loop is still running at the deadline; it is
+    /// left running then.
+    pub(crate) fn join_by(self, deadline: Instant) -> bool {
+        self.thread.join_by(deadline) && self.saved.load(Ordering::Acquire)
+    }
 }
 
 /// The parts of a [`FrontendBridgeHandle`], for a frontend that drives them
@@ -639,7 +664,7 @@ pub(crate) struct BridgeParts {
     pub(crate) events: Receiver<BridgeEvent>,
     pub(crate) spectra: Receiver<AnalysisEvent>,
     pub(crate) spectral_generation: Arc<AtomicU64>,
-    pub(crate) thread: JoinableThread,
+    pub(crate) thread: BridgeThread,
 }
 
 struct BridgeRuntimeOptions {
@@ -692,10 +717,14 @@ impl FrontendBridgeHandle {
 
         let imports = imports::ImportWorker::new();
         let import_gate = imports.gate();
+        let saved = Arc::new(AtomicBool::new(false));
+        let saved_by_loop = Arc::clone(&saved);
         let thread = spawn_joinable("ferrous-bridge", move || {
-            run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route, imports);
+            let all_saved = run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route, imports);
+            saved_by_loop.store(all_saved, Ordering::Release);
         })
         .map_err(|error| format!("failed to start the bridge thread: {error}"))?;
+        let thread = BridgeThread { thread, saved };
         Ok(Self {
             tx: cmd_tx,
             rx: event_rx,
@@ -708,7 +737,7 @@ impl FrontendBridgeHandle {
 
     /// Stop the bridge and wait, up to [`BRIDGE_SHUTDOWN_TIMEOUT`], for it
     /// to save the settings, the session, and Last.fm's queue. Returns
-    /// false if it is still running then.
+    /// false if it is still running then, or if one of them was not saved.
     #[must_use]
     pub fn shutdown(self) -> bool {
         let _ = self.tx.send(BridgeCommand::Shutdown);
@@ -1050,7 +1079,9 @@ impl BridgeLoopRuntime {
         }
     }
 
-    fn run(&mut self, cmd_rx: &Receiver<BridgeCommand>, event_tx: &Sender<BridgeEvent>) {
+    /// Run until shutdown. Returns whether the settings, the session, and
+    /// Last.fm's queue were saved then.
+    fn run(&mut self, cmd_rx: &Receiver<BridgeCommand>, event_tx: &Sender<BridgeEvent>) -> bool {
         self.emit_initial_snapshot(event_tx);
         while self.flags.running {
             let wake = self.wait_for_wake(cmd_rx);
@@ -1058,7 +1089,7 @@ impl BridgeLoopRuntime {
             self.maybe_log_profile();
             self.maybe_persist(event_tx);
         }
-        self.shutdown(event_tx);
+        self.shutdown(event_tx)
     }
 
     fn emit_initial_snapshot(&mut self, event_tx: &Sender<BridgeEvent>) {
@@ -1412,6 +1443,11 @@ impl BridgeLoopRuntime {
         match &cmd {
             BridgeCommand::Shutdown | BridgeCommand::Queue(BridgeQueueCommand::Clear) => {
                 self.imports.discard_pending();
+            }
+            BridgeCommand::SaveState => {
+                let saved = self.save_state_now();
+                let _ = try_send_event(event_tx, BridgeEvent::StateSaved(saved));
+                return SnapshotUrgency::None;
             }
             _ => {}
         }
@@ -1801,11 +1837,7 @@ impl BridgeLoopRuntime {
         // A failed save stays dirty, so it is tried again.
         if self.flags.settings_dirty && self.last_settings_save.elapsed() >= Duration::from_secs(2)
         {
-            let saved = report_save(
-                save_settings(&self.state.settings),
-                &mut self.save_errors.settings,
-                event_tx,
-            );
+            let saved = self.save_settings_reported(event_tx);
             self.flags.settings_dirty = !saved;
             self.last_settings_save = Instant::now();
         }
@@ -1828,14 +1860,52 @@ impl BridgeLoopRuntime {
         self.last_session_save = Instant::now();
     }
 
-    fn shutdown(&mut self, event_tx: &Sender<BridgeEvent>) {
+    fn save_settings_reported(&mut self, event_tx: &Sender<BridgeEvent>) -> bool {
+        report_save(
+            save_settings(&self.state.settings),
+            &mut self.save_errors.settings,
+            event_tx,
+        )
+    }
+
+    /// Save the settings and the session now, for the UI to close the
+    /// window only once they are on disk. Returns what to show the user if
+    /// either save failed.
+    fn save_state_now(&mut self) -> Result<(), String> {
+        if !self.persisted_state_enabled {
+            return Ok(());
+        }
+        let mut failures = Vec::new();
+        match save_settings(&self.state.settings) {
+            Ok(()) => {
+                self.flags.settings_dirty = false;
+                self.save_errors.settings = None;
+            }
+            Err(failure) => failures.push(failure.message),
+        }
+        let session = session_snapshot_for_state(&self.state);
+        match save_session_snapshot(&session) {
+            Ok(()) => {
+                self.flags.session_dirty = false;
+                self.save_errors.session = None;
+                self.last_saved_session = Some(session);
+            }
+            Err(failure) => failures.push(failure.message),
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("\n"))
+        }
+    }
+
+    /// Save the state and stop the workers. Returns whether the settings,
+    /// the session, and Last.fm's queue were saved.
+    fn shutdown(&mut self, event_tx: &Sender<BridgeEvent>) -> bool {
+        let mut saved = true;
         if self.persisted_state_enabled {
-            report_save(
-                save_settings(&self.state.settings),
-                &mut self.save_errors.settings,
-                event_tx,
-            );
-            report_save(
+            saved &= self.save_settings_reported(event_tx);
+            saved &= report_save(
                 save_session_snapshot(&session_snapshot_for_state(&self.state)),
                 &mut self.save_errors.session,
                 event_tx,
@@ -1858,8 +1928,10 @@ impl BridgeLoopRuntime {
         if let Some(message) = lastfm_problem {
             eprintln!("{message}");
             let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+            saved = false;
         }
         let _ = try_send_event(event_tx, BridgeEvent::Stopped);
+        saved
     }
 }
 
@@ -1867,25 +1939,25 @@ impl BridgeLoopRuntime {
 /// the same way is shown once.
 #[derive(Default)]
 struct SaveErrors {
-    settings: Option<String>,
-    session: Option<String>,
+    settings: Option<(PathBuf, std::io::ErrorKind)>,
+    session: Option<(PathBuf, std::io::ErrorKind)>,
 }
 
-/// Show the user a failed save, unless `reported` says it was the last one
-/// shown. Returns whether the save succeeded.
+/// Show the user a failed save, unless `reported` says the same file failed
+/// the same way last time. Returns whether the save succeeded.
 fn report_save(
-    result: Result<(), String>,
-    reported: &mut Option<String>,
+    result: Result<(), SaveFailure>,
+    reported: &mut Option<(PathBuf, std::io::ErrorKind)>,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
-    let Err(message) = result else {
+    let Err(failure) = result else {
         *reported = None;
         return true;
     };
-    if reported.as_deref() != Some(message.as_str()) {
-        eprintln!("[ferrous] {message}");
-        if try_send_event(event_tx, BridgeEvent::Error(message.clone())).is_ok() {
-            *reported = Some(message);
+    if reported.as_ref() != Some(&failure.identity) {
+        eprintln!("[ferrous] {}", failure.message);
+        if try_send_event(event_tx, BridgeEvent::Error(failure.message)).is_ok() {
+            *reported = Some(failure.identity);
         }
     }
     false
@@ -1964,21 +2036,25 @@ fn run_bridge_loop(
     options: BridgeRuntimeOptions,
     spectral_tx: SpectrogramOutputRoute,
     imports: imports::ImportWorker,
-) {
+) -> bool {
     let ran = crate::panic_guard::catch("the bridge thread", || {
         let mut runtime = BridgeLoopRuntime::with_imports(options, Some(spectral_tx), imports);
-        runtime.run(cmd_rx, event_tx);
+        runtime.run(cmd_rx, event_tx)
     });
     // The runtime was dropped while unwinding, which stopped its workers.
     // The relay shows the UI this reason; if the event queue is full, it
     // reports the closed channel instead.
-    if let Err(message) = ran {
-        let _ = try_send_event(
-            event_tx,
-            BridgeEvent::Failed(format!(
-                "The Ferrous backend stopped after an {message}. Restart Ferrous to continue."
-            )),
-        );
+    match ran {
+        Ok(saved) => saved,
+        Err(message) => {
+            let _ = try_send_event(
+                event_tx,
+                BridgeEvent::Failed(format!(
+                    "The Ferrous backend stopped after an {message}. Restart Ferrous to continue."
+                )),
+            );
+            false
+        }
     }
 }
 
@@ -2167,6 +2243,48 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_save_that_keeps_failing_the_same_way_is_reported_once() {
+        let _guard = test_guard();
+        let settings_path = config::settings_path().expect("settings path");
+        let block = || {
+            let _ = std::fs::remove_file(&settings_path);
+            // Nothing can be renamed over a directory.
+            std::fs::create_dir_all(&settings_path).expect("block the settings");
+        };
+        let settings = BridgeSettings::default();
+        let (event_tx, event_rx) = unbounded();
+        let mut reported = None;
+
+        // Each attempt uses a temporary file with a new name.
+        block();
+        for _ in 0..3 {
+            assert!(!report_save(
+                save_settings(&settings),
+                &mut reported,
+                &event_tx
+            ));
+        }
+        let messages = error_messages(&event_rx);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+
+        // Once a save succeeds, the next failure is shown again.
+        std::fs::remove_dir(&settings_path).expect("unblock the settings");
+        assert!(report_save(
+            save_settings(&settings),
+            &mut reported,
+            &event_tx
+        ));
+        block();
+        assert!(!report_save(
+            save_settings(&settings),
+            &mut reported,
+            &event_tx
+        ));
+        assert_eq!(error_messages(&event_rx), messages);
+        std::fs::remove_dir(&settings_path).expect("unblock the settings");
     }
 
     #[test]
