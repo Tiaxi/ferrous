@@ -206,7 +206,7 @@ fn frame_seconds(frame: u64, sample_rate: u64) -> f64 {
 }
 
 fn decode_window(
-    session: &mut WaveformSession,
+    session: &WaveformSession,
     start_seconds: f64,
     end_seconds: f64,
     max_points: usize,
@@ -288,18 +288,17 @@ pub(super) mod tests {
             .map(|sample| i16::try_from((sample * 73) % 60_000 - 30_000).unwrap())
             .collect();
         let path = write_test_wave(&samples, 48_000, 2);
-        let mut session = WaveformSession::open(&path).expect("open fixture");
+        let session = WaveformSession::open(&path).expect("open fixture");
         let floats: Vec<_> = samples
             .iter()
             .map(|&sample| f32::from(sample) / 32768.0)
             .collect();
-        decode_window(&mut session, 0.0, 65_536.0 / 48_000.0, 64, &|| false)
-            .expect("warm summaries");
-        assert_eq!(session.decoded_tiles, 4);
+        decode_window(&session, 0.0, 65_536.0 / 48_000.0, 64, &|| false).expect("warm summaries");
+        assert_eq!(session.decoded_tiles(), 4);
         session.discard_pcm();
         for points in [64, 128, 256] {
             let window = decode_window(
-                &mut session,
+                &session,
                 2_048.0 / 48_000.0,
                 65_536.0 / 48_000.0,
                 points,
@@ -311,10 +310,14 @@ pub(super) mod tests {
             let expected = expected.finish(48_000);
             assert_eq!(window.extrema, expected.extrema);
             assert_eq!(window.downmix_extrema, expected.downmix_extrema);
-            assert_eq!(session.decoded_tiles, 4, "summary zoom must not reopen PCM");
+            assert_eq!(
+                session.decoded_tiles(),
+                4,
+                "summary zoom must not reopen PCM"
+            );
         }
         let window = decode_window(
-            &mut session,
+            &session,
             2_048.0 / 48_000.0,
             65_519.0 / 48_000.0,
             64,
@@ -325,7 +328,8 @@ pub(super) mod tests {
         expected.push_interleaved(0, &floats, 2);
         assert_eq!(window.extrema, expected.finish(48_000).extrema);
         assert_eq!(
-            session.decoded_tiles, 5,
+            session.decoded_tiles(),
+            5,
             "only the clipped endpoint needs PCM"
         );
         std::fs::remove_file(path).expect("remove fixture");
@@ -337,7 +341,7 @@ pub(super) mod tests {
             .map(|sample| i16::try_from((sample * 73) % 60_000 - 30_000).unwrap())
             .collect();
         let path = write_test_wave(&samples, 48_000, 2);
-        let mut session = WaveformSession::open(&path).expect("open fixture");
+        let session = WaveformSession::open(&path).expect("open fixture");
         let floats: Vec<_> = samples
             .iter()
             .map(|&sample| f32::from(sample) / 32768.0)
@@ -345,7 +349,7 @@ pub(super) mod tests {
         for (start, end) in [(1_001, 40_013), (2_003, 39_001), (1_001, 40_013)] {
             for points in [1, 31, 1_000, 65_536] {
                 let actual = decode_window(
-                    &mut session,
+                    &session,
                     f64::from(start) / 48_000.0,
                     f64::from(end) / 48_000.0,
                     points,
@@ -360,7 +364,8 @@ pub(super) mod tests {
             }
         }
         assert_eq!(
-            session.decoded_tiles, 3,
+            session.decoded_tiles(),
+            3,
             "all overlapping resolutions reuse PCM"
         );
         std::fs::remove_file(path).expect("remove fixture");
