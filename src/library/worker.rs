@@ -60,6 +60,7 @@ fn prepare_library(
     notice: Option<String>,
 ) {
     let mut notices: Vec<String> = notice.into_iter().collect();
+    library.begin_reads();
     control.external_writes(conn);
     library.reload(conn);
     library.status.last_error = joined(&notices);
@@ -122,6 +123,7 @@ pub(super) fn handle_command(
     event_tx: &Sender<LibraryEvent>,
     control: &mut Control,
 ) {
+    library.begin_reads();
     if let LibraryCommand::ReadRows(paths) = cmd {
         // Not a user's command: the error shown stays.
         if let Err(err) = library.read_rows(conn, &paths) {

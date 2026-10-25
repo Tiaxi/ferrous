@@ -615,3 +615,62 @@ fn reading_rows_again_corrects_a_copy_that_diverged() {
     assert_ne!(read.title, "Stale");
     assert_eq!(events.mirror.paths(), fixture.indexed());
 }
+
+#[test]
+fn events_are_numbered_before_the_reads_of_their_rows() {
+    let fixture = Fixture::new("read-after", &["a.mp3", "b.mp3", "c.mp3"]);
+    let (started, release) = hold_read(&fixture.track("b.mp3"));
+    let (service, mut events) = fixture.start();
+    let before_scan = crate::library::next_file_sequence();
+    service.command(LibraryCommand::AddRoot {
+        path: fixture.root.clone(),
+        name: String::new(),
+    });
+    started
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the scan reads the held file");
+
+    // Rows read again between the files of the scan go out with rows that
+    // the scan may have begun to read before them, so with the scan's
+    // number.
+    let before_rows = crate::library::next_file_sequence();
+    let missing = fixture.track("missing.mp3");
+    service.command(LibraryCommand::ReadRows(vec![missing.clone()]));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut numbers = Vec::new();
+    loop {
+        let event = events.rx.recv_deadline(deadline).expect("an event");
+        events.mirror.apply(&event);
+        if !event.changes.is_empty() {
+            numbers.push(event.read_after);
+        }
+        if event.changes.removed.contains(&missing) {
+            break;
+        }
+    }
+    drop(release);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !idle_with_tracks(&events.view(), 3) {
+        let event = events.rx.recv_deadline(deadline).expect("an event");
+        events.mirror.apply(&event);
+        if !event.changes.is_empty() {
+            numbers.push(event.read_after);
+        }
+    }
+    assert!(
+        numbers
+            .iter()
+            .all(|&number| before_scan < number && number < before_rows),
+        "{before_scan} < {numbers:?} < {before_rows}"
+    );
+
+    let before_read = crate::library::next_file_sequence();
+    service.command(LibraryCommand::ReadRows(vec![fixture.track("a.mp3")]));
+    let event = events
+        .rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the row read again");
+    assert!(!event.changes.upserted.is_empty());
+    assert!(before_read < event.read_after);
+    assert!(event.read_after < crate::library::next_file_sequence());
+}

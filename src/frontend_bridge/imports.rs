@@ -19,10 +19,10 @@ use super::commands::{
     expand_import_paths_cancellable, format_import_warning, ImportExpandOutcome,
 };
 use super::BridgeQueueCommand;
-use crate::library::{IndexedTrack, TrackFileFingerprint};
+use crate::library::{next_file_sequence, IndexedTrack, TrackFileFingerprint};
 use crate::playback::{remap_path, PathRenames};
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::{
@@ -85,16 +85,6 @@ pub(super) enum ImportMessage {
     },
 }
 
-static FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-/// The next number of one process-wide sequence that orders the bridge's
-/// edit refresh requests against renames: a rename takes its number after it
-/// has read the renamed files, and the bridge takes a request's number when
-/// it sends the request, before the files are read.
-pub(super) fn next_file_sequence() -> u64 {
-    FILE_SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1
-}
-
 /// What a rename read from the files it renamed, so that the bridge does
 /// not read them again.
 #[derive(Debug, Default)]
@@ -105,6 +95,9 @@ pub(crate) struct RenamedDetails {
     pub(crate) fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
     /// The files that could not be read fully, for the user.
     pub(crate) problem: Option<String>,
+    /// New paths that a read after the rename found gone, which the rename
+    /// leaves out of the library.
+    pub(crate) gone: HashSet<PathBuf>,
 }
 
 /// Orders file renames against the import worker's reads of the filesystem,
