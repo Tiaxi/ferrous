@@ -945,9 +945,9 @@ struct SpectrogramSessionState {
     /// reaches EOF.  Set by command processing, consumed at EOF.
     /// Fields: `(path, track_token)`.
     pending_continue: Option<(PathBuf, u64)>,
-    /// A continuation before the track switch was rejected, so a switch
-    /// to it ends the session: the analysis thread restarts it.
-    continuation_rejected: bool,
+    /// The file of a continuation rejected before the track switch: a
+    /// switch to it ends the session, and the analysis thread restarts it.
+    rejected_continuation: Option<PathBuf>,
     /// Why the decode failed, when it did.
     failure: Option<String>,
 }
@@ -1159,7 +1159,7 @@ fn run_spectrogram_session(
         #[cfg(feature = "gst")]
         gst_duration_requeried: false,
         pending_continue: None,
-        continuation_rejected: false,
+        rejected_continuation: None,
         failure: None,
     };
 
@@ -1246,14 +1246,14 @@ fn run_spectrogram_session(
                     );
                     let _ = reports.send(SessionReport::ContinuationRejected {
                         generation: session.gen,
-                        path,
+                        path: path.clone(),
                         stamp,
                         format,
                     });
                     if track_token != session.track_token {
                         return None;
                     }
-                    session.continuation_rejected = true;
+                    session.rejected_continuation = Some(path);
                     continue;
                 };
                 let _ = reports.send(SessionReport::Opened {
@@ -1265,7 +1265,7 @@ fn run_spectrogram_session(
                 });
                 source = new_source;
                 session.source_reached_eof = false;
-                session.continuation_rejected = false;
+                session.rejected_continuation = None;
                 session.timeline = AudioTimeline::new(0);
                 session.track_token = track_token;
                 session.path = path;
@@ -1784,7 +1784,7 @@ fn update_track_token(session: &mut SpectrogramSessionState, track_token: u64) -
         // Old-track columns keep the old token until EOF.
         *pending_token = track_token;
         SessionAction::Continue
-    } else if session.continuation_rejected {
+    } else if session.rejected_continuation.is_some() {
         // The worker could not continue with the file now playing, and the
         // analysis thread, told so, starts it afresh.  Positions on the
         // timeline it switched to do not fit this session.
@@ -2836,7 +2836,7 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
-            continuation_rejected: false,
+            rejected_continuation: None,
             failure: None,
         };
 
@@ -2949,7 +2949,7 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
-            continuation_rejected: false,
+            rejected_continuation: None,
             failure: None,
         };
 
@@ -3001,7 +3001,7 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
-            continuation_rejected: false,
+            rejected_continuation: None,
             failure: None,
         };
 
@@ -3063,7 +3063,7 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
-            continuation_rejected: false,
+            rejected_continuation: None,
             failure: None,
         };
 
@@ -3117,7 +3117,7 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
-            continuation_rejected: false,
+            rejected_continuation: None,
             failure: None,
         };
 
@@ -3202,7 +3202,7 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
-            continuation_rejected: false,
+            rejected_continuation: None,
             failure: None,
         }
     }
