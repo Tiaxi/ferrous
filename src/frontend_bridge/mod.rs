@@ -18,8 +18,8 @@ use crate::lastfm::{
     RuntimeState as LastFmRuntimeState, ShutdownOutcome as LastFmShutdownOutcome,
 };
 use crate::library::{
-    IndexedTrack, LibraryEvent, LibraryService, LibrarySnapshot, TrackFileFingerprint,
-    LIBRARY_SHUTDOWN_TIMEOUT,
+    IndexedTrack, LibraryCommand, LibraryEvent, LibraryService, LibrarySnapshot, LibraryStatus,
+    TrackFileFingerprint, LIBRARY_SHUTDOWN_TIMEOUT,
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
@@ -51,11 +51,10 @@ use config::{
     save_settings, session_snapshot_for_state, SaveFailure, SessionSnapshot,
 };
 use events::{
-    drain_analysis_events, drain_apply_album_art_events, drain_lastfm_events, drain_library_events,
+    apply_library_events, drain_analysis_events, drain_apply_album_art_events, drain_lastfm_events,
     drain_metadata_events, drain_playback_events, finalize_lastfm_track,
     note_precomputed_spectrogram_chunk, process_analysis_event, process_apply_album_art_event,
-    process_lastfm_event, process_library_event, process_metadata_event, process_playback_event,
-    tick_lastfm_playback,
+    process_lastfm_event, process_metadata_event, process_playback_event, tick_lastfm_playback,
 };
 pub use queue_sync::{QueueEdit, QueueUpdate};
 pub(crate) use search::is_main_album_disc_section;
@@ -400,6 +399,7 @@ pub struct BridgeSnapshot {
     pub analysis: AnalysisSnapshot,
     pub metadata: TrackMetadata,
     pub library: Arc<LibrarySnapshot>,
+    pub library_status: LibraryStatus,
     pub(crate) queue_details: Arc<HashMap<PathBuf, IndexedTrack>>,
     pub library_artist_count: usize,
     pub library_album_count: usize,
@@ -493,8 +493,13 @@ pub(super) struct BridgeState {
     analysis: AnalysisSnapshot,
     metadata: TrackMetadata,
     library: Arc<LibrarySnapshot>,
+    library_status: LibraryStatus,
     /// Finds `library`'s tracks by path.
     library_index: library_index::LibraryPathIndex,
+    /// Paths whose tracks the bridge changed itself, from what other
+    /// workers read. The library worker reads their rows again, so that a
+    /// change applied after a newer one is corrected.
+    library_rows_to_read: Vec<PathBuf>,
     queue_details: Arc<HashMap<PathBuf, IndexedTrack>>,
     queue_detail_fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
     library_artist_count: usize,
@@ -570,6 +575,26 @@ pub(super) struct ApplyAlbumArtEvent {
 }
 
 impl BridgeState {
+    /// Apply `changes` to a copy of the library, which shares the tracks it
+    /// keeps and keeps them in the database's order, and keep the path
+    /// index for it.
+    fn apply_library_changes(
+        &mut self,
+        changes: &crate::library::LibraryChanges,
+    ) -> crate::library::AppliedChanges {
+        let previous = Arc::clone(&self.library);
+        let mut next = (*previous).clone();
+        let applied = next.apply_changes(changes, |path| {
+            self.library_index.positions(&previous, path)
+        });
+        if applied.changed {
+            self.library = Arc::new(next);
+            self.library_index
+                .follow(&previous, &self.library, &applied);
+        }
+        applied
+    }
+
     /// Have the UI compare its queue rows with the queue's details, which
     /// may have changed.
     fn refresh_queue_rows(&mut self) {
@@ -583,13 +608,20 @@ impl BridgeState {
         metadata.current_bitrate_kbps = self
             .metadata
             .displayed_bitrate_kbps(self.playback.position.as_secs_f64());
-        let mut library_expanded_keys = self.expanded_keys.iter().cloned().collect::<Vec<_>>();
-        library_expanded_keys.sort_unstable();
+        // The keys are only sent with a tree.
+        let library_expanded_keys = if include_tree {
+            let mut keys = self.expanded_keys.iter().cloned().collect::<Vec<_>>();
+            keys.sort_unstable();
+            keys
+        } else {
+            Vec::new()
+        };
         BridgeSnapshot {
             playback: self.playback.clone(),
             analysis: self.analysis.clone(),
             metadata,
             library: self.library.clone(),
+            library_status: self.library_status.clone(),
             queue_details: self.queue_details.clone(),
             library_artist_count: self.library_artist_count,
             library_album_count: self.library_album_count,
@@ -680,6 +712,9 @@ struct BridgeRuntimeOptions {
     /// A Last.fm service to use instead of starting one.
     #[cfg(test)]
     lastfm: Option<(LastFmHandle, Receiver<LastFmEvent>)>,
+    /// A library database of the test's own, instead of the process's.
+    #[cfg(test)]
+    library_db: Option<PathBuf>,
 }
 
 impl Default for BridgeRuntimeOptions {
@@ -689,6 +724,8 @@ impl Default for BridgeRuntimeOptions {
             persisted_state_enabled: cfg!(not(test)),
             #[cfg(test)]
             lastfm: None,
+            #[cfg(test)]
+            library_db: None,
         }
     }
 }
@@ -862,7 +899,13 @@ struct BridgeLoopRuntime {
     tree_emit_interval: Duration,
     tree_emit_min_track_delta: usize,
     last_tree_emit_at: Option<Instant>,
-    last_tree_emit_track_count: usize,
+    /// Rows that changed since the tree was last requested; while a scan
+    /// runs, the tree is rebuilt only for enough of them.
+    rows_changed_since_tree: usize,
+    /// Whether the library changed since the tree was last requested.
+    tree_stale: bool,
+    /// Whether the library changed since the search worker last got it.
+    search_library_stale: bool,
     deferred_tree_rebuild_at: Option<Instant>,
     persisted_state_enabled: bool,
     /// How often each worker was restarted after it stopped.
@@ -1010,6 +1053,12 @@ impl BridgeLoopRuntime {
         let (analysis, analysis_rx) = AnalysisEngine::new_with_spectrogram_output(spectral_tx);
         let (playback, playback_rx) = PlaybackEngine::new(analysis.sender());
         let (metadata, metadata_rx) = MetadataService::new_with_delay(options.metadata_delay);
+        #[cfg(test)]
+        let (library, library_rx) = match options.library_db.take() {
+            Some(path) => LibraryService::at_database(path),
+            None => LibraryService::new(),
+        };
+        #[cfg(not(test))]
         let (library, library_rx) = LibraryService::new();
         let (search_query_tx, search_results_rx) = spawn_search_worker();
         let (apply_album_art_tx, apply_album_art_event_rx) = spawn_apply_album_art_worker();
@@ -1084,7 +1133,9 @@ impl BridgeLoopRuntime {
             tree_emit_interval: scan_tree_emit_interval(),
             tree_emit_min_track_delta: scan_tree_emit_min_track_delta(),
             last_tree_emit_at: None,
-            last_tree_emit_track_count: 0,
+            rows_changed_since_tree: 0,
+            tree_stale: false,
+            search_library_stale: false,
             deferred_tree_rebuild_at: None,
             persisted_state_enabled: options.persisted_state_enabled,
             worker_restarts: HashMap::new(),
@@ -1250,7 +1301,7 @@ impl BridgeLoopRuntime {
             BridgeLoopWake::Playback(event) => self.handle_playback_event(event, event_tx),
             BridgeLoopWake::Analysis(event) => self.handle_analysis_event(event, event_tx),
             BridgeLoopWake::Metadata(event) => self.handle_metadata_event(event),
-            BridgeLoopWake::Library(event) => self.handle_library_event(event),
+            BridgeLoopWake::Library(event) => self.handle_library_events(Some(event)),
             BridgeLoopWake::SearchResults(frame) => self.handle_search_results(frame),
             BridgeLoopWake::ApplyAlbumArt(event) => {
                 self.handle_apply_album_art_event(event, event_tx)
@@ -1267,8 +1318,23 @@ impl BridgeLoopRuntime {
             }
         };
         urgency = urgency.max(self.drain_pending_updates(event_tx));
+        self.read_patched_library_rows();
         self.note_snapshot_urgency(urgency);
         self.maybe_emit_pending_snapshot(event_tx);
+    }
+
+    /// Have the library worker read again the rows the bridge changed
+    /// itself. Its changes reach the bridge as events, after any it sent
+    /// before, so the bridge's copy ends with what the database has even if
+    /// it applied a change, such as a rename's, after a newer one.
+    fn read_patched_library_rows(&mut self) {
+        if self.state.library_rows_to_read.is_empty() {
+            return;
+        }
+        let mut paths = std::mem::take(&mut self.state.library_rows_to_read);
+        paths.sort_unstable();
+        paths.dedup();
+        self.library.command(LibraryCommand::ReadRows(paths));
     }
 
     fn apply_import_result(
@@ -1458,9 +1524,12 @@ impl BridgeLoopRuntime {
         let _ = try_send_event(event_tx, BridgeEvent::Error(message));
     }
 
-    fn request_tree(&self) {
+    fn request_tree(&mut self) {
+        self.tree_stale = false;
+        self.rows_changed_since_tree = 0;
         self.tree_worker.request(
             Arc::clone(&self.state.library),
+            self.state.library_status.scan_in_progress,
             self.state.settings.library_sort_mode,
             self.state.expanded_keys.clone(),
         );
@@ -1632,21 +1701,14 @@ impl BridgeLoopRuntime {
         urgency
     }
 
-    fn handle_library_event(&mut self, event: LibraryEvent) -> SnapshotUrgency {
-        let urgency = process_library_event(event, &mut self.state);
-        if urgency.is_pending() {
-            self.flags.session_dirty = true;
-            self.handle_library_refresh(urgency);
-            if !self.state.library.scan_in_progress {
-                let _ = self.search_query_tx.send(SearchWorkerQuery {
-                    limit: 0,
-                    seq: 0,
-                    query: String::new(),
-                    library: Arc::clone(&self.state.library),
-                });
-            }
-        }
-        urgency
+    /// Apply `first` and the library events after it as one change.
+    fn handle_library_events(&mut self, first: Option<LibraryEvent>) -> SnapshotUrgency {
+        let applied = apply_library_events(
+            first.into_iter().chain(self.library_rx.try_iter()),
+            &mut self.state,
+        );
+        self.handle_library_refresh(applied);
+        applied.urgency()
     }
 
     fn handle_search_results(&mut self, frame: BridgeSearchResultsFrame) -> SnapshotUrgency {
@@ -1715,7 +1777,7 @@ impl BridgeLoopRuntime {
         );
         let analysis_urgency = drain_analysis_events(&self.analysis_rx, event_tx, &mut self.state);
         let metadata_urgency = drain_metadata_events(&self.metadata_rx, &mut self.state);
-        let library_urgency = drain_library_events(&self.library_rx, &mut self.state);
+        let library_urgency = self.handle_library_events(None);
         let apply_album_art_urgency = drain_apply_album_art_events(
             &self.apply_album_art_rx,
             &self.metadata,
@@ -1732,7 +1794,6 @@ impl BridgeLoopRuntime {
         if apply_album_art_urgency.is_pending() {
             self.deferred_tree_rebuild_at = Some(Instant::now() + Duration::from_millis(150));
         }
-        self.handle_library_refresh(library_urgency);
         urgency = urgency
             .max(analysis_urgency)
             .max(metadata_urgency)
@@ -1745,28 +1806,42 @@ impl BridgeLoopRuntime {
         urgency
     }
 
-    fn handle_library_refresh(&mut self, library_urgency: SnapshotUrgency) {
-        if !library_urgency.is_pending() {
-            return;
+    /// Rebuild the tree and the search index for library changes. While a
+    /// scan runs, the tree is rebuilt at intervals, for enough changed rows,
+    /// and the search index after the scan.
+    fn handle_library_refresh(&mut self, applied: events::LibraryEventsApplied) {
+        if applied.rows_changed > 0 {
+            self.flags.session_dirty = true;
+            self.deferred_tree_rebuild_at = None;
+            self.state.refresh_queue_rows();
+            self.tree_stale = true;
+            self.search_library_stale = true;
+            self.rows_changed_since_tree = self
+                .rows_changed_since_tree
+                .saturating_add(applied.rows_changed);
         }
-        self.deferred_tree_rebuild_at = None;
-        self.state.refresh_queue_rows();
-        let now = Instant::now();
-        let track_delta = self
-            .state
-            .library
-            .tracks
-            .len()
-            .saturating_sub(self.last_tree_emit_track_count);
-        let scan_emit_due = self
-            .last_tree_emit_at
-            .is_none_or(|last| now.duration_since(last) >= self.tree_emit_interval);
-        let should_emit_tree = !self.state.library.scan_in_progress
-            || self.last_tree_emit_at.is_none()
-            || (scan_emit_due && track_delta >= self.tree_emit_min_track_delta);
-        if should_emit_tree {
-            self.request_tree();
-            self.note_snapshot_urgency(SnapshotUrgency::Immediate);
+        let scanning = self.state.library_status.scan_in_progress;
+        if self.tree_stale {
+            let scan_emit_due = self
+                .last_tree_emit_at
+                .is_none_or(|last| last.elapsed() >= self.tree_emit_interval);
+            let should_emit_tree = !scanning
+                || self.last_tree_emit_at.is_none()
+                || (scan_emit_due
+                    && self.rows_changed_since_tree >= self.tree_emit_min_track_delta);
+            if should_emit_tree {
+                self.request_tree();
+                self.note_snapshot_urgency(SnapshotUrgency::Immediate);
+            }
+        }
+        if self.search_library_stale && !scanning {
+            self.search_library_stale = false;
+            let _ = self.search_query_tx.send(SearchWorkerQuery {
+                limit: 0,
+                seq: 0,
+                query: String::new(),
+                library: Arc::clone(&self.state.library),
+            });
         }
     }
 
@@ -1817,7 +1892,6 @@ impl BridgeLoopRuntime {
             self.diagnostics.prof_snapshots_sent += 1;
             if self.snapshot_plan.include_tree_in_next_snapshot {
                 self.last_tree_emit_at = Some(Instant::now());
-                self.last_tree_emit_track_count = self.state.library.tracks.len();
             }
             self.last_snapshot_emit = Instant::now();
             self.snapshot_plan.include_tree_in_next_snapshot = false;
@@ -2499,11 +2573,11 @@ mod tests {
         assert!(!should_sync_queue_details_on_initial_restore(&state));
 
         state.library = Arc::new(LibrarySnapshot {
-            tracks: vec![LibraryTrack {
+            tracks: crate::library::shared_tracks(vec![LibraryTrack {
                 search_tags: crate::library::SearchTags::default(),
                 path: p("/music/a.flac"),
                 ..LibraryTrack::default()
-            }],
+            }]),
             ..LibrarySnapshot::default()
         });
         assert!(should_sync_queue_details_on_initial_restore(&state));
@@ -2815,6 +2889,7 @@ mod tests {
                         None,
                     )
                 })
+                .map(std::sync::Arc::new)
                 .collect(),
             ..LibrarySnapshot::default()
         });
@@ -3601,12 +3676,12 @@ mod tests {
                 path: dir.clone(),
                 name: String::new(),
             }],
-            tracks: vec![LibraryTrack {
+            tracks: crate::library::shared_tracks(vec![LibraryTrack {
                 path: old.clone(),
                 root_path: dir.clone(),
                 title: "Old".to_string(),
                 ..LibraryTrack::default()
-            }],
+            }]),
             ..LibrarySnapshot::default()
         });
         runtime.state.queue = vec![old.clone()];
@@ -3718,7 +3793,13 @@ mod tests {
         assert_eq!(checks(&runtime), 3, "playback going on");
 
         library_tx
-            .send(LibraryEvent::Snapshot(LibrarySnapshot::default()))
+            .send(LibraryEvent::with_library(LibrarySnapshot {
+                tracks: crate::library::shared_tracks(vec![LibraryTrack {
+                    path: dir.join("library.flac"),
+                    ..LibraryTrack::default()
+                }]),
+                ..LibrarySnapshot::default()
+            }))
             .expect("library snapshot");
         runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
         assert_eq!(checks(&runtime), 4, "a library change");
@@ -3899,6 +3980,7 @@ mod tests {
                     title: title.to_string(),
                     ..LibraryTrack::default()
                 })
+                .map(std::sync::Arc::new)
                 .collect(),
             ..LibrarySnapshot::default()
         });
@@ -4518,19 +4600,19 @@ mod tests {
         let root = p("/music");
         let snapshot = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![library_track(
+            tracks: crate::library::shared_tracks(vec![library_track(
                 "/music/Artist/Album/01 - Song.flac",
                 &root,
                 "Artist",
                 "Album",
                 Some(2020),
                 Some(1),
-            )],
+            )]),
             ..LibrarySnapshot::default()
         };
 
         runtime.handle_wake(
-            BridgeLoopWake::Library(LibraryEvent::Snapshot(snapshot)),
+            BridgeLoopWake::Library(LibraryEvent::with_library(snapshot)),
             &event_tx,
         );
 
@@ -4551,7 +4633,13 @@ mod tests {
             Ok(BridgeEvent::Snapshot(snapshot)) => *snapshot,
             other => panic!("expected library snapshot, got {other:?}"),
         };
-        assert_eq!(snapshot.library.tracks.len(), 1);
+        // The library worker's own events may add the tracks of the
+        // process's test library.
+        assert!(snapshot
+            .library
+            .tracks
+            .iter()
+            .any(|track| track.path == p("/music/Artist/Album/01 - Song.flac")));
         assert!(snapshot.pre_built_tree_bytes.is_some());
         assert!(!snapshot
             .pre_built_tree_bytes
@@ -4868,5 +4956,207 @@ mod tests {
         assert_eq!(updated_metadata.metadata.title, second_title);
 
         bridge.command(BridgeCommand::Shutdown);
+    }
+
+    /// A runtime with a library database of its own, whose engine commands
+    /// the test reads, and a library folder with one artist's album.
+    struct LibraryOrderFixture {
+        runtime: BridgeLoopRuntime,
+        event_tx: Sender<BridgeEvent>,
+        _event_rx: Receiver<BridgeEvent>,
+        _engine_rx: Receiver<PlaybackCommand>,
+        folder: PathBuf,
+        root: PathBuf,
+        album: PathBuf,
+    }
+
+    impl LibraryOrderFixture {
+        fn new(name: &str, tracks: &[&str]) -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let folder = crate::paths::test_root().join(format!(
+                "bridge-library-order-{name}-{}",
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let album = folder.join("music/Artist/Album");
+            std::fs::create_dir_all(&album).expect("album folder");
+            let root = folder.join("music").canonicalize().expect("canonical root");
+            let album = root.join("Artist/Album");
+            let mut runtime = BridgeLoopRuntime::new(
+                BridgeRuntimeOptions {
+                    library_db: Some(folder.join("library.sqlite3")),
+                    ..BridgeRuntimeOptions::default()
+                },
+                None,
+            );
+            let (engine_tx, engine_rx) = unbounded();
+            runtime.playback = PlaybackEngine::from_command_sender(engine_tx);
+            let (event_tx, event_rx) = unbounded();
+            let mut fixture = Self {
+                runtime,
+                event_tx,
+                _event_rx: event_rx,
+                _engine_rx: engine_rx,
+                folder,
+                root,
+                album,
+            };
+            for track in tracks {
+                fixture.write(track);
+            }
+            fixture.command(BridgeLibraryCommand::AddRoot {
+                path: fixture.root.clone(),
+                name: String::new(),
+            });
+            fixture.wait_for_tracks(tracks.len());
+            fixture
+        }
+
+        fn write(&self, track: &str) {
+            std::fs::write(self.album.join(track), track.as_bytes()).expect("track file");
+        }
+
+        fn command(&mut self, command: BridgeLibraryCommand) {
+            let event_tx = self.event_tx.clone();
+            self.runtime.handle_wake(
+                BridgeLoopWake::Command(BridgeCommand::Library(command)),
+                &event_tx,
+            );
+        }
+
+        /// Applies the library worker's events until the bridge has `count`
+        /// tracks and no scan runs.
+        fn wait_for_tracks(&mut self, count: usize) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let event_tx = self.event_tx.clone();
+            while self.runtime.state.library.tracks.len() != count
+                || self.runtime.state.library_status.scan_in_progress
+            {
+                let event = self
+                    .runtime
+                    .library_rx
+                    .recv_deadline(deadline)
+                    .expect("the library reaches the expected tracks");
+                self.runtime
+                    .handle_wake(BridgeLoopWake::Library(event), &event_tx);
+            }
+        }
+
+        /// The queue after `command` appends to an empty queue.
+        fn queued_by(&mut self, command: BridgeLibraryCommand) -> Vec<String> {
+            self.runtime.state.queue.clear();
+            self.command(command);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let event_tx = self.event_tx.clone();
+            while self.runtime.state.queue.is_empty() {
+                if let Ok(result) = self.runtime.imports.results.recv_deadline(deadline) {
+                    self.runtime
+                        .handle_wake(BridgeLoopWake::Import(result), &event_tx);
+                } else {
+                    panic!("nothing was queued");
+                }
+            }
+            self.runtime
+                .state
+                .queue
+                .iter()
+                .map(|path| {
+                    path.file_name()
+                        .expect("name")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        }
+
+        fn album_key(&self) -> BridgeLibraryCommand {
+            let root = self.root.to_string_lossy();
+            BridgeLibraryCommand::AppendAlbumByKey {
+                artist: format!("artist|{root}|Artist"),
+                album: format!("album|{root}|Artist|Album"),
+            }
+        }
+    }
+
+    impl Drop for LibraryOrderFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.folder);
+        }
+    }
+
+    #[test]
+    fn a_track_added_by_a_rescan_is_queued_in_its_album_place() {
+        let _guard = test_guard();
+        let mut fixture = LibraryOrderFixture::new("rescan", &["02.mp3", "03.mp3"]);
+        fixture.write("01.mp3");
+        fixture.command(BridgeLibraryCommand::RescanRoot(fixture.root.clone()));
+        fixture.wait_for_tracks(3);
+
+        let expected = ["01.mp3", "02.mp3", "03.mp3"];
+        let album = fixture.album_key();
+        assert_eq!(fixture.queued_by(album), expected);
+        assert_eq!(
+            fixture.queued_by(BridgeLibraryCommand::AppendArtistByKey {
+                artist: format!("artist|{}|Artist", fixture.root.to_string_lossy()),
+            }),
+            expected
+        );
+        assert_eq!(
+            fixture.queued_by(BridgeLibraryCommand::AppendRootByPath {
+                root: fixture.root.to_string_lossy().into_owned(),
+            }),
+            expected
+        );
+        assert_eq!(
+            fixture.queued_by(BridgeLibraryCommand::AppendAllTracks),
+            expected
+        );
+        // The bridge's tracks are in the order a full read of the database has.
+        let mut read = LibrarySnapshot::default();
+        crate::library::schema_load_snapshot_for_test(
+            &fixture.folder.join("library.sqlite3"),
+            &mut read,
+        );
+        let paths = |library: &LibrarySnapshot| {
+            library
+                .tracks
+                .iter()
+                .map(|track| track.path.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths(&fixture.runtime.state.library), paths(&read));
+    }
+
+    #[test]
+    fn a_renamed_track_is_queued_in_its_new_place() {
+        let _guard = test_guard();
+        let mut fixture = LibraryOrderFixture::new("rename", &["01.mp3", "02.mp3", "03.mp3"]);
+        // A rename on disk and in the database, as the tag editor's.
+        let old = fixture.album.join("03.mp3");
+        let new = fixture.album.join("00.mp3");
+        std::fs::rename(&old, &new).expect("rename the file");
+        rusqlite::Connection::open(fixture.folder.join("library.sqlite3"))
+            .and_then(|conn| {
+                conn.execute(
+                    "UPDATE tracks SET path = ?2 WHERE path = ?1",
+                    rusqlite::params![old.to_string_lossy(), new.to_string_lossy()],
+                )
+            })
+            .expect("rename the row");
+        let event_tx = fixture.event_tx.clone();
+        let _ = fixture.runtime.apply_renamed_paths(
+            1,
+            Arc::new(PathRenames::from([(old.clone(), new.clone())])),
+            imports::RenamedDetails::default(),
+            imports::next_file_sequence(),
+            &event_tx,
+        );
+
+        let album = fixture.album_key();
+        assert_eq!(fixture.queued_by(album), ["00.mp3", "01.mp3", "02.mp3"]);
+        // The rows the rename changed are read again; the order stays.
+        fixture.command(BridgeLibraryCommand::RescanRoot(fixture.root.clone()));
+        fixture.wait_for_tracks(3);
+        let album = fixture.album_key();
+        assert_eq!(fixture.queued_by(album), ["00.mp3", "01.mp3", "02.mp3"]);
     }
 }

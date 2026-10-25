@@ -608,12 +608,14 @@ impl FfiEncoder {
         let mut latest_snapshot: Option<BridgeSnapshot> = None;
         // Every snapshot's queue update, in order: none may be lost.
         let mut queue_batch: Option<QueueBatch> = None;
-        let mut latest_tree_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
+        // The latest tree, with the expanded keys sent with it.
+        let mut latest_tree: Option<(std::sync::Arc<Vec<u8>>, Vec<String>)> = None;
         for event in events {
             match event {
                 BridgeEvent::Snapshot(snapshot) => {
                     if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
-                        latest_tree_bytes = Some(tree_bytes.clone());
+                        latest_tree =
+                            Some((tree_bytes.clone(), snapshot.library_expanded_keys.clone()));
                     }
                     self.queue.apply(&snapshot, &mut queue_batch);
                     latest_snapshot = Some(*snapshot);
@@ -651,13 +653,14 @@ impl FfiEncoder {
             }
         }
 
-        if let Some(tree_bytes) = latest_tree_bytes.as_ref() {
+        if let Some((tree_bytes, _)) = latest_tree.as_ref() {
             prepared.push(PreparedEvent::Tree(tree_bytes.as_ref().clone()));
         }
         let mut sections = None;
         if let Some(mut snapshot) = latest_snapshot {
-            if latest_tree_bytes.is_some() {
-                snapshot.pre_built_tree_bytes = latest_tree_bytes;
+            if let Some((tree_bytes, expanded_keys)) = latest_tree {
+                snapshot.pre_built_tree_bytes = Some(tree_bytes);
+                snapshot.library_expanded_keys = expanded_keys;
             }
             let analysis_delta = compute_analysis_delta(&snapshot, &mut self.analysis_state);
             prepared.push(PreparedEvent::Analysis(encode_analysis_frame(
@@ -2403,7 +2406,7 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
 
 fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     let mut out = Vec::new();
-    let progress = snapshot.library.scan_progress.as_ref();
+    let progress = snapshot.library_status.scan_progress.as_ref();
     let roots_completed = progress.map_or(0, |p| clamp_u32(p.roots_completed));
     let roots_total = progress.map_or(0, |p| clamp_u32(p.roots_total));
     let files_discovered = progress.map_or(0, |p| clamp_u32(p.supported_files_discovered));
@@ -2415,11 +2418,15 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u32(&mut out, clamp_u32(snapshot.library.tracks.len()));
     push_u32(&mut out, clamp_u32(snapshot.library_artist_count));
     push_u32(&mut out, clamp_u32(snapshot.library_album_count));
-    push_u8(&mut out, u8::from(snapshot.library.scan_in_progress));
+    push_u8(&mut out, u8::from(snapshot.library_status.scan_in_progress));
     push_i32(&mut out, snapshot.settings.library_sort_mode.to_i32());
     push_string(
         &mut out,
-        snapshot.library.last_error.as_deref().unwrap_or_default(),
+        snapshot
+            .library_status
+            .last_error
+            .as_deref()
+            .unwrap_or_default(),
     );
     push_u32(&mut out, roots_completed);
     push_u32(&mut out, roots_total);
@@ -2932,7 +2939,7 @@ mod tests {
             },
             library: Arc::new(LibrarySnapshot {
                 roots: vec![root("/music")],
-                tracks: vec![LibraryTrack {
+                tracks: crate::library::shared_tracks(vec![LibraryTrack {
                     search_tags: crate::library::SearchTags::default(),
                     path: PathBuf::from("/music/a.flac"),
                     root_path: PathBuf::from("/music"),
@@ -2944,9 +2951,10 @@ mod tests {
                     year: Some(2020),
                     track_no: Some(1),
                     duration_secs: Some(180.0),
-                }],
+                }]),
                 ..LibrarySnapshot::default()
             }),
+            library_status: crate::library::LibraryStatus::default(),
             queue_details: Arc::default(),
             library_artist_count: 1,
             library_album_count: 1,
@@ -4801,7 +4809,8 @@ mod tests {
         // address. Editing the library in place stands in for that: it
         // keeps the address whenever nothing else holds the library.
         let address = Arc::as_ptr(&snapshot.library).addr();
-        Arc::make_mut(&mut snapshot.library).tracks[0].title = "Renamed Track".to_string();
+        Arc::make_mut(&mut Arc::make_mut(&mut snapshot.library).tracks[0]).title =
+            "Renamed Track".to_string();
         snapshot.queue_revision = 2;
         snapshot.queue_update = Some(edits(1, vec![QueueEdit::Refresh]));
         let section = decode_queue_section(&queue_sections(&mut relay, [&snapshot]).unwrap());

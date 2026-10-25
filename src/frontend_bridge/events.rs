@@ -24,7 +24,7 @@ use crate::playback::{
 use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
-    library_tree, try_send_event, ApplyAlbumArtEvent, BridgeEvent, BridgeLoopFlags, BridgeState,
+    try_send_event, ApplyAlbumArtEvent, BridgeEvent, BridgeLoopFlags, BridgeState,
     LastFmPlaybackTracker, PendingWaveformTrack, SettingsSaveTiming, SnapshotUrgency,
 };
 
@@ -118,9 +118,9 @@ pub(super) fn update_library_cover_paths(
     let previous = Arc::clone(&state.library);
     let mut next_library = (*previous).clone();
     for (position, cover_path) in updates {
-        next_library.tracks[position]
-            .cover_path
-            .clone_from(cover_path);
+        let track = Arc::make_mut(&mut next_library.tracks[position]);
+        track.cover_path.clone_from(cover_path);
+        state.library_rows_to_read.push(track.path.clone());
     }
     next_library.search_revision = next_library.search_revision.saturating_add(1);
     state.library = Arc::new(next_library);
@@ -807,42 +807,59 @@ pub(super) fn unix_timestamp_now() -> i64 {
         .unwrap_or(0)
 }
 
-pub(super) fn process_library_event(
-    event: LibraryEvent,
-    state: &mut BridgeState,
-) -> SnapshotUrgency {
-    match event {
-        LibraryEvent::Snapshot(snapshot) => {
-            let (artist_count, album_count) = library_tree::compute_artist_album_counts(&snapshot);
-            state.library = Arc::new(snapshot);
-            state.library_artist_count = artist_count;
-            state.library_album_count = album_count;
-            if !state.queue.is_empty() {
-                super::sync_queue_details(state);
-            }
+/// What a batch of library events changed in the bridge's library.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct LibraryEventsApplied {
+    /// How many tracks were upserted or removed; roots count as one.
+    pub(super) rows_changed: usize,
+    pub(super) status_changed: bool,
+}
+
+impl LibraryEventsApplied {
+    pub(super) fn urgency(self) -> SnapshotUrgency {
+        if self.rows_changed > 0 || self.status_changed {
             SnapshotUrgency::Immediate
+        } else {
+            SnapshotUrgency::None
         }
     }
 }
 
-pub(super) fn drain_library_events(
-    library_rx: &Receiver<LibraryEvent>,
+/// Apply the library worker's events, in order, as one change: the bridge
+/// copies its library once for all of them, and only if a row changed. The
+/// copy shares every track it keeps, and the path index is kept for it when
+/// no track moved.
+pub(super) fn apply_library_events(
+    events: impl IntoIterator<Item = LibraryEvent>,
     state: &mut BridgeState,
-) -> SnapshotUrgency {
-    let mut urgency = SnapshotUrgency::None;
-    while let Ok(event) = library_rx.try_recv() {
-        urgency = urgency.max(process_library_event(event, state));
+) -> LibraryEventsApplied {
+    let mut changes = crate::library::LibraryChanges::default();
+    let mut status = None;
+    for event in events {
+        changes.merge(event.changes);
+        status = Some(event.status);
     }
-    urgency
-}
+    let Some(status) = status else {
+        return LibraryEventsApplied::default();
+    };
+    let mut applied = LibraryEventsApplied {
+        rows_changed: 0,
+        status_changed: state.library_status != status,
+    };
+    state.library_status = status;
+    if changes.is_empty() {
+        return applied;
+    }
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub(super) fn pump_library_events(
-    library_rx: &Receiver<LibraryEvent>,
-    state: &mut BridgeState,
-) -> bool {
-    drain_library_events(library_rx, state).is_pending()
+    if !state.apply_library_changes(&changes).changed {
+        return applied;
+    }
+    applied.rows_changed =
+        changes.upserted.len() + changes.removed.len() + usize::from(changes.roots.is_some());
+    if !state.queue.is_empty() {
+        super::sync_queue_details(state);
+    }
+    applied
 }
 
 #[cfg(test)]
@@ -1199,6 +1216,7 @@ mod tests {
                             ..LibraryTrack::default()
                         }),
                     )
+                    .map(std::sync::Arc::new)
                     .collect(),
                 ..LibrarySnapshot::default()
             })
@@ -1569,5 +1587,215 @@ mod tests {
         let queued = queued_scrobbles(&commands.try_iter().collect::<Vec<_>>());
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].duration_seconds, Some(600));
+    }
+
+    fn library_event(
+        upserted: Vec<crate::library::LibraryTrack>,
+        removed: Vec<PathBuf>,
+    ) -> LibraryEvent {
+        LibraryEvent {
+            changes: crate::library::LibraryChanges {
+                roots: None,
+                upserted: upserted.into_iter().map(Arc::new).collect(),
+                removed,
+            },
+            status: crate::library::LibraryStatus::default(),
+        }
+    }
+
+    fn library_track(path: &str, title: &str) -> crate::library::LibraryTrack {
+        crate::library::LibraryTrack {
+            path: p(path),
+            root_path: p("/music"),
+            title: title.to_string(),
+            ..crate::library::LibraryTrack::default()
+        }
+    }
+
+    fn filler_library(count: usize) -> Vec<crate::library::LibraryTrack> {
+        (0..count)
+            .map(|index| {
+                library_track(
+                    &format!("/music/Artist {}/Album/{index}.flac", index % 50),
+                    "Song",
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pending_library_events_are_applied_as_one_change() {
+        let mut state = BridgeState {
+            queue: vec![p("/elsewhere/queued.flac")],
+            ..BridgeState::default()
+        };
+        apply_library_events([library_event(filler_library(10), Vec::new())], &mut state);
+        let generation = state.queue_detail_generation;
+        let revision = state.library.search_revision;
+
+        let mut scanning = crate::library::LibraryStatus {
+            scan_in_progress: true,
+            ..crate::library::LibraryStatus::default()
+        };
+        let mut events = Vec::new();
+        for batch in 0..3 {
+            let mut event = library_event(
+                vec![library_track(
+                    &format!("/music/New/Album/{batch}.flac"),
+                    "New",
+                )],
+                Vec::new(),
+            );
+            event.status = scanning.clone();
+            events.push(event);
+        }
+        events.push(library_event(
+            vec![library_track(
+                "/music/New/Album/1.flac",
+                "Renamed in the scan",
+            )],
+            vec![p("/music/Artist 3/Album/3.flac")],
+        ));
+        scanning.scan_in_progress = false;
+        scanning.last_error = Some("one file could not be read".to_string());
+        events.last_mut().expect("event").status = scanning;
+
+        let applied = apply_library_events(events, &mut state);
+
+        assert_eq!(
+            state.queue_detail_generation,
+            generation + 1,
+            "the queue's details are checked once for the batch"
+        );
+        assert_eq!(
+            state.library.search_revision,
+            revision + 1,
+            "one library for the batch"
+        );
+        assert!(applied.status_changed);
+        assert!(!state.library_status.scan_in_progress, "the latest status");
+        assert_eq!(
+            state.library_status.last_error.as_deref(),
+            Some("one file could not be read")
+        );
+        assert_eq!(state.library.tracks.len(), 12);
+        let renamed = state
+            .library_index
+            .position(&state.library, Path::new("/music/New/Album/1.flac"))
+            .expect("added track");
+        assert_eq!(state.library.tracks[renamed].title, "Renamed in the scan");
+        assert!(!state
+            .library_index
+            .contains(&state.library, Path::new("/music/Artist 3/Album/3.flac")));
+    }
+
+    #[test]
+    fn a_one_row_change_to_a_large_library_does_not_copy_or_count_the_library() {
+        let mut state = BridgeState::default();
+        apply_library_events(
+            [library_event(filler_library(5_000), Vec::new())],
+            &mut state,
+        );
+        // The index is built when it is first needed.
+        assert!(state
+            .library_index
+            .contains(&state.library, Path::new("/music/Artist 0/Album/0.flac")));
+        let edit = library_event(
+            vec![library_track("/music/Artist 7/Album/7.flac", "Edited")],
+            Vec::new(),
+        );
+        let addition = library_event(
+            vec![library_track("/music/Artist 9/Album/new.flac", "New")],
+            Vec::new(),
+        );
+
+        let before = crate::test_alloc::allocations();
+        let applied = apply_library_events([edit, addition], &mut state);
+        let allocations = crate::test_alloc::allocations() - before;
+
+        assert_eq!(applied.rows_changed, 2);
+        // Copying the track list's pointers and merging the index allocate a
+        // few times; copying or counting the tracks would allocate for each.
+        assert!(allocations < 100, "{allocations} allocations");
+        assert_eq!(state.library.tracks.len(), 5_001);
+    }
+
+    #[test]
+    fn the_path_index_follows_library_changes() {
+        let mut state = BridgeState::default();
+        apply_library_events([library_event(filler_library(100), Vec::new())], &mut state);
+        assert!(state
+            .library_index
+            .contains(&state.library, Path::new("/music/Artist 1/Album/1.flac")));
+        assert_eq!(state.library_index.builds(), 1);
+
+        // Edits and additions keep the index.
+        apply_library_events(
+            [library_event(
+                vec![
+                    library_track("/music/Artist 1/Album/1.flac", "Edited"),
+                    library_track("/music/Artist 2/Album/new.flac", "New"),
+                ],
+                Vec::new(),
+            )],
+            &mut state,
+        );
+        let new = state
+            .library_index
+            .position(&state.library, Path::new("/music/Artist 2/Album/new.flac"))
+            .expect("new track");
+        assert_eq!(state.library.tracks[new].title, "New");
+        let edited = state
+            .library_index
+            .position(&state.library, Path::new("/music/Artist 1/Album/1.flac"))
+            .expect("edited track");
+        assert_eq!(state.library.tracks[edited].title, "Edited");
+        for (position, track) in state.library.tracks.iter().enumerate() {
+            assert_eq!(
+                state.library_index.position(&state.library, &track.path),
+                Some(position)
+            );
+        }
+        assert_eq!(state.library_index.builds(), 1, "no rebuild for additions");
+
+        // A removal moves tracks, and the index is built again.
+        apply_library_events(
+            [library_event(
+                Vec::new(),
+                vec![p("/music/Artist 0/Album/0.flac")],
+            )],
+            &mut state,
+        );
+        assert!(!state
+            .library_index
+            .contains(&state.library, Path::new("/music/Artist 0/Album/0.flac")));
+        for (position, track) in state.library.tracks.iter().enumerate() {
+            assert_eq!(
+                state.library_index.position(&state.library, &track.path),
+                Some(position)
+            );
+        }
+    }
+
+    #[test]
+    fn progress_alone_leaves_the_library_as_it_was() {
+        let mut state = BridgeState::default();
+        apply_library_events([library_event(filler_library(10), Vec::new())], &mut state);
+        let library = Arc::clone(&state.library);
+
+        let applied = apply_library_events(
+            [LibraryEvent {
+                changes: crate::library::LibraryChanges::default(),
+                status: crate::library::LibraryStatus {
+                    scan_in_progress: true,
+                    ..crate::library::LibraryStatus::default()
+                },
+            }],
+            &mut state,
+        );
+
+        assert_eq!(applied.rows_changed, 0);
+        assert!(applied.status_changed);
+        assert!(Arc::ptr_eq(&library, &state.library));
     }
 }

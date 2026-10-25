@@ -174,8 +174,8 @@ struct BinaryTreeRow {
     quint8 rowType{0};
     quint16 depth{0};
     qint32 sourceIndex{-1};
-    quint16 trackNumber{0};
-    quint16 childCount{0};
+    quint32 trackNumber{0};
+    quint32 childCount{0};
     QString title;
     QString key;
     QString artist;
@@ -204,8 +204,8 @@ QByteArray encodeRows(const QVector<BinaryTreeRow> &rows) {
         out.append(static_cast<char>(row.rowType));
         appendLe<quint16>(out, row.depth);
         appendLe<qint32>(out, row.sourceIndex);
-        appendLe<quint16>(out, row.trackNumber);
-        appendLe<quint16>(out, row.childCount);
+        appendLe<quint32>(out, row.trackNumber);
+        appendLe<quint32>(out, row.childCount);
         appendUtf8(out, row.title);
         appendUtf8(out, row.key);
         appendUtf8(out, row.artist);
@@ -276,7 +276,7 @@ QByteArray artistWithManyAlbumsBinary(int albumCount) {
         0,
         -1,
         0,
-        static_cast<quint16>(albumCount),
+        static_cast<quint32>(albumCount),
         QStringLiteral("Artist A (%1)").arg(albumCount),
         QStringLiteral("artist|Artist A"),
         QStringLiteral("Artist A"),
@@ -401,6 +401,81 @@ QByteArray multiRootBinary() {
         {},
     });
     return encodeRows(rows);
+}
+
+// A tree like the bridge sends for expanded artists: under `root`, each
+// artist in `artists` has one album of `tracksPerAlbum` tracks. `title`
+// names each track. With `withRootRow`, the root has a row of its own.
+QVector<BinaryTreeRow> artistAlbumRows(
+    const QString &root,
+    const QVector<int> &artists,
+    int tracksPerAlbum,
+    const std::function<QString(int, int)> &title,
+    bool withRootRow = false) {
+    QVector<BinaryTreeRow> rows;
+    const quint16 base = withRootRow ? 1 : 0;
+    if (withRootRow) {
+        rows.push_back(BinaryTreeRow{0, 0, -1, 0, static_cast<quint32>(artists.size()), root,
+            QStringLiteral("root|%1").arg(root), {}, root, {}, {}, {}});
+    }
+    for (int artist : artists) {
+        const QString name = QStringLiteral("Artist %1").arg(artist, 4, 10, QLatin1Char('0'));
+        const QString artistPath = root + QLatin1Char('/') + name;
+        const QString albumPath = artistPath + QStringLiteral("/Album");
+        rows.push_back(BinaryTreeRow{1, base, -1, 0, 1, name + QStringLiteral(" (1)"),
+            QStringLiteral("artist|%1|%2").arg(root, name), name, artistPath, {}, {}, {}});
+        rows.push_back(BinaryTreeRow{2, static_cast<quint16>(base + 1), -1, 0,
+            static_cast<quint32>(tracksPerAlbum), QStringLiteral("Album"),
+            QStringLiteral("album|%1|%2|Album").arg(root, name), name, albumPath,
+            albumPath + QStringLiteral("/cover.jpg"), {}, {}});
+        for (int track = 1; track <= tracksPerAlbum; ++track) {
+            const QString path = albumPath + QStringLiteral("/%1.flac").arg(track, 2, 10, QLatin1Char('0'));
+            rows.push_back(BinaryTreeRow{4, static_cast<quint16>(base + 2), -1,
+                static_cast<quint32>(track), 0, title(artist, track),
+                QStringLiteral("track|%1").arg(path), name, path, {}, path, QStringList{path}});
+        }
+    }
+    return rows;
+}
+
+QVector<int> artistRange(int first, int last) {
+    QVector<int> artists;
+    for (int artist = first; artist <= last; ++artist) {
+        artists.push_back(artist);
+    }
+    return artists;
+}
+
+QStringList expandedArtistAlbumKeys(const QString &root, const QVector<int> &artists) {
+    QStringList keys;
+    for (int artist : artists) {
+        const QString name = QStringLiteral("Artist %1").arg(artist, 4, 10, QLatin1Char('0'));
+        keys.push_back(QStringLiteral("artist|%1|%2").arg(root, name));
+        keys.push_back(QStringLiteral("album|%1|%2|Album").arg(root, name));
+    }
+    return keys;
+}
+
+QString plainTrackTitle(int, int track) {
+    return QStringLiteral("%1 - Track").arg(track, 2, 10, QLatin1Char('0'));
+}
+
+// Applies `treeBytes` and waits for the model to take it.
+bool applyLibraryTree(LibraryTreeModel &model, const QByteArray &treeBytes) {
+    QSignalSpy applied(&model, &LibraryTreeModel::treeApplied);
+    model.setLibraryTreeFromBinary(treeBytes);
+    return applied.count() > 0 || applied.wait(10000);
+}
+
+// Every row of `model`, as a list of its roles, to compare with a model
+// that parsed the same tree from scratch.
+QVector<QVariantMap> modelRows(const LibraryTreeModel &model) {
+    QVector<QVariantMap> rows;
+    rows.reserve(model.rowCount());
+    for (int row = 0; row < model.rowCount(); ++row) {
+        rows.push_back(model.rowDataForRow(row));
+    }
+    return rows;
 }
 
 QString formatQmlErrors(const QList<QQmlError> &errors) {
@@ -552,6 +627,9 @@ private slots:
     void libraryTreeSeedsExpandedKeysBeforeFirstFrame();
     void libraryTreeCollapsesAllExpandedBranches();
     void artistPrefixSearchUsesModelLookup();
+    void libraryTreeAppliesALargeUpdateWithoutAReset();
+    void libraryTreeMovesRowsWithoutAReset();
+    void libraryTreeFollowsRootChanges();
     void libraryControllerExtendsSelectionWithShiftArrows();
     void libraryControllerRestoresExpandedSelectionAndViewport();
     void libraryControllerUsesDelegateCoordinatesForViewportAnchor();
@@ -2578,6 +2656,169 @@ void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("artist b"), 0), 3);
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("artist a"), 2), 1);
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("missing"), 0), -1);
+}
+
+void QmlSmokeTest::libraryTreeAppliesALargeUpdateWithoutAReset() {
+    const QString root = QStringLiteral("/music");
+    // 500 expanded artists of 38 tracks: 20,000 rows.
+    const QVector<int> before = artistRange(200, 699);
+    // 125 new artists sort before them, adding 5,000 rows above the view;
+    // the last 10 artists go, and one artist's titles change.
+    QVector<int> after = artistRange(0, 124);
+    after += artistRange(200, 689);
+    const auto changedTitles = [](int artist, int track) {
+        return artist == 400 ? QStringLiteral("%1 - Retagged").arg(track) : plainTrackTitle(artist, track);
+    };
+    QStringList expanded = expandedArtistAlbumKeys(root, before);
+    expanded += expandedArtistAlbumKeys(root, artistRange(0, 124));
+
+    LibraryTreeModel model;
+    model.setExpandedKeys(expanded);
+    QVERIFY(applyLibraryTree(model, encodeRows(artistAlbumRows(root, before, 38, plainTrackTitle))));
+    QCOMPARE(model.rowCount(), 20000);
+
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> window(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+
+Window {
+    width: 320
+    height: 240
+    visible: true
+    property alias view: view
+
+    // As the library pane's view: reused delegates bound to the roles.
+    ListView {
+        id: view
+        anchors.fill: parent
+        model: testLibraryModel
+        reuseItems: true
+        cacheBuffer: 200
+        delegate: Rectangle {
+            property string rowKey: selectionKey || ""
+            property bool rowExpanded: expanded
+            width: ListView.view.width
+            height: 24
+            color: index % 2 === 0 ? "white" : "lightgray"
+            Text { text: title || "" }
+        }
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    auto *view = qvariant_cast<QQuickItem *>(window->property("view"));
+    QVERIFY(view != nullptr);
+
+    const QString currentKey = QStringLiteral("track|/music/Artist 0450/Album/05.flac");
+    const QString expandedArtist = QStringLiteral("artist|/music|Artist 0450");
+    const int currentRow = model.indexForSelectionKey(currentKey);
+    QVERIFY(currentRow > 0);
+    view->setProperty("currentIndex", currentRow);
+    QVERIFY(QMetaObject::invokeMethod(
+        view, "positionViewAtIndex", Q_ARG(int, currentRow), Q_ARG(int, 0 /* ListView.Beginning */)));
+    const auto topKey = [&]() {
+        int top = -1;
+        QMetaObject::invokeMethod(view, "indexAt", Q_RETURN_ARG(int, top),
+            Q_ARG(qreal, 1.0), Q_ARG(qreal, view->property("contentY").toReal() + 1.0));
+        return model.selectionKeyForRow(top);
+    };
+    QTRY_COMPARE(topKey(), currentKey);
+
+    QSignalSpy resets(&model, &QAbstractItemModel::modelReset);
+    QSignalSpy inserts(&model, &QAbstractItemModel::rowsInserted);
+    QSignalSpy removals(&model, &QAbstractItemModel::rowsRemoved);
+    QSignalSpy changes(&model, &QAbstractItemModel::dataChanged);
+    const QByteArray next = encodeRows(artistAlbumRows(root, after, 38, changedTitles));
+    QVERIFY(applyLibraryTree(model, next));
+
+    QCOMPARE(resets.count(), 0);
+    QVERIFY(inserts.count() > 0);
+    QVERIFY(removals.count() > 0);
+    QVERIFY(changes.count() > 0);
+    QCOMPARE(model.rowCount(), 20000 + 5000 - 400);
+    // The view keeps its current item and what it shows, once it lays out
+    // the changes.
+    QTRY_COMPARE(view->property("currentIndex").toInt(), currentRow + 5000);
+    QCOMPARE(model.selectionKeyForRow(view->property("currentIndex").toInt()), currentKey);
+    QTRY_COMPARE(topKey(), currentKey);
+    const int artistRow = model.indexForSelectionKey(expandedArtist);
+    QVERIFY(model.data(model.index(artistRow, 0), LibraryTreeModel::ExpandedRole).toBool());
+    const int retagged = model.indexForSelectionKey(QStringLiteral("track|/music/Artist 0400/Album/07.flac"));
+    QCOMPARE(model.data(model.index(retagged, 0), LibraryTreeModel::TitleRole).toString(),
+        QStringLiteral("7 - Retagged"));
+
+    // The rows are those of a model that parsed the tree from scratch.
+    LibraryTreeModel fresh;
+    fresh.setExpandedKeys(expanded);
+    QVERIFY(applyLibraryTree(fresh, next));
+    QVERIFY(modelRows(model) == modelRows(fresh));
+}
+
+void QmlSmokeTest::libraryTreeMovesRowsWithoutAReset() {
+    const QString root = QStringLiteral("/music");
+    const QVector<int> artists = artistRange(0, 199);
+    LibraryTreeModel model;
+    model.setExpandedKeys(expandedArtistAlbumKeys(root, artists));
+    QVERIFY(applyLibraryTree(model, encodeRows(artistAlbumRows(root, artists, 10, plainTrackTitle))));
+    const QPersistentModelIndex kept(model.index(model.indexForSelectionKey(
+        QStringLiteral("track|/music/Artist 0150/Album/03.flac")), 0));
+    QVERIFY(kept.isValid());
+
+    // As a sort order or rename that changes where rows go: the first
+    // artists' rows come last, and one album's tracks reverse.
+    QVector<BinaryTreeRow> rows = artistAlbumRows(root, artistRange(5, 199), 10, plainTrackTitle);
+    rows += artistAlbumRows(root, artistRange(0, 4), 10, plainTrackTitle);
+    const int album = static_cast<int>(std::find_if(rows.begin(), rows.end(), [](const BinaryTreeRow &row) {
+        return row.key == QStringLiteral("album|/music|Artist 0020|Album");
+    }) - rows.begin());
+    std::reverse(rows.begin() + album + 1, rows.begin() + album + 11);
+    QSignalSpy resets(&model, &QAbstractItemModel::modelReset);
+    const QByteArray next = encodeRows(rows);
+    QVERIFY(applyLibraryTree(model, next));
+
+    QCOMPARE(resets.count(), 0);
+    QVERIFY(kept.isValid());
+    QCOMPARE(kept.data(LibraryTreeModel::SelectionKeyRole).toString(),
+        QStringLiteral("track|/music/Artist 0150/Album/03.flac"));
+    LibraryTreeModel fresh;
+    fresh.setExpandedKeys(expandedArtistAlbumKeys(root, artists));
+    QVERIFY(applyLibraryTree(fresh, next));
+    QVERIFY(modelRows(model) == modelRows(fresh));
+}
+
+void QmlSmokeTest::libraryTreeFollowsRootChanges() {
+    const QVector<int> artists = artistRange(0, 9);
+    QStringList expanded = expandedArtistAlbumKeys(QStringLiteral("/music"), artists);
+    expanded += expandedArtistAlbumKeys(QStringLiteral("/more"), artists);
+    const QByteArray single = encodeRows(artistAlbumRows(QStringLiteral("/music"), artists, 3, plainTrackTitle));
+    QVector<BinaryTreeRow> twoRoots = artistAlbumRows(QStringLiteral("/more"), artists, 3, plainTrackTitle, true);
+    twoRoots += artistAlbumRows(QStringLiteral("/music"), artists, 3, plainTrackTitle, true);
+    const QByteArray multi = encodeRows(twoRoots);
+    const QByteArray other = encodeRows(artistAlbumRows(QStringLiteral("/more"), artists, 3, plainTrackTitle));
+
+    LibraryTreeModel model;
+    model.setExpandedKeys(expanded);
+    QVERIFY(applyLibraryTree(model, single));
+    for (const QByteArray &tree : {multi, single, other, QByteArray{}, single}) {
+        QVERIFY(applyLibraryTree(model, tree));
+        LibraryTreeModel fresh;
+        fresh.setExpandedKeys(expanded);
+        QVERIFY(applyLibraryTree(fresh, tree));
+        QVERIFY(modelRows(model) == modelRows(fresh));
+    }
+    // A root added beside the first keeps its artists' rows, at a new depth.
+    QVERIFY(applyLibraryTree(model, single));
+    const QPersistentModelIndex artist(model.index(0, 0));
+    QVERIFY(applyLibraryTree(model, multi));
+    QVERIFY(artist.isValid());
+    QCOMPARE(artist.data(LibraryTreeModel::SelectionKeyRole).toString(),
+        QStringLiteral("artist|/music|Artist 0000"));
+    QCOMPARE(artist.data(LibraryTreeModel::DepthRole).toInt(), 1);
 }
 
 void QmlSmokeTest::libraryControllerExtendsSelectionWithShiftArrows() {

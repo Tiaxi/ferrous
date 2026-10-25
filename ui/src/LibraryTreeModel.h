@@ -104,7 +104,6 @@ private:
     static QVector<TreeNode> parseTreeNodesFromBinary(const QByteArray &treeBytes);
     static bool rowsEqual(const FlatRow &a, const FlatRow &b);
     static bool nodeMatchesSearch(const TreeNode &node, const QString &searchLower);
-    static bool hasDuplicateSelectionKeys(const QVector<FlatRow> &rows);
     bool isExpanded(const TreeNode &node, bool autoExpand) const;
     void appendFlatRows(
         const QVector<TreeNode> &nodes,
@@ -112,14 +111,20 @@ private:
         int depth,
         bool autoExpand) const;
     QVector<FlatRow> buildFlatRows() const;
-    bool hasDetectedMove(const QVector<FlatRow> &nextRows) const;
-    bool shouldUseResetForRows(const QVector<FlatRow> &nextRows) const;
+    // The rows as views see them, also while an update is applied.
+    int rowTotal() const;
+    const FlatRow &rowAt(int row) const;
+    void applyRows(QVector<FlatRow> nextRows);
     bool applyRowsIncremental(const QVector<FlatRow> &nextRows);
-    void applyRowsReset(const QVector<FlatRow> &nextRows);
     void rebuildRows();
 
     QVector<TreeNode> m_tree;
     QVector<FlatRow> m_rows;
+    // While an update is applied, the rows are the first m_stagedPrefix rows
+    // of *m_stagedNext, followed by m_rows from m_stagedOldStart on.
+    const QVector<FlatRow> *m_stagedNext{nullptr};
+    int m_stagedPrefix{0};
+    int m_stagedOldStart{0};
     QHash<QString, bool> m_expandedByKey;
     QString m_searchLower;
     QFutureWatcher<QVector<TreeNode>> m_parseWatcher;

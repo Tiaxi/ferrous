@@ -40,7 +40,7 @@ where
     fn poll(
         &mut self,
         conn: &Connection,
-        _snapshot: &mut LibrarySnapshot,
+        _library: &mut WorkerLibrary,
         _event_tx: &Sender<LibraryEvent>,
         _scanning: &Path,
         _remaining: &[PathBuf],
@@ -110,18 +110,16 @@ fn db_paths(conn: &Connection) -> Vec<PathBuf> {
         .collect()
 }
 
-fn snapshot_paths(snapshot: &LibrarySnapshot) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = snapshot.tracks.iter().map(|t| t.path.clone()).collect();
-    paths.sort();
-    paths
+fn snapshot_paths(library: &WorkerLibrary) -> Vec<PathBuf> {
+    library.paths()
 }
 
-fn last_published(rx: &Receiver<LibraryEvent>) -> LibrarySnapshot {
-    let mut last = None;
-    while let Ok(LibraryEvent::Snapshot(snapshot)) = rx.try_recv() {
-        last = Some(snapshot);
-    }
-    last.expect("a published snapshot")
+/// The library as the events published so far have it.
+fn last_published(rx: &Receiver<LibraryEvent>) -> crate::library::LibraryMirror {
+    let mut mirror = crate::library::LibraryMirror::default();
+    mirror.drain(rx);
+    assert!(mirror.events > 0, "a published event");
+    mirror
 }
 
 fn title_of(conn: &Connection, path: &Path) -> String {
@@ -140,8 +138,8 @@ fn a_stopped_scan_keeps_its_committed_batches_and_removes_nothing() {
     let conn = Connection::open_in_memory().expect("db");
     init_schema(&conn).expect("schema");
     let (root, paths) = root_with_gone_track(&conn, &dir, 6);
-    let mut snapshot = LibrarySnapshot::default();
-    load_snapshot(&conn, &mut snapshot);
+    let mut snapshot = WorkerLibrary::default();
+    snapshot.reload(&conn);
     let (tx, rx) = unbounded();
     // Stop as soon as the first batch is in the database.
     let mut control = TestControl::new(|conn: &Connection, _| {
@@ -169,7 +167,7 @@ fn a_stopped_scan_keeps_its_committed_batches_and_removes_nothing() {
         "one batch, and the gone track kept"
     );
     assert_eq!(snapshot_paths(&snapshot), expected);
-    assert_eq!(snapshot_paths(&last_published(&rx)), expected);
+    assert_eq!(last_published(&rx).paths(), expected);
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -187,8 +185,8 @@ fn a_failed_batch_keeps_the_batches_before_it_and_is_reported() {
          BEGIN SELECT RAISE(ABORT, 'injected write failure'); END",
     )
     .expect("inject failure");
-    let mut snapshot = LibrarySnapshot::default();
-    load_snapshot(&conn, &mut snapshot);
+    let mut snapshot = WorkerLibrary::default();
+    snapshot.reload(&conn);
     let (tx, rx) = unbounded();
 
     handle_command(
@@ -200,7 +198,7 @@ fn a_failed_batch_keeps_the_batches_before_it_and_is_reported() {
     );
 
     let published = last_published(&rx);
-    let error = published.last_error.as_deref().unwrap_or_default();
+    let error = published.status.last_error.as_deref().unwrap_or_default();
     assert!(
         error.contains(&format!("failed to scan '{}'", root.display()))
             && error.contains("injected write failure"),
@@ -210,7 +208,7 @@ fn a_failed_batch_keeps_the_batches_before_it_and_is_reported() {
     // did not finish.
     let expected = vec![paths[0].clone(), paths[1].clone(), root.join("gone.mp3")];
     assert_eq!(db_paths(&conn), expected);
-    assert_eq!(snapshot_paths(&published), expected);
+    assert_eq!(published.paths(), expected);
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -246,7 +244,7 @@ fn a_rename_between_batches_does_not_wait_for_the_scan() {
     let root = dir.join("music");
     let paths = flac_tracks(&dir, &["One", "Two", "Three", "Four", "Five"]);
     let renamed = root.join("99 - Renamed.flac");
-    let mut snapshot = LibrarySnapshot::default();
+    let mut snapshot = WorkerLibrary::default();
     let (tx, rx) = unbounded();
     let rename_count = std::cell::Cell::new(0);
     let mut control = TestControl::new(|conn: &Connection, _| {
@@ -279,7 +277,7 @@ fn a_rename_between_batches_does_not_wait_for_the_scan() {
     assert_eq!(db_paths(&conn), expected);
     assert!(renamed.is_file() && !paths[0].exists());
     assert_eq!(title_of(&conn, &renamed), "One");
-    assert_eq!(snapshot_paths(&last_published(&rx)), expected);
+    assert_eq!(last_published(&rx).paths(), expected);
     drop(conn);
     let _ = fs::remove_dir_all(dir);
 }
@@ -297,8 +295,8 @@ fn a_file_renamed_after_the_scan_read_it_gets_no_row_under_its_old_name() {
     drop(existing);
     write_test_flac(&paths[0], &[("TITLE", "One, edited")]);
     let renamed = root.join("99 - Renamed.flac");
-    let mut snapshot = LibrarySnapshot::default();
-    load_snapshot(&conn, &mut snapshot);
+    let mut snapshot = WorkerLibrary::default();
+    snapshot.reload(&conn);
     let (tx, rx) = unbounded();
     let mut control = TestControl::new(|_: &Connection, poll| {
         // Poll 3 comes after the scan read the first file, before its batch.
@@ -327,7 +325,7 @@ fn a_file_renamed_after_the_scan_read_it_gets_no_row_under_its_old_name() {
     expected.push(renamed.clone());
     assert_eq!(db_paths(&conn), expected, "no row for the old name");
     assert_eq!(title_of(&conn, &renamed), "One, edited");
-    assert_eq!(snapshot_paths(&last_published(&rx)), expected);
+    assert_eq!(last_published(&rx).paths(), expected);
     drop(conn);
     let _ = fs::remove_dir_all(dir);
 }
@@ -339,7 +337,7 @@ fn an_edit_during_a_scan_is_not_overwritten_by_the_scans_older_read() {
     let (conn, db) = worker_db(&dir);
     let root = dir.join("music");
     let paths = flac_tracks(&dir, &["One", "Two", "Three"]);
-    let mut snapshot = LibrarySnapshot::default();
+    let mut snapshot = WorkerLibrary::default();
     let (tx, rx) = unbounded();
     run_scans_with(
         &conn,
@@ -375,6 +373,7 @@ fn an_edit_during_a_scan_is_not_overwritten_by_the_scans_older_read() {
     assert_eq!(title_of(&conn, &paths[1]), "Two, edited in Ferrous");
     let published = last_published(&rx);
     let track = published
+        .snapshot
         .tracks
         .iter()
         .find(|track| track.path == paths[1])
@@ -391,7 +390,7 @@ fn a_cover_refresh_during_a_scan_is_not_overwritten_by_the_scans_older_read() {
     let (conn, db) = worker_db(&dir);
     let root = dir.join("music");
     let paths = flac_tracks(&dir, &["One", "Two"]);
-    let mut snapshot = LibrarySnapshot::default();
+    let mut snapshot = WorkerLibrary::default();
     let (tx, _rx) = unbounded();
     run_scans_with(
         &conn,

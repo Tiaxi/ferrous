@@ -13,8 +13,9 @@ use rusqlite::{params, Connection};
 
 use crate::metadata::EmbeddedCoverCache;
 
+use super::publish::WorkerLibrary;
 use super::scan::{count_label, find_cover_path_for_track, scan_snapshot_emit_interval};
-use super::{emit_snapshot, LibraryEvent, LibraryScanProgress, LibrarySnapshot};
+use super::{LibraryEvent, LibraryScanProgress};
 
 const MIGRATION_BATCH_SIZE: usize = 256;
 
@@ -158,11 +159,11 @@ fn remove_unreferenced_entries(
 /// Returns whether any row changed.
 pub(super) fn migrate_legacy_embedded_covers(
     conn: &Connection,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<bool, String> {
     match EmbeddedCoverCache::shared() {
-        Some(cache) => migrate_and_remove_legacy_entries(conn, cache, snapshot, event_tx),
+        Some(cache) => migrate_and_remove_legacy_entries(conn, cache, library, event_tx),
         None => Ok(false),
     }
 }
@@ -170,7 +171,7 @@ pub(super) fn migrate_legacy_embedded_covers(
 fn migrate_and_remove_legacy_entries(
     conn: &Connection,
     cache: &EmbeddedCoverCache,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<bool, String> {
     let mut last_emit = Instant::now();
@@ -194,14 +195,14 @@ fn migrate_and_remove_legacy_entries(
         },
         |processed, total| {
             if last_emit.elapsed() >= scan_snapshot_emit_interval() {
-                snapshot.scan_in_progress = true;
-                snapshot.scan_progress = Some(LibraryScanProgress {
-                    roots_total: snapshot.roots.len(),
+                library.status.scan_in_progress = true;
+                library.status.scan_progress = Some(LibraryScanProgress {
+                    roots_total: library.roots().len(),
                     supported_files_discovered: total,
                     supported_files_processed: processed,
                     ..LibraryScanProgress::default()
                 });
-                emit_snapshot(event_tx, snapshot);
+                library.publish(event_tx);
                 last_emit = Instant::now();
             }
         },
@@ -407,7 +408,7 @@ mod tests {
             &conn,
             &[root.clone()],
             Some(cache),
-            &mut LibrarySnapshot::default(),
+            &mut WorkerLibrary::default(),
             &event_tx,
         )
         .expect("scan root");
@@ -441,7 +442,7 @@ mod tests {
         let migrated = migrate_and_remove_legacy_entries(
             &conn,
             &cache,
-            &mut LibrarySnapshot::default(),
+            &mut WorkerLibrary::default(),
             &event_tx,
         );
 
@@ -615,7 +616,7 @@ mod tests {
         let error = migrate_and_remove_legacy_entries(
             &conn,
             &cache,
-            &mut LibrarySnapshot::default(),
+            &mut WorkerLibrary::default(),
             &event_tx,
         )
         .expect_err("the failed migration is reported");
@@ -638,7 +639,7 @@ mod tests {
         let migrated = migrate_and_remove_legacy_entries(
             &conn,
             &cache,
-            &mut LibrarySnapshot::default(),
+            &mut WorkerLibrary::default(),
             &event_tx,
         );
 

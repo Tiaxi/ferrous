@@ -2,6 +2,7 @@
 
 mod cover_cache;
 mod db;
+mod publish;
 mod scan;
 mod schema;
 #[cfg(test)]
@@ -9,12 +10,16 @@ mod test_fixtures;
 mod worker;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::worker_thread::JoinableThread;
 
+#[cfg(test)]
+pub(crate) use publish::LibraryMirror;
+pub(crate) use publish::{AppliedChanges, LibraryChanges};
 #[cfg(test)]
 pub(crate) use scan::scan_test_hooks::hold_read;
 #[cfg(test)]
@@ -30,7 +35,7 @@ pub(crate) use scan::{read_library_snapshot_from_db, ExternalTrackCache};
 /// Additional, potentially repeated text tags collected during library scans.
 pub type SearchTags = std::collections::BTreeMap<String, Vec<String>>;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LibraryTrack {
     pub search_tags: SearchTags,
     pub path: PathBuf,
@@ -90,7 +95,7 @@ pub struct LibrarySearchTrack {
     pub score: f32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LibraryScanProgress {
     pub current_root: Option<PathBuf>,
     pub roots_completed: usize,
@@ -101,20 +106,54 @@ pub struct LibraryScanProgress {
     pub eta_seconds: Option<f32>,
 }
 
+/// The library's roots and tracks. Tracks are shared, so a copy of the
+/// snapshot copies only pointers, and a change replaces only its tracks.
 #[derive(Debug, Clone, Default)]
 pub struct LibrarySnapshot {
     pub roots: Vec<LibraryRoot>,
-    pub tracks: Vec<LibraryTrack>,
+    pub tracks: Vec<Arc<LibraryTrack>>,
+    /// Advances whenever the roots or tracks change.
     pub search_revision: u64,
-    pub scan_in_progress: bool,
-    pub scan_progress: Option<LibraryScanProgress>,
-    pub last_error: Option<String>,
 }
 
 impl LibrarySnapshot {
+    /// A snapshot of `roots` and `tracks`.
+    #[must_use]
+    pub fn new(roots: Vec<LibraryRoot>, tracks: Vec<LibraryTrack>) -> Self {
+        Self {
+            roots,
+            tracks: tracks.into_iter().map(Arc::new).collect(),
+            search_revision: 0,
+        }
+    }
+
     fn bump_search_revision(&mut self) {
         self.search_revision = self.search_revision.saturating_add(1);
     }
+}
+
+/// The library in the database at `path`, as the worker reads it, for tests.
+#[cfg(test)]
+pub(crate) fn schema_load_snapshot_for_test(
+    path: &std::path::Path,
+    snapshot: &mut LibrarySnapshot,
+) {
+    let conn = rusqlite::Connection::open(path).expect("open the test library");
+    schema::load_snapshot(&conn, snapshot);
+}
+
+/// `tracks` as a snapshot holds them, for tests.
+#[cfg(test)]
+pub(crate) fn shared_tracks(tracks: Vec<LibraryTrack>) -> Vec<Arc<LibraryTrack>> {
+    tracks.into_iter().map(Arc::new).collect()
+}
+
+/// What the library worker is doing, apart from the rows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LibraryStatus {
+    pub scan_in_progress: bool,
+    pub scan_progress: Option<LibraryScanProgress>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,16 +165,45 @@ pub(crate) struct TrackFileFingerprint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LibraryCommand {
     ScanRoot(PathBuf),
-    AddRoot { path: PathBuf, name: String },
-    RenameRoot { path: PathBuf, name: String },
+    AddRoot {
+        path: PathBuf,
+        name: String,
+    },
+    RenameRoot {
+        path: PathBuf,
+        name: String,
+    },
     RemoveRoot(PathBuf),
     RescanRoot(PathBuf),
     RescanAll,
+    /// Read the rows of these paths again and publish them whatever the
+    /// worker last published, so that a copy of the library that applied
+    /// changes out of order matches the database again.
+    ReadRows(Vec<PathBuf>),
 }
 
-#[derive(Debug, Clone)]
-pub enum LibraryEvent {
-    Snapshot(LibrarySnapshot),
+/// What changed in the library since the worker's previous event. The
+/// first event has every row.
+#[derive(Debug, Clone, Default)]
+pub struct LibraryEvent {
+    pub changes: LibraryChanges,
+    pub status: LibraryStatus,
+}
+
+#[cfg(test)]
+impl LibraryEvent {
+    /// An event that adds `library`'s roots and tracks, as a worker's first
+    /// event does.
+    pub(crate) fn with_library(library: LibrarySnapshot) -> Self {
+        Self {
+            changes: LibraryChanges {
+                roots: Some(library.roots),
+                upserted: library.tracks,
+                removed: Vec::new(),
+            },
+            status: LibraryStatus::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,16 +228,18 @@ pub struct LibraryService {
     thread: Option<JoinableThread>,
 }
 
-fn emit_snapshot(event_tx: &Sender<LibraryEvent>, snapshot: &LibrarySnapshot) {
-    let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
-}
-
 impl LibraryService {
     #[must_use]
     pub fn new() -> (Self, Receiver<LibraryEvent>) {
         let db_path = crate::paths::library_db_path()
             .map_err(|err| format!("could not open the library database: {err}"));
         Self::spawn(db_path, schema::BUSY_TIMEOUT, || {})
+    }
+
+    /// A service on the database at `path`, scanning as the app does.
+    #[cfg(test)]
+    pub(crate) fn at_database(path: PathBuf) -> (Self, Receiver<LibraryEvent>) {
+        Self::spawn(Ok(path), schema::BUSY_TIMEOUT, || {})
     }
 
     /// A service on the database at `path`, whose scans use `tuning`.

@@ -12,13 +12,14 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use rusqlite::Connection;
 
 use super::db::{checkpoint, open_worker_db, OpenedLibrary};
+use super::publish::WorkerLibrary;
 use super::scan::{
     backfill_search_tags, handle_add_root, handle_rescan_all, handle_rescan_root,
     remove_root_and_purge, rename_root, resolve_root_path, ExternalWrites, ScanControl,
     ScanDirective,
 };
-use super::schema::{load_roots, load_snapshot, needs_search_tag_backfill};
-use super::{cover_cache, emit_snapshot, LibraryCommand, LibraryEvent, LibrarySnapshot};
+use super::schema::{load_roots, needs_search_tag_backfill};
+use super::{cover_cache, LibraryCommand, LibraryEvent};
 
 /// Runs the library worker until `commands` closes.
 pub(super) fn run(
@@ -27,20 +28,20 @@ pub(super) fn run(
     commands: Receiver<LibraryCommand>,
     event_tx: &Sender<LibraryEvent>,
 ) {
-    let mut snapshot = LibrarySnapshot::default();
+    let mut library = WorkerLibrary::default();
     let opened = db_path.and_then(|path| open_worker_db(&path, busy_timeout));
     let OpenedLibrary { conn, notice } = match opened {
         Ok(opened) => opened,
         Err(err) => {
-            snapshot.last_error = Some(err);
-            emit_snapshot(event_tx, &snapshot);
+            library.status.last_error = Some(err);
+            library.publish(event_tx);
             return;
         }
     };
     let mut control = Control::new(commands);
-    prepare_library(&conn, &mut snapshot, event_tx, &mut control, notice);
+    prepare_library(&conn, &mut library, event_tx, &mut control, notice);
     while let Some(cmd) = control.next_command() {
-        handle_command(&conn, cmd, &mut snapshot, event_tx, &mut control);
+        handle_command(&conn, cmd, &mut library, event_tx, &mut control);
     }
     // Nobody is left to show a failure to; the log stays in the database
     // directory and is applied at the next start.
@@ -53,105 +54,115 @@ pub(super) fn run(
 /// libraries need, reporting what went wrong.
 fn prepare_library(
     conn: &Connection,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
     control: &mut Control,
     notice: Option<String>,
 ) {
     let mut notices: Vec<String> = notice.into_iter().collect();
     control.external_writes(conn);
-    load_snapshot(conn, snapshot);
-    snapshot.bump_search_revision();
-    snapshot.last_error = joined(&notices);
-    emit_snapshot(event_tx, snapshot);
+    library.reload(conn);
+    library.status.last_error = joined(&notices);
+    library.publish(event_tx);
 
     // Publish the cached library first, then fill new tag columns on this
     // library worker. Existing libraries need no manual rescan after upgrade.
     if needs_search_tag_backfill(conn) {
-        match backfill_search_tags(conn, snapshot, event_tx) {
+        match backfill_search_tags(conn, library, event_tx) {
             Ok(problem) => notices.extend(problem),
             Err(err) => notices.push(err),
         }
-        finish_preparation(conn, snapshot, event_tx, control, &notices);
+        finish_preparation(conn, library, event_tx, control, &notices);
     }
 
-    match cover_cache::migrate_legacy_embedded_covers(conn, snapshot, event_tx) {
+    match cover_cache::migrate_legacy_embedded_covers(conn, library, event_tx) {
         Ok(false) => {}
         result => {
             if let Err(err) = result {
                 notices.push(err);
             }
-            finish_preparation(conn, snapshot, event_tx, control, &notices);
+            // The migration rewrote cover paths in the database.
+            library.reload(conn);
+            finish_preparation(conn, library, event_tx, control, &notices);
         }
     }
 }
 
 fn finish_preparation(
     conn: &Connection,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
     control: &mut Control,
     notices: &[String],
 ) {
-    control.external_writes(conn);
-    load_snapshot(conn, snapshot);
-    snapshot.bump_search_revision();
-    snapshot.scan_in_progress = false;
-    snapshot.scan_progress = None;
-    snapshot.last_error = joined(notices);
-    emit_snapshot(event_tx, snapshot);
+    if control.external_writes(conn) {
+        library.reload(conn);
+    }
+    library.status.scan_in_progress = false;
+    library.status.scan_progress = None;
+    library.status.last_error = joined(notices);
+    library.publish(event_tx);
 }
 
 fn joined(problems: &[String]) -> Option<String> {
     (!problems.is_empty()).then(|| problems.join("; "))
 }
 
-/// Runs one command on the library worker and publishes the resulting
-/// snapshot, with the command's failure, and those of commands run during
-/// it, in `last_error`.
+/// Runs one command on the library worker and publishes what it changed,
+/// with the command's failure, and those of commands run during it, in
+/// `last_error`.
+///
+/// The worker's copy follows its own writes, so the library is read again
+/// only after a command that removes rows wholesale, or when another
+/// connection wrote to the database.
 pub(super) fn handle_command(
     conn: &Connection,
     cmd: LibraryCommand,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
     control: &mut Control,
 ) {
-    snapshot.last_error = None;
+    if let LibraryCommand::ReadRows(paths) = cmd {
+        // Not a user's command: the error shown stays.
+        if let Err(err) = library.read_rows(conn, &paths) {
+            library.status.last_error = Some(err);
+        }
+        library.publish(event_tx);
+        return;
+    }
+    library.status.last_error = None;
     control.begin(&cmd);
-    let reload_search_data_on_success = matches!(
-        &cmd,
-        LibraryCommand::RenameRoot { .. } | LibraryCommand::RemoveRoot(_)
-    );
+    let reload = matches!(&cmd, LibraryCommand::RemoveRoot(_));
     let result = match cmd {
         LibraryCommand::ScanRoot(root) => {
-            handle_add_root(conn, &root, "", snapshot, event_tx, control)
+            handle_add_root(conn, &root, "", library, event_tx, control)
         }
         LibraryCommand::AddRoot { path, name } => {
-            handle_add_root(conn, &path, &name, snapshot, event_tx, control)
+            handle_add_root(conn, &path, &name, library, event_tx, control)
         }
         LibraryCommand::RenameRoot { path, name } => rename_root(conn, &path, &name),
         LibraryCommand::RemoveRoot(root) => remove_root_and_purge(conn, &root),
         LibraryCommand::RescanRoot(root) => {
-            handle_rescan_root(conn, &root, snapshot, event_tx, control)
+            handle_rescan_root(conn, &root, library, event_tx, control)
         }
-        LibraryCommand::RescanAll => handle_rescan_all(conn, snapshot, event_tx, control),
+        LibraryCommand::RescanAll => handle_rescan_all(conn, library, event_tx, control),
+        LibraryCommand::ReadRows(_) => Ok(()),
     };
-    let succeeded = result.is_ok();
     let errors: Vec<String> = result.err().into_iter().chain(control.finish()).collect();
-    snapshot.last_error = joined(&errors);
+    library.status.last_error = joined(&errors);
     if control.shutting_down {
         // Nothing is left to publish to.
         return;
     }
 
-    let external = control.external_writes(conn);
-    load_snapshot(conn, snapshot);
-    if external || (succeeded && reload_search_data_on_success) {
-        snapshot.bump_search_revision();
+    if control.external_writes(conn) || reload {
+        library.reload(conn);
+    } else {
+        library.set_roots(load_roots(conn));
     }
-    snapshot.scan_in_progress = false;
-    snapshot.scan_progress = None;
-    emit_snapshot(event_tx, snapshot);
+    library.status.scan_in_progress = false;
+    library.status.scan_progress = None;
+    library.publish(event_tx);
 }
 
 /// The library worker's commands, and what it knows about the command it
@@ -246,14 +257,21 @@ impl Control {
         }
     }
 
-    fn run_priority(&mut self, conn: &Connection, cmd: LibraryCommand) {
+    fn run_priority(
+        &mut self,
+        conn: &Connection,
+        library: &mut WorkerLibrary,
+        cmd: LibraryCommand,
+    ) {
         let result = match cmd {
             LibraryCommand::RemoveRoot(root) => remove_root_and_purge(conn, &root).map(|()| {
                 self.removed.insert(root);
             }),
             LibraryCommand::RenameRoot { path, name } => rename_root(conn, &path, &name),
+            LibraryCommand::ReadRows(paths) => library.read_rows(conn, &paths),
             other => {
-                // Only removals and renames are queued as priority commands.
+                // Only removals, renames and row reads are queued as priority
+                // commands.
                 self.queue.normal.push_front(other);
                 Ok(())
             }
@@ -268,7 +286,7 @@ impl ScanControl for Control {
     fn poll(
         &mut self,
         conn: &Connection,
-        snapshot: &mut LibrarySnapshot,
+        library: &mut WorkerLibrary,
         event_tx: &Sender<LibraryEvent>,
         scanning: &Path,
         remaining: &[PathBuf],
@@ -282,17 +300,16 @@ impl ScanControl for Control {
             let mut removed_any = false;
             while let Some(cmd) = self.queue.priority.pop_front() {
                 removed_any |= matches!(cmd, LibraryCommand::RemoveRoot(_));
-                self.run_priority(conn, cmd);
+                self.run_priority(conn, library, cmd);
             }
             if removed_any {
                 self.external_writes(conn);
-                load_snapshot(conn, snapshot);
+                library.reload(conn);
             } else {
-                snapshot.roots = load_roots(conn);
+                library.set_roots(load_roots(conn));
             }
-            snapshot.bump_search_revision();
-            snapshot.last_error = joined(&self.errors);
-            emit_snapshot(event_tx, snapshot);
+            library.status.last_error = joined(&self.errors);
+            library.publish(event_tx);
         }
         if self.shutting_down {
             ScanDirective::StopAll
@@ -327,6 +344,7 @@ fn resolve_command(cmd: LibraryCommand) -> LibraryCommand {
         LibraryCommand::RemoveRoot(path) => LibraryCommand::RemoveRoot(resolve_root_path(&path)),
         LibraryCommand::RescanRoot(path) => LibraryCommand::RescanRoot(resolve_root_path(&path)),
         LibraryCommand::RescanAll => LibraryCommand::RescanAll,
+        LibraryCommand::ReadRows(paths) => LibraryCommand::ReadRows(paths),
     }
 }
 
@@ -355,6 +373,7 @@ fn scanned_root(cmd: &LibraryCommand) -> Option<&Path> {
         | LibraryCommand::RescanRoot(path) => Some(path),
         LibraryCommand::RenameRoot { .. }
         | LibraryCommand::RemoveRoot(_)
+        | LibraryCommand::ReadRows(_)
         | LibraryCommand::RescanAll => None,
     }
 }
@@ -410,6 +429,17 @@ impl CommandQueue {
                     self.normal.push_back(cmd);
                 } else {
                     self.priority.push_back(cmd);
+                }
+            }
+            // Runs between the files of a scan, so that a copy of the
+            // library is corrected soon.
+            LibraryCommand::ReadRows(paths) => {
+                match self.priority.iter_mut().find_map(|queued| match queued {
+                    LibraryCommand::ReadRows(queued) => Some(queued),
+                    _ => None,
+                }) {
+                    Some(queued) => queued.extend(paths),
+                    None => self.priority.push_back(LibraryCommand::ReadRows(paths)),
                 }
             }
             LibraryCommand::RemoveRoot(path) => {
