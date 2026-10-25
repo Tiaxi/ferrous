@@ -121,6 +121,45 @@ impl LibraryPathIndex {
         }
     }
 
+    /// Keep the index for `next`, a copy of `previous` whose tracks before
+    /// `appended_from` have the same paths in the same order, adding the
+    /// tracks from `appended_from` on.
+    pub(super) fn extend(
+        &self,
+        previous: &Arc<LibrarySnapshot>,
+        next: &Arc<LibrarySnapshot>,
+        appended_from: usize,
+    ) {
+        let mut built = self.built.borrow_mut();
+        let Some(index) = built.as_mut().filter(|built| built.indexes(previous)) else {
+            return;
+        };
+        index.library = Arc::downgrade(next);
+        let Some(appended) = next.tracks.get(appended_from..) else {
+            return;
+        };
+        if appended.is_empty() {
+            return;
+        }
+        let mut added = appended
+            .iter()
+            .enumerate()
+            .map(|(offset, track)| (hash_path(&track.path), appended_from + offset))
+            .collect::<Vec<_>>();
+        added.sort_unstable();
+        let existing = std::mem::take(&mut index.by_hash);
+        let mut merged = Vec::with_capacity(existing.len() + added.len());
+        let mut existing = existing.into_iter().peekable();
+        for entry in added {
+            while let Some(old) = existing.next_if(|old| *old <= entry) {
+                merged.push(old);
+            }
+            merged.push(entry);
+        }
+        merged.extend(existing);
+        index.by_hash = merged;
+    }
+
     /// How often an index was built.
     #[cfg(test)]
     pub(super) fn builds(&self) -> usize {
@@ -155,6 +194,7 @@ mod tests {
                     path: PathBuf::from(path),
                     ..LibraryTrack::default()
                 })
+                .map(std::sync::Arc::new)
                 .collect(),
             ..LibrarySnapshot::default()
         })
@@ -181,7 +221,7 @@ mod tests {
         let first = library(&["/m/a.flac", "/m/b.flac"]);
         assert!(index.contains(&first, Path::new("/m/a.flac")));
         let mut copy = (*first).clone();
-        copy.tracks[0].title = "Edited".to_string();
+        Arc::make_mut(&mut copy.tracks[0]).title = "Edited".to_string();
         let copy = Arc::new(copy);
         index.carry_over(&first, &copy);
         assert_eq!(index.position(&copy, Path::new("/m/b.flac")), Some(1));

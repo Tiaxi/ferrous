@@ -1024,7 +1024,9 @@ fn update_library_track_details(
     let previous = Arc::clone(&state.library);
     let mut next_library = (*previous).clone();
     for (position, indexed) in updates {
-        copy_track_details(&mut next_library.tracks[position], indexed);
+        let track = Arc::make_mut(&mut next_library.tracks[position]);
+        copy_track_details(track, indexed);
+        state.library_rows_to_read.push(track.path.clone());
     }
     next_library.search_revision = next_library.search_revision.saturating_add(1);
     state.library = Arc::new(next_library);
@@ -1152,7 +1154,10 @@ fn apply_renamed_library_paths(
     }
     let mut next_library = (*state.library).clone();
     for (position, new_path, indexed) in updates {
-        let track = &mut next_library.tracks[position];
+        let track = Arc::make_mut(&mut next_library.tracks[position]);
+        state
+            .library_rows_to_read
+            .extend([track.path.clone(), new_path.clone()]);
         track.path.clone_from(new_path);
         if let Some(indexed) = indexed {
             copy_track_details(track, indexed);
@@ -1238,7 +1243,7 @@ mod tests {
     use std::time::Duration;
 
     use super::super::events::{
-        process_playback_event, pump_library_events, pump_metadata_events, pump_playback_events,
+        apply_library_events, process_playback_event, pump_metadata_events, pump_playback_events,
     };
     use crate::library::load_external_track_caches;
 
@@ -1326,13 +1331,13 @@ mod tests {
                     path: root_path.clone(),
                     name: String::new(),
                 }],
-                tracks: vec![LibraryTrack {
+                tracks: crate::library::shared_tracks(vec![LibraryTrack {
                     search_tags: crate::library::SearchTags::default(),
                     path: track_path.clone(),
                     root_path,
                     artist: "Artist".to_string(),
                     ..LibraryTrack::default()
-                }],
+                }]),
                 ..LibrarySnapshot::default()
             }),
             ..BridgeState::default()
@@ -1564,11 +1569,11 @@ mod tests {
         let track = p("/library/song.flac");
         let mut state = BridgeState::default();
         state.library = Arc::new(LibrarySnapshot {
-            tracks: vec![LibraryTrack {
+            tracks: crate::library::shared_tracks(vec![LibraryTrack {
                 search_tags: crate::library::SearchTags::default(),
                 path: track.clone(),
                 ..LibraryTrack::default()
-            }],
+            }]),
             ..LibrarySnapshot::default()
         });
         state.queue = vec![track.clone()];
@@ -1607,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_library_events_requests_queue_details_for_restored_external_tracks() {
+    fn library_changes_request_queue_details_for_restored_external_tracks() {
         use crate::library::LibraryEvent;
 
         let root = test_dir("restored-external-queue-details");
@@ -1618,12 +1623,16 @@ mod tests {
         let mut state = BridgeState::default();
         state.queue = vec![track.clone()];
 
-        let (library_tx, library_rx) = crossbeam_channel::unbounded();
-        library_tx
-            .send(LibraryEvent::Snapshot(LibrarySnapshot::default()))
-            .expect("send library snapshot");
+        let library = LibrarySnapshot {
+            tracks: crate::library::shared_tracks(vec![LibraryTrack {
+                path: root.join("other.flac"),
+                ..LibraryTrack::default()
+            }]),
+            ..LibrarySnapshot::default()
+        };
+        let applied = apply_library_events([LibraryEvent::with_library(library)], &mut state);
 
-        assert!(pump_library_events(&library_rx, &mut state));
+        assert!(applied.rows_changed > 0);
         assert!(state.queue_detail_validation_requested);
         assert!(state.queue_details.is_empty());
 
@@ -1673,7 +1682,7 @@ mod tests {
         let root = p("/music");
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 library_track(
                     "/music/Artist/Alpha/01 - One.flac",
                     &root,
@@ -1690,7 +1699,7 @@ mod tests {
                     Some(2010),
                     Some(1),
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -1709,7 +1718,7 @@ mod tests {
         let root = p("/music");
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 library_track(
                     "/music/Artist/Alpha/01 - One.flac",
                     &root,
@@ -1734,7 +1743,7 @@ mod tests {
                     Some(2010),
                     Some(1),
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -1754,7 +1763,7 @@ mod tests {
         let root = p("/music");
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 library_track(
                     "/music/Artist/Alpha/01 - One.flac",
                     &root,
@@ -1771,7 +1780,7 @@ mod tests {
                     Some(2010),
                     Some(1),
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -1806,7 +1815,7 @@ mod tests {
         );
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![sampler, blackfield],
+            tracks: crate::library::shared_tracks(vec![sampler, blackfield]),
             ..LibrarySnapshot::default()
         };
 
@@ -1824,7 +1833,7 @@ mod tests {
         let root_b = p("/music-b");
         let library = LibrarySnapshot {
             roots: vec![library_root(&root_a), library_root(&root_b)],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 library_track(
                     "/music-a/Same Artist/Alpha/01 - One.flac",
                     &root_a,
@@ -1841,7 +1850,7 @@ mod tests {
                     Some(2021),
                     Some(1),
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -1858,7 +1867,7 @@ mod tests {
         let root = p("/music");
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 // Root-level album track — always included.
                 library_track(
                     "/music/Porcupine Tree/Muut/01 - Intro.flac",
@@ -1895,7 +1904,7 @@ mod tests {
                     Some(2004),
                     Some(1),
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -1985,6 +1994,7 @@ mod tests {
             tracks: tracks
                 .iter()
                 .map(|(path, artist, album)| library_track(path, &outer, artist, album, None, None))
+                .map(std::sync::Arc::new)
                 .collect(),
             ..LibrarySnapshot::default()
         }
@@ -2049,7 +2059,7 @@ mod tests {
         }
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks,
+            tracks: crate::library::shared_tracks(tracks),
             ..LibrarySnapshot::default()
         };
 
@@ -2078,7 +2088,7 @@ mod tests {
         let root = p("/music");
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 // Root-level album track — included.
                 library_track(
                     "/music/Opeth/Blackwater Park/01 - The Leper Affinity.flac",
@@ -2106,7 +2116,7 @@ mod tests {
                     Some(2001),
                     Some(1),
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -2481,6 +2491,7 @@ mod tests {
                         None,
                     )
                 })
+                .map(std::sync::Arc::new)
                 .collect(),
             ..LibrarySnapshot::default()
         };
@@ -2534,11 +2545,11 @@ mod tests {
         let path = p("/music/Artist/Album/song.flac");
         let mut state = BridgeState::default();
         state.library = Arc::new(crate::library::LibrarySnapshot {
-            tracks: vec![LibraryTrack {
+            tracks: crate::library::shared_tracks(vec![LibraryTrack {
                 path: path.clone(),
                 root_path: p("/music"),
                 ..LibraryTrack::default()
-            }],
+            }]),
             ..crate::library::LibrarySnapshot::default()
         });
         let tags =
@@ -2581,14 +2592,14 @@ mod tests {
         fs::write(&path, flac(&[&comment_block(&broken)])).expect("break track");
         let mut state = BridgeState {
             library: Arc::new(LibrarySnapshot {
-                tracks: vec![LibraryTrack {
+                tracks: crate::library::shared_tracks(vec![LibraryTrack {
                     path: path.clone(),
                     root_path: dir.clone(),
                     title: "Saved Title".to_string(),
                     artist: "Saved Artist".to_string(),
                     album: "Saved Album".to_string(),
                     ..LibraryTrack::default()
-                }],
+                }]),
                 ..LibrarySnapshot::default()
             }),
             ..BridgeState::default()

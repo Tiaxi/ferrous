@@ -24,7 +24,7 @@ use crate::playback::{
 use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
-    library_tree, try_send_event, ApplyAlbumArtEvent, BridgeEvent, BridgeLoopFlags, BridgeState,
+    try_send_event, ApplyAlbumArtEvent, BridgeEvent, BridgeLoopFlags, BridgeState,
     LastFmPlaybackTracker, PendingWaveformTrack, SettingsSaveTiming, SnapshotUrgency,
 };
 
@@ -118,9 +118,9 @@ pub(super) fn update_library_cover_paths(
     let previous = Arc::clone(&state.library);
     let mut next_library = (*previous).clone();
     for (position, cover_path) in updates {
-        next_library.tracks[position]
-            .cover_path
-            .clone_from(cover_path);
+        let track = Arc::make_mut(&mut next_library.tracks[position]);
+        track.cover_path.clone_from(cover_path);
+        state.library_rows_to_read.push(track.path.clone());
     }
     next_library.search_revision = next_library.search_revision.saturating_add(1);
     state.library = Arc::new(next_library);
@@ -807,42 +807,70 @@ pub(super) fn unix_timestamp_now() -> i64 {
         .unwrap_or(0)
 }
 
-pub(super) fn process_library_event(
-    event: LibraryEvent,
-    state: &mut BridgeState,
-) -> SnapshotUrgency {
-    match event {
-        LibraryEvent::Snapshot(snapshot) => {
-            let (artist_count, album_count) = library_tree::compute_artist_album_counts(&snapshot);
-            state.library = Arc::new(snapshot);
-            state.library_artist_count = artist_count;
-            state.library_album_count = album_count;
-            if !state.queue.is_empty() {
-                super::sync_queue_details(state);
-            }
+/// What a batch of library events changed in the bridge's library.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct LibraryEventsApplied {
+    /// How many tracks were upserted or removed; roots count as one.
+    pub(super) rows_changed: usize,
+    pub(super) status_changed: bool,
+}
+
+impl LibraryEventsApplied {
+    pub(super) fn urgency(self) -> SnapshotUrgency {
+        if self.rows_changed > 0 || self.status_changed {
             SnapshotUrgency::Immediate
+        } else {
+            SnapshotUrgency::None
         }
     }
 }
 
-pub(super) fn drain_library_events(
-    library_rx: &Receiver<LibraryEvent>,
+/// Apply the library worker's events, in order, as one change: the bridge
+/// copies its library once for all of them, and only if a row changed. The
+/// copy shares every track it keeps, and the path index is kept for it when
+/// no track moved.
+pub(super) fn apply_library_events(
+    events: impl IntoIterator<Item = LibraryEvent>,
     state: &mut BridgeState,
-) -> SnapshotUrgency {
-    let mut urgency = SnapshotUrgency::None;
-    while let Ok(event) = library_rx.try_recv() {
-        urgency = urgency.max(process_library_event(event, state));
+) -> LibraryEventsApplied {
+    let mut changes = crate::library::LibraryChanges::default();
+    let mut status = None;
+    for event in events {
+        changes.merge(event.changes);
+        status = Some(event.status);
     }
-    urgency
-}
+    let Some(status) = status else {
+        return LibraryEventsApplied::default();
+    };
+    let mut applied = LibraryEventsApplied {
+        rows_changed: 0,
+        status_changed: state.library_status != status,
+    };
+    state.library_status = status;
+    if changes.is_empty() {
+        return applied;
+    }
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub(super) fn pump_library_events(
-    library_rx: &Receiver<LibraryEvent>,
-    state: &mut BridgeState,
-) -> bool {
-    drain_library_events(library_rx, state).is_pending()
+    let previous = Arc::clone(&state.library);
+    let mut next = (*previous).clone();
+    let result = next.apply_changes(&changes, |path| {
+        state.library_index.positions(&previous, path)
+    });
+    if !result.changed {
+        return applied;
+    }
+    applied.rows_changed =
+        changes.upserted.len() + changes.removed.len() + usize::from(changes.roots.is_some());
+    state.library = Arc::new(next);
+    if result.positions_kept {
+        state
+            .library_index
+            .extend(&previous, &state.library, result.appended_from);
+    }
+    if !state.queue.is_empty() {
+        super::sync_queue_details(state);
+    }
+    applied
 }
 
 #[cfg(test)]
@@ -1199,6 +1227,7 @@ mod tests {
                             ..LibraryTrack::default()
                         }),
                     )
+                    .map(std::sync::Arc::new)
                     .collect(),
                 ..LibrarySnapshot::default()
             })

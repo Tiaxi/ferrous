@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use super::LibraryTrack;
 
@@ -219,43 +219,67 @@ pub(super) fn needs_search_tag_backfill(conn: &Connection) -> bool {
     .unwrap_or(false)
 }
 
+const TRACK_COLUMNS: &str = "path, root_path, title, artist, album, cover_path, genre, year, \
+     track_no, duration_secs, search_tags";
+
+fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack> {
+    Ok(LibraryTrack {
+        search_tags: serde_json::from_str(&row.get::<_, Option<String>>(10)?.unwrap_or_default())
+            .unwrap_or_default(),
+        path: PathBuf::from(row.get::<_, String>(0)?),
+        root_path: PathBuf::from(row.get::<_, String>(1)?),
+        title: row.get::<_, String>(2)?,
+        artist: row.get::<_, String>(3)?,
+        album: row.get::<_, String>(4)?,
+        cover_path: row.get::<_, String>(5)?,
+        genre: row.get::<_, String>(6)?,
+        year: row
+            .get::<_, Option<i64>>(7)?
+            .and_then(|v| i32::try_from(v).ok()),
+        track_no: row
+            .get::<_, Option<i64>>(8)?
+            .and_then(|v| u32::try_from(v).ok()),
+        duration_secs: row.get::<_, Option<f32>>(9)?,
+    })
+}
+
 pub(super) fn load_snapshot(conn: &Connection, snapshot: &mut super::LibrarySnapshot) {
     snapshot.roots = load_roots(conn);
     snapshot.tracks.clear();
 
-    if let Ok(mut stmt) = conn.prepare(
-        r"
-        SELECT path, root_path, title, artist, album, cover_path, genre, year, track_no, duration_secs, search_tags
-        FROM tracks
-        ORDER BY
-            root_path COLLATE NOCASE,
-            path COLLATE NOCASE
-        ",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |row| {
-            Ok(LibraryTrack {
-                search_tags: serde_json::from_str(&row.get::<_, Option<String>>(10)?.unwrap_or_default()).unwrap_or_default(),
-                path: PathBuf::from(row.get::<_, String>(0)?),
-                root_path: PathBuf::from(row.get::<_, String>(1)?),
-                title: row.get::<_, String>(2)?,
-                artist: row.get::<_, String>(3)?,
-                album: row.get::<_, String>(4)?,
-                cover_path: row.get::<_, String>(5)?,
-                genre: row.get::<_, String>(6)?,
-                year: row
-                    .get::<_, Option<i64>>(7)?
-                    .and_then(|v| i32::try_from(v).ok()),
-                track_no: row
-                    .get::<_, Option<i64>>(8)?
-                    .and_then(|v| u32::try_from(v).ok()),
-                duration_secs: row.get::<_, Option<f32>>(9)?,
-            })
-        }) {
+    if let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT {TRACK_COLUMNS} FROM tracks \
+         ORDER BY root_path COLLATE NOCASE, path COLLATE NOCASE"
+    )) {
+        if let Ok(rows) = stmt.query_map([], track_from_row) {
             for row in rows.flatten() {
-                snapshot.tracks.push(row);
+                snapshot.tracks.push(std::sync::Arc::new(row));
             }
         }
     }
+}
+
+/// The rows of those of `paths` that the library has.
+pub(super) fn load_tracks(
+    conn: &Connection,
+    paths: &[PathBuf],
+) -> Result<Vec<LibraryTrack>, String> {
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks WHERE path = ?1"
+        ))
+        .map_err(|error| format!("could not read library tracks: {error}"))?;
+    let mut tracks = Vec::new();
+    for path in paths {
+        if let Some(track) = stmt
+            .query_row(params![path.to_string_lossy()], track_from_row)
+            .optional()
+            .map_err(|error| format!("could not read '{}': {error}", path.display()))?
+        {
+            tracks.push(track);
+        }
+    }
+    Ok(tracks)
 }
 
 pub(super) fn load_roots(conn: &Connection) -> Vec<super::LibraryRoot> {

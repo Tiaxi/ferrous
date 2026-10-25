@@ -240,8 +240,8 @@ fn the_search_tag_backfill_leaves_and_reports_a_file_whose_reader_panics() {
     index_then_break(&mut conn, &dir, &broken);
     conn.execute("UPDATE tracks SET search_tags = NULL", [])
         .expect("a row from before search tags");
-    let mut snapshot = LibrarySnapshot::default();
-    load_snapshot(&conn, &mut snapshot);
+    let mut snapshot = WorkerLibrary::default();
+    snapshot.reload(&conn);
     let (event_tx, _event_rx) = unbounded();
 
     let problem = backfill_search_tags(&conn, &mut snapshot, &event_tx).expect("backfill");

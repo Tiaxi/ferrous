@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::folder_cover::find_folder_cover;
 use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
@@ -252,54 +253,6 @@ pub fn build_library_tree_flat_binary<S: BuildHasher>(
     encode_flat_rows(&rows)
 }
 
-#[must_use]
-pub fn compute_artist_album_counts(library: &LibrarySnapshot) -> (usize, usize) {
-    let roots = library.roots.clone();
-    if roots.is_empty() {
-        return (0, 0);
-    }
-
-    let mut artists = HashSet::new();
-    let mut albums = HashSet::new();
-    for track in &library.tracks {
-        let Some(root) = pick_root_for_track(&roots, track) else {
-            continue;
-        };
-        let Ok(rel) = track.path.strip_prefix(&root.path) else {
-            continue;
-        };
-        let components = rel
-            .components()
-            .filter_map(|component| {
-                let std::path::Component::Normal(name) = component else {
-                    return None;
-                };
-                Some(name.to_string_lossy().to_string())
-            })
-            .collect::<Vec<_>>();
-
-        if components.is_empty() {
-            continue;
-        }
-
-        let root_key = root.path.to_string_lossy().to_string();
-        let artist_name = if components.len() >= 2 {
-            components[0].clone()
-        } else if track.artist.trim().is_empty() {
-            String::from("Unknown Artist")
-        } else {
-            track.artist.trim().to_string()
-        };
-        artists.insert(artist_row_key(&root_key, &artist_name));
-
-        if components.len() > 2 {
-            albums.insert(album_row_key(&root_key, &artist_name, &components[1]));
-        }
-    }
-
-    (artists.len(), albums.len())
-}
-
 pub fn retain_valid_expanded_keys<S: BuildHasher + Default>(
     library: &LibrarySnapshot,
     expanded_keys: &mut HashSet<String, S>,
@@ -400,11 +353,24 @@ impl LibraryTreeCache {
                 }
             }
         }
+        // The artists and albums are the tree's, so they are counted here,
+        // once per library.
+        let counts = builders.values().fold((0, 0), |(artists, albums), root| {
+            (
+                artists + root.artists.len(),
+                albums
+                    + root
+                        .artists
+                        .values()
+                        .map(|artist| artist.albums.len())
+                        .sum::<usize>(),
+            )
+        });
         Self {
             builders,
             resolved_albums: HashMap::new(),
             valid_keys,
-            counts: compute_artist_album_counts(library),
+            counts,
         }
     }
 
@@ -467,7 +433,7 @@ fn build_library_tree_flat_rows<S: BuildHasher>(
 
 fn build_root_builders(
     roots: &[LibraryRoot],
-    tracks: &[LibraryTrack],
+    tracks: &[Arc<LibraryTrack>],
 ) -> BTreeMap<String, RootNodeBuilder> {
     let mut builders: BTreeMap<String, RootNodeBuilder> = roots
         .iter()
@@ -1429,7 +1395,7 @@ mod tests {
         song.root_path.clone_from(&dir);
         let library = LibrarySnapshot {
             roots: vec![root(&dir.to_string_lossy())],
-            tracks: vec![song],
+            tracks: crate::library::shared_tracks(vec![song]),
             ..Default::default()
         };
         let mut cache = LibraryTreeCache::new(&library);
@@ -1526,13 +1492,13 @@ mod tests {
     fn single_root_hides_root_rows() {
         let library = LibrarySnapshot {
             roots: vec![root("/music")],
-            tracks: vec![track(
+            tracks: crate::library::shared_tracks(vec![track(
                 "/music/Artist A/Album A/01.flac",
                 "Album A",
                 Some(2020),
                 Some(1),
                 "Track",
-            )],
+            )]),
             ..LibrarySnapshot::default()
         };
 
@@ -1550,7 +1516,7 @@ mod tests {
     fn multi_root_keeps_roots_split() {
         let library = LibrarySnapshot {
             roots: vec![root("/music-a"), root("/music-b")],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 LibraryTrack {
                     search_tags: crate::library::SearchTags::default(),
                     path: PathBuf::from("/music-a/Artist/Album/01.flac"),
@@ -1577,7 +1543,7 @@ mod tests {
                     track_no: Some(1),
                     duration_secs: None,
                 },
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -1598,7 +1564,7 @@ mod tests {
     fn artist_keys_include_root_identity() {
         let library = LibrarySnapshot {
             roots: vec![root("/music-a"), root("/music-b")],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 LibraryTrack {
                     search_tags: crate::library::SearchTags::default(),
                     path: PathBuf::from("/music-a/Same Artist/Album A/01.flac"),
@@ -1625,7 +1591,7 @@ mod tests {
                     track_no: Some(1),
                     duration_secs: None,
                 },
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -1648,13 +1614,13 @@ mod tests {
     fn lazy_hydration_emits_artist_then_album_then_tracks() {
         let library = LibrarySnapshot {
             roots: vec![root("/music")],
-            tracks: vec![track(
+            tracks: crate::library::shared_tracks(vec![track(
                 "/music/Artist A/Album A/01.flac",
                 "Album A",
                 Some(2020),
                 Some(1),
                 "Track 01",
-            )],
+            )]),
             ..LibrarySnapshot::default()
         };
 
@@ -1686,13 +1652,13 @@ mod tests {
     fn retain_valid_expanded_keys_prunes_missing_nodes() {
         let library = LibrarySnapshot {
             roots: vec![root("/music")],
-            tracks: vec![track(
+            tracks: crate::library::shared_tracks(vec![track(
                 "/music/Artist A/Album A/01.flac",
                 "Album A",
                 Some(2020),
                 Some(1),
                 "Track 01",
-            )],
+            )]),
             ..LibrarySnapshot::default()
         };
 
@@ -1755,13 +1721,13 @@ mod tests {
     fn binary_row_tracks_include_paths_and_play_paths() {
         let library = LibrarySnapshot {
             roots: vec![root("/music")],
-            tracks: vec![track(
+            tracks: crate::library::shared_tracks(vec![track(
                 "/music/Artist A/Album A/01.flac",
                 "Album A",
                 Some(2020),
                 Some(1),
                 "Track 01",
-            )],
+            )]),
             ..LibrarySnapshot::default()
         };
         let bytes = build_library_tree_flat_binary(
@@ -2089,7 +2055,7 @@ mod tests {
         // Within Album B: root, disc sections (alphabetical), non-disc sections (by year/name).
         let library = LibrarySnapshot {
             roots: vec![root("/music")],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 // Album A — year 2000
                 track(
                     "/music/TestArtist/Album A/01.flac",
@@ -2129,7 +2095,7 @@ mod tests {
                     Some(1),
                     "Bonus 01",
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -2181,7 +2147,7 @@ mod tests {
         // Year sort → Beta's albums: Y(1990), Z(2010); Alpha's album: X(2020).
         let library = LibrarySnapshot {
             roots: vec![root("/music")],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 track(
                     "/music/Beta/Album Z/01.flac",
                     "Album Z",
@@ -2203,7 +2169,7 @@ mod tests {
                     Some(1),
                     "Track 01",
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -2224,7 +2190,7 @@ mod tests {
     fn collect_root_paths_tree_order_sorts_by_artist_then_album_title() {
         let library = LibrarySnapshot {
             roots: vec![root("/music")],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 track(
                     "/music/Artist/Zebra/01.flac",
                     "Zebra",
@@ -2239,7 +2205,7 @@ mod tests {
                     Some(1),
                     "Track 01",
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -2259,7 +2225,7 @@ mod tests {
         // Two roots: /a and /b, each with one artist and one album.
         let library = LibrarySnapshot {
             roots: vec![root("/a"), root("/b")],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 track_in_root(
                     "/b/Artist/Album/01.flac",
                     "/b",
@@ -2276,7 +2242,7 @@ mod tests {
                     Some(1),
                     "T1",
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -2295,7 +2261,7 @@ mod tests {
     fn collect_all_paths_tree_order_sorts_albums_by_year_across_artists() {
         let library = LibrarySnapshot {
             roots: vec![root("/music")],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 track(
                     "/music/Zeppelin/Houses (1973)/01.flac",
                     "Houses (1973)",
@@ -2324,7 +2290,7 @@ mod tests {
                     Some(1),
                     "Track 01",
                 ),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 

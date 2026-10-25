@@ -1581,7 +1581,7 @@ mod tests {
         let root = p("/music");
         let snapshot = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 crate::library::LibraryTrack {
                     search_tags: crate::library::SearchTags::default(),
                     path: p("/music/Artist/Album/01 - Intro.flac"),
@@ -1621,7 +1621,7 @@ mod tests {
                     track_no: Some(3),
                     duration_secs: Some(80.0),
                 },
-            ],
+            ]),
             ..LibrarySnapshot::default()
         };
 
@@ -1641,7 +1641,7 @@ mod tests {
         let root = p("/music");
         let snapshot = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![crate::library::LibraryTrack {
+            tracks: crate::library::shared_tracks(vec![crate::library::LibraryTrack {
                 search_tags: crate::library::SearchTags::default(),
                 path: p("/music/Artist/Album/01 - Song.flac"),
                 root_path: root,
@@ -1653,7 +1653,7 @@ mod tests {
                 year: Some(2020),
                 track_no: Some(1),
                 duration_secs: Some(60.0),
-            }],
+            }]),
             ..LibrarySnapshot::default()
         };
         let prepared = prepare_search_library(&snapshot);
@@ -1677,22 +1677,19 @@ mod tests {
         let root = p("/music");
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![library_track(
+            tracks: crate::library::shared_tracks(vec![library_track(
                 "/music/Artist/Album/01 - Song.flac",
                 &root,
                 "Artist",
                 "Album",
                 Some(2020),
                 Some(1),
-            )],
+            )]),
             search_revision: 7,
             ..LibrarySnapshot::default()
         };
         let first = Arc::new(library.clone());
-        let second = Arc::new(LibrarySnapshot {
-            last_error: Some("scan still running".to_string()),
-            ..library
-        });
+        let second = Arc::new(library);
 
         let mut cache = SearchWorkerPreparedCache::default();
         let prepared_first = cache.prepared_for(&first);
@@ -1706,14 +1703,14 @@ mod tests {
         let root = p("/music");
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![library_track(
+            tracks: crate::library::shared_tracks(vec![library_track(
                 "/music/Artist/Album/01 - Song.flac",
                 &root,
                 "Artist",
                 "Album",
                 Some(2020),
                 Some(1),
-            )],
+            )]),
             search_revision: 7,
             ..LibrarySnapshot::default()
         };
@@ -1746,7 +1743,7 @@ mod tests {
 
         let library = LibrarySnapshot {
             roots: vec![library_root(&root)],
-            tracks: vec![crate::library::LibraryTrack {
+            tracks: crate::library::shared_tracks(vec![crate::library::LibraryTrack {
                 search_tags: crate::library::SearchTags::default(),
                 path: track,
                 root_path: root,
@@ -1758,7 +1755,7 @@ mod tests {
                 year: Some(2020),
                 track_no: Some(1),
                 duration_secs: Some(60.0),
-            }],
+            }]),
             search_revision: 1,
             ..LibrarySnapshot::default()
         };
@@ -1836,7 +1833,7 @@ mod tests {
     ) -> Vec<BridgeSearchResultRow> {
         let library = LibrarySnapshot {
             roots: vec![library_root(&p("/music"))],
-            tracks,
+            tracks: crate::library::shared_tracks(tracks),
             ..LibrarySnapshot::default()
         };
         let prepared = prepare_search_library(&library);
@@ -1876,7 +1873,7 @@ mod tests {
         tracks.push(copy);
         let library = LibrarySnapshot {
             roots: vec![library_root(&p("/music")), library_root(&p("/surround"))],
-            tracks,
+            tracks: crate::library::shared_tracks(tracks),
             ..LibrarySnapshot::default()
         };
         let prepared = prepare_search_library(&library);
@@ -1890,7 +1887,7 @@ mod tests {
                 .tracks
                 .iter()
                 .filter(|track| track.root_path == p("/music"))
-                .cloned()
+                .map(|track| (**track).clone())
                 .collect();
             let rows = fixture_search(query, tracks, 1);
             let artist = rows
@@ -2071,7 +2068,7 @@ mod tests {
                 path: p("/music"),
                 name: "Surround".into(),
             }],
-            tracks: vec![
+            tracks: crate::library::shared_tracks(vec![
                 fixture_track("Anesthetize", "Porcupine Tree", "Anesthetize", "01"),
                 fixture_track(
                     "Anesthetize",
@@ -2080,7 +2077,7 @@ mod tests {
                     "02",
                 ),
                 fixture_track("Halo", "Porcupine Tree", "Anesthetize", "03"),
-            ],
+            ]),
             ..LibrarySnapshot::default()
         });
         let (_tx, rx) = crossbeam_channel::unbounded();
@@ -2230,6 +2227,7 @@ mod tests {
                         &format!("{i:03}"),
                     )
                 })
+                .map(std::sync::Arc::new)
                 .collect(),
             ..LibrarySnapshot::default()
         });
@@ -2383,7 +2381,9 @@ mod tests {
     fn cache_warmup_does_not_replace_a_queued_query() {
         let library = Arc::new(LibrarySnapshot {
             roots: vec![library_root(&p("/music"))],
-            tracks: vec![fixture_track("Blue", "Artist", "Album", "01")],
+            tracks: crate::library::shared_tracks(vec![fixture_track(
+                "Blue", "Artist", "Album", "01",
+            )]),
             ..LibrarySnapshot::default()
         });
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -2413,7 +2413,9 @@ mod tests {
     fn cache_warmup_does_not_cancel_in_progress_search() {
         let library = LibrarySnapshot {
             roots: vec![library_root(&p("/music"))],
-            tracks: vec![fixture_track("Blue", "Artist", "Album", "01")],
+            tracks: crate::library::shared_tracks(vec![fixture_track(
+                "Blue", "Artist", "Album", "01",
+            )]),
             ..LibrarySnapshot::default()
         };
         let prepared = prepare_search_library(&library);

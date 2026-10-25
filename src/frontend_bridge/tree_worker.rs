@@ -11,6 +11,8 @@ use std::sync::{
 
 struct TreeRequest {
     library: Arc<LibrarySnapshot>,
+    /// Whether a scan is still adding the library's tracks.
+    scan_in_progress: bool,
     sort_mode: LibrarySortMode,
     expanded: HashSet<String>,
     generation: u64,
@@ -54,7 +56,7 @@ impl TreeWorker {
                     *cache = LibraryTreeCache::new(&request.library);
                     *cached_library = Arc::clone(&request.library);
                 }
-                if !request.library.scan_in_progress {
+                if !request.scan_in_progress {
                     cache.retain_expanded_keys(&mut request.expanded);
                 }
                 let bytes = cache.build(request.sort_mode, Some(&request.expanded));
@@ -82,12 +84,14 @@ impl TreeWorker {
     pub(super) fn request(
         &self,
         library: Arc<LibrarySnapshot>,
+        scan_in_progress: bool,
         sort_mode: LibrarySortMode,
         expanded: HashSet<String>,
     ) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.tx.send(TreeRequest {
             library,
+            scan_in_progress,
             sort_mode,
             expanded,
             generation,
@@ -113,7 +117,12 @@ mod tests {
     fn newer_expansion_invalidates_ready_tree_results() {
         let worker = TreeWorker::new();
         let library = Arc::new(LibrarySnapshot::default());
-        worker.request(Arc::clone(&library), LibrarySortMode::Year, HashSet::new());
+        worker.request(
+            Arc::clone(&library),
+            false,
+            LibrarySortMode::Year,
+            HashSet::new(),
+        );
         let first = worker
             .results
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -121,6 +130,7 @@ mod tests {
         assert!(worker.is_current(&first));
         worker.request(
             library,
+            false,
             LibrarySortMode::Title,
             HashSet::from(["restored".into()]),
         );

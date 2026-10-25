@@ -25,12 +25,13 @@ use crate::raw_audio::{
     is_raw_surround_file, probe_raw_surround_technical_details, read_appended_apev2_text_metadata,
 };
 
+use super::publish::WorkerLibrary;
 use super::schema::{
     init_schema, load_roots, load_snapshot, normalize_root_name, open_library_db, u128_to_i64,
     u64_to_i64, usize_to_f32,
 };
 use super::{
-    emit_snapshot, IndexedTrack, LibraryEvent, LibraryScanProgress, LibrarySnapshot, LibraryTrack,
+    IndexedTrack, LibraryEvent, LibraryScanProgress, LibrarySnapshot, LibraryTrack,
     TrackFileFingerprint,
 };
 
@@ -268,7 +269,7 @@ pub(super) fn handle_add_root(
     conn: &Connection,
     root: &Path,
     name: &str,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
     control: &mut dyn ScanControl,
 ) -> Result<(), String> {
@@ -277,13 +278,12 @@ pub(super) fn handle_add_root(
     reject_nested_root(conn, &root)?;
     insert_root(conn, &root, name)?;
     // Reflect the newly-added root in UI state immediately, before scan completion.
-    snapshot.roots = load_roots(conn);
-    snapshot.bump_search_revision();
+    library.set_roots(load_roots(conn));
     run_scans_with(
         conn,
         &[root],
         EmbeddedCoverCache::shared(),
-        snapshot,
+        library,
         event_tx,
         control,
     )
@@ -306,7 +306,7 @@ pub(super) fn resolve_root_path(root: &Path) -> PathBuf {
 pub(super) fn handle_rescan_root(
     conn: &Connection,
     root: &Path,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
     control: &mut dyn ScanControl,
 ) -> Result<(), String> {
@@ -323,7 +323,7 @@ pub(super) fn handle_rescan_root(
         conn,
         &roots,
         EmbeddedCoverCache::shared(),
-        snapshot,
+        library,
         event_tx,
         control,
     )
@@ -331,7 +331,7 @@ pub(super) fn handle_rescan_root(
 
 pub(super) fn handle_rescan_all(
     conn: &Connection,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
     control: &mut dyn ScanControl,
 ) -> Result<(), String> {
@@ -346,7 +346,7 @@ pub(super) fn handle_rescan_all(
         conn,
         &roots,
         EmbeddedCoverCache::shared(),
-        snapshot,
+        library,
         event_tx,
         control,
     )
@@ -357,10 +357,10 @@ pub(super) fn handle_rescan_all(
 /// without search tags, so the next scan reads them again.
 pub(super) fn backfill_search_tags(
     conn: &Connection,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<Option<String>, String> {
-    backfill_search_tags_using(conn, snapshot, event_tx, |path| {
+    backfill_search_tags_using(conn, library, event_tx, |path| {
         let before = track_file_fingerprint(path)?;
         fs::File::open(path).ok()?;
         let read = read_track_catching_panic(path, EmbeddedCoverCache::shared());
@@ -373,7 +373,7 @@ pub(super) fn backfill_search_tags(
 /// skips the file, and an error is why its tags could not be read.
 fn backfill_search_tags_using(
     conn: &Connection,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
     mut read_tags: impl FnMut(&Path) -> Option<Result<super::SearchTags, String>>,
 ) -> Result<Option<String>, String> {
@@ -419,23 +419,18 @@ fn backfill_search_tags_using(
             }
         }
         tx.commit().map_err(|error| error.to_string())?;
-        if !updates.is_empty() {
-            for track in &mut snapshot.tracks {
-                if let Some(tags) = updates.remove(&track.path) {
-                    track.search_tags = tags;
-                }
-            }
-            snapshot.bump_search_revision();
+        for (path, tags) in updates {
+            library.modify(&path, |track| track.search_tags = tags);
         }
         if last_emit.elapsed() >= scan_snapshot_emit_interval() {
-            snapshot.scan_in_progress = true;
-            snapshot.scan_progress = Some(LibraryScanProgress {
-                roots_total: snapshot.roots.len(),
+            library.status.scan_in_progress = true;
+            library.status.scan_progress = Some(LibraryScanProgress {
+                roots_total: library.roots().len(),
                 supported_files_discovered: paths.len(),
                 supported_files_processed: ((batch_index + 1) * 256).min(paths.len()),
                 ..LibraryScanProgress::default()
             });
-            emit_snapshot(event_tx, snapshot);
+            library.publish(event_tx);
             last_emit = Instant::now();
         }
     }
@@ -458,18 +453,18 @@ pub(super) trait ScanControl {
     /// Called between files and batches, while the scan holds no write lock
     /// and the database has everything it committed. May run commands that
     /// must not wait for the scan, such as removing or renaming a root,
-    /// updating `snapshot` and publishing it.
+    /// updating `library` and publishing it.
     fn poll(
         &mut self,
         conn: &Connection,
-        snapshot: &mut LibrarySnapshot,
+        library: &mut WorkerLibrary,
         event_tx: &Sender<LibraryEvent>,
         scanning: &Path,
         remaining: &[PathBuf],
     ) -> ScanDirective;
 
     /// Whether another connection, such as a tag edit's, committed to the
-    /// database since the last call, so that `snapshot` must be read again
+    /// database since the last call, so that `library` must be read again
     /// before it is published.
     fn external_writes(&mut self, conn: &Connection) -> bool;
 }
@@ -505,7 +500,7 @@ impl ScanControl for Uninterrupted {
     fn poll(
         &mut self,
         _conn: &Connection,
-        _snapshot: &mut LibrarySnapshot,
+        _library: &mut WorkerLibrary,
         _event_tx: &Sender<LibraryEvent>,
         _scanning: &Path,
         _remaining: &[PathBuf],
@@ -524,10 +519,10 @@ pub(super) fn run_scans(
     conn: &Connection,
     roots: &[PathBuf],
     covers: Option<&'static EmbeddedCoverCache>,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
 ) -> Result<(), String> {
-    run_scans_with(conn, roots, covers, snapshot, event_tx, &mut Uninterrupted)
+    run_scans_with(conn, roots, covers, library, event_tx, &mut Uninterrupted)
 }
 
 /// Scans `roots`, caching embedded pictures in `covers`, then removes the
@@ -537,7 +532,7 @@ pub(super) fn run_scans_with(
     conn: &Connection,
     roots: &[PathBuf],
     covers: Option<&'static EmbeddedCoverCache>,
-    snapshot: &mut LibrarySnapshot,
+    library: &mut WorkerLibrary,
     event_tx: &Sender<LibraryEvent>,
     control: &mut dyn ScanControl,
 ) -> Result<(), String> {
@@ -549,14 +544,13 @@ pub(super) fn run_scans_with(
     let mut problems = Vec::new();
     for (idx, root) in roots.iter().enumerate() {
         let remaining = &roots[idx + 1..];
-        match control.poll(conn, snapshot, event_tx, root, remaining) {
+        match control.poll(conn, library, event_tx, root, remaining) {
             ScanDirective::Continue => {}
             ScanDirective::SkipRoot => continue,
             ScanDirective::StopAll => return scan_result(&problems),
         }
-        let revision_before_scan = snapshot.search_revision;
         let mut sink = SnapshotSink::new(
-            snapshot,
+            library,
             event_tx,
             &mut *control,
             root,
@@ -568,27 +562,26 @@ pub(super) fn run_scans_with(
         // reported without stopping the remaining scans.
         let result = scan_root(conn, root, covers, &mut sink);
         let stopped = sink.stopped;
+        let committed_any = sink.committed_any;
         let final_progress = sink.final_progress.clone();
         match result {
             Ok(outcome) => {
                 if !outcome.removed.is_empty() {
                     let stale_set: HashSet<String> = outcome.removed.into_iter().collect();
-                    snapshot
-                        .tracks
-                        .retain(|track| !stale_set.contains(track.path.to_string_lossy().as_ref()));
-                    snapshot.bump_search_revision();
+                    library.remove_where(|track| {
+                        stale_set.contains(track.path.to_string_lossy().as_ref())
+                    });
                 }
                 problems.extend(outcome.problem);
             }
             Err(err) => {
                 // The batches committed before the failure stay, and the
-                // snapshot already has them; the failed batch was rolled
-                // back. Read the snapshot again so it matches the database
+                // copy already has them; the failed batch was rolled back.
+                // Read the library again so it matches the database
                 // whatever the failure left.
-                if snapshot.search_revision != revision_before_scan {
+                if committed_any {
                     control.external_writes(conn);
-                    load_snapshot(conn, snapshot);
-                    snapshot.bump_search_revision();
+                    library.reload(conn);
                 }
                 problems.push(format!("failed to scan '{}': {err}", root.display()));
             }
@@ -598,11 +591,10 @@ pub(super) fn run_scans_with(
         }
 
         if control.external_writes(conn) {
-            load_snapshot(conn, snapshot);
-            snapshot.bump_search_revision();
+            library.reload(conn);
         }
-        snapshot.scan_in_progress = true;
-        snapshot.scan_progress = Some(LibraryScanProgress {
+        library.status.scan_in_progress = true;
+        library.status.scan_progress = Some(LibraryScanProgress {
             current_root: Some(root.clone()),
             roots_completed: idx + 1,
             roots_total,
@@ -611,7 +603,7 @@ pub(super) fn run_scans_with(
             files_per_second: final_progress.files_per_second,
             eta_seconds: None,
         });
-        emit_snapshot(event_tx, snapshot);
+        library.publish(event_tx);
     }
 
     // Tracks that a scan kept or could not finish still reference their
@@ -640,33 +632,31 @@ trait ScanSink {
     fn should_stop(&mut self, conn: &Connection) -> bool;
 }
 
-/// Keeps the library worker's snapshot in step with a scan of one root, and
-/// publishes it as the scan goes.
+/// Keeps the library worker's copy in step with a scan of one root, and
+/// publishes its changes as the scan goes. A scan that changes no row only
+/// publishes its progress.
 struct SnapshotSink<'a> {
-    snapshot: &'a mut LibrarySnapshot,
+    library: &'a mut WorkerLibrary,
     event_tx: &'a Sender<LibraryEvent>,
     control: &'a mut dyn ScanControl,
     root: &'a Path,
     remaining: &'a [PathBuf],
     /// The root's index in the run, and the number of roots in the run.
     position: (usize, usize),
-    /// Indexed across roots: a root can claim tracks that another root
-    /// owned, and its entries must replace theirs. Built for the snapshot at
-    /// `indexed_revision`.
-    track_indices: HashMap<String, usize>,
-    indexed_revision: Option<u64>,
     emit_interval: Duration,
     min_processed_delta: usize,
     last_emit: Instant,
     last_processed: usize,
     final_progress: RootScanProgress,
+    /// Whether a batch was committed.
+    committed_any: bool,
     /// Why the scan stopped early, if it did.
     stopped: Option<ScanDirective>,
 }
 
 impl<'a> SnapshotSink<'a> {
     fn new(
-        snapshot: &'a mut LibrarySnapshot,
+        library: &'a mut WorkerLibrary,
         event_tx: &'a Sender<LibraryEvent>,
         control: &'a mut dyn ScanControl,
         root: &'a Path,
@@ -675,14 +665,12 @@ impl<'a> SnapshotSink<'a> {
     ) -> Self {
         let emit_interval = scan_snapshot_emit_interval();
         Self {
-            snapshot,
+            library,
             event_tx,
             control,
             root,
             remaining,
             position,
-            track_indices: HashMap::new(),
-            indexed_revision: None,
             emit_interval,
             min_processed_delta: scan_snapshot_min_processed_delta(),
             last_emit: Instant::now()
@@ -690,31 +678,17 @@ impl<'a> SnapshotSink<'a> {
                 .unwrap_or_else(Instant::now),
             last_processed: 0,
             final_progress: RootScanProgress::default(),
+            committed_any: false,
             stopped: None,
         }
-    }
-
-    /// The position of each track of the snapshot, by path.
-    fn track_indices(&mut self) -> &mut HashMap<String, usize> {
-        if self.indexed_revision != Some(self.snapshot.search_revision) {
-            self.track_indices = self
-                .snapshot
-                .tracks
-                .iter()
-                .enumerate()
-                .map(|(index, track)| (track.path.to_string_lossy().to_string(), index))
-                .collect();
-            self.indexed_revision = Some(self.snapshot.search_revision);
-        }
-        &mut self.track_indices
     }
 }
 
 impl ScanSink for SnapshotSink<'_> {
     fn progress(&mut self, conn: &Connection, progress: RootScanProgress) {
         let (idx, roots_total) = self.position;
-        self.snapshot.scan_in_progress = true;
-        self.snapshot.scan_progress = Some(LibraryScanProgress {
+        self.library.status.scan_in_progress = true;
+        self.library.status.scan_progress = Some(LibraryScanProgress {
             current_root: Some(self.root.to_path_buf()),
             roots_completed: idx,
             roots_total,
@@ -732,10 +706,9 @@ impl ScanSink for SnapshotSink<'_> {
             // A tag edit or a rename may have changed rows that this copy
             // still has as they were.
             if self.control.external_writes(conn) {
-                load_snapshot(conn, self.snapshot);
-                self.snapshot.bump_search_revision();
+                self.library.reload(conn);
             }
-            emit_snapshot(self.event_tx, self.snapshot);
+            self.library.publish(self.event_tx);
             self.last_emit = Instant::now();
             self.last_processed = progress.processed;
         }
@@ -746,11 +719,9 @@ impl ScanSink for SnapshotSink<'_> {
         if rows.is_empty() {
             return;
         }
-        let mut new_tracks = Vec::new();
-        let indices = self.track_indices();
-        let mut replaced = Vec::new();
+        self.committed_any = true;
         for (task, indexed) in rows {
-            let track = LibraryTrack {
+            self.library.upsert(LibraryTrack {
                 search_tags: indexed.search_tags,
                 path: task.path,
                 root_path: root.to_path_buf(),
@@ -762,34 +733,14 @@ impl ScanSink for SnapshotSink<'_> {
                 year: indexed.year,
                 track_no: indexed.track_no,
                 duration_secs: indexed.duration_secs,
-            };
-            match indices.get(&task.path_string) {
-                Some(&index) => replaced.push((index, track)),
-                None => new_tracks.push((task.path_string, track)),
-            }
+            });
         }
-        let tracks = &mut self.snapshot.tracks;
-        for (index, track) in replaced {
-            if let Some(existing) = tracks.get_mut(index) {
-                *existing = track;
-            }
-        }
-        for (path_string, track) in new_tracks {
-            self.track_indices.insert(path_string, tracks.len());
-            tracks.push(track);
-        }
-        self.snapshot.bump_search_revision();
-        self.indexed_revision = Some(self.snapshot.search_revision);
     }
 
     fn should_stop(&mut self, conn: &Connection) -> bool {
-        let directive = self.control.poll(
-            conn,
-            self.snapshot,
-            self.event_tx,
-            self.root,
-            self.remaining,
-        );
+        let directive =
+            self.control
+                .poll(conn, self.library, self.event_tx, self.root, self.remaining);
         if directive == ScanDirective::Continue {
             return false;
         }
@@ -4105,7 +4056,7 @@ mod tests {
     fn handle_command(
         conn: &Connection,
         cmd: LibraryCommand,
-        snapshot: &mut LibrarySnapshot,
+        snapshot: &mut WorkerLibrary,
         event_tx: &Sender<LibraryEvent>,
     ) {
         super::super::worker::handle_command(
@@ -4120,7 +4071,7 @@ mod tests {
     fn indexed_paths(conn: &Connection) -> Vec<PathBuf> {
         let mut snapshot = LibrarySnapshot::default();
         load_snapshot(conn, &mut snapshot);
-        let mut paths: Vec<PathBuf> = snapshot.tracks.into_iter().map(|t| t.path).collect();
+        let mut paths: Vec<PathBuf> = snapshot.tracks.iter().map(|t| t.path.clone()).collect();
         paths.sort();
         paths
     }
@@ -4179,8 +4130,15 @@ mod tests {
             load_snapshot(conn, &mut snapshot);
             snapshot
                 .tracks
-                .into_iter()
-                .map(|track| (track.path, track.title, track.artist, track.album))
+                .iter()
+                .map(|track| {
+                    (
+                        track.path.clone(),
+                        track.title.clone(),
+                        track.artist.clone(),
+                        track.album.clone(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         let indexed = vec![(
@@ -4236,9 +4194,9 @@ mod tests {
         .expect("track row")
     }
 
-    fn snapshot_cover(snapshot: &LibrarySnapshot, path: &Path) -> String {
+    fn snapshot_cover(snapshot: &WorkerLibrary, path: &Path) -> String {
         snapshot
-            .tracks
+            .tracks()
             .iter()
             .find(|track| track.path == path)
             .map(|track| track.cover_path.clone())
@@ -4249,7 +4207,7 @@ mod tests {
         conn: &Connection,
         root: &Path,
         cache: &'static EmbeddedCoverCache,
-        snapshot: &mut LibrarySnapshot,
+        snapshot: &mut WorkerLibrary,
     ) -> Result<(), String> {
         let (event_tx, _event_rx) = unbounded();
         run_scans(
@@ -4283,7 +4241,7 @@ mod tests {
             .dir()
             .join(format!("{:x}.png", md5::compute(&picture)));
         fs::create_dir_all(&entry).expect("block the entry");
-        let mut snapshot = LibrarySnapshot::default();
+        let mut snapshot = WorkerLibrary::default();
 
         let error = scan_with_cache(&conn, &root, cache, &mut snapshot)
             .expect_err("the uncached covers are reported");
@@ -4355,8 +4313,8 @@ mod tests {
             .dir()
             .join(format!("{:x}.jpg", md5::compute(&picture)));
         fs::create_dir(&entry).expect("block the new entry");
-        let mut snapshot = LibrarySnapshot::default();
-        load_snapshot(&conn, &mut snapshot);
+        let mut snapshot = WorkerLibrary::default();
+        snapshot.reload(&conn);
 
         let error = scan_with_cache(&conn, &root, cache, &mut snapshot)
             .expect_err("the uncached cover is reported");
@@ -4419,8 +4377,8 @@ mod tests {
             .dir()
             .join(format!("{:x}.jpg", md5::compute(&picture)));
         fs::create_dir(&entry).expect("block the new entry");
-        let mut snapshot = LibrarySnapshot::default();
-        load_snapshot(&conn, &mut snapshot);
+        let mut snapshot = WorkerLibrary::default();
+        snapshot.reload(&conn);
 
         let error = scan_with_cache(&conn, &inner, cache, &mut snapshot)
             .expect_err("the uncached cover is reported");
@@ -4500,9 +4458,9 @@ mod tests {
         fs::create_dir_all(base.join("music/inner")).expect("mkdir inner");
         fs::create_dir_all(base.join("music-2")).expect("mkdir sibling");
         let base = base.canonicalize().expect("canonical base");
-        let mut snapshot = LibrarySnapshot::default();
+        let mut snapshot = WorkerLibrary::default();
         let (tx, _rx) = unbounded();
-        let add = |snapshot: &mut LibrarySnapshot, path: &Path| {
+        let add = |snapshot: &mut WorkerLibrary, path: &Path| {
             handle_add_root(&conn, path, "", snapshot, &tx, &mut Uninterrupted)
         };
 
@@ -4710,8 +4668,8 @@ mod tests {
 
         fs::remove_dir_all(&missing).expect("remove first root");
         write_stub(&healthy.join("new.mp3"), b"new");
-        let mut snapshot = LibrarySnapshot::default();
-        load_snapshot(&conn, &mut snapshot);
+        let mut snapshot = WorkerLibrary::default();
+        snapshot.reload(&conn);
         let (tx, _rx) = unbounded();
         let err = handle_rescan_all(&conn, &mut snapshot, &tx, &mut Uninterrupted)
             .expect_err("failure is reported");
@@ -4727,7 +4685,7 @@ mod tests {
         ];
         assert_eq!(indexed_paths(&conn), expected);
         let mut snapshot_paths: Vec<PathBuf> =
-            snapshot.tracks.iter().map(|t| t.path.clone()).collect();
+            snapshot.tracks().iter().map(|t| t.path.clone()).collect();
         snapshot_paths.sort();
         assert_eq!(snapshot_paths, expected);
 
@@ -4790,19 +4748,16 @@ mod tests {
         .expect("track row")
     }
 
-    fn snapshot_paths(snapshot: &LibrarySnapshot) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = snapshot.tracks.iter().map(|t| t.path.clone()).collect();
-        paths.sort();
-        paths
+    fn snapshot_paths(snapshot: &WorkerLibrary) -> Vec<PathBuf> {
+        snapshot.paths()
     }
 
-    /// The last snapshot the library worker published.
-    fn last_published(rx: &Receiver<LibraryEvent>) -> LibrarySnapshot {
-        let mut last = None;
-        while let Ok(LibraryEvent::Snapshot(snapshot)) = rx.try_recv() {
-            last = Some(snapshot);
-        }
-        last.expect("a published snapshot")
+    /// The library as the events the library worker published have it.
+    fn last_published(rx: &Receiver<LibraryEvent>) -> crate::library::LibraryMirror {
+        let mut mirror = crate::library::LibraryMirror::default();
+        mirror.drain(rx);
+        assert!(mirror.events > 0, "a published event");
+        mirror
     }
 
     #[test]
@@ -4872,8 +4827,8 @@ mod tests {
         write_stub(&inner.join("two.mp3"), b"two");
         scan(&conn, &outer);
         insert_root(&conn, &inner, "").expect("legacy inner root");
-        let mut snapshot = LibrarySnapshot::default();
-        load_snapshot(&conn, &mut snapshot);
+        let mut snapshot = WorkerLibrary::default();
+        snapshot.reload(&conn);
         let (tx, _rx) = unbounded();
 
         handle_rescan_root(&conn, &inner, &mut snapshot, &tx, &mut Uninterrupted)
@@ -4886,7 +4841,7 @@ mod tests {
         ];
         assert_eq!(indexed_paths(&conn), expected);
         assert_eq!(snapshot_paths(&snapshot), expected);
-        for track in &snapshot.tracks {
+        for track in snapshot.tracks() {
             assert_eq!(
                 track.root_path.to_string_lossy(),
                 root_of(&conn, &track.path),
@@ -4922,14 +4877,14 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'injected write failure'); END",
         )
         .expect("inject failure");
-        let mut snapshot = LibrarySnapshot::default();
-        load_snapshot(&conn, &mut snapshot);
+        let mut snapshot = WorkerLibrary::default();
+        snapshot.reload(&conn);
         let (tx, rx) = unbounded();
 
         handle_command(&conn, LibraryCommand::RescanAll, &mut snapshot, &tx);
 
         let published = last_published(&rx);
-        let error = published.last_error.as_deref().unwrap_or_default();
+        let error = published.status.last_error.as_deref().unwrap_or_default();
         assert!(
             error.contains(&format!("failed to scan '{}'", failing.display()))
                 && error.contains("injected write failure"),
@@ -4937,7 +4892,7 @@ mod tests {
         );
         let expected = [failing.join("changed.mp3"), healthy.join("healthy.mp3")];
         assert_eq!(indexed_paths(&conn), expected);
-        assert_eq!(snapshot_paths(&published), expected);
+        assert_eq!(published.paths(), expected);
         let size: i64 = conn
             .query_row(
                 "SELECT size_bytes FROM tracks WHERE path=?1",
@@ -4967,8 +4922,8 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END",
         )
         .expect("inject failure");
-        let mut snapshot = LibrarySnapshot::default();
-        load_snapshot(&conn, &mut snapshot);
+        let mut snapshot = WorkerLibrary::default();
+        snapshot.reload(&conn);
         let (tx, rx) = unbounded();
 
         handle_command(
@@ -4979,7 +4934,7 @@ mod tests {
         );
 
         let published = last_published(&rx);
-        let error = published.last_error.as_deref().unwrap_or_default();
+        let error = published.status.last_error.as_deref().unwrap_or_default();
         assert!(
             error.contains("injected delete failure"),
             "unexpected error: {error}"
@@ -4991,7 +4946,7 @@ mod tests {
             root.join("kept.mp3"),
         ];
         assert_eq!(indexed_paths(&conn), expected);
-        assert_eq!(snapshot_paths(&published), expected);
+        assert_eq!(published.paths(), expected);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -5090,7 +5045,7 @@ mod tests {
             .expect("simulate legacy rows");
         assert!(super::super::schema::needs_search_tag_backfill(&conn));
         let (tx, _rx) = unbounded();
-        backfill_search_tags(&conn, &mut snapshot, &tx).expect("backfill");
+        backfill_search_tags(&conn, &mut WorkerLibrary::default(), &tx).expect("backfill");
         load_snapshot(&conn, &mut snapshot);
         assert_eq!(snapshot.tracks[0].search_tags, tags);
         assert!(!super::super::schema::needs_search_tag_backfill(&conn));
@@ -5111,7 +5066,7 @@ mod tests {
         let mut snapshot = LibrarySnapshot::default();
         load_snapshot(&conn, &mut snapshot);
         let (tx, _rx) = unbounded();
-        backfill_search_tags(&conn, &mut snapshot, &tx).expect("skip offline root");
+        backfill_search_tags(&conn, &mut WorkerLibrary::default(), &tx).expect("skip offline root");
         load_snapshot(&conn, &mut snapshot);
         assert_eq!(snapshot.tracks.len(), 1);
         assert!(super::super::schema::needs_search_tag_backfill(&conn));
@@ -5130,7 +5085,7 @@ mod tests {
         load_snapshot(&conn, &mut snapshot);
         let (tx, _rx) = unbounded();
         let edited = super::super::SearchTags::from([("comment".into(), vec!["Edited".into()])]);
-        backfill_search_tags_using(&conn, &mut snapshot, &tx, |_| {
+        backfill_search_tags_using(&conn, &mut WorkerLibrary::default(), &tx, |_| {
             other
                 .execute(
                     "UPDATE tracks SET search_tags=?1",

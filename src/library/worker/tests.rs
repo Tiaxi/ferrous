@@ -173,7 +173,7 @@ impl Fixture {
     }
 
     /// The service, with its first snapshot read.
-    fn start(&self) -> (LibraryService, Receiver<LibraryEvent>) {
+    fn start(&self) -> (LibraryService, Events) {
         let (service, events) = LibraryService::with_database(
             self.db.clone(),
             Duration::from_secs(5),
@@ -183,7 +183,8 @@ impl Fixture {
                 workers: 2,
             },
         );
-        next_snapshot(&events, |_| true);
+        let mut events = Events::new(events);
+        next_snapshot(&mut events, |_| true);
         (service, events)
     }
 
@@ -209,22 +210,58 @@ impl Drop for Fixture {
     }
 }
 
-/// The first snapshot that satisfies `wanted`, waiting up to 20 s.
-fn next_snapshot(
-    events: &Receiver<LibraryEvent>,
-    mut wanted: impl FnMut(&LibrarySnapshot) -> bool,
-) -> LibrarySnapshot {
+/// The library as the worker's events have it after one of them.
+#[derive(Debug, Clone)]
+struct View {
+    roots: Vec<crate::library::LibraryRoot>,
+    tracks: Vec<std::sync::Arc<crate::library::LibraryTrack>>,
+    scan_in_progress: bool,
+    last_error: Option<String>,
+}
+
+/// The worker's events, applied as they are received.
+struct Events {
+    rx: Receiver<LibraryEvent>,
+    mirror: crate::library::LibraryMirror,
+}
+
+impl Events {
+    fn new(rx: Receiver<LibraryEvent>) -> Self {
+        Self {
+            rx,
+            mirror: crate::library::LibraryMirror::default(),
+        }
+    }
+
+    fn view(&self) -> View {
+        View {
+            roots: self.mirror.snapshot.roots.clone(),
+            tracks: self.mirror.snapshot.tracks.clone(),
+            scan_in_progress: self.mirror.status.scan_in_progress,
+            last_error: self.mirror.status.last_error.clone(),
+        }
+    }
+}
+
+/// The library after the first event that leaves it satisfying `wanted`,
+/// waiting up to 20 s.
+fn next_snapshot(events: &mut Events, mut wanted: impl FnMut(&View) -> bool) -> View {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        match events.recv_deadline(deadline) {
-            Ok(LibraryEvent::Snapshot(snapshot)) if wanted(&snapshot) => return snapshot,
-            Ok(LibraryEvent::Snapshot(_)) => {}
+        match events.rx.recv_deadline(deadline) {
+            Ok(event) => {
+                events.mirror.apply(&event);
+                let view = events.view();
+                if wanted(&view) {
+                    return view;
+                }
+            }
             Err(error) => panic!("no such snapshot: {error}"),
         }
     }
 }
 
-fn idle_with_tracks(snapshot: &LibrarySnapshot, count: usize) -> bool {
+fn idle_with_tracks(snapshot: &View, count: usize) -> bool {
     !snapshot.scan_in_progress && snapshot.tracks.len() == count
 }
 
@@ -232,7 +269,7 @@ fn idle_with_tracks(snapshot: &LibrarySnapshot, count: usize) -> bool {
 fn removing_a_root_during_its_scan_does_not_wait_for_the_scan() {
     let fixture = Fixture::new("remove", &["a.mp3", "b.mp3", "c.mp3", "d.mp3", "e.mp3"]);
     let (started, release) = hold_read(&fixture.track("c.mp3"));
-    let (service, events) = fixture.start();
+    let (service, mut events) = fixture.start();
     service.command(LibraryCommand::AddRoot {
         path: fixture.root.clone(),
         name: "Music".to_string(),
@@ -244,11 +281,11 @@ fn removing_a_root_during_its_scan_does_not_wait_for_the_scan() {
     service.command(LibraryCommand::RemoveRoot(fixture.root.clone()));
 
     // The read is still held: the scan has not finished.
-    let removed = next_snapshot(&events, |snapshot| snapshot.roots.is_empty());
+    let removed = next_snapshot(&mut events, |snapshot| snapshot.roots.is_empty());
     assert!(removed.tracks.is_empty(), "{:?}", removed.tracks);
     assert_eq!(removed.last_error, None);
     drop(release);
-    let done = next_snapshot(&events, |snapshot| !snapshot.scan_in_progress);
+    let done = next_snapshot(&mut events, |snapshot| !snapshot.scan_in_progress);
     assert!(done.roots.is_empty());
     assert_eq!(done.last_error, None);
     drop(service);
@@ -264,7 +301,7 @@ fn removing_a_root_during_its_scan_does_not_wait_for_the_scan() {
 fn renaming_a_root_during_its_scan_applies_at_once() {
     let fixture = Fixture::new("rename", &["a.mp3", "b.mp3", "c.mp3"]);
     let (started, release) = hold_read(&fixture.track("b.mp3"));
-    let (service, events) = fixture.start();
+    let (service, mut events) = fixture.start();
     service.command(LibraryCommand::AddRoot {
         path: fixture.root.clone(),
         name: "Old".to_string(),
@@ -278,7 +315,7 @@ fn renaming_a_root_during_its_scan_applies_at_once() {
         name: "New".to_string(),
     });
 
-    let renamed = next_snapshot(&events, |snapshot| {
+    let renamed = next_snapshot(&mut events, |snapshot| {
         snapshot
             .roots
             .first()
@@ -286,7 +323,7 @@ fn renaming_a_root_during_its_scan_applies_at_once() {
     });
     assert!(renamed.scan_in_progress, "the scan is still running");
     drop(release);
-    let done = next_snapshot(&events, |snapshot| idle_with_tracks(snapshot, 3));
+    let done = next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 3));
     assert_eq!(done.roots[0].name, "New");
     assert_eq!(done.last_error, None);
 }
@@ -294,12 +331,12 @@ fn renaming_a_root_during_its_scan_applies_at_once() {
 #[test]
 fn rescans_requested_during_a_scan_of_the_root_merge_with_it() {
     let fixture = Fixture::new("merge", &["a.mp3", "b.mp3", "c.mp3"]);
-    let (service, events) = fixture.start();
+    let (service, mut events) = fixture.start();
     service.command(LibraryCommand::AddRoot {
         path: fixture.root.clone(),
         name: String::new(),
     });
-    next_snapshot(&events, |snapshot| idle_with_tracks(snapshot, 3));
+    next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 3));
     fs::write(fixture.track("b.mp3"), b"changed").expect("change a track");
     let (started, release) = hold_read(&fixture.track("b.mp3"));
     service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
@@ -316,7 +353,7 @@ fn rescans_requested_during_a_scan_of_the_root_merge_with_it() {
         path: fixture.root.clone(),
         name: "Seen".to_string(),
     });
-    next_snapshot(&events, |snapshot| {
+    next_snapshot(&mut events, |snapshot| {
         snapshot.scan_in_progress
             && snapshot
                 .roots
@@ -328,7 +365,7 @@ fn rescans_requested_during_a_scan_of_the_root_merge_with_it() {
     service.command(LibraryCommand::RescanRoot(missing));
     drop(release);
 
-    let done = next_snapshot(&events, |snapshot| {
+    let done = next_snapshot(&mut events, |snapshot| {
         snapshot
             .last_error
             .as_deref()
@@ -390,7 +427,8 @@ fn the_worker_migrates_a_version_0_library_and_publishes_all_of_it() {
         },
     );
 
-    let first = next_snapshot(&events, |_| true);
+    let mut events = Events::new(events);
+    let first = next_snapshot(&mut events, |_| true);
 
     assert_eq!(first.last_error, None);
     assert_eq!(
@@ -429,7 +467,8 @@ fn the_worker_reports_a_damaged_database_that_it_moved_aside() {
         },
     );
 
-    let first = next_snapshot(&events, |_| true);
+    let mut events = Events::new(events);
+    let first = next_snapshot(&mut events, |_| true);
 
     let error = first.last_error.expect("the move is shown");
     assert!(error.contains("was damaged"), "{error}");
