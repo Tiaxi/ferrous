@@ -71,6 +71,7 @@ impl PipelineTrace {
     /// the pipeline does. The pipeline is queried on another thread, so a
     /// pipeline that blocks is reported too.
     pub(crate) fn report(&self, what: &str, details: &str) -> String {
+        let dump = dump_threads();
         let (tx, rx) = bounded(1);
         let pipeline = self.pipeline.clone();
         let messages = Arc::clone(&self.messages);
@@ -85,9 +86,44 @@ impl PipelineTrace {
             format!("  the pipeline did not answer its queries within {REPORT_TIMEOUT:?}\n")
         });
         format!(
-            "{what}\n  waited until {:.3} s after the test started\n{details}{pipeline}",
+            "{what}\n  waited until {:.3} s after the test started\n{details}{pipeline}{dump}",
             self.started.elapsed().as_secs_f64(),
         )
+    }
+}
+
+/// With `FERROUS_TEST_THREAD_DUMPS` set to a directory, write the stacks of
+/// every thread of the test process there, while the pipeline still stalls,
+/// and name the file. Needs `gdb`, and a `ptrace` scope that lets a child
+/// trace its parent.
+fn dump_threads() -> String {
+    let Some(dir) = std::env::var_os("FERROUS_TEST_THREAD_DUMPS") else {
+        return String::new();
+    };
+    let pid = std::process::id();
+    let path = std::path::Path::new(&dir).join(format!(
+        "{pid}-{}.txt",
+        std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .replace("::", "-")
+    ));
+    // gdb writes to the file itself: it stops this process, which could not
+    // read a pipe meanwhile. It looks up no debug information online.
+    let dumped = std::fs::File::create(&path).and_then(|file| {
+        std::process::Command::new("gdb")
+            .args(["-p", &pid.to_string(), "-batch", "-nx"])
+            .args(["-iex", "set debuginfod enabled off"])
+            .args(["-ex", "thread apply all bt"])
+            .stdin(std::process::Stdio::null())
+            .stdout(file)
+            .stderr(std::process::Stdio::null())
+            .status()
+    });
+    match dumped {
+        Ok(status) if status.success() => format!("  thread dump: {}\n", path.display()),
+        Ok(status) => format!("  no thread dump: gdb exited with {status}\n"),
+        Err(error) => format!("  no thread dump: {error}\n"),
     }
 }
 

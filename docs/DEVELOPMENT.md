@@ -76,6 +76,8 @@ The launcher also provides cleanup options that delete local app state:
 
 See [data locations](INSTALL.md#data-locations). Use `./scripts/run-ui.sh --help` for the complete launcher interface.
 
+A GStreamer test that times out reports its pipeline's state, the elements still changing state, and its latest bus messages. Starving the tests of CPU makes stalls more likely, for example with `taskset -c 0,1 cargo test --features gst --lib -- --test-threads=4`. With `FERROUS_TEST_THREAD_DUMPS` set to a directory, the report also names a file there with the `gdb` stacks of every thread, taken while the pipeline stalls. This needs `gdb` and a `ptrace` scope that lets a process trace its parent (`kernel.yama.ptrace_scope` 0).
+
 ## Profiling
 
 See [visualization architecture](VISUALIZATION_ARCHITECTURE.md) for decoder ownership, cache budgets, cancellation, and visibility scheduling.
