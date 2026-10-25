@@ -1231,6 +1231,8 @@ mod tests {
 
 #[cfg(feature = "gst")]
 mod collection_order;
+#[cfg(feature = "gst")]
+pub(crate) mod parsebin_stall;
 #[cfg(all(test, feature = "gst"))]
 pub(crate) mod pipeline_trace;
 mod queue;

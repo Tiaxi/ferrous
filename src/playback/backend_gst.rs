@@ -21,6 +21,7 @@ use crate::raw_audio::{
 };
 
 use super::clock::{self, MonotonicClock, MonotonicTime};
+use super::parsebin_stall;
 use super::queue::{
     same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff, ManualMove,
 };
@@ -35,6 +36,10 @@ use crate::file_identity::{self, file_id, FileId, ResolvedPath, WatchedFile};
 /// to its end, or a command that starts or navigates playback, ends a run
 /// of failures.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
+/// Why a file whose stream a `parsebin` held twice failed.
+const STALLED_STREAM_DETAIL: &str =
+    "playback could not start: GStreamer stalled twice while opening it";
 
 /// A current track whose file the pipeline found missing when it opened it.
 #[derive(Debug, Clone)]
@@ -389,6 +394,10 @@ struct GstPlaybackRuntime {
     /// forgotten. Its old path may have been given to the pipeline after
     /// a rename that has not reached the engine yet.
     missing_on_open: Option<MissingTrack>,
+    /// The file whose stream a `parsebin` held after exposing it since
+    /// failures were last forgotten. The run was started again for it; see
+    /// `handle_stalled_stream`.
+    stalled_file: Option<PathBuf>,
     /// Shared with the about-to-finish callback and the probes on the
     /// outputs of the pipeline's sources; see `InputSwitches`.
     input_switches: Arc<InputSwitches>,
@@ -516,6 +525,7 @@ impl GstPlaybackRuntime {
             consecutive_failures: 0,
             missing_plugin: None,
             missing_on_open: None,
+            stalled_file: None,
             input_switches: Arc::default(),
             source_activation,
             #[cfg(test)]
@@ -1826,6 +1836,7 @@ impl GstPlaybackRuntime {
     fn reset_failures(&mut self) {
         self.consecutive_failures = 0;
         self.missing_on_open = None;
+        self.stalled_file = None;
         if let Ok(mut queue) = self.queue_state.lock() {
             queue.clear_failed();
         }
@@ -2216,8 +2227,10 @@ impl GstPlaybackRuntime {
                 }
             }
             gst::MessageView::Error(err) => self.handle_error_message(err),
-            gst::MessageView::Element(_) => {
-                if let Ok(missing) = gst_pbutils::MissingPluginMessage::parse(msg) {
+            gst::MessageView::Element(element) => {
+                if parsebin_stall::is_report(element) {
+                    self.handle_stalled_stream(input_file(msg.src()));
+                } else if let Ok(missing) = gst_pbutils::MissingPluginMessage::parse(msg) {
                     self.note_missing_plugin(&missing);
                 }
             }
@@ -2280,6 +2293,32 @@ impl GstPlaybackRuntime {
         };
         // Every later message of the faulted run is discarded.
         self.fail_track(file, detail, not_found);
+    }
+
+    /// A `parsebin` of the run holds the stream of `file` after exposing it,
+    /// so the run never plays it (see `parsebin_stall`): the current track
+    /// does not start, or the successor that the pipeline was handed does
+    /// not follow it. Start the run again where the current track is,
+    /// which hands the successor over again. The same file stalling again
+    /// before failures are forgotten fails it.
+    fn handle_stalled_stream(&mut self, file: Option<PathBuf>) {
+        // An unknown input is the committed track's.
+        let file = file.or_else(|| self.snapshot.current.clone());
+        let name = file
+            .as_deref()
+            .and_then(Path::file_name)
+            .map_or_else(|| "?".into(), |name| name.to_string_lossy());
+        if file.is_some() && self.stalled_file == file {
+            eprintln!("[ferrous] GStreamer stalled again while starting {name}");
+            self.stalled_file = None;
+            self.fail_track(file, STALLED_STREAM_DETAIL.to_owned(), false);
+            return;
+        }
+        eprintln!("[ferrous] GStreamer stalled while starting {name}; starting the run again");
+        self.stalled_file = file;
+        // Also a run that prerolls for a restart, which then never does.
+        self.restart = Some(RunRestart::Required);
+        self.restart_at_current_position();
     }
 
     /// Remember a missing plugin, to name it in the error that follows.
@@ -4699,6 +4738,8 @@ mod gst_integration_tests {
 /// run in real time.
 #[cfg(all(test, feature = "gst"))]
 mod engine_tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
     use crate::playback::pipeline_trace::PipelineTrace;
     use crate::playback::source_activation::race::{
@@ -4828,6 +4869,18 @@ mod engine_tests {
             }
             let path = self.dir.join(name);
             std::fs::write(&path, bytes).unwrap();
+            path
+        }
+
+        /// Silent 48 kHz MP3 of `millis` milliseconds, in frames of 24 ms.
+        /// `parsebin` plugs a parser for it, which finds the caps once it
+        /// reads.
+        fn mp3(&self, name: &str, millis: usize) -> PathBuf {
+            // 320 kbit/s; zeroed side information decodes as silence.
+            let mut frame = vec![0xFF, 0xFB, 0xE4, 0xC0];
+            frame.resize(960, 0);
+            let path = self.dir.join(name);
+            std::fs::write(&path, frame.repeat(millis / 24)).unwrap();
             path
         }
     }
@@ -8736,6 +8789,113 @@ mod engine_tests {
         });
         assert_eq!(engine.errors.len(), 3);
         assert_eq!(engine.changes.len(), 2, "{:?}", engine.changes);
+    }
+
+    /// Block the data of the next `count` streams of `file` that a
+    /// `parsebin` of `playbin` exposes, at the parser, as a race in
+    /// `parsebin` does (see `parsebin_stall`). Nothing lets the data go
+    /// until the run ends. Returns how many streams were blocked.
+    fn block_exposed_streams(
+        playbin: &gst::Element,
+        file: &Path,
+        count: usize,
+    ) -> Arc<AtomicUsize> {
+        let blocked = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&blocked);
+        let file = file.to_path_buf();
+        playbin.connect("deep-element-added", false, move |values| {
+            let parsebin = values.get(2)?.get::<gst::Element>().ok()?;
+            if parsebin.factory()?.name() != "parsebin" {
+                return None;
+            }
+            let (counted, file) = (Arc::clone(&counted), file.clone());
+            parsebin.connect_pad_added(move |parsebin, pad| {
+                if input_file(Some(parsebin.upcast_ref())).as_ref() != Some(&file)
+                    || counted
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |blocked| {
+                            (blocked < count).then_some(blocked + 1)
+                        })
+                        .is_err()
+                {
+                    return;
+                }
+                let parser = pad
+                    .downcast_ref::<gst::GhostPad>()
+                    .and_then(gst::prelude::GhostPadExt::target)
+                    .expect("the exposed stream's parser");
+                parser.add_probe(
+                    gst::PadProbeType::BLOCK
+                        | gst::PadProbeType::BUFFER
+                        | gst::PadProbeType::BUFFER_LIST,
+                    |_, _| gst::PadProbeReturn::Ok,
+                );
+            });
+            None
+        });
+        blocked
+    }
+
+    #[test]
+    fn current_track_that_parsebin_holds_after_exposing_it_plays_once_restarted() {
+        // GStreamer 1.24 and 1.28 can block the parser of a stream again
+        // after exposing the stream, so the run never prerolls.
+        let fixtures = Fixtures::new("parsebin-stall");
+        let a = fixtures.mp3("a.mp3", 4_800);
+        let b = fixtures.mp3("b.mp3", 5_280);
+        let mut engine = Engine::start();
+        let blocked = block_exposed_streams(&engine.playbin, &a, 1);
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_800));
+        engine.wait_until("A did not play", |engine| {
+            engine.snapshot.position >= millis(500)
+        });
+        assert_eq!(blocked.load(Ordering::SeqCst), 1);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_eq!(engine.changes.len(), 1, "{:?}", engine.changes);
+    }
+
+    #[test]
+    fn current_track_that_parsebin_holds_twice_fails() {
+        let fixtures = Fixtures::new("parsebin-stall-twice");
+        let a = fixtures.mp3("a.mp3", 4_800);
+        let b = fixtures.mp3("b.mp3", 5_280);
+        let mut engine = Engine::start();
+        let blocked = block_exposed_streams(&engine.playbin, &a, 2);
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        let error = engine.wait_for_errors(1);
+        assert_eq!(error.path.as_deref(), Some(a.as_path()));
+        assert_eq!(error.outcome, PlaybackErrorOutcome::Skipped);
+        assert_eq!(error.detail, STALLED_STREAM_DETAIL);
+        assert_eq!(
+            error.message(),
+            "Couldn't play \u{201c}a.mp3\u{201d} (playback could not start: GStreamer \
+             stalled twice while opening it); skipped it."
+        );
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
+        engine.wait_for_playing(1, millis(5_280));
+        assert_eq!(blocked.load(Ordering::SeqCst), 2);
+        assert_eq!(engine.errors.len(), 1, "{:?}", engine.errors);
+    }
+
+    #[test]
+    fn successor_that_parsebin_holds_after_exposing_it_follows_once_restarted() {
+        // The successor's stream never reaches the output, so the pipeline
+        // would stop at the end of A without an error.
+        let fixtures = Fixtures::new("parsebin-stall-successor");
+        let a = fixtures.mp3("a.mp3", 4_800);
+        let b = fixtures.mp3("b.mp3", 5_280);
+        let mut engine = Engine::start();
+        let blocked = block_exposed_streams(&engine.playbin, &b, 1);
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_800));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        engine.wait_for_playing(1, millis(5_280));
+        assert_eq!(blocked.load(Ordering::SeqCst), 1);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
     }
 
     #[test]
