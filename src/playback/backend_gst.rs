@@ -963,20 +963,7 @@ impl GstPlaybackRuntime {
             }
         }
         if was_stopped {
-            self.applied_volume = 0.0;
-            self.playbin
-                .set_property("volume", f64::from(self.applied_volume));
-            self.startup_gain_ramp = true;
-            self.startup_ramp_hold_until = if self
-                .snapshot
-                .current
-                .as_deref()
-                .is_some_and(is_raw_surround_file)
-            {
-                Some(Instant::now() + Duration::from_millis(80))
-            } else {
-                None
-            };
+            self.begin_startup_ramp();
         }
         self.buffering_active = false;
         if self.restarting() {
@@ -1339,19 +1326,28 @@ impl GstPlaybackRuntime {
     fn start_playing_muted(&mut self) {
         let _ = self.set_pipeline_state(gst::State::Playing);
         self.playing_state_requested_at = Some(Instant::now());
+        self.begin_startup_ramp();
+    }
+
+    /// Silence the output and fade the current track in from silence.
+    fn begin_startup_ramp(&mut self) {
         self.applied_volume = 0.0;
         self.playbin.set_property("volume", 0.0_f64);
         self.startup_gain_ramp = true;
-        self.startup_ramp_hold_until = if self
+        // The fade-in starts its own clock. A fade that was running would
+        // count the time since its last step, such as a track switch, and
+        // skip the fade-in.
+        self.volume_ramp_tick_at = None;
+        // AC3/DTS decoders produce garbage frames during startup: hold
+        // silence until the decoder has stabilised. Other codecs produce
+        // clean output immediately, so skip the hold to avoid swallowing
+        // the start of the track.
+        self.startup_ramp_hold_until = self
             .snapshot
             .current
             .as_deref()
             .is_some_and(is_raw_surround_file)
-        {
-            Some(Instant::now() + Duration::from_millis(80))
-        } else {
-            None
-        };
+            .then(|| Instant::now() + RAW_SURROUND_START_HOLD);
     }
 
     fn hold_stream_ends(&self) {
@@ -2228,23 +2224,14 @@ impl GstPlaybackRuntime {
         // Also drops a successor staged while the old run was stopping.
         self.begin_pipeline_run(false);
         self.set_run_uri(path, uri);
+        self.snapshot.current = Some(path.to_path_buf());
         if was_playing {
             let _ = self.set_pipeline_state(gst::State::Playing);
             self.playing_state_requested_at = Some(Instant::now());
-            // Re-assert mute after state transition to close the race window
-            // where new internal elements may not have volume=0.
-            self.playbin.set_property("volume", 0.0_f64);
             self.snapshot.state = PlaybackState::Playing;
-            self.startup_gain_ramp = true;
-            // AC3/DTS decoders produce garbage frames during startup — hold
-            // silence until the decoder has stabilised.  Other codecs produce
-            // clean output immediately, so skip the hold to avoid swallowing
-            // the start of the track.
-            self.startup_ramp_hold_until = if is_raw_surround_file(path) {
-                Some(Instant::now() + Duration::from_millis(80))
-            } else {
-                None
-            };
+            // Mutes again after the state change, so that elements the new
+            // run created also start silent.
+            self.begin_startup_ramp();
         } else if self.snapshot.state == PlaybackState::Paused {
             let _ = self.set_pipeline_state(gst::State::Paused);
             self.startup_gain_ramp = false;
@@ -2253,7 +2240,6 @@ impl GstPlaybackRuntime {
             self.startup_gain_ramp = false;
             self.startup_ramp_hold_until = None;
         }
-        self.snapshot.current = Some(path.to_path_buf());
         // The new run starts at the beginning and advances once it plays.
         self.set_position_sample(Duration::ZERO, false);
         self.snapshot.duration = Duration::ZERO;
@@ -2519,6 +2505,8 @@ const VOLUME_RAMP_TICK: Duration = Duration::from_millis(5);
 const VOLUME_FADE_FULL_SCALE: Duration = Duration::from_millis(220);
 /// Time the fade-in after a start or track switch takes to reach full level.
 const STARTUP_FADE_FULL_SCALE: Duration = Duration::from_millis(90);
+/// Silence held at the start of an AC3/DTS track before its fade-in.
+const RAW_SURROUND_START_HOLD: Duration = Duration::from_millis(80);
 
 /// Remaining level distance that counts as arrived; it absorbs rounding from
 /// stepping in small increments (about 0.003 dB at full level).
@@ -3536,6 +3524,15 @@ fn install_caps_change_probe(element: &gst::Element, analysis_tx: Sender<Analysi
     });
 }
 
+/// The bin that playbin plays to: it reports format changes to analysis,
+/// converts to a format `sink` takes, and silences muted channels.
+///
+/// The bin holds no queue. Playsink already reads ahead into its own queue,
+/// which also gives the output its own streaming thread. When `sink` does
+/// not control the stream volume itself, playsink applies the volume in an
+/// element after that queue, right before this bin, and a queue here would
+/// delay each volume step, and the fade-in of each track, by the second of
+/// audio it holds.
 fn build_audio_output_bin(
     analysis_tx: Sender<AnalysisCommand>,
     channel_mute_mask: &Arc<AtomicU64>,
@@ -3544,13 +3541,11 @@ fn build_audio_output_bin(
     let bin = gst::Bin::new();
     let raw_audio_caps = build_raw_audio_caps();
     let input_capsfilter = build_capsfilter(&raw_audio_caps)?;
-    let queue = gst::ElementFactory::make("queue").build()?;
     let convert = gst::ElementFactory::make("audioconvert").build()?;
     let resample = gst::ElementFactory::make("audioresample").build()?;
     let output_capsfilter = build_capsfilter(&raw_audio_caps)?;
     let elements = [
         &input_capsfilter,
-        &queue,
         &convert,
         &resample,
         &output_capsfilter,
@@ -4429,6 +4424,8 @@ mod engine_tests {
 
     const TIMEOUT: Duration = Duration::from_secs(10);
     const WAV_RATE: u32 = 8_000;
+    /// The loudest sample of the WAV fixtures, as a fraction of full scale.
+    const WAV_PEAK: f64 = 8_000.0 / 32_768.0;
 
     struct Fixtures {
         dir: PathBuf,
@@ -4452,7 +4449,14 @@ mod engine_tests {
         /// switch (see `InputSwitches`), and the tests of that ordering
         /// force it on purpose.
         fn wav(&self, name: &str, millis: u32) -> PathBuf {
-            let frames = WAV_RATE * millis / 1_000;
+            self.wav_at(name, millis, WAV_RATE)
+        }
+
+        /// 16-bit mono PCM WAV of `millis` milliseconds at `rate` Hz. The
+        /// parser reads it in blocks of 4 KiB, so a higher rate makes the
+        /// buffers the output receives shorter.
+        fn wav_at(&self, name: &str, millis: u32, rate: u32) -> PathBuf {
+            let frames = rate * millis / 1_000;
             let data_len = frames * 2;
             let mut bytes = Vec::new();
             bytes.extend_from_slice(b"RIFF");
@@ -4461,8 +4465,8 @@ mod engine_tests {
             bytes.extend_from_slice(&16u32.to_le_bytes());
             bytes.extend_from_slice(&1u16.to_le_bytes());
             bytes.extend_from_slice(&1u16.to_le_bytes());
-            bytes.extend_from_slice(&WAV_RATE.to_le_bytes());
-            bytes.extend_from_slice(&(WAV_RATE * 2).to_le_bytes());
+            bytes.extend_from_slice(&rate.to_le_bytes());
+            bytes.extend_from_slice(&(rate * 2).to_le_bytes());
             bytes.extend_from_slice(&2u16.to_le_bytes());
             bytes.extend_from_slice(&16u16.to_le_bytes());
             bytes.extend_from_slice(b"data");
@@ -4621,36 +4625,55 @@ mod engine_tests {
         }
     }
 
-    /// Record the stream time at which the output first carries sound
-    /// louder than a tenth of full scale.
-    fn listen_for_sound(playbin: &gst::Element) -> Arc<Mutex<Option<Duration>>> {
-        let heard = Arc::new(Mutex::new(None));
+    /// A buffer that reached the output.
+    #[derive(Debug, Clone, Copy)]
+    struct OutputBuffer {
+        stream_time: Duration,
+        /// The loudest sample, as a fraction of full scale.
+        peak: f64,
+    }
+
+    /// Call `observe` with every buffer that reaches the output of
+    /// `playbin`.
+    fn observe_output(
+        playbin: &gst::Element,
+        observe: impl Fn(OutputBuffer) + Send + Sync + 'static,
+    ) {
         let pad = output_sink_pad(playbin);
-        let recorded = Arc::clone(&heard);
         pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
             let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data else {
                 return gst::PadProbeReturn::Ok;
             };
             let format = pad
                 .current_caps()
-                .and_then(|caps| Some(caps.structure(0)?.get::<String>("format").ok()?))
+                .and_then(|caps| caps.structure(0)?.get::<String>("format").ok())
                 .unwrap_or_default();
             let Ok(map) = buffer.map_readable() else {
                 return gst::PadProbeReturn::Ok;
             };
-            let loud = match format.as_str() {
-                "S16LE" => map.chunks_exact(2).any(|sample| {
-                    i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs() > 3_277
-                }),
-                "S32LE" => map.chunks_exact(4).any(|sample| {
-                    i32::from_le_bytes(sample.try_into().unwrap()).unsigned_abs() > 214_748_365
-                }),
+            let peak = match format.as_str() {
+                "S16LE" => map
+                    .chunks_exact(2)
+                    .map(|sample| {
+                        f64::from(i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs())
+                            / 32_768.0
+                    })
+                    .fold(0.0, f64::max),
+                "S32LE" => map
+                    .chunks_exact(4)
+                    .map(|sample| {
+                        f64::from(i32::from_le_bytes(sample.try_into().unwrap()).unsigned_abs())
+                            / 2_147_483_648.0
+                    })
+                    .fold(0.0, f64::max),
                 "F32LE" => map
                     .chunks_exact(4)
-                    .any(|sample| f32::from_le_bytes(sample.try_into().unwrap()).abs() > 0.1),
+                    .map(|sample| f64::from(f32::from_le_bytes(sample.try_into().unwrap()).abs()))
+                    .fold(0.0, f64::max),
                 "F64LE" => map
                     .chunks_exact(8)
-                    .any(|sample| f64::from_le_bytes(sample.try_into().unwrap()).abs() > 0.1),
+                    .map(|sample| f64::from_le_bytes(sample.try_into().unwrap()).abs())
+                    .fold(0.0, f64::max),
                 other => panic!("unexpected sample format {other:?}"),
             };
             let stream_time = pad
@@ -4661,12 +4684,39 @@ mod engine_tests {
                         .downcast_ref::<gst::ClockTime>()?
                         .to_stream_time(buffer.pts()?)
                 });
-            if let (true, Some(time), Ok(mut heard)) = (loud, stream_time, recorded.lock()) {
-                heard.get_or_insert(Duration::from_nanos(time.nseconds()));
+            if let Some(time) = stream_time {
+                observe(OutputBuffer {
+                    stream_time: Duration::from_nanos(time.nseconds()),
+                    peak,
+                });
             }
             gst::PadProbeReturn::Ok
         });
+    }
+
+    /// Record the stream time at which the output first carries sound
+    /// louder than a tenth of full scale.
+    fn listen_for_sound(playbin: &gst::Element) -> Arc<Mutex<Option<Duration>>> {
+        let heard = Arc::new(Mutex::new(None));
+        let recorded = Arc::clone(&heard);
+        observe_output(playbin, move |buffer| {
+            if let (true, Ok(mut heard)) = (buffer.peak > 0.1, recorded.lock()) {
+                heard.get_or_insert(buffer.stream_time);
+            }
+        });
         heard
+    }
+
+    /// Record every buffer that reaches the output.
+    fn record_output(playbin: &gst::Element) -> Arc<Mutex<Vec<OutputBuffer>>> {
+        let buffers = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&buffers);
+        observe_output(playbin, move |buffer| {
+            if let Ok(mut buffers) = recorded.lock() {
+                buffers.push(buffer);
+            }
+        });
+        buffers
     }
 
     impl Drop for Fixtures {
@@ -7708,5 +7758,272 @@ mod engine_tests {
             events.recv_timeout(millis(100)),
             Err(crossbeam_channel::RecvTimeoutError::Timeout)
         ));
+    }
+
+    /// The buffers of the last pipeline run among `buffers`: those from
+    /// the last one at the start of a stream on.
+    fn last_run(buffers: &[OutputBuffer]) -> &[OutputBuffer] {
+        let start = buffers
+            .iter()
+            .rposition(|buffer| buffer.stream_time.is_zero())
+            .expect("a run started");
+        &buffers[start..]
+    }
+
+    /// Assert that `run`, the buffers of a track from its start, fades in
+    /// from silence over its first buffers.
+    #[track_caller]
+    fn assert_fades_in_from_the_start(run: &[OutputBuffer]) {
+        assert!(run[0].peak < WAV_PEAK / 2.0, "{run:?}");
+        let full = run
+            .iter()
+            .position(|buffer| buffer.peak > WAV_PEAK * 0.99)
+            .unwrap_or_else(|| panic!("never at full level: {run:?}"));
+        assert!(
+            run[full].stream_time < millis(300),
+            "full level only at {:?}: {run:?}",
+            run[full].stream_time
+        );
+        assert!(
+            run[..=full]
+                .windows(2)
+                .all(|pair| pair[1].peak >= pair[0].peak),
+            "the fade-in does not rise: {run:?}"
+        );
+        assert!(
+            run[full..]
+                .iter()
+                .all(|buffer| buffer.peak > WAV_PEAK * 0.99),
+            "{run:?}"
+        );
+    }
+
+    #[test]
+    fn volume_change_reaches_an_output_without_stream_volume_at_once() {
+        // Playsink applies the volume itself for an output, such as this
+        // fakesink, that does not control the stream volume.
+        let fixtures = Fixtures::new("volume-latency");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let mut engine = Engine::start();
+        let output = record_output(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![a]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 0.5 s", |engine| {
+            engine.snapshot.position >= millis(500)
+        });
+        let changed_at = engine
+            .playbin
+            .query_position::<gst::ClockTime>()
+            .map(|position| Duration::from_nanos(position.nseconds()))
+            .unwrap();
+        engine.send(PlaybackCommand::SetVolume(0.0));
+        let silent_by = changed_at + VOLUME_FADE_FULL_SCALE + millis(300);
+        engine.wait_until("the position did not pass the fade", |engine| {
+            engine.snapshot.position >= silent_by + millis(100)
+        });
+
+        let buffers = output.lock().unwrap().clone();
+        let full = buffers
+            .iter()
+            .position(|buffer| buffer.peak > WAV_PEAK * 0.99)
+            .expect("full level");
+        let faded = full
+            + buffers[full..]
+                .iter()
+                .position(|buffer| buffer.peak < WAV_PEAK * 0.9)
+                .expect("the fade reached the output");
+        // Within two of these 43 ms buffers, rather than after the second
+        // of audio a queue before the output would hold.
+        assert!(
+            buffers[faded].stream_time < changed_at + millis(200),
+            "the volume change at {changed_at:?} reached the output at {:?}",
+            buffers[faded].stream_time
+        );
+        let silent = buffers[faded..]
+            .iter()
+            .find(|buffer| buffer.peak < WAV_PEAK * 0.001)
+            .map(|buffer| buffer.stream_time);
+        assert!(
+            silent.is_some_and(|silent| silent < silent_by),
+            "silent at {silent:?}, expected by {silent_by:?}"
+        );
+    }
+
+    #[test]
+    fn fade_in_plays_from_the_start_of_each_track() {
+        let fixtures = Fixtures::new("fade-in");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let b = fixtures.wav_at("b.wav", 4_000, 48_000);
+        let mut engine = Engine::start();
+        let output = record_output(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 0.6 s", |engine| {
+            engine.snapshot.position >= millis(600)
+        });
+        assert_fades_in_from_the_start(last_run(&output.lock().unwrap()));
+
+        engine.send(PlaybackCommand::Next);
+        engine.wait_until("row 1 did not reach 0.6 s", |engine| {
+            engine.snapshot.current_queue_index == Some(1)
+                && engine.snapshot.position >= millis(600)
+        });
+        assert_fades_in_from_the_start(last_run(&output.lock().unwrap()));
+    }
+
+    /// Assert that `switches`, the buffers of the tracks that played
+    /// gaplessly, stay at full level from the end of the first track's
+    /// fade-in on.
+    #[track_caller]
+    fn assert_full_level_across_switches(buffers: &[OutputBuffer]) {
+        let full = buffers
+            .iter()
+            .position(|buffer| buffer.peak > WAV_PEAK * 0.99)
+            .expect("full level");
+        let quieter: Vec<_> = buffers[full..]
+            .iter()
+            .filter(|buffer| buffer.peak <= WAV_PEAK * 0.99)
+            .collect();
+        assert!(quieter.is_empty(), "quieter buffers: {quieter:?}");
+        // The output played into the next track.
+        assert!(
+            buffers[full..]
+                .windows(2)
+                .any(|pair| pair[1].stream_time < pair[0].stream_time),
+            "{buffers:?}"
+        );
+    }
+
+    #[test]
+    fn gapless_switch_plays_at_full_level() {
+        let fixtures = Fixtures::new("gapless-level");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let b = fixtures.wav_at("b.wav", 4_500, 48_000);
+        let mut engine = Engine::start();
+        let output = record_output(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        engine.wait_until("row 1 did not reach 0.5 s", |engine| {
+            engine.snapshot.current_queue_index == Some(1)
+                && engine.snapshot.position >= millis(500)
+        });
+        assert_full_level_across_switches(&output.lock().unwrap());
+    }
+
+    #[test]
+    fn repeat_one_replay_plays_at_full_level() {
+        let fixtures = Fixtures::new("repeat-one-level");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let mut engine = Engine::start();
+        let output = record_output(&engine.playbin);
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Play);
+        assert_change(&engine.wait_for_changes(2), &a, 0, Expect::Gapless);
+        engine.wait_until("the replay did not reach 0.5 s", |engine| {
+            engine.snapshot.track_token == engine.changes[1].token
+                && engine.snapshot.position >= millis(500)
+        });
+        assert_full_level_across_switches(&output.lock().unwrap());
+    }
+
+    impl DirectEngine {
+        /// Run the fade in progress to its end, as the engine loop would.
+        fn finish_fade(&mut self) {
+            let now = Instant::now();
+            self.runtime.poll_volume_ramp(now);
+            self.runtime.poll_volume_ramp(now + Duration::from_secs(1));
+            assert!(!self.runtime.volume_ramp_pending());
+        }
+
+        /// Step a fade to `level` partway, and return when it stepped last.
+        fn start_fade_to(&mut self, level: f32) -> Instant {
+            self.runtime
+                .apply_command(PlaybackCommand::SetVolume(level));
+            let now = Instant::now();
+            self.runtime.poll_volume_ramp(now);
+            self.runtime.poll_volume_ramp(now + millis(20));
+            assert!(self.runtime.volume_ramp_pending());
+            assert!(self.runtime.volume_ramp_tick_at.is_some());
+            now + millis(20)
+        }
+
+        /// Assert that the fade-in of a track start, to volume level 0.5,
+        /// starts from silence, however long ago a fade stepped last.
+        #[track_caller]
+        fn assert_fades_in_from_silence(&mut self) {
+            assert!(self.runtime.startup_gain_ramp);
+            let later = Instant::now() + Duration::from_secs(2);
+            self.runtime.poll_volume_ramp(later);
+            assert!(self.runtime.applied_volume.abs() < f32::EPSILON);
+            assert!(self.runtime.playbin.property::<f64>("volume").abs() < f64::EPSILON);
+            // A third of the way: 30 ms of the 90 ms startup fade.
+            self.runtime.poll_volume_ramp(later + millis(30));
+            let level = super::super::volume_gain_to_level(self.runtime.applied_volume);
+            assert!((level - 1.0 / 3.0).abs() < 1e-3, "level {level}");
+        }
+    }
+
+    #[test]
+    fn quick_switches_during_a_fade_fade_in_from_silence() {
+        let fixtures = Fixtures::new("switch-fade");
+        let queue: Vec<_> = ["a.wav", "b.wav", "c.wav"]
+            .into_iter()
+            .map(|name| fixtures.wav(name, 4_000))
+            .collect();
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(queue, RepeatMode::Off);
+        engine.finish_fade();
+
+        // Next during a volume change.
+        engine.start_fade_to(0.5);
+        engine.runtime.apply_command(PlaybackCommand::Next);
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(1));
+        engine.assert_fades_in_from_silence();
+
+        // Next again during the fade-in of the track switched to.
+        engine.runtime.apply_command(PlaybackCommand::Next);
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(2));
+        engine.assert_fades_in_from_silence();
+    }
+
+    #[test]
+    fn play_after_the_queue_ended_during_a_fade_fades_in_from_silence() {
+        let fixtures = Fixtures::new("end-fade");
+        let a = fixtures.wav("a.wav", 1_000);
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.finish_fade();
+        engine.start_fade_to(0.5);
+        let eos = engine.handle_messages_until("end of stream", |message| {
+            matches!(message.view(), gst::MessageView::Eos(_))
+        });
+        engine.runtime.handle_bus_message(&eos);
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Stopped);
+
+        // Play in the same burst as the end of stream, before a fade step.
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.assert_fades_in_from_silence();
+    }
+
+    #[test]
+    fn restart_for_a_seek_during_a_fade_fades_in_from_silence() {
+        let fixtures = Fixtures::new("restart-fade");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = DirectEngine::start();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.5));
+        let mut hold = engine.hold_seek_of_a_restart(vec![a, b]);
+        // The restart silenced the output, and the fade back runs.
+        engine.start_fade_to(0.5);
+        hold.release();
+        engine.wait_until("the restart did not play", |runtime| {
+            runtime.restart.is_none()
+        });
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+        engine.assert_fades_in_from_silence();
     }
 }
