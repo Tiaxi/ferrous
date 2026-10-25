@@ -1379,18 +1379,15 @@ impl GstPlaybackRuntime {
         }
     }
 
-    /// Change the state of the pipeline once no source finds the type of
-    /// its file, which also holds back the type finding of the sources of a
+    /// Change the state of the pipeline once no source sets up the type it
+    /// found, which also holds back the type finding of the sources of a
     /// new run (see `SourceActivation`), or end the run at Ready or Null
     /// (see `InputSwitches::end_run`).
     fn set_pipeline_state(
         &self,
         state: gst::State,
     ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
-        let change = || {
-            self.source_activation
-                .change_state(|| self.playbin.set_state(state))
-        };
+        let change = || self.source_activation.set_state(&self.playbin, state);
         if state <= gst::State::Ready {
             self.input_switches.end_run(change)
         } else {
@@ -4235,7 +4232,7 @@ mod gst_integration_tests {
             let runtime = &self.runtime;
             let _ = runtime
                 .source_activation
-                .change_state(|| runtime.playbin.set_state(gst::State::Null));
+                .set_state(&runtime.playbin, gst::State::Null);
         }
     }
 
@@ -4406,7 +4403,7 @@ mod gst_integration_tests {
         configure_playbin_buffering(&playbin);
         install_raw_surround_source_probe(&playbin);
         let activation = SourceActivation::connect(&playbin);
-        let set_state = |state| activation.change_state(|| playbin.set_state(state));
+        let set_state = |state| activation.set_state(&playbin, state);
         playbin.set_property("audio-sink", &make_full_analysis_sink());
         let trace = PipelineTrace::new(&playbin);
 
@@ -6413,7 +6410,7 @@ mod engine_tests {
             let runtime = &self.runtime;
             let _ = runtime
                 .source_activation
-                .change_state(|| runtime.playbin.set_state(gst::State::Null));
+                .set_state(&runtime.playbin, gst::State::Null);
         }
     }
 
@@ -7011,10 +7008,10 @@ mod engine_tests {
     }
 
     /// How a state change of the engine met a source that a
-    /// `TypeFoundHold` holds while it finds the type of its file.
+    /// `TypeFoundHold` holds while it sets up the type of its file.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TypeFoundRace {
-        /// The state change waited for the type finding to end.
+        /// The state change waited for the setup to end.
         StateChangeWaited,
         /// The state change started, and can reach the `parsebin` that
         /// `urisourcebin` sets up for the source once it goes on.
@@ -7118,7 +7115,7 @@ mod engine_tests {
     }
 
     #[test]
-    fn state_changes_wait_for_a_source_that_finds_the_type_of_its_file() {
+    fn state_changes_wait_for_a_source_that_sets_up_the_type_of_its_file() {
         // Once a source has found the type of its file, its streaming thread
         // sets up a parsebin, which deadlocks with a state change of the
         // pipeline that reaches the new parsebin (GStreamer issue 4472).
@@ -7143,6 +7140,342 @@ mod engine_tests {
         engine.send(PlaybackCommand::Pause);
         engine.wait_until("the hold did not end", |_| hold.race().is_some());
         assert_eq!(hold.race(), Some(TypeFoundRace::StateChangeWaited));
+        engine.wait_until("playback did not pause", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        engine.send(PlaybackCommand::Play);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+    }
+
+    /// How a `TypeFindingHold` holds the type finder of a source.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FindingHold {
+        /// Until the test releases it, as a read of a slow mount that does
+        /// not return holds it. The end of the run waits for it too, as
+        /// GStreamer waits for the streaming thread of a source it stops.
+        Stuck,
+        /// Forever, in a block of its pad, which only the end of the run
+        /// flushes: the type finder never goes on by itself.
+        Blocked,
+    }
+
+    #[derive(Default)]
+    struct TypeFindingHoldState {
+        /// The hold was set up. Later sources of the file are not held.
+        watched: bool,
+        /// The type finder reached the hold.
+        reached: bool,
+        released: bool,
+    }
+
+    /// Holds the type finder of the first source that reads a file, once
+    /// `SourceActivation` has let it go: at the start of its stream, before
+    /// it reads the file to find the type and long before it sets up what
+    /// it found.
+    #[derive(Default)]
+    struct TypeFindingHold {
+        state: Mutex<TypeFindingHoldState>,
+        released: Condvar,
+    }
+
+    impl TypeFindingHold {
+        fn new(engine: &Engine, file: &Path, how: FindingHold) -> Arc<Self> {
+            let hold = Arc::new(Self::default());
+            let uri = file_uri(file).unwrap();
+            let state = Arc::downgrade(&hold);
+            engine
+                .playbin
+                .connect("deep-element-added", false, move |values| {
+                    let bin = values.get(1)?.get::<gst::Element>().ok()?;
+                    let element = values.get(2)?.get::<gst::Element>().ok()?;
+                    let is_source = bin.factory().is_some_and(|f| f.name() == "urisourcebin")
+                        && bin.property::<Option<String>>("uri").as_deref() == Some(&uri);
+                    if !is_source || element.factory().is_none_or(|f| f.name() != "typefind") {
+                        return None;
+                    }
+                    let hold = state.upgrade()?;
+                    if std::mem::replace(&mut hold.state.lock().unwrap().watched, true) {
+                        return None;
+                    }
+                    // Added after the probe of `SourceActivation`, which
+                    // lets a blocking probe go first.
+                    let probe = match how {
+                        FindingHold::Stuck => gst::PadProbeType::EVENT_DOWNSTREAM,
+                        FindingHold::Blocked => {
+                            gst::PadProbeType::BLOCK | gst::PadProbeType::EVENT_DOWNSTREAM
+                        }
+                    };
+                    let hold = Arc::downgrade(&hold);
+                    element.static_pad("src")?.add_probe(probe, move |_, info| {
+                        let stream_start = matches!(
+                            &info.data,
+                            Some(gst::PadProbeData::Event(event))
+                                if event.type_() == gst::EventType::StreamStart
+                        );
+                        match hold.upgrade().filter(|_| stream_start) {
+                            Some(hold) => hold.hold(how),
+                            None => gst::PadProbeReturn::Pass,
+                        }
+                    });
+                    None
+                });
+            hold
+        }
+
+        /// On the type finder's streaming thread.
+        fn hold(&self, how: FindingHold) -> gst::PadProbeReturn {
+            let mut state = self.state.lock().unwrap();
+            if std::mem::replace(&mut state.reached, true) {
+                return gst::PadProbeReturn::Pass;
+            }
+            match how {
+                FindingHold::Stuck => {
+                    let _released = self
+                        .released
+                        .wait_while(state, |state| !state.released)
+                        .unwrap();
+                    gst::PadProbeReturn::Ok
+                }
+                FindingHold::Blocked => gst::PadProbeReturn::Ok,
+            }
+        }
+
+        fn reached(&self) -> bool {
+            self.state.lock().unwrap().reached
+        }
+
+        fn release(&self) {
+            self.state.lock().unwrap().released = true;
+            self.released.notify_all();
+        }
+    }
+
+    impl Engine {
+        /// Play `queue` until `hold` holds the type finder of the second
+        /// track's source, which about-to-finish handed over, and the
+        /// pipeline plays.
+        #[track_caller]
+        fn play_until_finding_held(&mut self, queue: Vec<PathBuf>, hold: &TypeFindingHold) {
+            self.send(PlaybackCommand::LoadQueue(queue));
+            self.send(PlaybackCommand::Play);
+            self.wait_until("the successor's source did not start", |_| hold.reached());
+            self.wait_until("the pipeline did not reach Playing", |engine| {
+                (
+                    engine.playbin.current_state(),
+                    engine.playbin.pending_state(),
+                ) == (gst::State::Playing, gst::State::VoidPending)
+                    && engine.snapshot.state == PlaybackState::Playing
+            });
+        }
+
+        /// Send `command` while the successor's source is held by a stuck
+        /// `hold`, and release it once the command has started to end the
+        /// run, which waits for the source's streaming thread.
+        #[track_caller]
+        fn end_run_while_finding_stuck(
+            &mut self,
+            command: PlaybackCommand,
+            hold: &TypeFindingHold,
+        ) {
+            self.send(command);
+            let activation = Arc::clone(&self.activation);
+            self.wait_until("the command did not end the run", |_| activation.run_ends());
+            hold.release();
+        }
+    }
+
+    #[test]
+    fn pause_and_play_do_not_wait_for_a_successor_that_finds_its_type() {
+        // A successor's source finds the type of its file on its own thread
+        // once it has been handed over, which takes as long as its reads
+        // do. Only the setup that follows conflicts with a state change.
+        let fixtures = Fixtures::new("finding-pause");
+        let a = fixtures.wav("a.wav", 6_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = TypeFindingHold::new(&engine, &b, FindingHold::Stuck);
+        engine.play_until_finding_held(vec![a, b.clone()], &hold);
+        // B's source stays held until the commands have taken effect.
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("playback did not pause", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        engine.send(PlaybackCommand::SetVolume(0.5));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("playback did not resume", |engine| {
+            engine.snapshot.state == PlaybackState::Playing && engine.snapshot.position_advancing
+        });
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("playback did not pause again", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        assert!((engine.snapshot.volume - 0.5).abs() < f32::EPSILON);
+        hold.release();
+        engine.send(PlaybackCommand::Play);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+    }
+
+    #[test]
+    fn stop_while_a_successor_finds_its_type_stops_once_its_source_stops() {
+        let fixtures = Fixtures::new("finding-stop");
+        let a = fixtures.wav("a.wav", 6_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = TypeFindingHold::new(&engine, &b, FindingHold::Stuck);
+        engine.play_until_finding_held(vec![a.clone(), b.clone()], &hold);
+        engine.end_run_while_finding_stuck(PlaybackCommand::Stop, &hold);
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(6_000));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    #[test]
+    fn next_while_a_successor_finds_its_type_plays_it_once_its_source_stops() {
+        let fixtures = Fixtures::new("finding-next");
+        let a = fixtures.wav("a.wav", 6_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = TypeFindingHold::new(&engine, &b, FindingHold::Stuck);
+        engine.play_until_finding_held(vec![a, b.clone()], &hold);
+        engine.end_run_while_finding_stuck(PlaybackCommand::Next, &hold);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Manual);
+        engine.wait_for_playing(1, millis(4_500));
+        engine.wait_until("B did not play", |engine| {
+            engine.snapshot.state == PlaybackState::Playing && engine.snapshot.position_advancing
+        });
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    #[test]
+    fn seek_while_a_successor_finds_its_type_lands_once_its_source_stops() {
+        let fixtures = Fixtures::new("finding-seek");
+        let a = fixtures.wav("a.wav", 6_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = TypeFindingHold::new(&engine, &b, FindingHold::Stuck);
+        engine.play_until_finding_held(vec![a.clone(), b.clone()], &hold);
+        // The seek restarts the run, which was handed B.
+        engine.end_run_while_finding_stuck(PlaybackCommand::Seek(millis(3_000)), &hold);
+        engine.wait_until("the seek did not land", |engine| !engine.seeked.is_empty());
+        assert!(
+            engine.seeked[0].abs_diff(millis(3_000)) < millis(100),
+            "{:?}",
+            engine.seeked
+        );
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    #[test]
+    fn a_successor_that_never_finds_its_type_holds_no_command() {
+        // The type finder never goes on by itself. Commands that keep the
+        // run take effect at once, and the end of the run stops the source.
+        let fixtures = Fixtures::new("finding-never");
+        let a = fixtures.wav("a.wav", 6_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = TypeFindingHold::new(&engine, &b, FindingHold::Blocked);
+        engine.play_until_finding_held(vec![a.clone(), b.clone()], &hold);
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("playback did not pause", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("playback did not resume", |engine| {
+            engine.snapshot.state == PlaybackState::Playing && engine.snapshot.position_advancing
+        });
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        // The next run hands B over again, with a source that is not held.
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(6_000));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    /// How the setup of what a successor's source found met a state change
+    /// of the engine that it found the type during.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SetupRace {
+        /// The setup waited for the state change to return.
+        SetupWaited,
+        /// `urisourcebin` set up a `parsebin` during the state change,
+        /// which can reach it and deadlock with it.
+        SetUp,
+        /// Neither happened within `RACE_TIMEOUT`.
+        Neither,
+    }
+
+    #[test]
+    fn a_source_sets_up_the_type_of_its_file_only_once_a_state_change_has_returned() {
+        // The order of the seek restart's stall: the successor's source
+        // found its type while the engine set the pipeline playing.
+        let fixtures = Fixtures::new("setup-waits");
+        let a = fixtures.wav("a.wav", 6_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        let hold = TypeFindingHold::new(&engine, &b, FindingHold::Stuck);
+        engine.play_until_finding_held(vec![a, b.clone()], &hold);
+        // Inside the engine's Pause, once it changes the state of B's
+        // source, let B's type finder go and see what comes first.
+        let race = Arc::new(Mutex::new(None));
+        let recorded = Arc::clone(&race);
+        let activation = Arc::clone(&engine.activation);
+        let released = Arc::clone(&hold);
+        let file = b.clone();
+        let bus = engine.playbin.bus().unwrap();
+        bus.enable_sync_message_emission();
+        bus.connect_sync_message(None, move |_, message| {
+            let gst::MessageView::StateChanged(change) = message.view() else {
+                return;
+            };
+            let source = message
+                .src()
+                .and_then(|src| src.downcast_ref::<gst::Element>())
+                .filter(|element| {
+                    element.factory().is_some_and(|f| f.name() == "filesrc")
+                        && input_file(Some(element.upcast_ref())).as_deref() == Some(file.as_path())
+                });
+            if source.is_none()
+                || (change.old(), change.current()) != (gst::State::Playing, gst::State::Paused)
+                || recorded.lock().unwrap().is_some()
+            {
+                return;
+            }
+            let urisourcebin = source.unwrap().parent().and_downcast::<gst::Bin>();
+            released.release();
+            let deadline = Instant::now() + RACE_TIMEOUT;
+            let outcome = loop {
+                if activation.setup_waits() {
+                    break SetupRace::SetupWaited;
+                }
+                let set_up = urisourcebin.as_ref().is_some_and(|bin| {
+                    bin.iterate_elements()
+                        .into_iter()
+                        .filter_map(Result::ok)
+                        .any(|element| element.factory().is_some_and(|f| f.name() == "parsebin"))
+                });
+                if set_up {
+                    break SetupRace::SetUp;
+                }
+                if Instant::now() >= deadline {
+                    break SetupRace::Neither;
+                }
+                std::thread::sleep(millis(1));
+            };
+            *recorded.lock().unwrap() = Some(outcome);
+        });
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("the race did not end", |_| race.lock().unwrap().is_some());
+        assert_eq!(*race.lock().unwrap(), Some(SetupRace::SetupWaited));
         engine.wait_until("playback did not pause", |engine| {
             engine.snapshot.state == PlaybackState::Paused
         });

@@ -486,7 +486,7 @@ mod gst_tests {
 
         fn set_state(&self, state: gst::State) -> Result<(), String> {
             self.activation
-                .change_state(|| self.playbin.set_state(state))
+                .set_state(&self.playbin, state)
                 .map(|_| ())
                 .map_err(|err| err.to_string())
         }
