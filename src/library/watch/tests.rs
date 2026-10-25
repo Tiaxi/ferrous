@@ -108,8 +108,8 @@ fn mount_rescans_are_due_after_a_burst_and_at_most_once_per_interval() {
     let root = Path::new("/music");
     let mut rescans = MountRescans::default();
     let start = Instant::now();
-    rescans.request(root, start, &tuning);
-    rescans.request(root, start + Duration::from_millis(100), &tuning);
+    rescans.request(root, start, &tuning, false);
+    rescans.request(root, start + Duration::from_millis(100), &tuning, false);
     assert_eq!(rescans.deadline(), Some(start + tuning.quiet));
 
     // A root gone when its rescan is due is not rescanned, and is rescanned
@@ -117,17 +117,37 @@ fn mount_rescans_are_due_after_a_burst_and_at_most_once_per_interval() {
     assert!(rescans.take_due(start + tuning.quiet, |_| false).is_empty());
     assert_eq!(rescans.deadline(), None);
     let back = start + Duration::from_secs(1);
-    rescans.request(root, back, &tuning);
+    rescans.request(root, back, &tuning, false);
     assert_eq!(rescans.deadline(), Some(back + tuning.quiet));
     let sent = back + tuning.quiet;
     assert_eq!(rescans.take_due(sent, |_| true), vec![root.to_path_buf()]);
 
-    // Changes after it wait for the interval.
-    rescans.request(root, sent + Duration::from_secs(1), &tuning);
+    // Changes below it after that wait for the interval.
+    rescans.request(root, sent + Duration::from_secs(1), &tuning, false);
     assert!(rescans
         .take_due(sent + Duration::from_secs(2), |_| true)
         .is_empty());
     assert_eq!(rescans.deadline(), Some(sent + tuning.mount_rescan));
+
+    // The root's own folder replaced does not wait, and while it keeps
+    // changing, its rescan waits until it settles.
+    let replaced = sent + Duration::from_secs(3);
+    rescans.request(root, replaced, &tuning, true);
+    assert_eq!(rescans.deadline(), Some(replaced + tuning.quiet));
+    let settled = replaced + Duration::from_millis(300);
+    rescans.request(root, settled, &tuning, true);
+    // A change below it meanwhile joins the same rescan.
+    rescans.request(root, settled, &tuning, false);
+    assert!(rescans
+        .take_due(replaced + tuning.quiet, |_| true)
+        .is_empty());
+    assert_eq!(
+        rescans.take_due(settled + tuning.quiet, |_| true),
+        vec![root.to_path_buf()]
+    );
+    assert_eq!(rescans.deadline(), None);
+
+    rescans.request(root, settled + tuning.quiet, &tuning, false);
     rescans.forget(root);
     assert_eq!(rescans.deadline(), None);
 }
@@ -667,5 +687,48 @@ fn a_flapping_mount_rescans_its_root_at_most_once_per_interval() {
         vec![LibraryCommand::RescanRoot(root.clone())]
     );
     assert!(watcher.mount_rescans.deadline().is_none());
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_card_swapped_at_a_roots_mount_point_is_rescanned_without_waiting() {
+    let folder = test_folder("card-swap");
+    let root = folder.join("card");
+    std::fs::create_dir(&root).expect("card A");
+    std::fs::write(root.join("a.mp3"), b"a").expect("track on card A");
+    let card_b = folder.join("card-b");
+    std::fs::create_dir(&card_b).expect("card B");
+    std::fs::write(card_b.join("b.mp3"), b"b").expect("track on card B");
+    let (mut watcher, commands) = watching(std::slice::from_ref(&root));
+    let quiet = watcher.tuning.quiet;
+
+    // Card A unmounted: the empty mount point is left, and rescanned.
+    std::fs::rename(&root, folder.join("card-a")).expect("unmount card A");
+    std::fs::create_dir(&root).expect("mount point");
+    watcher.recheck_mounts();
+    let due = watcher.mount_rescans.deadline().expect("a rescan");
+    assert!(due <= Instant::now() + quiet);
+    watcher.rescan_for_mounts_if_due(due);
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![LibraryCommand::RescanRoot(root.clone())]
+    );
+
+    // Card B mounted soon after: its files make no events, so its rescan
+    // does not wait for the interval.
+    std::fs::rename(&card_b, &root).expect("mount card B");
+    watcher.recheck_mounts();
+    let due = watcher.mount_rescans.deadline().expect("a rescan");
+    assert!(
+        due <= Instant::now() + quiet,
+        "due in {:?}",
+        due.saturating_duration_since(Instant::now())
+    );
+    watcher.rescan_for_mounts_if_due(due);
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![LibraryCommand::RescanRoot(root.clone())]
+    );
+    assert!(watcher.table.has_below(&root));
     let _ = std::fs::remove_dir_all(folder);
 }

@@ -14,8 +14,8 @@
 //!   [`WatchTuning::periodic`] instead, and the worker publishes it, with
 //!   the reason, in [`super::LibraryStatus::unwatched_roots`].
 //! - When the mount table changes, a root whose folder is now another one,
-//!   such as a drive mounted there, that is back, or that has other mounts
-//!   below it, is watched again and rescanned, at most once every
+//!   such as a drive mounted there, or that is back, is watched again and
+//!   rescanned. So is a root with other mounts below it, at most once every
 //!   [`WatchTuning::mount_rescan`].
 
 mod inotify;
@@ -49,7 +49,7 @@ pub(super) struct WatchTuning {
     /// Above this many changed paths, a root is rescanned instead.
     pub(super) max_paths: usize,
     /// The shortest time between two rescans of a root for mount changes
-    /// below or at it.
+    /// below it.
     pub(super) mount_rescan: Duration,
 }
 
@@ -64,12 +64,14 @@ impl Default for WatchTuning {
     ///   hour, or at once with Rescan.
     /// - `max_paths`, 2048: past that, scanning each path separately costs
     ///   about as much as one walk of the root.
-    /// - `mount_rescan`, 5 min: a mount change rescans the whole root, which
-    ///   for a large one on a slow disk takes a minute or more. A mount that
-    ///   keeps coming and going, such as a flaky automount, then rescans it
-    ///   at most once every 5 minutes instead of all the time. Its changes
-    ///   between are merged into the next rescan, not dropped, and the
-    ///   root's local changes are still scanned within seconds.
+    /// - `mount_rescan`, 5 min: a mount change below a root rescans all of
+    ///   it, which for a large one on a slow disk takes a minute or more. A
+    ///   mount that keeps coming and going, such as a flaky automount, then
+    ///   rescans it at most once every 5 minutes instead of all the time.
+    ///   Its changes between are merged into the next rescan, not dropped,
+    ///   and the root's local changes are still scanned within seconds. A
+    ///   root whose own folder is replaced, such as a card swapped at a
+    ///   fixed mount point, is rescanned without this wait.
     fn default() -> Self {
         Self {
             quiet: Duration::from_millis(500),
@@ -409,9 +411,9 @@ impl Coalescer {
     }
 }
 
-/// The rescans of roots asked for by mount changes, at most one per root
-/// every [`WatchTuning::mount_rescan`]; see there. Changes until a rescan
-/// is sent merge into it.
+/// The rescans of roots asked for by mount changes. For mounts below a
+/// root, at most one per root every [`WatchTuning::mount_rescan`]; see
+/// there. Changes until a rescan is sent merge into it.
 #[derive(Debug, Default)]
 struct MountRescans {
     /// When each root was last rescanned for mount changes.
@@ -421,13 +423,23 @@ struct MountRescans {
 }
 
 impl MountRescans {
-    /// Asks for a rescan of `root` after a mount change at `now`. It is due
-    /// `quiet` after the first change, so that mounts made together, such
-    /// as several shares at login, are one rescan, but not before
-    /// `mount_rescan` after the last one sent.
-    fn request(&mut self, root: &Path, now: Instant, tuning: &WatchTuning) {
+    /// Asks for a rescan of `root` after a mount change at `now`.
+    ///
+    /// - If the root's own folder was `replaced`, it is due `quiet` after
+    ///   the last replacement: a new card's files make no events, so its
+    ///   rescan must not wait, and a root that keeps changing is rescanned
+    ///   once it settles.
+    /// - Otherwise it is due `quiet` after the first change, so that mounts
+    ///   made together, such as several shares at login, are one rescan,
+    ///   but not before `mount_rescan` after the last one sent.
+    fn request(&mut self, root: &Path, now: Instant, tuning: &WatchTuning, replaced: bool) {
+        let at = now + tuning.quiet;
+        if replaced {
+            self.due.insert(root.to_path_buf(), at);
+            return;
+        }
         let earliest = self.sent.get(root).map(|sent| *sent + tuning.mount_rescan);
-        let at = (now + tuning.quiet).max(earliest.unwrap_or(now));
+        let at = at.max(earliest.unwrap_or(now));
         self.due.entry(root.to_path_buf()).or_insert(at);
     }
 
@@ -741,7 +753,9 @@ impl Watcher {
             }
             // Events of the replaced watches may be lost: rescan all of it,
             // as after lost events, not only where the mounts changed.
-            self.mount_rescans.request(&root, now, &self.tuning);
+            let replaced = folder.identity != before.identity;
+            self.mount_rescans
+                .request(&root, now, &self.tuning, replaced);
         }
     }
 
