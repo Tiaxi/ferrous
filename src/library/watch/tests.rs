@@ -3,7 +3,9 @@
 use crossbeam_channel::{unbounded, Receiver};
 
 use super::inotify::{parse_events, RawEvent};
-use super::mounts::{misses_changes, mount_type_of, mounts_below, parse_mountinfo};
+use super::mounts::{
+    misses_changes, mount_type_of, mounts_at_or_below, mounts_below, parse_mountinfo,
+};
 use super::*;
 
 fn tuning() -> WatchTuning {
@@ -12,6 +14,7 @@ fn tuning() -> WatchTuning {
         max_delay: Duration::from_secs(5),
         periodic: Duration::from_secs(1800),
         max_paths: 4,
+        mount_rescan: Duration::from_secs(300),
     }
 }
 
@@ -100,6 +103,36 @@ fn a_root_held_by_a_test_has_no_deadline() {
 }
 
 #[test]
+fn mount_rescans_are_due_after_a_burst_and_at_most_once_per_interval() {
+    let tuning = tuning();
+    let root = Path::new("/music");
+    let mut rescans = MountRescans::default();
+    let start = Instant::now();
+    rescans.request(root, start, &tuning);
+    rescans.request(root, start + Duration::from_millis(100), &tuning);
+    assert_eq!(rescans.deadline(), Some(start + tuning.quiet));
+
+    // A root gone when its rescan is due is not rescanned, and is rescanned
+    // as soon as it is back.
+    assert!(rescans.take_due(start + tuning.quiet, |_| false).is_empty());
+    assert_eq!(rescans.deadline(), None);
+    let back = start + Duration::from_secs(1);
+    rescans.request(root, back, &tuning);
+    assert_eq!(rescans.deadline(), Some(back + tuning.quiet));
+    let sent = back + tuning.quiet;
+    assert_eq!(rescans.take_due(sent, |_| true), vec![root.to_path_buf()]);
+
+    // Changes after it wait for the interval.
+    rescans.request(root, sent + Duration::from_secs(1), &tuning);
+    assert!(rescans
+        .take_due(sent + Duration::from_secs(2), |_| true)
+        .is_empty());
+    assert_eq!(rescans.deadline(), Some(sent + tuning.mount_rescan));
+    rescans.forget(root);
+    assert_eq!(rescans.deadline(), None);
+}
+
+#[test]
 fn the_watch_table_forgets_folders_below_a_path_and_shares_descriptors() {
     let mut table = WatchTable::default();
     table.insert(PathBuf::from("/m"), 1);
@@ -180,6 +213,10 @@ fn the_file_system_of_a_root_is_its_deepest_mount() {
         ]
     );
     assert!(mounts_below(&table, Path::new("/mnt/music")).is_empty());
+    assert_eq!(
+        mounts_at_or_below(&table, Path::new("/mnt/music")),
+        vec![(PathBuf::from("/mnt/music"), "cifs".to_string())]
+    );
 
     for watched in ["btrfs", "ext4", "xfs", "tmpfs", "fuseblk", "zfs"] {
         assert!(!misses_changes(watched), "{watched}");
@@ -273,7 +310,7 @@ fn a_root_whose_folder_is_replaced_when_mounts_change_is_watched_again_and_resca
     std::fs::create_dir(&root).expect("mounted");
     watcher.recheck_mounts();
     assert_eq!(
-        commands.try_iter().collect::<Vec<_>>(),
+        rescans_for_mounts(&mut watcher, &commands),
         vec![LibraryCommand::RescanRoot(root.clone())]
     );
     assert_ne!(watcher.table.wds.get(&root).copied(), first);
@@ -282,17 +319,28 @@ fn a_root_whose_folder_is_replaced_when_mounts_change_is_watched_again_and_resca
     // Gone, as when unmounted with no folder underneath: not rescanned.
     std::fs::remove_dir(&root).expect("unmounted");
     watcher.recheck_mounts();
-    assert!(commands.try_recv().is_err());
+    assert!(rescans_for_mounts(&mut watcher, &commands).is_empty());
     assert_eq!(watcher.unwatched.get(&root), Some(&Fallback::Missing));
     // Back.
     std::fs::create_dir(&root).expect("mounted again");
     watcher.recheck_mounts();
     assert_eq!(
-        commands.try_iter().collect::<Vec<_>>(),
+        rescans_for_mounts(&mut watcher, &commands),
         vec![LibraryCommand::RescanRoot(root.clone())]
     );
     assert!(watcher.unwatched.is_empty());
     let _ = std::fs::remove_dir_all(folder);
+}
+
+/// The commands sent once the rescans asked for by mount changes are due.
+fn rescans_for_mounts(
+    watcher: &mut Watcher,
+    commands: &Receiver<LibraryCommand>,
+) -> Vec<LibraryCommand> {
+    if let Some(due) = watcher.mount_rescans.deadline() {
+        watcher.rescan_for_mounts_if_due(due);
+    }
+    commands.try_iter().collect()
 }
 
 /// Applies the events waiting, and returns the commands for the changes
@@ -405,7 +453,7 @@ fn mounts_below_a_root_that_miss_changes_are_rescanned_instead_and_reported() {
     watch_test_hooks::set_fs_type(&usb, "cifs");
     watcher.recheck_mounts();
     assert_eq!(
-        commands.try_iter().collect::<Vec<_>>(),
+        rescans_for_mounts(&mut watcher, &commands),
         vec![LibraryCommand::RescanRoot(root.clone())]
     );
     assert!(!watcher.table.has_below(&usb));
@@ -416,7 +464,7 @@ fn mounts_below_a_root_that_miss_changes_are_rescanned_instead_and_reported() {
     watch_test_hooks::unmount_fake(&usb);
     watcher.recheck_mounts();
     assert_eq!(
-        commands.try_iter().collect::<Vec<_>>(),
+        rescans_for_mounts(&mut watcher, &commands),
         vec![LibraryCommand::RescanRoot(root.clone())]
     );
     assert!(watcher.table.has_below(&nas.join("a")));
@@ -474,7 +522,7 @@ fn a_change_waiting_when_mounts_below_its_root_change_is_still_scanned() {
     watcher.recheck_mounts();
     watcher.flush_due(Instant::now() + Duration::from_secs(3600));
 
-    let sent = commands.try_iter().collect::<Vec<_>>();
+    let sent = rescans_for_mounts(&mut watcher, &commands);
     assert!(
         sent.iter().any(|command| match command {
             LibraryCommand::RescanRoot(rescanned) => *rescanned == root,
@@ -515,5 +563,109 @@ fn an_outer_root_taking_an_inner_ones_folders_leaves_its_network_mounts_unwatche
         commands.try_iter().collect::<Vec<_>>(),
         vec![scan_paths(&outer, std::slice::from_ref(&nas))]
     );
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_network_mount_at_a_removed_inner_roots_folder_stays_unwatched() {
+    let folder = test_folder("nested-mount-at-inner");
+    let outer = folder.join("music");
+    let inner = outer.join("nas");
+    std::fs::create_dir_all(inner.join("album")).expect("folders");
+    watch_test_hooks::set_fs_type(&inner, "nfs4");
+    let (mut watcher, commands) = watching(&[outer.clone(), inner.clone()]);
+    assert_eq!(
+        watcher.unwatched.get(&inner),
+        Some(&Fallback::FileSystem("nfs4".to_string()))
+    );
+
+    watcher.handle(WatchMessage::Roots(vec![outer.clone()]));
+
+    assert!(
+        !watcher.table.has_below(&inner),
+        "the network mount is not watched"
+    );
+    assert!(watcher.table.has_below(&outer));
+    assert_eq!(
+        watcher.unwatched_mounts.get(&inner),
+        Some(&(outer.clone(), "nfs4".to_string()))
+    );
+    let _ = commands.try_iter().count();
+    watcher.report();
+    let reported = commands.try_iter().collect::<Vec<_>>();
+    let [LibraryCommand::SetUnwatchedRoots(unwatched)] = reported.as_slice() else {
+        panic!("one report: {reported:?}");
+    };
+    assert_eq!(unwatched.len(), 1);
+    assert_eq!(unwatched[0].path, outer);
+    assert!(
+        unwatched[0]
+            .reason
+            .contains(&format!("{} (nfs4)", inner.display())),
+        "{}",
+        unwatched[0].reason
+    );
+    let due = watcher.next_periodic.expect("a periodic rescan");
+    watcher.rescan_unwatched_if_due(due);
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![scan_paths(&outer, std::slice::from_ref(&inner))]
+    );
+    watch_test_hooks::unmount_fake(&inner);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_flapping_mount_rescans_its_root_at_most_once_per_interval() {
+    let folder = test_folder("flapping-mount");
+    let root = folder.join("music");
+    for name in ["local", "auto"] {
+        std::fs::create_dir_all(root.join(name)).expect("folders");
+    }
+    let auto = root.join("auto");
+    let (mut watcher, commands) = watching(std::slice::from_ref(&root));
+    let interval = watcher.tuning.mount_rescan;
+    let flap = |watcher: &mut Watcher, times: usize| {
+        for _ in 0..times {
+            watch_test_hooks::set_fs_type(&auto, "autofs");
+            watcher.recheck_mounts();
+            watch_test_hooks::unmount_fake(&auto);
+            watcher.recheck_mounts();
+        }
+    };
+
+    // A burst of mount changes is one rescan.
+    flap(&mut watcher, 5);
+    let first = watcher.mount_rescans.deadline().expect("a rescan");
+    watcher.rescan_for_mounts_if_due(first);
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![LibraryCommand::RescanRoot(root.clone())]
+    );
+
+    // An album being copied: seen, and waiting for more, when the mount
+    // keeps changing.
+    std::fs::write(root.join("local/1.mp3"), b"1").expect("track");
+    let mut events = Vec::new();
+    watcher.read_events(&mut events);
+    flap(&mut watcher, 5);
+    // Its changes are scanned when due, while the next rescan waits.
+    let local = first + watcher.tuning.max_delay;
+    watcher.flush_due(local);
+    watcher.rescan_for_mounts_if_due(local);
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![scan_paths(&root, &[root.join("local/1.mp3")])]
+    );
+    // Changes until the interval is over are the same rescan.
+    flap(&mut watcher, 5);
+    watcher.rescan_for_mounts_if_due(first + interval - Duration::from_millis(1));
+    assert!(commands.try_recv().is_err());
+    watcher.rescan_for_mounts_if_due(first + interval);
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![LibraryCommand::RescanRoot(root.clone())]
+    );
+    assert!(watcher.mount_rescans.deadline().is_none());
     let _ = std::fs::remove_dir_all(folder);
 }

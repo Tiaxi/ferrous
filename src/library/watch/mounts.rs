@@ -39,9 +39,21 @@ pub(super) fn mount_type_of(table: &[(PathBuf, String)], path: &Path) -> Option<
 /// The mounts strictly below `root`, sorted by mount point, with the type
 /// of the last one mounted at each.
 pub(super) fn mounts_below(table: &[(PathBuf, String)], root: &Path) -> Vec<(PathBuf, String)> {
+    mounts_from(table, root, false)
+}
+
+/// [`mounts_below`] `top`, and the one at `top` itself.
+pub(super) fn mounts_at_or_below(
+    table: &[(PathBuf, String)],
+    top: &Path,
+) -> Vec<(PathBuf, String)> {
+    mounts_from(table, top, true)
+}
+
+fn mounts_from(table: &[(PathBuf, String)], top: &Path, at_top: bool) -> Vec<(PathBuf, String)> {
     let mut below = std::collections::BTreeMap::new();
     for (mount_point, fs_type) in table {
-        if mount_point != root && mount_point.starts_with(root) {
+        if (at_top || mount_point != top) && mount_point.starts_with(top) {
             below.insert(mount_point.clone(), fs_type.clone());
         }
     }

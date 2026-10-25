@@ -26,6 +26,7 @@ fn tuning(periodic: Duration) -> WatchTuning {
         max_delay: Duration::from_secs(2),
         periodic,
         max_paths: 2048,
+        mount_rescan: Duration::from_secs(300),
     }
 }
 
