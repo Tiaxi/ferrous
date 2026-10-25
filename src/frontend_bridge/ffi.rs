@@ -4665,6 +4665,29 @@ mod tests {
         blocked.release.send(()).expect("release the request");
     }
 
+    #[test]
+    fn destroy_reports_scrobbles_lastfm_could_only_keep_in_memory() {
+        let dir = crate::paths::test_root().join("ffi-lastfm-unreadable-queue");
+        let _ = std::fs::remove_dir_all(&dir);
+        // A directory in place of the queue file cannot be read or replaced.
+        let queue_path = dir.join("lastfm_queue.json");
+        std::fs::create_dir_all(&queue_path).expect("create directory at queue path");
+        let (lastfm, events) = crate::lastfm::test_support::spawn_connected(
+            crate::lastfm::test_support::OfflineTransport,
+            queue_path.clone(),
+        );
+        lastfm.command(crate::lastfm::Command::QueueScrobble(scrobble(0)));
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            lastfm: Some((lastfm, events)),
+            ..BridgeRuntimeOptions::default()
+        });
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(!unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        assert!(queue_path.is_dir());
+    }
+
     fn scrobble(index: i64) -> crate::lastfm::ScrobbleEntry {
         crate::lastfm::ScrobbleEntry {
             artist: "Artist".to_string(),
