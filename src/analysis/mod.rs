@@ -38,7 +38,7 @@ use fft::{ensure_sample_buffer, peak_across_channels, WaveformAccumulator};
 use gst_waveform::decode_waveform_peaks_stream_gst;
 use session::{
     spawn_centered_staging_worker, spawn_spectrogram_decode_worker, SessionHandoff,
-    SpectrogramWorkerCommand, SpectrogramWorkerHandles, SpectrogramWorkerStatus,
+    SessionReport, SpectrogramWorkerCommand, SpectrogramWorkerHandles, SpectrogramWorkerStatus,
 };
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -323,8 +323,12 @@ struct AnalysisRuntimeState {
     track_io_lost: bool,
     /// The track whose stamp and saved waveform the helper is reading.
     pending_track_load: Option<u64>,
-    /// Formats the helper found, by file.
+    /// Formats the helper found, or the spectrogram worker read from the
+    /// files it opened, by file.
     formats: FormatCache,
+    /// The track whose format the spectrogram worker has reported. Its
+    /// decoder knows the format better than the file helper's probe.
+    worker_format_track: Option<u64>,
     /// A rolling gapless switch to this track that continued the worker's
     /// timeline on a format known before the switch, with the session's
     /// effective rate and channel count before it.  The file may have
@@ -451,12 +455,14 @@ impl AnalysisEngine {
         let worker_columns_produced = Arc::new(AtomicU64::new(0));
         let worker_track_duration_ms = Arc::new(AtomicU64::new(0));
         let spectrogram_status = SpectrogramWorkerStatus::default();
+        let (session_report_tx, session_report_rx) = unbounded::<SessionReport>();
         threads.extend(spawn_spectrogram_decode_worker(
             spectrogram_cmd_rx,
             event_tx.clone(),
             Arc::clone(&spectrogram_decode_generation),
             Arc::clone(&worker_columns_produced),
             Arc::clone(&worker_track_duration_ms),
+            session_report_tx,
             &spectrogram_status,
         ));
 
@@ -475,6 +481,7 @@ impl AnalysisEngine {
                 columns_produced: worker_columns_produced,
                 track_duration_ms: worker_track_duration_ms,
                 status: spectrogram_status,
+                reports: session_report_rx,
             },
         ));
 
@@ -616,6 +623,7 @@ impl AnalysisRuntimeState {
             track_io_lost: false,
             pending_track_load: None,
             formats: FormatCache::default(),
+            worker_format_track: None,
             unconfirmed_continuation: None,
             pending_candidate: None,
             next_candidate_request: 0,
@@ -912,6 +920,13 @@ impl AnalysisRuntimeState {
         self.clear_early_continuation(ctx);
         self.cancel_centered_staging();
 
+        let cached = self.formats.get(&path).map(|probed| probed.format);
+        // A format the worker read when it decoded the file before.
+        if let Some(known @ TrackFormat::Known { .. }) = cached {
+            self.stage_successor_if_compatible(path, known, ctx);
+            return;
+        }
+
         // For raw surround files (AC3/DTS), Symphonia can't probe the
         // format and a GStreamer pipeline is too expensive.  Same-extension
         // surround transitions are virtually always compatible (same rate
@@ -930,7 +945,6 @@ impl AnalysisRuntimeState {
             return;
         }
 
-        let cached = self.formats.get(&path).map(|probed| probed.format);
         if let Some(format) = format_from_name(&path).or(cached) {
             self.stage_successor_if_compatible(path, format, ctx);
             return;
@@ -1174,6 +1188,7 @@ impl AnalysisRuntimeState {
         // A successor still being probed is not the one that follows now.
         self.pending_candidate = None;
         self.unconfirmed_continuation = None;
+        self.worker_format_track = None;
 
         // Save previous compat params so the rolling gapless path can
         // detect incompatible transitions (e.g. 48 kHz/6ch → 44.1 kHz/2ch)
@@ -1186,7 +1201,11 @@ impl AnalysisRuntimeState {
         // again if the file has changed since. Otherwise the helper probes
         // it below, and the compatibility is not known yet.
         let cached = self.formats.get(&path);
-        let format = format_from_name(&path).or(cached.map(|probed| probed.format));
+        let format = match cached.map(|probed| probed.format) {
+            // Read by the worker when it opened the file, or probed.
+            Some(known @ TrackFormat::Known { .. }) => Some(known),
+            cached_format => format_from_name(&path).or(cached_format),
+        };
         if let Some(format) = format {
             self.apply_track_format(format);
         }
@@ -1198,7 +1217,8 @@ impl AnalysisRuntimeState {
                         && self.active_session_channel_count == prev_channel_count
                 }
                 // The worker finds the format when it opens the file, and
-                // falls back to a new session if it does not match.
+                // reports a continuation that does not fit, which then
+                // starts afresh.
                 Some(TrackFormat::Unknown) => true,
                 None => false,
             };
@@ -1387,6 +1407,8 @@ impl AnalysisRuntimeState {
         let Some(path) = self.active_track_path.clone() else {
             return;
         };
+        // The format the worker reported is the one it decodes.
+        let format = format.filter(|_| self.worker_format_track != Some(track_token));
         if let Some(format) = format {
             self.formats.insert(path.clone(), format, stamp);
             self.apply_track_format(format);
@@ -1398,13 +1420,8 @@ impl AnalysisRuntimeState {
             ) != (rate, channels)
             {
                 // The file changed after its format was read, and does not
-                // fit the continued timeline: the worker starts it afresh,
-                // so the position offset would send it past the end.  Take
-                // the format-changed path, which keeps the history shown.
-                self.clear_early_continuation(ctx);
-                self.spectrogram_position_offset = 0.0;
-                let position = self.last_spectrogram_position;
-                self.start_spectrogram_session(position, true, false, ctx);
+                // fit the continued timeline.
+                self.restart_changed_format(ctx);
             }
         }
         if let Some(peaks) = peaks {
@@ -1442,6 +1459,76 @@ impl AnalysisRuntimeState {
                 let _ = ctx
                     .waveform_job_tx
                     .send(WaveformDecodeJob { track_token, path });
+            }
+        }
+    }
+
+    /// A rolling continuation's file does not fit the worker's timeline:
+    /// the worker starts it afresh, so the position offset would send it
+    /// past the end.  Start a session at the playback position, without
+    /// the offset; its reset keeps the history shown.
+    fn restart_changed_format(&mut self, ctx: &AnalysisContext<'_>) {
+        self.clear_early_continuation(ctx);
+        self.spectrogram_position_offset = 0.0;
+        let position = self.last_spectrogram_position;
+        self.start_spectrogram_session(position, true, false, ctx);
+    }
+
+    fn handle_session_report(&mut self, report: SessionReport, ctx: &AnalysisContext<'_>) {
+        // A newer session supersedes what an older one reports.
+        if report.generation() != ctx.spectrogram_decode_generation.load(Ordering::Relaxed) {
+            return;
+        }
+        match report {
+            SessionReport::Opened {
+                track_token,
+                path,
+                stamp,
+                format,
+                ..
+            } => {
+                let active = track_token == self.active_track_token
+                    && self.active_track_path.as_deref() == Some(path.as_path());
+                self.formats.insert(path, format, stamp);
+                if active {
+                    self.worker_format_track = Some(track_token);
+                    self.apply_track_format(format);
+                }
+            }
+            SessionReport::ContinuationRejected {
+                path,
+                stamp,
+                format,
+                ..
+            } => {
+                if let Some(format) = format {
+                    self.formats.insert(path.clone(), format, stamp);
+                }
+                if self.staged_continuation_path.as_deref() == Some(path.as_path()) {
+                    // Rejected before the switch, which judges the format
+                    // again.
+                    self.staged_continuation_path = None;
+                } else if self.active_track_path.as_deref() == Some(path.as_path())
+                    && self.display_mode == SpectrogramDisplayMode::Rolling
+                {
+                    self.restart_changed_format(ctx);
+                }
+            }
+            SessionReport::Failed {
+                track_token,
+                path,
+                error,
+                ..
+            } => {
+                if track_token != self.active_track_token {
+                    return;
+                }
+                let name = path.file_name().map_or_else(
+                    || path.to_string_lossy(),
+                    |name| name.to_string_lossy(),
+                );
+                let message = format!("The spectrogram cannot show {name}: {error}.");
+                let _ = ctx.event_tx.send(AnalysisEvent::WorkerFailed(message));
             }
         }
     }
@@ -1980,6 +2067,7 @@ fn spawn_analysis_worker(
     crate::worker_thread::spawn_worker("ferrous-analysis", move || {
         let mut state = AnalysisRuntimeState::with_track_io(track_io.requests);
         let mut track_io_replies = track_io.replies;
+        let mut session_reports = spectrogram.reports;
         let mut spectrogram_loss_reported = false;
         report_lost_spectrogram_worker(
             &spectrogram.status,
@@ -2017,6 +2105,14 @@ fn spawn_analysis_worker(
                     } else {
                         track_io_replies = crossbeam_channel::never();
                         state.handle_track_io_lost(&ctx);
+                    }
+                }
+                recv(session_reports) -> report => {
+                    if let Ok(report) = report {
+                        state.handle_session_report(report, &ctx);
+                    } else {
+                        // The worker is gone; its status says why.
+                        session_reports = crossbeam_channel::never();
                     }
                 }
             }
@@ -2113,8 +2209,44 @@ where
         return decode_waveform_peaks_stream_gst(path, max_points, on_update, is_cancelled);
     }
 
+    let unreadable = match decode_waveform_peaks_symphonia(
+        path,
+        max_points,
+        &mut on_update,
+        &mut is_cancelled,
+    ) {
+        Ok(true) => return Ok(()),
+        Ok(false) => anyhow::anyhow!("no audio could be decoded"),
+        Err(error) => error,
+    };
+    // Symphonia has no demuxer or decoder for the file (Opus, WavPack, and
+    // others GStreamer plays), or decoded none of its audio.
+    #[cfg(feature = "gst")]
+    {
+        let _ = unreadable;
+        if is_cancelled() {
+            return Ok(());
+        }
+        decode_waveform_peaks_stream_gst(path, max_points, on_update, is_cancelled)
+    }
+    #[cfg(not(feature = "gst"))]
+    Err(unreadable)
+}
+
+/// Decode the overview with Symphonia. Returns whether it decoded audio
+/// or was cancelled; `false` or an error means it could not read the file.
+fn decode_waveform_peaks_symphonia<F, C>(
+    path: &Path,
+    max_points: usize,
+    on_update: &mut F,
+    is_cancelled: &mut C,
+) -> anyhow::Result<bool>
+where
+    F: FnMut(Vec<f32>, f32, bool) -> bool,
+    C: FnMut() -> bool,
+{
     if is_cancelled() {
-        return Ok(());
+        return Ok(true);
     }
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -2147,9 +2279,10 @@ where
     let mut waveform = WaveformAccumulator::new(max_points, estimated_frames, sample_rate_hz);
 
     let mut packet_counter = 0usize;
+    let mut decoded_any = false;
     loop {
         if is_cancelled() {
-            return Ok(());
+            return Ok(true);
         }
         let packet = match format.next_packet() {
             Ok(packet) => packet,
@@ -2176,14 +2309,15 @@ where
         buf.copy_interleaved_ref(decoded_audio);
 
         let samples = buf.samples();
+        decoded_any |= !samples.is_empty();
         let frame_width = channels;
         for base in (0..samples.len()).step_by(frame_width) {
             if base.is_multiple_of(4096) && is_cancelled() {
-                return Ok(());
+                return Ok(true);
             }
             let peak = peak_across_channels(samples, base, channels);
-            if !waveform.push_sample(peak, 1, &mut on_update) {
-                return Ok(());
+            if !waveform.push_sample(peak, 1, on_update) {
+                return Ok(true);
             }
         }
 
@@ -2193,10 +2327,13 @@ where
         }
     }
 
+    if !decoded_any {
+        return Ok(false);
+    }
     if !is_cancelled() {
         let _ = on_update(waveform.finish(), 0.0, true);
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
