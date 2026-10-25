@@ -350,7 +350,9 @@ if(BUILD_TESTING)
         QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
     add_test(NAME ferrous_bridge_client_tests COMMAND ferrous_bridge_client_tests)
+    # Tests that start the real bridge must not depend on an audio device:
+    # a machine without one, such as a CI runner, reports it as an error.
     set_tests_properties(ferrous_bridge_client_tests PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;FERROUS_GST_OUTPUT_SINK=fakesink"
     )
 endif()

@@ -696,6 +696,8 @@ void BridgeClientTest::thousandsOfAppendedPathsReachTheBackendInOrder() {
     QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
 
     // Appending starts no playback, so the real backend can take the list.
+    // CTest runs these tests with a fake audio output (ui/CMakeLists.txt),
+    // so the bridge reports no missing audio device here.
     // The queue an earlier test left behind is cleared first; commands
     // apply in order.
     bridge.clearQueue();
