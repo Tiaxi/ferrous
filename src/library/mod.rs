@@ -13,10 +13,10 @@ use scan::{
     handle_add_root, handle_rescan_all, handle_rescan_root, remove_root_and_purge, rename_root,
 };
 #[cfg(test)]
-pub(crate) use scan::{index_tracks_for_test, load_external_track_caches};
+pub(crate) use scan::{index_tracks_for_test, load_external_track_caches, write_test_apple_double};
 pub(crate) use scan::{
-    is_supported_audio, load_external_track_cache, read_external_track, read_track_info,
-    refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
+    is_audio_track_file, is_supported_audio, load_external_track_cache, read_external_track,
+    read_track_info, refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
     refresh_indexed_metadata_for_paths, rename_indexed_metadata_paths, store_external_track_cache,
     track_file_fingerprint,
 };
