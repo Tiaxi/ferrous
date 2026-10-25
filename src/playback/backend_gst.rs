@@ -6324,6 +6324,32 @@ mod engine_tests {
             self.runtime
                 .apply_command(PlaybackCommand::RemapPaths(Arc::new(renames)));
         }
+
+        /// Wait until what the source of the successor handed over found
+        /// is recorded, which the about-to-finish handler does after the
+        /// handover. A rename before then finds it not known yet; see
+        /// `StreamDurations::opened_files`. Bus messages are left alone, so
+        /// an error from the handover stays unhandled.
+        #[track_caller]
+        fn wait_until_successor_recorded(&self) {
+            let deadline = Instant::now() + TIMEOUT;
+            while !self
+                .runtime
+                .stream_durations
+                .lock()
+                .unwrap()
+                .streams
+                .get(1)
+                .is_some_and(|stream| matches!(stream.opened, OpenedFile::Found(_)))
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "{}",
+                    self.report("the successor's file was not recorded")
+                );
+                std::thread::sleep(millis(1));
+            }
+        }
     }
 
     #[test]
@@ -6336,13 +6362,14 @@ mod engine_tests {
         let mut engine = DirectEngine::start();
         engine.play_until_opened(vec![a.clone(), b.clone()], RepeatMode::Off);
         let old_b = file_uri(&b);
-        engine.wait_until("B was not handed over", |runtime| {
+        engine.wait_until("no successor was handed over", |runtime| {
             runtime
                 .queue_state
                 .lock()
                 .unwrap()
                 .successor_handed_to_pipeline()
         });
+        engine.wait_until_successor_recorded();
         let started = engine.runtime.snapshot.track_token;
         std::fs::rename(&a, &renamed_a).unwrap();
         std::fs::rename(&b, &renamed_b).unwrap();
@@ -6451,17 +6478,14 @@ mod engine_tests {
         let mut engine = DirectEngine::start();
         let source = engine.play_until_opened(vec![a.clone(), b.clone()], RepeatMode::Off);
         let old_b = file_uri(&b);
-        engine.wait_until("B was not handed over and recorded", |runtime| {
+        engine.wait_until("no successor was handed over", |runtime| {
             runtime
                 .queue_state
                 .lock()
                 .unwrap()
                 .successor_handed_to_pipeline()
-                && matches!(
-                    runtime.stream_durations.lock().unwrap().opened_files()[..],
-                    [_, (1, Some(_))]
-                )
         });
+        engine.wait_until_successor_recorded();
         let started = engine.runtime.snapshot.track_token;
         save_tags(&b);
         std::fs::rename(&b, &renamed).unwrap();
@@ -6585,12 +6609,7 @@ mod engine_tests {
         let mut engine = DirectEngine::start();
         engine.play_until_opened(vec![a.clone(), b.clone(), c], RepeatMode::Off);
         engine.wait_for_unhandled_error();
-        assert!(engine
-            .runtime
-            .queue_state
-            .lock()
-            .unwrap()
-            .successor_handed_to_pipeline());
+        engine.wait_until_successor_recorded();
         engine.remap(PathRenames::from([(b, renamed.clone())]));
         assert!(
             !engine
@@ -6631,13 +6650,14 @@ mod engine_tests {
         let swap = swap_files(&b, &c);
         let mut engine = DirectEngine::start();
         engine.play_until_opened(vec![a.clone(), b.clone(), c.clone()], RepeatMode::Off);
-        engine.wait_until("B's old path was not handed over", |runtime| {
+        engine.wait_until("no successor was handed over", |runtime| {
             runtime
                 .queue_state
                 .lock()
                 .unwrap()
                 .successor_handed_to_pipeline()
         });
+        engine.wait_until_successor_recorded();
         engine.remap(swap);
 
         // B now has C's old name and is row 1.
@@ -6669,6 +6689,7 @@ mod engine_tests {
         let started = engine.runtime.snapshot.track_token;
         std::fs::rename(&a, &renamed).unwrap();
         engine.wait_for_unhandled_error();
+        engine.wait_until_successor_recorded();
         engine.remap(PathRenames::from([(a, renamed.clone())]));
         assert_eq!(
             engine.runtime.snapshot.track_token, started,
