@@ -499,11 +499,6 @@ pub(super) struct BridgeState {
     pending_search_results: Option<BridgeSearchResultsFrame>,
     pending_waveform_track: Option<PendingWaveformTrack>,
     analysis_track_token: u64,
-    /// Set by gapless `TrackChanged` events.  When true, the next snapshot
-    /// should skip the queue section because only the playing index changed
-    /// (already in the playback section).  Avoids the 100-250 ms model
-    /// reset stall on the Qt side for large playlists.
-    skip_queue_for_gapless: bool,
     last_track_change: TrackChangeMarker,
     /// Renames sent to the playback engine that it has not acknowledged.
     /// Events it sent before the acknowledgement still carry the old paths.
@@ -710,8 +705,7 @@ impl FrontendBridgeHandle {
 
     fn spawn_with_options(options: BridgeRuntimeOptions) -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = unbounded::<BridgeCommand>();
-        // Keep snapshot/event queue bounded so a slow UI consumer cannot grow memory unbounded.
-        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        let (event_tx, event_rx) = event_channel();
         let (spectral_tx, spectral_rx) = bounded::<AnalysisEvent>(4);
         let spectral_generation = Arc::new(AtomicU64::new(0));
         let spectral_route = SpectrogramOutputRoute {
@@ -1701,15 +1695,6 @@ impl BridgeLoopRuntime {
             .max(apply_album_art_urgency)
             .max(external_queue_details_urgency)
             .max(lastfm_urgency);
-        // Gapless track changes don't modify the queue contents — only
-        // the playing index moves, which is already in the playback section.
-        // Suppress the queue section to avoid the 100-250 ms model reset
-        // stall on the Qt side for large playlists.  Any deferred queue
-        // detail sync catches up on the next revalidation cycle (~2 s).
-        if self.state.skip_queue_for_gapless {
-            self.state.skip_queue_for_gapless = false;
-            self.snapshot_plan.include_queue_in_next_snapshot = false;
-        }
         if urgency.is_pending() {
             self.flags.session_dirty = true;
         }
@@ -2053,8 +2038,7 @@ fn run_bridge_loop(
         runtime.run(cmd_rx, event_tx)
     });
     // The runtime was dropped while unwinding, which stopped its workers.
-    // The relay shows the UI this reason; if the event queue is full, it
-    // reports the closed channel instead.
+    // The relay shows the UI this reason.
     match ran {
         Ok(saved) => saved,
         Err(message) => {
@@ -2069,10 +2053,40 @@ fn run_bridge_loop(
     }
 }
 
+/// Events waiting for the relay past which the bridge holds back the ones a
+/// newer one replaces, so a relay that falls behind cannot grow memory.
+const MAX_RELAY_BACKLOG: usize = 32;
+
+/// The bridge's channel to the relay. It is unbounded, so the events the UI
+/// must receive, such as errors and the answers to save requests, never
+/// wait or drop; [`try_send_event`] bounds the rest.
+fn event_channel() -> (Sender<BridgeEvent>, Receiver<BridgeEvent>) {
+    unbounded()
+}
+
+/// Whether a newer event of the same kind replaces this one, so it can be
+/// held back while the relay is behind.
+fn replaced_by_newer(event: &BridgeEvent) -> bool {
+    matches!(
+        event,
+        BridgeEvent::Snapshot(_) | BridgeEvent::SearchResults(_)
+    )
+}
+
+fn relay_is_behind(event_tx: &Sender<BridgeEvent>) -> bool {
+    event_tx.is_full() || event_tx.len() >= MAX_RELAY_BACKLOG
+}
+
+/// Send an event to the relay without waiting: the bridge thread drives
+/// playback. An event a newer one replaces is refused while the relay is
+/// behind.
 pub(super) fn try_send_event(
     event_tx: &Sender<BridgeEvent>,
     event: BridgeEvent,
 ) -> Result<(), TrySendError<BridgeEvent>> {
+    if replaced_by_newer(&event) && relay_is_behind(event_tx) {
+        return Err(TrySendError::Full(event));
+    }
     event_tx.try_send(event)
 }
 
@@ -2083,7 +2097,7 @@ fn send_snapshot_event(
     include_queue: bool,
 ) -> bool {
     // Drop stale snapshot updates when the consumer is behind; next snapshot will replace it.
-    if event_tx.is_full() {
+    if relay_is_behind(event_tx) {
         return false;
     }
     try_send_event(
@@ -3344,6 +3358,107 @@ mod tests {
         assert!(cleared.selected_queue_index.is_none());
 
         bridge.command(BridgeCommand::Shutdown);
+    }
+
+    fn emitted_snapshots(event_rx: &Receiver<BridgeEvent>) -> Vec<BridgeSnapshot> {
+        event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Snapshot(snapshot) => Some(*snapshot),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn gapless_change(path: &str, queue_index: usize) -> PlaybackEvent {
+        PlaybackEvent::TrackChanged {
+            path: p(path),
+            queue_index,
+            kind: crate::playback::TrackChangeKind::Gapless,
+            track_token: 2,
+        }
+    }
+
+    #[test]
+    fn a_gapless_track_change_keeps_a_queue_edit_in_the_snapshot() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let (playback_tx, playback_rx) = unbounded();
+        runtime.playback_rx = playback_rx;
+        // The UI has the queue the bridge started with.
+        assert!(runtime.emit_snapshot(&event_tx, true));
+        while event_rx.try_recv().is_ok() {}
+
+        // On its own, a gapless change moves only the playing index, which
+        // the playback section carries.
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(gapless_change("/music/a.flac", 0)),
+            &event_tx,
+        );
+        let snapshots = emitted_snapshots(&event_rx);
+        assert!(!snapshots.is_empty());
+        assert!(snapshots.iter().all(|snapshot| !snapshot.queue_included));
+
+        // The engine's next gapless change is waiting when the loop takes a
+        // queue edit, and the loop handles both before it sends a snapshot.
+        playback_tx
+            .send(gapless_change("/music/b.flac", 1))
+            .expect("queue the track change");
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Queue(BridgeQueueCommand::Append(vec![p(
+                "/music/edit.flac",
+            )]))),
+            &event_tx,
+        );
+        assert_eq!(runtime.state.playback.current_queue_index, Some(1));
+        let snapshot = emitted_snapshots(&event_rx)
+            .pop()
+            .expect("a snapshot after the edit");
+        assert!(snapshot.queue_included);
+        assert_eq!(snapshot.queue.last(), Some(&p("/music/edit.flac")));
+        assert!(!runtime.snapshot_plan.include_queue_in_next_snapshot);
+    }
+
+    #[test]
+    fn errors_and_save_answers_reach_a_relay_that_is_behind() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = event_channel();
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        // The relay falls behind: snapshots fill its backlog, and the bridge
+        // holds back the next one.
+        while runtime.emit_snapshot(&event_tx, false) {}
+        assert_eq!(event_rx.len(), MAX_RELAY_BACKLOG);
+
+        runtime.handle_wake(
+            BridgeLoopWake::Analysis(AnalysisEvent::WorkerFailed("worker failed".to_string())),
+            &event_tx,
+        );
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(7)),
+            &event_tx,
+        );
+
+        let events: Vec<BridgeEvent> = event_rx.try_iter().collect();
+        assert_eq!(events.len(), MAX_RELAY_BACKLOG + 2);
+        assert!(events[..MAX_RELAY_BACKLOG]
+            .iter()
+            .all(|event| matches!(event, BridgeEvent::Snapshot(_))));
+        assert!(matches!(
+            &events[MAX_RELAY_BACKLOG],
+            BridgeEvent::Error(message) if message == "worker failed"
+        ));
+        assert!(matches!(
+            events[MAX_RELAY_BACKLOG + 1],
+            BridgeEvent::StateSaved {
+                request_id: 7,
+                result: Ok(())
+            }
+        ));
+        // With the backlog gone, snapshots go again.
+        assert!(runtime.emit_snapshot(&event_tx, false));
     }
 
     #[test]

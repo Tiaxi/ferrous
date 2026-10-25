@@ -14,13 +14,17 @@
 #include <QQuickWindow>
 #include <QSignalSpy>
 #include <QSemaphore>
+#include <QSocketNotifier>
 #include <QFutureWatcher>
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <utility>
 #include <QTemporaryDir>
 #include <QUrl>
 #include <QtTest/QtTest>
+
+#include <poll.h>
 
 #define private public
 #include "../src/BridgeClient.h"
@@ -105,6 +109,29 @@ QByteArray makePrecomputedFrame(
         }
     }
     return raw;
+}
+
+// Whether `fd` would wake the client's notifier now.
+bool wakeFdIsReadable(int fd, int timeoutMs = 0) {
+    pollfd target{fd, POLLIN, 0};
+    return ::poll(&target, 1, timeoutMs) > 0 && (target.revents & POLLIN) != 0;
+}
+
+// A command the backend does not know, which it answers with an error event.
+constexpr quint16 kUnknownCommandId = 0xFFFF;
+
+bool sendUnknownCommand(FerrousFfiBridge *bridge) {
+    const QByteArray command = BinaryBridgeCodec::encodeCommandNoPayload(kUnknownCommandId);
+    return ferrous_ffi_bridge_send_binary(
+        bridge,
+        reinterpret_cast<const std::uint8_t *>(command.constData()),
+        static_cast<std::size_t>(command.size()));
+}
+
+int unknownCommandErrors(const QSignalSpy &errors) {
+    const QString expected = QStringLiteral("unknown binary command id %1").arg(kUnknownCommandId);
+    return static_cast<int>(std::count_if(errors.cbegin(), errors.cend(),
+        [&expected](const QList<QVariant> &error) { return error.at(0).toString() == expected; }));
 }
 
 QByteArray littleEndian32(qsizetype value) {
@@ -196,6 +223,8 @@ private slots:
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
     void inProcessBridgeInstallsWakeNotifier();
+    void aStalledClientReceivesTheLatestQueueAndEveryError();
+    void aDrainEndsWithNoWakeupPending();
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
@@ -1109,6 +1138,86 @@ void BridgeClientTest::inProcessBridgeInstallsWakeNotifier() {
     QVERIFY(client.m_bridgeWakeNotifier->isEnabled());
 
     isolateBridgeClient(client);
+}
+
+void BridgeClientTest::aStalledClientReceivesTheLatestQueueAndEveryError() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (const QString &name : {QStringLiteral("a.flac"), QStringLiteral("b.flac")}) {
+        QFile file(base + QLatin1Char('/') + name);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("stub"), qint64(4));
+        paths.push_back(file.fileName());
+    }
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    QVERIFY(bridge.m_bridgeWakeNotifier != nullptr);
+    const int wakeFd = bridge.m_bridgeWakeFd;
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    // The client has taken everything, so the next event published wakes it.
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !wakeFdIsReadable(wakeFd) && bridge.m_bridgeWakeNotifier->isEnabled()
+            && !bridge.m_bridgePollTimer.isActive(),
+        10000);
+    QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
+
+    // The UI thread stalls: the event loop does not run, so nothing drains
+    // the bridge. The queue changes, and the bridge sends it once: with
+    // nothing playing, its snapshot is the first event published, and the
+    // wake fd says when it waits for the client.
+    bridge.m_bridgePollTimer.stop();
+    bridge.m_bridgeWakeNotifier->setEnabled(false);
+    bridge.appendPaths(paths);
+    QVERIFY(wakeFdIsReadable(wakeFd, 10000));
+    // Far more events than the bridge used to keep follow the queue.
+    constexpr int kErrors = 30;
+    for (int i = 0; i < kErrors; ++i) {
+        QVERIFY(!sendUnknownCommand(bridge.m_ffiBridge));
+    }
+
+    bridge.m_bridgeWakeNotifier->setEnabled(true);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 2, 10000);
+    QCOMPARE(bridge.queuePathAt(0), paths.at(0));
+    QCOMPARE(bridge.queuePathAt(1), paths.at(1));
+    QTRY_COMPARE_WITH_TIMEOUT(unknownCommandErrors(errors), kErrors, 10000);
+
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    isolateBridgeClient(bridge);
+}
+
+void BridgeClientTest::aDrainEndsWithNoWakeupPending() {
+    BridgeClient client;
+    QVERIFY(client.m_ffiBridge != nullptr);
+    QVERIFY(client.m_bridgeWakeNotifier != nullptr);
+    const int wakeFd = client.m_bridgeWakeFd;
+
+    // Stop the backend, so only this test queues events from here on.
+    const QByteArray shutdown =
+        BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown);
+    QVERIFY(ferrous_ffi_bridge_send_binary(
+        client.m_ffiBridge,
+        reinterpret_cast<const std::uint8_t *>(shutdown.constData()),
+        static_cast<std::size_t>(shutdown.size())));
+    QTRY_VERIFY_WITH_TIMEOUT(!client.backendFailure().isEmpty(), 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !wakeFdIsReadable(wakeFd) && client.m_bridgeWakeNotifier->isEnabled()
+            && !client.m_bridgePollTimer.isActive(),
+        10000);
+
+    QSignalSpy wakeups(client.m_bridgeWakeNotifier, &QSocketNotifier::activated);
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    QVERIFY(!sendUnknownCommand(client.m_ffiBridge));
+    QVERIFY(wakeFdIsReadable(wakeFd));
+    QTRY_COMPARE(unknownCommandErrors(errors), 1);
+    // The poll acknowledged after draining, so nothing is left to wake for.
+    QVERIFY(!wakeFdIsReadable(wakeFd));
+    QTest::qWait(100);
+    QCOMPARE(wakeups.count(), 1);
+    QVERIFY(client.m_bridgeWakeNotifier->isEnabled());
 }
 
 void BridgeClientTest::scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm() {
