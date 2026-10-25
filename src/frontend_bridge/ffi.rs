@@ -2929,7 +2929,6 @@ mod tests {
                 current_bitrate_kbps: Some(905),
                 bitrate_timeline_kbps: vec![905, 877, 901],
                 cover_art_path: Some("/music/a.cover.png".to_string()),
-                cover_art_rgba: None,
             },
             library: Arc::new(LibrarySnapshot {
                 roots: vec![root("/music")],
