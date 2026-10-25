@@ -14,7 +14,9 @@ std::uint64_t ferrous_ffi_spectrogram_ring_capacity(
     std::uint32_t bins, std::uint32_t channels, double zoom, bool centered);
 
 FerrousFfiBridge *ferrous_ffi_bridge_create();
-void ferrous_ffi_bridge_destroy(FerrousFfiBridge *handle);
+// Blocks until the backend has saved its state, for a few seconds at most.
+// Returns false if it had not finished by then, or could not save it all.
+bool ferrous_ffi_bridge_destroy(FerrousFfiBridge *handle);
 bool ferrous_ffi_bridge_send_binary(
     FerrousFfiBridge *handle,
     const std::uint8_t *cmd_ptr,

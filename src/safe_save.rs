@@ -158,6 +158,79 @@ fn create_file_with(path: &Path, bytes: &[u8], before_rename: impl FnOnce()) -> 
         .map_err(|err| format!("failed to flush directory {}: {err}", parent.display()))
 }
 
+/// Write `bytes` to `path`, an app-owned file that may not exist yet, so
+/// that readers see either the previous file or the complete new one.
+///
+/// The bytes go to a uniquely named file in the same directory, which is
+/// flushed and renamed over `path`, so concurrent writers never share a
+/// temporary file: the last rename wins with a complete file. A symbolic
+/// link at `path` is followed, so the file it points to is replaced and
+/// the link survives. The replacement gets the permissions new files get,
+/// not the old file's, so this is meant for the app's own state, not the
+/// user's files; see [`replace_file`] for those.
+///
+/// # Errors
+///
+/// Returns the failed step and its error. `path` is unchanged then, and the
+/// temporary file is removed.
+pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<(), WriteFileError> {
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let failed = |step, error| WriteFileError {
+        path: target.clone(),
+        step,
+        error,
+    };
+    let parent = target.parent().ok_or_else(|| {
+        failed(
+            WriteStep::CreateTemporary,
+            io::Error::new(io::ErrorKind::InvalidInput, "the path has no directory"),
+        )
+    })?;
+    let mut temp = TempSibling::open(parent, &target, 0o666)
+        .map_err(|error| failed(WriteStep::CreateTemporary, error))?;
+    temp.file
+        .write_all(bytes)
+        .map_err(|error| failed(WriteStep::Write, error))?;
+    temp.persist(&target)
+        .map_err(|(step, error)| failed(step, error))
+}
+
+/// A step of [`write_file`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteStep {
+    CreateTemporary,
+    Write,
+    Flush,
+    Replace,
+    FlushDirectory,
+}
+
+/// Why [`write_file`] failed. The message names the file being saved, not
+/// the temporary file, so a save that keeps failing the same way gives the
+/// same message every time.
+#[derive(Debug)]
+pub(crate) struct WriteFileError {
+    pub(crate) path: PathBuf,
+    pub(crate) step: WriteStep,
+    pub(crate) error: io::Error,
+}
+
+impl std::fmt::Display for WriteFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path = self.path.display();
+        match self.step {
+            WriteStep::CreateTemporary => {
+                write!(f, "failed to create a temporary file for {path}")?;
+            }
+            WriteStep::Write => write!(f, "failed to write {path}")?,
+            WriteStep::Flush => write!(f, "failed to flush {path}")?,
+            WriteStep::Replace => write!(f, "failed to replace {path}")?,
+            WriteStep::FlushDirectory => write!(f, "failed to flush the directory of {path}")?,
+        }
+        write!(f, ": {}", self.error)
+    }
+}
+
 /// Check, without changing anything, that [`rewrite_via_temp_copy`] could
 /// replace `path` now: the file opens for writing, its metadata can be read,
 /// and its directory accepts the temporary copy.
@@ -435,6 +508,16 @@ impl TempSibling {
         let parent = target
             .parent()
             .ok_or_else(|| format!("missing parent directory for {}", target.display()))?;
+        Self::open(parent, target, mode).map_err(|err| {
+            format!(
+                "failed to create temporary file in {}: {err}",
+                parent.display()
+            )
+        })
+    }
+
+    /// Create a uniquely named file for `target` in `parent`, its directory.
+    fn open(parent: &Path, target: &Path, mode: u32) -> io::Result<Self> {
         let name = target
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -454,13 +537,7 @@ impl TempSibling {
             .write(true)
             .create_new(true)
             .mode(mode)
-            .open(&path)
-            .map_err(|err| {
-                format!(
-                    "failed to create temporary file in {}: {err}",
-                    parent.display()
-                )
-            })?;
+            .open(&path)?;
         Ok(Self {
             path,
             file,
@@ -480,23 +557,37 @@ impl TempSibling {
         if let Some(replaced) = replaced {
             replaced.apply(&self.file, target, &System)?;
         }
-        self.file
-            .sync_all()
-            .map_err(|err| format!("failed to flush {}: {err}", self.path.display()))?;
-        fs::rename(&self.path, target).map_err(|err| {
-            format!(
+        self.persist(target).map_err(|(step, err)| match step {
+            WriteStep::Flush => format!("failed to flush {}: {err}", self.path.display()),
+            WriteStep::Replace => format!(
                 "failed to replace {} with {}: {err}",
                 target.display(),
                 self.path.display()
+            ),
+            _ => format!(
+                "failed to flush directory {}: {err}",
+                target.parent().unwrap_or(target).display()
+            ),
+        })
+    }
+
+    /// Flush the file, rename it to `target`, and flush the directory so
+    /// the rename survives a crash.
+    fn persist(&mut self, target: &Path) -> Result<(), (WriteStep, io::Error)> {
+        self.file
+            .sync_all()
+            .map_err(|err| (WriteStep::Flush, err))?;
+        fs::rename(&self.path, target).map_err(|err| (WriteStep::Replace, err))?;
+        self.persisted = true;
+        let parent = target.parent().ok_or_else(|| {
+            (
+                WriteStep::FlushDirectory,
+                io::Error::new(io::ErrorKind::InvalidInput, "the path has no directory"),
             )
         })?;
-        self.persisted = true;
-        let parent = target
-            .parent()
-            .ok_or_else(|| format!("missing parent directory for {}", target.display()))?;
         File::open(parent)
             .and_then(|dir| dir.sync_all())
-            .map_err(|err| format!("failed to flush directory {}: {err}", parent.display()))
+            .map_err(|err| (WriteStep::FlushDirectory, err))
     }
 }
 
@@ -1200,6 +1291,84 @@ mod tests {
         assert!(error.contains("for writing"), "{error}");
         assert_eq!(fs::read(&path).expect("read original"), b"original");
         assert_eq!(dir_entries(&dir), vec!["song.flac".to_string()]);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn write_file_creates_and_replaces_app_state() {
+        let dir = test_dir("write");
+        let path = dir.join("settings.txt");
+
+        write_file(&path, b"first").expect("create");
+        write_file(&path, b"second").expect("replace");
+
+        assert_eq!(fs::read(&path).expect("read"), b"second");
+        assert_eq!(dir_entries(&dir), vec!["settings.txt".to_string()]);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_replaces_the_file_a_link_points_to() {
+        let dir = test_dir("write-link");
+        let target = dir.join("dotfiles-settings.txt");
+        let link = dir.join("settings.txt");
+        fs::write(&target, b"old").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+
+        write_file(&link, b"new").expect("write through the link");
+
+        assert!(fs::symlink_metadata(&link)
+            .expect("link metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).expect("read target"), b"new");
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn write_file_failures_name_the_target_not_the_temporary_file() {
+        let dir = test_dir("write-fails");
+        let path = dir.join("settings.txt");
+        // Nothing can be renamed over a directory.
+        fs::create_dir(&path).expect("block the target");
+
+        let first = write_file(&path, b"first").expect_err("the rename fails");
+        let second = write_file(&path, b"second").expect_err("the rename fails");
+
+        assert_eq!(first.step, WriteStep::Replace);
+        assert_eq!(first.path, path);
+        assert_eq!(first.to_string(), second.to_string());
+        assert!(!first.to_string().contains(".tmp"), "{first}");
+        assert_eq!(dir_entries(&dir), vec!["settings.txt".to_string()]);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn concurrent_writers_never_share_a_temporary_file() {
+        let dir = test_dir("write-concurrent");
+        let path = dir.join("settings.txt");
+        let contents: Vec<Vec<u8>> = (0..4u8)
+            .map(|writer| vec![b'a' + writer; 64 * 1024])
+            .collect();
+
+        std::thread::scope(|scope| {
+            for bytes in &contents {
+                let path = &path;
+                scope.spawn(move || {
+                    for _ in 0..25 {
+                        write_file(path, bytes).expect("every write succeeds");
+                    }
+                });
+            }
+        });
+
+        let saved = fs::read(&path).expect("read");
+        assert!(
+            contents.contains(&saved),
+            "the file mixes writers' contents"
+        );
+        assert_eq!(dir_entries(&dir), vec!["settings.txt".to_string()]);
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 }

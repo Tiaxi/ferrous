@@ -898,8 +898,6 @@ BridgeClient::BridgeClient(QObject *parent)
 
 BridgeClient::~BridgeClient() {
     m_bridgePollTimer.stop();
-    m_diagnosticsFlushTimer.stop();
-    flushPendingDiagnosticDiskLines();
     if (m_bridgeWakeNotifier != nullptr) {
         m_bridgeWakeNotifier->setEnabled(false);
         delete m_bridgeWakeNotifier;
@@ -915,9 +913,20 @@ BridgeClient::~BridgeClient() {
     stopCoverLookupWorker();
     stopSearchApplyWorker();
     if (m_ffiBridge != nullptr) {
-        ferrous_ffi_bridge_destroy(m_ffiBridge);
+        // The app's window is gone by now, so waiting for the backend's
+        // final saves holds up only the exit. The window closed only after
+        // saveStateBeforeQuit saved the settings and the queue, or after the
+        // user chose to quit without them.
+        if (!ferrous_ffi_bridge_destroy(m_ffiBridge)) {
+            logDiagnostic(
+                QStringLiteral("bridge"),
+                QStringLiteral("the backend did not save everything before exiting; recent "
+                               "settings, the queue, or Last.fm scrobbles may be missing"));
+        }
         m_ffiBridge = nullptr;
     }
+    m_diagnosticsFlushTimer.stop();
+    flushPendingDiagnosticDiskLines();
 }
 
 void BridgeClient::startFileBrowserNameDetection() {
@@ -3756,6 +3765,30 @@ void BridgeClient::requestSnapshot() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot));
 }
 
+quint32 BridgeClient::saveStateBeforeQuit() {
+    // 0 is never an attempt, so callers can use it for none.
+    m_lastStateSaveRequestId = m_lastStateSaveRequestId == std::numeric_limits<quint32>::max()
+        ? 1
+        : m_lastStateSaveRequestId + 1;
+    const quint32 requestId = m_lastStateSaveRequestId;
+    if (m_backendFailure.isEmpty()
+        && sendBinaryCommand(
+            BinaryBridgeCodec::encodeCommandU32(BinaryBridgeCodec::CmdSaveState, requestId))) {
+        return requestId;
+    }
+    // Answer after the caller has returned, as the backend would.
+    QMetaObject::invokeMethod(
+        this,
+        [this, requestId]() {
+            emit stateSaveFinished(
+                requestId,
+                false,
+                QStringLiteral("Settings and the queue could not be saved: the backend has stopped."));
+        },
+        Qt::QueuedConnection);
+    return requestId;
+}
+
 void BridgeClient::shutdown() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown));
 }
@@ -4784,6 +4817,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                                      "Restart Ferrous to continue.")
                     : reason);
         }
+        return false;
+    }
+
+    if (snapshot.hasStateSaved) {
+        emit stateSaveFinished(
+            snapshot.stateSaveRequestId, snapshot.stateSaved, snapshot.stateSaveError);
         return false;
     }
 

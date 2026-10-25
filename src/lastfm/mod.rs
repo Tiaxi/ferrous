@@ -3,9 +3,11 @@
 mod queue_file;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{bounded, select, unbounded, Receiver, RecvTimeoutError, Sender};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -123,19 +125,32 @@ pub enum Event {
 #[derive(Debug, Clone)]
 pub struct Handle {
     tx: Sender<Command>,
+    requests: Arc<RequestCancellation>,
 }
 
 impl Handle {
+    fn new(tx: Sender<Command>) -> Self {
+        Self {
+            tx,
+            requests: Arc::new(RequestCancellation::new()),
+        }
+    }
+
     pub fn command(&self, command: Command) {
         let _ = self.tx.send(command);
     }
 
     /// Stops the service once it has handled the commands sent before this
     /// call, without starting network requests for them. Waits up to
-    /// `timeout` for the queue to be saved. The service cannot confirm while
-    /// a request that started earlier is still running.
+    /// `timeout` for the queue to be saved.
+    ///
+    /// The service stops waiting for a request in progress, which can take
+    /// up to 15 s, so a scrobble queued behind it is saved at once. The
+    /// scrobbles that request carried stay queued, as after any request
+    /// without an answer, and are sent again after the next start.
     #[must_use]
     pub fn shutdown(&self, timeout: Duration) -> ShutdownOutcome {
+        self.requests.cancel();
         let (done_tx, done_rx) = bounded(1);
         if self.tx.send(Command::Shutdown(done_tx)).is_err() {
             return ShutdownOutcome::Unconfirmed;
@@ -161,8 +176,70 @@ pub(crate) struct HttpReply {
     pub(crate) body: String,
 }
 
+/// Tells the service to stop waiting for requests, once it is shutting down.
+#[derive(Debug)]
+struct RequestCancellation {
+    cancelled: AtomicBool,
+    /// Wakes a request that is waiting for its answer.
+    wake_tx: Sender<()>,
+    wake_rx: Receiver<()>,
+}
+
+impl RequestCancellation {
+    fn new() -> Self {
+        let (wake_tx, wake_rx) = bounded(1);
+        Self {
+            cancelled: AtomicBool::new(false),
+            wake_tx,
+            wake_rx,
+        }
+    }
+
+    fn cancel(&self) {
+        // Set before the wake-up, so a request starting after the wake-up
+        // was taken sees the flag.
+        self.cancelled.store(true, Ordering::SeqCst);
+        let _ = self.wake_tx.try_send(());
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+/// Runs each request of `inner` on a thread of its own and waits for its
+/// answer only until the service is cancelled, so shutdown never waits for
+/// the network. A request that is abandoned finishes on its own thread, and
+/// its answer is dropped.
+struct CancellableTransport {
+    inner: Arc<dyn Transport>,
+    cancellation: Arc<RequestCancellation>,
+}
+
+impl Transport for CancellableTransport {
+    fn post_form(&self, url: &str, form: &[(String, String)]) -> Result<HttpReply, String> {
+        const CANCELLED: &str = "the request was abandoned because Ferrous is quitting";
+        if self.cancellation.is_cancelled() {
+            return Err(CANCELLED.to_string());
+        }
+        let (reply_tx, reply_rx) = bounded(1);
+        let inner = Arc::clone(&self.inner);
+        let (url, form) = (url.to_string(), form.to_vec());
+        // Dropping the thread's handle detaches it. If it cannot start,
+        // `reply_tx` is dropped with the closure, which ends the wait below.
+        let _ = crate::worker_thread::spawn_worker("ferrous-lastfm-request", move || {
+            let _ = reply_tx.send(inner.post_form(&url, &form));
+        });
+        select! {
+            recv(reply_rx) -> reply => reply
+                .unwrap_or_else(|_| Err("the request thread stopped without an answer".to_string())),
+            recv(self.cancellation.wake_rx) -> _ => Err(CANCELLED.to_string()),
+        }
+    }
+}
+
 /// Sends requests to the Last.fm API.
-pub(crate) trait Transport: Send {
+pub(crate) trait Transport: Send + Sync {
     /// Posts `form` to `url`. Returns the reply, or a description of why no
     /// reply arrived.
     fn post_form(&self, url: &str, form: &[(String, String)]) -> Result<HttpReply, String>;
@@ -415,11 +492,18 @@ pub(crate) fn spawn_with_backends(
 ) -> (Handle, Receiver<Event>) {
     let (cmd_tx, cmd_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
+    let handle = Handle::new(cmd_tx);
+    let cancellation = Arc::clone(&handle.requests);
     crate::worker_thread::spawn_worker("ferrous-lastfm", move || {
-        let service = Service::new(options, backends());
+        let mut backends = backends();
+        backends.transport = Box::new(CancellableTransport {
+            inner: Arc::from(backends.transport),
+            cancellation,
+        });
+        let service = Service::new(options, backends);
         run_service_loop(&cmd_rx, &event_tx, service);
     });
-    (Handle { tx: cmd_tx }, event_rx)
+    (handle, event_rx)
 }
 
 fn run_service_loop(cmd_rx: &Receiver<Command>, event_tx: &Sender<Event>, mut service: Service) {
@@ -1194,17 +1278,102 @@ fn request_error_message(error: &RequestError) -> String {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::collections::{HashMap, VecDeque};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
 
-    use crossbeam_channel::{unbounded, Receiver};
+    use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 
-    use super::{Command, Handle, HttpReply, SessionKeyStore, Transport};
+    use super::{
+        AppCredentials, Command, Event, Handle, HttpReply, RetryPolicy, ServiceBackends,
+        ServiceOptions, SessionKeyStore, Transport,
+    };
+
+    /// Starts a service, connected with a stored session, that sends its
+    /// requests through `transport` and saves its queue to `queue_path`.
+    pub(crate) fn spawn_connected(
+        transport: impl Transport + 'static,
+        queue_path: PathBuf,
+    ) -> (Handle, Receiver<Event>) {
+        let (handle, events) = super::spawn_with_backends(
+            ServiceOptions {
+                queue_path: Some(queue_path),
+                initial_enabled: true,
+            },
+            move || ServiceBackends {
+                transport: Box::new(transport),
+                session_keys: Box::new(MemorySessionKeys::with_key("tester", "session")),
+                credentials: Some(AppCredentials {
+                    api_key: "api-key".to_string(),
+                    shared_secret: "secret".to_string(),
+                }),
+                retry: RetryPolicy::DEFAULT,
+            },
+        );
+        handle.command(Command::LoadStoredSession {
+            username: "tester".to_string(),
+        });
+        (handle, events)
+    }
+
+    /// Holds every request until the test releases it, as a server that
+    /// does not answer would.
+    pub(crate) struct BlockingTransport {
+        started: Sender<()>,
+        release: Receiver<()>,
+        answered: Arc<AtomicUsize>,
+    }
+
+    /// The test's side of a [`BlockingTransport`].
+    pub(crate) struct BlockedRequests {
+        /// Gets a message when a request starts.
+        pub(crate) started: Receiver<()>,
+        /// Lets one request answer, with a transport error.
+        pub(crate) release: Sender<()>,
+        answered: Arc<AtomicUsize>,
+    }
+
+    impl BlockedRequests {
+        /// How many requests have answered.
+        pub(crate) fn answered(&self) -> usize {
+            self.answered.load(Ordering::SeqCst)
+        }
+    }
+
+    impl BlockingTransport {
+        pub(crate) fn new() -> (Self, BlockedRequests) {
+            let (started_tx, started) = unbounded();
+            let (release, release_rx) = bounded(0);
+            let answered = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    started: started_tx,
+                    release: release_rx,
+                    answered: Arc::clone(&answered),
+                },
+                BlockedRequests {
+                    started,
+                    release,
+                    answered,
+                },
+            )
+        }
+    }
+
+    impl Transport for BlockingTransport {
+        fn post_form(&self, _url: &str, _form: &[(String, String)]) -> Result<HttpReply, String> {
+            let _ = self.started.send(());
+            let _ = self.release.recv();
+            self.answered.fetch_add(1, Ordering::SeqCst);
+            Err("the test released the request".to_string())
+        }
+    }
 
     /// A handle whose commands go to the returned receiver instead of a
     /// running service.
     pub(crate) fn command_handle() -> (Handle, Receiver<Command>) {
         let (tx, rx) = unbounded();
-        (Handle { tx }, rx)
+        (Handle::new(tx), rx)
     }
 
     pub(crate) struct OfflineTransport;
@@ -1942,6 +2111,57 @@ mod tests {
         assert_eq!(done_rx.try_recv(), Ok(Ok(())));
         assert!(transport.requests().is_empty());
         assert_eq!(read_queue_file(&queue_path), vec![entry(0)]);
+    }
+
+    #[test]
+    fn shutdown_saves_a_scrobble_queued_behind_a_request_that_does_not_answer() {
+        let dir = scratch_dir("blocked-request");
+        let queue_path = dir.join("lastfm_queue.json");
+        let (transport, blocked) = test_support::BlockingTransport::new();
+        let (handle, _events) = test_support::spawn_connected(transport, queue_path.clone());
+        handle.command(Command::QueueScrobble(entry(0)));
+        blocked
+            .started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the scrobble is sent");
+        // Waits behind the request.
+        handle.command(Command::QueueScrobble(entry(1)));
+
+        assert_eq!(
+            handle.shutdown(Duration::from_secs(5)),
+            ShutdownOutcome::Stopped
+        );
+
+        assert_eq!(read_queue_file(&queue_path), entries(0..2));
+        assert_eq!(blocked.answered(), 0, "the request is still running");
+        blocked.release.send(()).expect("release the request");
+    }
+
+    #[test]
+    fn requests_after_shutdown_fail_without_reaching_the_transport() {
+        let transport = ScriptedTransport::with_replies([accepted_reply(1)]);
+        let cancellation = Arc::new(RequestCancellation::new());
+        let cancellable = CancellableTransport {
+            inner: Arc::new(transport.clone()),
+            cancellation: Arc::clone(&cancellation),
+        };
+        cancellation.cancel();
+
+        assert!(cancellable.post_form(API_ENDPOINT, &[]).is_err());
+        assert!(cancellable.post_form(API_ENDPOINT, &[]).is_err());
+        assert!(transport.requests().is_empty());
+    }
+
+    #[test]
+    fn requests_before_shutdown_get_their_answers() {
+        let transport = ScriptedTransport::with_replies([accepted_reply(1)]);
+        let cancellable = CancellableTransport {
+            inner: Arc::new(transport.clone()),
+            cancellation: Arc::new(RequestCancellation::new()),
+        };
+
+        assert_eq!(cancellable.post_form(API_ENDPOINT, &[]), accepted_reply(1));
+        assert_eq!(transport.requests().len(), 1);
     }
 
     #[test]

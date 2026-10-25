@@ -66,6 +66,8 @@ pub(super) fn handle_bridge_command(
             *context.running = false;
             false
         }
+        // The runtime answers it before commands get here.
+        BridgeCommand::SaveState(_) => false,
         BridgeCommand::Playback(cmd) => {
             handle_playback_bridge_command(&cmd, state, context);
             false
@@ -215,6 +217,16 @@ fn set_fft_size(state: &mut BridgeState, context: &mut BridgeCommandContext<'_>,
     *context.settings_dirty = true;
 }
 
+/// Save the settings, showing the user a failure.
+fn save_settings_now(state: &BridgeState, context: &mut BridgeCommandContext<'_>) {
+    match save_settings(&state.settings) {
+        Ok(()) => *context.settings_dirty = false,
+        Err(failure) => {
+            let _ = try_send_event(context.event_tx, BridgeEvent::Error(failure.message));
+        }
+    }
+}
+
 fn handle_settings_bridge_command(
     cmd: &BridgeSettingsCommand,
     state: &mut BridgeState,
@@ -224,10 +236,7 @@ fn handle_settings_bridge_command(
         BridgeSettingsCommand::LoadFromDisk => {
             handle_load_settings_from_disk(state, context);
         }
-        BridgeSettingsCommand::SaveToDisk => {
-            save_settings(&state.settings);
-            *context.settings_dirty = false;
-        }
+        BridgeSettingsCommand::SaveToDisk => save_settings_now(state, context),
         BridgeSettingsCommand::SetVolume(volume) => {
             let volume = volume.clamp(0.0, 1.0);
             state.settings.volume = volume;

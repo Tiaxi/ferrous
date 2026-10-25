@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::fd::RawFd;
@@ -16,7 +16,8 @@ use super::imports::ImportGate;
 use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
     BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand,
-    BridgeSnapshot, FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
+    BridgeSnapshot, BridgeThread, FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
+    BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
@@ -60,6 +61,9 @@ const SECTION_SETTINGS: u16 = 1 << 5;
 const SECTION_ERROR: u16 = 1 << 6;
 const SECTION_STOPPED: u16 = 1 << 7;
 const SECTION_LASTFM: u16 = 1 << 8;
+/// The answer to a save request: a u8, 1 if it succeeded, and a string with
+/// what to show the user otherwise.
+const SECTION_STATE_SAVED: u16 = 1 << 9;
 
 #[cfg(unix)]
 fn create_nonblocking_pipe() -> Option<(RawFd, RawFd)> {
@@ -553,6 +557,11 @@ impl FfiEncoder {
                     prepared.push(PreparedEvent::Binary(encode_failure_event(&message)));
                     prepared.push(PreparedEvent::Stopped);
                 }
+                BridgeEvent::StateSaved { request_id, result } => {
+                    prepared.push(PreparedEvent::Binary(encode_state_saved_event(
+                        request_id, &result,
+                    )));
+                }
             }
         }
 
@@ -794,18 +803,32 @@ impl FfiShared {
 pub struct FerrousFfiBridge {
     shared: Arc<FfiShared>,
     import_gate: Arc<ImportGate>,
+    bridge_thread: Option<BridgeThread>,
+    /// How long [`Self::shutdown`] waits for the bridge thread.
+    shutdown_timeout: Duration,
     relay_thread: Option<JoinHandle<()>>,
     spectral_relay_thread: Option<JoinHandle<()>>,
 }
 
-impl Drop for FerrousFfiBridge {
-    fn drop(&mut self) {
-        self.shared.request_stop();
+impl FerrousFfiBridge {
+    /// Stop the bridge, waiting up to `shutdown_timeout` for it to save
+    /// the settings, the session, and Last.fm's queue, and then stop the
+    /// relays. Returns false if one of them was not saved, or if the bridge
+    /// thread was still running at the bound; it is left running then, so
+    /// the app's exit is not held up.
+    fn shutdown(&mut self) -> bool {
+        // The relays keep draining the bridge's output meanwhile, so it
+        // never waits on a full channel.
         let _ = self
             .shared
             .lock_runtime()
             .command_tx
             .send(BridgeCommand::Shutdown);
+        let finished = self
+            .bridge_thread
+            .take()
+            .is_none_or(|thread| thread.join_by(Instant::now() + self.shutdown_timeout));
+        self.shared.request_stop();
         for thread in [self.relay_thread.take(), self.spectral_relay_thread.take()]
             .into_iter()
             .flatten()
@@ -813,18 +836,31 @@ impl Drop for FerrousFfiBridge {
             let _ = thread.join();
         }
         self.shared.lock_runtime().close_wakeup_pipe();
+        finished
+    }
+}
+
+impl Drop for FerrousFfiBridge {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
 /// Start the bridge thread and the threads that relay its output to the UI.
 fn create_bridge() -> Result<FerrousFfiBridge, String> {
-    let handle = FrontendBridgeHandle::spawn()?;
+    connect_bridge(FrontendBridgeHandle::spawn()?)
+}
+
+/// Start the threads that relay the output of the bridge behind `handle`
+/// to the UI.
+fn connect_bridge(handle: FrontendBridgeHandle) -> Result<FerrousFfiBridge, String> {
     let import_gate = handle.import_gate();
-    let (command_tx, event_rx, spectral_rx, spectral_generation) = handle.into_parts();
+    let parts = handle.into_parts();
+    let (event_rx, spectral_rx) = (parts.events, parts.spectra);
     let (wake_read_fd, wake_write_fd) = create_nonblocking_pipe().unwrap_or((-1, -1));
     let shared = Arc::new(FfiShared::new(
-        FfiRuntime::new(command_tx, wake_read_fd, wake_write_fd),
-        spectral_generation,
+        FfiRuntime::new(parts.commands, wake_read_fd, wake_write_fd),
+        parts.spectral_generation,
     ));
     let _ = shared
         .lock_runtime()
@@ -835,6 +871,8 @@ fn create_bridge() -> Result<FerrousFfiBridge, String> {
     let mut bridge = FerrousFfiBridge {
         shared: Arc::clone(&shared),
         import_gate,
+        bridge_thread: Some(parts.thread),
+        shutdown_timeout: BRIDGE_SHUTDOWN_TIMEOUT,
         relay_thread: None,
         spectral_relay_thread: None,
     };
@@ -1047,22 +1085,29 @@ pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
 }
 
 #[no_mangle]
+/// Stop the bridge and free it. Blocks until the bridge has saved the
+/// settings, the session, and Last.fm's queue, or for at most
+/// [`BRIDGE_SHUTDOWN_TIMEOUT`]. Returns false if one of them was not saved,
+/// or if the bridge was still shutting down then, so they may be missing.
+///
 /// # Safety
 ///
 /// `handle` must be null or a pointer previously returned by
 /// [`ferrous_ffi_bridge_create`], and must not be used again after this call.
-pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridge) {
+pub unsafe extern "C" fn ferrous_ffi_bridge_destroy(handle: *mut FerrousFfiBridge) -> bool {
     ffi_call(
         "ferrous_ffi_bridge_destroy",
-        |_| (),
+        |_| false,
         || {
-            if !handle.is_null() {
-                // SAFETY: The caller hands over the pointer `Box::into_raw`
-                // made in `ferrous_ffi_bridge_create` and never uses it again.
-                drop(unsafe { Box::from_raw(handle) });
+            if handle.is_null() {
+                return true;
             }
+            // SAFETY: The caller hands over the pointer `Box::into_raw`
+            // made in `ferrous_ffi_bridge_create` and never uses it again.
+            let mut bridge = unsafe { Box::from_raw(handle) };
+            bridge.shutdown()
         },
-    );
+    )
 }
 
 #[no_mangle]
@@ -1940,6 +1985,7 @@ fn parse_system_command(
     let command = match cmd_id {
         33 => BridgeCommand::RequestSnapshot,
         34 => BridgeCommand::Shutdown,
+        66 => BridgeCommand::SaveState(reader.read_u32()?),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -2058,6 +2104,17 @@ fn encode_error_event(message: &str) -> Vec<u8> {
     let mut payload = Vec::new();
     push_string(&mut payload, message);
     encode_packet(vec![(SECTION_ERROR, payload)])
+}
+
+fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_u32(&mut payload, request_id);
+    push_u8(&mut payload, u8::from(result.is_ok()));
+    push_string(
+        &mut payload,
+        result.as_ref().err().map_or("", String::as_str),
+    );
+    encode_packet(vec![(SECTION_STATE_SAVED, payload)])
 }
 
 fn encode_stopped_event() -> Vec<u8> {
@@ -2827,6 +2884,7 @@ mod error_packet_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{config, BridgeRuntimeOptions};
     use super::*;
     use crate::analysis::AnalysisSnapshot;
     use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
@@ -4430,6 +4488,305 @@ mod tests {
         let _ = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
         // SAFETY: `handle` came from `ferrous_ffi_bridge_create` and is not used again.
         unsafe { ferrous_ffi_bridge_destroy(handle) };
+    }
+
+    /// Start a bridge with `options` behind the same handle the UI gets.
+    fn ffi_bridge_with(options: BridgeRuntimeOptions) -> *mut FerrousFfiBridge {
+        let handle = FrontendBridgeHandle::spawn_with_options(options).expect("spawn bridge");
+        Box::into_raw(Box::new(connect_bridge(handle).expect("connect bridge")))
+    }
+
+    /// A bridge that saves its state, as the app's does, starting from no
+    /// saved state.
+    fn ffi_bridge_saving_state() -> *mut FerrousFfiBridge {
+        for path in [config::settings_path(), config::session_path()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        ffi_bridge_with(BridgeRuntimeOptions {
+            persisted_state_enabled: true,
+            ..BridgeRuntimeOptions::default()
+        })
+    }
+
+    fn ffi_set_db_range(handle: *mut FerrousFfiBridge, value: f32) {
+        assert!(ffi_send_binary(
+            handle,
+            &encode_command(27, &value.to_le_bytes())
+        ));
+    }
+
+    fn saved_settings() -> String {
+        std::fs::read_to_string(config::settings_path().expect("settings path"))
+            .expect("read the saved settings")
+    }
+
+    /// Files in the config directory that a save left behind.
+    fn leftover_temporary_files() -> Vec<String> {
+        let dir = config::config_base_path().expect("config dir");
+        std::fs::read_dir(dir)
+            .expect("read the config dir")
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| std::path::Path::new(name).extension() == Some("tmp".as_ref()))
+            .collect()
+    }
+
+    #[test]
+    fn destroy_returns_after_saving_settings_changed_just_before() {
+        let _guard = super::super::tests::test_guard();
+        let handle = ffi_bridge_saving_state();
+        ffi_set_db_range(handle, 123.0);
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        assert!(
+            saved_settings().contains("db_range=123.00"),
+            "{}",
+            saved_settings()
+        );
+        assert!(config::session_path().expect("session path").exists());
+    }
+
+    #[test]
+    fn bridges_saving_settings_back_to_back_keep_the_last_ones() {
+        let _guard = super::super::tests::test_guard();
+        for value in [111.0_f32, 122.0, 133.0] {
+            let handle = ffi_bridge_saving_state();
+            ffi_set_db_range(handle, value);
+            // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+            assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+        }
+
+        assert!(
+            saved_settings().contains("db_range=133.00"),
+            "{}",
+            saved_settings()
+        );
+        assert_eq!(leftover_temporary_files(), Vec::<String>::new());
+    }
+
+    /// A Last.fm service that waits for `release` before it confirms
+    /// shutdown, as if it were saving its queue, and then sets `saved`.
+    fn slow_lastfm(
+        release: crossbeam_channel::Receiver<()>,
+        saved: Arc<AtomicBool>,
+    ) -> (
+        crate::lastfm::Handle,
+        crossbeam_channel::Receiver<crate::lastfm::Event>,
+    ) {
+        let (handle, commands) = crate::lastfm::test_support::command_handle();
+        thread::spawn(move || {
+            while let Ok(command) = commands.recv() {
+                if let crate::lastfm::Command::Shutdown(done) = command {
+                    let _ = release.recv();
+                    saved.store(true, Ordering::SeqCst);
+                    let _ = done.send(Ok(()));
+                    return;
+                }
+            }
+        });
+        let (_event_tx, events) = crossbeam_channel::unbounded();
+        (handle, events)
+    }
+
+    #[test]
+    fn destroy_returns_after_lastfm_has_saved_its_queue() {
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let saved = Arc::new(AtomicBool::new(false));
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            lastfm: Some(slow_lastfm(release_rx, Arc::clone(&saved))),
+            ..BridgeRuntimeOptions::default()
+        });
+        // The save finishes while destroy waits.
+        release_tx.send(()).expect("release the save");
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        assert!(saved.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn destroy_gives_up_on_a_bridge_that_does_not_stop_in_time() {
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let saved = Arc::new(AtomicBool::new(false));
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            lastfm: Some(slow_lastfm(release_rx, Arc::clone(&saved))),
+            ..BridgeRuntimeOptions::default()
+        });
+        // SAFETY: `handle` is live until it is destroyed below.
+        unsafe { (*handle).shutdown_timeout = Duration::from_millis(50) };
+
+        // The Last.fm save is held until destroy has returned.
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(!unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        assert!(!saved.load(Ordering::SeqCst));
+        release_tx.send(()).expect("release the save");
+    }
+
+    #[test]
+    fn destroy_saves_a_scrobble_queued_behind_a_lastfm_request_that_does_not_answer() {
+        let dir = crate::paths::test_root().join("ffi-lastfm-blocked-request");
+        let _ = std::fs::remove_dir_all(&dir);
+        let queue_path = dir.join("lastfm_queue.json");
+        let (transport, blocked) = crate::lastfm::test_support::BlockingTransport::new();
+        let (lastfm, events) =
+            crate::lastfm::test_support::spawn_connected(transport, queue_path.clone());
+        lastfm.command(crate::lastfm::Command::QueueScrobble(scrobble(0)));
+        blocked
+            .started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the scrobble is sent");
+        // Accepted while Last.fm waits for the request, so only in memory.
+        lastfm.command(crate::lastfm::Command::QueueScrobble(scrobble(1)));
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            lastfm: Some((lastfm, events)),
+            ..BridgeRuntimeOptions::default()
+        });
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        let saved: Vec<crate::lastfm::ScrobbleEntry> =
+            serde_json::from_slice(&std::fs::read(&queue_path).expect("read the queue"))
+                .expect("parse the queue");
+        assert_eq!(saved, vec![scrobble(0), scrobble(1)]);
+        assert_eq!(blocked.answered(), 0, "the request is still running");
+        blocked.release.send(()).expect("release the request");
+    }
+
+    fn scrobble(index: i64) -> crate::lastfm::ScrobbleEntry {
+        crate::lastfm::ScrobbleEntry {
+            artist: "Artist".to_string(),
+            track: format!("Track {index}"),
+            album: String::new(),
+            track_number: None,
+            duration_seconds: Some(200),
+            timestamp_utc: 1_700_000_000 + index,
+        }
+    }
+
+    #[test]
+    fn destroy_reports_a_lastfm_queue_that_was_not_confirmed_saved() {
+        let (lastfm, commands) = crate::lastfm::test_support::command_handle();
+        // Stops without confirming that the queue was saved.
+        thread::spawn(move || {
+            while let Ok(command) = commands.recv() {
+                if let crate::lastfm::Command::Shutdown(done) = command {
+                    drop(done);
+                    return;
+                }
+            }
+        });
+        let (_event_tx, events) = crossbeam_channel::unbounded();
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            lastfm: Some((lastfm, events)),
+            ..BridgeRuntimeOptions::default()
+        });
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(!unsafe { ferrous_ffi_bridge_destroy(handle) });
+    }
+
+    fn ffi_send_save_state(handle: *mut FerrousFfiBridge, request_id: u32) {
+        assert!(ffi_send_binary(
+            handle,
+            &encode_command(66, &request_id.to_le_bytes())
+        ));
+    }
+
+    /// The next answer to a save request: its request ID, and `None` for
+    /// success or what the user is shown.
+    fn ffi_next_state_saved(handle: *mut FerrousFfiBridge) -> (u32, Option<String>) {
+        let packet = ffi_wait_for_mask(handle, SECTION_STATE_SAVED, Duration::from_secs(5))
+            .expect("the bridge answers");
+        let (_, _, mask) = parse_packet_header(&packet);
+        assert_eq!(mask, SECTION_STATE_SAVED);
+        // The header and the section length, then the request ID, the
+        // success flag, and the message.
+        let request_id = u32::from_le_bytes(packet[16..20].try_into().expect("request ID"));
+        let saved = packet[20] != 0;
+        let len = u32::from_le_bytes(packet[21..25].try_into().expect("length")) as usize;
+        let message = String::from_utf8(packet[25..25 + len].to_vec()).expect("UTF-8");
+        assert_eq!(packet.len(), 25 + len);
+        assert_eq!(saved, message.is_empty());
+        (request_id, (!saved).then_some(message))
+    }
+
+    /// Ask the bridge to save its state, and return its answer: `None` for
+    /// success, or what the user is shown.
+    fn ffi_save_state(handle: *mut FerrousFfiBridge) -> Option<String> {
+        ffi_send_save_state(handle, 7);
+        let (request_id, message) = ffi_next_state_saved(handle);
+        assert_eq!(request_id, 7);
+        message
+    }
+
+    #[test]
+    fn save_state_answers_whether_settings_and_queue_reached_the_disk() {
+        let _guard = super::super::tests::test_guard();
+        let handle = ffi_bridge_saving_state();
+        ffi_set_db_range(handle, 101.0);
+        assert_eq!(ffi_save_state(handle), None);
+        assert!(saved_settings().contains("db_range=101.00"));
+        assert!(config::session_path().expect("session path").exists());
+
+        // Nothing can be renamed over a directory.
+        let settings_path = config::settings_path().expect("settings path");
+        std::fs::remove_file(&settings_path).expect("remove the settings");
+        std::fs::create_dir(&settings_path).expect("block the settings");
+        ffi_set_db_range(handle, 102.0);
+        let message = ffi_save_state(handle).expect("the save fails");
+        assert!(
+            message.starts_with("Settings could not be saved"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&settings_path.display().to_string()),
+            "{message}"
+        );
+
+        // Retrying once the cause is gone saves the latest settings.
+        std::fs::remove_dir(&settings_path).expect("unblock the settings");
+        assert_eq!(ffi_save_state(handle), None);
+        assert!(saved_settings().contains("db_range=102.00"));
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+    }
+
+    #[test]
+    fn save_state_answers_each_request_with_its_own_id() {
+        let _guard = super::super::tests::test_guard();
+        let handle = ffi_bridge_saving_state();
+        // A retry sent before the first answer arrived.
+        ffi_send_save_state(handle, 1);
+        ffi_send_save_state(handle, u32::MAX);
+        assert_eq!(ffi_next_state_saved(handle), (1, None));
+        assert_eq!(ffi_next_state_saved(handle), (u32::MAX, None));
+        // A save request must say which attempt it is.
+        assert!(parse_binary_command(&encode_command(66, &[])).is_err());
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+    }
+
+    #[test]
+    fn save_state_succeeds_when_state_is_not_persisted() {
+        let handle = ffi_bridge_with(BridgeRuntimeOptions::default());
+        assert_eq!(ffi_save_state(handle), None);
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
     }
 
     /// The reason in a packet that reports a stop the UI did not ask for.

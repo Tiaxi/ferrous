@@ -261,6 +261,12 @@ ApplicationWindow {
         property string diagnosticsLogPath: ""
         property bool connected: false
         property string backendFailure: ""
+        // What saveStateBeforeQuit fails with; empty for a save that succeeds.
+        property string stateSaveError: ""
+        // Leaves saveStateBeforeQuit unanswered, so tests can answer it
+        // with stateSaveFinished in the order they choose.
+        property bool holdStateSaveAnswers: false
+        property int lastStateSaveRequestId: 0
         signal playbackChanged()
         signal trackIdentityChanged()
         signal trackMetadataChanged()
@@ -352,6 +358,17 @@ ApplicationWindow {
         function scanDefaultMusicRoot() {}
         function requestSnapshot() {}
         function shutdown() {}
+        signal stateSaveFinished(int requestId, bool saved, string message)
+        function saveStateBeforeQuit() {
+            const requestId = ++bridgeFallback.lastStateSaveRequestId
+            const error = bridgeFallback.stateSaveError
+            if (!bridgeFallback.holdStateSaveAnswers) {
+                Qt.callLater(function() {
+                    bridgeFallback.stateSaveFinished(requestId, error.length === 0, error)
+                })
+            }
+            return requestId
+        }
         function clearDiagnostics() {}
         function reloadDiagnosticsFromDisk() {}
         function toggleChannelMute(channelIndex) {}
@@ -545,9 +562,12 @@ ApplicationWindow {
     }
     Action {
         id: quitAction
+        objectName: "quitAction"
         text: "Quit"
         shortcut: StandardKey.Quit
-        onTriggered: Qt.quit()
+        // Closing the window, not quitting, runs onClosing, which saves the
+        // settings and the queue and stops the backend.
+        onTriggered: root.close()
     }
     Action {
         id: playLibrarySelectionAction
@@ -1185,13 +1205,90 @@ ApplicationWindow {
         sourceSize.height: root.albumArtViewerDecodeHeight
     }
 
+    // Set once the settings and the queue are saved for quitting, or the
+    // user chose to quit without them, so that the window may close.
+    property bool quitStateSettled: false
+    // The request ID of the latest save attempt still waiting for its
+    // answer, or 0. Only its answer settles quitting; the timeout only
+    // shows the dialog, so a late answer still does.
+    property real quitStateRequestId: 0
+
     onClosing: function(close) {
-        libraryController.persistLibraryViewState()
+        if (!root.quitStateSettled) {
+            // Closes again once the save has answered, while the window can
+            // still show a failure.
+            close.accepted = false
+            if (root.quitStateRequestId === 0) {
+                root.saveStateBeforeClosing()
+            }
+            return
+        }
         uiBridge.shutdown()
+    }
+
+    function saveStateBeforeClosing() {
+        // The library view is saved with the queue.
+        libraryController.persistLibraryViewState()
+        quitStateSaveTimeout.restart()
+        root.quitStateRequestId = uiBridge.saveStateBeforeQuit()
+    }
+
+    function finishStateSaveBeforeClosing(requestId, saved, message) {
+        if (requestId === 0 || requestId !== root.quitStateRequestId) {
+            // An earlier attempt, superseded by a retry, or one the user
+            // has stopped waiting for.
+            return
+        }
+        root.forgetStateSaveBeforeClosing()
+        if (saved) {
+            quitSaveFailedDialog.close()
+            root.closeNow()
+        } else {
+            quitSaveFailedDialog.message = message
+            quitSaveFailedDialog.open()
+        }
+    }
+
+    function forgetStateSaveBeforeClosing() {
+        root.quitStateRequestId = 0
+        quitStateSaveTimeout.stop()
+    }
+
+    function closeNow() {
+        root.forgetStateSaveBeforeClosing()
+        root.quitStateSettled = true
+        root.close()
+    }
+
+    Timer {
+        id: quitStateSaveTimeout
+        objectName: "quitStateSaveTimeout"
+        // Saving takes milliseconds. A backend that has not answered by then
+        // may be stuck, and the user decides whether to wait or quit. The
+        // window still closes if the answer is a success that comes later.
+        interval: 5000
+        onTriggered: {
+            quitSaveFailedDialog.message =
+                "The backend did not answer in time; settings and the queue may not have been saved."
+            quitSaveFailedDialog.open()
+        }
+    }
+
+    Dialogs.QuitSaveFailedDialog {
+        id: quitSaveFailedDialog
+        uiPalette: root.uiPalette
+        windowRoot: root
+        onRetryRequested: root.saveStateBeforeClosing()
+        onQuitRequested: root.closeNow()
+        // Escape keeps Ferrous open, so a late answer must not close it.
+        onRejected: root.forgetStateSaveBeforeClosing()
     }
 
     Connections {
         target: uiBridge
+        function onStateSaveFinished(requestId, saved, message) {
+            root.finishStateSaveBeforeClosing(requestId, saved, message)
+        }
         function onSnapshotChanged() {
             libraryController.tryApplyPersistedViewState()
             if (uiBridge.profileLogsEnabled) {

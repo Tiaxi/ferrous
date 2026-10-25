@@ -122,6 +122,7 @@ qt_add_qml_module(ferrous
         qml/dialogs/ItunesArtworkDialog.qml
         qml/dialogs/LibraryRootNameDialog.qml
         qml/dialogs/PreferencesDialog.qml
+        qml/dialogs/QuitSaveFailedDialog.qml
         qml/dialogs/AutoNumberDialog.qml
         qml/dialogs/TagEditorCloseConfirmDialog.qml
         qml/dialogs/TagEditorDialog.qml

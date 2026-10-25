@@ -20,6 +20,7 @@ use super::{
     f64_to_u64_saturating, usize_to_u64, AnalysisEvent, PrecomputedSpectrogramChunk,
     SpectrogramDisplayMode, SpectrogramViewMode, REFERENCE_HOP,
 };
+use crate::worker_thread::{spawn_joinable, JoinableThread};
 
 #[cfg(feature = "profiling-logs")]
 macro_rules! profile_eprintln {
@@ -611,6 +612,8 @@ impl Drop for StopOnExit {
     }
 }
 
+const SPECTROGRAM_THREAD_NAME: &str = "ferrous-spectrogram-decode";
+
 pub(super) fn spawn_spectrogram_decode_worker(
     cmd_rx: Receiver<SpectrogramWorkerCommand>,
     event_tx: AnalysisOutputs,
@@ -618,7 +621,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
     columns_produced: Arc<AtomicU64>,
     track_duration_ms: Arc<AtomicU64>,
     status: &SpectrogramWorkerStatus,
-) {
+) -> Option<JoinableThread> {
     let thread_status = status.clone();
     let work = move || {
         let _stopped = StopOnExit(thread_status);
@@ -630,20 +633,21 @@ pub(super) fn spawn_spectrogram_decode_worker(
             &track_duration_ms,
         );
     };
-    let builder = std::thread::Builder::new().name("ferrous-spectrogram-decode".to_string());
     #[cfg(test)]
     let spawned = if spawn_test_hooks::take_spawn_failure() {
         drop(work);
         Err(std::io::Error::other("injected spawn failure"))
     } else {
-        builder.spawn(work)
+        spawn_joinable(SPECTROGRAM_THREAD_NAME, work)
     };
     #[cfg(not(test))]
-    let spawned = builder.spawn(work);
-    if let Err(error) = spawned {
-        eprintln!("[ferrous] failed to start the spectrogram decode thread: {error}");
-        status.stop(format!("its thread could not start ({error})"));
-    }
+    let spawned = spawn_joinable(SPECTROGRAM_THREAD_NAME, work);
+    spawned
+        .inspect_err(|error| {
+            eprintln!("[ferrous] failed to start the spectrogram decode thread: {error}");
+            status.stop(format!("its thread could not start ({error})"));
+        })
+        .ok()
 }
 
 /// Mark `status` stopped the way a spectrogram worker that panics does.
