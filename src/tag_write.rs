@@ -38,7 +38,8 @@ use crate::vorbis_comment_scan::skipped_comments;
 ///   [`Changes`] for how an edit is told apart from what the generic tag lost.
 ///
 /// lofty does not read some Vorbis comments, such as ones whose value is
-/// not UTF-8, so its own tag cannot keep them. Such files are not saved.
+/// not UTF-8, or some FLAC picture blocks, so its own tag cannot keep them.
+/// Such files are not saved.
 ///
 /// # Errors
 ///
@@ -55,15 +56,20 @@ pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<()
         WriteOptions::new()
     };
     // Edit before the file is touched, so a refused edit leaves it unchanged.
-    let edited = match read_native_tag(path, file_type, tag.tag_type()).map_err(describe)? {
+    let native = read_native_tag(path, file_type, tag.tag_type()).map_err(describe)?;
+    // Checked for FLAC files without comments too: writing the new comments
+    // replaces their picture blocks.
+    if tag.tag_type() == TagType::VorbisComments {
+        let refuse = |err: String| format!("failed to save tags for {}: {err}", path.display());
+        if let Some(refusal) = skipped_comments(path, file_type)
+            .map_err(refuse)?
+            .save_refusal()
+        {
+            return Err(refuse(refusal));
+        }
+    }
+    let edited = match native {
         Some(NativeTag::Vorbis(original)) => {
-            let refuse = |err: String| format!("failed to save tags for {}: {err}", path.display());
-            if let Some(refusal) = skipped_comments(path, file_type)
-                .map_err(refuse)?
-                .save_refusal()
-            {
-                return Err(refuse(refusal));
-            }
             Some(NativeTag::Vorbis(edit_vorbis_comments(original, &tag)))
         }
         Some(NativeTag::Ape(original)) => Some(NativeTag::Ape(edit_ape_tag(original, &tag))),
@@ -1035,6 +1041,114 @@ mod tests {
                 path.display()
             );
         }
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    /// Set the title of the generic tag read from `path`, or of a new one
+    /// when the file has none, as the tag editor does, and save it.
+    fn save_title_creating_tag(path: &Path, title: &str) -> Result<(), String> {
+        let tagged = lofty::read_from_path(path).expect("read tags");
+        let mut tag = tagged
+            .primary_tag()
+            .cloned()
+            .unwrap_or_else(|| Tag::new(tagged.primary_tag_type()));
+        tag.set_title(title.to_string());
+        save_tag(path, tagged.file_type(), &tag)
+    }
+
+    #[test]
+    fn saves_that_would_delete_unreadable_flac_picture_blocks_are_refused() {
+        let dir = test_dir("flac-unreadable-picture");
+        let comments = fixtures::comment_block(&[b"TITLE=Old"]);
+        let readable = fixtures::picture_block(b"cover");
+        let malformed = fixtures::malformed_picture_block();
+        let with_comments = dir.join("comments.flac");
+        std::fs::write(
+            &with_comments,
+            fixtures::flac_blocks(&[
+                (fixtures::VORBIS_COMMENT, &comments),
+                (fixtures::PICTURE, &readable),
+                (fixtures::PICTURE, &malformed),
+            ]),
+        )
+        .expect("write FLAC");
+        // Without a comment block, the new comments are written as a new tag.
+        let picture_only = dir.join("picture-only.flac");
+        std::fs::write(
+            &picture_only,
+            fixtures::flac_blocks(&[(fixtures::PICTURE, &malformed)]),
+        )
+        .expect("write FLAC");
+        for path in [with_comments, picture_only] {
+            let before = std::fs::read(&path).expect("read file");
+
+            let error = save_title_creating_tag(&path, "New").expect_err("title save");
+
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(
+                error.ends_with(
+                    "1 picture block in this file can't be read safely; saving would delete it"
+                ),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&path).expect("read file"), before);
+        }
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn files_with_readable_flac_picture_blocks_still_save() {
+        let dir = test_dir("flac-readable-picture");
+        let path = dir.join("song.flac");
+        let comments = fixtures::comment_block(&[b"TITLE=Old"]);
+        let readable = fixtures::picture_block(b"cover");
+        std::fs::write(
+            &path,
+            fixtures::flac_blocks(&[
+                (fixtures::VORBIS_COMMENT, &comments),
+                (fixtures::PICTURE, &readable),
+            ]),
+        )
+        .expect("write FLAC");
+
+        save_title(&path, "New").expect("title save");
+
+        let mut file = File::open(&path).expect("open file");
+        let flac =
+            lofty::flac::FlacFile::read_from(&mut file, ParseOptions::new()).expect("parse FLAC");
+        assert_eq!(
+            flac.vorbis_comments().and_then(|tag| tag.get("TITLE")),
+            Some("New")
+        );
+        let pictures = flac.pictures();
+        assert_eq!(pictures.len(), 1);
+        assert_eq!(pictures[0].0.data(), b"cover");
+        assert_eq!(pictures[0].0.pic_type(), PictureType::CoverFront);
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn truncated_flac_picture_blocks_fail_to_save_without_a_change() {
+        let dir = test_dir("flac-truncated-picture");
+        let path = dir.join("song.flac");
+        let comments = fixtures::comment_block(&[b"TITLE=Old"]);
+        let readable = fixtures::picture_block(b"cover");
+        let bytes = fixtures::flac_blocks(&[
+            (fixtures::VORBIS_COMMENT, &comments),
+            (fixtures::PICTURE, &readable),
+        ]);
+        std::fs::write(&path, &bytes[..bytes.len() - 1]).expect("write FLAC");
+        let tag = {
+            let mut tag = Tag::new(TagType::VorbisComments);
+            tag.set_title("New".to_string());
+            tag
+        };
+        let before = std::fs::read(&path).expect("read file");
+
+        let error = save_tag(&path, FileType::Flac, &tag).expect_err("truncated save");
+
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert_eq!(std::fs::read(&path).expect("read file"), before);
         std::fs::remove_dir_all(dir).expect("remove test dir");
     }
 
