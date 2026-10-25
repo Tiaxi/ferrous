@@ -43,6 +43,13 @@ const RELAY_RECV_TIMEOUT: Duration = Duration::from_millis(250);
 const BACKEND_STOPPED_MESSAGE: &str =
     "The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.";
 
+/// A command is a u16 id, a u32 payload length, and the payload. Strings in
+/// it, and in every frame sent to the UI, are a u32 byte length and UTF-8;
+/// lists of strings or indices start with a u32 count. The payload bound
+/// matches `kMaxCommandPayloadBytes` in `ui/src/BinaryBridgeCodec.h`.
+const COMMAND_HEADER_BYTES: usize = 6;
+const MAX_COMMAND_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+
 const SNAPSHOT_MAGIC: u32 = 0xFE55_0001;
 const SECTION_PLAYBACK: u16 = 1 << 0;
 const SECTION_QUEUE: u16 = 1 << 1;
@@ -1649,14 +1656,22 @@ fn encode_waveform_window(window: &crate::analysis::WaveformWindow) -> Vec<u8> {
     bytes
 }
 
-fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String> {
-    if payload.len() < 4 {
+pub(super) fn parse_binary_command(payload: &[u8]) -> Result<Option<BridgeCommand>, String> {
+    let Some((header, actual_payload)) = payload.split_at_checked(COMMAND_HEADER_BYTES) else {
         return Err("binary command payload too short".to_string());
+    };
+    let cmd_id = u16::from_le_bytes([header[0], header[1]]);
+    let declared_len = usize_from_u32(u32::from_le_bytes([
+        header[2], header[3], header[4], header[5],
+    ]));
+    if declared_len > MAX_COMMAND_PAYLOAD_BYTES || actual_payload.len() > MAX_COMMAND_PAYLOAD_BYTES
+    {
+        return Err(format!(
+            "Command too large for the backend ({} bytes; the limit is {} MiB). Nothing was changed.",
+            declared_len.max(actual_payload.len()),
+            MAX_COMMAND_PAYLOAD_BYTES / (1024 * 1024)
+        ));
     }
-
-    let cmd_id = u16::from_le_bytes([payload[0], payload[1]]);
-    let declared_len = usize::from(u16::from_le_bytes([payload[2], payload[3]]));
-    let actual_payload = &payload[4..];
     if actual_payload.len() != declared_len {
         return Err(format!(
             "binary command payload length mismatch: header={declared_len}, actual={}",
@@ -1747,8 +1762,8 @@ fn parse_queue_command(
             BridgeQueueCommand::Select(selected)
         }
         63 => {
-            let count = reader.read_u16()?;
-            let mut indices = Vec::with_capacity(usize::from(count));
+            let count = reader.read_count(4)?;
+            let mut indices = Vec::with_capacity(count);
             for _ in 0..count {
                 indices.push(usize_from_u32(reader.read_u32()?));
             }
@@ -1772,35 +1787,35 @@ fn parse_library_collection_command(
     reader: &mut BinaryReader<'_>,
 ) -> Result<Option<BridgeCommand>, String> {
     let command = match cmd_id {
-        13 => BridgeLibraryCommand::AddTrack(PathBuf::from(reader.read_u16_string()?)),
-        14 => BridgeLibraryCommand::PlayTrack(PathBuf::from(reader.read_u16_string()?)),
+        13 => BridgeLibraryCommand::AddTrack(PathBuf::from(reader.read_string()?)),
+        14 => BridgeLibraryCommand::PlayTrack(PathBuf::from(reader.read_string()?)),
         15 => BridgeLibraryCommand::ReplaceWithAlbum(read_path_vec(reader)?),
         16 => BridgeLibraryCommand::AppendAlbum(read_path_vec(reader)?),
         17 => BridgeLibraryCommand::ReplaceAlbumByKey {
-            artist: reader.read_u16_string()?,
-            album: reader.read_u16_string()?,
+            artist: reader.read_string()?,
+            album: reader.read_string()?,
         },
         18 => BridgeLibraryCommand::AppendAlbumByKey {
-            artist: reader.read_u16_string()?,
-            album: reader.read_u16_string()?,
+            artist: reader.read_string()?,
+            album: reader.read_string()?,
         },
         19 => BridgeLibraryCommand::ReplaceArtistByKey {
-            artist: reader.read_u16_string()?,
+            artist: reader.read_string()?,
         },
         20 => BridgeLibraryCommand::AppendArtistByKey {
-            artist: reader.read_u16_string()?,
+            artist: reader.read_string()?,
         },
         37 => BridgeLibraryCommand::ReplaceAllTracks,
         38 => BridgeLibraryCommand::AppendAllTracks,
         48 => BridgeLibraryCommand::ReplaceRootByPath {
-            root: reader.read_u16_string()?,
+            root: reader.read_string()?,
         },
         49 => BridgeLibraryCommand::AppendRootByPath {
-            root: reader.read_u16_string()?,
+            root: reader.read_string()?,
         },
         46 => BridgeLibraryCommand::ApplyAlbumArt {
-            track_path: PathBuf::from(reader.read_u16_string()?),
-            artwork_path: PathBuf::from(reader.read_u16_string()?),
+            track_path: PathBuf::from(reader.read_string()?),
+            artwork_path: PathBuf::from(reader.read_string()?),
         },
         47 => BridgeLibraryCommand::RefreshEditedPaths(read_path_vec(reader)?),
         _ => return Ok(None),
@@ -1815,28 +1830,28 @@ fn parse_library_ui_command(
 ) -> Result<Option<BridgeCommand>, String> {
     let command = match cmd_id {
         21 => BridgeLibraryCommand::AddRoot {
-            path: PathBuf::from(reader.read_u16_string()?),
-            name: reader.read_u16_string()?,
+            path: PathBuf::from(reader.read_string()?),
+            name: reader.read_string()?,
         },
-        22 => BridgeLibraryCommand::RemoveRoot(PathBuf::from(reader.read_u16_string()?)),
-        23 => BridgeLibraryCommand::RescanRoot(PathBuf::from(reader.read_u16_string()?)),
+        22 => BridgeLibraryCommand::RemoveRoot(PathBuf::from(reader.read_string()?)),
+        23 => BridgeLibraryCommand::RescanRoot(PathBuf::from(reader.read_string()?)),
         24 => BridgeLibraryCommand::RescanAll,
         35 => BridgeLibraryCommand::SetNodeExpanded {
-            key: reader.read_u16_string()?,
+            key: reader.read_string()?,
             expanded: reader.read_u8()? != 0,
         },
         60 => BridgeLibraryCommand::SetViewState {
-            selection_key: reader.read_u16_string()?,
-            anchor_key: reader.read_u16_string()?,
+            selection_key: reader.read_string()?,
+            anchor_key: reader.read_string()?,
             anchor_offset: match reader.read_f32()? {
                 value if value.is_finite() => value,
                 _ => return Err("library view anchor offset must be finite".to_string()),
             },
         },
-        61 => BridgeLibraryCommand::ShowTrackInLibrary(PathBuf::from(reader.read_u16_string()?)),
+        61 => BridgeLibraryCommand::ShowTrackInLibrary(PathBuf::from(reader.read_string()?)),
         36 => BridgeLibraryCommand::SetSearchQuery {
             seq: reader.read_u32()?,
-            query: reader.read_u16_string()?,
+            query: reader.read_string()?,
             limit: if reader.offset == reader.bytes.len() {
                 0
             } else {
@@ -1844,8 +1859,8 @@ fn parse_library_ui_command(
             },
         },
         45 => BridgeLibraryCommand::RenameRoot {
-            path: PathBuf::from(reader.read_u16_string()?),
-            name: reader.read_u16_string()?,
+            path: PathBuf::from(reader.read_string()?),
+            name: reader.read_string()?,
         },
         _ => return Ok(None),
     };
@@ -1933,7 +1948,7 @@ fn parse_system_command(
 
 fn read_path_vec(reader: &mut BinaryReader<'_>) -> Result<Vec<PathBuf>, String> {
     Ok(reader
-        .read_u16_string_vec()?
+        .read_string_vec()?
         .into_iter()
         .map(PathBuf::from)
         .collect())
@@ -1958,7 +1973,7 @@ impl<'a> BinaryReader<'a> {
     }
 
     fn read_exact<const N: usize>(&mut self) -> Result<[u8; N], String> {
-        if self.offset + N > self.bytes.len() {
+        if N > self.remaining() {
             return Err("binary command payload truncated".to_string());
         }
         let mut out = [0u8; N];
@@ -1969,10 +1984,6 @@ impl<'a> BinaryReader<'a> {
 
     fn read_u8(&mut self) -> Result<u8, String> {
         Ok(self.read_exact::<1>()?[0])
-    }
-
-    fn read_u16(&mut self) -> Result<u16, String> {
-        Ok(u16::from_le_bytes(self.read_exact::<2>()?))
     }
 
     fn read_u32(&mut self) -> Result<u32, String> {
@@ -1991,21 +2002,36 @@ impl<'a> BinaryReader<'a> {
         Ok(f64::from_le_bytes(self.read_exact::<8>()?))
     }
 
-    fn read_u16_string(&mut self) -> Result<String, String> {
-        let len = usize::from(self.read_u16()?);
-        if self.offset + len > self.bytes.len() {
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.offset
+    }
+
+    /// Read a u32 count of items that each take at least `min_item_bytes`,
+    /// refusing one the rest of the payload cannot hold before anything is
+    /// allocated for it.
+    fn read_count(&mut self, min_item_bytes: usize) -> Result<usize, String> {
+        let count = usize_from_u32(self.read_u32()?);
+        if count > self.remaining() / min_item_bytes {
+            return Err("binary command list count exceeds its payload".to_string());
+        }
+        Ok(count)
+    }
+
+    fn read_string(&mut self) -> Result<String, String> {
+        let len = usize_from_u32(self.read_u32()?);
+        if len > self.remaining() {
             return Err("binary command string truncated".to_string());
         }
         let bytes = &self.bytes[self.offset..self.offset + len];
         self.offset += len;
-        Ok(String::from_utf8_lossy(bytes).to_string())
+        Ok(String::from_utf8_lossy(bytes).into_owned())
     }
 
-    fn read_u16_string_vec(&mut self) -> Result<Vec<String>, String> {
-        let count = usize::from(self.read_u16()?);
+    fn read_string_vec(&mut self) -> Result<Vec<String>, String> {
+        let count = self.read_count(4)?;
         let mut out = Vec::with_capacity(count);
         for _ in 0..count {
-            out.push(self.read_u16_string()?);
+            out.push(self.read_string()?);
         }
         Ok(out)
     }
@@ -2030,7 +2056,7 @@ fn encode_binary_snapshot(
 
 fn encode_error_event(message: &str) -> Vec<u8> {
     let mut payload = Vec::new();
-    push_u16_string(&mut payload, message);
+    push_string(&mut payload, message);
     encode_packet(vec![(SECTION_ERROR, payload)])
 }
 
@@ -2041,7 +2067,7 @@ fn encode_stopped_event() -> Vec<u8> {
 /// A stop the UI did not ask for: the stopped section with the reason.
 fn encode_failure_event(message: &str) -> Vec<u8> {
     let mut payload = Vec::new();
-    push_u16_string(&mut payload, message);
+    push_string(&mut payload, message);
     encode_packet(vec![
         (SECTION_ERROR, payload),
         (SECTION_STOPPED, Vec::new()),
@@ -2069,18 +2095,18 @@ fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
         push_u16(&mut out, row.track_number.map_or(0, clamp_u32_to_u16));
         push_u32(&mut out, row.count);
         push_f32(&mut out, row.length_seconds.unwrap_or(-1.0));
-        push_u16_string(&mut out, &row.label);
-        push_u16_string(&mut out, &row.artist);
-        push_u16_string(&mut out, &row.album);
-        push_u16_string(&mut out, &row.root_label);
-        push_u16_string(&mut out, &row.genre);
-        push_u16_string(&mut out, &row.cover_path);
-        push_u16_string(&mut out, &row.artist_key);
-        push_u16_string(&mut out, &row.album_key);
-        push_u16_string(&mut out, &row.section_key);
-        push_u16_string(&mut out, &row.track_key);
-        push_u16_string(&mut out, &row.track_path);
-        push_u16_string(&mut out, &row.match_detail);
+        push_string(&mut out, &row.label);
+        push_string(&mut out, &row.artist);
+        push_string(&mut out, &row.album);
+        push_string(&mut out, &row.root_label);
+        push_string(&mut out, &row.genre);
+        push_string(&mut out, &row.cover_path);
+        push_string(&mut out, &row.artist_key);
+        push_string(&mut out, &row.album_key);
+        push_string(&mut out, &row.section_key);
+        push_string(&mut out, &row.track_key);
+        push_string(&mut out, &row.track_path);
+        push_string(&mut out, &row.match_detail);
     }
     out
 }
@@ -2134,7 +2160,7 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u8(&mut out, repeat_mode);
     push_u8(&mut out, u8::from(snapshot.playback.shuffle_enabled));
     push_i32(&mut out, current_queue_index);
-    push_u16_string(&mut out, &current_path);
+    push_string(&mut out, &current_path);
     push_u64(&mut out, snapshot.playback.muted_channels_mask);
     push_u8(
         &mut out,
@@ -2327,15 +2353,15 @@ fn encode_queue_section(snapshot: &BridgeSnapshot, queue_section: &QueueSectionD
     push_u32(&mut out, clamp_u32(queue_section.tracks.len()));
 
     for track in &queue_section.tracks {
-        push_u16_string(&mut out, &track.title);
-        push_u16_string(&mut out, &track.artist);
-        push_u16_string(&mut out, &track.album);
-        push_u16_string(&mut out, &track.cover_path);
-        push_u16_string(&mut out, &track.genre);
+        push_string(&mut out, &track.title);
+        push_string(&mut out, &track.artist);
+        push_string(&mut out, &track.album);
+        push_string(&mut out, &track.cover_path);
+        push_string(&mut out, &track.genre);
         push_i32(&mut out, track.year.unwrap_or(i32::MIN));
         push_u16(&mut out, track.track_number.map_or(0, clamp_u32_to_u16));
         push_f32(&mut out, track.length_seconds.unwrap_or(-1.0));
-        push_u16_string(&mut out, &track.path);
+        push_string(&mut out, &track.path);
     }
 
     out
@@ -2357,7 +2383,7 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u32(&mut out, clamp_u32(snapshot.library_album_count));
     push_u8(&mut out, u8::from(snapshot.library.scan_in_progress));
     push_i32(&mut out, snapshot.settings.library_sort_mode.to_i32());
-    push_u16_string(
+    push_string(
         &mut out,
         snapshot.library.last_error.as_deref().unwrap_or_default(),
     );
@@ -2370,8 +2396,8 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u16(&mut out, clamp_u16(snapshot.library.roots.len()));
     for root in &snapshot.library.roots {
         let root_str = root.path.to_string_lossy().to_string();
-        push_u16_string(&mut out, &root_str);
-        push_u16_string(&mut out, &root.name);
+        push_string(&mut out, &root_str);
+        push_string(&mut out, &root.name);
     }
     if snapshot.pre_built_tree_bytes.is_some() {
         push_u16(&mut out, clamp_u16(snapshot.library_expanded_keys.len()));
@@ -2380,10 +2406,10 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
             .iter()
             .take(usize::from(u16::MAX))
         {
-            push_u16_string(&mut out, key);
+            push_string(&mut out, key);
         }
-        push_u16_string(&mut out, &snapshot.library_view_selection_key);
-        push_u16_string(&mut out, &snapshot.library_view_anchor_key);
+        push_string(&mut out, &snapshot.library_view_selection_key);
+        push_string(&mut out, &snapshot.library_view_anchor_key);
         push_f32(&mut out, snapshot.library_view_anchor_offset);
         push_u32(&mut out, snapshot.library_reveal_generation);
     }
@@ -2393,26 +2419,26 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
 
 fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     let mut out = Vec::new();
-    push_u16_string(
+    push_string(
         &mut out,
         snapshot.metadata.source_path.as_deref().unwrap_or_default(),
     );
-    push_u16_string(&mut out, &snapshot.metadata.title);
-    push_u16_string(&mut out, &snapshot.metadata.artist);
-    push_u16_string(&mut out, &snapshot.metadata.album);
-    push_u16_string(&mut out, &snapshot.metadata.album_artist);
-    push_u16_string(&mut out, &snapshot.metadata.genre);
+    push_string(&mut out, &snapshot.metadata.title);
+    push_string(&mut out, &snapshot.metadata.artist);
+    push_string(&mut out, &snapshot.metadata.album);
+    push_string(&mut out, &snapshot.metadata.album_artist);
+    push_string(&mut out, &snapshot.metadata.genre);
     push_i32(&mut out, snapshot.metadata.year.unwrap_or(i32::MIN));
     push_u32(&mut out, snapshot.metadata.sample_rate_hz.unwrap_or(0));
     push_u32(&mut out, snapshot.metadata.bitrate_kbps.unwrap_or(0));
     push_u16(&mut out, snapshot.metadata.channels.map_or(0, u16::from));
     push_u16(&mut out, snapshot.metadata.bit_depth.map_or(0, u16::from));
-    push_u16_string(&mut out, &snapshot.metadata.format_label);
+    push_string(&mut out, &snapshot.metadata.format_label);
     push_u32(
         &mut out,
         snapshot.metadata.current_bitrate_kbps.unwrap_or(0),
     );
-    push_u16_string(
+    push_string(
         &mut out,
         snapshot
             .metadata
@@ -2429,7 +2455,7 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         .iter()
         .take(usize::from(u16::MAX))
     {
-        push_u16_string(&mut out, label);
+        push_string(&mut out, label);
     }
     out
 }
@@ -2506,9 +2532,9 @@ fn encode_lastfm_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u8(&mut out, u8::from(snapshot.lastfm.build_configured));
     push_u8(&mut out, auth_state);
     push_u32(&mut out, clamp_u32(snapshot.lastfm.pending_scrobble_count));
-    push_u16_string(&mut out, &snapshot.lastfm.username);
-    push_u16_string(&mut out, &snapshot.lastfm.status_text);
-    push_u16_string(&mut out, &snapshot.lastfm.auth_url);
+    push_string(&mut out, &snapshot.lastfm.username);
+    push_string(&mut out, &snapshot.lastfm.status_text);
+    push_string(&mut out, &snapshot.lastfm.auth_url);
     out
 }
 
@@ -2592,11 +2618,16 @@ fn push_f64(out: &mut Vec<u8>, value: f64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn push_u16_string(out: &mut Vec<u8>, value: &str) {
-    let bytes = value.as_bytes();
-    let len = clamp_u16(bytes.len());
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&bytes[..usize::from(len)]);
+/// Append a u32 byte length and the UTF-8 bytes. No string the bridge sends
+/// comes near 4 GiB, and no frame could hold one, so one that did would be
+/// sent empty rather than cut inside a character.
+pub(super) fn push_string(out: &mut Vec<u8>, value: &str) {
+    let Ok(len) = u32::try_from(value.len()) else {
+        push_u32(out, 0);
+        return;
+    };
+    push_u32(out, len);
+    out.extend_from_slice(value.as_bytes());
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2767,11 +2798,11 @@ mod error_packet_tests {
         let text = message.as_bytes();
         let mut expected = Vec::new();
         expected.extend_from_slice(&0xFE55_0001_u32.to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(22 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(24 + text.len()).unwrap().to_le_bytes());
         expected.extend_from_slice(&((1_u16 << 6) | (1_u16 << 7)).to_le_bytes());
         expected.extend_from_slice(&0_u16.to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(2 + text.len()).unwrap().to_le_bytes());
-        expected.extend_from_slice(&u16::try_from(text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(4 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
         expected.extend_from_slice(text);
         expected.extend_from_slice(&0_u32.to_le_bytes());
         assert_eq!(encode_failure_event(message), expected);
@@ -2784,11 +2815,11 @@ mod error_packet_tests {
         let text = message.as_bytes();
         let mut expected = Vec::new();
         expected.extend_from_slice(&0xFE55_0001_u32.to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(18 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(20 + text.len()).unwrap().to_le_bytes());
         expected.extend_from_slice(&(1_u16 << 6).to_le_bytes());
         expected.extend_from_slice(&0_u16.to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(2 + text.len()).unwrap().to_le_bytes());
-        expected.extend_from_slice(&u16::try_from(text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(4 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
         expected.extend_from_slice(text);
         assert_eq!(encode_error_event(message), expected);
     }
@@ -2930,9 +2961,9 @@ mod tests {
     }
 
     fn encode_command(cmd_id: u16, payload: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(4 + payload.len());
+        let mut out = Vec::with_capacity(COMMAND_HEADER_BYTES + payload.len());
         out.extend_from_slice(&cmd_id.to_le_bytes());
-        out.extend_from_slice(&clamp_u16(payload.len()).to_le_bytes());
+        out.extend_from_slice(&clamp_u32(payload.len()).to_le_bytes());
         out.extend_from_slice(payload);
         out
     }
@@ -2979,15 +3010,8 @@ mod tests {
         f64::from_le_bytes(bytes[start..end].try_into().expect("f64 bytes"))
     }
 
-    fn read_u16_string(bytes: &[u8], offset: &mut usize) -> String {
-        let len = {
-            let start = *offset;
-            let end = start + 2;
-            *offset = end;
-            usize::from(u16::from_le_bytes(
-                bytes[start..end].try_into().expect("u16 bytes"),
-            ))
-        };
+    fn read_string(bytes: &[u8], offset: &mut usize) -> String {
+        let len = usize::try_from(read_u32(bytes, offset)).expect("string length");
         let start = *offset;
         let end = start + len;
         *offset = end;
@@ -3019,7 +3043,7 @@ mod tests {
     #[test]
     fn batch_removal_command_decodes_all_indices_and_rejects_truncation() {
         let mut payload = Vec::new();
-        push_u16(&mut payload, 3);
+        push_u32(&mut payload, 3);
         for index in [9, 5, 1] {
             push_u32(&mut payload, index);
         }
@@ -3029,6 +3053,143 @@ mod tests {
         );
         payload.pop();
         assert!(parse_binary_command(&encode_command(63, &payload)).is_err());
+    }
+
+    /// A string list payload as the Qt encoder writes it.
+    fn string_list_payload(values: &[String]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::try_from(values.len()).expect("count"));
+        for value in values {
+            push_string(&mut payload, value);
+        }
+        payload
+    }
+
+    /// 65,534 ASCII bytes, then characters of 2, 3, and 4 bytes that
+    /// straddle the 65,535 bytes a u16 length could hold.
+    fn string_past_the_old_length_limit() -> String {
+        let text = format!("{}é€😀tail", "a".repeat(65_534));
+        assert!(text.len() > usize::from(u16::MAX));
+        assert!(!text.is_char_boundary(usize::from(u16::MAX)));
+        text
+    }
+
+    #[test]
+    fn a_path_list_far_beyond_64_kib_decodes_whole_and_in_order() {
+        let paths: Vec<String> = (0..5_000)
+            .rev()
+            .map(|i| format!("/fixture/Ärtist {i:04}/トラック – {i:04}.flac"))
+            .collect();
+        let payload = string_list_payload(&paths);
+        assert!(payload.len() > 3 * usize::from(u16::MAX));
+        let expected: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        for cmd_id in [15, 16] {
+            match parse_binary_command(&encode_command(cmd_id, &payload)) {
+                Ok(Some(BridgeCommand::Library(
+                    BridgeLibraryCommand::ReplaceWithAlbum(parsed)
+                    | BridgeLibraryCommand::AppendAlbum(parsed),
+                ))) => assert_eq!(parsed, expected, "command {cmd_id}"),
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            parse_binary_command(&encode_command(47, &payload)),
+            Ok(Some(BridgeCommand::Library(BridgeLibraryCommand::RefreshEditedPaths(parsed))))
+                if parsed == expected
+        ));
+    }
+
+    #[test]
+    fn strings_past_the_old_length_limit_cross_the_bridge_whole_both_ways() {
+        // Mirrored by BridgeClientTest::stringsPastTheOldLengthLimitCrossWhole.
+        let text = string_past_the_old_length_limit();
+        let mut payload = Vec::new();
+        push_string(&mut payload, &text);
+        assert_eq!(
+            &payload[..4],
+            &u32::try_from(text.len()).unwrap().to_le_bytes()
+        );
+        assert!(matches!(
+            parse_binary_command(&encode_command(14, &payload)),
+            Ok(Some(BridgeCommand::Library(BridgeLibraryCommand::PlayTrack(path))))
+                if path.as_os_str() == text.as_str()
+        ));
+
+        // The UI gets the same string whole in an error packet.
+        let packet = encode_failure_event(&text);
+        assert_eq!(failure_message(&packet).as_deref(), Some(text.as_str()));
+    }
+
+    #[test]
+    fn commands_over_the_bound_are_refused_with_a_message_the_ui_shows() {
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        let oversized = vec![0_u8; MAX_COMMAND_PAYLOAD_BYTES + 1];
+        let parsed = parse_binary_command(&encode_command(15, &oversized));
+        let message = parsed.clone().expect_err("over the bound");
+        assert!(message.contains("too large"), "{message}");
+        assert!(message.contains("8 MiB"), "{message}");
+        assert!(!runtime.send_command(parsed));
+        assert!(command_rx.try_recv().is_err(), "nothing reaches the bridge");
+        let packet = runtime.pop_binary_event().expect("error event");
+        let (_, _, mask) = parse_packet_header(&packet);
+        assert_eq!(mask, SECTION_ERROR);
+        let mut offset = 16;
+        assert_eq!(read_string(&packet, &mut offset), message);
+
+        // A header that claims more than the bound is refused before the
+        // payload is looked at.
+        let mut header = encode_command(15, &[]);
+        header[2..6].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_binary_command(&header)
+            .expect_err("claimed length")
+            .contains("too large"));
+
+        // A list at the bound is still taken.
+        let path = "p".repeat(1020);
+        let fill = (MAX_COMMAND_PAYLOAD_BYTES - 4) / (4 + path.len());
+        let payload = string_list_payload(&vec![path; fill]);
+        assert!(payload.len() <= MAX_COMMAND_PAYLOAD_BYTES);
+        assert!(parse_binary_command(&encode_command(16, &payload)).is_ok());
+    }
+
+    #[test]
+    fn truncated_or_corrupt_lengths_are_refused_without_a_panic() {
+        let payload = string_list_payload(&["/fixture/a.flac".to_string(), "é€😀".to_string()]);
+        let command = encode_command(15, &payload);
+        // Every cut of the command is refused: in the header, or because the
+        // payload no longer matches its length.
+        for len in 0..command.len() {
+            assert!(
+                parse_binary_command(&command[..len]).is_err(),
+                "cut at {len}"
+            );
+        }
+        // Every cut of the payload, framed with its own length, is refused
+        // by the reader, also within a character.
+        for len in 0..payload.len() {
+            assert!(
+                parse_binary_command(&encode_command(15, &payload[..len])).is_err(),
+                "payload cut at {len}"
+            );
+        }
+        let long = string_list_payload(&[string_past_the_old_length_limit()]);
+        for len in [8, 4 + usize::from(u16::MAX), long.len() - 1] {
+            assert!(parse_binary_command(&encode_command(15, &long[..len])).is_err());
+        }
+
+        // Counts and lengths the payload cannot hold allocate nothing.
+        let mut huge_count = Vec::new();
+        push_u32(&mut huge_count, u32::MAX);
+        for cmd_id in [15, 16, 47, 63] {
+            assert!(parse_binary_command(&encode_command(cmd_id, &huge_count)).is_err());
+        }
+        let mut huge_string = Vec::new();
+        push_u32(&mut huge_string, 1);
+        push_u32(&mut huge_string, u32::MAX);
+        huge_string.extend_from_slice(b"short");
+        assert!(parse_binary_command(&encode_command(15, &huge_string)).is_err());
+        assert!(parse_binary_command(&encode_command(14, &huge_string[4..])).is_err());
     }
 
     #[test]
@@ -3061,9 +3222,9 @@ mod tests {
         // Renames reach the bridge through the import gate, in order with
         // import results, never as a command the UI sends afterwards.
         let mut payload = Vec::new();
-        push_u16(&mut payload, 2);
-        push_u16_string(&mut payload, "/fixture/old.ac3");
-        push_u16_string(&mut payload, "/fixture/new.ac3");
+        push_u32(&mut payload, 2);
+        push_string(&mut payload, "/fixture/old.ac3");
+        push_string(&mut payload, "/fixture/new.ac3");
         assert_eq!(
             parse_binary_command(&encode_command(62, &payload)).err(),
             Some("unknown binary command id 62".to_string())
@@ -3250,13 +3411,9 @@ mod tests {
     #[test]
     fn parse_binary_command_supports_library_batch_commands() {
         let mut payload = Vec::new();
-        let first = b"/music/a.flac";
-        let second = b"/music/b.flac";
-        payload.extend_from_slice(&2u16.to_le_bytes());
-        payload.extend_from_slice(&clamp_u16(first.len()).to_le_bytes());
-        payload.extend_from_slice(first);
-        payload.extend_from_slice(&clamp_u16(second.len()).to_le_bytes());
-        payload.extend_from_slice(second);
+        push_u32(&mut payload, 2);
+        push_string(&mut payload, "/music/a.flac");
+        push_string(&mut payload, "/music/b.flac");
 
         let cmd = parse_binary_command(&encode_command(15, &payload))
             .expect("parse")
@@ -3279,8 +3436,7 @@ mod tests {
     fn parse_binary_command_supports_set_node_expanded() {
         let key = "artist|/music|Artist A";
         let mut payload = Vec::new();
-        payload.extend_from_slice(&clamp_u16(key.len()).to_le_bytes());
-        payload.extend_from_slice(key.as_bytes());
+        push_string(&mut payload, key);
         payload.push(1);
 
         let cmd = parse_binary_command(&encode_command(35, &payload))
@@ -3303,8 +3459,8 @@ mod tests {
         let selection_key = "track|/music/Artist/Album/01.flac";
         let anchor_key = "album|/music|Artist|Album";
         let mut payload = Vec::new();
-        push_u16_string(&mut payload, selection_key);
-        push_u16_string(&mut payload, anchor_key);
+        push_string(&mut payload, selection_key);
+        push_string(&mut payload, anchor_key);
         push_f32(&mut payload, 5.5);
 
         let cmd = parse_binary_command(&encode_command(60, &payload))
@@ -3325,7 +3481,7 @@ mod tests {
 
         let path = "/music/Artist/Album/01.flac";
         let mut payload = Vec::new();
-        push_u16_string(&mut payload, path);
+        push_string(&mut payload, path);
         let cmd = parse_binary_command(&encode_command(61, &payload))
             .expect("parse")
             .expect("command");
@@ -3341,7 +3497,7 @@ mod tests {
     fn search_protocol_carries_expansion_and_totals() {
         let mut payload = Vec::new();
         push_u32(&mut payload, 9);
-        push_u16_string(&mut payload, "blue");
+        push_string(&mut payload, "blue");
         push_u32(&mut payload, 80);
         assert!(matches!(
             parse_binary_command(&encode_command(36, &payload)).expect("parse"),
@@ -3390,7 +3546,7 @@ mod tests {
             rows: vec![row],
         });
         let mut suffix = Vec::new();
-        push_u16_string(&mut suffix, "Comment: remaster");
+        push_string(&mut suffix, "Comment: remaster");
         assert!(bytes.ends_with(&suffix));
     }
 
@@ -3399,8 +3555,7 @@ mod tests {
         let query = "pink floyd";
         let mut payload = Vec::new();
         payload.extend_from_slice(&42u32.to_le_bytes());
-        payload.extend_from_slice(&clamp_u16(query.len()).to_le_bytes());
-        payload.extend_from_slice(query.as_bytes());
+        push_string(&mut payload, query);
 
         let cmd = parse_binary_command(&encode_command(36, &payload))
             .expect("parse")
@@ -3458,15 +3613,15 @@ mod tests {
         assert!((read_f64(&encoded, &mut offset) - 180.0).abs() < 0.001);
         assert_eq!(read_u32(&encoded, &mut offset), 0);
         assert_eq!(read_u32(&encoded, &mut offset), 1);
-        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Track");
-        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Artist");
-        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Album");
-        assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.cover.png");
-        assert_eq!(read_u16_string(&encoded, &mut offset), "Rock");
+        assert_eq!(read_string(&encoded, &mut offset), "Sample Track");
+        assert_eq!(read_string(&encoded, &mut offset), "Sample Artist");
+        assert_eq!(read_string(&encoded, &mut offset), "Sample Album");
+        assert_eq!(read_string(&encoded, &mut offset), "/music/a.cover.png");
+        assert_eq!(read_string(&encoded, &mut offset), "Rock");
         assert_eq!(read_i32(&encoded, &mut offset), 2020);
         assert_eq!(read_u16(&encoded, &mut offset), 1);
         assert!((read_f32(&encoded, &mut offset) - 180.0).abs() < 0.001);
-        assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.flac");
+        assert_eq!(read_string(&encoded, &mut offset), "/music/a.flac");
         assert_eq!(offset, encoded.len());
     }
 
@@ -3543,15 +3698,12 @@ mod tests {
         let encoded = encode_metadata_section(&snapshot);
 
         let mut offset = 0usize;
-        assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.flac");
-        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Track");
-        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Artist");
-        assert_eq!(read_u16_string(&encoded, &mut offset), "Sample Album");
-        assert_eq!(
-            read_u16_string(&encoded, &mut offset),
-            "Sample Album Artist"
-        );
-        assert_eq!(read_u16_string(&encoded, &mut offset), "Rock");
+        assert_eq!(read_string(&encoded, &mut offset), "/music/a.flac");
+        assert_eq!(read_string(&encoded, &mut offset), "Sample Track");
+        assert_eq!(read_string(&encoded, &mut offset), "Sample Artist");
+        assert_eq!(read_string(&encoded, &mut offset), "Sample Album");
+        assert_eq!(read_string(&encoded, &mut offset), "Sample Album Artist");
+        assert_eq!(read_string(&encoded, &mut offset), "Rock");
         assert_eq!(read_i32(&encoded, &mut offset), 2020);
         assert_eq!(read_u32(&encoded, &mut offset), 48_000);
         assert_eq!(read_u32(&encoded, &mut offset), 320);
@@ -3569,14 +3721,14 @@ mod tests {
             u16::from_le_bytes(encoded[start..end].try_into().expect("bit depth"))
         };
         assert_eq!(bit_depth, 24);
-        assert_eq!(read_u16_string(&encoded, &mut offset), "FLAC");
+        assert_eq!(read_string(&encoded, &mut offset), "FLAC");
         assert_eq!(read_u32(&encoded, &mut offset), 905);
-        assert_eq!(read_u16_string(&encoded, &mut offset), "/music/a.cover.png");
+        assert_eq!(read_string(&encoded, &mut offset), "/music/a.cover.png");
         assert_eq!(read_u32(&encoded, &mut offset), 3);
         assert_eq!(&encoded[offset..offset + 2], &2u16.to_le_bytes());
         offset += 2;
-        assert_eq!(read_u16_string(&encoded, &mut offset), "L");
-        assert_eq!(read_u16_string(&encoded, &mut offset), "R");
+        assert_eq!(read_string(&encoded, &mut offset), "L");
+        assert_eq!(read_string(&encoded, &mut offset), "R");
         assert_eq!(offset, encoded.len());
     }
 
@@ -3696,9 +3848,9 @@ mod tests {
         assert_eq!(lastfm[lastfm_offset], 2);
         lastfm_offset += 1;
         assert_eq!(read_u32(lastfm, &mut lastfm_offset), 2);
-        assert_eq!(read_u16_string(lastfm, &mut lastfm_offset), "tester");
-        assert_eq!(read_u16_string(lastfm, &mut lastfm_offset), "Connected");
-        assert_eq!(read_u16_string(lastfm, &mut lastfm_offset), "");
+        assert_eq!(read_string(lastfm, &mut lastfm_offset), "tester");
+        assert_eq!(read_string(lastfm, &mut lastfm_offset), "Connected");
+        assert_eq!(read_string(lastfm, &mut lastfm_offset), "");
         assert_eq!(lastfm_offset, lastfm.len());
     }
 
@@ -4288,7 +4440,7 @@ mod tests {
         }
         let mut offset = 12;
         let _section_len = read_u32(packet, &mut offset);
-        Some(read_u16_string(packet, &mut offset))
+        Some(read_string(packet, &mut offset))
     }
 
     fn relay_shared() -> Arc<FfiShared> {
@@ -4503,8 +4655,8 @@ mod tests {
             p += 1; // u8   repeat_mode
             p += 1; // u8   shuffle
             p += 4; // i32  queue_index
-            let path_len = u16::from_le_bytes(s[p..p + 2].try_into().unwrap()) as usize;
-            p += 2 + path_len; // skip path bytes
+            let path_len = u32::from_le_bytes(s[p..p + 4].try_into().unwrap()) as usize;
+            p += 4 + path_len; // skip path bytes
             result.playback_muted_channels_mask =
                 u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
             p += 8;

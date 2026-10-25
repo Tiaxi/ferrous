@@ -46,6 +46,10 @@ public:
         return m_offset == m_bytes.size();
     }
 
+    quint64 remaining() const {
+        return static_cast<quint64>(m_bytes.size() - m_offset);
+    }
+
     bool readU8(quint8 *out) {
         if (!out || m_offset + 1 > m_bytes.size()) {
             return false;
@@ -82,19 +86,19 @@ public:
         return true;
     }
 
-    bool readUtf8U16(QString *out) {
+    bool readUtf8(QString *out) {
         if (!out) {
             return false;
         }
-        quint16 len = 0;
-        if (!readU16(&len)) {
+        quint32 len = 0;
+        if (!readU32(&len)) {
             return false;
         }
-        if (m_offset + len > m_bytes.size()) {
+        if (static_cast<quint64>(len) > static_cast<quint64>(m_bytes.size() - m_offset)) {
             return false;
         }
-        *out = QString::fromUtf8(m_bytes.constData() + m_offset, len);
-        m_offset += len;
+        *out = QString::fromUtf8(m_bytes.constData() + m_offset, static_cast<qsizetype>(len));
+        m_offset += static_cast<qsizetype>(len);
         return true;
     }
 
@@ -152,20 +156,20 @@ bool parseRows(const QByteArray &treeBytes, QVector<ParsedBinaryRow> *rowsOut) {
         qint32 sourceIndex = -1;
         quint16 trackNumber = 0;
         quint16 childCount = 0;
-        quint16 playPathCount = 0;
+        quint32 playPathCount = 0;
 
         if (!reader.readU8(&row.rowType)
             || !reader.readU16(&depth)
             || !reader.readI32(&sourceIndex)
             || !reader.readU16(&trackNumber)
             || !reader.readU16(&childCount)
-            || !reader.readUtf8U16(&row.title)
-            || !reader.readUtf8U16(&row.key)
-            || !reader.readUtf8U16(&row.artist)
-            || !reader.readUtf8U16(&row.path)
-            || !reader.readUtf8U16(&row.coverPath)
-            || !reader.readUtf8U16(&row.trackPath)
-            || !reader.readU16(&playPathCount)) {
+            || !reader.readUtf8(&row.title)
+            || !reader.readUtf8(&row.key)
+            || !reader.readUtf8(&row.artist)
+            || !reader.readUtf8(&row.path)
+            || !reader.readUtf8(&row.coverPath)
+            || !reader.readUtf8(&row.trackPath)
+            || !reader.readU32(&playPathCount)) {
             return false;
         }
 
@@ -173,10 +177,14 @@ bool parseRows(const QByteArray &treeBytes, QVector<ParsedBinaryRow> *rowsOut) {
         row.sourceIndex = static_cast<int>(sourceIndex);
         row.trackNumber = static_cast<int>(trackNumber);
         row.childCount = static_cast<int>(childCount);
-        row.playPaths.reserve(playPathCount);
-        for (quint16 p = 0; p < playPathCount; ++p) {
+        // Each path takes at least its 4-byte length, which bounds the count.
+        if (playPathCount > reader.remaining() / 4) {
+            return false;
+        }
+        row.playPaths.reserve(static_cast<qsizetype>(playPathCount));
+        for (quint32 p = 0; p < playPathCount; ++p) {
             QString path;
-            if (!reader.readUtf8U16(&path)) {
+            if (!reader.readUtf8(&path)) {
                 return false;
             }
             row.playPaths.push_back(path);

@@ -182,6 +182,10 @@ private slots:
     void tagEditorShowsRefusedEditsAndKeepsTheFile();
     void tagEditorLoadReportsUnreadableFiles();
     void batchRemovalCodecPreservesIndices();
+    void pathListsFarBeyond64KiBAreSentWholeInOneCommand();
+    void thousandsOfAppendedPathsReachTheBackendInOrder();
+    void commandsOverTheBoundAreRefusedVisibly();
+    void stringsPastTheOldLengthLimitCrossWhole();
     void playAtDoesNotEmitImmediateSnapshotChanged();
     void playAtKeepsTheClockUntilTheEngineSwitches();
     void trackSwitchReanchorsBeforeSpectrogramData_data();
@@ -310,7 +314,7 @@ void BridgeClientTest::spectrogramActivityFollowsVisibleItemsAndWindows() {
     QTRY_VERIFY(!client.m_spectrogramActive);
     const QByteArray activeCommand = BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramActive, 1);
-    QCOMPARE(activeCommand, QByteArray::fromHex("4000010001"));
+    QCOMPARE(activeCommand, QByteArray::fromHex("40000100000001"));
 }
 
 void BridgeClientTest::tagJobsKeepUiResponsiveAndDiscardClosedLoads() {
@@ -614,12 +618,227 @@ void BridgeClientTest::tagEditorLoadReportsUnreadableFiles() {
 
 void BridgeClientTest::batchRemovalCodecPreservesIndices() {
     const QByteArray bytes = BinaryBridgeCodec::encodeCommandIndices(BinaryBridgeCodec::CmdRemoveMany, {9, 5, 1});
+    QCOMPARE(bytes.size(), 22);
     QCOMPARE(qFromLittleEndian<quint16>(bytes.constData()), quint16(63));
-    QCOMPARE(qFromLittleEndian<quint16>(bytes.constData() + 2), quint16(14));
-    QCOMPARE(qFromLittleEndian<quint16>(bytes.constData() + 4), quint16(3));
-    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 6), quint32(9));
-    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 10), quint32(5));
-    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 14), quint32(1));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 2), quint32(16));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 6), quint32(3));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 10), quint32(9));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 14), quint32(5));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 18), quint32(1));
+}
+
+namespace {
+
+// Reads a path list command as the Rust decoder does: a u16 id, a u32
+// payload length, a u32 count, then u32-length UTF-8 strings.
+bool decodePathListCommand(const QByteArray &command, quint16 *cmdId, QStringList *paths) {
+    if (command.size() < BinaryBridgeCodec::kCommandHeaderBytes + 4) {
+        return false;
+    }
+    const auto *bytes = reinterpret_cast<const uchar *>(command.constData());
+    *cmdId = qFromLittleEndian<quint16>(bytes);
+    if (qFromLittleEndian<quint32>(bytes + 2) != command.size() - BinaryBridgeCodec::kCommandHeaderBytes) {
+        return false;
+    }
+    qsizetype offset = BinaryBridgeCodec::kCommandHeaderBytes;
+    const quint32 count = qFromLittleEndian<quint32>(bytes + offset);
+    offset += 4;
+    paths->clear();
+    for (quint32 i = 0; i < count; ++i) {
+        if (offset + 4 > command.size()) {
+            return false;
+        }
+        const quint32 len = qFromLittleEndian<quint32>(bytes + offset);
+        offset += 4;
+        if (offset + len > command.size()) {
+            return false;
+        }
+        paths->push_back(QString::fromUtf8(command.constData() + offset, len));
+        offset += len;
+    }
+    return offset == command.size();
+}
+
+// 65,534 ASCII bytes, then characters of 2, 3, and 4 bytes that straddle
+// the 65,535 bytes a u16 length could hold.
+QString stringPastTheOldLengthLimit() {
+    return QString(65534, QLatin1Char('a')) + QStringLiteral("é€😀tail");
+}
+
+} // namespace
+
+void BridgeClientTest::pathListsFarBeyond64KiBAreSentWholeInOneCommand() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    // Reverse order, so a sort anywhere on the way would show.
+    QStringList paths;
+    for (int i = 4999; i >= 0; --i) {
+        paths.push_back(QStringLiteral("/fixture/Ärtist %1/トラック – %1.flac")
+                            .arg(i, 4, 10, QLatin1Char('0')));
+    }
+
+    // Opening files from outside the app, dropping them, and saving tags.
+    client.replaceWithPaths(paths);
+    client.appendPaths(paths);
+    client.refreshEditedPaths(paths);
+
+    QVERIFY(errors.isEmpty());
+    QCOMPARE(sent.size(), 3);
+    const quint16 expectedIds[] = {
+        BinaryBridgeCodec::CmdReplaceAlbum,
+        BinaryBridgeCodec::CmdAppendAlbum,
+        BinaryBridgeCodec::CmdRefreshEditedPaths,
+    };
+    for (int i = 0; i < sent.size(); ++i) {
+        QVERIFY(sent[i].size() > 3 * 65535);
+        quint16 cmdId = 0;
+        QStringList decoded;
+        QVERIFY(decodePathListCommand(sent[i], &cmdId, &decoded));
+        QCOMPARE(cmdId, expectedIds[i]);
+        QCOMPARE(decoded.size(), 5000);
+        QCOMPARE(decoded, paths);
+    }
+}
+
+void BridgeClientTest::thousandsOfAppendedPathsReachTheBackendInOrder() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (int i = 4999; i >= 0; --i) {
+        const QString path = base
+            + QStringLiteral("/%1 – Ärtist トラック.flac").arg(i, 4, 10, QLatin1Char('0'));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("stub"), qint64(4));
+        paths.push_back(path);
+    }
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
+
+    // Appending starts no playback, so the real backend can take the list.
+    // CTest runs these tests with a fake audio output (ui/CMakeLists.txt),
+    // so the bridge reports no missing audio device here.
+    // The queue an earlier test left behind is cleared first; commands
+    // apply in order.
+    bridge.clearQueue();
+    bridge.appendPaths(paths);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 5000, 30000);
+    for (int i = 0; i < paths.size(); ++i) {
+        QCOMPARE(bridge.queuePathAt(i), paths[i]);
+    }
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
+    // Leave no queue of removed fixtures to the tests after this one.
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    isolateBridgeClient(bridge);
+}
+
+void BridgeClientTest::commandsOverTheBoundAreRefusedVisibly() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    // About 10 MiB of paths, over the 8 MiB bound.
+    QStringList paths;
+    for (int i = 0; i < 2500; ++i) {
+        paths.push_back(QStringLiteral("/fixture/%1/%2.flac").arg(QString(4000, QLatin1Char('d'))).arg(i));
+    }
+
+    client.replaceWithPaths(paths);
+    QCOMPARE(errors.size(), 1);
+    QString message = errors.takeFirst().first().toString();
+    QVERIFY2(message.contains(QStringLiteral("2500 files")), qPrintable(message));
+    QVERIFY2(message.contains(QStringLiteral("8 MiB")), qPrintable(message));
+    QVERIFY2(message.contains(QStringLiteral("queue was not changed")), qPrintable(message));
+    client.appendPaths(paths);
+    QCOMPARE(errors.size(), 1);
+    message = errors.takeFirst().first().toString();
+    QVERIFY2(message.contains(QStringLiteral("queue was not changed")), qPrintable(message));
+    client.refreshEditedPaths(paths);
+    QCOMPARE(errors.size(), 1);
+    message = errors.takeFirst().first().toString();
+    QVERIFY2(message.contains(QStringLiteral("Rescan the library")), qPrintable(message));
+    QVERIFY(sent.isEmpty());
+
+    // A string over the bound is refused whole, never cut, and a refused
+    // command fails and says why.
+    const qsizetype maxString = BinaryBridgeCodec::kMaxCommandPayloadBytes - 4;
+    QVERIFY(BinaryBridgeCodec::encodeCommandString(
+                BinaryBridgeCodec::CmdPlayTrack, QString(maxString + 1, QLatin1Char('x')))
+                .isEmpty());
+    QVERIFY(!client.sendBinaryCommand(BinaryBridgeCodec::encodeCommandString(
+        BinaryBridgeCodec::CmdPlayTrack, QString(maxString + 1, QLatin1Char('x')))));
+    QCOMPARE(errors.size(), 1);
+    message = errors.takeFirst().first().toString();
+    QVERIFY2(message.contains(QStringLiteral("8 MiB")), qPrintable(message));
+    QVERIFY(sent.isEmpty());
+
+    // A command at the bound is sent.
+    const QByteArray atBound = BinaryBridgeCodec::encodeCommandString(
+        BinaryBridgeCodec::CmdPlayTrack, QString(maxString, QLatin1Char('x')));
+    QCOMPARE(atBound.size(),
+             BinaryBridgeCodec::kCommandHeaderBytes + qsizetype(BinaryBridgeCodec::kMaxCommandPayloadBytes));
+    QVERIFY(client.sendBinaryCommand(atBound));
+    QCOMPARE(sent.size(), 1);
+    QVERIFY(errors.isEmpty());
+}
+
+void BridgeClientTest::stringsPastTheOldLengthLimitCrossWhole() {
+    // Mirrored by ffi::tests::strings_past_the_old_length_limit_cross_the_bridge_whole_both_ways.
+    const QString text = stringPastTheOldLengthLimit();
+    const QByteArray utf8 = text.toUtf8();
+    QVERIFY(utf8.size() > 65535);
+
+    // To Rust: the command carries every byte, with a u32 length.
+    const QByteArray command =
+        BinaryBridgeCodec::encodeCommandString(BinaryBridgeCodec::CmdPlayTrack, text);
+    const auto *bytes = reinterpret_cast<const uchar *>(command.constData());
+    QCOMPARE(command.size(), BinaryBridgeCodec::kCommandHeaderBytes + 4 + utf8.size());
+    QCOMPARE(qFromLittleEndian<quint16>(bytes), quint16(BinaryBridgeCodec::CmdPlayTrack));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes + 2), quint32(4 + utf8.size()));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes + 6), quint32(utf8.size()));
+    QCOMPARE(command.mid(10), utf8);
+
+    // From Rust: an error packet with the same string decodes whole.
+    QByteArray payload;
+    QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+    payloadStream.setByteOrder(QDataStream::LittleEndian);
+    payloadStream << quint32(utf8.size());
+    payload.append(utf8);
+    const auto packetWith = [](const QByteArray &section) {
+        QByteArray packet;
+        QDataStream header(&packet, QIODevice::WriteOnly);
+        header.setByteOrder(QDataStream::LittleEndian);
+        header << quint32(0xFE550001u) << quint32(16 + section.size())
+               << quint16(BinaryBridgeCodec::SectionError) << quint16(0)
+               << quint32(section.size());
+        packet.append(section);
+        return packet;
+    };
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packetWith(payload), &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.errorMessage, text);
+
+    // A length past the end of the section is refused.
+    QByteArray corrupt = payload;
+    qToLittleEndian<quint32>(quint32(utf8.size() + 1), corrupt.data());
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWith(corrupt), &decoded, &error));
+    qToLittleEndian<quint32>(std::numeric_limits<quint32>::max(), corrupt.data());
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWith(corrupt), &decoded, &error));
 }
 
 void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
@@ -1906,7 +2125,7 @@ void BridgeClientTest::albumArtistFollowsMatchingMetadataAcrossTracks() {
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::LittleEndian);
     auto appendText = [&stream](const QByteArray &value) {
-        stream << quint16(value.size());
+        stream << quint32(value.size());
         stream.writeRawData(value.constData(), value.size());
     };
     for (const QByteArray &text : {QByteArray("/fixture/a.flac"), QByteArray("Title"), QByteArray("Artist"),
@@ -2175,11 +2394,11 @@ void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
     const QByteArray text = message.toUtf8();
 
     // The packet the Rust bridge encodes for an error event: the header,
-    // then the error section with a u16-length UTF-8 string.
+    // then the error section with a u32-length UTF-8 string.
     QByteArray payload;
     QDataStream payloadStream(&payload, QIODevice::WriteOnly);
     payloadStream.setByteOrder(QDataStream::LittleEndian);
-    payloadStream << quint16(text.size());
+    payloadStream << quint32(text.size());
     payload.append(text);
     QByteArray packet;
     QDataStream header(&packet, QIODevice::WriteOnly);
@@ -2207,7 +2426,7 @@ QByteArray backendFailurePacket(const QString &message) {
     QByteArray payload;
     QDataStream payloadStream(&payload, QIODevice::WriteOnly);
     payloadStream.setByteOrder(QDataStream::LittleEndian);
-    payloadStream << quint16(text.size());
+    payloadStream << quint32(text.size());
     payload.append(text);
     QByteArray packet;
     QDataStream stream(&packet, QIODevice::WriteOnly);
@@ -2384,7 +2603,7 @@ void BridgeClientTest::spectrogramOverlaySettingsDecodeFromBinaryPayload() {
     QCOMPARE(decoded.settings.preventDisplaySleepInFullscreen, false);
     QCOMPARE(decoded.settings.showLevelMeter, false);
     const QByteArray command = BinaryBridgeCodec::encodeCommandU8(BinaryBridgeCodec::CmdSetShowLevelMeter, 0);
-    QCOMPARE(command, QByteArray::fromHex("4100010000"));
+    QCOMPARE(command, QByteArray::fromHex("41000100000000"));
     // Verify other fields survived too.
     QCOMPARE(decoded.settings.systemMediaControlsEnabled, true);
     QCOMPARE(decoded.settings.fftSize, 8192);
@@ -2408,9 +2627,9 @@ void BridgeClientTest::testMutedChannelsMaskDecoding()
     appendLe(quint8(0));          // repeat mode
     appendLe(quint8(0));          // shuffle
     appendLe(qint32(2));          // currentQueueIndex
-    // u16-prefixed string (path)
+    // u32-prefixed string (path)
     QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
-    appendLe(quint16(pathUtf8.size()));
+    appendLe(quint32(pathUtf8.size()));
     payload.append(pathUtf8);
     // muted_channels_mask
     appendLe(quint64(0b10101));   // channels 0, 2, 4 muted
@@ -2452,7 +2671,7 @@ void BridgeClientTest::metadataChannelLabelsDecodeOptionalTail()
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::LittleEndian);
     auto appendText = [&stream](const QByteArray &value) {
-        stream << quint16(value.size());
+        stream << quint32(value.size());
         stream.writeRawData(value.constData(), value.size());
     };
     appendText("/fixture/surround.wav");
@@ -2530,13 +2749,13 @@ void BridgeClientTest::testSoloChannelCommandEncoding()
     // using the same encodeCommandU8 helper as CmdToggleChannelMute.
     QByteArray cmd = BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSoloChannel, 3);
-    // Format: u16 cmd_id (LE) + u16 payload_len (LE) + u8 channel
-    QCOMPARE(cmd.size(), 5);
+    // Format: u16 cmd_id (LE) + u32 payload_len (LE) + u8 channel
+    QCOMPARE(cmd.size(), 7);
     quint16 cmdId = qFromLittleEndian<quint16>(cmd.constData());
-    quint16 payloadLen = qFromLittleEndian<quint16>(cmd.constData() + 2);
-    quint8 channel = static_cast<quint8>(cmd.at(4));
+    quint32 payloadLen = qFromLittleEndian<quint32>(cmd.constData() + 2);
+    quint8 channel = static_cast<quint8>(cmd.at(6));
     QCOMPARE(cmdId, quint16(BinaryBridgeCodec::CmdSoloChannel));
-    QCOMPARE(payloadLen, quint16(1));
+    QCOMPARE(payloadLen, quint32(1));
     QCOMPARE(channel, quint8(3));
 }
 
@@ -2556,7 +2775,7 @@ void BridgeClientTest::testSoloedChannelDecoding()
     appendLe(quint8(0));          // shuffle
     appendLe(qint32(0));          // currentQueueIndex
     QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
-    appendLe(quint16(pathUtf8.size()));
+    appendLe(quint32(pathUtf8.size()));
     payload.append(pathUtf8);
     appendLe(quint64(0));         // mutedChannelsMask
     payload.append(static_cast<char>(3)); // soloedChannel = 3
@@ -2595,7 +2814,7 @@ void BridgeClientTest::testSoloedChannelDecodingNone()
     appendLe(quint8(0));
     appendLe(qint32(0));
     QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
-    appendLe(quint16(pathUtf8.size()));
+    appendLe(quint32(pathUtf8.size()));
     payload.append(pathUtf8);
     appendLe(quint64(0));
     payload.append(static_cast<char>(0xFF)); // no solo
@@ -2634,7 +2853,7 @@ void BridgeClientTest::testPlaybackTrackTokenDecoding()
     appendLe(quint8(0));
     appendLe(qint32(0));
     QByteArray pathUtf8 = QStringLiteral("/test.flac").toUtf8();
-    appendLe(quint16(pathUtf8.size()));
+    appendLe(quint32(pathUtf8.size()));
     payload.append(pathUtf8);
     appendLe(quint64(0));
     payload.append(static_cast<char>(0xFF));
@@ -2763,7 +2982,7 @@ void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {
 void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {
     QByteArray bytes;
     const auto append = [&bytes](auto value) { auto le = qToLittleEndian(value); bytes.append(reinterpret_cast<const char *>(&le), sizeof(le)); };
-    const auto text = [&bytes, &append](const QString &value) { const auto utf8 = value.toUtf8(); append(quint16(utf8.size())); bytes.append(utf8); };
+    const auto text = [&bytes, &append](const QString &value) { const auto utf8 = value.toUtf8(); append(quint32(utf8.size())); bytes.append(utf8); };
     append(quint8('S')); append(quint8(4)); append(quint16(1)); append(quint32(9));
     append(quint32(0)); append(quint32(0)); append(quint32(1));
     append(quint8(3)); append(quint32(0)); append(qint32(1997)); append(quint16(1)); append(quint32(0)); append(quint32(0));

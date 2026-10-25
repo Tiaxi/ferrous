@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::folder_cover::find_folder_cover;
 use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
 
+use super::ffi::push_string;
 use super::LibrarySortMode;
 
 const ROW_TYPE_ROOT: u8 = 0;
@@ -782,15 +783,18 @@ fn encode_flat_rows(rows: &[FlatTreeRow]) -> Vec<u8> {
         push_i32(&mut out, row.source_index);
         push_u16(&mut out, row.track_number);
         push_u16(&mut out, row.child_count);
-        push_u16_string(&mut out, &row.title);
-        push_u16_string(&mut out, &row.key);
-        push_u16_string(&mut out, &row.artist);
-        push_u16_string(&mut out, &row.path);
-        push_u16_string(&mut out, &row.cover_path);
-        push_u16_string(&mut out, &row.track_path);
-        push_u16(&mut out, clamp_u16(row.play_paths.len()));
+        push_string(&mut out, &row.title);
+        push_string(&mut out, &row.key);
+        push_string(&mut out, &row.artist);
+        push_string(&mut out, &row.path);
+        push_string(&mut out, &row.cover_path);
+        push_string(&mut out, &row.track_path);
+        push_u32(
+            &mut out,
+            u32::try_from(row.play_paths.len()).unwrap_or(u32::MAX),
+        );
         for path in &row.play_paths {
-            push_u16_string(&mut out, path);
+            push_string(&mut out, path);
         }
     }
     out
@@ -814,13 +818,6 @@ fn push_u32(out: &mut Vec<u8>, value: u32) {
 
 fn push_i32(out: &mut Vec<u8>, value: i32) {
     out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u16_string(out: &mut Vec<u8>, value: &str) {
-    let bytes = value.as_bytes();
-    let len = bytes.len().min(usize::from(u16::MAX));
-    push_u16(out, u16::try_from(len).unwrap_or(u16::MAX));
-    out.extend_from_slice(&bytes[..len]);
 }
 
 fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
@@ -1303,8 +1300,8 @@ mod tests {
         Some(value)
     }
 
-    fn read_u16_string(input: &[u8], offset: &mut usize) -> Option<String> {
-        let len = usize::from(read_u16(input, offset)?);
+    fn read_string(input: &[u8], offset: &mut usize) -> Option<String> {
+        let len = usize::try_from(read_u32(input, offset)?).ok()?;
         if *offset + len > input.len() {
             return None;
         }
@@ -1335,31 +1332,31 @@ mod tests {
             let Some(child_count) = read_u16(bytes, &mut offset) else {
                 break;
             };
-            let Some(title) = read_u16_string(bytes, &mut offset) else {
+            let Some(title) = read_string(bytes, &mut offset) else {
                 break;
             };
-            let Some(key) = read_u16_string(bytes, &mut offset) else {
+            let Some(key) = read_string(bytes, &mut offset) else {
                 break;
             };
-            let Some(artist) = read_u16_string(bytes, &mut offset) else {
+            let Some(artist) = read_string(bytes, &mut offset) else {
                 break;
             };
-            let Some(path) = read_u16_string(bytes, &mut offset) else {
+            let Some(path) = read_string(bytes, &mut offset) else {
                 break;
             };
-            let Some(cover_path) = read_u16_string(bytes, &mut offset) else {
+            let Some(cover_path) = read_string(bytes, &mut offset) else {
                 break;
             };
-            let Some(track_path) = read_u16_string(bytes, &mut offset) else {
+            let Some(track_path) = read_string(bytes, &mut offset) else {
                 break;
             };
-            let Some(play_path_count) = read_u16(bytes, &mut offset) else {
+            let Some(play_path_count) = read_u32(bytes, &mut offset) else {
                 break;
             };
-            let mut play_paths = Vec::with_capacity(usize::from(play_path_count));
+            let mut play_paths = Vec::new();
             let mut ok = true;
             for _ in 0..play_path_count {
-                let Some(play_path) = read_u16_string(bytes, &mut offset) else {
+                let Some(play_path) = read_string(bytes, &mut offset) else {
                     ok = false;
                     break;
                 };

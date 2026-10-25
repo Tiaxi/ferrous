@@ -98,19 +98,19 @@ public:
         return true;
     }
 
-    bool readUtf8U16(QString *out) {
+    bool readUtf8(QString *out) {
         if (!out) {
             return false;
         }
-        quint16 len = 0;
-        if (!readU16(&len)) {
+        quint32 len = 0;
+        if (!readU32(&len)) {
             return false;
         }
-        if (m_offset + len > m_bytes.size()) {
+        if (static_cast<quint64>(len) > static_cast<quint64>(m_bytes.size() - m_offset)) {
             return false;
         }
-        *out = QString::fromUtf8(m_bytes.constData() + m_offset, len);
-        m_offset += len;
+        *out = QString::fromUtf8(m_bytes.constData() + m_offset, static_cast<qsizetype>(len));
+        m_offset += static_cast<qsizetype>(len);
         return true;
     }
 
@@ -138,23 +138,28 @@ void appendLe(QByteArray &out, T value) {
     out.append(reinterpret_cast<const char *>(&little), static_cast<int>(sizeof(T)));
 }
 
-void appendUtf8U16(QByteArray &out, const QString &text) {
-    QByteArray utf8 = text.toUtf8();
-    if (utf8.size() > static_cast<int>(std::numeric_limits<quint16>::max())) {
-        utf8.truncate(static_cast<int>(std::numeric_limits<quint16>::max()));
+// Appends a u32 length and the UTF-8 bytes. A string that cannot fit in a
+// command is refused whole, so no command ever carries a cut string.
+bool appendUtf8(QByteArray &out, const QString &text) {
+    const QByteArray utf8 = text.toUtf8();
+    if (utf8.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes)) {
+        return false;
     }
-    appendLe<quint16>(out, static_cast<quint16>(utf8.size()));
+    appendLe<quint32>(out, static_cast<quint32>(utf8.size()));
     out.append(utf8);
+    return true;
 }
 
+// Frames a command as a u16 id, a u32 payload length, and the payload.
+// Returns an empty array, never a cut command, for a payload over the bound.
 QByteArray finalizeCommand(quint16 cmdId, const QByteArray &payload) {
-    if (payload.size() > static_cast<int>(std::numeric_limits<quint16>::max())) {
+    if (payload.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes)) {
         return {};
     }
     QByteArray out;
-    out.reserve(4 + payload.size());
+    out.reserve(kCommandHeaderBytes + payload.size());
     appendLe<quint16>(out, cmdId);
-    appendLe<quint16>(out, static_cast<quint16>(payload.size()));
+    appendLe<quint32>(out, static_cast<quint32>(payload.size()));
     out.append(payload);
     return out;
 }
@@ -177,7 +182,7 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
         || !reader.readU8(&repeatMode)
         || !reader.readU8(&shuffleEnabled)
         || !reader.readI32(&currentQueueIndex)
-        || !reader.readUtf8U16(&currentPath)
+        || !reader.readUtf8(&currentPath)
         || !reader.readU64(&mutedMask)) {
         return false;
     }
@@ -250,15 +255,15 @@ bool decodeQueueSection(const QByteArray &payload, DecodedQueue *out) {
         quint16 trackNumber = 0;
         float lengthSeconds = -1.0f;
         QString path;
-        if (!reader.readUtf8U16(&title)
-            || !reader.readUtf8U16(&artist)
-            || !reader.readUtf8U16(&album)
-            || !reader.readUtf8U16(&coverPath)
-            || !reader.readUtf8U16(&genre)
+        if (!reader.readUtf8(&title)
+            || !reader.readUtf8(&artist)
+            || !reader.readUtf8(&album)
+            || !reader.readUtf8(&coverPath)
+            || !reader.readUtf8(&genre)
             || !reader.readI32(&year)
             || !reader.readU16(&trackNumber)
             || !reader.readF32(&lengthSeconds)
-            || !reader.readUtf8U16(&path)) {
+            || !reader.readUtf8(&path)) {
             return false;
         }
         DecodedQueueTrack item;
@@ -311,7 +316,7 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
         || !reader.readU32(&albumCount)
         || !reader.readU8(&scanInProgress)
         || !reader.readI32(&sortMode)
-        || !reader.readUtf8U16(&lastError)
+        || !reader.readUtf8(&lastError)
         || !reader.readU32(&rootsCompleted)
         || !reader.readU32(&rootsTotal)
         || !reader.readU32(&filesDiscovered)
@@ -328,7 +333,7 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     rootEntries.reserve(rootPathCount);
     for (quint16 i = 0; i < rootPathCount; ++i) {
         DecodedLibraryRoot root;
-        if (!reader.readUtf8U16(&root.path) || !reader.readUtf8U16(&root.name)) {
+        if (!reader.readUtf8(&root.path) || !reader.readUtf8(&root.name)) {
             return false;
         }
         rootPaths.push_back(root.path);
@@ -349,13 +354,13 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
         expandedKeys.reserve(expandedKeyCount);
         for (quint16 i = 0; i < expandedKeyCount; ++i) {
             QString key;
-            if (!reader.readUtf8U16(&key)) {
+            if (!reader.readUtf8(&key)) {
                 return false;
             }
             expandedKeys.push_back(key);
         }
-        if (!reader.readUtf8U16(&viewSelectionKey)
-            || !reader.readUtf8U16(&viewAnchorKey)
+        if (!reader.readUtf8(&viewSelectionKey)
+            || !reader.readUtf8(&viewAnchorKey)
             || !reader.readF32(&viewAnchorOffset)
             || !reader.readU32(&revealGeneration)) {
             return false;
@@ -401,20 +406,20 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     quint16 channels = 0;
     quint16 bitDepth = 0;
     quint32 trackNumber = 0;
-    if (!reader.readUtf8U16(&out->sourcePath)
-        || !reader.readUtf8U16(&out->title)
-        || !reader.readUtf8U16(&out->artist)
-        || !reader.readUtf8U16(&out->album)
-        || !reader.readUtf8U16(&out->albumArtist)
-        || !reader.readUtf8U16(&out->genre)
+    if (!reader.readUtf8(&out->sourcePath)
+        || !reader.readUtf8(&out->title)
+        || !reader.readUtf8(&out->artist)
+        || !reader.readUtf8(&out->album)
+        || !reader.readUtf8(&out->albumArtist)
+        || !reader.readUtf8(&out->genre)
         || !reader.readI32(&out->year)
         || !reader.readU32(&sampleRateHz)
         || !reader.readU32(&bitrateKbps)
         || !reader.readU16(&channels)
         || !reader.readU16(&bitDepth)
-        || !reader.readUtf8U16(&out->formatLabel)
+        || !reader.readUtf8(&out->formatLabel)
         || !reader.readU32(&currentBitrateKbps)
-        || !reader.readUtf8U16(&out->coverPath)
+        || !reader.readUtf8(&out->coverPath)
         || !reader.readU32(&trackNumber)) {
         return false;
     }
@@ -424,7 +429,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
         if (!reader.readU16(&count) || count > 64 || (count != 0 && count != channels)) return false;
         for (quint16 i = 0; i < count; ++i) {
             QString label;
-            if (!reader.readUtf8U16(&label)) return false;
+            if (!reader.readUtf8(&label)) return false;
             out->channelLabels.append(label);
         }
         if (!reader.atEnd()) return false;
@@ -528,9 +533,9 @@ bool decodeLastFmSection(const QByteArray &payload, DecodedLastFm *out) {
         || !reader.readU8(&buildConfigured)
         || !reader.readU8(&authState)
         || !reader.readU32(&pendingScrobbleCount)
-        || !reader.readUtf8U16(&out->username)
-        || !reader.readUtf8U16(&out->statusText)
-        || !reader.readUtf8U16(&out->authUrl)
+        || !reader.readUtf8(&out->username)
+        || !reader.readUtf8(&out->statusText)
+        || !reader.readUtf8(&out->authUrl)
         || !reader.atEnd()) {
         return false;
     }
@@ -591,20 +596,25 @@ QByteArray encodeCommandF64(quint16 cmdId, double value) {
 
 QByteArray encodeCommandString(quint16 cmdId, const QString &value) {
     QByteArray payload;
-    appendUtf8U16(payload, value);
+    if (!appendUtf8(payload, value)) {
+        return {};
+    }
     return finalizeCommand(cmdId, payload);
 }
 
 QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QString &second) {
     QByteArray payload;
-    appendUtf8U16(payload, first);
-    appendUtf8U16(payload, second);
+    if (!appendUtf8(payload, first) || !appendUtf8(payload, second)) {
+        return {};
+    }
     return finalizeCommand(cmdId, payload);
 }
 
 QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool flag) {
     QByteArray payload;
-    appendUtf8U16(payload, value);
+    if (!appendUtf8(payload, value)) {
+        return {};
+    }
     payload.append(flag ? '\x01' : '\x00');
     return finalizeCommand(cmdId, payload);
 }
@@ -615,8 +625,9 @@ QByteArray encodeCommandLibraryViewState(
     const QString &anchorKey,
     float anchorOffset) {
     QByteArray payload;
-    appendUtf8U16(payload, selectionKey);
-    appendUtf8U16(payload, anchorKey);
+    if (!appendUtf8(payload, selectionKey) || !appendUtf8(payload, anchorKey)) {
+        return {};
+    }
     quint32 bits = 0;
     static_assert(sizeof(anchorOffset) == sizeof(bits), "float size mismatch");
     std::memcpy(&bits, &anchorOffset, sizeof(bits));
@@ -626,26 +637,38 @@ QByteArray encodeCommandLibraryViewState(
 
 QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query, quint32 limit) {
     QByteArray payload;
-    payload.reserve(8 + query.size());
+    payload.reserve(12 + query.size());
     appendLe<quint32>(payload, seq);
-    appendUtf8U16(payload, query);
+    if (!appendUtf8(payload, query)) {
+        return {};
+    }
     appendLe<quint32>(payload, limit);
     return finalizeCommand(cmdId, payload);
 }
 
 QByteArray encodeCommandIndices(quint16 cmdId, const QList<quint32> &indices) {
+    if (indices.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes / 4)) {
+        return {};
+    }
     QByteArray payload;
-    appendLe<quint16>(payload, static_cast<quint16>(indices.size()));
+    payload.reserve(4 + 4 * indices.size());
+    appendLe<quint32>(payload, static_cast<quint32>(indices.size()));
     for (quint32 index : indices) appendLe<quint32>(payload, index);
     return finalizeCommand(cmdId, payload);
 }
 
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values) {
+    if (values.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes / 4)) {
+        return {};
+    }
     QByteArray payload;
-    const int count = std::min<int>(values.size(), std::numeric_limits<quint16>::max());
-    appendLe<quint16>(payload, static_cast<quint16>(count));
-    for (int i = 0; i < count; ++i) {
-        appendUtf8U16(payload, values[i]);
+    appendLe<quint32>(payload, static_cast<quint32>(values.size()));
+    for (const QString &value : values) {
+        // Stop at the bound rather than build a list that cannot be sent.
+        if (!appendUtf8(payload, value)
+            || payload.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes)) {
+            return {};
+        }
     }
     return finalizeCommand(cmdId, payload);
 }
@@ -753,7 +776,7 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
         case SectionError: {
             Reader sectionReader(sectionPayload);
             QString message;
-            ok = sectionReader.readUtf8U16(&message) && sectionReader.atEnd();
+            ok = sectionReader.readUtf8(&message) && sectionReader.atEnd();
             if (ok) {
                 out->errorMessage = message;
             }
@@ -861,17 +884,17 @@ bool decodeSearchResultsFrame(
             || !reader.readU16(&trackNumber)
             || !reader.readU32(&count)
             || !reader.readF32(&lengthSeconds)
-            || !reader.readUtf8U16(&label)
-            || !reader.readUtf8U16(&artist)
-            || !reader.readUtf8U16(&album)
-            || !reader.readUtf8U16(&rootLabel)
-            || !reader.readUtf8U16(&genre)
-            || !reader.readUtf8U16(&coverPath)
-            || !reader.readUtf8U16(&artistKey)
-            || !reader.readUtf8U16(&albumKey)
-            || !reader.readUtf8U16(&sectionKey)
-            || !reader.readUtf8U16(&trackKey)
-            || !reader.readUtf8U16(&trackPath)) {
+            || !reader.readUtf8(&label)
+            || !reader.readUtf8(&artist)
+            || !reader.readUtf8(&album)
+            || !reader.readUtf8(&rootLabel)
+            || !reader.readUtf8(&genre)
+            || !reader.readUtf8(&coverPath)
+            || !reader.readUtf8(&artistKey)
+            || !reader.readUtf8(&albumKey)
+            || !reader.readUtf8(&sectionKey)
+            || !reader.readUtf8(&trackKey)
+            || !reader.readUtf8(&trackPath)) {
             if (errorMessage) {
                 *errorMessage = QStringLiteral("search frame row %1 truncated").arg(i);
             }
@@ -886,7 +909,7 @@ bool decodeSearchResultsFrame(
         }
 
         DecodedSearchRow row;
-        if (version >= 4 && !reader.readUtf8U16(&row.matchDetail)) {
+        if (version >= 4 && !reader.readUtf8(&row.matchDetail)) {
             if (errorMessage) *errorMessage = QStringLiteral("search match detail truncated");
             return false;
         }
