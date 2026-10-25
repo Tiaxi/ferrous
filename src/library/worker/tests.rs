@@ -530,6 +530,49 @@ fn a_rescan_asked_for_after_a_running_scan_passed_the_change_finds_it() {
 }
 
 #[test]
+fn rescanning_an_outer_root_keeps_an_inner_roots_hard_links() {
+    let fixture = Fixture::new("hard-links", &["x.mp3"]);
+    let inner = fixture.root.join("inner");
+    fs::create_dir_all(&inner).expect("inner root");
+    fs::write(inner.join("a.mp3"), b"a").expect("track");
+    fs::hard_link(inner.join("a.mp3"), inner.join("b.mp3")).expect("hard link");
+    let (service, mut events) = fixture.start();
+    service.command(LibraryCommand::AddRoot {
+        path: inner.clone(),
+        name: String::new(),
+    });
+    next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 1));
+    // An outer root from before nested roots were refused.
+    fixture
+        .conn()
+        .execute(
+            "INSERT INTO roots(path, name, added_at) VALUES (?1, '', 0)",
+            [fixture.root.to_string_lossy()],
+        )
+        .expect("outer root");
+    service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
+    next_snapshot(&mut events, |snapshot| {
+        snapshot.roots.len() == 2 && idle_with_tracks(snapshot, 2)
+    });
+
+    fs::remove_file(inner.join("a.mp3")).expect("remove");
+    service.command(LibraryCommand::ScanPaths {
+        root: inner.clone(),
+        paths: vec![inner.join("a.mp3")],
+    });
+    let done = next_snapshot(&mut events, |snapshot| {
+        !snapshot.scan_in_progress
+            && snapshot
+                .tracks
+                .iter()
+                .all(|track| track.path != inner.join("a.mp3"))
+    });
+    let mut paths: Vec<PathBuf> = done.tracks.iter().map(|track| track.path.clone()).collect();
+    paths.sort();
+    assert_eq!(paths, vec![inner.join("b.mp3"), fixture.track("x.mp3")]);
+}
+
+#[test]
 fn stopping_the_service_stops_a_scan_and_keeps_its_committed_batches() {
     let fixture = Fixture::new("shutdown", &["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
     let (started, release) = hold_read(&fixture.track("d.mp3"));

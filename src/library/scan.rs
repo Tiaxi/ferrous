@@ -716,9 +716,19 @@ impl ScanRun<'_> {
                             .iter()
                             .any(|path| self.library.hard_linked.contains(Path::new(path))));
                 if let Some(hard_linked) = outcome.hard_linked {
-                    self.library
-                        .hard_linked
-                        .retain(|path| !path.starts_with(root));
+                    // The roots inside this one, from before nested roots
+                    // were refused, are theirs; the scan skipped them.
+                    let nested: Vec<PathBuf> = self
+                        .library
+                        .roots()
+                        .iter()
+                        .map(|known| known.path.clone())
+                        .filter(|known| known != root && known.starts_with(root))
+                        .collect();
+                    self.library.hard_linked.retain(|path| {
+                        !path.starts_with(root)
+                            || nested.iter().any(|inner| path.starts_with(inner))
+                    });
                     self.library.hard_linked.extend(hard_linked);
                 }
                 if !outcome.removed.is_empty() {

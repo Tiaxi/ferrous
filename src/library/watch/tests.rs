@@ -406,17 +406,18 @@ fn mounts_below_a_root_that_miss_changes_are_rescanned_instead_and_reported() {
     watcher.recheck_mounts();
     assert_eq!(
         commands.try_iter().collect::<Vec<_>>(),
-        vec![scan_paths(&root, std::slice::from_ref(&usb))]
+        vec![LibraryCommand::RescanRoot(root.clone())]
     );
     assert!(!watcher.table.has_below(&usb));
 
-    // Both unmounted: the folders under them are watched, and scanned.
+    // Both unmounted: the folders under them are watched, and the root
+    // rescanned.
     watch_test_hooks::unmount_fake(&nas);
     watch_test_hooks::unmount_fake(&usb);
     watcher.recheck_mounts();
     assert_eq!(
         commands.try_iter().collect::<Vec<_>>(),
-        vec![scan_paths(&root, &[nas.clone(), usb.clone()])]
+        vec![LibraryCommand::RescanRoot(root.clone())]
     );
     assert!(watcher.table.has_below(&nas.join("a")));
     assert!(watcher.table.has_below(&usb));
@@ -451,6 +452,68 @@ fn removing_an_outer_or_inner_root_keeps_the_other_watched() {
     assert_eq!(
         changes_seen(&mut watcher, &commands),
         vec![scan_paths(&outer, &[inner.join("album/2.mp3")])]
+    );
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_change_waiting_when_mounts_below_its_root_change_is_still_scanned() {
+    let folder = test_folder("submount-pending");
+    let root = folder.join("music");
+    for name in ["local", "nas"] {
+        std::fs::create_dir_all(root.join(name)).expect("folders");
+    }
+    let (mut watcher, commands) = watching(std::slice::from_ref(&root));
+    // An album being copied: seen, and waiting for more.
+    std::fs::write(root.join("local/1.mp3"), b"1").expect("track");
+    let mut events = Vec::new();
+    watcher.read_events(&mut events);
+    assert!(commands.try_recv().is_err());
+
+    watch_test_hooks::set_fs_type(&root.join("nas"), "nfs4");
+    watcher.recheck_mounts();
+    watcher.flush_due(Instant::now() + Duration::from_secs(3600));
+
+    let sent = commands.try_iter().collect::<Vec<_>>();
+    assert!(
+        sent.iter().any(|command| match command {
+            LibraryCommand::RescanRoot(rescanned) => *rescanned == root,
+            LibraryCommand::ScanPaths { paths, .. } => paths.contains(&root.join("local/1.mp3")),
+            _ => false,
+        }),
+        "the copied file is scanned: {sent:?}"
+    );
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn an_outer_root_taking_an_inner_ones_folders_leaves_its_network_mounts_unwatched() {
+    let folder = test_folder("nested-submount");
+    let outer = folder.join("music");
+    let inner = outer.join("inner");
+    let nas = inner.join("nas");
+    std::fs::create_dir_all(nas.join("album")).expect("folders");
+    watch_test_hooks::set_fs_type(&nas, "nfs4");
+    let (mut watcher, commands) = watching(&[outer.clone(), inner.clone()]);
+    assert!(!watcher.table.has_below(&nas));
+
+    watcher.handle(WatchMessage::Roots(vec![outer.clone()]));
+
+    assert!(
+        !watcher.table.has_below(&nas),
+        "the network mount is not watched"
+    );
+    assert!(watcher.table.has_below(&inner));
+    assert_eq!(
+        watcher.unwatched_mounts.get(&nas),
+        Some(&(outer.clone(), "nfs4".to_string()))
+    );
+    let due = watcher.next_periodic.expect("a periodic rescan");
+    let _ = commands.try_iter().count();
+    watcher.rescan_unwatched_if_due(due);
+    assert_eq!(
+        commands.try_iter().collect::<Vec<_>>(),
+        vec![scan_paths(&outer, std::slice::from_ref(&nas))]
     );
     let _ = std::fs::remove_dir_all(folder);
 }

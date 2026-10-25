@@ -603,6 +603,11 @@ impl Watcher {
             for inner in removed.iter().filter(|inner| inner.starts_with(root)) {
                 if self.watched_root_of(inner).as_deref() == Some(root.as_path()) {
                     let now = Instant::now();
+                    self.leave_out_unwatchable_mounts(root, inner, &mounts::mount_table());
+                    if self.unwatched_mounts.values().any(|(of, _)| of == root) {
+                        self.next_periodic
+                            .get_or_insert_with(|| now + self.tuning.periodic);
+                    }
                     if let Err(fallback) = self.watch_tree(root, inner) {
                         self.fall_back(root, fallback, now);
                     }
@@ -647,27 +652,10 @@ impl Watcher {
             if now.identity.is_none() {
                 continue;
             }
-            let command = if before.identity == now.identity {
-                // Only the mounts below the root changed: scan where they did.
-                let paths: BTreeSet<PathBuf> = before
-                    .mounts
-                    .iter()
-                    .filter(|mount| !now.mounts.contains(mount))
-                    .chain(
-                        now.mounts
-                            .iter()
-                            .filter(|mount| !before.mounts.contains(mount)),
-                    )
-                    .map(|(mount_point, _)| mount_point.clone())
-                    .collect();
-                LibraryCommand::ScanPaths {
-                    root,
-                    paths: paths.into_iter().collect(),
-                }
-            } else {
-                LibraryCommand::RescanRoot(root)
-            };
-            let _ = self.commands.send(command);
+            // Rebuilding the watches dropped the root's pending changes, and
+            // events of the replaced watches may be lost: rescan all of it,
+            // as after lost events, not only where the mounts changed.
+            let _ = self.commands.send(LibraryCommand::RescanRoot(root));
         }
     }
 
@@ -709,10 +697,27 @@ impl Watcher {
                 self.unavailable.clone().unwrap_or_default(),
             ));
         }
-        // Mounts below the root whose file systems miss changes are left out
-        // of the watches, and rescanned instead; the outermost ones suffice.
+        self.leave_out_unwatchable_mounts(root, root, table);
+        match self.watch_tree(root, root) {
+            Ok(()) => None,
+            Err(fallback) => {
+                self.unwatch_root(root);
+                Some(fallback)
+            }
+        }
+    }
+
+    /// Leaves out of the watches of `root` the mounts below `top`, one of
+    /// its folders, whose file systems miss changes; they are rescanned
+    /// instead. The outermost ones suffice.
+    fn leave_out_unwatchable_mounts(
+        &mut self,
+        root: &Path,
+        top: &Path,
+        table: &[(PathBuf, String)],
+    ) {
         let nested = self.nested_roots(root);
-        for (mount_point, fs_type) in mounts::mounts_below(table, root) {
+        for (mount_point, fs_type) in mounts::mounts_below(table, top) {
             if mounts::misses_changes(&fs_type)
                 && !nested.iter().any(|inner| mount_point.starts_with(inner))
                 && !self
@@ -722,13 +727,6 @@ impl Watcher {
             {
                 self.unwatched_mounts
                     .insert(mount_point, (root.to_path_buf(), fs_type));
-            }
-        }
-        match self.watch_tree(root, root) {
-            Ok(()) => None,
-            Err(fallback) => {
-                self.unwatch_root(root);
-                Some(fallback)
             }
         }
     }
