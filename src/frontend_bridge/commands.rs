@@ -2209,9 +2209,17 @@ mod tests {
             crate::analysis::AnalysisEvent::Snapshot(_) => {}
             _ => panic!("unexpected event variant"),
         }
-        assert!(analysis_rx
-            .recv_timeout(Duration::from_millis(120))
-            .is_err());
+        // The file does not exist, so the spectrogram reports that it cannot
+        // read it; no further waveform snapshot follows.
+        let later: Vec<_> =
+            std::iter::from_fn(|| analysis_rx.recv_timeout(Duration::from_millis(120)).ok())
+                .collect();
+        assert!(
+            !later
+                .iter()
+                .any(|event| matches!(event, crate::analysis::AnalysisEvent::Snapshot(_))),
+            "{later:?}"
+        );
     }
 
     #[test]
