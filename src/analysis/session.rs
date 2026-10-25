@@ -20,6 +20,7 @@ use super::{
     f64_to_u64_saturating, usize_to_u64, AnalysisEvent, PrecomputedSpectrogramChunk,
     SpectrogramDisplayMode, SpectrogramViewMode, REFERENCE_HOP,
 };
+use crate::playback::{remap_path, PathRenames};
 use crate::worker_thread::{spawn_joinable, JoinableThread};
 
 #[cfg(feature = "profiling-logs")]
@@ -254,6 +255,24 @@ pub(super) enum SpectrogramWorkerCommand {
     /// Release the current decoder and wait for another session. The worker
     /// itself lives until its command channel disconnects.
     StopSession,
+    /// Files were renamed on disk. A continuation or a session that the
+    /// worker has not opened yet opens its file at the new path; the file
+    /// it reads stays open.
+    RemapPaths(Arc<PathRenames>),
+}
+
+/// Point a session that has not started at its file's new path.
+fn remap_new_track_path(cmd: &mut SpectrogramWorkerCommand, renames: &PathRenames) {
+    if let SpectrogramWorkerCommand::NewTrack { path, .. } = cmd {
+        remap_path(path, renames);
+    }
+}
+
+/// Point a continuation that has not been opened at its file's new path.
+fn remap_pending_continue(session: &mut SpectrogramSessionState, renames: &PathRenames) {
+    if let Some((path, _)) = session.pending_continue.as_mut() {
+        remap_path(path, renames);
+    }
 }
 
 pub(super) struct SpectrogramWorkerHandles {
@@ -810,6 +829,9 @@ fn coalesce_queued_new_track_command(
             }
             SpectrogramWorkerCommand::StopSession => {
                 return Some(SpectrogramWorkerCommand::StopSession)
+            }
+            SpectrogramWorkerCommand::RemapPaths(renames) => {
+                remap_new_track_path(&mut latest_new_track, &renames);
             }
             _ => {}
         }
@@ -1486,6 +1508,12 @@ fn process_session_commands(
             SpectrogramWorkerCommand::StopSession => {
                 return Some(SessionAction::Stop);
             }
+            SpectrogramWorkerCommand::RemapPaths(renames) => {
+                remap_pending_continue(session, &renames);
+                if let Some(cmd) = latest_new_track.as_mut() {
+                    remap_new_track_path(cmd, &renames);
+                }
+            }
         }
     }
 
@@ -1592,6 +1620,10 @@ fn handle_single_command(
             SessionAction::Continue
         }
         SpectrogramWorkerCommand::StopSession => SessionAction::Stop,
+        SpectrogramWorkerCommand::RemapPaths(renames) => {
+            remap_pending_continue(session, &renames);
+            SessionAction::Continue
+        }
     }
 }
 
@@ -3314,6 +3346,88 @@ mod tests {
         );
         assert!(matches!(action, SessionAction::Continue));
         assert!(session.pending_continue.is_some());
+    }
+
+    fn test_new_track(path: &str, generation: u64) -> SpectrogramWorkerCommand {
+        SpectrogramWorkerCommand::NewTrack {
+            track_token: 30,
+            generation,
+            path: PathBuf::from(path),
+            fft_size: 2_048,
+            hop_size: 256,
+            zoom_level: 1.0,
+            widget_width: 1920,
+            channel_count: 1,
+            start_seconds: 0.0,
+            target_position_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Rolling,
+        }
+    }
+
+    fn new_track_path(cmd: &SpectrogramWorkerCommand) -> &Path {
+        match cmd {
+            SpectrogramWorkerCommand::NewTrack { path, .. } => path,
+            other => panic!("expected NewTrack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn renames_reach_files_the_worker_has_not_opened_yet() {
+        let renames = |pairs: &[(&str, &str)]| {
+            SpectrogramWorkerCommand::RemapPaths(Arc::new(
+                pairs
+                    .iter()
+                    .map(|(old, new)| (PathBuf::from(old), PathBuf::from(new)))
+                    .collect(),
+            ))
+        };
+
+        // A parked session opens its continuation at the new path.
+        let mut session = make_test_session();
+        session.pending_continue = Some((PathBuf::from("/music/next.flac"), 42));
+        let action = handle_single_command(
+            &mut session,
+            renames(&[("/music/next.flac", "/music/02.flac")]),
+        );
+        assert!(matches!(action, SessionAction::Continue));
+        assert_eq!(
+            session.pending_continue,
+            Some((PathBuf::from("/music/02.flac"), 42))
+        );
+
+        // A session queued before the renames starts at the new path, one
+        // queued after them at the path it names. In this swap, renaming
+        // the later one would give it the other file.
+        let swap = [
+            ("/music/a.flac", "/music/b.flac"),
+            ("/music/b.flac", "/music/a.flac"),
+        ];
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        tx.send(test_new_track("/music/a.flac", 1)).unwrap();
+        tx.send(renames(&swap)).unwrap();
+        let Some(SessionAction::NewSession(cmd)) = process_session_commands(&mut session, &rx)
+        else {
+            panic!("expected the queued session");
+        };
+        assert_eq!(new_track_path(&cmd), Path::new("/music/b.flac"));
+        tx.send(renames(&swap)).unwrap();
+        tx.send(test_new_track("/music/a.flac", 2)).unwrap();
+        let Some(SessionAction::NewSession(cmd)) = process_session_commands(&mut session, &rx)
+        else {
+            panic!("expected the queued session");
+        };
+        assert_eq!(new_track_path(&cmd), Path::new("/music/a.flac"));
+
+        // So does a session waiting for an idle worker.
+        let generation = AtomicU64::new(3);
+        tx.send(renames(&swap)).unwrap();
+        let cmd =
+            coalesce_queued_new_track_command(test_new_track("/music/a.flac", 3), &rx, &generation)
+                .expect("current session");
+        assert_eq!(new_track_path(&cmd), Path::new("/music/b.flac"));
     }
 
     // ---------------------------------------------------------------
