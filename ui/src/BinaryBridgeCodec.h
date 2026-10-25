@@ -28,6 +28,8 @@ enum SnapshotSection : quint16 {
     SectionReservedLibraryTree = 1u << 3,
     SectionMetadata = 1u << 4,
     SectionSettings = 1u << 5,
+    // An error for the user: a u8 ErrorCategory, a u8 ErrorSeverity, the
+    // subject (a file or folder path, or empty), and the message.
     SectionError = 1u << 6,
     SectionStopped = 1u << 7,
     SectionLastFm = 1u << 8,
@@ -35,6 +37,25 @@ enum SnapshotSection : quint16 {
     // carried, a u8, 1 if the save succeeded, and a string with what to show
     // the user otherwise.
     SectionStateSaved = 1u << 9,
+};
+
+// What part of Ferrous an error concerns. Mirrors ErrorCategory in
+// src/frontend_bridge/errors.rs; ui/qml/logic/ErrorUtils.js names them.
+enum ErrorCategory : quint8 {
+    ErrorCategorySystem = 0,
+    ErrorCategoryPlayback = 1,
+    ErrorCategoryLibrary = 2,
+    ErrorCategoryAnalysis = 3,
+    ErrorCategoryTags = 4,
+    ErrorCategoryLastFm = 5,
+    ErrorCategorySettings = 6,
+    ErrorCategoryLast = ErrorCategorySettings,
+};
+
+// Mirrors ErrorSeverity in src/frontend_bridge/errors.rs.
+enum ErrorSeverity : quint8 {
+    ErrorSeverityWarning = 0,
+    ErrorSeverityError = 1,
 };
 
 // Queue commands that name rows (CmdPlayAt, CmdSelectQueue, CmdRemoveAt,
@@ -204,6 +225,8 @@ struct DecodedLibraryRoot {
     QString name;
     // Why the library does not watch the root for changes; empty if it does.
     QString unwatchedReason;
+    // What the latest scan of the root could not do; empty if nothing.
+    QString scanProblem;
 };
 
 struct DecodedLibraryMeta {
@@ -288,6 +311,9 @@ struct DecodedSnapshot {
     quint16 sectionMask{0};
     bool hasStopped{false};
     QString errorMessage;
+    quint8 errorCategory{ErrorCategorySystem};
+    quint8 errorSeverity{ErrorSeverityError};
+    QString errorSubject;
     bool hasStateSaved{false};
     quint32 stateSaveRequestId{0};
     bool stateSaved{false};

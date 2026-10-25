@@ -2,8 +2,8 @@
 
 use super::{commands::validate_queue_details, BridgeState};
 use crate::library::{
-    read_external_track, track_file_fingerprint, ExternalTrackCache, IndexedTrack,
-    TrackFileFingerprint,
+    read_external_track, track_file_fingerprint, ExternalReadFailures, ExternalTrackCache,
+    IndexedTrack, TrackFileFingerprint,
 };
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::collections::HashMap;
@@ -17,6 +17,8 @@ pub(super) struct ValidationResult {
     generation: u64,
     pub(super) details: Arc<HashMap<PathBuf, IndexedTrack>>,
     pub(super) fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
+    /// What the files read for this result could not give, for the user.
+    pub(super) problem: Option<String>,
 }
 
 pub(super) struct QueueValidationWorker {
@@ -56,6 +58,7 @@ impl QueueValidationWorker {
                     }
                     cache.get_or_insert_with(&cache_factory).load_many(pending)
                 });
+                let mut failures = ExternalReadFailures::default();
                 for (path, fingerprint) in reads {
                     if cancelled() {
                         break;
@@ -65,6 +68,7 @@ impl QueueValidationWorker {
                     if track_file_fingerprint(&path) != Some(fingerprint) {
                         continue;
                     }
+                    failures.note(&path, &read);
                     let indexed = match &cache {
                         Some(cache) => cache.store(&path, fingerprint, read),
                         None => read.into_indexed(),
@@ -80,6 +84,7 @@ impl QueueValidationWorker {
                             generation: state.queue_detail_generation,
                             details: state.queue_details,
                             fingerprints: state.queue_detail_fingerprints,
+                            problem: failures.problem(),
                         })
                         .is_err()
                 {
@@ -121,17 +126,25 @@ impl QueueValidationWorker {
         }
     }
 
-    pub(super) fn apply(&mut self, result: ValidationResult, state: &mut BridgeState) -> bool {
+    /// Take `result` if it is for the queue as it is. Returns whether the
+    /// details changed, and what the user is shown about the files that
+    /// could not be read fully.
+    pub(super) fn apply(
+        &mut self,
+        result: ValidationResult,
+        state: &mut BridgeState,
+    ) -> (bool, Option<String>) {
         if self.in_flight == Some(result.generation) {
             self.in_flight = None;
         }
         if result.generation != state.queue_detail_generation {
-            return false;
+            // The files are read again for the newer queue.
+            return (false, None);
         }
         let changed = state.queue_details != result.details;
         state.queue_details = result.details;
         state.queue_detail_fingerprints = result.fingerprints;
-        changed
+        (changed, result.problem)
     }
 }
 
@@ -204,7 +217,7 @@ mod tests {
             .results
             .recv_timeout(std::time::Duration::from_secs(3))
             .expect("validation");
-        assert!(worker.apply(first, &mut state));
+        assert!(worker.apply(first, &mut state).0);
         assert!(state.queue_details.contains_key(&path));
         let fingerprint = state.queue_detail_fingerprints[&path];
         std::fs::write(&path, [0u8; 256]).expect("changed fixture");
@@ -222,13 +235,13 @@ mod tests {
             .expect("old result");
         state.queue.clear();
         state.queue_detail_generation += 1;
-        assert!(!worker.apply(stale, &mut state));
+        assert_eq!(worker.apply(stale, &mut state), (false, None));
         worker.request(&state);
         let cleared = worker
             .results
             .recv_timeout(std::time::Duration::from_secs(3))
             .expect("clear result");
-        assert!(worker.apply(cleared, &mut state));
+        assert!(worker.apply(cleared, &mut state).0);
         assert!(state.queue_details.is_empty());
         std::fs::remove_file(path).expect("remove fixture");
     }

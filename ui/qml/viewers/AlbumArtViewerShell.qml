@@ -19,6 +19,10 @@ Item {
     required property var openContextMenu
     // Actions whose shortcuts also work in the viewer.
     property var viewerActions: []
+    // The app's errors and palette; the viewer shows the newest error, as
+    // it hides the main window's.
+    property var errorController: null
+    property var uiPalette: null
 
     property alias popupHost: albumArtPopupHost
     property alias windowHost: albumArtWindowHost
@@ -137,6 +141,18 @@ Item {
             id: albumArtPopupHost
             anchors.fill: parent
         }
+
+        Components.ErrorBanner {
+            objectName: "albumArtPopupErrorBanner"
+            z: 30
+            anchors.bottom: parent.bottom
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottomMargin: 24
+            width: Math.min(parent.width - 48, 720)
+            errorController: root.errorController
+            uiPalette: root.uiPalette
+            historyAvailable: false
+        }
     }
 
     Window {
@@ -216,6 +232,18 @@ Item {
                 id: albumArtWindowHost
                 anchors.fill: parent
             }
+        }
+
+        Components.ErrorBanner {
+            objectName: "albumArtFullscreenErrorBanner"
+            z: 30
+            anchors.bottom: parent.bottom
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottomMargin: 24
+            width: Math.min(parent.width - 48, 720)
+            errorController: root.errorController
+            uiPalette: root.uiPalette
+            historyAvailable: false
         }
     }
 }

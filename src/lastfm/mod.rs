@@ -54,6 +54,20 @@ pub struct RuntimeState {
     pub pending_scrobble_count: usize,
     pub status_text: String,
     pub auth_url: String,
+    /// Whether queued scrobbles exist only in memory, because the queue
+    /// file could not be read or saved, so quitting would lose them.
+    pub unsaved_scrobbles: bool,
+    /// What went wrong since the previous state, for the user. The status
+    /// text shows the latest; these are shown once each.
+    pub problems: Vec<Problem>,
+}
+
+/// A Last.fm failure the user is told about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Problem {
+    pub message: String,
+    /// Whether the service works around it, for example by retrying.
+    pub warning: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +115,9 @@ pub enum Command {
     SendNowPlaying(NowPlayingTrack),
     QueueScrobble(ScrobbleEntry),
     Flush,
+    /// Save scrobbles that exist only in memory, before the app quits, and
+    /// answer with [`Event::SavedForQuit`].
+    SaveForQuit(u32),
     /// Sent by [`Handle::shutdown`]; the sender receives the result of
     /// saving the queue once the service has stopped.
     Shutdown(Sender<Result<(), String>>),
@@ -120,6 +137,12 @@ pub enum ShutdownOutcome {
 #[derive(Debug, Clone)]
 pub enum Event {
     State(RuntimeState),
+    /// The answer to [`Command::SaveForQuit`] with that request ID: what
+    /// quitting would lose, if the queue still could not be saved.
+    SavedForQuit {
+        request_id: u32,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -411,6 +434,8 @@ struct Service {
     session: Option<Session>,
     pending_auth: Option<PendingAuth>,
     state: RuntimeState,
+    /// Failures not yet published; see [`RuntimeState::problems`].
+    problems: Vec<Problem>,
 }
 
 #[derive(Debug)]
@@ -542,11 +567,18 @@ fn run_service_loop(cmd_rx: &Receiver<Command>, event_tx: &Sender<Event>, mut se
             service.network_allowed = false;
         }
         for command in commands {
-            if matches!(command, Command::Shutdown(_)) {
-                break;
+            match command {
+                Command::Shutdown(_) => break,
+                Command::SaveForQuit(request_id) => {
+                    let result = service.save_for_quit();
+                    service.publish(event_tx);
+                    let _ = event_tx.send(Event::SavedForQuit { request_id, result });
+                }
+                command => {
+                    service.handle_command(command);
+                    service.publish(event_tx);
+                }
             }
-            service.handle_command(command);
-            service.publish(event_tx);
         }
         if let Some(done) = shutdown {
             let saved = service.save_unsaved_queue();
@@ -577,6 +609,7 @@ impl Service {
             queue_save_error: None,
             session: None,
             pending_auth: None,
+            problems: Vec::new(),
             state: RuntimeState {
                 enabled: options.initial_enabled,
                 build_configured,
@@ -604,10 +637,12 @@ impl Service {
                     path.display(),
                     moved_to.display()
                 );
-                self.queue_load_notice = Some(format!(
+                let notice = format!(
                     "Saved scrobbles could not be read; the file was kept as {}.",
                     moved_to.display()
-                ));
+                );
+                self.report(&notice, true);
+                self.queue_load_notice = Some(notice);
             }
             LoadOutcome::Unavailable { error } => {
                 eprintln!(
@@ -616,11 +651,13 @@ impl Service {
                 );
                 // Saving now would replace a file that may still hold scrobbles.
                 self.queue_unreadable = Some(error.clone());
-                self.queue_load_notice = Some(format!(
+                let notice = format!(
                     "Saved scrobbles in {} could not be read ({error}). New scrobbles \
                      are kept in memory only; Ferrous tries to save them again when it quits.",
                     path.display()
-                ));
+                );
+                self.report(&notice, false);
+                self.queue_load_notice = Some(notice);
             }
         }
     }
@@ -640,11 +677,30 @@ impl Service {
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
+        state.unsaved_scrobbles = self.queue_save_error.is_some()
+            || (self.queue_unreadable.is_some() && !self.queue.is_empty());
         state
     }
 
-    fn publish(&self, event_tx: &Sender<Event>) {
-        let _ = event_tx.send(Event::State(self.published_state()));
+    fn publish(&mut self, event_tx: &Sender<Event>) {
+        let mut state = self.published_state();
+        state.problems = std::mem::take(&mut self.problems);
+        let _ = event_tx.send(Event::State(state));
+    }
+
+    /// Tell the user about `message` with the next state; see
+    /// [`RuntimeState::problems`].
+    fn report(&mut self, message: &str, warning: bool) {
+        self.problems.push(Problem {
+            message: message.to_string(),
+            warning,
+        });
+    }
+
+    /// Show `message` as the status, and tell the user about it.
+    fn fail(&mut self, message: String, warning: bool) {
+        self.report(&message, warning);
+        self.state.status_text = message;
     }
 
     fn handle_command(&mut self, command: Command) {
@@ -664,8 +720,8 @@ impl Service {
                 self.flush_queue();
             }
             Command::Flush => self.flush_queue(),
-            // The service loop stops before handing shutdown to a command.
-            Command::Shutdown(_) => {}
+            // The service loop answers these itself.
+            Command::SaveForQuit(_) | Command::Shutdown(_) => {}
         }
     }
 
@@ -696,7 +752,7 @@ impl Service {
             }
             Err(err) => {
                 self.state.auth_state = AuthState::Error;
-                self.state.status_text = request_error_message(&err);
+                self.fail(request_error_message(&err), false);
             }
         }
     }
@@ -722,7 +778,7 @@ impl Service {
                     .store(&session.username, &session.session_key)
                 {
                     self.state.auth_state = AuthState::Error;
-                    self.state.status_text = request_error_message(&RequestError::Keyring(err));
+                    self.fail(request_error_message(&RequestError::Keyring(err)), false);
                     return;
                 }
                 self.session = Some(session.clone());
@@ -736,7 +792,7 @@ impl Service {
             }
             Err(err) => {
                 self.state.auth_state = AuthState::Error;
-                self.state.status_text = request_error_message(&err);
+                self.fail(request_error_message(&err), false);
             }
         }
     }
@@ -763,7 +819,7 @@ impl Service {
                 );
                 self.state.username = username;
                 self.state.auth_state = AuthState::Disconnected;
-                self.state.status_text = "Reconnect Last.fm to resume scrobbling.".to_string();
+                self.fail("Reconnect Last.fm to resume scrobbling.".to_string(), true);
             }
             Err(err) => {
                 let message = request_error_message(&RequestError::Keyring(err));
@@ -772,7 +828,7 @@ impl Service {
                 );
                 self.state.username = username;
                 self.state.auth_state = AuthState::Error;
-                self.state.status_text = message;
+                self.fail(message, false);
             }
         }
     }
@@ -785,6 +841,7 @@ impl Service {
                     "Last.fm disconnected, but the session key could not be removed \
                      from the keyring: {err}"
                 );
+                self.report(&status_text, true);
             }
         }
         self.session = None;
@@ -828,7 +885,7 @@ impl Service {
                 );
             }
             Err(err) => {
-                self.state.status_text = request_error_message(&err);
+                self.fail(request_error_message(&err), true);
             }
         }
     }
@@ -895,25 +952,30 @@ impl Service {
                     // Last.fm refused the request itself, for example because
                     // the API key is invalid. That says nothing about these
                     // scrobbles, so they stay queued for the next flush.
-                    self.state.status_text =
-                        format!("{}. Scrobbles stay queued.", request_error_message(&err));
+                    self.fail(
+                        format!("{}. Scrobbles stay queued.", request_error_message(&err)),
+                        false,
+                    );
                     return;
                 }
             }
         }
         let ignored = std::mem::take(&mut self.flush_ignored);
-        self.state.status_text = match ignored.reason {
-            None => "Last.fm scrobble queue flushed.".to_string(),
-            Some(reason) => format!(
-                "Last.fm ignored {} {}: {reason}",
-                ignored.count,
-                if ignored.count == 1 {
-                    "scrobble"
-                } else {
-                    "scrobbles"
-                }
+        match ignored.reason {
+            None => self.state.status_text = "Last.fm scrobble queue flushed.".to_string(),
+            Some(reason) => self.fail(
+                format!(
+                    "Last.fm ignored {} {}: {reason}",
+                    ignored.count,
+                    if ignored.count == 1 {
+                        "scrobble"
+                    } else {
+                        "scrobbles"
+                    }
+                ),
+                true,
             ),
-        };
+        }
     }
 
     fn commands_waiting(&self) -> bool {
@@ -926,6 +988,10 @@ impl Service {
         self.retry_attempt = self.retry_attempt.saturating_add(1);
         let delay = self.retry_policy.delay(self.retry_attempt);
         self.retry_due = Some(Instant::now() + delay);
+        // Told once for a run of failures; the status shows each retry.
+        if self.retry_attempt == 1 {
+            self.report(&format!("{message}; Ferrous keeps retrying."), true);
+        }
         self.state.status_text = format!("{message}; retrying in {}.", describe_delay(delay));
     }
 
@@ -936,14 +1002,48 @@ impl Service {
         self.retry_due = None;
         self.state.auth_url.clear();
         self.state.auth_state = AuthState::ReauthRequired;
-        self.state.status_text = message.to_string();
+        self.fail(message.to_string(), false);
+    }
+
+    /// [`Self::try_save_unsaved_queue`], as the service stops: fails with
+    /// the scrobbles that are lost.
+    fn save_unsaved_queue(&mut self) -> Result<(), String> {
+        self.try_save_unsaved_queue().map_err(|problem| {
+            format!(
+                "Last.fm: {} lost on quit. {problem}",
+                self.unsaved_scrobbles_were()
+            )
+        })
+    }
+
+    /// [`Self::try_save_unsaved_queue`], before the app quits: fails with
+    /// what quitting would lose, so that the user can retry or quit anyway.
+    fn save_for_quit(&mut self) -> Result<(), String> {
+        self.try_save_unsaved_queue().map_err(|problem| {
+            format!(
+                "Last.fm: {} not saved and would be lost on quit. {problem}",
+                self.unsaved_scrobbles_were()
+            )
+        })
+    }
+
+    fn unsaved_scrobbles_were(&self) -> String {
+        format!(
+            "{} {}",
+            self.queue.len(),
+            if self.queue.len() == 1 {
+                "scrobble was"
+            } else {
+                "scrobbles were"
+            }
+        )
     }
 
     /// Saves the queue if it is not on disk: after a failed save, or while
     /// the queue file is unreadable. Every change to the queue is saved, so
-    /// it differs from the file only then. Fails with the number of
-    /// scrobbles that exist only in memory if they still cannot be saved.
-    fn save_unsaved_queue(&mut self) -> Result<(), String> {
+    /// it differs from the file only then. Fails with why the scrobbles
+    /// that exist only in memory still cannot be saved.
+    fn try_save_unsaved_queue(&mut self) -> Result<(), String> {
         if self.queue_unreadable.is_some() {
             self.save_beside_unreadable_queue();
         } else if self.queue_save_error.is_some() {
@@ -959,15 +1059,7 @@ impl Service {
             ),
             _ => return Ok(()),
         };
-        Err(format!(
-            "Last.fm: {} {} lost on quit. {problem}",
-            self.queue.len(),
-            if self.queue.len() == 1 {
-                "scrobble was"
-            } else {
-                "scrobbles were"
-            }
-        ))
+        Err(problem)
     }
 
     /// Reads the queue file that could not be read at startup again, and
@@ -1032,10 +1124,15 @@ impl Service {
             "Last.fm: failed to save scrobble queue {}: {err}",
             path.display()
         );
-        self.queue_save_error = Some(format!(
+        let error = format!(
             "Pending scrobbles could not be saved to {} ({err}).",
             path.display()
-        ));
+        );
+        // A save that keeps failing the same way is told once.
+        if self.queue_save_error.as_ref() != Some(&error) {
+            self.report(&error, false);
+        }
+        self.queue_save_error = Some(error);
     }
 }
 
@@ -2372,7 +2469,10 @@ mod tests {
 
         event_rx
             .try_iter()
-            .map(|Event::State(state)| state)
+            .filter_map(|event| match event {
+                Event::State(state) => Some(state),
+                Event::SavedForQuit { .. } => None,
+            })
             .collect()
     }
 
@@ -2487,6 +2587,94 @@ mod tests {
             }
             other => panic!("expected a save failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_save_for_quit_reports_scrobbles_it_could_not_save_and_keeps_running() {
+        let dir = scratch_dir("quit-save-failure");
+        let config_dir = dir.join("config");
+        fs::write(&config_dir, b"").expect("write blocking file");
+        let (handle, events) = spawn_with_backends(
+            ServiceOptions {
+                queue_path: Some(config_dir.join("lastfm_queue.json")),
+                initial_enabled: false,
+            },
+            || backends(&ScriptedTransport::default(), MemorySessionKeys::default()),
+        );
+        handle.command(Command::QueueScrobble(entry(0)));
+        handle.command(Command::SaveForQuit(7));
+        handle.command(Command::SaveForQuit(8));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut states = Vec::new();
+        let mut answers = Vec::new();
+        while answers.len() < 2 {
+            match events.recv_deadline(deadline).expect("events") {
+                Event::State(state) => states.push(state),
+                Event::SavedForQuit { request_id, result } => answers.push((request_id, result)),
+            }
+        }
+        for (expected_id, (request_id, result)) in [7, 8].into_iter().zip(&answers) {
+            assert_eq!(*request_id, expected_id);
+            let message = result.as_ref().expect_err("still unsaved");
+            assert!(
+                message.contains("1 scrobble was not saved and would be lost on quit"),
+                "{message}"
+            );
+        }
+        let latest = states.last().expect("a state");
+        assert!(latest.unsaved_scrobbles);
+        // The failed save was told once, though every save failed.
+        let problems: Vec<&Problem> = states.iter().flat_map(|state| &state.problems).collect();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(!problems[0].warning);
+        assert!(problems[0].message.contains("could not be saved"));
+
+        // The service is still running.
+        assert!(matches!(
+            handle.shutdown(Duration::from_secs(5)),
+            ShutdownOutcome::SaveFailed(_)
+        ));
+    }
+
+    #[test]
+    fn a_save_for_quit_succeeds_once_the_queue_can_be_saved() {
+        let dir = scratch_dir("quit-save-recovered");
+        let config_dir = dir.join("config");
+        fs::write(&config_dir, b"").expect("write blocking file");
+        let (handle, events) = spawn_with_backends(
+            ServiceOptions {
+                queue_path: Some(config_dir.join("lastfm_queue.json")),
+                initial_enabled: false,
+            },
+            || backends(&ScriptedTransport::default(), MemorySessionKeys::default()),
+        );
+        handle.command(Command::QueueScrobble(entry(0)));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(
+            events.recv_deadline(deadline).expect("state"),
+            Event::State(RuntimeState {
+                unsaved_scrobbles: true,
+                ..
+            })
+        ) {}
+        // The user frees the folder, then retries quitting.
+        fs::remove_file(&config_dir).expect("remove blocking file");
+        fs::create_dir(&config_dir).expect("config folder");
+        handle.command(Command::SaveForQuit(3));
+
+        let answer = loop {
+            match events.recv_deadline(deadline).expect("answer") {
+                Event::State(state) => assert!(state.problems.is_empty()),
+                Event::SavedForQuit { request_id, result } => break (request_id, result),
+            }
+        };
+        assert_eq!(answer, (3, Ok(())));
+        assert!(config_dir.join("lastfm_queue.json").is_file());
+        assert_eq!(
+            handle.shutdown(Duration::from_secs(5)),
+            ShutdownOutcome::Stopped
+        );
     }
 
     /// A directory in place of the queue file, which cannot be read,

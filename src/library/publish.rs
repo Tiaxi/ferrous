@@ -286,6 +286,7 @@ impl WorkerLibrary {
     }
 
     pub(super) fn set_roots(&mut self, roots: Vec<LibraryRoot>) {
+        self.status.retain_root_problems(&roots);
         if self.snapshot.roots != roots {
             self.snapshot.roots = roots;
             self.snapshot.bump_search_revision();

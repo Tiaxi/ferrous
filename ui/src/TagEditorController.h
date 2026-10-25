@@ -90,6 +90,9 @@ signals:
     void bulkSummaryChanged();
     void saveFinished(bool success);
     void renameFinished();
+    // A load, save, or rename that failed, in whole or in part: the status
+    // and the first failures, for the app's error list.
+    void errorReported(const QString &message);
 
 private:
     enum class Operation { Load, Save, Rename };
@@ -122,6 +125,7 @@ private:
     QThreadPool *m_workerPool{nullptr};
     QStringList m_operationFiles;
     QVector<int> targetRows() const;
+    void reportFailures(const QString &status, const QStringList &failureLines);
     void setStatusText(const QString &text, const QString &details = QString(),
                        bool isError = false);
     void setSelection(QSet<int> rows);

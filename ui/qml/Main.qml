@@ -11,6 +11,7 @@ import org.kde.kirigami 2.20 as Kirigami
 import "components" as Components
 import "controllers" as Controllers
 import "dialogs" as Dialogs
+import "logic/ErrorUtils.js" as ErrorUtils
 import "logic/FormatUtils.js" as FormatUtils
 import "logic/PathUtils.js" as PathUtils
 import "logic/WheelUtils.js" as WheelUtils
@@ -48,7 +49,6 @@ ApplicationWindow {
     property string pendingLibraryRootDialogMode: ""
     property string pendingLibraryRootPath: ""
     property string pendingLibraryRootName: ""
-    property string transientBridgeError: ""
     // The backend stopped without being asked to, so no control works anymore.
     readonly property bool backendStopped: (root.uiBridge.backendFailure || "").length > 0
     readonly property real snappyScrollFlickDeceleration: 18000
@@ -134,6 +134,11 @@ ApplicationWindow {
         tryCaptureGlobalSearchPrefill: globalSearchController.tryCapturePrefill
         tagEditorApi: root.tagEditorApi
         openTagEditorDialog: function() { tagEditorDialog.open() }
+    }
+
+    Controllers.ErrorController {
+        id: errorController
+        objectName: "errorController"
     }
 
     Controllers.ViewerController {
@@ -284,7 +289,7 @@ ApplicationWindow {
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal diagnosticsChanged()
-        signal bridgeError(string message)
+        signal bridgeError(string message, int category, int severity, string subject)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
             real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken, var generation)
@@ -457,13 +462,6 @@ ApplicationWindow {
     FontMetrics {
         id: playlistOrderFontMetrics
         font: root.font
-    }
-
-    Timer {
-        id: bridgeErrorTimer
-        interval: 10000
-        repeat: false
-        onTriggered: root.transientBridgeError = ""
     }
 
     // Scroll left over from earlier wheel events that the view has not
@@ -1087,7 +1085,7 @@ ApplicationWindow {
         uiPalette: root.uiPalette
         channelStatusIconSource: root.channelStatusIconSource
         themeIsDark: root.themeIsDark
-        transientError: root.transientBridgeError
+        errorController: errorController
         positionText: playbackController.positionText
     }
 
@@ -1102,6 +1100,13 @@ ApplicationWindow {
             showCloseButton: false
             visible: root.backendStopped
             text: root.uiBridge.backendFailure || ""
+        }
+
+        Components.ErrorBanner {
+            objectName: "mainErrorBanner"
+            Layout.fillWidth: true
+            errorController: errorController
+            uiPalette: root.uiPalette
         }
 
         Panes.TransportBar {
@@ -1255,6 +1260,8 @@ ApplicationWindow {
         displaySleepInhibitionEnabled: root.uiBridge.preventDisplaySleepInFullscreen
         playbackPlaying: root.uiBridge.playbackState === "Playing"
         viewerActions: root.viewerActions
+        errorController: errorController
+        uiPalette: root.uiPalette
     }
 
     Dialogs.ItunesArtworkDialog {
@@ -1280,6 +1287,8 @@ ApplicationWindow {
         switchComparisonImage: viewerController.switchComparisonImage
         openContextMenu: function() { albumArtSurface.openContextMenu() }
         viewerActions: root.viewerActions
+        errorController: errorController
+        uiPalette: root.uiPalette
     }
 
     Viewers.AlbumArtSurface {
@@ -1384,8 +1393,12 @@ ApplicationWindow {
     // A quit from outside the window, such as from the desktop's media
     // controls, can find it minimized or behind other windows. Dialogs that
     // quitting opens are drawn in the window, so the window comes forward
-    // too; window managers raise the window they activate.
+    // too; window managers raise the window they activate. A fullscreen
+    // viewer is a modal window over the main one, and the dialog would open
+    // behind it, so the viewers close first.
     function bringWindowForward() {
+        viewerController.closeAlbumArtViewer()
+        viewerController.closeSpectrogramViewer()
         if (root.visibility === Window.Minimized || !root.visible) {
             root.showNormal()
         }
@@ -1503,16 +1516,27 @@ ApplicationWindow {
         function onGlobalSearchResultsChanged() {
             globalSearchController.syncSelectionAfterResultsChange()
         }
-        function onBridgeError(message) {
-            if (message.indexOf("[analysis]") !== -1
-                    || message.indexOf("[gst]") !== -1
-                    || message.indexOf("[bridge]") !== -1
-                    || message.indexOf("[bridge-json]") !== -1) {
-                return
-            }
-            root.transientBridgeError = message
-            bridgeErrorTimer.restart()
-            console.warn("bridge error:", message)
+        function onBridgeError(message, category, severity, subject) {
+            errorController.report(category, severity, subject, message)
+        }
+    }
+
+    Connections {
+        target: root.tagEditorApi
+        ignoreUnknownSignals: true
+        function onErrorReported(message) {
+            errorController.report(
+                ErrorUtils.CategoryTags, ErrorUtils.SeverityError, "", message)
+        }
+    }
+
+    // Shown when the user asked the fullscreen viewer to keep the screen awake.
+    Connections {
+        target: root.displaySleepInhibitorApi
+        ignoreUnknownSignals: true
+        function onInhibitionFailed(message) {
+            errorController.report(
+                ErrorUtils.CategorySystem, ErrorUtils.SeverityWarning, "", message)
         }
     }
 

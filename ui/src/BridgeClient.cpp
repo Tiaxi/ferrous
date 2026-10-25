@@ -965,7 +965,8 @@ bool BridgeClient::startInProcessBridge() {
     m_ffiBridge = ferrous_ffi_bridge_create();
     if (m_ffiBridge == nullptr) {
         logDiagnostic(QStringLiteral("bridge"), QStringLiteral("failed to create in-process bridge"));
-        emit bridgeError(QStringLiteral("failed to create in-process Rust bridge"));
+        reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                    QStringLiteral("failed to create in-process Rust bridge"));
         return false;
     }
 
@@ -1486,7 +1487,8 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
             logDiagnostic(
                 QStringLiteral("bridge"),
                 QStringLiteral("snapshot decode error: %1").arg(decodeError));
-            emit bridgeError(QStringLiteral("invalid bridge packet: %1").arg(decodeError));
+            reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                        QStringLiteral("invalid bridge packet: %1").arg(decodeError));
             continue;
         }
         processBinarySnapshot(decoded);
@@ -2860,8 +2862,9 @@ void BridgeClient::sendPathListCommand(
             QStringLiteral("refuse path list command id=%1 paths=%2: over the command bound")
                 .arg(cmdId)
                 .arg(sanitized.size()));
-        emit bridgeError(tooLargeMessage.arg(sanitized.size())
-                             .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
+        reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                    tooLargeMessage.arg(sanitized.size())
+                        .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
         return;
     }
     sendBinaryCommand(command);
@@ -3602,8 +3605,9 @@ void BridgeClient::openInFileBrowser(const QString &path) {
     }
     const bool ok = openUrlInFileBrowser(path, false);
     if (!ok) {
-        emit bridgeError(QStringLiteral("failed to open in %1: %2")
-                             .arg(m_fileBrowserName, path));
+        reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                    QStringLiteral("failed to open in %1: %2").arg(m_fileBrowserName, path),
+                    path);
     }
 }
 
@@ -3613,8 +3617,10 @@ void BridgeClient::openContainingFolder(const QString &path) {
     }
     const bool ok = openUrlInFileBrowser(path, true);
     if (!ok) {
-        emit bridgeError(QStringLiteral("failed to open containing folder in %1: %2")
-                             .arg(m_fileBrowserName, path));
+        reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                    QStringLiteral("failed to open containing folder in %1: %2")
+                        .arg(m_fileBrowserName, path),
+                    path);
     }
 }
 
@@ -3949,7 +3955,8 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
                     .arg(frame.seq)
                     .arg(frame.decodeError));
         }
-        emit bridgeError(QStringLiteral("invalid search frame: %1").arg(frame.decodeError));
+        reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                    QStringLiteral("invalid search frame: %1").arg(frame.decodeError));
         return false;
     }
     if (m_globalSearchDebounceTimer.isActive()) return false;
@@ -4134,7 +4141,8 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         const auto *lenPtr = base + readOffset;
         const quint32 frameBytes = qFromLittleEndian<quint32>(lenPtr);
         if (frameBytes == 0 || frameBytes > kMaxAnalysisFrameBytes) {
-            emit bridgeError(QStringLiteral("invalid analysis frame size: %1").arg(frameBytes));
+            reportError(BinaryBridgeCodec::ErrorCategoryAnalysis,
+                        QStringLiteral("invalid analysis frame size: %1").arg(frameBytes));
             m_analysisBuffer.clear();
             m_analysisBufferReadOffset = 0;
             break;
@@ -4651,13 +4659,19 @@ bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFold
     return QDesktopServices::openUrl(QUrl::fromLocalFile(targetPath));
 }
 
+void BridgeClient::reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
+                               const QString &subject, BinaryBridgeCodec::ErrorSeverity severity) {
+    emit bridgeError(message, static_cast<int>(category), static_cast<int>(severity), subject);
+}
+
 bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
     if (payload.isEmpty()) {
         // Encoders return nothing for a command over the bound.
         logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command over the bound"));
-        emit bridgeError(QStringLiteral("Command not sent: it is over the %1 MiB the backend "
-                                        "takes in one command.")
-                             .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
+        reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                    QStringLiteral("Command not sent: it is over the %1 MiB the backend "
+                                   "takes in one command.")
+                        .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
         return false;
     }
     if (m_sendCommandOverride) {
@@ -4665,7 +4679,8 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
     }
     if (m_ffiBridge == nullptr) {
         logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command: bridge not initialized"));
-        emit bridgeError(QStringLiteral("bridge is not initialized"));
+        reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                    QStringLiteral("bridge is not initialized"));
         return false;
     }
     const auto *ptr = reinterpret_cast<const std::uint8_t *>(payload.constData());
@@ -4673,9 +4688,10 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
         logDiagnostic(
             QStringLiteral("bridge"),
             QStringLiteral("failed to send command bytes=%1").arg(payload.size()));
-        emit bridgeError(m_backendFailure.isEmpty()
-                ? QStringLiteral("failed to send command to in-process bridge")
-                : QStringLiteral("command not sent: the backend has stopped"));
+        reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                    m_backendFailure.isEmpty()
+                        ? QStringLiteral("failed to send command to in-process bridge")
+                        : QStringLiteral("command not sent: the backend has stopped"));
         return false;
     }
     return true;
@@ -4728,7 +4744,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     if (!snapshot.errorMessage.trimmed().isEmpty()) {
-        emit bridgeError(snapshot.errorMessage);
+        reportError(static_cast<BinaryBridgeCodec::ErrorCategory>(snapshot.errorCategory),
+                    snapshot.errorMessage, snapshot.errorSubject,
+                    static_cast<BinaryBridgeCodec::ErrorSeverity>(snapshot.errorSeverity));
         return false;
     }
 
@@ -5524,14 +5542,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
                 trimmedName.isEmpty() ? root.path : trimmedName);
             entry.insert(QStringLiteral("searchLabel"), rootSearchLabel(root.path, trimmedName));
             entry.insert(QStringLiteral("unwatchedReason"), root.unwatchedReason);
+            entry.insert(QStringLiteral("scanProblem"), root.scanProblem);
             rootEntries.push_back(entry);
             // Told once per root and reason; the preferences show it while it lasts.
             const QString reported = root.path + QLatin1Char('\n') + root.unwatchedReason;
             if (!root.unwatchedReason.isEmpty() && !m_reportedUnwatchedRoots.contains(reported)) {
                 m_reportedUnwatchedRoots.insert(reported);
-                emit bridgeError(QStringLiteral("Not watched for changes in library folder %1: %2")
-                                     .arg(trimmedName.isEmpty() ? root.path : trimmedName,
-                                          root.unwatchedReason));
+                reportError(BinaryBridgeCodec::ErrorCategoryLibrary,
+                            QStringLiteral("Not watched for changes in library folder %1: %2")
+                                .arg(trimmedName.isEmpty() ? root.path : trimmedName,
+                                     root.unwatchedReason),
+                            root.path, BinaryBridgeCodec::ErrorSeverityWarning);
             }
         }
     }
@@ -5545,7 +5566,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (m_libraryLastError != libraryLastError) {
         m_libraryLastError = libraryLastError;
         if (!m_libraryLastError.trimmed().isEmpty()) {
-            emit bridgeError(QStringLiteral("library: %1").arg(m_libraryLastError));
+            reportError(BinaryBridgeCodec::ErrorCategoryLibrary, m_libraryLastError);
         }
         librarySignalChanged = true;
     }

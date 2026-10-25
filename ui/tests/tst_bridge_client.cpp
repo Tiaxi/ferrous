@@ -307,6 +307,7 @@ private slots:
     void libraryViewStateAvailabilityFollowsSnapshot();
     void libraryChangesNotifyOnlyLibraryProperties();
     void libraryWatchingDecodesFromBinaryPayload();
+    void libraryScanErrorsAreReportedAsLibraryErrors();
     void unwatchedLibraryRootsAreShownAndReportedOnce();
     void searchExtendedMatchDetailsDecodeAndHighlight();
     void searchResultsRankFilterAndHighlight();
@@ -759,6 +760,7 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
           QByteArray(R"({"results":[{"path":"/fixture/Album 0/0.flac","ok":false,"error":"busy"}]})")}}));
     QVERIFY(!editor.statusIsError());
     QSignalSpy status(&editor, &TagEditorController::statusChanged);
+    QSignalSpy reported(&editor, &TagEditorController::errorReported);
 
     // A failure is flagged whatever words describe it.
     editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
@@ -767,6 +769,10 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
     QTRY_COMPARE(saved.size(), 1);
     QVERIFY(editor.statusIsError());
     QVERIFY(status.size() > 0);
+    // The app's error list hears of it, with the file that failed.
+    QCOMPARE(reported.size(), 1);
+    QCOMPARE(reported.at(0).at(0).toString(),
+             QStringLiteral("Saved 0 file(s); 1 failed.\n0.flac: Fehler"));
 
     editor.setSelectedRows({0});
     QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
@@ -774,6 +780,9 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
     QTRY_COMPARE(renamed.size(), 1);
     QVERIFY(editor.statusIsError());
     QCOMPARE(editor.m_tableModel.rowAt(0)->errorText, QStringLiteral("busy"));
+    QCOMPARE(reported.size(), 2);
+    QCOMPARE(reported.at(1).at(0).toString(),
+             QStringLiteral("Renamed 0 file(s); 1 failed.\n0.flac: busy"));
 
     // A success whose wording mentions errors is not a failure.
     TagEditorController succeeding(nullptr);
@@ -787,11 +796,13 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
           QByteArray(R"({"results":[{"path":"/fixture/error failed.flac","ok":true}]})")}}));
     succeeding.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
     QSignalSpy succeeded(&succeeding, &TagEditorController::saveFinished);
+    QSignalSpy succeededReports(&succeeding, &TagEditorController::errorReported);
     QVERIFY(succeeding.save());
     QTRY_COMPARE(succeeded.size(), 1);
     QVERIFY(succeeded.first().first().toBool());
     QVERIFY(succeeding.statusDetails().contains(QStringLiteral("error failed.flac")));
     QVERIFY(!succeeding.statusIsError());
+    QCOMPARE(succeededReports.size(), 0);
 }
 
 void BridgeClientTest::tagEditorKeepsExtraValuesUntilTheirFieldIsSaved() {
@@ -1159,7 +1170,8 @@ void BridgeClientTest::stringsPastTheOldLengthLimitCrossWhole() {
     QByteArray payload;
     QDataStream payloadStream(&payload, QIODevice::WriteOnly);
     payloadStream.setByteOrder(QDataStream::LittleEndian);
-    payloadStream << quint32(utf8.size());
+    // A system error with no subject, then the message.
+    payloadStream << quint8(0) << quint8(1) << quint32(0) << quint32(utf8.size());
     payload.append(utf8);
     const auto packetWith = [](const QByteArray &section) {
         QByteArray packet;
@@ -1179,9 +1191,9 @@ void BridgeClientTest::stringsPastTheOldLengthLimitCrossWhole() {
 
     // A length past the end of the section is refused.
     QByteArray corrupt = payload;
-    qToLittleEndian<quint32>(quint32(utf8.size() + 1), corrupt.data());
+    qToLittleEndian<quint32>(quint32(utf8.size() + 1), corrupt.data() + 6);
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWith(corrupt), &decoded, &error));
-    qToLittleEndian<quint32>(std::numeric_limits<quint32>::max(), corrupt.data());
+    qToLittleEndian<quint32>(std::numeric_limits<quint32>::max(), corrupt.data() + 6);
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWith(corrupt), &decoded, &error));
 }
 
@@ -3383,34 +3395,63 @@ void BridgeClientTest::mprisReportsAReplayOfTheSameFileAsSeeked() {
 }
 
 void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
+    // Mirrored by ffi::error_packet_tests::playback_error_packet_layout_matches_the_qt_decoder.
     BridgeClient client;
     isolateBridgeClient(client);
     const QString message = QStringLiteral(
         "Couldn't play \u201cbad.flac\u201d (Resource not found); skipped it.");
-    const QByteArray text = message.toUtf8();
+    const QString subject = QStringLiteral("/music/bad.flac");
 
     // The packet the Rust bridge encodes for an error event: the header,
-    // then the error section with a u32-length UTF-8 string.
-    QByteArray payload;
-    QDataStream payloadStream(&payload, QIODevice::WriteOnly);
-    payloadStream.setByteOrder(QDataStream::LittleEndian);
-    payloadStream << quint32(text.size());
-    payload.append(text);
-    QByteArray packet;
-    QDataStream header(&packet, QIODevice::WriteOnly);
-    header.setByteOrder(QDataStream::LittleEndian);
-    header << quint32(0xFE550001u) << quint32(16 + payload.size())
-           << quint16(BinaryBridgeCodec::SectionError) << quint16(0)
-           << quint32(payload.size());
-    packet.append(payload);
+    // then the error section with the category, the severity, and the
+    // subject and the message as u32-length UTF-8 strings.
+    const auto packetWith = [&](quint8 category, quint8 severity) {
+        const QByteArray text = message.toUtf8();
+        const QByteArray subjectText = subject.toUtf8();
+        QByteArray payload;
+        QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+        payloadStream.setByteOrder(QDataStream::LittleEndian);
+        payloadStream << category << severity << quint32(subjectText.size());
+        payloadStream.writeRawData(subjectText.constData(), static_cast<int>(subjectText.size()));
+        payloadStream << quint32(text.size());
+        payloadStream.writeRawData(text.constData(), static_cast<int>(text.size()));
+        QByteArray packet;
+        QDataStream header(&packet, QIODevice::WriteOnly);
+        header.setByteOrder(QDataStream::LittleEndian);
+        header << quint32(0xFE550001u) << quint32(16 + payload.size())
+               << quint16(BinaryBridgeCodec::SectionError) << quint16(0)
+               << quint32(payload.size());
+        packet.append(payload);
+        return packet;
+    };
 
     BinaryBridgeCodec::DecodedSnapshot decoded;
     QString error;
-    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error), qPrintable(error));
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                 packetWith(BinaryBridgeCodec::ErrorCategoryPlayback,
+                            BinaryBridgeCodec::ErrorSeverityWarning),
+                 &decoded, &error),
+             qPrintable(error));
     QSignalSpy errors(&client, &BridgeClient::bridgeError);
     QVERIFY(!client.processBinarySnapshot(decoded));
     QCOMPARE(errors.count(), 1);
     QCOMPARE(errors.at(0).at(0).toString(), message);
+    QCOMPARE(errors.at(0).at(1).toInt(), int(BinaryBridgeCodec::ErrorCategoryPlayback));
+    QCOMPARE(errors.at(0).at(2).toInt(), int(BinaryBridgeCodec::ErrorSeverityWarning));
+    QCOMPARE(errors.at(0).at(3).toString(), subject);
+
+    // Every category and severity Rust sends decodes; values past them do not.
+    for (quint8 category = 0; category <= BinaryBridgeCodec::ErrorCategoryLast; ++category) {
+        decoded = {};
+        QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWith(category, BinaryBridgeCodec::ErrorSeverityError), &decoded, &error));
+        QCOMPARE(decoded.errorCategory, category);
+        QCOMPARE(decoded.errorSeverity, quint8(BinaryBridgeCodec::ErrorSeverityError));
+    }
+    QCOMPARE(int(BinaryBridgeCodec::ErrorCategoryLast), 6);
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWith(BinaryBridgeCodec::ErrorCategoryLast + 1, 0), &decoded, &error));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWith(0, 2), &decoded, &error));
 }
 
 namespace {
@@ -3422,7 +3463,8 @@ QByteArray backendFailurePacket(const QString &message) {
     QByteArray payload;
     QDataStream payloadStream(&payload, QIODevice::WriteOnly);
     payloadStream.setByteOrder(QDataStream::LittleEndian);
-    payloadStream << quint32(text.size());
+    // A system error with no subject.
+    payloadStream << quint8(0) << quint8(1) << quint32(0) << quint32(text.size());
     payload.append(text);
     QByteArray packet;
     QDataStream stream(&packet, QIODevice::WriteOnly);
@@ -4127,8 +4169,8 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
         return packet;
     };
 
-    // The library meta section as Rust encodes it: path, name and the reason
-    // a root is not watched, per root.
+    // The library meta section as Rust encodes it: path, name, the reason
+    // a root is not watched, and its scan problem, per root.
     for (quint32 value : {2u, 0u, 0u, 0u}) append(value); // roots, tracks, artists, albums
     append(quint8(0));                                       // scan in progress
     append(qint32(0));                                       // sort mode
@@ -4138,7 +4180,8 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     append(float(-1.0f));
     append(quint16(2));
     for (const QString &value : {QStringLiteral("/music"), QStringLiteral("Music"), QString(),
-                                 QStringLiteral("/nas"), QString(), QStringLiteral("it is on nfs4")}) {
+                                 QStringLiteral("could not read 1 folder"), QStringLiteral("/nas"),
+                                 QString(), QStringLiteral("it is on nfs4"), QString()}) {
         text(value);
     }
     BinaryBridgeCodec::DecodedSnapshot decoded;
@@ -4151,6 +4194,8 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     QVERIFY(decoded.library.rootEntries[0].unwatchedReason.isEmpty());
     QCOMPARE(decoded.library.rootEntries[1].path, QStringLiteral("/nas"));
     QCOMPARE(decoded.library.rootEntries[1].unwatchedReason, QStringLiteral("it is on nfs4"));
+    QCOMPARE(decoded.library.rootEntries[0].scanProblem, QStringLiteral("could not read 1 folder"));
+    QVERIFY(decoded.library.rootEntries[1].scanProblem.isEmpty());
 
     // The settings section ends with library watching, and older payloads
     // without it default on.
@@ -4180,6 +4225,26 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
              QByteArray::fromHex("43000100000001"));
 }
 
+void BridgeClientTest::libraryScanErrorsAreReportedAsLibraryErrors() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.library.present = true;
+    snapshot.library.lastError = QStringLiteral("could not read 1 folder or file in '/music'");
+
+    client.processBinarySnapshot(snapshot);
+    QCOMPARE(errors.count(), 1);
+    // The category says where it came from; the message has no prefix.
+    QCOMPARE(errors[0][0].toString(), snapshot.library.lastError);
+    QCOMPARE(errors[0][1].toInt(), int(BinaryBridgeCodec::ErrorCategoryLibrary));
+    QCOMPARE(errors[0][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityError));
+
+    // The same error again is not told again.
+    client.processBinarySnapshot(snapshot);
+    QCOMPARE(errors.count(), 1);
+}
+
 void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -4194,6 +4259,7 @@ void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
     share.path = QStringLiteral("/nas");
     share.name = QStringLiteral("NAS");
     share.unwatchedReason = QStringLiteral("it is on nfs4");
+    watched.scanProblem = QStringLiteral("could not read 1 folder");
     snapshot.library.rootEntries = {watched, share};
     snapshot.library.rootPaths = {watched.path, share.path};
 
@@ -4204,9 +4270,14 @@ void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
     QVERIFY(entries[0].toMap().value(QStringLiteral("unwatchedReason")).toString().isEmpty());
     QCOMPARE(entries[1].toMap().value(QStringLiteral("unwatchedReason")).toString(),
              QStringLiteral("it is on nfs4"));
+    QCOMPARE(entries[0].toMap().value(QStringLiteral("scanProblem")).toString(),
+             QStringLiteral("could not read 1 folder"));
     QCOMPARE(errors.count(), 1);
     QCOMPARE(errors[0][0].toString(),
              QStringLiteral("Not watched for changes in library folder NAS: it is on nfs4"));
+    QCOMPARE(errors[0][1].toInt(), int(BinaryBridgeCodec::ErrorCategoryLibrary));
+    QCOMPARE(errors[0][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityWarning));
+    QCOMPARE(errors[0][3].toString(), QStringLiteral("/nas"));
 
     // The same roots again: nothing changed, and they were told once.
     QVERIFY(!client.processBinarySnapshot(snapshot));

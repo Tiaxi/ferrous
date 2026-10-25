@@ -139,6 +139,7 @@ ScrollView {
                             readonly property string rootName: rootEntry.name || ""
                             readonly property string rootDisplayName: rootEntry.displayName || rootPath
                             readonly property string unwatchedReason: rootEntry.unwatchedReason || ""
+                            readonly property string scanProblem: rootEntry.scanProblem || ""
 
                             width: ListView.view.width
                             height: Math.max(52, rootRow.implicitHeight + 12)
@@ -180,6 +181,20 @@ ScrollView {
                                         wrapMode: Text.Wrap
                                         color: Kirigami.Theme.neutralTextColor
                                         font.pixelSize: Math.max(11, root.windowRoot.font.pixelSize - 1)
+                                    }
+
+                                    // Stays until a rescan of the whole folder finds nothing wrong.
+                                    Label {
+                                        objectName: "libraryRootScanProblemLabel"
+                                        Layout.fillWidth: true
+                                        visible: scanProblem.length > 0
+                                        text: "Last scan: " + scanProblem
+                                        wrapMode: Text.Wrap
+                                        color: Kirigami.Theme.negativeTextColor
+                                        font.pixelSize: Math.max(11, root.windowRoot.font.pixelSize - 1)
+                                        Accessible.role: Accessible.AlertMessage
+                                        Accessible.name: "Problem with library folder "
+                                            + rootDisplayName + ": " + scanProblem
                                     }
                                 }
 

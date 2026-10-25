@@ -412,7 +412,7 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     for (quint16 i = 0; i < rootPathCount; ++i) {
         DecodedLibraryRoot root;
         if (!reader.readUtf8(&root.path) || !reader.readUtf8(&root.name)
-            || !reader.readUtf8(&root.unwatchedReason)) {
+            || !reader.readUtf8(&root.unwatchedReason) || !reader.readUtf8(&root.scanProblem)) {
             return false;
         }
         rootPaths.push_back(root.path);
@@ -878,9 +878,18 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             break;
         case SectionError: {
             Reader sectionReader(sectionPayload);
+            quint8 category = 0;
+            quint8 severity = 0;
+            QString subject;
             QString message;
-            ok = sectionReader.readUtf8(&message) && sectionReader.atEnd();
+            ok = sectionReader.readU8(&category) && category <= ErrorCategoryLast
+                && sectionReader.readU8(&severity) && severity <= ErrorSeverityError
+                && sectionReader.readUtf8(&subject) && sectionReader.readUtf8(&message)
+                && sectionReader.atEnd();
             if (ok) {
+                out->errorCategory = category;
+                out->errorSeverity = severity;
+                out->errorSubject = subject;
                 out->errorMessage = message;
             }
             break;

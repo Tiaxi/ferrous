@@ -7,7 +7,10 @@ use crossbeam_channel::Sender;
 use crate::playback::{PlaybackCommand, PlaybackEngine, PlaybackState};
 
 use super::queue_sync::QueueEdit;
-use super::{sync_queue_details, try_send_event, BridgeEvent, BridgeQueueCommand, BridgeState};
+use super::{
+    sync_queue_details, try_send_event, BridgeError, BridgeEvent, BridgeQueueCommand, BridgeState,
+    ErrorCategory,
+};
 
 pub(super) fn handle_queue_command(
     cmd: BridgeQueueCommand,
@@ -57,7 +60,10 @@ pub(super) fn handle_queue_command(
         }
     }
     if let Some(error) = outcome.error {
-        let _ = try_send_event(event_tx, BridgeEvent::Error(error));
+        let _ = try_send_event(
+            event_tx,
+            BridgeEvent::Error(BridgeError::error(ErrorCategory::Playback, error)),
+        );
     }
     outcome.changed
 }
