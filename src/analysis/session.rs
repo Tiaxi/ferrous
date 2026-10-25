@@ -3879,7 +3879,7 @@ mod tests {
         assert!((i4 - 11.43).abs() < 0.1);
     }
 
-    /// Write a mono 16-bit tone WAV and return its path.
+    /// Write a mono 16-bit square-wave WAV and return its path.
     fn write_tone_fixture(name: &str, seconds: u32, rate: u32) -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("ferrous-session-{name}-{}.wav", std::process::id()));
@@ -3892,9 +3892,7 @@ mod tests {
         bytes.extend_from_slice(b"\x02\0\x10\0data");
         bytes.extend_from_slice(&(frames * 2).to_le_bytes());
         for frame in 0..frames {
-            let phase = f64::from(frame % 64) / 64.0 * std::f64::consts::TAU;
-            #[allow(clippy::cast_possible_truncation)]
-            let sample = (phase.sin() * 8_000.0) as i16;
+            let sample: i16 = if frame % 64 < 32 { 8_000 } else { -8_000 };
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         std::fs::write(&path, bytes).expect("write fixture");

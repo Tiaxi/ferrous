@@ -975,6 +975,7 @@ impl AnalysisRuntimeState {
         self.stage_successor(path, false, ctx);
     }
 
+    // `optimistic` is only logged.
     #[cfg_attr(not(feature = "profiling-logs"), allow(unused_variables))]
     fn stage_successor(&mut self, path: PathBuf, optimistic: bool, ctx: &AnalysisContext<'_>) {
         if self.display_mode == SpectrogramDisplayMode::Rolling {

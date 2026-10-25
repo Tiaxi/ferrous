@@ -4,11 +4,11 @@
 
 Playback owns audio output and publishes transport position and track identity. The position is the pipeline's own, with the `CLOCK_MONOTONIC` time the engine read it and whether it advances from there; the UI's `PlaybackClock` extrapolates it once, and the transport bar, spectrogram, waveforms, level meter, and MPRIS all read that clock. It does not forward unused PCM to the visualizations. Analysis opens independent decoders, preserving native sample rate and timestamped frame positions. Exact seeks decode codec preroll and trim to the requested frame. Spectrogram sessions align their FFT windows to an absolute sample grid; timestamp gaps become bounded silence batches and overlaps are trimmed. Waveform detail preserves missing coverage separately from actual silence.
 
-The analysis control thread owns track identity, display settings, generation changes, and gapless staging. A spectrogram worker owns its decoder, FFT scratch storage, peak-hold state, and partial output batch. Seeking resets these objects without recursive decode loops or rebuilding FFT plans. Rolling continuation uses a continuous column timeline; centered transitions use the new track's timeline.
+The analysis control thread owns track identity, display settings, generation changes, and gapless staging. It is the only thread that creates generations, and it neither reads files nor waits for the library database: a file helper thread reads file stamps, probes formats, and keeps decoded overview waveforms in memory and in the database. Stopped staging threads are not waited for until shutdown. A spectrogram worker owns its decoder, FFT scratch storage, peak-hold state, and partial output batch. Seeking resets these objects without recursive decode loops or rebuilding FFT plans. Rolling continuation uses a continuous column timeline; centered transitions use the new track's timeline.
 
 ## Ownership and backpressure
 
-Spectral batches travel through a dedicated bounded channel to an FFI relay. Snapshot/control delivery remains independent. The relay serializes outside the UI queue lock and waits for queue space. Generation changes discard obsolete output and interrupt blocked sends; shutdown wakes the relay explicitly. Rust and Qt must agree on command IDs, payloads, and FFI buffer ownership.
+Spectral batches travel through a dedicated bounded channel to an FFI relay. Snapshot/control delivery remains independent. The relay serializes outside the UI queue lock and waits for queue space. The spectrogram worker is the only writer: the control thread hands it the chunks to emit before a session (staged columns, an immediate ring clear) with that session, so every chunk carries its session's generation and arrives in order. Generation changes discard obsolete output and interrupt blocked sends; shutdown wakes the relay explicitly. Rust and Qt must agree on command IDs, payloads, and FFI buffer ownership.
 
 | Storage | Policy |
 | --- | --- |
@@ -24,7 +24,7 @@ The lookahead policy is shared by Rust and Qt through `ferrous_ffi_spectrogram_r
 
 ## Waveform queries
 
-Detail requests run on Qt worker threads. A shared Rust service serializes access to a persistent decoder and caches PCM and min/max summaries. File identity includes path, length, and modification time. Cancellation also applies while waiting for the service; incomplete cancelled tiles are not cached. The summary pyramid starts at 64-frame blocks and supports coarser power-of-two queries without decoding again. Clipped endpoints use PCM to avoid including samples outside the requested interval.
+Detail requests run on Qt worker threads. A shared Rust service gives them one persistent decoder, held for one tile at a time, and caches PCM and min/max summaries; the level meter decodes between the tiles of a detail window. File identity includes path, length, and modification time, and one file is opened at a time. A cancelled request does not wait for the service; incomplete cancelled tiles are not cached. The summary pyramid starts at 64-frame blocks and supports coarser power-of-two queries without decoding again. Clipped endpoints use PCM to avoid including samples outside the requested interval.
 
 Native channels and the arithmetic downmix have separate extrema: averaging channel extrema would destroy phase cancellation. The versioned WVF2 payload carries both. The compact whole-track overview remains a separate background job with a persistent cache, partial-coverage metadata, and peak-preserving reduction.
 
