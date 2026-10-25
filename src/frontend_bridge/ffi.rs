@@ -5305,7 +5305,9 @@ mod tests {
     }
 
     /// A bridge that saves its state, as the app's does, starting from no
-    /// saved state.
+    /// saved state. It saves in the test's config directory, which the test
+    /// makes its own with [`crate::paths::TestConfigDir`] so that no other
+    /// test's save reaches it.
     fn ffi_bridge_saving_state() -> *mut FerrousFfiBridge {
         for path in [config::settings_path(), config::session_path()]
             .into_iter()
@@ -5349,7 +5351,7 @@ mod tests {
 
     #[test]
     fn destroy_returns_after_saving_settings_changed_just_before() {
-        let _guard = super::super::tests::test_guard();
+        let _config = crate::paths::TestConfigDir::new();
         let handle = ffi_bridge_saving_state();
         ffi_set_db_range(handle, 123.0);
 
@@ -5366,7 +5368,7 @@ mod tests {
 
     #[test]
     fn bridges_saving_settings_back_to_back_keep_the_last_ones() {
-        let _guard = super::super::tests::test_guard();
+        let _config = crate::paths::TestConfigDir::new();
         for value in [111.0_f32, 122.0, 133.0] {
             let handle = ffi_bridge_saving_state();
             ffi_set_db_range(handle, value);
@@ -5565,7 +5567,7 @@ mod tests {
 
     #[test]
     fn save_state_answers_whether_settings_and_queue_reached_the_disk() {
-        let _guard = super::super::tests::test_guard();
+        let _config = crate::paths::TestConfigDir::new();
         let handle = ffi_bridge_saving_state();
         ffi_set_db_range(handle, 101.0);
         assert_eq!(ffi_save_state(handle), None);
@@ -5598,7 +5600,7 @@ mod tests {
 
     #[test]
     fn save_state_answers_each_request_with_its_own_id() {
-        let _guard = super::super::tests::test_guard();
+        let _config = crate::paths::TestConfigDir::new();
         let handle = ffi_bridge_saving_state();
         // A retry sent before the first answer arrived.
         ffi_send_save_state(handle, 1);

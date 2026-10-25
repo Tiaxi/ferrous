@@ -727,7 +727,12 @@ impl FrontendBridgeHandle {
         let import_gate = imports.gate();
         let saved = Arc::new(AtomicBool::new(false));
         let saved_by_loop = Arc::clone(&saved);
+        // The bridge saves in the config directory of the test that starts it.
+        #[cfg(test)]
+        let config_dir = crate::paths::config_dir_override();
         let thread = spawn_joinable("ferrous-bridge", move || {
+            #[cfg(test)]
+            crate::paths::set_config_dir_override(config_dir);
             let all_saved = run_bridge_loop(&cmd_rx, &event_tx, options, spectral_route, imports);
             saved_by_loop.store(all_saved, Ordering::Release);
         })
@@ -872,6 +877,7 @@ struct BridgeLoopRuntime {
 struct BridgeLoopFlags {
     running: bool,
     settings_dirty: bool,
+    settings_save_timing: SettingsSaveTiming,
     session_dirty: bool,
     pending_snapshot: SnapshotUrgency,
 }
@@ -885,6 +891,16 @@ struct BridgeLoopDiagnostics {
 
 struct BridgeSnapshotPlan {
     include_tree_in_next_snapshot: bool,
+}
+
+/// When dirty settings are saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsSaveTiming {
+    /// With the periodic save.
+    #[default]
+    Periodic,
+    /// Without waiting for the periodic save.
+    Now,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -1037,6 +1053,7 @@ impl BridgeLoopRuntime {
             flags: BridgeLoopFlags {
                 running: true,
                 settings_dirty: false,
+                settings_save_timing: SettingsSaveTiming::Periodic,
                 session_dirty: false,
                 pending_snapshot: SnapshotUrgency::None,
             },
@@ -1194,9 +1211,13 @@ impl BridgeLoopRuntime {
     }
 
     fn next_settings_save_delay(&self) -> Option<Duration> {
-        self.flags
-            .settings_dirty
-            .then(|| Duration::from_secs(2).saturating_sub(self.last_settings_save.elapsed()))
+        self.flags.settings_dirty.then(|| {
+            if self.flags.settings_save_timing == SettingsSaveTiming::Now {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(2).saturating_sub(self.last_settings_save.elapsed())
+            }
+        })
     }
 
     fn next_session_save_delay(&self) -> Option<Duration> {
@@ -1650,7 +1671,7 @@ impl BridgeLoopRuntime {
     }
 
     fn handle_lastfm_event(&mut self, event: LastFmEvent) -> SnapshotUrgency {
-        let urgency = process_lastfm_event(event, &mut self.state, &mut self.flags.settings_dirty);
+        let urgency = process_lastfm_event(event, &mut self.state, &mut self.flags);
         if urgency.is_pending() {
             self.flags.session_dirty = true;
         }
@@ -1703,11 +1724,7 @@ impl BridgeLoopRuntime {
             event_tx,
             &mut self.state,
         );
-        let lastfm_urgency = drain_lastfm_events(
-            &self.lastfm_rx,
-            &mut self.state,
-            &mut self.flags.settings_dirty,
-        );
+        let lastfm_urgency = drain_lastfm_events(&self.lastfm_rx, &mut self.state, &mut self.flags);
         drain_search_results(&self.search_results_rx, &mut self.state);
         tick_lastfm_playback(&self.state, &self.lastfm, &mut self.lastfm_tracker);
         if self.state.queue_detail_validation_requested {
@@ -1840,13 +1857,16 @@ impl BridgeLoopRuntime {
     }
 
     fn maybe_persist(&mut self, event_tx: &Sender<BridgeEvent>) {
+        let save_now =
+            std::mem::take(&mut self.flags.settings_save_timing) == SettingsSaveTiming::Now;
         if !self.persisted_state_enabled {
             self.flags.settings_dirty = false;
             self.flags.session_dirty = false;
             return;
         }
-        // A failed save stays dirty, so it is tried again.
-        if self.flags.settings_dirty && self.last_settings_save.elapsed() >= Duration::from_secs(2)
+        // A failed save stays dirty, so the periodic save tries it again.
+        if self.flags.settings_dirty
+            && (save_now || self.last_settings_save.elapsed() >= Duration::from_secs(2))
         {
             let saved = self.save_settings_reported(event_tx);
             self.flags.settings_dirty = !saved;
@@ -2271,7 +2291,7 @@ mod tests {
 
     #[test]
     fn a_save_that_keeps_failing_the_same_way_is_reported_once() {
-        let _guard = test_guard();
+        let _config = crate::paths::TestConfigDir::new();
         let settings_path = config::settings_path().expect("settings path");
         let block = || {
             let _ = std::fs::remove_file(&settings_path);
@@ -2494,9 +2514,7 @@ mod tests {
     #[test]
     fn default_test_runtime_ignores_persisted_session_snapshot() {
         let _guard = test_guard();
-        if let Some(path) = config::session_path() {
-            let _ = std::fs::remove_file(path);
-        }
+        let _config = crate::paths::TestConfigDir::new();
         save_session_snapshot(&SessionSnapshot {
             queue: vec![p("/music/a.flac")],
             selected_queue_index: Some(0),
@@ -2515,9 +2533,84 @@ mod tests {
         assert!(runtime.state.queue.is_empty());
         assert!(runtime.state.selected_queue_index.is_none());
         assert!(runtime.state.playback.current.is_none());
-        if let Some(path) = config::session_path() {
-            let _ = std::fs::remove_file(path);
-        }
+    }
+
+    fn lastfm_connected_as(username: &str) -> LastFmEvent {
+        LastFmEvent::State(crate::lastfm::RuntimeState {
+            username: username.to_string(),
+            ..crate::lastfm::RuntimeState::default()
+        })
+    }
+
+    #[test]
+    fn a_runtime_that_does_not_persist_state_does_not_save_a_new_lastfm_username() {
+        let _guard = test_guard();
+        let _config = crate::paths::TestConfigDir::new();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = unbounded();
+
+        runtime.handle_lastfm_event(lastfm_connected_as("tester"));
+        runtime.maybe_persist(&event_tx);
+
+        assert_eq!(
+            runtime.state.settings.integrations.lastfm_username,
+            "tester"
+        );
+        assert!(!config::settings_path().expect("settings path").exists());
+    }
+
+    #[test]
+    fn a_new_lastfm_username_is_saved_at_once_and_a_failed_save_is_shown_and_retried() {
+        let _guard = test_guard();
+        let _config = crate::paths::TestConfigDir::new();
+        let mut runtime = BridgeLoopRuntime::new(
+            BridgeRuntimeOptions {
+                persisted_state_enabled: true,
+                ..BridgeRuntimeOptions::default()
+            },
+            None,
+        );
+        let (event_tx, event_rx) = unbounded();
+        let settings_path = config::settings_path().expect("settings path");
+        let saved_username = || {
+            let text = std::fs::read_to_string(&settings_path).expect("read the settings");
+            let mut settings = BridgeSettings::default();
+            config::parse_settings_text(&mut settings, &text);
+            settings.integrations.lastfm_username
+        };
+
+        // Without waiting for the periodic save.
+        runtime.last_settings_save = Instant::now();
+        runtime.handle_lastfm_event(lastfm_connected_as("first"));
+        assert_eq!(runtime.next_settings_save_delay(), Some(Duration::ZERO));
+        runtime.maybe_persist(&event_tx);
+        assert_eq!(saved_username(), "first");
+        assert!(!runtime.flags.settings_dirty);
+        assert_eq!(error_messages(&event_rx), Vec::<String>::new());
+
+        // Nothing can be renamed over a directory.
+        std::fs::remove_file(&settings_path).expect("remove the settings");
+        std::fs::create_dir(&settings_path).expect("block the settings");
+        runtime.handle_lastfm_event(lastfm_connected_as("second"));
+        runtime.maybe_persist(&event_tx);
+        let messages = error_messages(&event_rx);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].starts_with("Settings could not be saved"),
+            "{messages:?}"
+        );
+        assert!(runtime.flags.settings_dirty);
+        assert_eq!(
+            runtime.flags.settings_save_timing,
+            SettingsSaveTiming::Periodic
+        );
+
+        // The periodic save tries again.
+        std::fs::remove_dir(&settings_path).expect("unblock the settings");
+        runtime.last_settings_save = Instant::now() - Duration::from_secs(3);
+        runtime.maybe_persist(&event_tx);
+        assert_eq!(saved_username(), "second");
+        assert!(!runtime.flags.settings_dirty);
     }
 
     fn wait_for_snapshot_matching<F>(
