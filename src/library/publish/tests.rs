@@ -390,6 +390,50 @@ fn changes_keep_the_order_a_database_read_has() {
 }
 
 #[test]
+fn paths_that_differ_only_in_case_keep_the_order_a_database_read_has() {
+    let conn = memory_db();
+    // Inserted in the opposite of their byte order, which the database
+    // would otherwise follow for paths that `NOCASE` finds equal.
+    let rows = [
+        ("/music", "/music/song.flac"),
+        ("/music", "/music/Song.flac"),
+        ("/music", "/music/SONG.flac"),
+        ("/Music", "/Music/song.flac"),
+    ];
+    let mut snapshot = LibrarySnapshot::default();
+    for (root, path) in rows {
+        conn.execute(
+            "INSERT INTO tracks(path, root_path, title, artist, album, mtime_ns, size_bytes, indexed_at) \
+             VALUES (?1, ?2, '', '', '', 0, 0, 0)",
+            params![path, root],
+        )
+        .expect("insert track");
+        apply(
+            &mut snapshot,
+            &LibraryChanges {
+                upserted: vec![Arc::new(LibraryTrack {
+                    path: PathBuf::from(path),
+                    root_path: PathBuf::from(root),
+                    ..LibraryTrack::default()
+                })],
+                ..LibraryChanges::default()
+            },
+        );
+    }
+    let mut read = LibrarySnapshot::default();
+    crate::library::schema::load_snapshot(&conn, &mut read);
+
+    let expected = [
+        "/Music/song.flac",
+        "/music/SONG.flac",
+        "/music/Song.flac",
+        "/music/song.flac",
+    ];
+    assert_eq!(paths(&snapshot), expected, "incremental changes");
+    assert_eq!(paths(&read), expected, "a full read");
+}
+
+#[test]
 fn a_track_that_changes_root_moves_to_its_place() {
     let mut snapshot = LibrarySnapshot::default();
     let at = |root: &str, path: &str| {

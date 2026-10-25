@@ -247,7 +247,8 @@ pub(super) struct WorkerLibrary {
     /// The status of the previous event, if there was one.
     published_status: Option<LibraryStatus>,
     /// The [`next_file_sequence`] number taken before the reads of the
-    /// command running began; see [`Self::begin_reads`].
+    /// command running, or of the root its scan is at, began; see
+    /// [`Self::begin_reads`].
     reads_after: u64,
     /// The tracks whose files had other names, hard links, when their root
     /// was last scanned whole. A scan of changed paths that removes one
@@ -271,9 +272,11 @@ impl WorkerLibrary {
 
     /// Takes the number that the changes made from now on are published
     /// as read after. Called when a command begins, before it reads
-    /// anything, and not again during it: a scan's reads run ahead of the
-    /// rows it records, and the commands run between its files publish with
-    /// those rows.
+    /// anything, and again before a scan reads each root. Not during a
+    /// root's scan: its reads run ahead of the rows it records, and the
+    /// commands run between its files publish with those rows. A root's
+    /// rows, read after the number of its own scan, can then win over
+    /// renames made while the scan was at an earlier root.
     pub(super) fn begin_reads(&mut self) {
         self.reads_after = next_file_sequence();
     }

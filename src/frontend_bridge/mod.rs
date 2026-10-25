@@ -5134,6 +5134,9 @@ mod tests {
     /// the test reads, and a library folder with one artist's album.
     struct LibraryOrderFixture {
         runtime: BridgeLoopRuntime,
+        /// The library worker's events, which the test hands to the runtime
+        /// one at a time; the runtime's own receiver gets none.
+        library_rx: Receiver<LibraryEvent>,
         event_tx: Sender<BridgeEvent>,
         _event_rx: Receiver<BridgeEvent>,
         _engine_rx: Receiver<PlaybackCommand>,
@@ -5162,9 +5165,11 @@ mod tests {
             );
             let (engine_tx, engine_rx) = unbounded();
             runtime.playback = PlaybackEngine::from_command_sender(engine_tx);
+            let library_rx = std::mem::replace(&mut runtime.library_rx, never());
             let (event_tx, event_rx) = unbounded();
             let mut fixture = Self {
                 runtime,
+                library_rx,
                 event_tx,
                 _event_rx: event_rx,
                 _engine_rx: engine_rx,
@@ -5199,18 +5204,52 @@ mod tests {
         /// tracks and no scan runs.
         fn wait_for_tracks(&mut self, count: usize) {
             let deadline = Instant::now() + Duration::from_secs(20);
-            let event_tx = self.event_tx.clone();
             while self.runtime.state.library.tracks.len() != count
                 || self.runtime.state.library_status.scan_in_progress
             {
                 let event = self
-                    .runtime
                     .library_rx
                     .recv_deadline(deadline)
                     .expect("the library reaches the expected tracks");
-                self.runtime
-                    .handle_wake(BridgeLoopWake::Library(event), &event_tx);
+                self.apply(event);
             }
+        }
+
+        /// Applies the library worker's events until a scan has started and
+        /// finished, and returns the paths that the scan's events upserted
+        /// or removed. Each event is seen, so the scan's status is too.
+        fn wait_for_scan(&mut self) -> Vec<PathBuf> {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut started = false;
+            let mut changed = Vec::new();
+            loop {
+                let event = self
+                    .library_rx
+                    .recv_deadline(deadline)
+                    .expect("the scan finishes");
+                let scanning = event.status.scan_in_progress;
+                started |= scanning;
+                if started {
+                    changed.extend(
+                        event
+                            .changes
+                            .upserted
+                            .iter()
+                            .map(|track| track.path.clone()),
+                    );
+                    changed.extend(event.changes.removed.iter().cloned());
+                }
+                self.apply(event);
+                if started && !scanning {
+                    return changed;
+                }
+            }
+        }
+
+        fn apply(&mut self, event: LibraryEvent) {
+            let event_tx = self.event_tx.clone();
+            self.runtime
+                .handle_wake(BridgeLoopWake::Library(event), &event_tx);
         }
 
         /// The queue after `command` appends to an empty queue.
@@ -5389,10 +5428,106 @@ mod tests {
 
         let album = fixture.album_key();
         assert_eq!(fixture.queued_by(album), ["00.mp3", "01.mp3", "02.mp3"]);
-        // The rows the rename changed are read again; the order stays.
+        // The rows the rename changed are read again, and the renamed file
+        // changed since, so the rescan reads it too; the order stays.
+        crate::tag_write::write_test_mp3_with_only_id3v1(
+            &new,
+            &[
+                (lofty::tag::ItemKey::TrackTitle, "Zero"),
+                (lofty::tag::ItemKey::TrackArtist, "Artist"),
+                (lofty::tag::ItemKey::AlbumTitle, "Album"),
+            ],
+        );
         fixture.command(BridgeLibraryCommand::RescanRoot(fixture.root.clone()));
-        fixture.wait_for_tracks(3);
+        assert!(fixture.wait_for_scan().contains(&new));
+        let position = fixture
+            .runtime
+            .state
+            .library_index
+            .position(&fixture.runtime.state.library, &new)
+            .expect("the renamed track");
+        assert_eq!(fixture.runtime.state.library.tracks[position].title, "Zero");
         let album = fixture.album_key();
         assert_eq!(fixture.queued_by(album), ["00.mp3", "01.mp3", "02.mp3"]);
+    }
+
+    #[test]
+    fn a_rescan_that_reaches_a_root_after_a_rename_keeps_what_it_read_there() {
+        let _guard = test_guard();
+        let mut fixture = LibraryOrderFixture::new("rescan-all-rename", &["01.mp3"]);
+        // A second root, which a rescan of all roots reads after the first.
+        let next = fixture.folder.join("next");
+        std::fs::create_dir_all(&next).expect("second root");
+        let next = next.canonicalize().expect("canonical root");
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|name| next.join(format!("{name}.flac")));
+        for (path, title) in [(&a, "A"), (&b, "B"), (&c, "C")] {
+            crate::tag_write::write_test_flac(path, &[("TITLE", title)]);
+        }
+        fixture.command(BridgeLibraryCommand::AddRoot {
+            path: next.clone(),
+            name: String::new(),
+        });
+        fixture.wait_for_tracks(4);
+        let refreshes = gated_refreshes(&mut fixture.runtime);
+        let event_tx = fixture.event_tx.clone();
+
+        // The rescan waits in the first root.
+        let first = fixture.album.join("01.mp3");
+        std::fs::write(&first, b"01.mp3, changed").expect("change the first root");
+        let (started, release) = crate::library::hold_read(&first);
+        fixture.command(BridgeLibraryCommand::RescanAll);
+        started
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the rescan reads the first root");
+
+        // Meanwhile a and b swap names and c becomes d, as the tag editor
+        // renames them: on disk, in the database, and through the gate,
+        // whose notification waits.
+        let moved = next.join("moved.flac");
+        for (from, to) in [(&a, &moved), (&b, &a), (&moved, &b), (&c, &d)] {
+            std::fs::rename(from, to).expect("rename the file");
+            rusqlite::Connection::open(fixture.folder.join("library.sqlite3"))
+                .and_then(|conn| {
+                    conn.execute(
+                        "UPDATE tracks SET path = ?2 WHERE path = ?1",
+                        rusqlite::params![from.to_string_lossy(), to.to_string_lossy()],
+                    )
+                })
+                .expect("rename the row");
+        }
+        rename_on_disk(
+            &fixture.runtime,
+            &refreshes,
+            &[(&a, &b), (&b, &a), (&c, &d)],
+            &[(&a, "B"), (&b, "A"), (&d, "C")],
+        );
+        // Saves of b and d are read and applied, and kept for the rename.
+        refreshes.set(&[(&b, "A, saved"), (&d, "C, saved")]);
+        save(&mut fixture.runtime, &refreshes, &[&b, &d], &event_tx);
+        accept_refresh(&mut fixture.runtime, &refreshes, &event_tx);
+        // Then b changes again and d is deleted, before the rescan reaches
+        // the second root.
+        crate::tag_write::write_test_flac(&b, &[("TITLE", "A, changed again")]);
+        std::fs::remove_file(&d).expect("delete d");
+        drop(release);
+        let scanned = fixture.wait_for_scan();
+        assert!(
+            scanned.contains(&b) && scanned.contains(&d),
+            "the rescan read b and found d gone: {scanned:?}"
+        );
+
+        // What the rescan read in the second root is newer than the rename
+        // and the saves: b keeps the rescan's row, and d stays gone.
+        apply_next_import_result(&mut fixture.runtime, &event_tx);
+        let titles = library_titles(&fixture.runtime);
+        let titles: HashMap<&Path, &str> = titles
+            .iter()
+            .filter(|(path, _)| path.starts_with(&next))
+            .map(|(path, title)| (path.as_path(), title.as_str()))
+            .collect();
+        assert_eq!(
+            titles,
+            HashMap::from([(a.as_path(), "B"), (b.as_path(), "A, changed again")])
+        );
     }
 }
