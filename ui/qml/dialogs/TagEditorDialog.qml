@@ -14,12 +14,15 @@ Dialog {
     required property var uiPalette
     required property var windowRoot
 
-    property var selectedRows: []
     property int selectionAnchor: -1
-    property int totalRows: 0
+    readonly property int totalRows: tagEditorTable.count
+    readonly property int selectedCount: root.tagEditorApi.selectedCount || 0
     property bool operationInFlight: false
     property string operationText: ""
     property bool closeAfterSave: false
+    // Ferrous is waiting to quit until the edits here are saved or dropped.
+    property bool quitPending: false
+    readonly property int tableRowHeight: 24
     readonly property string keepText: "<keep>"
     readonly property color uiSurfaceColor: root.uiPalette.uiSurfaceColor
     readonly property color uiSurfaceRaisedColor: root.uiPalette.uiPaneColor
@@ -27,9 +30,7 @@ Dialog {
     readonly property color uiColumnsColor: root.uiPalette.uiColumnsColor
     readonly property color uiBorderColor: root.uiPalette.uiBorderColor
     readonly property color uiMutedTextColor: root.uiPalette.uiMutedTextColor
-    readonly property bool statusHasFailure: root.tagEditorApi.statusText.toLowerCase().indexOf("failed") >= 0
-        || root.tagEditorApi.statusText.toLowerCase().indexOf("error") >= 0
-        || root.tagEditorApi.statusDetails.indexOf("Failed:") >= 0
+    readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property var editorFields: [
         { key: "title", label: "Title", allowTitleCase: true, allowCapitalize: true },
         { key: "artist", label: "Artist", allowTitleCase: true, allowCapitalize: true },
@@ -68,18 +69,31 @@ Dialog {
     standardButtons: Dialog.NoButton
     closePolicy: Popup.NoAutoClose
 
+    // Sent when the edits that held up quitting are saved or dropped.
+    signal quitMayProceed()
+
+    objectName: "tagEditorDialog"
+
     function closeEditor() {
+        // The results and errors of a save show here, so the editor stays
+        // open until the save has finished.
+        if (root.tagEditorApi.saving) {
+            return
+        }
         root.tagEditorApi.close()
         root.close()
     }
 
+    // A field commits its typed text when it loses focus.
     function commitPendingEditorEdits() {
-        tagEditorListFocusSink.forceActiveFocus()
+        if (root.visible) {
+            tagEditorTable.forceActiveFocus()
+        }
     }
 
     function triggerSave(closeAfterSuccess) {
         if (root.tagEditorApi.loading || root.tagEditorApi.saving || !root.tagEditorApi.dirty) {
-            return
+            return false
         }
         root.commitPendingEditorEdits()
         root.operationInFlight = true
@@ -89,11 +103,13 @@ Dialog {
             root.operationInFlight = false
             root.operationText = ""
             root.closeAfterSave = false
+            return false
         }
+        return true
     }
 
     function triggerRename() {
-        if (root.tagEditorApi.loading || root.tagEditorApi.saving || root.selectedRows.length === 0) return
+        if (root.tagEditorApi.loading || root.tagEditorApi.saving || root.selectedCount === 0) return
         root.commitPendingEditorEdits()
         root.operationInFlight = true
         root.operationText = "Renaming files..."
@@ -103,11 +119,14 @@ Dialog {
         }
     }
 
+    // The close button, Cancel, and Escape all close through here.
     function requestClose() {
-        if (root.tagEditorApi.loading || root.tagEditorApi.saving) {
+        if (root.tagEditorApi.saving) {
             return
         }
+        root.commitPendingEditorEdits()
         if (root.tagEditorApi.dirty) {
+            tagEditorCloseConfirmDialog.forQuit = false
             tagEditorCloseConfirmDialog.open()
             return
         }
@@ -115,126 +134,150 @@ Dialog {
     }
 
     function saveAndClose() {
-        if (root.tagEditorApi.loading || root.tagEditorApi.saving) {
+        if (!root.triggerSave(true)) {
+            tagEditorCloseConfirmDialog.close()
+            root.continueQuit(!root.tagEditorApi.dirty)
+        }
+    }
+
+    // Whether Ferrous may quit now. When edits are unsaved, this asks whether
+    // to save them, and when a save is running, it waits for it; either way
+    // it sends quitMayProceed once quitting may go on.
+    function prepareToQuit() {
+        if (root.tagEditorApi.saving) {
+            root.quitPending = true
+            return false
+        }
+        root.commitPendingEditorEdits()
+        if (root.tagEditorApi.dirty) {
+            root.quitPending = true
+            if (!root.visible) {
+                root.open()
+            }
+            tagEditorCloseConfirmDialog.forQuit = true
+            tagEditorCloseConfirmDialog.open()
+            return false
+        }
+        root.quitPending = false
+        return true
+    }
+
+    function continueQuit(succeeded) {
+        if (!root.quitPending) {
             return
         }
-        root.triggerSave(true)
-    }
-
-    function normalizedSelection(rows) {
-        const next = []
-        for (let i = 0; i < rows.length; ++i) {
-            const row = rows[i]
-            if (row < 0 || row >= root.totalRows || next.indexOf(row) >= 0) {
-                continue
-            }
-            next.push(row)
+        root.quitPending = false
+        // A failure stays on screen, and the user decides again.
+        if (succeeded && root.prepareToQuit()) {
+            root.quitMayProceed()
         }
-        next.sort(function(a, b) { return a - b })
-        return next
-    }
-
-    function isSelected(row) {
-        return root.selectedRows.indexOf(row) >= 0
-    }
-
-    function updateSelection(rows, anchor) {
-        root.selectedRows = root.normalizedSelection(rows)
-        root.selectionAnchor = anchor
-        root.tagEditorApi.setSelectedRows(root.selectedRows)
     }
 
     function selectOnlyRow(row) {
-        root.updateSelection([row], row)
-    }
-
-    function toggleRow(row) {
-        let next = root.selectedRows.slice()
-        const existing = next.indexOf(row)
-        if (existing >= 0) {
-            next.splice(existing, 1)
-        } else {
-            next.push(row)
-        }
-        root.updateSelection(next, row)
-    }
-
-    function selectRange(row) {
-        if (root.selectionAnchor < 0) {
-            root.selectOnlyRow(row)
-            return
-        }
-        const start = Math.min(root.selectionAnchor, row)
-        const end = Math.max(root.selectionAnchor, row)
-        const next = []
-        for (let current = start; current <= end; ++current) {
-            next.push(current)
-        }
-        root.updateSelection(next, root.selectionAnchor)
+        root.tagEditorApi.setSelectedRows([row])
+        root.selectionAnchor = row
+        tagEditorTable.currentIndex = row
     }
 
     function handleRowClick(row, modifiers) {
-        tagEditorListFocusSink.forceActiveFocus()
+        tagEditorTable.forceActiveFocus()
         const ctrl = (modifiers & Qt.ControlModifier) !== 0
         const shift = (modifiers & Qt.ShiftModifier) !== 0
-        if (shift) {
-            root.selectRange(row)
+        if (shift && root.selectionAnchor >= 0) {
+            root.tagEditorApi.selectRange(root.selectionAnchor, row)
+            tagEditorTable.currentIndex = row
             return
         }
         if (ctrl) {
-            root.toggleRow(row)
+            root.tagEditorApi.toggleRowSelected(row)
+            root.selectionAnchor = row
+            tagEditorTable.currentIndex = row
             return
         }
         root.selectOnlyRow(row)
     }
 
+    // Moves the current row by keyboard; with Shift, the selection extends
+    // from the anchor to it.
+    function moveCurrentRow(row, extend) {
+        if (root.totalRows === 0) {
+            return
+        }
+        const target = Math.max(0, Math.min(root.totalRows - 1, row))
+        if (extend && root.selectionAnchor >= 0) {
+            root.tagEditorApi.selectRange(root.selectionAnchor, target)
+            tagEditorTable.currentIndex = target
+        } else {
+            root.selectOnlyRow(target)
+        }
+        tagEditorTable.positionViewAtIndex(target, ListView.Contain)
+    }
+
+    function handleTableKey(event) {
+        const current = Math.max(0, tagEditorTable.currentIndex)
+        const page = Math.max(1, Math.floor(tagEditorTable.height / root.tableRowHeight) - 2)
+        const extend = (event.modifiers & Qt.ShiftModifier) !== 0
+        switch (event.key) {
+        case Qt.Key_Up: root.moveCurrentRow(tagEditorTable.currentIndex < 0 ? 0 : current - 1, extend); break
+        case Qt.Key_Down: root.moveCurrentRow(tagEditorTable.currentIndex < 0 ? 0 : current + 1, extend); break
+        case Qt.Key_PageUp: root.moveCurrentRow(current - page, extend); break
+        case Qt.Key_PageDown: root.moveCurrentRow(current + page, extend); break
+        case Qt.Key_Home: root.moveCurrentRow(0, extend); break
+        case Qt.Key_End: root.moveCurrentRow(root.totalRows - 1, extend); break
+        case Qt.Key_Space:
+            if (tagEditorTable.currentIndex < 0) {
+                return
+            }
+            root.tagEditorApi.toggleRowSelected(tagEditorTable.currentIndex)
+            root.selectionAnchor = tagEditorTable.currentIndex
+            break
+        default:
+            return
+        }
+        event.accepted = true
+    }
+
     function initializeSelection() {
-        root.totalRows = root.tagEditorApi.loadedPaths().length
-        if (root.totalRows > 0 && root.selectedRows.length === 0) {
+        if (root.totalRows > 0 && root.selectedCount === 0) {
             root.selectOnlyRow(0)
         }
     }
 
     function clearSelection() {
-        root.selectedRows = []
-        root.selectionAnchor = -1
         root.tagEditorApi.setSelectedRows([])
+        root.selectionAnchor = -1
     }
 
     function selectAllRows() {
-        const next = []
-        for (let row = 0; row < root.totalRows; ++row) {
-            next.push(row)
-        }
-        root.updateSelection(next, root.totalRows > 0 ? 0 : -1)
+        root.tagEditorApi.selectAllRows()
+        root.selectionAnchor = root.totalRows > 0 ? 0 : -1
     }
 
-    function rowText(columnKey, rowData) {
+    function cellText(columnKey, row) {
         switch (columnKey) {
-        case "fileName": return rowData.fileName || ""
-        case "directory": return FormatUtils.basenameFromPath(rowData.directory || "")
-        case "formatKind": return rowData.formatKind || ""
-        case "title": return rowData.title || ""
-        case "artist": return rowData.artist || ""
-        case "album": return rowData.album || ""
-        case "albumArtist": return rowData.albumArtist || ""
-        case "genre": return rowData.genre || ""
-        case "year": return rowData.year || ""
-        case "trackNo": return rowData.trackNo || ""
-        case "discNo": return rowData.discNo || ""
+        case "directory": return FormatUtils.basenameFromPath(row.directory || "")
+        case "title":
+        case "artist":
+        case "album":
+        case "genre": {
+            // Show every value of a field that holds several.
+            const extra = row.extraValues ? row.extraValues[columnKey] : undefined
+            const value = row[columnKey] || ""
+            return extra && extra.length > 0 ? [value].concat(extra).join("; ") : value
+        }
         case "status":
-            return rowData.errorText && rowData.errorText.length > 0
-                ? rowData.errorText
-                : (rowData.dirty ? "Modified" : "")
+            return row.errorText.length > 0 ? row.errorText : (row.dirty ? "Modified" : "")
         default:
-            return ""
+            return row[columnKey] || ""
         }
     }
 
-    onOpened: root.initializeSelection()
+    onOpened: {
+        root.initializeSelection()
+        tagEditorTable.forceActiveFocus()
+    }
     onClosed: {
         root.clearSelection()
-        root.totalRows = 0
         root.operationInFlight = false
         root.operationText = ""
         tagEditorStatusFlash.stop()
@@ -259,17 +302,20 @@ Dialog {
         function onSaveFinished(success) {
             root.operationInFlight = false
             root.operationText = ""
+            // A failure shows in the editor, under the confirmation.
+            tagEditorCloseConfirmDialog.close()
             if (success && root.closeAfterSave) {
-                tagEditorCloseConfirmDialog.close()
                 root.closeEditor()
             }
             root.closeAfterSave = false
             tagEditorStatusFlash.restart()
+            root.continueQuit(success)
         }
         function onRenameFinished() {
             root.operationInFlight = false
             root.operationText = ""
             tagEditorStatusFlash.restart()
+            root.continueQuit(!root.tagEditorApi.statusIsError)
         }
         function onStatusChanged() {
             if (!root.tagEditorApi.statusText.length) {
@@ -301,8 +347,12 @@ Dialog {
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
         windowRoot: root.windowRoot
-        closeEditor: root.closeEditor
-        saveAndClose: root.saveAndClose
+        onSaveRequested: root.saveAndClose()
+        onDiscardRequested: {
+            root.closeEditor()
+            root.continueQuit(true)
+        }
+        onKeepEditingRequested: root.quitPending = false
     }
 
     Dialogs.TagEditorStatusDetailsDialog {
@@ -399,16 +449,17 @@ Dialog {
             }
 
             Label {
-                text: root.selectedRows.length > 0
-                    ? root.selectedRows.length + " selected"
+                text: root.selectedCount > 0
+                    ? root.selectedCount + " selected"
                     : root.totalRows + " loaded"
                 color: root.tagEditorApi.dirty ? Kirigami.Theme.negativeTextColor : root.uiMutedTextColor
                 font.weight: Font.DemiBold
             }
 
             Button {
+                objectName: "tagEditorCloseButton"
                 text: "\u00d7"
-                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
+                enabled: !root.tagEditorApi.saving
                 padding: 2
                 implicitWidth: 26
                 implicitHeight: 24
@@ -430,7 +481,7 @@ Dialog {
 
             Button {
                 text: "Clear Selection"
-                enabled: root.selectedRows.length > 0
+                enabled: root.selectedCount > 0
                 onClicked: root.clearSelection()
             }
 
@@ -446,20 +497,24 @@ Dialog {
                 }
             }
             Button {
+                objectName: "tagEditorAutoNumberButton"
                 text: "Auto Number"
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
                 onClicked: autoNumberDialog.open()
             }
             Button {
                 text: "Rename Files"
-                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.selectedRows.length > 0
+                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.selectedCount > 0
                 onClicked: root.triggerRename()
             }
             Button {
+                objectName: "tagEditorCancelButton"
                 text: "Cancel"
-                onClicked: root.closeEditor()
+                enabled: !root.tagEditorApi.saving
+                onClicked: root.requestClose()
             }
             Button {
+                objectName: "tagEditorSaveButton"
                 text: root.tagEditorApi.saving ? "Saving..." : "Save"
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
                 highlighted: true
@@ -489,14 +544,8 @@ Dialog {
             sequences: ["Esc"]
             context: Qt.WindowShortcut
             enabled: root.visible && !tagEditorCloseConfirmDialog.visible
+                && !autoNumberDialog.visible && !tagEditorStatusDetailsDialog.visible
             onActivated: root.requestClose()
-        }
-
-        FocusScope {
-            id: tagEditorListFocusSink
-            visible: false
-            width: 0
-            height: 0
         }
 
         Frame {
@@ -561,6 +610,7 @@ Dialog {
 
                             TextField {
                                 id: fieldEditor
+                                objectName: "tagEditorField_" + modelData.key
                                 width: parent.width
                                 selectByMouse: true
                                 persistentSelection: true
@@ -568,10 +618,11 @@ Dialog {
                                 property var editRowsSnapshot: []
 
                                 function captureEditRowsSnapshot() {
-                                    editRowsSnapshot = root.selectedRows.slice()
+                                    editRowsSnapshot = root.tagEditorApi.selectedRows()
                                 }
 
                                 function syncFromController() {
+                                    extraValuesNote.text = root.tagEditorApi.extraValuesNote(modelData.key)
                                     const value = root.tagEditorApi.bulkValue(modelData.key)
                                     const mixed = value === root.keepText
                                     if (activeFocus && touched) {
@@ -615,6 +666,16 @@ Dialog {
                                     function onSelectionChanged() { fieldEditor.syncFromController() }
                                     function onBulkSummaryChanged() { fieldEditor.syncFromController() }
                                 }
+                            }
+
+                            Label {
+                                id: extraValuesNote
+                                objectName: "tagEditorExtraValuesNote_" + modelData.key
+                                width: parent.width
+                                visible: text.length > 0
+                                wrapMode: Text.WordWrap
+                                font.pixelSize: 11
+                                color: Kirigami.Theme.neutralTextColor
                             }
 
                             Popup {
@@ -676,128 +737,124 @@ Dialog {
                 border.color: root.uiBorderColor
             }
 
-            contentItem: ScrollView {
+            // Only the visible rows have items, so thousands of rows open at
+            // once. Selection is a role, so each row reads it once.
+            contentItem: ListView {
+                id: tagEditorTable
+                objectName: "tagEditorTable"
                 clip: true
+                focus: true
+                activeFocusOnTab: true
+                model: root.tagEditorApi.tableModel
+                currentIndex: -1
+                keyNavigationEnabled: false
+                highlightFollowsCurrentItem: false
+                contentWidth: root.tableContentWidth
+                flickableDirection: Flickable.AutoFlickIfNeeded
+                boundsBehavior: Flickable.StopAtBounds
+                headerPositioning: ListView.OverlayHeader
+                ScrollBar.vertical: ScrollBar {}
+                ScrollBar.horizontal: ScrollBar {}
+                Accessible.role: Accessible.Table
+                Accessible.name: "Files"
 
-                Flickable {
-                    id: tagEditorTableFlick
-                    contentWidth: root.tableContentWidth
-                    contentHeight: tagEditorTableColumn.implicitHeight
-                    boundsBehavior: Flickable.StopAtBounds
+                Keys.onPressed: function(event) { root.handleTableKey(event) }
 
-                    Column {
-                        id: tagEditorTableColumn
-                        width: tagEditorTableFlick.contentWidth
-                        spacing: 0
+                header: Rectangle {
+                    z: 2
+                    width: root.tableContentWidth
+                    height: 26
+                    color: root.uiColumnsColor
 
-                        Rectangle {
-                            width: parent.width
-                            height: 26
-                            color: root.uiColumnsColor
-
-                            Row {
-                                anchors.fill: parent
-                                anchors.leftMargin: 6
-                                anchors.rightMargin: 6
-                                spacing: 6
-
-                                Repeater {
-                                    model: root.tableColumns
-                                    delegate: Label {
-                                        required property var modelData
-                                        width: modelData.width
-                                        height: parent.height
-                                        text: modelData.label
-                                        font.pixelSize: 11
-                                        font.weight: Font.DemiBold
-                                        verticalAlignment: Text.AlignVCenter
-                                        horizontalAlignment: Text.AlignLeft
-                                        elide: Text.ElideRight
-                                    }
-                                }
-                            }
-                        }
+                    Row {
+                        anchors.fill: parent
+                        anchors.leftMargin: 6
+                        anchors.rightMargin: 6
+                        spacing: 6
 
                         Repeater {
-                            model: root.tagEditorApi.tableModel
-                            delegate: Rectangle {
-                                required property int index
-                                required property string path
-                                required property string fileName
-                                required property string directory
-                                required property string formatKind
-                                required property string title
-                                required property string artist
-                                required property string album
-                                required property string albumArtist
-                                required property string genre
-                                required property string year
-                                required property string trackNo
-                                required property string discNo
-                                required property string totalTracks
-                                required property string totalDiscs
-                                required property string comment
-                                required property bool dirty
-                                required property string errorText
+                            model: root.tableColumns
+                            delegate: Label {
+                                required property var modelData
+                                width: modelData.width
+                                height: parent.height
+                                text: modelData.label
+                                font.pixelSize: 11
+                                font.weight: Font.DemiBold
+                                verticalAlignment: Text.AlignVCenter
+                                horizontalAlignment: Text.AlignLeft
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+                }
 
-                                width: tagEditorTableColumn.width
-                                height: 24
-                                color: root.isSelected(index)
-                                    ? Qt.rgba(0.12, 0.44, 0.72, 0.14)
-                                    : (index % 2 === 0
-                                        ? Qt.rgba(1, 1, 1, 0.02)
-                                        : "transparent")
-                                border.color: errorText.length > 0
+                delegate: Rectangle {
+                    id: tableRow
+                    objectName: "tagEditorRow"
+                    required property int index
+                    required property string fileName
+                    required property string directory
+                    required property string formatKind
+                    required property string title
+                    required property string artist
+                    required property string album
+                    required property string genre
+                    required property string year
+                    required property string trackNo
+                    required property string discNo
+                    required property bool dirty
+                    required property bool selected
+                    required property string errorText
+                    required property var extraValues
+                    readonly property bool current: ListView.isCurrentItem && tagEditorTable.activeFocus
+
+                    width: root.tableContentWidth
+                    height: root.tableRowHeight
+                    color: tableRow.selected
+                        ? Qt.rgba(0.12, 0.44, 0.72, 0.14)
+                        : (tableRow.index % 2 === 0
+                            ? Qt.rgba(1, 1, 1, 0.02)
+                            : "transparent")
+                    border.color: tableRow.errorText.length > 0
+                        ? Kirigami.Theme.negativeTextColor
+                        : (tableRow.current
+                            ? Kirigami.Theme.focusColor
+                            : (tableRow.selected
+                                ? Qt.rgba(0.12, 0.44, 0.72, 0.34)
+                                : root.uiBorderColor))
+                    border.width: tableRow.errorText.length > 0 || tableRow.selected || tableRow.current ? 1 : 0
+                    Accessible.role: Accessible.Row
+                    Accessible.name: tableRow.fileName
+                    Accessible.selected: tableRow.selected
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton
+                        onClicked: function(mouse) {
+                            root.handleRowClick(tableRow.index, mouse.modifiers)
+                        }
+                    }
+
+                    Row {
+                        anchors.fill: parent
+                        anchors.leftMargin: 6
+                        anchors.rightMargin: 6
+                        spacing: 6
+
+                        Repeater {
+                            model: root.tableColumns
+                            delegate: Label {
+                                required property var modelData
+                                width: modelData.width
+                                height: parent.height
+                                text: root.cellText(modelData.key, tableRow)
+                                color: modelData.key === "status" && tableRow.errorText.length > 0
                                     ? Kirigami.Theme.negativeTextColor
-                                    : (root.isSelected(index)
-                                        ? Qt.rgba(0.12, 0.44, 0.72, 0.34)
-                                        : root.uiBorderColor)
-                                border.width: errorText.length > 0 || root.isSelected(index) ? 1 : 0
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    acceptedButtons: Qt.LeftButton
-                                    onClicked: function(mouse) {
-                                        root.handleRowClick(index, mouse.modifiers)
-                                    }
-                                }
-
-                                Row {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 6
-                                    anchors.rightMargin: 6
-                                    spacing: 6
-
-                                    Repeater {
-                                        model: root.tableColumns
-                                        delegate: Label {
-                                            required property var modelData
-                                            width: modelData.width
-                                            height: parent.height
-                                            text: root.rowText(modelData.key, {
-                                                fileName: fileName,
-                                                directory: directory,
-                                                formatKind: formatKind,
-                                                title: title,
-                                                artist: artist,
-                                                album: album,
-                                                albumArtist: albumArtist,
-                                                genre: genre,
-                                                year: year,
-                                                trackNo: trackNo,
-                                                discNo: discNo,
-                                                dirty: dirty,
-                                                errorText: errorText
-                                            })
-                                            color: modelData.key === "status" && errorText.length > 0
-                                                ? Kirigami.Theme.negativeTextColor
-                                                : Kirigami.Theme.textColor
-                                            verticalAlignment: Text.AlignVCenter
-                                            horizontalAlignment: Text.AlignLeft
-                                            elide: Text.ElideRight
-                                        }
-                                    }
-                                }
+                                    : Kirigami.Theme.textColor
+                                verticalAlignment: Text.AlignVCenter
+                                horizontalAlignment: Text.AlignLeft
+                                elide: Text.ElideRight
                             }
                         }
                     }

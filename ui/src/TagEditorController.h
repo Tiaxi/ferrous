@@ -24,6 +24,9 @@ class TagEditorController final : public QObject {
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusChanged)
     Q_PROPERTY(QString statusDetails READ statusDetails NOTIFY statusChanged)
+    // Whether the status reports something that failed.
+    Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusChanged)
+    Q_PROPERTY(int selectedCount READ selectedCount NOTIFY selectionChanged)
 
 public:
     explicit TagEditorController(BridgeClient *bridge, QObject *parent = nullptr);
@@ -35,6 +38,8 @@ public:
     bool dirty() const;
     QString statusText() const;
     QString statusDetails() const;
+    bool statusIsError() const;
+    int selectedCount() const;
 
     Q_INVOKABLE bool openSelection(const QVariantList &selections);
     Q_INVOKABLE bool openForPaths(const QStringList &paths);
@@ -44,7 +49,14 @@ public:
     Q_INVOKABLE bool renameSelectedFiles();
     Q_INVOKABLE void setSelectedRows(const QVariantList &rows);
     Q_INVOKABLE QVariantList selectedRows() const;
+    // Selects rows `first` to `last`, in either order, and no others.
+    Q_INVOKABLE void selectRange(int first, int last);
+    Q_INVOKABLE void toggleRowSelected(int row);
+    Q_INVOKABLE void selectAllRows();
     Q_INVOKABLE QString bulkValue(const QString &field) const;
+    // Says which of the edited rows hold more than one value of `field`,
+    // which an edit replaces; empty when none do.
+    Q_INVOKABLE QString extraValuesNote(const QString &field) const;
     Q_INVOKABLE void applyBulkField(const QString &field, const QString &value);
     Q_INVOKABLE void applyBulkFieldToRows(
         const QVariantList &rows,
@@ -81,14 +93,26 @@ private:
                                        const RenameGate &renameGate);
     void runOperation(Operation operation, const QByteArray &payload,
                       std::function<void(const QByteArray &)> apply);
-    void applyLoadResult(const QByteArray &response);
+    // A load response, parsed by the worker so thousands of rows never
+    // block the UI thread.
+    struct LoadResult {
+        QVector<TagEditorRowState> rows;
+        QStringList resolvedPaths;
+        QString errorText;
+        QStringList failureLines;
+    };
+    static LoadResult parseLoadResponse(const QByteArray &response);
+    void runLoad(const QByteArray &payload);
+    void applyLoadResult(LoadResult result);
     void applySaveResult(const QByteArray &response);
     void applyRenameResult(const QByteArray &response);
     std::function<QByteArray(Operation, const QByteArray &, const RenameGate &)> m_executeOperation{
         executeOperation};
     quint64 m_operationGeneration{0};
     QVector<int> targetRows() const;
-    void setStatusText(const QString &text, const QString &details = QString());
+    void setStatusText(const QString &text, const QString &details = QString(),
+                       bool isError = false);
+    void setSelection(QSet<int> rows);
     void resetSelection();
     void notifyRowMutation();
 
@@ -98,6 +122,7 @@ private:
     QStringList m_loadedPaths;
     QString m_statusText;
     QString m_statusDetails;
+    bool m_statusIsError{false};
     bool m_open{false};
     bool m_loading{false};
     bool m_saving{false};

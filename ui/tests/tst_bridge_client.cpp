@@ -208,6 +208,12 @@ private slots:
     void tagEditorSavesFullDateRowAndKeepsOtherTags();
     void tagEditorShowsRefusedEditsAndKeepsTheFile();
     void tagEditorLoadReportsUnreadableFiles();
+    void tagEditorAutoNumberRestartsInEachFolder();
+    void tagEditorReportsFailuresAsAProperty();
+    void tagEditorKeepsExtraValuesUntilTheirFieldIsSaved();
+    void tagEditorSelectionIsAModelRole();
+    void tagEditorEditsOfManyRowsAnnounceOnce();
+    void tagEditorRenameKeepsRowsInPlace();
     void batchRemovalCodecPreservesIndices();
     void pathListsFarBeyond64KiBAreSentWholeInOneCommand();
     void thousandsOfAppendedPathsReachTheBackendInOrder();
@@ -650,9 +656,262 @@ void BridgeClientTest::tagEditorLoadReportsUnreadableFiles() {
     QCOMPARE(editor.m_tableModel.rowCount(), 1);
     QCOMPARE(editor.m_tableModel.rowAt(0)->path, good);
     QCOMPARE(editor.statusText(), QStringLiteral("Loaded 1 file(s); 1 failed."));
+    QVERIFY(editor.statusIsError());
     QVERIFY2(editor.statusDetails().startsWith(QStringLiteral("Failed:\n  garbage.flac: ")),
              qPrintable(editor.statusDetails()));
     QCOMPARE(editor.loadedPaths(), (QStringList{garbage, good}));
+}
+
+namespace {
+
+// Rows of `count` tracks, `perFolder` to a folder, at /fixture.
+QJsonArray tagEditorRows(int count, int perFolder) {
+    QJsonArray rows;
+    for (int i = 0; i < count; ++i) {
+        const QString directory = QStringLiteral("/fixture/Album %1").arg(i / perFolder);
+        rows.push_back(QJsonObject{
+            {QStringLiteral("path"), QStringLiteral("%1/%2.flac").arg(directory).arg(i)},
+            {QStringLiteral("fileName"), QStringLiteral("%1.flac").arg(i)},
+            {QStringLiteral("directory"), directory},
+            {QStringLiteral("title"), QStringLiteral("Song %1").arg(i)},
+            {QStringLiteral("artist"), QStringLiteral("A")},
+        });
+    }
+    return rows;
+}
+
+// Loads `rows` into `editor`; later operations answer with `responses`, by
+// operation, or with an empty response.
+bool loadTagEditorRows(TagEditorController &editor, const QJsonArray &rows,
+                       QHash<TagEditorController::Operation, QByteArray> responses = {}) {
+    QJsonArray paths;
+    for (const QJsonValue &row : rows) {
+        paths.push_back(row.toObject().value(QStringLiteral("path")));
+    }
+    responses.insert(TagEditorController::Operation::Load,
+                     QJsonDocument(QJsonObject{{QStringLiteral("resolvedPaths"), paths},
+                                               {QStringLiteral("rows"), rows}})
+                         .toJson(QJsonDocument::Compact));
+    editor.m_executeOperation = [responses](TagEditorController::Operation operation,
+                                            const QByteArray &, const TagEditorController::RenameGate &) {
+        return responses.value(operation);
+    };
+    if (!editor.openForPaths({QStringLiteral("/fixture")})) {
+        return false;
+    }
+    return QTest::qWaitFor([&editor]() { return !editor.loading(); });
+}
+
+QStringList tagEditorColumn(const TagEditorController &editor, const QString &field) {
+    QStringList values;
+    for (int row = 0; row < editor.m_tableModel.rowCount(); ++row) {
+        values.push_back(editor.m_tableModel.fieldValue(row, field));
+    }
+    return values;
+}
+
+} // namespace
+
+void BridgeClientTest::tagEditorAutoNumberRestartsInEachFolder() {
+    TagEditorController editor(nullptr);
+    QVERIFY(loadTagEditorRows(editor, tagEditorRows(5, 3)));
+    QCOMPARE(editor.m_tableModel.fieldValue(3, QStringLiteral("directory")),
+             QStringLiteral("/fixture/Album 1"));
+
+    editor.autoNumber(1, 1, false, false, true, false);
+    QCOMPARE(tagEditorColumn(editor, QStringLiteral("trackNo")),
+             (QStringList{QStringLiteral("1"), QStringLiteral("2"), QStringLiteral("3"),
+                          QStringLiteral("1"), QStringLiteral("2")}));
+
+    editor.autoNumber(1, 1, false, false, false, false);
+    QCOMPARE(tagEditorColumn(editor, QStringLiteral("trackNo")).last(), QStringLiteral("5"));
+    // The folder is shown, not edited.
+    editor.setCell(0, QStringLiteral("directory"), QStringLiteral("/elsewhere"));
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("directory")),
+             QStringLiteral("/fixture/Album 0"));
+}
+
+void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
+    // Renames need a bridge to report them to.
+    BridgeClient bridge;
+    isolateBridgeClient(bridge);
+    TagEditorController editor(&bridge);
+    QVERIFY(loadTagEditorRows(
+        editor, tagEditorRows(1, 1),
+        {{TagEditorController::Operation::Save,
+          QByteArray(R"({"results":[{"path":"/fixture/Album 0/0.flac","ok":false,"error":"Fehler"}]})")},
+         {TagEditorController::Operation::Rename,
+          QByteArray(R"({"results":[{"path":"/fixture/Album 0/0.flac","ok":false,"error":"busy"}]})")}}));
+    QVERIFY(!editor.statusIsError());
+    QSignalSpy status(&editor, &TagEditorController::statusChanged);
+
+    // A failure is flagged whatever words describe it.
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QVERIFY(editor.statusIsError());
+    QVERIFY(status.size() > 0);
+
+    editor.setSelectedRows({0});
+    QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+    QVERIFY(editor.renameSelectedFiles());
+    QTRY_COMPARE(renamed.size(), 1);
+    QVERIFY(editor.statusIsError());
+    QCOMPARE(editor.m_tableModel.rowAt(0)->errorText, QStringLiteral("busy"));
+
+    // A success whose wording mentions errors is not a failure.
+    TagEditorController succeeding(nullptr);
+    QJsonArray rows = tagEditorRows(1, 1);
+    QJsonObject row = rows.first().toObject();
+    row.insert(QStringLiteral("path"), QStringLiteral("/fixture/error failed.flac"));
+    rows[0] = row;
+    QVERIFY(loadTagEditorRows(
+        succeeding, rows,
+        {{TagEditorController::Operation::Save,
+          QByteArray(R"({"results":[{"path":"/fixture/error failed.flac","ok":true}]})")}}));
+    succeeding.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+    QSignalSpy succeeded(&succeeding, &TagEditorController::saveFinished);
+    QVERIFY(succeeding.save());
+    QTRY_COMPARE(succeeded.size(), 1);
+    QVERIFY(succeeded.first().first().toBool());
+    QVERIFY(succeeding.statusDetails().contains(QStringLiteral("error failed.flac")));
+    QVERIFY(!succeeding.statusIsError());
+}
+
+void BridgeClientTest::tagEditorKeepsExtraValuesUntilTheirFieldIsSaved() {
+    QJsonArray rows = tagEditorRows(2, 2);
+    QJsonObject first = rows.first().toObject();
+    first.insert(QStringLiteral("extraValues"),
+                 QJsonObject{{QStringLiteral("artist"), QJsonArray{QStringLiteral("B")}},
+                             {QStringLiteral("genre"), QJsonArray{QStringLiteral("Jazz")}}});
+    rows[0] = first;
+    TagEditorController editor(nullptr);
+    QVERIFY(loadTagEditorRows(
+        editor, rows,
+        {{TagEditorController::Operation::Save,
+          QByteArray(R"({"results":[{"path":"/fixture/Album 0/0.flac","ok":true}]})")}}));
+    const auto extras = [&editor]() {
+        return editor.m_tableModel.data(editor.m_tableModel.index(0),
+                                        TagEditorTableModel::ExtraValuesRole).toMap();
+    };
+    QCOMPARE(extras().value(QStringLiteral("artist")).toStringList(), QStringList{QStringLiteral("B")});
+
+    // Both rows are edited when none is selected; one of them has more artists.
+    QCOMPARE(editor.extraValuesNote(QStringLiteral("artist")),
+             QStringLiteral("1 of these files have more than one value. Editing replaces them all "
+                            "with the one above."));
+    QVERIFY(editor.extraValuesNote(QStringLiteral("title")).isEmpty());
+    editor.setSelectedRows({0});
+    QCOMPARE(editor.extraValuesNote(QStringLiteral("artist")),
+             QStringLiteral("Also: B. Editing replaces every value with the one above."));
+
+    // A changed artist will replace them, so they are not shown; changing it
+    // back shows them again.
+    editor.setCell(0, QStringLiteral("artist"), QStringLiteral("C"));
+    QVERIFY(!extras().contains(QStringLiteral("artist")));
+    QVERIFY(extras().contains(QStringLiteral("genre")));
+    QVERIFY(editor.extraValuesNote(QStringLiteral("artist")).isEmpty());
+    editor.setCell(0, QStringLiteral("artist"), QStringLiteral("A"));
+    QVERIFY(extras().contains(QStringLiteral("artist")));
+
+    // Once saved, the file holds one artist.
+    editor.setCell(0, QStringLiteral("artist"), QStringLiteral("C"));
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QVERIFY(saved.first().first().toBool());
+    QVERIFY(!editor.m_tableModel.rowAt(0)->extraValues.contains(QStringLiteral("artist")));
+    QVERIFY(editor.m_tableModel.rowAt(0)->extraValues.contains(QStringLiteral("genre")));
+    editor.setCell(0, QStringLiteral("artist"), QStringLiteral("A"));
+    QVERIFY(!extras().contains(QStringLiteral("artist")));
+}
+
+void BridgeClientTest::tagEditorSelectionIsAModelRole() {
+    TagEditorController editor(nullptr);
+    QVERIFY(loadTagEditorRows(editor, tagEditorRows(6, 6)));
+    TagEditorTableModel &model = editor.m_tableModel;
+    const auto selected = [&model]() {
+        QList<int> rows;
+        for (int row = 0; row < model.rowCount(); ++row) {
+            if (model.data(model.index(row), TagEditorTableModel::SelectedRole).toBool()) {
+                rows.push_back(row);
+            }
+        }
+        return rows;
+    };
+    QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+    QSignalSpy selection(&editor, &TagEditorController::selectionChanged);
+
+    editor.selectRange(4, 1);
+    QCOMPARE(selected(), (QList<int>{1, 2, 3, 4}));
+    QCOMPARE(editor.selectedCount(), 4);
+    QCOMPARE(changed.size(), 1);
+    QCOMPARE(changed.first().at(2).value<QList<int>>(), QList<int>{TagEditorTableModel::SelectedRole});
+
+    editor.toggleRowSelected(2);
+    QCOMPARE(selected(), (QList<int>{1, 3, 4}));
+    editor.toggleRowSelected(5);
+    QCOMPARE(selected(), (QList<int>{1, 3, 4, 5}));
+
+    // Selecting everything notifies the rows that change, in runs.
+    changed.clear();
+    editor.selectAllRows();
+    QCOMPARE(selected(), (QList<int>{0, 1, 2, 3, 4, 5}));
+    QCOMPARE(changed.size(), 2);
+    QCOMPARE(editor.selectedCount(), 6);
+
+    editor.setSelectedRows({});
+    QVERIFY(selected().isEmpty());
+    QCOMPARE(selection.size(), 5);
+    editor.close();
+    QCOMPARE(editor.selectedCount(), 0);
+}
+
+void BridgeClientTest::tagEditorEditsOfManyRowsAnnounceOnce() {
+    constexpr int kRows = 2000;
+    TagEditorController editor(nullptr);
+    QVERIFY(loadTagEditorRows(editor, tagEditorRows(kRows, 10)));
+    QVariantList rows;
+    for (int row = 0; row < kRows; ++row) {
+        rows.push_back(row);
+    }
+    QSignalSpy summary(&editor, &TagEditorController::bulkSummaryChanged);
+    QSignalSpy dirty(&editor, &TagEditorController::dirtyChanged);
+
+    editor.applyBulkFieldToRows(rows, QStringLiteral("album"), QStringLiteral("One"));
+
+    // Each announcement makes every field editor summarize the edited rows.
+    QCOMPARE(summary.size(), 1);
+    QCOMPARE(dirty.size(), 1);
+    QVERIFY(editor.dirty());
+    QCOMPARE(editor.bulkValue(QStringLiteral("album")), QStringLiteral("One"));
+}
+
+void BridgeClientTest::tagEditorRenameKeepsRowsInPlace() {
+    BridgeClient bridge;
+    isolateBridgeClient(bridge);
+    TagEditorController editor(&bridge);
+    QVERIFY(loadTagEditorRows(
+        editor, tagEditorRows(3, 3),
+        {{TagEditorController::Operation::Rename,
+          QByteArray(R"({"results":[{"path":"/fixture/Album 0/1.flac","ok":true,)"
+                     R"("newPath":"/fixture/Album 0/01 Song 1.flac"}]})")}}));
+    editor.setSelectedRows({1});
+    QSignalSpy reset(&editor.m_tableModel, &QAbstractItemModel::modelReset);
+    QSignalSpy changed(&editor.m_tableModel, &QAbstractItemModel::dataChanged);
+    QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+
+    QVERIFY(editor.renameSelectedFiles());
+    QTRY_COMPARE(renamed.size(), 1);
+
+    QCOMPARE(reset.size(), 0);
+    QCOMPARE(changed.size(), 1);
+    QCOMPARE(editor.m_tableModel.rowAt(1)->fileName, QStringLiteral("01 Song 1.flac"));
+    QCOMPARE(editor.loadedPaths().at(1), QStringLiteral("/fixture/Album 0/01 Song 1.flac"));
+    QCOMPARE(editor.selectedRows(), QVariantList{1});
+    QVERIFY(editor.m_tableModel.rowAt(1)->selected);
+    QVERIFY(!editor.statusIsError());
 }
 
 void BridgeClientTest::batchRemovalCodecPreservesIndices() {
