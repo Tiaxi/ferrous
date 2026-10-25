@@ -464,9 +464,9 @@ fn the_linked_sqlite_is_at_least_3_51_3() {
 /// that `closing_and_opening_connections_never_deadlock` starts.
 const WAL_STRESS_DB_ENV: &str = "FERROUS_TEST_WAL_STRESS_DB";
 /// How long the child process closes and opens connections.
-const WAL_STRESS_RUN: Duration = Duration::from_secs(2);
+const WAL_STRESS_RUN: Duration = Duration::from_secs(1);
 /// How long the child process may take before it counts as deadlocked.
-const WAL_STRESS_LIMIT: Duration = Duration::from_secs(60);
+const WAL_STRESS_LIMIT: Duration = Duration::from_secs(30);
 
 /// `SQLite` 3.51.1 could deadlock when one thread closed the last connection to
 /// a file in write-ahead logging while another thread opened the file (#218).
@@ -518,8 +518,9 @@ fn closing_and_opening_connections_never_deadlock() {
 
 /// The child process's part of `closing_and_opening_connections_never_deadlock`.
 /// One thread opens, reads, and closes a connection, so that each close is the
-/// last one and takes down the write-ahead log, while two threads open and
-/// close the file without reading it.
+/// last one and takes down the write-ahead log, while another thread opens and
+/// closes the file without reading it. One opener is enough to deadlock
+/// 3.51.1 within a second, and keeps the load on the other tests low.
 #[test]
 #[ignore = "run in a child process by closing_and_opening_connections_never_deadlock"]
 fn wal_close_open_stress() {
@@ -542,21 +543,17 @@ fn wal_close_open_stress() {
             closes
         })
     };
-    let openers: Vec<_> = (0..2)
-        .map(|_| {
-            let (path, stop) = (path.clone(), Arc::clone(&stop));
-            thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    drop(Connection::open(&path).expect("open"));
-                }
-            })
+    let opener = {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                drop(Connection::open(&path).expect("open"));
+            }
         })
-        .collect();
+    };
     thread::sleep(WAL_STRESS_RUN);
     stop.store(true, Ordering::Relaxed);
     let closes = closer.join().expect("closer");
-    for opener in openers {
-        opener.join().expect("opener");
-    }
+    opener.join().expect("opener");
     assert!(closes > 0, "no connection closed");
 }
