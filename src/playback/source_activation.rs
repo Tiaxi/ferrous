@@ -36,7 +36,9 @@
 //! change the state of what the source sets up.
 //!
 //! Connecting also orders the stream collection of each stream that a
-//! source parses ahead of the stream's data; see `collection_order`.
+//! source parses ahead of the stream's data; see `collection_order`. And it
+//! reports each stream that a `parsebin` holds after exposing it; see
+//! `parsebin_stall`.
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
@@ -99,6 +101,7 @@ impl SourceActivation {
     /// in push mode only.
     pub(crate) fn connect(playbin: &gst::Element) -> Arc<Self> {
         super::collection_order::connect(playbin);
+        super::parsebin_stall::connect(playbin);
         let activation = Arc::new(Self {
             state: Mutex::default(),
             settled: Condvar::new(),
