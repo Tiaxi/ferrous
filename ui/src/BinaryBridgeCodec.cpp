@@ -410,7 +410,8 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     rootEntries.reserve(rootPathCount);
     for (quint16 i = 0; i < rootPathCount; ++i) {
         DecodedLibraryRoot root;
-        if (!reader.readUtf8(&root.path) || !reader.readUtf8(&root.name)) {
+        if (!reader.readUtf8(&root.path) || !reader.readUtf8(&root.name)
+            || !reader.readUtf8(&root.unwatchedReason)) {
             return false;
         }
         rootPaths.push_back(root.path);
@@ -576,6 +577,10 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&showLevelMeter)) {
         return false;
     }
+    quint8 libraryWatchEnabled = 1;
+    if (!reader.atEnd() && !reader.readU8(&libraryWatchEnabled)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -594,6 +599,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->channelButtonsVisibility = std::clamp(static_cast<int>(channelButtonsVisibility), 0, 2);
     out->spectrogramZoomEnabled = spectrogramZoomEnabled != 0;
     out->preventDisplaySleepInFullscreen = preventDisplaySleepInFullscreen != 0;
+    out->libraryWatchEnabled = libraryWatchEnabled != 0;
     return true;
 }
 

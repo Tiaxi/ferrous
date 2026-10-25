@@ -170,6 +170,9 @@ fn apply_analysis_spectrogram_settings(state: &mut BridgeState, analysis: &Analy
 
 fn handle_load_settings_from_disk(state: &mut BridgeState, context: &mut BridgeCommandContext<'_>) {
     load_settings_into(&mut state.settings);
+    context
+        .library
+        .set_watching(state.settings.library_watch_enabled);
     state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
     context
         .playback
@@ -293,6 +296,11 @@ fn handle_settings_bridge_command(
         }
         BridgeSettingsCommand::SetLibrarySortMode(mode) => {
             state.settings.library_sort_mode = *mode;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetLibraryWatchEnabled(enabled) => {
+            state.settings.library_watch_enabled = *enabled;
+            context.library.set_watching(*enabled);
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetLastFmScrobblingEnabled(enabled) => {

@@ -215,6 +215,7 @@ ApplicationWindow {
         property double mutedChannelsMask: 0
         property int channelButtonsVisibility: 1
         property bool systemMediaControlsEnabled: true
+        property bool libraryWatchEnabled: true
         property bool lastFmScrobblingEnabled: false
         property bool lastFmBuildConfigured: false
         property string lastFmUsername: ""
@@ -310,6 +311,7 @@ ApplicationWindow {
         function registerSpectrogramItem(item, channelIndex) {}
         function unregisterSpectrogramItem(item) {}
         function setSystemMediaControlsEnabled(value) {}
+        function setLibraryWatchEnabled(value) {}
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}
         function completeLastFmAuth() {}

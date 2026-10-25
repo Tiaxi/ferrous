@@ -245,6 +245,7 @@ pub enum BridgeSettingsCommand {
     SetLastFmScrobblingEnabled(bool),
     SetChannelButtonsVisibility(u8),
     SetSpectrogramZoomEnabled(bool),
+    SetLibraryWatchEnabled(bool),
     BeginLastFmAuth,
     CompleteLastFmAuth,
     DisconnectLastFm,
@@ -450,7 +451,13 @@ pub struct BridgeSettings {
     pub db_range: f32,
     pub display: BridgeDisplaySettings,
     pub library_sort_mode: LibrarySortMode,
+    /// Whether the library watches its roots for changes, and rescans them
+    /// at startup.
+    pub library_watch_enabled: bool,
     pub integrations: BridgeIntegrationSettings,
+    /// Lines of the settings file with keys this build does not know, such
+    /// as a newer build's, kept as they were.
+    pub unknown_lines: Vec<String>,
 }
 
 impl Default for BridgeSettings {
@@ -476,11 +483,13 @@ impl Default for BridgeSettings {
                 spectrogram_zoom_enabled: true,
             },
             library_sort_mode: LibrarySortMode::Year,
+            library_watch_enabled: true,
             integrations: BridgeIntegrationSettings {
                 system_media_controls_enabled: true,
                 lastfm_scrobbling_enabled: false,
                 lastfm_username: String::new(),
             },
+            unknown_lines: Vec::new(),
         }
     }
 }
@@ -715,6 +724,11 @@ struct BridgeRuntimeOptions {
     /// A library database of the test's own, instead of the process's.
     #[cfg(test)]
     library_db: Option<PathBuf>,
+    /// Whether the library watches its roots as the settings say. Tests
+    /// share the process's library database, so they watch only when they
+    /// ask to.
+    #[cfg(test)]
+    library_watching: bool,
 }
 
 impl Default for BridgeRuntimeOptions {
@@ -726,6 +740,8 @@ impl Default for BridgeRuntimeOptions {
             lastfm: None,
             #[cfg(test)]
             library_db: None,
+            #[cfg(test)]
+            library_watching: false,
         }
     }
 }
@@ -1066,6 +1082,11 @@ impl BridgeLoopRuntime {
 
         let (state, lastfm, lastfm_rx) =
             prepare_initial_bridge_state(&mut options, &analysis, &playback);
+        #[cfg(test)]
+        let watching = state.settings.library_watch_enabled && options.library_watching;
+        #[cfg(not(test))]
+        let watching = state.settings.library_watch_enabled;
+        library.set_watching(watching);
 
         let playing_poll_interval = env_duration_ms("FERROUS_PLAYBACK_POLL_MS", 40, 8, 500);
         let paused_poll_interval =
@@ -5218,6 +5239,70 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.folder);
         }
+    }
+
+    #[test]
+    fn the_library_watches_its_roots_as_the_setting_says() {
+        let _guard = test_guard();
+        let folder = crate::paths::test_root().join("bridge-library-watching");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("music")).expect("library folder");
+        let root = folder.join("music").canonicalize().expect("canonical root");
+        std::fs::write(root.join("a.mp3"), b"a").expect("track");
+        let mut runtime = BridgeLoopRuntime::new(
+            BridgeRuntimeOptions {
+                library_db: Some(folder.join("library.sqlite3")),
+                library_watching: true,
+                ..BridgeRuntimeOptions::default()
+            },
+            None,
+        );
+        assert!(runtime.state.settings.library_watch_enabled);
+        let (event_tx, _event_rx) = unbounded();
+        let mut run = |runtime: &mut BridgeLoopRuntime, command| {
+            runtime.handle_wake(BridgeLoopWake::Command(command), &event_tx);
+        };
+        let wait_for = |runtime: &mut BridgeLoopRuntime, count: usize| {
+            let (event_tx, _event_rx) = unbounded();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while runtime.state.library.tracks.len() != count
+                || runtime.state.library_status.scan_in_progress
+            {
+                let event = runtime
+                    .library_rx
+                    .recv_deadline(deadline)
+                    .unwrap_or_else(|_| panic!("the library reaches {count} tracks"));
+                runtime.handle_wake(BridgeLoopWake::Library(event), &event_tx);
+            }
+        };
+        run(
+            &mut runtime,
+            BridgeCommand::Library(BridgeLibraryCommand::AddRoot {
+                path: root.clone(),
+                name: String::new(),
+            }),
+        );
+        wait_for(&mut runtime, 1);
+
+        // Seen by the watcher: no rescan was asked for.
+        std::fs::write(root.join("b.mp3"), b"b").expect("track");
+        wait_for(&mut runtime, 2);
+
+        run(
+            &mut runtime,
+            BridgeCommand::Settings(BridgeSettingsCommand::SetLibraryWatchEnabled(false)),
+        );
+        assert!(!runtime.state.settings.library_watch_enabled);
+        assert!(runtime.flags.settings_dirty);
+        std::fs::write(root.join("c.mp3"), b"c").expect("track");
+        // Turning watching on rescans the roots.
+        run(
+            &mut runtime,
+            BridgeCommand::Settings(BridgeSettingsCommand::SetLibraryWatchEnabled(true)),
+        );
+        wait_for(&mut runtime, 3);
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

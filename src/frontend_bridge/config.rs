@@ -235,6 +235,7 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
     // also has `volume_cubic`, the level itself.
     let mut legacy_volume_gain = None;
     let mut volume_level = None;
+    settings.unknown_lines.clear();
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else {
             continue;
@@ -327,7 +328,13 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
             "lastfm_username" => {
                 settings.integrations.lastfm_username = value.to_string();
             }
-            _ => {}
+            "library_watch_enabled" => {
+                if let Ok(x) = value.parse::<i32>() {
+                    settings.library_watch_enabled = x != 0;
+                }
+            }
+            // Kept for the build that wrote it.
+            _ => settings.unknown_lines.push(line.to_string()),
         }
     }
     if let Some(level) = volume_level.or_else(|| legacy_volume_gain.map(volume_gain_to_level)) {
@@ -392,8 +399,8 @@ fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), SaveFailure> {
 
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     // `volume` keeps the linear gain so older builds play at the same loudness.
-    format!(
-        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\n",
+    let mut text = format!(
+        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlibrary_watch_enabled={}\n",
         settings.volume,
         volume_level_to_gain(settings.volume),
         settings.fft_size,
@@ -413,7 +420,13 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.library_sort_mode.to_i32(),
         i32::from(settings.integrations.lastfm_scrobbling_enabled),
         settings.integrations.lastfm_username,
-    )
+        i32::from(settings.library_watch_enabled),
+    );
+    for line in &settings.unknown_lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
 }
 
 #[cfg(test)]
@@ -459,11 +472,13 @@ mod tests {
                 spectrogram_zoom_enabled: true,
             },
             library_sort_mode: LibrarySortMode::Title,
+            library_watch_enabled: false,
             integrations: BridgeIntegrationSettings {
                 system_media_controls_enabled: false,
                 lastfm_scrobbling_enabled: true,
                 lastfm_username: "tester".to_string(),
             },
+            unknown_lines: Vec::new(),
         };
         let text = format_settings_text(&settings);
         let mut parsed = BridgeSettings::default();
@@ -489,6 +504,41 @@ mod tests {
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
         assert!(parsed.integrations.lastfm_scrobbling_enabled);
         assert_eq!(parsed.integrations.lastfm_username, "tester");
+        assert!(!parsed.library_watch_enabled);
+    }
+
+    #[test]
+    fn library_watching_defaults_on_and_roundtrips_both_values() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume=0.5\nlibrary_sort_mode=1\n");
+        assert!(settings.library_watch_enabled, "on in older settings files");
+        for enabled in [false, true] {
+            settings.library_watch_enabled = enabled;
+            let mut parsed = BridgeSettings::default();
+            parse_settings_text(&mut parsed, &format_settings_text(&settings));
+            assert_eq!(parsed.library_watch_enabled, enabled);
+        }
+    }
+
+    #[test]
+    fn settings_this_build_does_not_know_are_saved_as_they_were() {
+        let mut settings = BridgeSettings::default();
+        let text = "volume_cubic=0.5\nfuture_key=some value\nlibrary_watch_enabled=0\n\
+                    another.future = 1 \n";
+        parse_settings_text(&mut settings, text);
+        settings.volume = 0.25;
+
+        let saved = format_settings_text(&settings);
+        assert!(saved.contains("\nfuture_key=some value\n"), "{saved}");
+        assert!(saved.contains("\nanother.future = 1 \n"), "{saved}");
+        assert!(saved.contains("volume_cubic=0.2500\n"), "{saved}");
+        assert!(saved.contains("library_watch_enabled=0\n"), "{saved}");
+        assert_eq!(saved.matches("volume_cubic=").count(), 1);
+        // Loading again keeps them once.
+        let mut reloaded = BridgeSettings::default();
+        parse_settings_text(&mut reloaded, &saved);
+        parse_settings_text(&mut reloaded, &saved);
+        assert_eq!(format_settings_text(&reloaded), saved);
     }
 
     #[test]
