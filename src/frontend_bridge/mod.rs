@@ -1268,7 +1268,7 @@ impl BridgeLoopRuntime {
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         self.imports.remap_pending_paths(number, &renames);
-        self.edit_refreshes.renamed(&renames);
+        let read_again = self.edit_refreshes.renamed(&renames);
         let current = self.state.playback.current.clone();
         if commands::refresh_renamed_paths(
             &mut self.state,
@@ -1290,6 +1290,9 @@ impl BridgeLoopRuntime {
                 .active_path
                 .clone_from(&self.state.playback.current);
         }
+        // After the rename's rows, so that a save the rename missed lands
+        // on top of them.
+        self.request_edit_refresh(read_again, event_tx);
         self.request_tree();
         SnapshotUrgency::Immediate
     }
@@ -3667,30 +3670,16 @@ mod tests {
         std::fs::remove_dir_all(dir).expect("remove fixture");
     }
 
-    #[test]
-    fn an_edit_refresh_read_before_a_rename_leaves_the_renamed_tracks_alone() {
-        let _guard = test_guard();
-        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
-        let (_library_tx, library_rx) = unbounded();
-        runtime.library_rx = library_rx;
-        let (event_tx, _event_rx) = unbounded();
-        let root = p("/music/stale");
-        let (a, b) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/b.flac"));
-        let track = |path: &PathBuf, title: &str| LibraryTrack {
-            path: path.clone(),
-            root_path: root.clone(),
-            title: title.to_string(),
-            ..LibraryTrack::default()
-        };
-        runtime.state.library = Arc::new(LibrarySnapshot {
-            roots: vec![LibraryRoot {
-                path: root.clone(),
-                name: String::new(),
-            }],
-            tracks: vec![track(&a, "First"), track(&b, "Second")],
-            ..LibrarySnapshot::default()
-        });
-        let details = |title: &str| IndexedTrack {
+    /// An edit refresh worker that reads titles from `disk`, each read
+    /// waiting for one message on `release`.
+    struct GatedRefreshes {
+        disk: Arc<Mutex<HashMap<PathBuf, String>>>,
+        started: Receiver<Vec<PathBuf>>,
+        release: Sender<()>,
+    }
+
+    fn indexed_titled(title: &str) -> IndexedTrack {
+        IndexedTrack {
             search_tags: crate::library::SearchTags::default(),
             title: title.to_string(),
             artist: String::new(),
@@ -3700,23 +3689,166 @@ mod tests {
             year: None,
             track_no: None,
             duration_secs: None,
-        };
-        let (read_started, started) = bounded(1);
-        let (release, release_read) = bounded::<()>(1);
-        let stale = details("First, edited");
+        }
+    }
+
+    fn gated_refreshes(runtime: &mut BridgeLoopRuntime) -> GatedRefreshes {
+        let disk = Arc::new(Mutex::new(HashMap::<PathBuf, String>::new()));
+        let (started_tx, started) = unbounded();
+        let (release, release_rx) = unbounded::<()>();
+        let files = Arc::clone(&disk);
         runtime.edit_refreshes = edit_refresh::EditRefreshWorker::with_refresh(move |paths| {
-            read_started.send(()).expect("report the read");
-            release_read
+            started_tx.send(paths.to_vec()).expect("report the read");
+            release_rx
                 .recv_timeout(Duration::from_secs(10))
                 .expect("release the read");
+            let files = files.lock().expect("disk");
             Ok(crate::library::TrackRefresh {
                 indexed: paths
                     .iter()
-                    .map(|path| (path.clone(), stale.clone()))
+                    .filter_map(|path| Some((path.clone(), indexed_titled(files.get(path)?))))
                     .collect(),
                 problem: None,
             })
         });
+        GatedRefreshes {
+            disk,
+            started,
+            release,
+        }
+    }
+
+    impl GatedRefreshes {
+        fn set(&self, files: &[(&PathBuf, &str)]) {
+            let mut disk = self.disk.lock().expect("disk");
+            disk.clear();
+            disk.extend(
+                files
+                    .iter()
+                    .map(|(path, title)| ((*path).clone(), title.to_string())),
+            );
+        }
+
+        fn wait_for_read(&self) -> Vec<PathBuf> {
+            self.started
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a refresh read")
+        }
+    }
+
+    /// Release reads and apply their results until every request is answered.
+    fn finish_edit_refreshes(
+        runtime: &mut BridgeLoopRuntime,
+        refreshes: &GatedRefreshes,
+        event_tx: &Sender<BridgeEvent>,
+    ) {
+        while !runtime.edit_refreshes.is_idle() {
+            refreshes.release.send(()).expect("release a read");
+            let result = runtime
+                .edit_refreshes
+                .results
+                .recv_timeout(Duration::from_secs(10))
+                .expect("refresh result");
+            runtime.handle_wake(BridgeLoopWake::EditsRefreshed(result), event_tx);
+        }
+    }
+
+    fn library_titles(runtime: &BridgeLoopRuntime) -> HashMap<PathBuf, String> {
+        runtime
+            .state
+            .library
+            .tracks
+            .iter()
+            .map(|track| (track.path.clone(), track.title.clone()))
+            .collect()
+    }
+
+    fn stale_refresh_runtime(tracks: &[(&PathBuf, &str)]) -> BridgeLoopRuntime {
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (_library_tx, library_rx) = unbounded();
+        runtime.library_rx = library_rx;
+        let root = p("/music/stale");
+        runtime.state.library = Arc::new(LibrarySnapshot {
+            roots: vec![LibraryRoot {
+                path: root.clone(),
+                name: String::new(),
+            }],
+            tracks: tracks
+                .iter()
+                .map(|(path, title)| LibraryTrack {
+                    path: (*path).clone(),
+                    root_path: root.clone(),
+                    title: title.to_string(),
+                    ..LibraryTrack::default()
+                })
+                .collect(),
+            ..LibrarySnapshot::default()
+        });
+        runtime
+    }
+
+    #[test]
+    fn a_save_under_a_new_name_handled_before_its_rename_is_shown() {
+        let _guard = test_guard();
+        let (a, b) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/b.flac"));
+        // A queued file outside the library, renamed and saved with a.
+        let (e, f) = (p("/elsewhere/e.flac"), p("/elsewhere/f.flac"));
+        let mut runtime = stale_refresh_runtime(&[(&a, "Old")]);
+        runtime.state.queue = vec![a.clone(), e.clone()];
+        let (event_tx, _event_rx) = unbounded();
+        let refreshes = gated_refreshes(&mut runtime);
+        // On disk, both files were renamed and then saved.
+        refreshes.set(&[(&b, "Saved"), (&f, "Saved F")]);
+
+        // The save's command overtakes the rename's older notification.
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::Library(
+                BridgeLibraryCommand::RefreshEditedPaths(vec![b.clone(), f.clone()]),
+            )),
+            &event_tx,
+        );
+        assert_eq!(refreshes.wait_for_read(), vec![f.clone(), b.clone()]);
+        // The rename read the files before the save.
+        let _ = runtime.apply_renamed_paths(
+            1,
+            Arc::new(PathRenames::from([
+                (a.clone(), b.clone()),
+                (e.clone(), f.clone()),
+            ])),
+            imports::RenamedDetails {
+                indexed: HashMap::from([
+                    (b.clone(), indexed_titled("Renamed")),
+                    (f.clone(), indexed_titled("Renamed F")),
+                ]),
+                ..imports::RenamedDetails::default()
+            },
+            &event_tx,
+        );
+        finish_edit_refreshes(&mut runtime, &refreshes, &event_tx);
+
+        assert_eq!(
+            library_titles(&runtime),
+            HashMap::from([(b.clone(), "Saved".to_string())])
+        );
+        assert_eq!(runtime.state.queue, vec![b, f.clone()]);
+        assert_eq!(
+            runtime
+                .state
+                .queue_details
+                .get(&f)
+                .map(|details| details.title.as_str()),
+            Some("Saved F")
+        );
+    }
+
+    #[test]
+    fn an_edit_refresh_read_before_a_rename_leaves_the_renamed_tracks_alone() {
+        let _guard = test_guard();
+        let (a, b) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/b.flac"));
+        let mut runtime = stale_refresh_runtime(&[(&a, "First"), (&b, "Second")]);
+        let (event_tx, _event_rx) = unbounded();
+        let refreshes = gated_refreshes(&mut runtime);
+        refreshes.set(&[(&a, "First, edited"), (&b, "Second")]);
 
         runtime.handle_wake(
             BridgeLoopWake::Command(BridgeCommand::Library(
@@ -3724,11 +3856,16 @@ mod tests {
             )),
             &event_tx,
         );
-        started
+        assert_eq!(refreshes.wait_for_read(), vec![a.clone()]);
+        refreshes.release.send(()).expect("release the read");
+        // The read is done before the files swap names, and its result
+        // reaches the bridge after the rename.
+        let stale = runtime
+            .edit_refreshes
+            .results
             .recv_timeout(Duration::from_secs(10))
-            .expect("the refresh reads a");
-        // The files swap names while a is read; the rename read both of
-        // them at their new names.
+            .expect("refresh result");
+        refreshes.set(&[(&a, "Second"), (&b, "First, edited")]);
         let _ = runtime.apply_renamed_paths(
             1,
             Arc::new(PathRenames::from([
@@ -3737,30 +3874,25 @@ mod tests {
             ])),
             imports::RenamedDetails {
                 indexed: HashMap::from([
-                    (a.clone(), details("Second")),
-                    (b.clone(), details("First, edited")),
+                    (a.clone(), indexed_titled("Second")),
+                    (b.clone(), indexed_titled("First, edited")),
                 ]),
                 ..imports::RenamedDetails::default()
             },
             &event_tx,
         );
-        release.send(()).expect("release the read");
-        let result = runtime
-            .edit_refreshes
-            .results
-            .recv_timeout(Duration::from_secs(10))
-            .expect("refresh result");
-        runtime.handle_wake(BridgeLoopWake::EditsRefreshed(result), &event_tx);
-
-        let titles = runtime
-            .state
-            .library
-            .tracks
-            .iter()
-            .map(|track| (track.path.clone(), track.title.clone()))
-            .collect::<HashMap<_, _>>();
+        runtime.handle_wake(BridgeLoopWake::EditsRefreshed(stale), &event_tx);
         assert_eq!(
-            titles,
+            library_titles(&runtime),
+            HashMap::from([
+                (a.clone(), "Second".to_string()),
+                (b.clone(), "First, edited".to_string()),
+            ])
+        );
+        finish_edit_refreshes(&mut runtime, &refreshes, &event_tx);
+
+        assert_eq!(
+            library_titles(&runtime),
             HashMap::from([(a, "Second".to_string()), (b, "First, edited".to_string()),])
         );
     }

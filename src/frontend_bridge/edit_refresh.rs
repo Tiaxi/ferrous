@@ -6,9 +6,12 @@
 //!
 //! Every request has a generation. A result updates a path only if no newer
 //! request for the path is pending and no rename has moved the path since the
-//! request, so an older read never overwrites newer details.
+//! request, so an older read never overwrites newer details. A read that a
+//! rename made stale is asked for again under the file's new path, so the
+//! details shown always come from a read after both the rename and the save,
+//! in whichever order the bridge learns of them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -47,6 +50,8 @@ pub(super) struct EditRefreshWorker {
     next_generation: u64,
     /// The generation of the last request sent.
     last_requested: u64,
+    /// The generation of the last result accepted.
+    last_accepted: u64,
     /// For each path with a refresh in flight, the oldest generation whose
     /// result may update it.
     current_from: HashMap<PathBuf, u64>,
@@ -93,6 +98,7 @@ impl EditRefreshWorker {
             results,
             next_generation: 0,
             last_requested: 0,
+            last_accepted: 0,
             current_from: HashMap::new(),
         }
     }
@@ -110,16 +116,42 @@ impl EditRefreshWorker {
 
     /// Files were renamed on disk. A read in flight of any of their old or
     /// new paths may have read another file, or none, so it is ignored.
-    pub(super) fn renamed(&mut self, renames: &PathRenames) {
+    /// Returns the paths, under their new names, that must be read again:
+    /// the read may also hold a save the rename's own read missed, as when
+    /// a file is saved under its new name before the bridge applies the
+    /// rename. Request them once the rename is applied.
+    #[must_use]
+    pub(super) fn renamed(&mut self, renames: &PathRenames) -> Vec<PathBuf> {
         if self.current_from.is_empty() {
-            return;
+            return Vec::new();
         }
         let generation = self.advance();
+        let new_paths = renames.values().collect::<HashSet<_>>();
+        let mut read_again = Vec::new();
         for path in renames.keys().chain(renames.values()) {
-            if let Some(current_from) = self.current_from.get_mut(path) {
-                *current_from = generation;
+            let Some(current_from) = self.current_from.get_mut(path) else {
+                continue;
+            };
+            *current_from = generation;
+            // The request meant the file that had the path, now under its
+            // new name, or, if it was sent once the rename was on disk, the
+            // file that has it now.
+            if let Some(new_path) = renames.get(path) {
+                read_again.push(new_path.clone());
+            }
+            if new_paths.contains(path) {
+                read_again.push(path.clone());
             }
         }
+        read_again.sort_unstable();
+        read_again.dedup();
+        read_again
+    }
+
+    /// Whether every request has been answered.
+    #[cfg(test)]
+    pub(super) fn is_idle(&self) -> bool {
+        self.last_accepted == self.last_requested
     }
 
     /// The part of `result` that is still current.
@@ -140,6 +172,7 @@ impl EditRefreshWorker {
         };
         indexed.retain(|path, _| is_current(path));
         fingerprints.retain(|path, _| indexed.contains_key(path));
+        self.last_accepted = generation;
         if generation == self.last_requested {
             // Nothing is in flight any more.
             self.current_from.clear();
@@ -221,10 +254,15 @@ mod tests {
         let mut worker = idle_worker();
         assert!(worker.request(vec![PathBuf::from("/m/a.flac"), PathBuf::from("/m/c.flac")]));
         // a and b swap names while a is read.
-        worker.renamed(&PathRenames::from([
+        let read_again = worker.renamed(&PathRenames::from([
             (PathBuf::from("/m/a.flac"), PathBuf::from("/m/b.flac")),
             (PathBuf::from("/m/b.flac"), PathBuf::from("/m/a.flac")),
         ]));
+        // Either file may hold the save the read was for.
+        assert_eq!(
+            read_again,
+            vec![PathBuf::from("/m/a.flac"), PathBuf::from("/m/b.flac")]
+        );
         let accepted = worker.accept(result(1, &[("/m/a.flac", "a before"), ("/m/c.flac", "c")]));
         assert_eq!(
             accepted.indexed.keys().collect::<Vec<_>>(),
