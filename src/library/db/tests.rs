@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Instant;
 
 use rusqlite::params;
 use rusqlite::types::Value;
@@ -439,4 +443,117 @@ fn moving_aside_takes_the_side_files_and_never_reuses_a_folder() {
         b"second"
     );
     fs::remove_dir_all(folder).expect("cleanup");
+}
+
+/// The oldest `SQLite` the library can use, 3.51.3.
+const MIN_SQLITE_VERSION: i32 = 3_051_003;
+
+#[test]
+fn the_linked_sqlite_is_at_least_3_51_3() {
+    assert!(
+        rusqlite::version_number() >= MIN_SQLITE_VERSION,
+        "SQLite {} is linked, but the library needs 3.51.3 or later (#218): 3.51.0 and 3.51.1 \
+         can deadlock when one thread closes a write-ahead-logging connection while another \
+         opens the same file, and versions before 3.51.3 can corrupt a database when the log \
+         is reset",
+        rusqlite::version()
+    );
+}
+
+/// Names the database that `wal_close_open_stress` uses, in the child process
+/// that `closing_and_opening_connections_never_deadlock` starts.
+const WAL_STRESS_DB_ENV: &str = "FERROUS_TEST_WAL_STRESS_DB";
+/// How long the child process closes and opens connections.
+const WAL_STRESS_RUN: Duration = Duration::from_secs(1);
+/// How long the child process may take before it counts as deadlocked.
+const WAL_STRESS_LIMIT: Duration = Duration::from_secs(30);
+
+/// `SQLite` 3.51.1 could deadlock when one thread closed the last connection to
+/// a file in write-ahead logging while another thread opened the file (#218).
+/// A deadlocked thread holds `SQLite`'s process-wide lock and would stop every
+/// later test, so the stress runs in a child process, which is killed if it
+/// does not finish in time.
+#[test]
+fn closing_and_opening_connections_never_deadlock() {
+    let folder = test_folder("wal-close-open");
+    let path = folder.join("library.sqlite3");
+    let opened = open_worker_db(&path, SHORT_WAIT).expect("open");
+    assert!(opened.notice.is_none(), "{:?}", opened.notice);
+    drop(opened);
+
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, module)| module);
+    let name = format!("{module}::wal_close_open_stress");
+    let mut child = Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", &name, "--ignored"])
+        .env(WAL_STRESS_DB_ENV, &path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the stress");
+    let started = Instant::now();
+    while child.try_wait().expect("stress status").is_none() {
+        if started.elapsed() > WAL_STRESS_LIMIT {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "closing and opening connections to one database did not finish in {:?}; \
+                 SQLite {} deadlocked (#218)",
+                WAL_STRESS_LIMIT,
+                rusqlite::version()
+            );
+        }
+        thread::sleep(SHORT_WAIT);
+    }
+    let output = child.wait_with_output().expect("stress output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains(&format!("test {name} ... ok")),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(folder).expect("cleanup");
+}
+
+/// The child process's part of `closing_and_opening_connections_never_deadlock`.
+/// One thread opens, reads, and closes a connection, so that each close is the
+/// last one and takes down the write-ahead log, while another thread opens and
+/// closes the file without reading it. One opener is enough to deadlock
+/// 3.51.1 within a second, and keeps the load on the other tests low.
+#[test]
+#[ignore = "run in a child process by closing_and_opening_connections_never_deadlock"]
+fn wal_close_open_stress() {
+    let Some(path) = std::env::var_os(WAL_STRESS_DB_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let closer = {
+        let (path, stop) = (path.clone(), Arc::clone(&stop));
+        thread::spawn(move || {
+            let mut closes = 0_u64;
+            while !stop.load(Ordering::Relaxed) {
+                let conn = open_library_db_at(&path, SHORT_WAIT).expect("open");
+                let _: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+                    .expect("read");
+                drop(conn);
+                closes += 1;
+            }
+            closes
+        })
+    };
+    let opener = {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                drop(Connection::open(&path).expect("open"));
+            }
+        })
+    };
+    thread::sleep(WAL_STRESS_RUN);
+    stop.store(true, Ordering::Relaxed);
+    let closes = closer.join().expect("closer");
+    opener.join().expect("opener");
+    assert!(closes > 0, "no connection closed");
 }
