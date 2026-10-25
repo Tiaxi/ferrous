@@ -411,6 +411,9 @@ mod gst_tests {
             player
         }
 
+        /// Record what leaves each source after the filter. A flushing seek
+        /// starts a new run: what its source delivered before is dropped
+        /// once the end of the flush leaves the source, in stream order.
         fn record_delivered_buffers(&self) {
             let delivered = Arc::clone(&self.delivered);
             // Connected after the filter, so this probe runs after the filter's.
@@ -419,9 +422,13 @@ mod gst_tests {
                 let path = PathBuf::from(source.property::<Option<String>>("location")?);
                 let delivered = Arc::clone(&delivered);
                 source.static_pad("src")?.add_probe(
-                    gst::PadProbeType::BUFFER,
+                    gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_FLUSH,
                     move |_pad, info| {
-                        if let Some(buffer) = info.buffer() {
+                        if is_flush_stop(info) {
+                            if let Ok(mut delivered) = delivered.lock() {
+                                delivered.retain(|buffer| buffer.path != path);
+                            }
+                        } else if let Some(buffer) = info.buffer() {
                             if let (Ok(map), Ok(mut delivered)) =
                                 (buffer.map_readable(), delivered.lock())
                             {
@@ -439,6 +446,9 @@ mod gst_tests {
             });
         }
 
+        /// A sink that records what is decoded. A flushing seek starts a
+        /// new run once the end of the flush reaches the sink, before the
+        /// first buffer from the seek target.
         fn decoded_sink(&self) -> gst::Element {
             let decoded = Arc::clone(&self.decoded);
             let sink = gst::ElementFactory::make("fakesink")
@@ -446,9 +456,13 @@ mod gst_tests {
                 .build()
                 .expect("fakesink");
             sink.static_pad("sink").expect("fakesink pad").add_probe(
-                gst::PadProbeType::BUFFER,
+                gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_FLUSH,
                 move |_pad, info| {
-                    if let Some(buffer) = info.buffer() {
+                    if is_flush_stop(info) {
+                        if let Ok(mut decoded) = decoded.lock() {
+                            decoded.clear();
+                        }
+                    } else if let Some(buffer) = info.buffer() {
                         if let (Some(start), Some(length), Ok(mut decoded)) =
                             (buffer.pts(), buffer.duration(), decoded.lock())
                         {
@@ -499,11 +513,6 @@ mod gst_tests {
             self.trace.report(what, &details)
         }
 
-        fn clear(&self) {
-            self.decoded.lock().expect("decoded").clear();
-            self.delivered.lock().expect("delivered").clear();
-        }
-
         fn take_run(&self) -> Run {
             Run {
                 decoded: std::mem::take(&mut *self.decoded.lock().expect("decoded")),
@@ -515,6 +524,11 @@ mod gst_tests {
             let _ = self.set_state(gst::State::Null);
             result.unwrap_or_else(|err| panic!("{name}: {err}"))
         }
+    }
+
+    fn is_flush_stop(info: &gst::PadProbeInfo) -> bool {
+        info.event()
+            .is_some_and(|event| event.type_() == gst::EventType::FlushStop)
     }
 
     fn file_uri(path: &Path) -> String {
@@ -538,9 +552,6 @@ mod gst_tests {
                     .playbin
                     .seek_simple(seek_flags, gst::ClockTime::from_nseconds(nanos))
                     .map_err(|err| err.to_string())?;
-                // The flushing seek has completed; anything recorded so far
-                // belongs to the preroll or the previous run.
-                player.clear();
                 if index == 0 {
                     player.set_state(gst::State::Playing)?;
                 }
@@ -693,6 +704,40 @@ mod gst_tests {
             "{name}: decoded {decoded:?} of a {expected:?} queue"
         );
         run.assert_only_audio_delivered(&[first, clean, last]);
+    }
+
+    #[test]
+    fn a_flushing_seek_starts_a_new_run_of_what_is_decoded() {
+        // A run must not depend on when the test thread looks after the
+        // seek: under load, playback from the target can be well under way
+        // by then.
+        require_elements(AC3.elements);
+        let repeats = AC3.repeats();
+        let (path, _) = write_ripped_file(AC3.name, AC3.fixture, repeats);
+        let target = AC3.length(repeats) * 3 / 5;
+        let player = Player::new();
+        player.set_path(&path);
+        let result = (|| {
+            player.set_state(gst::State::Paused)?;
+            player.wait_for(gst::MessageType::AsyncDone)?;
+            let nanos = u64::try_from(target.as_nanos()).expect("target fits");
+            player
+                .playbin
+                .seek_simple(AC3.seek_flags, gst::ClockTime::from_nseconds(nanos))
+                .map_err(|err| err.to_string())?;
+            player.wait_for(gst::MessageType::AsyncDone)?;
+            Ok(player.take_run())
+        })();
+        let run = player.finish("seek while paused", result);
+        let _ = std::fs::remove_file(&path);
+
+        // Only the preroll from the target, not the one from the start.
+        let slack = AC3.frame_length * 2;
+        assert!(
+            !run.decoded.is_empty() && run.first_start() + slack >= target,
+            "decoded {:?} for a seek to {target:?}",
+            run.decoded
+        );
     }
 
     #[test]
