@@ -19,6 +19,7 @@ use crate::lastfm::{
 };
 use crate::library::{
     IndexedTrack, LibraryEvent, LibraryService, LibrarySnapshot, TrackFileFingerprint,
+    LIBRARY_SHUTDOWN_TIMEOUT,
 };
 use crate::metadata::{MetadataEvent, MetadataService, TrackMetadata};
 use crate::playback::{
@@ -797,13 +798,15 @@ const LASTFM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long stopping the bridge waits for its thread to end.
 ///
 /// Its shutdown waits up to [`LASTFM_SHUTDOWN_TIMEOUT`] for Last.fm, which
-/// may be in the middle of a request, and then up to
-/// [`ANALYSIS_SHUTDOWN_TIMEOUT`] for the analysis threads. The second left
-/// covers the settings and session saves, a few small files, and stopping
-/// playback. A normal shutdown takes milliseconds; the bound only keeps a
+/// may be in the middle of a request, then up to
+/// [`ANALYSIS_SHUTDOWN_TIMEOUT`] for the analysis threads, and up to
+/// [`LIBRARY_SHUTDOWN_TIMEOUT`] for the library worker to stop a scan and
+/// close its database. The second left covers the settings and session
+/// saves, a few small files, and stopping playback. A normal shutdown takes milliseconds; the bound only keeps a
 /// stuck one from holding the app open.
 pub(crate) const BRIDGE_SHUTDOWN_TIMEOUT: Duration = LASTFM_SHUTDOWN_TIMEOUT
     .saturating_add(ANALYSIS_SHUTDOWN_TIMEOUT)
+    .saturating_add(LIBRARY_SHUTDOWN_TIMEOUT)
     .saturating_add(Duration::from_secs(1));
 
 struct BridgeLoopRuntime {

@@ -274,7 +274,7 @@ fn an_inner_root_reclaiming_a_track_whose_reader_panics_keeps_its_row() {
     )
     .expect("row owned by the outer root");
 
-    let outcome = scan_root(
+    let outcome = scan_root_observed(
         &conn,
         &inner,
         EmbeddedCoverCache::shared(),

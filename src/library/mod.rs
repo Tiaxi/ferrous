@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 mod cover_cache;
+mod db;
 mod scan;
 mod schema;
+#[cfg(test)]
+mod test_fixtures;
+mod worker;
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use rusqlite::Connection;
 
-use scan::{
-    handle_add_root, handle_rescan_all, handle_rescan_root, remove_root_and_purge, rename_root,
-};
+use crate::worker_thread::JoinableThread;
+
 #[cfg(test)]
 pub(crate) use scan::{index_tracks_for_test, load_external_track_caches, write_test_apple_double};
 pub(crate) use scan::{
@@ -21,8 +24,6 @@ pub(crate) use scan::{
     track_file_fingerprint,
 };
 pub(crate) use scan::{read_library_snapshot_from_db, ExternalTrackCache};
-pub use schema::search_tracks_fts;
-use schema::{init_schema, load_snapshot, open_library_db};
 
 /// Additional, potentially repeated text tags collected during library scans.
 pub type SearchTags = std::collections::BTreeMap<String, Vec<String>>;
@@ -120,7 +121,7 @@ pub(crate) struct TrackFileFingerprint {
     pub(crate) size_bytes: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LibraryCommand {
     ScanRoot(PathBuf),
     AddRoot { path: PathBuf, name: String },
@@ -148,117 +149,82 @@ pub(crate) struct IndexedTrack {
     pub(crate) duration_secs: Option<f32>,
 }
 
+/// How long dropping the [`LibraryService`] waits for its worker to stop a
+/// scan, checkpoint the database, and close it.
+pub(crate) const LIBRARY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub struct LibraryService {
-    tx: Sender<LibraryCommand>,
+    tx: Option<Sender<LibraryCommand>>,
+    thread: Option<JoinableThread>,
 }
 
 fn emit_snapshot(event_tx: &Sender<LibraryEvent>, snapshot: &LibrarySnapshot) {
     let _ = event_tx.send(LibraryEvent::Snapshot(snapshot.clone()));
 }
 
-/// Runs one command on the library worker and publishes the resulting
-/// snapshot, with the command's failure, if any, in `last_error`.
-fn handle_command(
-    conn: &Connection,
-    cmd: LibraryCommand,
-    snapshot: &mut LibrarySnapshot,
-    event_tx: &Sender<LibraryEvent>,
-) {
-    snapshot.last_error = None;
-    let reload_search_data_on_success = matches!(
-        &cmd,
-        LibraryCommand::RenameRoot { .. } | LibraryCommand::RemoveRoot(_)
-    );
-    let result = match cmd {
-        LibraryCommand::ScanRoot(root) => handle_add_root(conn, &root, "", snapshot, event_tx),
-        LibraryCommand::AddRoot { path, name } => {
-            handle_add_root(conn, &path, &name, snapshot, event_tx)
-        }
-        LibraryCommand::RenameRoot { path, name } => rename_root(conn, &path, &name),
-        LibraryCommand::RemoveRoot(root) => remove_root_and_purge(conn, &root),
-        LibraryCommand::RescanRoot(root) => handle_rescan_root(conn, &root, snapshot, event_tx),
-        LibraryCommand::RescanAll => handle_rescan_all(conn, snapshot, event_tx),
-    };
-
-    if let Err(err) = &result {
-        snapshot.last_error = Some(err.clone());
-    }
-
-    load_snapshot(conn, snapshot);
-    if result.is_ok() && reload_search_data_on_success {
-        snapshot.bump_search_revision();
-    }
-    snapshot.scan_in_progress = false;
-    snapshot.scan_progress = None;
-    emit_snapshot(event_tx, snapshot);
-}
-
 impl LibraryService {
     #[must_use]
     pub fn new() -> (Self, Receiver<LibraryEvent>) {
+        let db_path = crate::paths::library_db_path()
+            .map_err(|err| format!("could not open the library database: {err}"));
+        Self::spawn(db_path, schema::BUSY_TIMEOUT, || {})
+    }
+
+    /// A service on the database at `path`, whose scans use `tuning`.
+    #[cfg(test)]
+    fn with_database(
+        path: PathBuf,
+        busy_timeout: Duration,
+        tuning: scan::ScanTuning,
+    ) -> (Self, Receiver<LibraryEvent>) {
+        Self::spawn(Ok(path), busy_timeout, move || {
+            scan::scan_test_hooks::set_tuning(tuning);
+        })
+    }
+
+    /// Starts the worker, which runs `configure` first.
+    fn spawn(
+        db_path: Result<PathBuf, String>,
+        busy_timeout: Duration,
+        configure: impl FnOnce() + Send + 'static,
+    ) -> (Self, Receiver<LibraryEvent>) {
         let (cmd_tx, cmd_rx) = unbounded::<LibraryCommand>();
         let (event_tx, event_rx) = unbounded::<LibraryEvent>();
 
-        crate::worker_thread::spawn_worker("ferrous-library", move || {
-            let mut snapshot = LibrarySnapshot::default();
-
-            match open_library_db() {
-                Ok(conn) => {
-                    if let Err(err) = init_schema(&conn) {
-                        snapshot.last_error = Some(format!("library DB init failed: {err}"));
-                        emit_snapshot(&event_tx, &snapshot);
-                        return;
-                    }
-                    load_snapshot(&conn, &mut snapshot);
-                    snapshot.bump_search_revision();
-                    emit_snapshot(&event_tx, &snapshot);
-
-                    // Publish the cached library first, then fill new tag columns on this
-                    // library worker. Existing libraries need no manual rescan after upgrade.
-                    if schema::needs_search_tag_backfill(&conn) {
-                        snapshot.last_error =
-                            scan::backfill_search_tags(&conn, &mut snapshot, &event_tx)
-                                .unwrap_or_else(Some);
-                        load_snapshot(&conn, &mut snapshot);
-                        snapshot.bump_search_revision();
-                        snapshot.scan_in_progress = false;
-                        snapshot.scan_progress = None;
-                        emit_snapshot(&event_tx, &snapshot);
-                    }
-
-                    match cover_cache::migrate_legacy_embedded_covers(
-                        &conn,
-                        &mut snapshot,
-                        &event_tx,
-                    ) {
-                        Ok(false) => {}
-                        result => {
-                            if let Err(err) = result {
-                                snapshot.last_error = Some(err);
-                            }
-                            load_snapshot(&conn, &mut snapshot);
-                            snapshot.bump_search_revision();
-                            snapshot.scan_in_progress = false;
-                            snapshot.scan_progress = None;
-                            emit_snapshot(&event_tx, &snapshot);
-                        }
-                    }
-
-                    while let Ok(cmd) = cmd_rx.recv() {
-                        handle_command(&conn, cmd, &mut snapshot, &event_tx);
-                    }
-                }
-                Err(err) => {
-                    snapshot.last_error = Some(format!("library DB open failed: {err}"));
-                    emit_snapshot(&event_tx, &snapshot);
-                }
-            }
+        let thread = crate::worker_thread::spawn_worker("ferrous-library", move || {
+            configure();
+            worker::run(db_path, busy_timeout, cmd_rx, &event_tx);
         });
 
-        (Self { tx: cmd_tx }, event_rx)
+        (
+            Self {
+                tx: Some(cmd_tx),
+                thread,
+            },
+            event_rx,
+        )
     }
 
     pub fn command(&self, cmd: LibraryCommand) {
-        let _ = self.tx.send(cmd);
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(cmd);
+        }
+    }
+}
+
+impl Drop for LibraryService {
+    /// Closes the command channel, which stops a running scan between
+    /// files, and waits a bounded time for the worker to checkpoint and
+    /// close the database.
+    fn drop(&mut self) {
+        self.tx = None;
+        if let Some(thread) = self.thread.take() {
+            if !thread.join_by(Instant::now() + LIBRARY_SHUTDOWN_TIMEOUT) {
+                eprintln!(
+                    "[ferrous] the library worker did not stop within {} s",
+                    LIBRARY_SHUTDOWN_TIMEOUT.as_secs()
+                );
+            }
+        }
     }
 }

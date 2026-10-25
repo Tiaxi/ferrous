@@ -81,7 +81,7 @@ See [supported formats](../README.md#supported-formats). Playback codec support 
 
 | State | Location |
 | --- | --- |
-| Library database and waveform cache | `$XDG_DATA_HOME/ferrous/library.sqlite3` |
+| Library database and waveform cache | `$XDG_DATA_HOME/ferrous/library.sqlite3`, with SQLite's `-wal` and `-shm` files while Ferrous runs; a damaged database is kept in `library.sqlite3.damaged-<UTC time>/` |
 | Diagnostics log | `$XDG_DATA_HOME/ferrous/diagnostics.log` |
 | Settings | `$XDG_CONFIG_HOME/ferrous/settings.txt` |
 | Pending Last.fm scrobbles | `$XDG_CONFIG_HOME/ferrous/lastfm_queue.json`; an unreadable file is kept as `lastfm_queue.json.corrupt` |
