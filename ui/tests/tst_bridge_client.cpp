@@ -222,6 +222,12 @@ private slots:
     void noOpNextPreservesPosition();
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
+    void queueDeltasChangeOnlyTheirRowsWithoutAReset();
+    void aMissedQueueRevisionAsksForTheWholeQueueOnce();
+    void rowCommandsCarryTheQueueRevision();
+    void aLargeQueueEditDecodesOnlyTheChangedRows();
+    void gaplessAndRepeatOneMoveOnlyThePlayingRow();
+    void realBridgeQueueEditsArriveAsRowSignals();
     void inProcessBridgeInstallsWakeNotifier();
     void aStalledClientReceivesTheLatestQueueAndEveryError();
     void aDrainEndsWithNoWakeupPending();
@@ -649,14 +655,15 @@ void BridgeClientTest::tagEditorLoadReportsUnreadableFiles() {
 }
 
 void BridgeClientTest::batchRemovalCodecPreservesIndices() {
-    const QByteArray bytes = BinaryBridgeCodec::encodeCommandIndices(BinaryBridgeCodec::CmdRemoveMany, {9, 5, 1});
-    QCOMPARE(bytes.size(), 22);
+    const QByteArray bytes = BinaryBridgeCodec::encodeCommandRemoveMany(5, {9, 5, 1});
+    QCOMPARE(bytes.size(), 30);
     QCOMPARE(qFromLittleEndian<quint16>(bytes.constData()), quint16(63));
-    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 2), quint32(16));
-    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 6), quint32(3));
-    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 10), quint32(9));
-    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 14), quint32(5));
-    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 18), quint32(1));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 2), quint32(24));
+    QCOMPARE(qFromLittleEndian<quint64>(bytes.constData() + 6), quint64(5));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 14), quint32(3));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 18), quint32(9));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 22), quint32(5));
+    QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 26), quint32(1));
 }
 
 namespace {
@@ -1117,7 +1124,7 @@ void BridgeClientTest::queuePathFallbackUsesCachedFirstIndex() {
     });
 
     QVERIFY(client.processBinarySnapshot(queueSnapshot));
-    QCOMPARE(client.m_queuePathFirstIndex.value(duplicatePath, -1), 0);
+    QCOMPARE(client.queuePathFirstIndex(duplicatePath), 0);
 
     BinaryBridgeCodec::DecodedSnapshot playbackSnapshot;
     playbackSnapshot.playback.present = true;
@@ -1128,6 +1135,391 @@ void BridgeClientTest::queuePathFallbackUsesCachedFirstIndex() {
     QVERIFY(client.processBinarySnapshot(playbackSnapshot));
     QCOMPARE(client.m_playingQueueIndex, 0);
     QCOMPARE(client.currentTrackTitle(), QStringLiteral("Duplicate First"));
+}
+
+namespace {
+
+BinaryBridgeCodec::DecodedQueueTrack queueTrack(const QString &path, const QString &title = {}) {
+    BinaryBridgeCodec::DecodedQueueTrack track;
+    track.title = title.isEmpty() ? QFileInfo(path).fileName() : title;
+    track.path = path;
+    track.lengthSeconds = 60.0f;
+    return track;
+}
+
+// A snapshot with the whole queue of `paths` at `revision`.
+BinaryBridgeCodec::DecodedSnapshot fullQueueSnapshot(
+    quint64 revision, const QStringList &paths, int selected = -1) {
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.queue.present = true;
+    snapshot.queue.kind = BinaryBridgeCodec::QueueFull;
+    snapshot.queue.revision = revision;
+    snapshot.queue.len = static_cast<int>(paths.size());
+    snapshot.queue.selectedIndex = selected;
+    for (const QString &path : paths) {
+        snapshot.queue.tracks.push_back(queueTrack(path));
+    }
+    return snapshot;
+}
+
+// A snapshot with `ops` from `base` to `revision`, which leave `len` rows.
+BinaryBridgeCodec::DecodedSnapshot queueDeltaSnapshot(
+    quint64 base,
+    quint64 revision,
+    int len,
+    QVector<BinaryBridgeCodec::DecodedQueueOp> ops,
+    int selected = -1) {
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.queue.present = true;
+    snapshot.queue.kind = BinaryBridgeCodec::QueueDelta;
+    snapshot.queue.baseRevision = base;
+    snapshot.queue.revision = revision;
+    snapshot.queue.len = len;
+    snapshot.queue.selectedIndex = selected;
+    snapshot.queue.ops = std::move(ops);
+    return snapshot;
+}
+
+BinaryBridgeCodec::DecodedQueueOp queueOp(
+    int type, int index, int countOrTo = 0, QVector<BinaryBridgeCodec::DecodedQueueTrack> tracks = {}) {
+    BinaryBridgeCodec::DecodedQueueOp op;
+    op.type = type;
+    op.index = index;
+    if (type == BinaryBridgeCodec::QueueOpRemove) {
+        op.count = countOrTo;
+    } else if (type == BinaryBridgeCodec::QueueOpMove) {
+        op.to = countOrTo;
+    }
+    op.tracks = std::move(tracks);
+    return op;
+}
+
+QStringList queuePaths(const BridgeClient &client) {
+    QStringList paths;
+    for (int index = 0; index < client.queueLength(); ++index) {
+        paths.push_back(client.queuePathAt(index));
+    }
+    return paths;
+}
+
+QStringList numberedPaths(int count) {
+    QStringList paths;
+    for (int index = 0; index < count; ++index) {
+        paths.push_back(QStringLiteral("/music/%1.flac").arg(index));
+    }
+    return paths;
+}
+
+// Counts the row signals of the client's queue model.
+struct QueueRowSignals {
+    explicit QueueRowSignals(QAbstractItemModel *model)
+        : resets(model, &QAbstractItemModel::modelReset),
+          inserts(model, &QAbstractItemModel::rowsInserted),
+          removes(model, &QAbstractItemModel::rowsRemoved),
+          moves(model, &QAbstractItemModel::rowsMoved),
+          updates(model, &QAbstractItemModel::dataChanged) {}
+
+    QSignalSpy resets;
+    QSignalSpy inserts;
+    QSignalSpy removes;
+    QSignalSpy moves;
+    QSignalSpy updates;
+};
+
+// Little-endian writers for building packets as the Rust relay does.
+template <typename T>
+void putLe(QByteArray &out, T value) {
+    const T little = qToLittleEndian(value);
+    out.append(reinterpret_cast<const char *>(&little), static_cast<qsizetype>(sizeof(T)));
+}
+
+void putString(QByteArray &out, const QString &value) {
+    const QByteArray utf8 = value.toUtf8();
+    putLe<quint32>(out, static_cast<quint32>(utf8.size()));
+    out.append(utf8);
+}
+
+void putQueueRow(QByteArray &out, const QString &path, const QString &title) {
+    putString(out, title);
+    for (int i = 0; i < 4; ++i) {
+        putString(out, QString{});
+    }
+    putLe<qint32>(out, std::numeric_limits<qint32>::min());
+    putLe<quint16>(out, 0);
+    const float seconds = 60.0f;
+    quint32 bits = 0;
+    std::memcpy(&bits, &seconds, sizeof(bits));
+    putLe<quint32>(out, bits);
+    putString(out, path);
+}
+
+void putQueueHeader(QByteArray &out, quint8 kind, quint64 revision, quint32 len) {
+    putLe<quint8>(out, kind);
+    putLe<quint64>(out, revision);
+    putLe<quint32>(out, len);
+    putLe<qint32>(out, -1);
+    const double total = 60.0 * len;
+    quint64 bits = 0;
+    std::memcpy(&bits, &total, sizeof(bits));
+    putLe<quint64>(out, bits);
+    putLe<quint32>(out, 0);
+}
+
+QByteArray queuePacket(const QByteArray &section) {
+    QByteArray packet;
+    putLe<quint32>(packet, BinaryBridgeCodec::kSnapshotMagic);
+    putLe<quint32>(packet, static_cast<quint32>(12 + 4 + section.size()));
+    putLe<quint16>(packet, BinaryBridgeCodec::SectionQueue);
+    putLe<quint16>(packet, 0);
+    putLe<quint32>(packet, static_cast<quint32>(section.size()));
+    packet.append(section);
+    return packet;
+}
+
+} // namespace
+
+void BridgeClientTest::queueDeltasChangeOnlyTheirRowsWithoutAReset() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(1, numberedPaths(5), 3)));
+    QCOMPARE(client.m_queueRevision, quint64(1));
+    QCOMPARE(client.queueLength(), 5);
+    QCOMPARE(client.selectedQueueIndex(), 3);
+
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QueueRowSignals rowSignals(model);
+    // [0, 1, 2, 3, 4] → insert x at 2 → [0, 1, x, 2, 3, 4] → remove 0
+    // → [1, x, 2, 3, 4] → move 4 to 0 → [4, 1, x, 2, 3] → retitle x.
+    QVector<BinaryBridgeCodec::DecodedQueueOp> ops{
+        queueOp(BinaryBridgeCodec::QueueOpInsert, 2, 0, {queueTrack(QStringLiteral("/music/x.flac"))}),
+        queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1),
+        queueOp(BinaryBridgeCodec::QueueOpMove, 4, 0),
+        queueOp(BinaryBridgeCodec::QueueOpUpdate, 2, 0,
+            {queueTrack(QStringLiteral("/music/x.flac"), QStringLiteral("Retitled"))}),
+    };
+    // The removal before row 3 moved it, and the backend says where.
+    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(1, 5, 5, ops, 4)));
+
+    QCOMPARE(rowSignals.resets.count(), 0);
+    QCOMPARE(rowSignals.inserts.count(), 1);
+    QCOMPARE(rowSignals.removes.count(), 1);
+    QCOMPARE(rowSignals.moves.count(), 1);
+    QCOMPARE(rowSignals.updates.count(), 1);
+    QCOMPARE(rowSignals.updates.at(0).at(0).toModelIndex().row(), 2);
+    QCOMPARE(queuePaths(client),
+        (QStringList{QStringLiteral("/music/4.flac"), QStringLiteral("/music/1.flac"),
+            QStringLiteral("/music/x.flac"), QStringLiteral("/music/2.flac"),
+            QStringLiteral("/music/3.flac")}));
+    QCOMPARE(model->data(model->index(2, 0), QueueRowsModel::TitleRole).toString(),
+        QStringLiteral("Retitled"));
+    QCOMPARE(client.m_queueRevision, quint64(5));
+    QCOMPARE(client.queueLength(), 5);
+    QCOMPARE(client.selectedQueueIndex(), 4);
+    QVERIFY(!client.m_queueResyncRequested);
+}
+
+void BridgeClientTest::aMissedQueueRevisionAsksForTheWholeQueueOnce() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<quint16> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(qFromLittleEndian<quint16>(payload.constData()));
+        return true;
+    };
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(1, numberedPaths(3))));
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QueueRowSignals rowSignals(model);
+
+    // The client's rows are at revision 1; a delta from revision 2 means
+    // it missed one. Its rows stay as they are, and it asks once.
+    const auto missed = queueDeltaSnapshot(
+        2, 3, 2, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)});
+    client.processBinarySnapshot(missed);
+    client.processBinarySnapshot(missed);
+    BinaryBridgeCodec::DecodedSnapshot lost;
+    lost.queue.present = true;
+    lost.queue.kind = BinaryBridgeCodec::QueueResync;
+    client.processBinarySnapshot(lost);
+    QCOMPARE(sent, (QList<quint16>{BinaryBridgeCodec::CmdRequestSnapshot}));
+    QCOMPARE(queuePaths(client), numberedPaths(3));
+    QCOMPARE(client.m_queueRevision, quint64(1));
+    QCOMPARE(rowSignals.removes.count(), 0);
+
+    // The whole queue settles it, and deltas apply again.
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(4, numberedPaths(2))));
+    QVERIFY(!client.m_queueResyncRequested);
+    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(
+        4, 5, 1, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)})));
+    QCOMPARE(queuePaths(client), (QStringList{QStringLiteral("/music/1.flac")}));
+    QCOMPARE(client.m_queueRevision, quint64(5));
+
+    // Operations that do not fit the rows leave them at no revision.
+    client.processBinarySnapshot(queueDeltaSnapshot(
+        5, 6, 0, {queueOp(BinaryBridgeCodec::QueueOpRemove, 3, 1)}));
+    QCOMPARE(client.m_queueRevision, quint64(0));
+    QCOMPARE(sent.count(BinaryBridgeCodec::CmdRequestSnapshot), 2);
+}
+
+void BridgeClientTest::rowCommandsCarryTheQueueRevision() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(42, numberedPaths(4))));
+
+    client.playAt(1);
+    client.selectQueueIndex(2);
+    client.removeAt(3);
+    client.moveQueue(0, 2);
+    client.removeIndices({QVariant(1), QVariant(3)});
+    QCOMPARE(sent.size(), 5);
+    const QList<quint16> ids{BinaryBridgeCodec::CmdPlayAt, BinaryBridgeCodec::CmdSelectQueue,
+        BinaryBridgeCodec::CmdRemoveAt, BinaryBridgeCodec::CmdMoveQueue,
+        BinaryBridgeCodec::CmdRemoveMany};
+    for (int i = 0; i < sent.size(); ++i) {
+        const QByteArray &command = sent.at(i);
+        QCOMPARE(qFromLittleEndian<quint16>(command.constData()), ids.at(i));
+        QCOMPARE(qFromLittleEndian<quint64>(command.constData() + 6), quint64(42));
+    }
+    QCOMPARE(qFromLittleEndian<quint32>(sent.at(0).constData() + 14), quint32(1));
+    QCOMPARE(qFromLittleEndian<qint32>(sent.at(1).constData() + 14), qint32(2));
+    QCOMPARE(qFromLittleEndian<quint32>(sent.at(2).constData() + 14), quint32(3));
+    QCOMPARE(qFromLittleEndian<quint32>(sent.at(3).constData() + 14), quint32(0));
+    QCOMPARE(qFromLittleEndian<quint32>(sent.at(3).constData() + 18), quint32(2));
+    QCOMPARE(qFromLittleEndian<quint32>(sent.at(4).constData() + 14), quint32(2));
+    QCOMPARE(qFromLittleEndian<quint32>(sent.at(4).constData() + 18), quint32(3));
+    QCOMPARE(qFromLittleEndian<quint32>(sent.at(4).constData() + 22), quint32(1));
+}
+
+void BridgeClientTest::aLargeQueueEditDecodesOnlyTheChangedRows() {
+    constexpr int kRows = 10000;
+    QByteArray full;
+    putQueueHeader(full, BinaryBridgeCodec::QueueFull, 1, kRows);
+    for (int index = 0; index < kRows; ++index) {
+        putQueueRow(full, QStringLiteral("/music/%1.flac").arg(index), QStringLiteral("Track"));
+    }
+    QByteArray delta;
+    putQueueHeader(delta, BinaryBridgeCodec::QueueDelta, 2, kRows);
+    putLe<quint64>(delta, 1);
+    putLe<quint32>(delta, 1);
+    putLe<quint8>(delta, BinaryBridgeCodec::QueueOpUpdate);
+    putLe<quint32>(delta, 7777);
+    putQueueRow(delta, QStringLiteral("/music/7777.flac"), QStringLiteral("Tagged"));
+
+    BinaryBridgeCodec::DecodedSnapshot decodedFull;
+    BinaryBridgeCodec::DecodedSnapshot decodedDelta;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(queuePacket(full), &decodedFull, &error),
+        qPrintable(error));
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(queuePacket(delta), &decodedDelta, &error),
+        qPrintable(error));
+    QCOMPARE(decodedFull.queue.tracks.size(), kRows);
+    // The edit decodes one row, not ten thousand.
+    QVERIFY(decodedDelta.queue.tracks.isEmpty());
+    QCOMPARE(decodedDelta.queue.ops.size(), 1);
+    QCOMPARE(decodedDelta.queue.ops.at(0).tracks.size(), 1);
+    QVERIFY2(delta.size() < 150, qPrintable(QString::number(delta.size())));
+    QVERIFY(full.size() > kRows * 40);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(client.processBinarySnapshot(decodedFull));
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QueueRowSignals rowSignals(model);
+    QVERIFY(client.processBinarySnapshot(decodedDelta));
+    QCOMPARE(rowSignals.resets.count(), 0);
+    QCOMPARE(rowSignals.updates.count(), 1);
+    QCOMPARE(model->data(model->index(7777, 0), QueueRowsModel::TitleRole).toString(),
+        QStringLiteral("Tagged"));
+    QCOMPARE(client.queueLength(), kRows);
+
+    // A truncated or overlong section is refused, not misread.
+    BinaryBridgeCodec::DecodedSnapshot refused;
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        queuePacket(delta.left(delta.size() - 1)), &refused, &error));
+    QByteArray overlong = delta;
+    qToLittleEndian<quint32>(1000000, overlong.data() + 37);
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(queuePacket(overlong), &refused, &error));
+}
+
+void BridgeClientTest::gaplessAndRepeatOneMoveOnlyThePlayingRow() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QStringList paths = numberedPaths(3);
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(1, paths)));
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(paths.at(0), 1.0, 1)));
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QueueRowSignals rowSignals(model);
+
+    // A gapless handoff and a Repeat-One restart carry only the playback
+    // section: the playing row moves, and no queue row changes.
+    auto gapless = playbackSnapshot(paths.at(1), 0.0, 2);
+    gapless.playback.currentQueueIndex = 1;
+    client.m_pollTrackIdentityChanged = false;
+    QVERIFY(client.processBinarySnapshot(gapless));
+    QCOMPARE(client.playingQueueIndex(), 1);
+    QVERIFY(client.m_pollTrackIdentityChanged);
+
+    auto repeatOne = playbackSnapshot(paths.at(1), 0.0, 3);
+    repeatOne.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(repeatOne));
+    QCOMPARE(client.playingQueueIndex(), 1);
+    QCOMPARE(client.m_currentTrackToken, quint64(3));
+    QCOMPARE(client.currentTrackPath(), paths.at(1));
+
+    // An edit before the playing row arrives with the new playing index.
+    auto edit = queueDeltaSnapshot(1, 2, 2, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 1)});
+    edit.playback = repeatOne.playback;
+    edit.playback.currentQueueIndex = 0;
+    QVERIFY(client.processBinarySnapshot(edit));
+    QCOMPARE(client.playingQueueIndex(), 0);
+    QCOMPARE(client.queuePathAt(0), paths.at(1));
+    QCOMPARE(rowSignals.resets.count(), 0);
+    QCOMPARE(rowSignals.updates.count(), 0);
+    QCOMPARE(rowSignals.removes.count(), 1);
+}
+
+void BridgeClientTest::realBridgeQueueEditsArriveAsRowSignals() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (const QString &name : {QStringLiteral("a.flac"), QStringLiteral("b.flac"),
+             QStringLiteral("c.flac")}) {
+        QFile file(base + QLatin1Char('/') + name);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("stub"), qint64(4));
+        paths.push_back(file.fileName());
+    }
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    bridge.clearQueue();
+    bridge.appendPaths(paths);
+    // The append may arrive whole, merged with the cleared queue the
+    // client had not taken yet.
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 3, 10000);
+    QCOMPARE(queuePaths(bridge), paths);
+    auto *model = qobject_cast<QueueRowsModel *>(bridge.queueRows());
+    QueueRowSignals rowSignals(model);
+
+    bridge.removeAt(1);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 2, 10000);
+    bridge.moveQueue(1, 0);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queuePathAt(0), paths.at(2), 10000);
+    QCOMPARE(queuePaths(bridge), (QStringList{paths.at(2), paths.at(0)}));
+
+    // The edits arrived as row signals.
+    QCOMPARE(rowSignals.resets.count(), 0);
+    QCOMPARE(rowSignals.removes.count(), 1);
+    QCOMPARE(rowSignals.moves.count(), 1);
+    QVERIFY(!bridge.m_queueResyncRequested);
+
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    isolateBridgeClient(bridge);
 }
 
 void BridgeClientTest::inProcessBridgeInstallsWakeNotifier() {

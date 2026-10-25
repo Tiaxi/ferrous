@@ -82,6 +82,7 @@ pub(super) fn apply_session_restore(
         return;
     };
     state.queue.clone_from(&session.queue);
+    state.queue_sync.reset();
     let restored_current_index = resolve_session_current_index(
         &state.queue,
         session.current_queue_index,

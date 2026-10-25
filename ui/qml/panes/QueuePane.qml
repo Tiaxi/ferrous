@@ -99,10 +99,6 @@ Rectangle {
                     : 0
 
                 Component.onCompleted: root.controller.registerView(playlistView)
-                onContentYChanged: root.controller.applyPendingViewportRestore()
-                onContentHeightChanged: root.controller.applyPendingViewportRestore()
-                onCountChanged: root.controller.applyPendingViewportRestore()
-                onHeightChanged: root.controller.applyPendingViewportRestore()
 
                 Keys.onPressed: function(event) {
                     root.controller.handlePlaylistKeyPress(event)
@@ -327,7 +323,6 @@ Rectangle {
                                     && root.controller.selectedIndices.length > 1) {
                                 root.controller.removeSelectedTrack()
                             } else {
-                                root.controller.requestViewportRestoreWindow(700)
                                 root.uiBridge.removeAt(playlistContextMenu.rowIndex)
                             }
                         }

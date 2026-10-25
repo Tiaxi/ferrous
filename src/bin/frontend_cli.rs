@@ -170,7 +170,7 @@ fn drain_bridge_events(bridge: &FrontendBridgeHandle) {
                     snapshot.playback.state,
                     snapshot.playback.position.as_secs(),
                     snapshot.playback.duration.as_secs(),
-                    snapshot.queue.len(),
+                    snapshot.queue_len,
                     snapshot.playback.volume
                 );
             }

@@ -23,6 +23,10 @@ public:
         return m_offset == m_bytes.size();
     }
 
+    qsizetype remaining() const {
+        return m_bytes.size() - m_offset;
+    }
+
     bool readU8(quint8 *out) {
         if (!out || m_offset + 1 > m_bytes.size()) {
             return false;
@@ -226,67 +230,140 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     return true;
 }
 
+bool readQueueTrack(Reader &reader, DecodedQueueTrack *out) {
+    qint32 year = std::numeric_limits<int>::min();
+    quint16 trackNumber = 0;
+    if (!reader.readUtf8(&out->title)
+        || !reader.readUtf8(&out->artist)
+        || !reader.readUtf8(&out->album)
+        || !reader.readUtf8(&out->coverPath)
+        || !reader.readUtf8(&out->genre)
+        || !reader.readI32(&year)
+        || !reader.readU16(&trackNumber)
+        || !reader.readF32(&out->lengthSeconds)
+        || !reader.readUtf8(&out->path)) {
+        return false;
+    }
+    out->year = year;
+    out->trackNumber = static_cast<int>(trackNumber);
+    return true;
+}
+
+// Read `count` rows, refusing a count the rest of the section cannot hold
+// before anything is allocated for it.
+bool readQueueTracks(Reader &reader, quint32 count, QVector<DecodedQueueTrack> *out) {
+    // A row takes at least six string lengths and its fixed fields.
+    constexpr qsizetype kMinRowBytes = 6 * 4 + 4 + 2 + 4;
+    if (static_cast<quint64>(count) * kMinRowBytes > static_cast<quint64>(reader.remaining())) {
+        return false;
+    }
+    out->reserve(static_cast<qsizetype>(count));
+    for (quint32 i = 0; i < count; ++i) {
+        DecodedQueueTrack track;
+        if (!readQueueTrack(reader, &track)) {
+            return false;
+        }
+        out->push_back(std::move(track));
+    }
+    return true;
+}
+
+bool readQueueOp(Reader &reader, DecodedQueueOp *out) {
+    quint8 type = 0;
+    quint32 index = 0;
+    if (!reader.readU8(&type) || !reader.readU32(&index)
+        || index > static_cast<quint32>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    out->type = type;
+    out->index = static_cast<int>(index);
+    quint32 second = 0;
+    switch (type) {
+    case QueueOpInsert:
+        return reader.readU32(&second) && readQueueTracks(reader, second, &out->tracks);
+    case QueueOpRemove:
+    case QueueOpMove:
+        if (!reader.readU32(&second)
+            || second > static_cast<quint32>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+        if (type == QueueOpRemove) {
+            out->count = static_cast<int>(second);
+        } else {
+            out->to = static_cast<int>(second);
+        }
+        return true;
+    case QueueOpUpdate:
+        return readQueueTracks(reader, 1, &out->tracks);
+    default:
+        return false;
+    }
+}
+
 bool decodeQueueSection(const QByteArray &payload, DecodedQueue *out) {
     if (!out) {
         return false;
     }
     Reader reader(payload);
+    quint8 kind = 0;
+    quint64 revision = 0;
     quint32 len = 0;
     qint32 selectedIndex = -1;
     quint32 unknownDurationCount = 0;
-    quint32 trackCount = 0;
-    if (!reader.readU32(&len)
+    if (!reader.readU8(&kind)
+        || !reader.readU64(&revision)
+        || !reader.readU32(&len)
         || !reader.readI32(&selectedIndex)
         || !reader.readF64(&out->totalDurationSeconds)
         || !reader.readU32(&unknownDurationCount)
-        || !reader.readU32(&trackCount)) {
+        || len > static_cast<quint32>(std::numeric_limits<int>::max())) {
         return false;
     }
 
     QVector<DecodedQueueTrack> tracks;
-    tracks.reserve(static_cast<int>(trackCount));
-    for (quint32 i = 0; i < trackCount; ++i) {
-        QString title;
-        QString artist;
-        QString album;
-        QString coverPath;
-        QString genre;
-        qint32 year = std::numeric_limits<int>::min();
-        quint16 trackNumber = 0;
-        float lengthSeconds = -1.0f;
-        QString path;
-        if (!reader.readUtf8(&title)
-            || !reader.readUtf8(&artist)
-            || !reader.readUtf8(&album)
-            || !reader.readUtf8(&coverPath)
-            || !reader.readUtf8(&genre)
-            || !reader.readI32(&year)
-            || !reader.readU16(&trackNumber)
-            || !reader.readF32(&lengthSeconds)
-            || !reader.readUtf8(&path)) {
+    QVector<DecodedQueueOp> ops;
+    quint64 baseRevision = 0;
+    switch (kind) {
+    case QueueFull:
+        if (!readQueueTracks(reader, len, &tracks)) {
             return false;
         }
-        DecodedQueueTrack item;
-        item.title = title;
-        item.artist = artist;
-        item.album = album;
-        item.coverPath = coverPath;
-        item.genre = genre;
-        item.year = year;
-        item.trackNumber = static_cast<int>(trackNumber);
-        item.lengthSeconds = lengthSeconds;
-        item.path = path;
-        tracks.push_back(std::move(item));
+        break;
+    case QueueDelta: {
+        quint32 opCount = 0;
+        // An operation takes at least nine bytes.
+        if (!reader.readU64(&baseRevision) || !reader.readU32(&opCount)
+            || static_cast<quint64>(opCount) * 9 > static_cast<quint64>(reader.remaining())) {
+            return false;
+        }
+        ops.reserve(static_cast<qsizetype>(opCount));
+        for (quint32 i = 0; i < opCount; ++i) {
+            DecodedQueueOp op;
+            if (!readQueueOp(reader, &op)) {
+                return false;
+            }
+            ops.push_back(std::move(op));
+        }
+        break;
+    }
+    case QueueResync:
+        break;
+    default:
+        return false;
     }
     if (!reader.atEnd()) {
         return false;
     }
 
     out->present = true;
+    out->kind = kind;
+    out->revision = revision;
+    out->baseRevision = baseRevision;
     out->len = static_cast<int>(len);
     out->selectedIndex = static_cast<int>(selectedIndex);
     out->unknownDurationCount = static_cast<int>(unknownDurationCount);
     out->tracks = std::move(tracks);
+    out->ops = std::move(ops);
     return true;
 }
 
@@ -646,17 +723,6 @@ QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &q
     return finalizeCommand(cmdId, payload);
 }
 
-QByteArray encodeCommandIndices(quint16 cmdId, const QList<quint32> &indices) {
-    if (indices.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes / 4)) {
-        return {};
-    }
-    QByteArray payload;
-    payload.reserve(4 + 4 * indices.size());
-    appendLe<quint32>(payload, static_cast<quint32>(indices.size()));
-    for (quint32 index : indices) appendLe<quint32>(payload, index);
-    return finalizeCommand(cmdId, payload);
-}
-
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values) {
     if (values.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes / 4)) {
         return {};
@@ -673,12 +739,41 @@ QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values) {
     return finalizeCommand(cmdId, payload);
 }
 
-QByteArray encodeCommandMoveQueue(quint32 from, quint32 to) {
+QByteArray encodeCommandQueueRow(quint16 cmdId, quint64 revision, quint32 index) {
     QByteArray payload;
-    payload.reserve(8);
+    payload.reserve(12);
+    appendLe<quint64>(payload, revision);
+    appendLe<quint32>(payload, index);
+    return finalizeCommand(cmdId, payload);
+}
+
+QByteArray encodeCommandSelectQueue(quint64 revision, qint32 index) {
+    QByteArray payload;
+    payload.reserve(12);
+    appendLe<quint64>(payload, revision);
+    appendLe<qint32>(payload, index);
+    return finalizeCommand(CmdSelectQueue, payload);
+}
+
+QByteArray encodeCommandMoveQueue(quint64 revision, quint32 from, quint32 to) {
+    QByteArray payload;
+    payload.reserve(16);
+    appendLe<quint64>(payload, revision);
     appendLe<quint32>(payload, from);
     appendLe<quint32>(payload, to);
     return finalizeCommand(CmdMoveQueue, payload);
+}
+
+QByteArray encodeCommandRemoveMany(quint64 revision, const QList<quint32> &indices) {
+    if (indices.size() > static_cast<qsizetype>((kMaxCommandPayloadBytes - 12) / 4)) {
+        return {};
+    }
+    QByteArray payload;
+    payload.reserve(12 + 4 * indices.size());
+    appendLe<quint64>(payload, revision);
+    appendLe<quint32>(payload, static_cast<quint32>(indices.size()));
+    for (quint32 index : indices) appendLe<quint32>(payload, index);
+    return finalizeCommand(CmdRemoveMany, payload);
 }
 
 bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QString *errorMessage) {

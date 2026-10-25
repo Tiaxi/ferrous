@@ -24,6 +24,7 @@ use crate::playback::{remap_path, PathRenames, PlaybackCommand, PlaybackEngine};
 use super::config::{load_settings_into, save_settings};
 use super::imports::QueueRequest;
 use super::queue::handle_queue_command;
+use super::queue_sync::QueueEdit;
 use super::search::derive_tree_path_context;
 use super::{
     library_tree, try_send_event, ApplyAlbumArtRequest, BridgeAnalysisCommand, BridgeCommand,
@@ -66,8 +67,8 @@ pub(super) fn handle_bridge_command(
             *context.running = false;
             false
         }
-        // The runtime answers it before commands get here.
-        BridgeCommand::SaveState(_) => false,
+        // The runtime answers or resolves these before commands get here.
+        BridgeCommand::SaveState(_) | BridgeCommand::QueueAt { .. } => false,
         BridgeCommand::Playback(cmd) => {
             handle_playback_bridge_command(&cmd, state, context);
             false
@@ -1294,9 +1295,18 @@ fn apply_renamed_queue_paths(
     indexed_by_path: &HashMap<PathBuf, IndexedTrack>,
     metadata: &MetadataService,
 ) -> bool {
-    let mut changed = false;
-    for path in &mut state.queue {
-        changed |= remap_path(path, rename_map);
+    let renamed: Vec<(usize, PathBuf)> = state
+        .queue
+        .iter_mut()
+        .enumerate()
+        .filter_map(|(index, path)| remap_path(path, rename_map).then(|| (index, path.clone())))
+        .collect();
+    let mut changed = !renamed.is_empty();
+    if changed {
+        let queue_len = state.queue.len();
+        state
+            .queue_sync
+            .record(QueueEdit::SetPaths(renamed), queue_len);
     }
 
     if let Some(current_path) = state.playback.current.as_mut() {

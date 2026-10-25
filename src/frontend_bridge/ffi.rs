@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::ffi::c_uchar;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -13,6 +12,7 @@ use std::time::{Duration, Instant};
 use std::os::fd::RawFd;
 
 use super::imports::ImportGate;
+use super::queue_relay::{QueueBatch, QueueRelay};
 use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
     BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand,
@@ -22,7 +22,6 @@ use super::{
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
 };
-use crate::library::{IndexedTrack, LibrarySnapshot, LibraryTrack};
 use crate::panic_guard;
 #[cfg(test)]
 use crate::panic_guard::test_hooks;
@@ -101,36 +100,6 @@ struct AnalysisEmitState {
     last_waveform_coverage_millis: u32,
     last_waveform_complete: bool,
     analysis_frame_seq: u32,
-}
-
-#[derive(Default)]
-struct QueueSectionCache {
-    /// The library the rows were built from. Holding it keeps a newer
-    /// library from being built at its address and matching.
-    library: Option<Arc<LibrarySnapshot>>,
-    queue_paths: Vec<PathBuf>,
-    queue_details_signature: u64,
-    queue_section: QueueSectionData,
-}
-
-#[derive(Debug, Clone, Default)]
-struct QueueSectionData {
-    total_duration_secs: f64,
-    unknown_duration_count: usize,
-    tracks: Vec<EncodedQueueTrack>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct EncodedQueueTrack {
-    title: String,
-    artist: String,
-    album: String,
-    cover_path: String,
-    genre: String,
-    year: Option<i32>,
-    track_number: Option<u32>,
-    length_seconds: Option<f32>,
-    path: String,
 }
 
 struct LibraryTreeFrame {
@@ -546,9 +515,10 @@ impl FfiRuntime {
         I: IntoIterator<Item = BridgeEvent>,
     {
         let prepared = self.encoder.prepare(events);
-        let snapshot = prepared
-            .snapshot
-            .map(|sections| merge_snapshot(&sections, self.take_pending_snapshot().as_deref()));
+        let snapshot = prepared.snapshot.map(|sections| {
+            let older = self.take_pending_snapshot();
+            self.encoder.merge_with_pending(sections, older.as_deref())
+        });
         self.publish(prepared.events, snapshot);
     }
 
@@ -617,7 +587,7 @@ enum PreparedEvent {
 #[derive(Default)]
 struct FfiEncoder {
     analysis_state: AnalysisEmitState,
-    queue_section_cache: QueueSectionCache,
+    queue: QueueRelay,
     stopped: bool,
 }
 
@@ -635,7 +605,8 @@ impl FfiEncoder {
         }
 
         let mut latest_snapshot: Option<BridgeSnapshot> = None;
-        let mut latest_queue_snapshot: Option<BridgeSnapshot> = None;
+        // Every snapshot's queue update, in order: none may be lost.
+        let mut queue_batch: Option<QueueBatch> = None;
         let mut latest_tree_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
         for event in events {
             match event {
@@ -643,9 +614,7 @@ impl FfiEncoder {
                     if let Some(tree_bytes) = snapshot.pre_built_tree_bytes.as_ref() {
                         latest_tree_bytes = Some(tree_bytes.clone());
                     }
-                    if snapshot.queue_included {
-                        latest_queue_snapshot = Some((*snapshot).clone());
-                    }
+                    self.queue.apply(&snapshot, &mut queue_batch);
                     latest_snapshot = Some(*snapshot);
                 }
                 BridgeEvent::PrecomputedSpectrogramChunk(chunk) => {
@@ -685,9 +654,7 @@ impl FfiEncoder {
             prepared.push(PreparedEvent::Tree(tree_bytes.as_ref().clone()));
         }
         let mut sections = None;
-        if let Some(mut snapshot) =
-            latest_snapshot.map(|snapshot| merge_queue_snapshot(snapshot, latest_queue_snapshot))
-        {
+        if let Some(mut snapshot) = latest_snapshot {
             if latest_tree_bytes.is_some() {
                 snapshot.pre_built_tree_bytes = latest_tree_bytes;
             }
@@ -695,79 +662,30 @@ impl FfiEncoder {
             prepared.push(PreparedEvent::Analysis(encode_analysis_frame(
                 &analysis_delta,
             )));
-            let queue_section = if snapshot.queue_included {
-                Some(self.queue_section_for_snapshot(&snapshot))
-            } else {
-                None
-            };
-            sections = Some(snapshot_sections(&snapshot, queue_section.as_ref()));
+            let queue_section = queue_batch.map(|batch| self.queue.section(batch, &snapshot));
+            sections = Some(snapshot_sections(&snapshot, queue_section));
         }
         Prepared {
             events: prepared,
             snapshot: sections,
         }
     }
-    fn queue_section_for_snapshot(&mut self, snapshot: &BridgeSnapshot) -> QueueSectionData {
-        if snapshot.queue.is_empty() {
-            return QueueSectionData::default();
+
+    /// The packet for a snapshot that replaces `older`, which the UI has
+    /// not taken; see [`merge_snapshot`]. A queue delta in `newer` builds on
+    /// the queue `older` leaves, so the two become one.
+    fn merge_with_pending(&self, mut newer: SnapshotSections, older: Option<&[u8]>) -> Vec<u8> {
+        if let Some(older) = older {
+            let older_queue = split_packet(older)
+                .into_iter()
+                .find(|(bit, _)| *bit == SECTION_QUEUE);
+            let newer_queue = newer.iter_mut().find(|(bit, _)| *bit == SECTION_QUEUE);
+            if let (Some((_, older_queue)), Some((_, newer_queue))) = (older_queue, newer_queue) {
+                *newer_queue = self.queue.merge(newer_queue, older_queue);
+            }
         }
-
-        if queue_section_cache_matches(&self.queue_section_cache, snapshot) {
-            return self.queue_section_cache.queue_section.clone();
-        }
-
-        let queue_section = compute_queue_section_data(snapshot);
-        self.queue_section_cache.library = Some(Arc::clone(&snapshot.library));
-        self.queue_section_cache
-            .queue_paths
-            .clone_from(&snapshot.queue);
-        self.queue_section_cache.queue_details_signature = queue_details_signature(snapshot);
-        self.queue_section_cache.queue_section = queue_section.clone();
-        queue_section
+        merge_snapshot(&newer, older)
     }
-}
-
-fn queue_section_cache_matches(cache: &QueueSectionCache, snapshot: &BridgeSnapshot) -> bool {
-    cache
-        .library
-        .as_ref()
-        .is_some_and(|library| Arc::ptr_eq(library, &snapshot.library))
-        && cache.queue_paths == snapshot.queue
-        && cache.queue_details_signature == queue_details_signature(snapshot)
-}
-
-fn queue_details_signature(snapshot: &BridgeSnapshot) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for path in &snapshot.queue {
-        path.hash(&mut hasher);
-        if let Some(track) = snapshot.queue_details.get(path) {
-            track.title.hash(&mut hasher);
-            track.artist.hash(&mut hasher);
-            track.album.hash(&mut hasher);
-            track.cover_path.hash(&mut hasher);
-            track.genre.hash(&mut hasher);
-            track.year.hash(&mut hasher);
-            track.track_no.hash(&mut hasher);
-            track.duration_secs.map(f32::to_bits).hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
-fn merge_queue_snapshot(
-    mut latest_snapshot: BridgeSnapshot,
-    latest_queue_snapshot: Option<BridgeSnapshot>,
-) -> BridgeSnapshot {
-    if latest_snapshot.queue_included {
-        return latest_snapshot;
-    }
-    let Some(queue_snapshot) = latest_queue_snapshot else {
-        return latest_snapshot;
-    };
-    latest_snapshot.queue_included = true;
-    latest_snapshot.queue = queue_snapshot.queue;
-    latest_snapshot.selected_queue_index = queue_snapshot.selected_queue_index;
-    latest_snapshot
 }
 
 // Receiver is consumed by this thread's main loop — ownership transfer is intentional.
@@ -880,7 +798,7 @@ fn prepare_and_publish(
     // back, that snapshot cannot also reach the UI.
     let snapshot = prepared.snapshot.map(|sections| {
         let older = shared.lock_runtime().take_pending_snapshot();
-        merge_snapshot(&sections, older.as_deref())
+        encoder.merge_with_pending(sections, older.as_deref())
     });
     shared.lock_runtime().publish(prepared.events, snapshot);
 }
@@ -1924,10 +1842,20 @@ fn parse_playback_command(
     Ok(Some(command))
 }
 
+/// Queue commands. Those that name rows start with the u64 queue revision
+/// the UI's rows showed, so the bridge can carry them across later edits.
 fn parse_queue_command(
     cmd_id: u16,
     reader: &mut BinaryReader<'_>,
 ) -> Result<Option<BridgeCommand>, String> {
+    if cmd_id == 12 {
+        reader.expect_done()?;
+        return Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)));
+    }
+    if !matches!(cmd_id, 8 | 9 | 10 | 11 | 63) {
+        return Ok(None);
+    }
+    let revision = reader.read_u64()?;
     let command = match cmd_id {
         8 => BridgeQueueCommand::PlayAt(usize_from_u32(reader.read_u32()?)),
         9 => {
@@ -1946,16 +1874,14 @@ fn parse_queue_command(
             BridgeQueueCommand::RemoveMany(indices)
         }
         10 => BridgeQueueCommand::Remove(usize_from_u32(reader.read_u32()?)),
-        11 => {
+        _ => {
             let from = usize_from_u32(reader.read_u32()?);
             let to = usize_from_u32(reader.read_u32()?);
             BridgeQueueCommand::Move { from, to }
         }
-        12 => BridgeQueueCommand::Clear,
-        _ => return Ok(None),
     };
     reader.expect_done()?;
-    Ok(Some(BridgeCommand::Queue(command)))
+    Ok(Some(BridgeCommand::QueueAt { revision, command }))
 }
 
 fn parse_library_collection_command(
@@ -2171,6 +2097,10 @@ impl<'a> BinaryReader<'a> {
         Ok(i32::from_le_bytes(self.read_exact::<4>()?))
     }
 
+    fn read_u64(&mut self) -> Result<u64, String> {
+        Ok(u64::from_le_bytes(self.read_exact::<8>()?))
+    }
+
     fn read_f32(&mut self) -> Result<f32, String> {
         Ok(f32::from_le_bytes(self.read_exact::<4>()?))
     }
@@ -2215,16 +2145,14 @@ impl<'a> BinaryReader<'a> {
 }
 
 #[cfg(test)]
-fn encode_binary_snapshot(
-    snapshot: &BridgeSnapshot,
-    queue_section: Option<&QueueSectionData>,
-) -> Vec<u8> {
+#[cfg(test)]
+fn encode_binary_snapshot(snapshot: &BridgeSnapshot, queue_section: Option<Vec<u8>>) -> Vec<u8> {
     encode_packet(&snapshot_sections(snapshot, queue_section))
 }
 
 fn snapshot_sections(
     snapshot: &BridgeSnapshot,
-    queue_section: Option<&QueueSectionData>,
+    queue_section: Option<Vec<u8>>,
 ) -> SnapshotSections {
     let mut sections: SnapshotSections = vec![
         (SECTION_PLAYBACK, encode_playback_section(snapshot)),
@@ -2234,7 +2162,7 @@ fn snapshot_sections(
         (SECTION_LASTFM, encode_lastfm_section(snapshot)),
     ];
     if let Some(section) = queue_section {
-        sections.insert(1, (SECTION_QUEUE, encode_queue_section(snapshot, section)));
+        sections.insert(1, (SECTION_QUEUE, section));
     }
     sections
 }
@@ -2444,197 +2372,6 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     // advances from it in real time while the flag is set.
     push_u64(&mut out, snapshot.playback.position_sampled_at.as_nanos());
     push_u8(&mut out, u8::from(snapshot.playback.position_advancing));
-    out
-}
-
-fn path_title_fallback(path: &std::path::Path, path_str: &str) -> String {
-    path.file_name().map_or_else(
-        || path_str.to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    )
-}
-
-fn compute_queue_section_data(snapshot: &BridgeSnapshot) -> QueueSectionData {
-    let mut by_path: HashMap<&std::path::Path, &crate::library::LibraryTrack> =
-        HashMap::with_capacity(snapshot.library.tracks.len());
-    for track in &snapshot.library.tracks {
-        by_path.insert(track.path.as_path(), track);
-    }
-
-    let mut tracks = Vec::with_capacity(snapshot.queue.len());
-    let mut total_duration_secs = 0.0;
-    let mut unknown_duration_count = 0usize;
-
-    for path in &snapshot.queue {
-        let path_str = path.to_string_lossy().to_string();
-        let fallback_title = path_title_fallback(path, &path_str);
-
-        if let Some(track) = by_path.get(path.as_path()) {
-            update_queue_duration_stats(
-                track.duration_secs,
-                &mut total_duration_secs,
-                &mut unknown_duration_count,
-            );
-            tracks.push(encoded_queue_track_from_library(
-                track,
-                fallback_title,
-                path_str,
-            ));
-            continue;
-        }
-
-        if let Some(track) = snapshot.queue_details.get(path) {
-            update_queue_duration_stats(
-                track.duration_secs,
-                &mut total_duration_secs,
-                &mut unknown_duration_count,
-            );
-            tracks.push(encoded_queue_track_from_indexed(
-                track,
-                fallback_title,
-                path_str,
-            ));
-            continue;
-        }
-
-        unknown_duration_count = unknown_duration_count.saturating_add(1);
-        tracks.push(EncodedQueueTrack {
-            title: fallback_title,
-            artist: String::new(),
-            album: String::new(),
-            cover_path: String::new(),
-            genre: String::new(),
-            year: None,
-            track_number: None,
-            length_seconds: None,
-            path: path_str,
-        });
-    }
-
-    QueueSectionData {
-        total_duration_secs,
-        unknown_duration_count,
-        tracks,
-    }
-}
-
-fn update_queue_duration_stats(
-    duration_secs: Option<f32>,
-    total_duration_secs: &mut f64,
-    unknown_duration_count: &mut usize,
-) {
-    if let Some(value) = duration_secs.filter(|value| value.is_finite() && *value > 0.0) {
-        *total_duration_secs += f64::from(value);
-    } else {
-        *unknown_duration_count = unknown_duration_count.saturating_add(1);
-    }
-}
-
-fn encoded_queue_track_from_library(
-    track: &LibraryTrack,
-    fallback_title: String,
-    path: String,
-) -> EncodedQueueTrack {
-    encoded_queue_track(
-        &QueueTrackSource {
-            title: &track.title,
-            artist: &track.artist,
-            album: &track.album,
-            cover_path: &track.cover_path,
-            genre: &track.genre,
-            year: track.year,
-            track_number: track.track_no,
-            duration_secs: track.duration_secs,
-        },
-        fallback_title,
-        path,
-    )
-}
-
-fn encoded_queue_track_from_indexed(
-    track: &IndexedTrack,
-    fallback_title: String,
-    path: String,
-) -> EncodedQueueTrack {
-    encoded_queue_track(
-        &QueueTrackSource {
-            title: &track.title,
-            artist: &track.artist,
-            album: &track.album,
-            cover_path: &track.cover_path,
-            genre: &track.genre,
-            year: track.year,
-            track_number: track.track_no,
-            duration_secs: track.duration_secs,
-        },
-        fallback_title,
-        path,
-    )
-}
-
-struct QueueTrackSource<'a> {
-    title: &'a str,
-    artist: &'a str,
-    album: &'a str,
-    cover_path: &'a str,
-    genre: &'a str,
-    year: Option<i32>,
-    track_number: Option<u32>,
-    duration_secs: Option<f32>,
-}
-
-fn encoded_queue_track(
-    track: &QueueTrackSource<'_>,
-    fallback_title: String,
-    path: String,
-) -> EncodedQueueTrack {
-    EncodedQueueTrack {
-        title: normalized_queue_title(track.title, fallback_title),
-        artist: track.artist.to_string(),
-        album: track.album.to_string(),
-        cover_path: track.cover_path.to_string(),
-        genre: track.genre.to_string(),
-        year: track.year,
-        track_number: track.track_number,
-        length_seconds: normalized_queue_duration(track.duration_secs),
-        path,
-    }
-}
-
-fn normalized_queue_title(title: &str, fallback_title: String) -> String {
-    if title.trim().is_empty() {
-        fallback_title
-    } else {
-        title.to_string()
-    }
-}
-
-fn normalized_queue_duration(duration_secs: Option<f32>) -> Option<f32> {
-    duration_secs.filter(|value| value.is_finite() && *value >= 0.0)
-}
-
-fn encode_queue_section(snapshot: &BridgeSnapshot, queue_section: &QueueSectionData) -> Vec<u8> {
-    let mut out = Vec::new();
-    let selected_index = snapshot.selected_queue_index.map_or(-1, clamp_i32);
-
-    push_u32(&mut out, clamp_u32(snapshot.queue.len()));
-    push_i32(&mut out, selected_index);
-    push_f64(&mut out, queue_section.total_duration_secs);
-    push_u32(&mut out, clamp_u32(queue_section.unknown_duration_count));
-    push_u32(&mut out, clamp_u32(queue_section.tracks.len()));
-
-    for track in &queue_section.tracks {
-        push_string(&mut out, &track.title);
-        push_string(&mut out, &track.artist);
-        push_string(&mut out, &track.album);
-        push_string(&mut out, &track.cover_path);
-        push_string(&mut out, &track.genre);
-        push_i32(&mut out, track.year.unwrap_or(i32::MIN));
-        push_u16(&mut out, track.track_number.map_or(0, clamp_u32_to_u16));
-        push_f32(&mut out, track.length_seconds.unwrap_or(-1.0));
-        push_string(&mut out, &track.path);
-    }
-
     out
 }
 
@@ -2861,31 +2598,31 @@ fn waveform_coverage_millis(coverage_seconds: f32) -> u32 {
     u32::try_from(millis).unwrap_or(u32::MAX)
 }
 
-fn push_u8(out: &mut Vec<u8>, value: u8) {
+pub(super) fn push_u8(out: &mut Vec<u8>, value: u8) {
     out.push(value);
 }
 
-fn push_u16(out: &mut Vec<u8>, value: u16) {
+pub(super) fn push_u16(out: &mut Vec<u8>, value: u16) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn push_u32(out: &mut Vec<u8>, value: u32) {
+pub(super) fn push_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn push_i32(out: &mut Vec<u8>, value: i32) {
+pub(super) fn push_i32(out: &mut Vec<u8>, value: i32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn push_f32(out: &mut Vec<u8>, value: f32) {
+pub(super) fn push_f32(out: &mut Vec<u8>, value: f32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn push_u64(out: &mut Vec<u8>, value: u64) {
+pub(super) fn push_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn push_f64(out: &mut Vec<u8>, value: f64) {
+pub(super) fn push_f64(out: &mut Vec<u8>, value: f64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -3104,7 +2841,9 @@ mod error_packet_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::super::queue_relay::{QueueRelay, QUEUE_DELTA, QUEUE_FULL, QUEUE_RESYNC};
     use super::super::{config, BridgeRuntimeOptions};
+    use super::super::{QueueEdit, QueueUpdate};
     use super::*;
     use crate::analysis::AnalysisSnapshot;
     use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
@@ -3192,8 +2931,9 @@ mod tests {
             library_view_anchor_offset: 4.0,
             library_reveal_generation: 0,
             pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
-            queue_included: true,
-            queue: vec![PathBuf::from("/music/a.flac")],
+            queue_len: 1,
+            queue_revision: 1,
+            queue_update: Some(QueueUpdate::Full(vec![PathBuf::from("/music/a.flac")])),
             selected_queue_index: Some(0),
             settings: super::super::BridgeSettings {
                 volume: 0.75,
@@ -3321,16 +3061,71 @@ mod tests {
     #[test]
     fn batch_removal_command_decodes_all_indices_and_rejects_truncation() {
         let mut payload = Vec::new();
+        push_u64(&mut payload, 41);
         push_u32(&mut payload, 3);
         for index in [9, 5, 1] {
             push_u32(&mut payload, index);
         }
-        assert!(
-            matches!(parse_binary_command(&encode_command(63, &payload)).expect("batch"),
-            Some(BridgeCommand::Queue(BridgeQueueCommand::RemoveMany(indices))) if indices == vec![9, 5, 1])
-        );
+        assert!(matches!(
+            parse_binary_command(&encode_command(63, &payload)).expect("batch"),
+            Some(BridgeCommand::QueueAt {
+                revision: 41,
+                command: BridgeQueueCommand::RemoveMany(indices),
+            }) if indices == vec![9, 5, 1]
+        ));
         payload.pop();
         assert!(parse_binary_command(&encode_command(63, &payload)).is_err());
+    }
+
+    #[test]
+    fn row_commands_carry_the_revision_the_ui_showed() {
+        let with_revision = |fields: &[u32]| {
+            let mut payload = Vec::new();
+            push_u64(&mut payload, 7);
+            for field in fields {
+                push_u32(&mut payload, *field);
+            }
+            payload
+        };
+        let parse = |cmd_id, payload: &[u8]| {
+            parse_binary_command(&encode_command(cmd_id, payload))
+                .expect("parse")
+                .expect("command")
+        };
+        assert!(matches!(
+            parse(8, &with_revision(&[3])),
+            BridgeCommand::QueueAt {
+                revision: 7,
+                command: BridgeQueueCommand::PlayAt(3)
+            }
+        ));
+        assert!(matches!(
+            parse(9, &with_revision(&[u32::MAX])),
+            BridgeCommand::QueueAt {
+                revision: 7,
+                command: BridgeQueueCommand::Select(None)
+            }
+        ));
+        assert!(matches!(
+            parse(10, &with_revision(&[2])),
+            BridgeCommand::QueueAt {
+                revision: 7,
+                command: BridgeQueueCommand::Remove(2)
+            }
+        ));
+        assert!(matches!(
+            parse(11, &with_revision(&[1, 4])),
+            BridgeCommand::QueueAt {
+                revision: 7,
+                command: BridgeQueueCommand::Move { from: 1, to: 4 },
+            }
+        ));
+        assert!(matches!(
+            parse(12, &[]),
+            BridgeCommand::Queue(BridgeQueueCommand::Clear)
+        ));
+        // A row command without its revision is refused, not misread.
+        assert!(parse_binary_command(&encode_command(10, &2u32.to_le_bytes())).is_err());
     }
 
     /// A string list payload as the Qt encoder writes it.
@@ -3879,18 +3674,206 @@ mod tests {
         assert!(err.contains("seek value must be finite and >= 0"));
     }
 
+    /// The section a relay that has no queue yet sends for `snapshot`.
+    fn full_queue_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
+        queue_sections(&mut QueueRelay::default(), [snapshot]).expect("a queue section")
+    }
+
+    /// The section the relay sends for a batch of `snapshots`.
+    fn queue_sections<'a>(
+        relay: &mut QueueRelay,
+        snapshots: impl IntoIterator<Item = &'a BridgeSnapshot>,
+    ) -> Option<Vec<u8>> {
+        let mut batch = None;
+        let mut latest = None;
+        for snapshot in snapshots {
+            relay.apply(snapshot, &mut batch);
+            latest = Some(snapshot);
+        }
+        Some(relay.section(batch?, latest?))
+    }
+
+    fn outside_track(title: &str) -> crate::library::IndexedTrack {
+        crate::library::IndexedTrack {
+            search_tags: crate::library::SearchTags::default(),
+            title: title.to_string(),
+            artist: "Outside Artist".to_string(),
+            album: "Outside Album".to_string(),
+            cover_path: "/outside/cover.jpg".to_string(),
+            genre: "Ambient".to_string(),
+            year: Some(2024),
+            track_no: Some(7),
+            duration_secs: Some(245.0),
+        }
+    }
+
+    /// A snapshot that carries `update`, which leaves the queue at
+    /// `revision`.
+    fn snapshot_with_update(update: QueueUpdate, revision: u64) -> BridgeSnapshot {
+        let mut snapshot = sample_snapshot();
+        snapshot.queue_revision = revision;
+        snapshot.queue_update = Some(update);
+        snapshot
+    }
+
+    fn edits(base_revision: u64, edits: Vec<QueueEdit>) -> QueueUpdate {
+        QueueUpdate::Edits {
+            base_revision,
+            edits,
+        }
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum TestQueueOp {
+        Insert(u32, Vec<String>),
+        Remove(u32, u32),
+        Move(u32, u32),
+        Update(u32, String, String),
+    }
+
+    /// A queue section as the UI decodes it. Rows are (title, path).
+    #[derive(Debug, Default)]
+    struct TestQueueSection {
+        kind: u8,
+        revision: u64,
+        len: u32,
+        selected: i32,
+        total_seconds: f64,
+        unknown: u32,
+        base_revision: u64,
+        rows: Vec<(String, String)>,
+        ops: Vec<TestQueueOp>,
+    }
+
+    fn read_queue_row(bytes: &[u8], offset: &mut usize) -> (String, String) {
+        let title = read_string(bytes, offset);
+        for _ in 0..4 {
+            read_string(bytes, offset);
+        }
+        let _year = read_i32(bytes, offset);
+        let _track = read_u16(bytes, offset);
+        let _length = read_f32(bytes, offset);
+        (title, read_string(bytes, offset))
+    }
+
+    fn decode_queue_section(section: &[u8]) -> TestQueueSection {
+        let mut offset = 1;
+        let mut decoded = TestQueueSection {
+            kind: section[0],
+            revision: read_u64(section, &mut offset),
+            len: read_u32(section, &mut offset),
+            selected: read_i32(section, &mut offset),
+            total_seconds: read_f64(section, &mut offset),
+            unknown: read_u32(section, &mut offset),
+            ..TestQueueSection::default()
+        };
+        match decoded.kind {
+            QUEUE_FULL => {
+                for _ in 0..decoded.len {
+                    decoded.rows.push(read_queue_row(section, &mut offset));
+                }
+            }
+            QUEUE_DELTA => {
+                decoded.base_revision = read_u64(section, &mut offset);
+                let count = read_u32(section, &mut offset);
+                for _ in 0..count {
+                    let op = section[offset];
+                    offset += 1;
+                    let first = read_u32(section, &mut offset);
+                    decoded.ops.push(match op {
+                        1 => {
+                            let count = read_u32(section, &mut offset);
+                            TestQueueOp::Insert(
+                                first,
+                                (0..count)
+                                    .map(|_| read_queue_row(section, &mut offset).1)
+                                    .collect(),
+                            )
+                        }
+                        2 => TestQueueOp::Remove(first, read_u32(section, &mut offset)),
+                        3 => TestQueueOp::Move(first, read_u32(section, &mut offset)),
+                        4 => {
+                            let (title, path) = read_queue_row(section, &mut offset);
+                            TestQueueOp::Update(first, title, path)
+                        }
+                        other => panic!("unknown queue operation {other}"),
+                    });
+                }
+            }
+            kind => assert_eq!(kind, QUEUE_RESYNC),
+        }
+        assert_eq!(offset, section.len(), "the whole section is read");
+        decoded
+    }
+
+    /// The UI's queue, which applies queue sections as the Qt client does.
+    #[derive(Default)]
+    struct TestUiQueue {
+        revision: u64,
+        paths: Vec<String>,
+        resyncs: usize,
+    }
+
+    impl TestUiQueue {
+        fn apply(&mut self, section: &[u8]) {
+            let decoded = decode_queue_section(section);
+            match decoded.kind {
+                QUEUE_FULL => {
+                    self.paths = decoded.rows.into_iter().map(|(_, path)| path).collect();
+                }
+                QUEUE_DELTA if decoded.base_revision == self.revision => {
+                    for op in decoded.ops {
+                        match op {
+                            TestQueueOp::Insert(at, rows) => {
+                                let at = usize_from_u32(at);
+                                self.paths.splice(at..at, rows);
+                            }
+                            TestQueueOp::Remove(start, count) => {
+                                let start = usize_from_u32(start);
+                                self.paths.drain(start..start + usize_from_u32(count));
+                            }
+                            TestQueueOp::Move(from, to) => {
+                                let path = self.paths.remove(usize_from_u32(from));
+                                self.paths.insert(usize_from_u32(to), path);
+                            }
+                            TestQueueOp::Update(index, _, path) => {
+                                self.paths[usize_from_u32(index)] = path;
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    self.resyncs += 1;
+                    return;
+                }
+            }
+            assert_eq!(self.paths.len(), usize_from_u32(decoded.len));
+            self.revision = decoded.revision;
+        }
+    }
+
+    fn path_strings(paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
     fn queue_section_encodes_enriched_track_rows() {
-        let snapshot = sample_snapshot();
-        let queue_section = compute_queue_section_data(&snapshot);
-        let encoded = encode_queue_section(&snapshot, &queue_section);
+        let encoded = full_queue_section(&sample_snapshot());
 
-        let mut offset = 0usize;
+        assert_eq!(encoded[0], QUEUE_FULL);
+        let mut offset = 1usize;
+        assert_eq!(read_u64(&encoded, &mut offset), 1);
         assert_eq!(read_u32(&encoded, &mut offset), 1);
         assert_eq!(read_i32(&encoded, &mut offset), 0);
         assert!((read_f64(&encoded, &mut offset) - 180.0).abs() < 0.001);
         assert_eq!(read_u32(&encoded, &mut offset), 0);
-        assert_eq!(read_u32(&encoded, &mut offset), 1);
         assert_eq!(read_string(&encoded, &mut offset), "Sample Track");
         assert_eq!(read_string(&encoded, &mut offset), "Sample Artist");
         assert_eq!(read_string(&encoded, &mut offset), "Sample Album");
@@ -3905,69 +3888,294 @@ mod tests {
 
     #[test]
     fn queue_section_uses_external_queue_details_when_library_misses() {
-        let mut snapshot = sample_snapshot();
+        let mut snapshot = snapshot_with_update(
+            QueueUpdate::Full(paths(&["/outside/song.flac", "/outside/unknown.flac"])),
+            1,
+        );
         snapshot.library = Arc::new(LibrarySnapshot::default());
-        snapshot.queue = vec![PathBuf::from("/outside/song.flac")];
         Arc::make_mut(&mut snapshot.queue_details).insert(
             PathBuf::from("/outside/song.flac"),
-            crate::library::IndexedTrack {
-                search_tags: crate::library::SearchTags::default(),
-                title: "Outside Song".to_string(),
-                artist: "Outside Artist".to_string(),
-                album: "Outside Album".to_string(),
-                cover_path: "/outside/cover.jpg".to_string(),
-                genre: "Ambient".to_string(),
-                year: Some(2024),
-                track_no: Some(7),
-                duration_secs: Some(245.0),
-            },
+            outside_track("Outside Song"),
         );
 
-        let queue_section = compute_queue_section_data(&snapshot);
-        assert_eq!(queue_section.unknown_duration_count, 0);
-        assert!((queue_section.total_duration_secs - 245.0).abs() < 0.001);
-        assert_eq!(queue_section.tracks.len(), 1);
-        assert_eq!(queue_section.tracks[0].title, "Outside Song");
-        assert_eq!(queue_section.tracks[0].artist, "Outside Artist");
-        assert_eq!(queue_section.tracks[0].album, "Outside Album");
-        assert_eq!(queue_section.tracks[0].cover_path, "/outside/cover.jpg");
-        assert_eq!(queue_section.tracks[0].genre, "Ambient");
-        assert_eq!(queue_section.tracks[0].year, Some(2024));
-        assert_eq!(queue_section.tracks[0].track_number, Some(7));
-        assert_eq!(queue_section.tracks[0].length_seconds, Some(245.0));
+        let mut relay = QueueRelay::default();
+        let section = decode_queue_section(&queue_sections(&mut relay, [&snapshot]).unwrap());
+        assert_eq!(section.unknown, 1);
+        assert!((section.total_seconds - 245.0).abs() < 0.001);
+        let row = &relay.rows()[0];
+        assert_eq!(row.title, "Outside Song");
+        assert_eq!(row.artist, "Outside Artist");
+        assert_eq!(row.album, "Outside Album");
+        assert_eq!(row.cover_path, "/outside/cover.jpg");
+        assert_eq!(row.genre, "Ambient");
+        assert_eq!(row.year, Some(2024));
+        assert_eq!(row.track_number, Some(7));
+        assert_eq!(row.length_seconds, Some(245.0));
+        // A file the bridge knows nothing about shows its name.
+        assert_eq!(relay.rows()[1].title, "unknown.flac");
+        assert_eq!(relay.rows()[1].length_seconds, None);
     }
 
     #[test]
-    fn queue_section_cache_invalidates_when_external_queue_details_change() {
-        let mut snapshot = sample_snapshot();
-        snapshot.library = Arc::new(LibrarySnapshot::default());
-        snapshot.queue = vec![PathBuf::from("/outside/song.flac")];
-        let path = snapshot.queue[0].clone();
+    fn a_refresh_sends_only_the_rows_whose_details_changed() {
+        let queue = paths(&["/outside/song.flac", "/music/a.flac", "/outside/other.flac"]);
+        let mut snapshot = snapshot_with_update(QueueUpdate::Full(queue), 1);
+        Arc::make_mut(&mut snapshot.queue_details)
+            .insert(PathBuf::from("/outside/song.flac"), outside_track("Before"));
+        let mut relay = QueueRelay::default();
+        let _ = queue_sections(&mut relay, [&snapshot]);
 
-        let mut cache = QueueSectionCache::default();
-        cache.library = Some(Arc::clone(&snapshot.library));
-        cache.queue_paths = snapshot.queue.clone();
-        cache.queue_details_signature = queue_details_signature(&snapshot);
-        cache.queue_section = compute_queue_section_data(&snapshot);
-
-        assert!(queue_section_cache_matches(&cache, &snapshot));
-
-        Arc::make_mut(&mut snapshot.queue_details).insert(
-            path,
-            crate::library::IndexedTrack {
-                search_tags: crate::library::SearchTags::default(),
-                title: "Outside Song".to_string(),
-                artist: "Outside Artist".to_string(),
-                album: "Outside Album".to_string(),
-                cover_path: "/outside/cover.jpg".to_string(),
-                genre: "Ambient".to_string(),
-                year: Some(2024),
-                track_no: Some(7),
-                duration_secs: Some(245.0),
-            },
+        Arc::make_mut(&mut snapshot.queue_details)
+            .insert(PathBuf::from("/outside/song.flac"), outside_track("After"));
+        snapshot.queue_revision = 2;
+        snapshot.queue_update = Some(edits(1, vec![QueueEdit::Refresh]));
+        let section = decode_queue_section(&queue_sections(&mut relay, [&snapshot]).unwrap());
+        assert_eq!(section.kind, QUEUE_DELTA);
+        assert_eq!((section.base_revision, section.revision), (1, 2));
+        assert_eq!(
+            section.ops,
+            vec![TestQueueOp::Update(
+                0,
+                "After".to_string(),
+                "/outside/song.flac".to_string()
+            )]
         );
 
-        assert!(!queue_section_cache_matches(&cache, &snapshot));
+        // A refresh that changes nothing sends no rows.
+        snapshot.queue_revision = 3;
+        snapshot.queue_update = Some(edits(2, vec![QueueEdit::Refresh]));
+        let section = decode_queue_section(&queue_sections(&mut relay, [&snapshot]).unwrap());
+        assert_eq!(section.kind, QUEUE_DELTA);
+        assert!(section.ops.is_empty());
+        assert_eq!(section.revision, 3);
+    }
+
+    #[test]
+    fn each_queue_edit_becomes_its_row_operations() {
+        let start = paths(&["/0", "/1", "/2", "/3", "/4", "/5"]);
+        let mut relay = QueueRelay::default();
+        let mut ui = TestUiQueue::default();
+        ui.apply(
+            &queue_sections(
+                &mut relay,
+                [&snapshot_with_update(QueueUpdate::Full(start.clone()), 1)],
+            )
+            .unwrap(),
+        );
+
+        let edit_list = vec![
+            QueueEdit::Insert {
+                at: 2,
+                paths: paths(&["/x", "/y"]),
+            },
+            // [0, 1, x, y, 2, 3, 4, 5]
+            QueueEdit::Remove(vec![0, 3, 4, 7]),
+            // [1, x, 3, 4]
+            QueueEdit::Move { from: 0, to: 3 },
+            // [x, 3, 4, 1]
+            QueueEdit::SetPaths(vec![(1, PathBuf::from("/renamed"))]),
+        ];
+        let snapshot = snapshot_with_update(edits(1, edit_list.clone()), 5);
+        let section = queue_sections(&mut relay, [&snapshot]).unwrap();
+        let decoded = decode_queue_section(&section);
+        assert_eq!(
+            decoded.ops,
+            vec![
+                TestQueueOp::Insert(2, vec!["/x".to_string(), "/y".to_string()]),
+                // Last range first.
+                TestQueueOp::Remove(7, 1),
+                TestQueueOp::Remove(3, 2),
+                TestQueueOp::Remove(0, 1),
+                TestQueueOp::Move(0, 3),
+                TestQueueOp::Update(1, "renamed".to_string(), "/renamed".to_string()),
+            ]
+        );
+        ui.apply(&section);
+        let mut expected = start;
+        for edit in &edit_list {
+            assert!(edit.apply_to(&mut expected));
+        }
+        assert_eq!(ui.paths, path_strings(&expected));
+        assert_eq!(ui.revision, 5);
+        assert_eq!(decoded.selected, 0);
+    }
+
+    #[test]
+    fn an_edit_in_a_large_queue_sends_only_the_rows_it_changes() {
+        let queue: Vec<PathBuf> = (0..10_000)
+            .map(|index| PathBuf::from(format!("/outside/album/{index:05} track.flac")))
+            .collect();
+        let mut snapshot = snapshot_with_update(QueueUpdate::Full(queue.clone()), 1);
+        snapshot.library = Arc::new(LibrarySnapshot::default());
+        let mut relay = QueueRelay::default();
+        let mut ui = TestUiQueue::default();
+        let full = queue_sections(&mut relay, [&snapshot]).unwrap();
+        ui.apply(&full);
+        assert!(
+            full.len() > 10_000 * 30,
+            "the whole queue is {} bytes",
+            full.len()
+        );
+
+        let mut expected = queue;
+        let mut send = |snapshot: &mut BridgeSnapshot, edit: QueueEdit| {
+            let base = snapshot.queue_revision;
+            assert!(edit.apply_to(&mut expected));
+            snapshot.queue_revision += 1;
+            snapshot.queue_update = Some(edits(base, vec![edit]));
+            let section = queue_sections(&mut relay, [&*snapshot]).unwrap();
+            ui.apply(&section);
+            assert_eq!(ui.paths, path_strings(&expected));
+            let decoded = decode_queue_section(&section);
+            assert_eq!(decoded.kind, QUEUE_DELTA);
+            (section.len(), decoded.ops.len())
+        };
+
+        // The header, the operation count, and one operation of no rows.
+        assert_eq!(send(&mut snapshot, QueueEdit::Remove(vec![5_000])), (50, 1));
+        assert_eq!(
+            send(&mut snapshot, QueueEdit::Move { from: 9_000, to: 2 }),
+            (50, 1)
+        );
+        // One new row, and the details of one row.
+        let (bytes, ops) = send(
+            &mut snapshot,
+            QueueEdit::Insert {
+                at: 4_000,
+                paths: paths(&["/outside/new.flac"]),
+            },
+        );
+        assert_eq!(ops, 1);
+        assert!(bytes < 150, "{bytes} bytes");
+        Arc::make_mut(&mut snapshot.queue_details).insert(
+            PathBuf::from("/outside/album/07777 track.flac"),
+            outside_track("Tagged"),
+        );
+        let (bytes, ops) = send(&mut snapshot, QueueEdit::Refresh);
+        assert_eq!(ops, 1);
+        assert!(bytes < 200, "{bytes} bytes");
+        let tagged = relay
+            .rows()
+            .iter()
+            .find(|row| row.path.ends_with("07777 track.flac"))
+            .expect("the tagged row");
+        assert_eq!(tagged.title, "Tagged");
+        assert_eq!(ui.resyncs, 0);
+    }
+
+    #[test]
+    fn larger_changes_fall_back_to_the_whole_queue_and_lost_ones_to_a_resync() {
+        let queue: Vec<PathBuf> = (0..1_000)
+            .map(|index| PathBuf::from(format!("/outside/{index:04}.flac")))
+            .collect();
+        let mut snapshot = snapshot_with_update(QueueUpdate::Full(queue.clone()), 1);
+        snapshot.library = Arc::new(LibrarySnapshot::default());
+        let mut relay = QueueRelay::default();
+        let mut ui = TestUiQueue::default();
+        ui.apply(&queue_sections(&mut relay, [&snapshot]).unwrap());
+
+        // In a small queue, updates to every row still travel as a delta.
+        let small = paths(&["/outside/0000.flac", "/outside/0001.flac"]);
+        let mut small_snapshot = snapshot_with_update(QueueUpdate::Full(small.clone()), 1);
+        let mut small_relay = QueueRelay::default();
+        let _ = queue_sections(&mut small_relay, [&small_snapshot]);
+        for path in &small {
+            Arc::make_mut(&mut small_snapshot.queue_details)
+                .insert(path.clone(), outside_track("New"));
+        }
+        small_snapshot.queue_revision = 2;
+        small_snapshot.queue_update = Some(edits(1, vec![QueueEdit::Refresh]));
+        let section = queue_sections(&mut small_relay, [&small_snapshot]).unwrap();
+        assert_eq!(decode_queue_section(&section).ops.len(), 2);
+
+        // In a large one, the rows alone are smaller than updates to them.
+        for path in &queue {
+            Arc::make_mut(&mut snapshot.queue_details).insert(path.clone(), outside_track("New"));
+        }
+        snapshot.queue_revision = 2;
+        snapshot.queue_update = Some(edits(1, vec![QueueEdit::Refresh]));
+        let section = queue_sections(&mut relay, [&snapshot]).unwrap();
+        assert_eq!(section[0], QUEUE_FULL);
+        ui.apply(&section);
+        assert_eq!(ui.revision, 2);
+
+        // An edit that does not fit the rows, or does not follow them, loses
+        // track of the queue until it comes whole again.
+        for update in [
+            edits(2, vec![QueueEdit::Remove(vec![1_000])]),
+            edits(1, vec![QueueEdit::Remove(vec![0])]),
+        ] {
+            let lost = snapshot_with_update(update, 3);
+            let section = queue_sections(&mut relay, [&lost]).unwrap();
+            assert_eq!(section[0], QUEUE_RESYNC);
+            ui.apply(&section);
+            let after = snapshot_with_update(edits(3, vec![QueueEdit::Refresh]), 4);
+            assert_eq!(
+                queue_sections(&mut relay, [&after]).unwrap()[0],
+                QUEUE_RESYNC
+            );
+            snapshot.queue_revision = 5;
+            snapshot.queue_update = Some(QueueUpdate::Full(queue.clone()));
+            let section = queue_sections(&mut relay, [&snapshot]).unwrap();
+            assert_eq!(section[0], QUEUE_FULL);
+            ui.apply(&section);
+            assert_eq!(ui.revision, 5);
+        }
+        assert_eq!(ui.resyncs, 2);
+    }
+
+    #[test]
+    fn snapshots_the_ui_has_not_taken_carry_every_queue_delta() {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        let mut ui = TestUiQueue::default();
+        let take_queue = |runtime: &mut FfiRuntime, ui: &mut TestUiQueue| {
+            let packets = pending_packets(runtime);
+            assert_eq!(packets.len(), 1, "one snapshot waits");
+            let queue = section(&packets[0], SECTION_QUEUE).expect("a queue section");
+            ui.apply(&queue);
+            decode_queue_section(&queue)
+        };
+        let publish = |runtime: &mut FfiRuntime, update, revision| {
+            runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(snapshot_with_update(
+                update, revision,
+            )))]);
+        };
+        publish(&mut runtime, QueueUpdate::Full(paths(&["/a", "/b"])), 1);
+        assert_eq!(take_queue(&mut runtime, &mut ui).kind, QUEUE_FULL);
+
+        // The UI stalls through three edits and a snapshot without one.
+        publish(
+            &mut runtime,
+            edits(
+                1,
+                vec![QueueEdit::Insert {
+                    at: 2,
+                    paths: paths(&["/c"]),
+                }],
+            ),
+            2,
+        );
+        publish(&mut runtime, edits(2, vec![QueueEdit::Remove(vec![0])]), 3);
+        runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(snapshot_without_queue(9)))]);
+        publish(
+            &mut runtime,
+            edits(3, vec![QueueEdit::Move { from: 1, to: 0 }]),
+            4,
+        );
+        let merged = take_queue(&mut runtime, &mut ui);
+        assert_eq!(merged.kind, QUEUE_DELTA);
+        assert_eq!((merged.base_revision, merged.revision), (1, 4));
+        assert_eq!(merged.ops.len(), 3);
+        assert_eq!(ui.paths, ["/c", "/b"]);
+
+        // A whole queue waiting for the UI stays whole with the edits after it.
+        publish(&mut runtime, QueueUpdate::Full(paths(&["/x", "/y"])), 5);
+        publish(&mut runtime, edits(5, vec![QueueEdit::Remove(vec![0])]), 6);
+        let merged = take_queue(&mut runtime, &mut ui);
+        assert_eq!(merged.kind, QUEUE_FULL);
+        assert_eq!(ui.paths, ["/y"]);
+        assert_eq!((ui.revision, ui.resyncs), (6, 0));
     }
 
     #[test]
@@ -4013,8 +4221,7 @@ mod tests {
     #[test]
     fn snapshot_packet_contract_has_expected_shape() {
         let snapshot = sample_snapshot();
-        let queue_section = compute_queue_section_data(&snapshot);
-        let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
+        let packet = encode_binary_snapshot(&snapshot, Some(full_queue_section(&snapshot)));
         let (magic, total_len, mask) = parse_packet_header(&packet);
         assert_eq!(magic, SNAPSHOT_MAGIC);
         assert_eq!(usize_from_u32(total_len), packet.len());
@@ -4057,8 +4264,7 @@ mod tests {
             .settings
             .display
             .prevent_display_sleep_in_fullscreen = false;
-        let queue_section = compute_queue_section_data(&snapshot);
-        let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
+        let packet = encode_binary_snapshot(&snapshot, Some(full_queue_section(&snapshot)));
         let mut offset = 12usize;
         let playback_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += playback_len;
@@ -4083,8 +4289,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.settings.display.show_spectrogram_crosshair = true;
         snapshot.settings.display.show_spectrogram_scale = true;
-        let queue_section = compute_queue_section_data(&snapshot);
-        let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
+        let packet = encode_binary_snapshot(&snapshot, Some(full_queue_section(&snapshot)));
         let mut offset = 12usize;
         let playback_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += playback_len;
@@ -4103,8 +4308,7 @@ mod tests {
     #[test]
     fn lastfm_section_encodes_runtime_state() {
         let snapshot = sample_snapshot();
-        let queue_section = compute_queue_section_data(&snapshot);
-        let packet = encode_binary_snapshot(&snapshot, Some(&queue_section));
+        let packet = encode_binary_snapshot(&snapshot, Some(full_queue_section(&snapshot)));
         let mut offset = 12usize;
         let playback_len = usize_from_u32(read_u32(&packet, &mut offset));
         offset += playback_len;
@@ -4135,8 +4339,7 @@ mod tests {
     #[test]
     fn snapshot_packet_can_omit_queue_section() {
         let mut snapshot = sample_snapshot();
-        snapshot.queue_included = false;
-        snapshot.queue.clear();
+        snapshot.queue_update = None;
 
         let packet = encode_binary_snapshot(&snapshot, None);
         let (_, total_len, mask) = parse_packet_header(&packet);
@@ -4400,26 +4603,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_queue_snapshot_preserves_latest_included_queue() {
-        let queue_snapshot = sample_snapshot();
-        let mut latest_snapshot = sample_snapshot();
-        latest_snapshot.queue_included = false;
-        latest_snapshot.queue.clear();
-        latest_snapshot.selected_queue_index = None;
-        latest_snapshot.playback.position = std::time::Duration::from_secs(42);
-
-        let merged = merge_queue_snapshot(latest_snapshot, Some(queue_snapshot.clone()));
-
-        assert!(merged.queue_included);
-        assert_eq!(merged.queue, queue_snapshot.queue);
-        assert_eq!(
-            merged.selected_queue_index,
-            queue_snapshot.selected_queue_index
-        );
-        assert_eq!(merged.playback.position, std::time::Duration::from_secs(42));
-    }
-
-    #[test]
     fn analysis_delta_and_frame_include_changes() {
         let snapshot = sample_snapshot();
         let mut emit_state = AnalysisEmitState::default();
@@ -4455,38 +4638,23 @@ mod tests {
             .find_map(|(section_bit, payload)| (section_bit == bit).then_some(payload))
     }
 
-    /// The paths of the rows in a queue section.
+    /// The paths of the rows in a whole-queue section.
     fn queue_section_paths(section: &[u8]) -> Vec<String> {
-        let mut offset = 0;
-        let _len = read_u32(section, &mut offset);
-        let _selected = read_i32(section, &mut offset);
-        let _total = read_f64(section, &mut offset);
-        let _unknown = read_u32(section, &mut offset);
-        let rows = read_u32(section, &mut offset);
-        (0..rows)
-            .map(|_| {
-                for _ in 0..5 {
-                    read_string(section, &mut offset);
-                }
-                let _year = read_i32(section, &mut offset);
-                let _track = read_u16(section, &mut offset);
-                let _length = read_f32(section, &mut offset);
-                read_string(section, &mut offset)
-            })
-            .collect()
+        let decoded = decode_queue_section(section);
+        assert_eq!(decoded.kind, QUEUE_FULL);
+        decoded.rows.into_iter().map(|(_, path)| path).collect()
     }
 
     fn snapshot_with_queue(paths: &[&str], position_secs: u64) -> BridgeSnapshot {
         let mut snapshot = sample_snapshot();
-        snapshot.queue = paths.iter().map(PathBuf::from).collect();
-        snapshot.queue_included = true;
+        snapshot.queue_update = Some(QueueUpdate::Full(paths.iter().map(PathBuf::from).collect()));
         snapshot.playback.position = Duration::from_secs(position_secs);
         snapshot
     }
 
     fn snapshot_without_queue(position_secs: u64) -> BridgeSnapshot {
         let mut snapshot = snapshot_with_queue(&[], position_secs);
-        snapshot.queue_included = false;
+        snapshot.queue_update = None;
         snapshot
     }
 
@@ -4598,10 +4766,10 @@ mod tests {
 
     #[test]
     fn queue_rows_follow_a_new_library_at_the_old_ones_address() {
-        let mut encoder = FfiEncoder::default();
+        let mut relay = QueueRelay::default();
         let mut snapshot = sample_snapshot();
-        let rows = encoder.queue_section_for_snapshot(&snapshot);
-        assert_eq!(rows.tracks[0].title, "Sample Track");
+        let _ = queue_sections(&mut relay, [&snapshot]);
+        assert_eq!(relay.rows()[0].title, "Sample Track");
 
         // The bridge replaces its library once the relay has let go of the
         // old one, and the allocator may build the new one at the old
@@ -4609,18 +4777,19 @@ mod tests {
         // keeps the address whenever nothing else holds the library.
         let address = Arc::as_ptr(&snapshot.library).addr();
         Arc::make_mut(&mut snapshot.library).tracks[0].title = "Renamed Track".to_string();
-        let rows = encoder.queue_section_for_snapshot(&snapshot);
-        assert_eq!(rows.tracks[0].title, "Renamed Track");
-        // The cache holds the old library, so the new one cannot reuse it.
+        snapshot.queue_revision = 2;
+        snapshot.queue_update = Some(edits(1, vec![QueueEdit::Refresh]));
+        let section = decode_queue_section(&queue_sections(&mut relay, [&snapshot]).unwrap());
+        assert_eq!(
+            section.ops,
+            vec![TestQueueOp::Update(
+                0,
+                "Renamed Track".to_string(),
+                "/music/a.flac".to_string()
+            )]
+        );
+        // The relay holds the old library, so the new one cannot reuse it.
         assert_ne!(Arc::as_ptr(&snapshot.library).addr(), address);
-
-        // The same library still hits the cache.
-        let cached = encoder.queue_section_for_snapshot(&snapshot);
-        assert_eq!(cached.tracks[0].title, "Renamed Track");
-        assert!(queue_section_cache_matches(
-            &encoder.queue_section_cache,
-            &snapshot
-        ));
     }
 
     #[test]
