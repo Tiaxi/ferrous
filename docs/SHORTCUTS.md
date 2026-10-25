@@ -7,11 +7,11 @@ These work in the main window and in the fullscreen viewers. Text fields, such a
 | Action | Keys |
 | --- | --- |
 | Play or pause | Space |
-| Stop | Ctrl+Space |
+| Stop | Ctrl+Shift+Space |
 | Previous or next track | Ctrl+Left, Ctrl+Right |
 | Seek back or forward 5 seconds | Shift+Left, Shift+Right |
 | Volume down or up 5% | Alt+Down, Alt+Up |
-| Mute | Ctrl+M |
+| Mute | Ctrl+Shift+M |
 | Open or close the visualization viewer | F11 |
 | Open or close the album art viewer | Shift+F11 |
 | Quit | Ctrl+Q |

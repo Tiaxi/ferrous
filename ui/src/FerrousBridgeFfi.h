@@ -14,6 +14,9 @@ std::uint64_t ferrous_ffi_spectrogram_ring_capacity(
     std::uint32_t bins, std::uint32_t channels, double zoom, bool centered);
 // The column hop of spectrogram data for fftSize at zoom; 0 on failure.
 std::uint32_t ferrous_ffi_spectrogram_column_hop(std::uint32_t fftSize, float zoom);
+// The zoom the spectrogram moves to when requested is asked of it at
+// current; current if it keeps its zoom.
+float ferrous_ffi_spectrogram_zoom_after_request(float current, float requested);
 
 FerrousFfiBridge *ferrous_ffi_bridge_create();
 // Blocks until the backend has saved its state, for a few seconds at most.

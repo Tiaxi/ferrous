@@ -739,7 +739,9 @@ ApplicationWindow {
         objectName: "stopAction"
         text: "&Stop"
         icon.name: "media-playback-stop"
-        shortcut: "Ctrl+Space"
+        // Not Ctrl+Space, which switches input methods in Fcitx and IBus,
+        // nor Shift+Space, which toggles full-width input in Fcitx.
+        shortcut: "Ctrl+Shift+Space"
         onTriggered: uiBridge.stop()
     }
     Action {
@@ -811,7 +813,8 @@ ApplicationWindow {
         id: muteAction
         objectName: "muteAction"
         text: "&Mute"
-        shortcut: "Ctrl+M"
+        // Not Ctrl+M, which KDE applications use to show the menu bar.
+        shortcut: "Ctrl+Shift+M"
         checkable: true
         checked: playbackController.volumeMuted
         onTriggered: playbackController.toggleMutedVolume()

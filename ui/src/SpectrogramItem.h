@@ -398,7 +398,8 @@ private:
     // window again and again, so zoom requests reach it after a pause.
     QTimer *m_zoomDebounceTimer{nullptr};
     float m_pendingBackendZoom{1.0f};
-    // The zoom the backend was asked for last.
+    // The zoom the backend is at after the requests sent to it, which
+    // leave it alone when too close to its zoom.
     float m_lastBackendZoom{1.0f};
     // The data on screen is not for m_zoomLevel yet. Until it is, the
     // canvas is shown scaled to m_zoomLevel.

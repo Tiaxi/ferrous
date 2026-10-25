@@ -551,7 +551,10 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
         {
             QMutexLocker lock(&m_stateMutex);
             zoom = m_pendingBackendZoom;
-            m_lastBackendZoom = zoom;
+            // The backend ignores a request too close to its zoom; the data
+            // to wait for is then still its current zoom's.
+            m_lastBackendZoom =
+                ferrous_ffi_spectrogram_zoom_after_request(m_lastBackendZoom, zoom);
         }
         emit backendZoomRequested(zoom);
     });
@@ -1054,12 +1057,10 @@ double SpectrogramItem::minimumZoomLevel() const {
 }
 
 double SpectrogramItem::backendZoomForRequestLocked() const {
-    // The backend keeps its zoom for a request within 0.001 of it; see
-    // AnalysisCommand::SetSpectrogramZoomLevel.
-    const float requested = static_cast<float>(m_zoomLevel);
-    return std::abs(requested - m_lastBackendZoom) < 0.001f
-        ? static_cast<double>(m_lastBackendZoom)
-        : static_cast<double>(requested);
+    // The backend keeps its zoom for a request too close to it; see
+    // accepted_spectrogram_zoom in src/analysis.
+    return static_cast<double>(ferrous_ffi_spectrogram_zoom_after_request(
+        m_lastBackendZoom, static_cast<float>(m_zoomLevel)));
 }
 
 int SpectrogramItem::columnHopForZoomLocked(double zoom) const {
@@ -1574,7 +1575,8 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_renderZoomLevel = 1.0;
             m_awaitingZoomData = false;
             m_pendingBackendZoom = 1.0f;
-            m_lastBackendZoom = 1.0f;
+            m_lastBackendZoom =
+                ferrous_ffi_spectrogram_zoom_after_request(m_lastBackendZoom, 1.0f);
             if (m_zoomDebounceTimer) {
                 m_zoomDebounceTimer->stop();
             }
@@ -1980,8 +1982,28 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     m_precomputedLastRightCol = -1;
 
+    // A canvas drawn at another hop or zoom, such as the frozen preview of
+    // an earlier zoom, has no place for this data's columns: writing them
+    // in would mix time scales.  It is rebuilt once the freeze ends.
+    const double chunkColumnsPerSecond = m_precomputedHopSize > 0
+        ? static_cast<double>(m_precomputedSampleRateHz)
+            / static_cast<double>(m_precomputedHopSize)
+        : 0.0;
+    const bool canvasDrawnFromThisData =
+        std::abs(m_precomputedCanvasZoomLevel - effectiveZoomLocked()) < 0.001
+        && (m_precomputedCanvasColumnsPerSecond <= 0.0
+            || std::abs(m_precomputedCanvasColumnsPerSecond - chunkColumnsPerSecond)
+                <= 1e-9 * chunkColumnsPerSecond);
     if (!isVisible() || (window() != nullptr && !window()->isVisible())) {
         m_precomputedCanvasDirty = true;
+    } else if (m_displayMode == 1
+        && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
+        && !m_canvas.isNull()
+        && m_precomputedBinsPerColumn > 0
+        && !canvasDrawnFromThisData) {
+        if (!m_zoomFillActive) {
+            m_precomputedCanvasDirty = true;
+        }
     } else if (m_displayMode == 1
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
         && !m_canvas.isNull()
@@ -2066,7 +2088,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_renderZoomLevel = 1.0;
         m_awaitingZoomData = false;
         m_zoomFillActive = false;
-        m_lastBackendZoom = 1.0f;
+        m_lastBackendZoom =
+            ferrous_ffi_spectrogram_zoom_after_request(m_lastBackendZoom, 1.0f);
         // Cancel any pending debounced setZoomLevel that would
         // otherwise overwrite this reset 150 ms later.  Scenario: the
         // QML zoomLevel binding pushes the SpectrogramSurface's

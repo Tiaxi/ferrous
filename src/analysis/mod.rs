@@ -259,6 +259,25 @@ pub fn spectrogram_column_hop(fft_size: usize, zoom_level: f32) -> usize {
     session::effective_hop_for_zoom(zoom_hop_size(fft_size, zoom_level), zoom_level)
 }
 
+/// The zoom the spectrogram moves to when `requested` is asked of it at
+/// `current`, or `None` when it keeps `current`. Qt mirrors this through
+/// the FFI to know which data to wait for.
+#[must_use]
+pub fn accepted_spectrogram_zoom(current: f32, requested: f32) -> Option<f32> {
+    let requested = requested.clamp(0.05, 16.0);
+    // Qt re-sends the zoom on width changes too (via the widthSettleTimer
+    // after a fullscreen toggle) with the unchanged zoom.  Restarting the
+    // session in that case wipes the ring and flashes black for ~100 ms
+    // while the decoder catches up — but the existing session's data is
+    // still valid at the same hop. Width commands already refill missing
+    // history or extend the worker's lookahead.
+    if (current - requested).abs() < 0.001 {
+        None
+    } else {
+        Some(requested)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WaveformDecodeJob {
     track_token: u64,
@@ -700,18 +719,10 @@ impl AnalysisRuntimeState {
                 }
             }
             AnalysisCommand::SetSpectrogramZoomLevel(level) => {
-                let level = level.clamp(0.05, 16.0);
-                // The Qt side fires this on width changes too (via the
-                // widthSettleTimer after a fullscreen toggle) with the
-                // unchanged zoom.  Restarting the session in that case
-                // wipes the ring and flashes black for ~100 ms while
-                // the decoder catches up — but the existing session's
-                // data is still valid at the same hop. Width commands already
-                // refill missing history or extend the worker's lookahead.
                 // Skip the restart when the zoom level hasn't actually changed.
-                if (self.zoom_level - level).abs() < 0.001 {
+                let Some(level) = accepted_spectrogram_zoom(self.zoom_level, level) else {
                     return;
-                }
+                };
                 self.clear_early_continuation(ctx);
                 self.cancel_centered_staging();
                 self.zoom_level = level;
@@ -4296,6 +4307,16 @@ mod tests {
         assert!(!rewritten[1].clear_history);
         assert_eq!(rewritten[2].track_token, 42);
         assert!(!rewritten[2].buffer_reset);
+    }
+
+    #[test]
+    fn zoom_requests_within_the_tolerance_keep_the_current_zoom() {
+        assert_eq!(accepted_spectrogram_zoom(0.1, 0.100_559), None);
+        assert_eq!(accepted_spectrogram_zoom(0.1, 0.100_934), None);
+        assert_eq!(accepted_spectrogram_zoom(0.1, 0.101_2), Some(0.101_2));
+        // Clamped first, so a request below the floor at the floor is kept.
+        assert_eq!(accepted_spectrogram_zoom(0.05, 0.01), None);
+        assert_eq!(accepted_spectrogram_zoom(1.0, 40.0), Some(16.0));
     }
 
     #[test]

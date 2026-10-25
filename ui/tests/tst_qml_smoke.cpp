@@ -849,6 +849,8 @@ private slots:
     void visualizationModeSwitchTakesKeyboardFocus();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
     void spectrogramZoomWithinTheBackendToleranceNeedsNoNewData();
+    void spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview();
+    void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -12234,6 +12236,14 @@ void QmlSmokeTest::playbackShortcutsWorkInTheViewers() {
             && stop != nullptr && surface != nullptr);
     QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
     QSignalSpy stopped(stop, SIGNAL(triggered(QObject*)));
+    // No action takes Ctrl+Space, which switches input methods in Fcitx
+    // and IBus, or Ctrl+M, which shows the menu bar in KDE applications.
+    for (QObject *object : window->findChildren<QObject *>()) {
+        const QKeySequence shortcut = object->property("shortcut").value<QKeySequence>();
+        QVERIFY2(shortcut != QKeySequence(QStringLiteral("Ctrl+Space"))
+                     && shortcut != QKeySequence(QStringLiteral("Ctrl+M")),
+                 qPrintable(object->property("text").toString()));
+    }
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     bridge->setProperty("durationSeconds", 100.0);
 
@@ -12244,11 +12254,15 @@ void QmlSmokeTest::playbackShortcutsWorkInTheViewers() {
     QTRY_VERIFY(popup->property("opened").toBool());
     QTest::keyClick(window, Qt::Key_Space);
     QCOMPARE(toggled.count(), 1);
-    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier);
+    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier);
     QCOMPARE(stopped.count(), 1);
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
     QCOMPARE(bridge->property("lastSeekSeconds").toDouble(), 5.0);
     QTest::keyClick(window, Qt::Key_Down, Qt::AltModifier);
+    QVERIFY(std::abs(bridge->property("volume").toDouble() - 0.95) < 1e-9);
+    QTest::keyClick(window, Qt::Key_M, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(bridge->property("volume").toDouble(), 0.0);
+    QTest::keyClick(window, Qt::Key_M, Qt::ControlModifier | Qt::ShiftModifier);
     QVERIFY(std::abs(bridge->property("volume").toDouble() - 0.95) < 1e-9);
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
@@ -12261,7 +12275,7 @@ void QmlSmokeTest::playbackShortcutsWorkInTheViewers() {
     QVERIFY(QTest::qWaitForWindowActive(fullscreen));
     QTest::keyClick(fullscreen, Qt::Key_Space);
     QCOMPARE(toggled.count(), 2);
-    QTest::keyClick(fullscreen, Qt::Key_Space, Qt::ControlModifier);
+    QTest::keyClick(fullscreen, Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier);
     QCOMPARE(stopped.count(), 2);
     QTest::keyClick(fullscreen, Qt::Key_Left, Qt::ShiftModifier);
     QCOMPARE(bridge->property("lastSeekSeconds").toDouble(), 0.0);
@@ -12442,6 +12456,127 @@ void QmlSmokeTest::spectrogramZoomWithinTheBackendToleranceNeedsNoNewData() {
     QVERIFY(sendPendingBackendZoom(item));
     QVERIFY(!item.m_awaitingZoomData);
     node = item.updatePaintNode(node, nullptr);
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview() {
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setZoomEnabled(true);
+    // The wheel asks the surface for a zoom, which sets it, as in QML.
+    QObject::connect(&item, &SpectrogramItem::zoomRequested, &item,
+                     [&item](double zoom) { item.setZoomLevel(zoom); });
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x40'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 10.0);
+
+    // Zoomed out to 0.1x, where the data comes at a hop of 10240.
+    item.setZoomLevel(0.1);
+    QVERIFY(sendPendingBackendZoom(item));
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 200, '\x60'), bins, 0, 200,
+        0, 200, 48000, 10240, true, true, 1, false, 2);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(!item.m_awaitingZoomData);
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+
+    // Two touchpad bursts, the debounce sending each: 0.100559x, then
+    // 0.100934x. Both are within the backend's tolerance of 0.1x, so it
+    // keeps 0.1x and sends nothing new.
+    const auto wheel = [&item](int angle) {
+        QWheelEvent event(QPointF(100, 50), QPointF(100, 50), QPoint(), QPoint(0, angle),
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        item.wheelEvent(&event);
+    };
+    wheel(3);
+    QVERIFY(std::abs(item.zoomLevel() - 0.100559) < 1e-6);
+    QVERIFY(sendPendingBackendZoom(item));
+    wheel(2);
+    QVERIFY(std::abs(item.zoomLevel() - 0.100934) < 1e-6);
+    QVERIFY(sendPendingBackendZoom(item));
+
+    // The data on screen is the backend's, so no preview waits for more.
+    QVERIFY(!item.m_awaitingZoomData);
+    node = item.updatePaintNode(node, nullptr);
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+    QVERIFY(!item.m_zoomPreviewShown);
+
+    // A third burst takes the zoom past the tolerance: the backend
+    // restarts, and the preview shows until its data arrives.
+    wheel(3);
+    QVERIFY(sendPendingBackendZoom(item));
+    QVERIFY(item.m_awaitingZoomData);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(item.m_zoomPreviewShown);
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview() {
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x40'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 10.0);
+    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+
+    // Zoomed out to half, sent; then in to 2x before the half data arrives.
+    item.setZoomLevel(0.5);
+    QVERIFY(sendPendingBackendZoom(item));
+    item.setZoomLevel(2.0);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
+    const QImage previewed = item.m_canvas.copy();
+    QVERIFY(!previewed.isNull());
+
+    // The half data covers the columns on screen, in another time scale:
+    // first its reset, then more of it.
+    constexpr int staleHop = 2048;
+    const int staleStart = static_cast<int>(10.0 * 48000 / staleHop) - 200;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 400, '\x7f'), bins, 0, 400,
+        staleStart, columns / 2, 48000, staleHop, false, true, 1, false, 2);
+    QVERIFY(item.m_zoomFillActive);
+    QCOMPARE(item.m_canvas, previewed);
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 400, '\x20'), bins, 0, 400,
+        staleStart + 400, columns / 2, 48000, staleHop, false, false, 1, false, 2);
+    QCOMPARE(item.m_canvas, previewed);
+    node = item.updatePaintNode(node, nullptr);
+    QCOMPARE(item.m_canvas, previewed);
+    QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
+
+    // The 2x data replaces it.
+    constexpr int hop = 512;
+    const int nowColumn = static_cast<int>(10.0 * 48000 / hop);
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 400, '\x70'), bins, 0, 400,
+        nowColumn - 150, columns * 2, 48000, hop, false, true, 1, false, 3);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(!item.m_zoomFillActive);
+    QVERIFY(item.m_canvas != previewed);
     QCOMPARE(drawnCanvasScale(node), 1.0);
 
     delete node;
