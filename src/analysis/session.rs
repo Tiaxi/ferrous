@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
+use super::cache::WaveformSourceStamp;
 use super::decoders::{
     deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource, AudioRead,
     AudioTimeline,
@@ -16,6 +17,7 @@ use super::decoders::{
 use super::fft::{PeakHoldResampler, StftComputer};
 use super::output::{AnalysisEventOutput, AnalysisOutputs};
 use super::retention::{lookahead_seconds, SpectrogramBufferConfig};
+use super::track_io::{source_stamp, TrackFormat};
 use super::{
     f64_to_u64_saturating, usize_to_u64, AnalysisEvent, PrecomputedSpectrogramChunk,
     SpectrogramDisplayMode, SpectrogramViewMode, REFERENCE_HOP,
@@ -291,6 +293,49 @@ pub(super) struct SessionHandoff {
     pub(super) prelude: Vec<PrecomputedSpectrogramChunk>,
 }
 
+/// What the worker tells the analysis thread about its sessions: the
+/// format of each file it opens, read from the decoder rather than probed,
+/// the continuations it cannot make, and the files it cannot read.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum SessionReport {
+    /// The session of `generation` opened `path`, for `track_token`.
+    Opened {
+        generation: u64,
+        track_token: u64,
+        path: PathBuf,
+        stamp: Option<WaveformSourceStamp>,
+        format: TrackFormat,
+    },
+    /// The worker did not continue its timeline with `path`, and nothing
+    /// decodes the file: its `format` does not fit the session, the file
+    /// cannot be opened (`None`), or no session is running.
+    ContinuationRejected {
+        generation: u64,
+        path: PathBuf,
+        stamp: Option<WaveformSourceStamp>,
+        format: Option<TrackFormat>,
+    },
+    /// The session could not read the audio of `path`, which it could
+    /// open, and ended after resetting the spectral stream.  A file that
+    /// cannot be opened at all is not reported: playback reports it.
+    Failed {
+        generation: u64,
+        track_token: u64,
+        path: PathBuf,
+        error: String,
+    },
+}
+
+impl SessionReport {
+    pub(super) fn generation(&self) -> u64 {
+        match self {
+            Self::Opened { generation, .. }
+            | Self::ContinuationRejected { generation, .. }
+            | Self::Failed { generation, .. } => *generation,
+        }
+    }
+}
+
 /// Point a session that has not started at its file's new path.
 fn remap_new_track_path(cmd: &mut SpectrogramWorkerCommand, renames: &PathRenames) {
     if let SpectrogramWorkerCommand::NewTrack { path, .. } = cmd {
@@ -316,6 +361,8 @@ pub(super) struct SpectrogramWorkerHandles {
     pub(super) track_duration_ms: Arc<AtomicU64>,
     /// Whether the worker is still there to take commands.
     pub(super) status: SpectrogramWorkerStatus,
+    /// What the worker reports about its sessions.
+    pub(super) reports: Receiver<SessionReport>,
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +718,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
     generation: Arc<AtomicU64>,
     columns_produced: Arc<AtomicU64>,
     track_duration_ms: Arc<AtomicU64>,
+    reports: Sender<SessionReport>,
     status: &SpectrogramWorkerStatus,
 ) -> Option<JoinableThread> {
     let thread_status = status.clone();
@@ -682,6 +730,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
             &generation,
             &columns_produced,
             &track_duration_ms,
+            &reports,
         );
     };
     #[cfg(test)]
@@ -732,32 +781,15 @@ pub(crate) mod spawn_test_hooks {
     }
 }
 
-/// Session parameters cached by the worker loop so that a
-/// `ContinueWithFile` arriving outside a live session can be
-/// converted to a `NewTrack` fallback.
-struct LastSessionParams {
-    /// The generation of the session these came from. A continuation that
-    /// arrives after the session ended belongs to it, and is stale once the
-    /// analysis thread has started another.
-    generation: u64,
-    fft_size: usize,
-    hop_size: usize,
-    zoom_level: f32,
-    widget_width: u32,
-    channel_count: usize,
-    view_mode: SpectrogramViewMode,
-    display_mode: SpectrogramDisplayMode,
-}
-
 fn spectrogram_worker_loop(
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &dyn AnalysisEventOutput,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
+    reports: &Sender<SessionReport>,
 ) {
     let mut next_cmd: Option<SpectrogramWorkerCommand> = None;
-    let mut last_params: Option<LastSessionParams> = None;
     loop {
         let cmd = match next_cmd.take() {
             Some(cmd) => cmd,
@@ -771,27 +803,7 @@ fn spectrogram_worker_loop(
         };
 
         match cmd {
-            SpectrogramWorkerCommand::NewTrack {
-                generation: session_generation,
-                fft_size,
-                hop_size,
-                zoom_level,
-                widget_width,
-                channel_count,
-                view_mode,
-                display_mode,
-                ..
-            } => {
-                last_params = Some(LastSessionParams {
-                    generation: session_generation,
-                    fft_size,
-                    hop_size,
-                    zoom_level,
-                    widget_width,
-                    channel_count,
-                    view_mode,
-                    display_mode,
-                });
+            SpectrogramWorkerCommand::NewTrack { .. } => {
                 let mut cmd = cmd;
                 next_cmd = run_spectrogram_session(
                     &mut cmd,
@@ -800,58 +812,21 @@ fn spectrogram_worker_loop(
                     generation,
                     columns_produced_out,
                     track_duration_ms_out,
+                    reports,
                 );
             }
-            SpectrogramWorkerCommand::ContinueWithFile { path, track_token } => {
-                // No active session — convert to NewTrack fallback. Only the
-                // analysis thread creates generations: the fallback belongs
-                // to the ended session, and a newer one supersedes it.
-                if let Some(params) = &last_params {
-                    if params.generation != generation.load(Ordering::Relaxed) {
-                        continue;
-                    }
-                    let mut fallback = SpectrogramWorkerCommand::NewTrack {
-                        track_token,
-                        generation: params.generation,
-                        path,
-                        fft_size: params.fft_size,
-                        hop_size: params.hop_size,
-                        zoom_level: params.zoom_level,
-                        widget_width: params.widget_width,
-                        channel_count: params.channel_count,
-                        start_seconds: 0.0,
-                        target_position_seconds: 0.0,
-                        emit_initial_reset: false,
-                        clear_history_on_reset: false,
-                        view_mode: params.view_mode,
-                        display_mode: params.display_mode,
-                        handoff: SessionHandoff::default(),
-                    };
-                    last_params = Some(LastSessionParams {
-                        generation: params.generation,
-                        fft_size: params.fft_size,
-                        hop_size: params.hop_size,
-                        zoom_level: params.zoom_level,
-                        widget_width: params.widget_width,
-                        channel_count: params.channel_count,
-                        view_mode: params.view_mode,
-                        display_mode: params.display_mode,
-                    });
-                    next_cmd = run_spectrogram_session(
-                        &mut fallback,
-                        cmd_rx,
-                        event_tx,
-                        generation,
-                        columns_produced_out,
-                        track_duration_ms_out,
-                    );
-                } else {
-                    eprintln!(
-                        "[ferrous] ContinueWithFile outside session with no prior params — ignoring"
-                    );
-                }
+            SpectrogramWorkerCommand::ContinueWithFile { path, .. } => {
+                // No session to continue: the analysis thread starts one,
+                // as only it creates generations, and positions it sends
+                // for a continued timeline would misplace a session that
+                // started here.
+                let _ = reports.send(SessionReport::ContinuationRejected {
+                    generation: generation.load(Ordering::Relaxed),
+                    path,
+                    stamp: None,
+                    format: None,
+                });
             }
-            SpectrogramWorkerCommand::StopSession => last_params = None,
             _ => {} // UpdateTrackToken, CancelPendingContinue, etc. — stale outside session
         }
     }
@@ -903,6 +878,8 @@ fn coalesce_queued_new_track_command(
 /// Holds decode state for a spectrogram session.
 struct SpectrogramSessionState {
     track_token: u64,
+    /// The file being decoded.
+    path: PathBuf,
     gen: u64,
     fft_size: usize,
     hop_size: usize,
@@ -941,7 +918,11 @@ struct SpectrogramSessionState {
     total_covered_samples: u64,
 
     // Rate throttling
-    session_start_time: std::time::Instant,
+    /// When and at which column the rolling rate limit started counting.
+    /// Unset while the post-reset window decodes unthrottled, and set when
+    /// the window ends, so the columns the window decoded ahead do not
+    /// count against the realtime budget.
+    throttle_origin: Option<(std::time::Instant, u64)>,
     /// Number of columns to decode immediately after a reset/handoff before
     /// re-enabling rolling-mode throttling and lookahead parking.
     post_reset_unthrottled_columns: u32,
@@ -965,6 +946,11 @@ struct SpectrogramSessionState {
     /// reaches EOF.  Set by command processing, consumed at EOF.
     /// Fields: `(path, track_token)`.
     pending_continue: Option<(PathBuf, u64)>,
+    /// The file of a continuation rejected before the track switch: a
+    /// switch to it ends the session, and the analysis thread restarts it.
+    rejected_continuation: Option<PathBuf>,
+    /// Why the decode failed, when it did.
+    failure: Option<String>,
 }
 
 /// Action returned by command processing in the session loop.
@@ -977,6 +963,9 @@ enum SessionAction {
     /// rate-limited data chunk.
     FlushToken,
     Stop,
+    /// The track switched to a continuation the worker rejected; the
+    /// session ends and the analysis thread restarts it.
+    End,
     NewSession(SpectrogramWorkerCommand),
     SeekRequired {
         position_seconds: f64,
@@ -997,6 +986,7 @@ fn run_spectrogram_session(
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
+    reports: &Sender<SessionReport>,
 ) -> Option<SpectrogramWorkerCommand> {
     let SpectrogramWorkerCommand::NewTrack { handoff, .. } = initial_cmd else {
         return None;
@@ -1013,7 +1003,7 @@ fn run_spectrogram_session(
         hop_size,
         zoom_level,
         widget_width,
-        channel_count: _,
+        channel_count: requested_channel_count,
         start_seconds,
         target_position_seconds,
         emit_initial_reset,
@@ -1034,7 +1024,26 @@ fn run_spectrogram_session(
     );
 
     let bins_per_column = (fft_size / 2) + 1;
-    let (mut source, native_sample_rate, native_channels, total_columns) = open_audio_file(path)?;
+    let Some((mut source, native_sample_rate, native_channels, total_columns)) =
+        open_audio_file(path)
+    else {
+        let cause = match std::fs::File::open(path) {
+            Err(error) => FailureCause::Unopenable(error),
+            Ok(_) => FailureCause::Analysis("its audio could not be read".to_string()),
+        };
+        fail_session(
+            event_tx,
+            reports,
+            SessionFailure {
+                generation: gen,
+                track_token,
+                channel_count: requested_channel_count,
+                path: path.clone(),
+                cause,
+            },
+        );
+        return None;
+    };
 
     profile_eprintln!(
         "[spect-worker] file opened in {:.2}ms sr={native_sample_rate} ch={native_channels} est_cols={total_columns}",
@@ -1044,6 +1053,16 @@ fn run_spectrogram_session(
     let effective_rate = u32::try_from(native_sample_rate).unwrap_or(48_000);
 
     publish_track_duration_ms(total_columns, effective_rate, track_duration_ms_out);
+    let _ = reports.send(SessionReport::Opened {
+        generation: gen,
+        track_token,
+        path: path.clone(),
+        stamp: source_stamp(path),
+        format: TrackFormat::Known {
+            sample_rate: effective_rate,
+            channels: native_channels,
+        },
+    });
 
     let actual_channel_count = match view_mode {
         SpectrogramViewMode::Downmix => 1,
@@ -1083,13 +1102,24 @@ fn run_spectrogram_session(
         stft_seek_grid(start_seconds, effective_rate, hop_size, effective_hop);
     if seek_frame > 0 {
         if let Err(error) = source.seek_to_frame(seek_frame, effective_rate) {
-            eprintln!("[analysis] spectrogram seek failed: {error}");
+            fail_session(
+                event_tx,
+                reports,
+                SessionFailure {
+                    generation: gen,
+                    track_token,
+                    channel_count: actual_channel_count,
+                    path: path.clone(),
+                    cause: FailureCause::Analysis(format!("seeking failed ({error})")),
+                },
+            );
             return None;
         }
     }
 
     let mut session = SpectrogramSessionState {
         track_token,
+        path: path.clone(),
         gen,
         fft_size,
         hop_size,
@@ -1119,7 +1149,7 @@ fn run_spectrogram_session(
         chunk_start_index: start_column,
         target_chunk_columns: 1, // Start with 1 for fastest first-pixel
         total_covered_samples: 0,
-        session_start_time: std::time::Instant::now(),
+        throttle_origin: None,
         post_reset_unthrottled_columns: initial_unthrottled_columns(
             display_mode,
             start_column,
@@ -1134,6 +1164,8 @@ fn run_spectrogram_session(
         #[cfg(feature = "gst")]
         gst_duration_requeried: false,
         pending_continue: None,
+        rejected_continuation: None,
+        failure: None,
     };
 
     // Send initial metadata chunk (0 columns, carries estimates + transition semantics).
@@ -1171,7 +1203,10 @@ fn run_spectrogram_session(
         );
 
         if let Some(SpectrogramWorkerCommand::Seek { position_seconds }) = result {
-            if !handle_session_seek(&mut session, position_seconds, &mut source, event_tx) {
+            if let Err(error) =
+                handle_session_seek(&mut session, position_seconds, &mut source, event_tx)
+            {
+                session.fail(event_tx, reports, format!("seeking failed ({error})"));
                 return None;
             }
             continue;
@@ -1191,6 +1226,11 @@ fn run_spectrogram_session(
                     session.columns_produced.saturating_sub(start_column),
                 );
                 let opened = open_audio_file(&path);
+                let stamp = source_stamp(&path);
+                let format = opened.as_ref().map(|(_, sr, ch, _)| TrackFormat::Known {
+                    sample_rate: u32::try_from(*sr).unwrap_or(u32::MAX),
+                    channels: *ch,
+                });
                 let compatible = opened.as_ref().is_some_and(|(_, sr, ch, _)| {
                     let eff_ch = match session.view_mode {
                         SpectrogramViewMode::Downmix => 1,
@@ -1198,60 +1238,60 @@ fn run_spectrogram_session(
                     };
                     *sr == u64::from(session.effective_rate) && eff_ch == session.channel_count
                 });
-                if compatible {
-                    let (new_source, _, _, new_est) = opened.unwrap();
-                    source = new_source;
-                    session.source_reached_eof = false;
-                    session.timeline = AudioTimeline::new(0);
-                    session.track_token = track_token;
-                    session.total_columns_estimate = new_est;
-                    // handle_track_change invalidates the outgoing duration
-                    // before dispatching ContinueWithFile.  A compatible
-                    // continuation stays inside this worker session, so it
-                    // must republish here; otherwise the duration remains
-                    // unknown for every later centered seek/zoom restart.
-                    publish_track_duration_ms(
-                        new_est,
-                        session.effective_rate,
-                        track_duration_ms_out,
-                    );
-
-                    session.target_chunk_columns = 1;
-                    session.session_start_time = std::time::Instant::now();
-                    session.session_start_column = session.columns_produced;
-                    session.post_reset_unthrottled_columns =
-                        post_reset_unthrottled_columns(session.display_mode);
-                    session.suppress_backward_seek = true;
+                let (Some((new_source, _, _, new_est)), Some(format), true) =
+                    (opened, format, compatible)
+                else {
+                    // The analysis thread starts the file afresh: the
+                    // positions it sends for the continued timeline would
+                    // misplace a session started here.  Before the track
+                    // switch, the outgoing track stays parked at its end.
                     profile_eprintln!(
-                        "[spect-worker] file switch OK, continuing session unthrottled_cols={}",
-                        session.post_reset_unthrottled_columns,
+                        "[spect-worker] ContinueWithFile rejected path={}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
                     );
-                    continue; // re-enter session_decode_loop
-                }
-                // Incompatible or open failed — fall back to NewTrack. It
-                // continues this session's stream, so it keeps the session's
-                // generation: only the analysis thread creates generations,
-                // and one created here would make its next session stale.
-                profile_eprintln!(
-                    "[spect-worker] ContinueWithFile incompatible, falling back to NewTrack"
-                );
-                return Some(SpectrogramWorkerCommand::NewTrack {
-                    track_token,
+                    let _ = reports.send(SessionReport::ContinuationRejected {
+                        generation: session.gen,
+                        path: path.clone(),
+                        stamp,
+                        format,
+                    });
+                    if track_token != session.track_token {
+                        return None;
+                    }
+                    session.rejected_continuation = Some(path);
+                    continue;
+                };
+                let _ = reports.send(SessionReport::Opened {
                     generation: session.gen,
-                    path,
-                    fft_size: session.fft_size,
-                    hop_size: session.hop_size,
-                    zoom_level: session.zoom_level,
-                    widget_width: session.widget_width,
-                    channel_count: session.channel_count,
-                    start_seconds: 0.0,
-                    target_position_seconds: 0.0,
-                    emit_initial_reset: false,
-                    clear_history_on_reset: false,
-                    view_mode: session.view_mode,
-                    display_mode: session.display_mode,
-                    handoff: SessionHandoff::default(),
+                    track_token,
+                    path: path.clone(),
+                    stamp,
+                    format,
                 });
+                source = new_source;
+                session.source_reached_eof = false;
+                session.rejected_continuation = None;
+                session.timeline = AudioTimeline::new(0);
+                session.track_token = track_token;
+                session.path = path;
+                session.total_columns_estimate = new_est;
+                // handle_track_change invalidates the outgoing duration
+                // before dispatching ContinueWithFile.  A compatible
+                // continuation stays inside this worker session, so it
+                // must republish here; otherwise the duration remains
+                // unknown for every later centered seek/zoom restart.
+                publish_track_duration_ms(new_est, session.effective_rate, track_duration_ms_out);
+
+                session.target_chunk_columns = 1;
+                session.throttle_origin = None;
+                session.session_start_column = session.columns_produced;
+                session.post_reset_unthrottled_columns =
+                    post_reset_unthrottled_columns(session.display_mode);
+                session.suppress_backward_seek = true;
+                profile_eprintln!(
+                    "[spect-worker] file switch OK, continuing session unthrottled_cols={}",
+                    session.post_reset_unthrottled_columns,
+                );
             }
             Some(cmd) => {
                 // Interrupted by NewTrack or Stop.
@@ -1271,6 +1311,10 @@ fn run_spectrogram_session(
                 return Some(cmd);
             }
             None => {
+                if let Some(error) = session.failure.take() {
+                    session.fail(event_tx, reports, error);
+                    return None;
+                }
                 // EOF is published before parking; session exit must not
                 // publish it again or turn a cancelled decode into completion.
                 profile_eprintln!(
@@ -1286,6 +1330,97 @@ fn run_spectrogram_session(
                 return None;
             }
         }
+    }
+}
+
+/// A session that cannot read its file.
+struct SessionFailure {
+    generation: u64,
+    track_token: u64,
+    channel_count: usize,
+    path: PathBuf,
+    cause: FailureCause,
+}
+
+/// Why a session cannot read its file.
+enum FailureCause {
+    /// The file cannot be opened at all, which playback reports itself.
+    Unopenable(std::io::Error),
+    /// The spectrogram cannot read audio that playback may play.
+    Analysis(String),
+}
+
+/// End a session that cannot read its file: clear what the UI shows of it,
+/// as a far seek does, and tell the analysis thread, which tells the user
+/// unless playback does. The worker waits for the next session, which may
+/// read its file.
+fn fail_session(
+    event_tx: &dyn AnalysisEventOutput,
+    reports: &Sender<SessionReport>,
+    failure: SessionFailure,
+) {
+    let error = match failure.cause {
+        FailureCause::Unopenable(error) => {
+            eprintln!(
+                "[analysis] spectrogram cannot open {}: {error}",
+                failure.path.display()
+            );
+            None
+        }
+        FailureCause::Analysis(error) => {
+            eprintln!(
+                "[analysis] spectrogram of {} failed: {error}",
+                failure.path.display()
+            );
+            Some(error)
+        }
+    };
+    let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+        PrecomputedSpectrogramChunk {
+            track_token: failure.track_token,
+            generation: failure.generation,
+            columns_u8: Vec::new(),
+            bins_per_column: 0,
+            column_count: 0,
+            channel_count: clamp_to_u8(failure.channel_count.max(1)),
+            start_column_index: 0,
+            total_columns_estimate: 0,
+            sample_rate_hz: 0,
+            hop_size: 0,
+            coverage_seconds: 0.0,
+            complete: false,
+            buffer_reset: true,
+            clear_history: true,
+        },
+    ));
+    if let Some(error) = error {
+        let _ = reports.send(SessionReport::Failed {
+            generation: failure.generation,
+            track_token: failure.track_token,
+            path: failure.path,
+            error,
+        });
+    }
+}
+
+impl SpectrogramSessionState {
+    fn fail(
+        &self,
+        event_tx: &dyn AnalysisEventOutput,
+        reports: &Sender<SessionReport>,
+        error: String,
+    ) {
+        fail_session(
+            event_tx,
+            reports,
+            SessionFailure {
+                generation: self.gen,
+                track_token: self.track_token,
+                channel_count: self.channel_count,
+                path: self.path.clone(),
+                cause: FailureCause::Analysis(error),
+            },
+        );
     }
 }
 
@@ -1333,6 +1468,11 @@ fn session_decode_loop(
         if is_stale() {
             return None;
         }
+        // A session parked at its end after rejecting a continuation has
+        // published its end already.
+        if session.source_reached_eof {
+            break;
+        }
 
         // 1. Check for commands via try_recv (drain pending, take latest position).
         if let Some(action) = process_session_commands(session, cmd_rx) {
@@ -1342,6 +1482,7 @@ fn session_decode_loop(
                     session_flush_token(session, event_tx, columns_produced_out);
                 }
                 SessionAction::Stop => return Some(SpectrogramWorkerCommand::StopSession),
+                SessionAction::End => return None,
                 SessionAction::NewSession(cmd) => return Some(cmd),
                 SessionAction::SeekRequired { position_seconds } => {
                     return Some(SpectrogramWorkerCommand::Seek { position_seconds });
@@ -1371,6 +1512,7 @@ fn session_decode_loop(
                     SessionAction::Stop => {
                         return Some(SpectrogramWorkerCommand::StopSession);
                     }
+                    SessionAction::End => return None,
                     SessionAction::NewSession(cmd) => return Some(cmd),
                     SessionAction::SeekRequired { position_seconds } => {
                         return Some(SpectrogramWorkerCommand::Seek { position_seconds });
@@ -1381,38 +1523,27 @@ fn session_decode_loop(
         }
 
         // 3. Rate throttle (rolling mode only, after the post-reset window).
-        if !post_reset_window_active(session) && session.decode_rate_limit.is_finite() {
-            let max_cols_per_wall_sec = session.decode_rate_limit * session.cols_per_second;
-            if max_cols_per_wall_sec > 0.0 {
-                let elapsed = session.session_start_time.elapsed().as_secs_f64();
-                let cols_since_start = session
-                    .columns_produced
-                    .saturating_sub(session.session_start_column);
-                #[allow(clippy::cast_precision_loss)]
-                let expected_elapsed = cols_since_start as f64 / max_cols_per_wall_sec;
-                if expected_elapsed > elapsed {
-                    let sleep_dur = Duration::from_secs_f64((expected_elapsed - elapsed).min(0.5));
-                    match cmd_rx.recv_timeout(sleep_dur) {
-                        Ok(cmd) => match handle_single_command(session, cmd) {
-                            SessionAction::Continue => continue,
-                            SessionAction::FlushToken => {
-                                session_flush_token(session, event_tx, columns_produced_out);
-                                continue;
-                            }
-                            SessionAction::Stop => {
-                                return Some(SpectrogramWorkerCommand::StopSession);
-                            }
-                            SessionAction::NewSession(cmd) => {
-                                return Some(cmd);
-                            }
-                            SessionAction::SeekRequired { position_seconds } => {
-                                return Some(SpectrogramWorkerCommand::Seek { position_seconds });
-                            }
-                        },
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                        Err(_) => return None,
+        if let Some(wait) = throttle_wait(session, std::time::Instant::now()) {
+            match cmd_rx.recv_timeout(wait.min(Duration::from_millis(500))) {
+                Ok(cmd) => match handle_single_command(session, cmd) {
+                    SessionAction::Continue => continue,
+                    SessionAction::FlushToken => {
+                        session_flush_token(session, event_tx, columns_produced_out);
+                        continue;
                     }
-                }
+                    SessionAction::Stop => {
+                        return Some(SpectrogramWorkerCommand::StopSession);
+                    }
+                    SessionAction::End => return None,
+                    SessionAction::NewSession(cmd) => {
+                        return Some(cmd);
+                    }
+                    SessionAction::SeekRequired { position_seconds } => {
+                        return Some(SpectrogramWorkerCommand::Seek { position_seconds });
+                    }
+                },
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(_) => return None,
             }
         }
 
@@ -1428,14 +1559,16 @@ fn session_decode_loop(
             Ok(AudioRead::Pending) => continue,
             Ok(AudioRead::Frames(audio)) => audio,
             Err(error) => {
-                eprintln!("[analysis] spectrogram decode failed: {error}");
+                session.failure = Some(format!("decoding failed ({error})"));
                 return None;
             }
             Ok(AudioRead::Eof) => {
-                // Real source EOF.  Mark so the outer wrapper emits a
-                // finalize chunk for this session (distinguishing EOF
-                // from the stale-generation None return below).
+                // Real source EOF.  Publish the decoded extent while this
+                // track is still current. Waiting until the parked worker
+                // exits leaves the UI using a padded estimate.
                 session.source_reached_eof = true;
+                session_flush_chunk(session, event_tx, columns_produced_out);
+                session_emit_finalize_chunk(session, event_tx);
                 break;
             }
         };
@@ -1479,10 +1612,6 @@ fn session_decode_loop(
         }
     }
 
-    // Publish the decoded extent while this track is still current. Waiting
-    // until the parked worker exits leaves the UI using a padded estimate.
-    session_flush_chunk(session, event_tx, columns_produced_out);
-    session_emit_finalize_chunk(session, event_tx);
     if let Some((path, track_token)) = session.pending_continue.take() {
         return Some(SpectrogramWorkerCommand::ContinueWithFile { path, track_token });
     }
@@ -1507,6 +1636,7 @@ fn session_decode_loop(
                     session_flush_token(session, event_tx, columns_produced_out);
                 }
                 SessionAction::Stop => return Some(SpectrogramWorkerCommand::StopSession),
+                SessionAction::End => return None,
                 SessionAction::NewSession(cmd) => return Some(cmd),
                 SessionAction::SeekRequired { position_seconds } => {
                     return Some(SpectrogramWorkerCommand::Seek { position_seconds });
@@ -1549,11 +1679,10 @@ fn process_session_commands(
                 session.pending_continue = Some((path, track_token));
             }
             SpectrogramWorkerCommand::UpdateTrackToken { track_token } => {
-                if let Some((_, ref mut pending_token)) = session.pending_continue {
-                    *pending_token = track_token;
-                } else {
-                    session.track_token = track_token;
-                    needs_flush_token = true;
+                match update_track_token(session, track_token) {
+                    SessionAction::FlushToken => needs_flush_token = true,
+                    SessionAction::End => return Some(SessionAction::End),
+                    _ => {}
                 }
             }
             SpectrogramWorkerCommand::CancelPendingContinue => {
@@ -1654,19 +1783,7 @@ fn handle_single_command(
             SessionAction::Continue
         }
         SpectrogramWorkerCommand::UpdateTrackToken { track_token } => {
-            if let Some((_, ref mut pending_token)) = session.pending_continue {
-                // Continuation not yet consumed — update pending token only.
-                // Old-track columns keep the old token until EOF.
-                *pending_token = track_token;
-                SessionAction::Continue
-            } else {
-                // Continuation already consumed — worker is on the new file.
-                // FlushToken tells the caller to emit a 0-column metadata
-                // chunk immediately so the UI gapless handler fires without
-                // waiting for the next rate-limited data chunk.
-                session.track_token = track_token;
-                SessionAction::FlushToken
-            }
+            update_track_token(session, track_token)
         }
         SpectrogramWorkerCommand::CancelPendingContinue => {
             session.pending_continue = None;
@@ -1687,6 +1804,28 @@ fn handle_single_command(
     }
 }
 
+/// The track switched to the session's continuation.
+fn update_track_token(session: &mut SpectrogramSessionState, track_token: u64) -> SessionAction {
+    if let Some((_, ref mut pending_token)) = session.pending_continue {
+        // Continuation not yet consumed — update pending token only.
+        // Old-track columns keep the old token until EOF.
+        *pending_token = track_token;
+        SessionAction::Continue
+    } else if session.rejected_continuation.is_some() {
+        // The worker could not continue with the file now playing, and the
+        // analysis thread, told so, starts it afresh.  Positions on the
+        // timeline it switched to do not fit this session.
+        SessionAction::End
+    } else {
+        // Continuation already consumed — worker is on the new file.
+        // FlushToken tells the caller to emit a 0-column metadata
+        // chunk immediately so the UI gapless handler fires without
+        // waiting for the next rate-limited data chunk.
+        session.track_token = track_token;
+        SessionAction::FlushToken
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Seek handling
 // ---------------------------------------------------------------------------
@@ -1698,7 +1837,7 @@ fn handle_session_seek(
     position_seconds: f64,
     source: &mut AudioFrameSource,
     event_tx: &dyn AnalysisEventOutput,
-) -> bool {
+) -> anyhow::Result<()> {
     profile_eprintln!("[spect-worker] SEEK to {position_seconds:.2}s");
 
     // Drop any partially accumulated pre-seek chunk. Emitting it after a seek
@@ -1712,10 +1851,7 @@ fn handle_session_seek(
         session.hop_size,
         session.effective_hop,
     );
-    if let Err(error) = source.seek_to_frame(frame, session.effective_rate) {
-        eprintln!("[analysis] spectrogram seek failed: {error}");
-        return false;
-    }
+    source.seek_to_frame(frame, session.effective_rate)?;
     session.source_reached_eof = false;
     session.timeline = AudioTimeline::new(frame);
     for stft in &mut session.stfts {
@@ -1732,7 +1868,7 @@ fn handle_session_seek(
     session.chunk_start_index = new_column;
     session.target_chunk_columns = 1; // Fast first-pixel after seek
     session.total_covered_samples = 0;
-    session.session_start_time = std::time::Instant::now();
+    session.throttle_origin = None;
     session.post_reset_unthrottled_columns = post_reset_unthrottled_columns(session.display_mode);
     session.target_position_seconds = position_seconds;
 
@@ -1756,7 +1892,7 @@ fn handle_session_seek(
         },
     ));
 
-    true
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1795,6 +1931,9 @@ fn next_target_chunk_columns_for_payload(
 /// and lookahead for the new mode.
 fn apply_display_mode(session: &mut SpectrogramSessionState, mode: SpectrogramDisplayMode) {
     session.display_mode = mode;
+    // Columns decoded at the centered mode's unlimited rate do not count
+    // against the rolling limit.
+    session.throttle_origin = None;
     if mode == SpectrogramDisplayMode::Rolling {
         session.decode_rate_limit = std::env::var("FERROUS_SPECTROGRAM_DECODE_RATE")
             .ok()
@@ -1851,6 +1990,38 @@ fn post_reset_window_active(session: &SpectrogramSessionState) -> bool {
         .columns_produced
         .saturating_sub(session.session_start_column)
         < u64::from(session.post_reset_unthrottled_columns)
+}
+
+/// How long a rolling session waits before decoding more, to stay within
+/// its rate limit; `None` when it may decode now.
+///
+/// The limit counts from where the post-reset window ended: the window
+/// decodes the history a reset needs, and the playback position that
+/// history ends at, at full speed. Counting those columns too would make
+/// the session wait for the time they would have taken at the limit,
+/// stalling the display after a rolling view is shown again.
+fn throttle_wait(
+    session: &mut SpectrogramSessionState,
+    now: std::time::Instant,
+) -> Option<Duration> {
+    if post_reset_window_active(session) || !session.decode_rate_limit.is_finite() {
+        return None;
+    }
+    let max_cols_per_wall_sec = session.decode_rate_limit * session.cols_per_second;
+    if max_cols_per_wall_sec <= 0.0 {
+        return None;
+    }
+    let (origin_time, origin_column) = *session
+        .throttle_origin
+        .get_or_insert((now, session.columns_produced));
+    let elapsed = now.saturating_duration_since(origin_time).as_secs_f64();
+    let columns = session.columns_produced.saturating_sub(origin_column);
+    #[allow(clippy::cast_precision_loss)]
+    let expected_elapsed = columns as f64 / max_cols_per_wall_sec;
+    Some(Duration::from_secs_f64(
+        (expected_elapsed - elapsed).max(0.0),
+    ))
+    .filter(|wait| !wait.is_zero())
 }
 
 // ---------------------------------------------------------------------------
@@ -2192,6 +2363,7 @@ mod tests {
                     &AtomicU64::new(1),
                     &AtomicU64::new(0),
                     &AtomicU64::new(0),
+                    &unbounded().0,
                 )
             });
             for token in 1..=3 {
@@ -2256,6 +2428,104 @@ mod tests {
         );
     }
 
+    /// Decode a rolling session's columns as the decode loop does, on a
+    /// simulated clock, while playback advances from where the session was
+    /// resumed; returns the least lead of the decoded right edge over the
+    /// playhead after the refill, and the longest the session waited at once.
+    fn simulate_rolling_resume(session: &mut SpectrogramSessionState, seconds: f64) -> (i64, f64) {
+        let start = std::time::Instant::now();
+        let resumed_at = session.target_position_seconds;
+        let step = 0.002;
+        let mut least_lead = i64::MAX;
+        let mut longest_wait = 0.0_f64;
+        let mut now = 0.0;
+        while now < seconds {
+            session.target_position_seconds = resumed_at + now;
+            let playhead =
+                f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
+            let lead = session.columns_produced.saturating_sub(playhead);
+            let at = start + Duration::from_secs_f64(now);
+            if lead >= session.lookahead_columns && !post_reset_window_active(session) {
+                now += step;
+            } else if let Some(wait) = throttle_wait(session, at) {
+                longest_wait = longest_wait.max(wait.as_secs_f64());
+                now += wait.as_secs_f64().min(0.5);
+                // The clock the wait is measured on counts nanoseconds.
+                now += 1e-9;
+            } else {
+                // Decoding takes no time on the simulated clock.
+                session.columns_produced += 1;
+            }
+            // The refill decodes the history up to the playhead first.
+            if !post_reset_window_active(session) {
+                #[allow(clippy::cast_possible_wrap)]
+                let lead = session.columns_produced as i64 - playhead as i64;
+                least_lead = least_lead.min(lead);
+            }
+        }
+        (least_lead, longest_wait)
+    }
+
+    #[test]
+    fn a_resumed_rolling_session_keeps_its_right_edge_ahead_of_playback() {
+        // Shown again 30 s into a track: the session restarts a viewport
+        // back and refills that history at full speed.
+        let mut session = make_test_session();
+        let (start_column, _) = stft_seek_grid(10.0, session.effective_rate, 256, 1_024);
+        session.columns_produced = start_column;
+        session.session_start_column = start_column;
+        session.target_position_seconds = 30.0;
+        session.post_reset_unthrottled_columns = initial_unthrottled_columns(
+            SpectrogramDisplayMode::Rolling,
+            start_column,
+            30.0,
+            session.cols_per_second,
+        );
+        let (least_lead, longest_wait) = simulate_rolling_resume(&mut session, 20.0);
+        // Within the rate limit, it does not wait for the time the refill
+        // would have taken at the limit, and stays ahead of playback.
+        assert!(longest_wait < 0.05, "waited {longest_wait} s");
+        assert!(
+            least_lead > 0,
+            "playback overtook the decoded columns by {least_lead}"
+        );
+        // It still decodes at twice the playback rate, up to its lookahead.
+        assert!(session.columns_produced > start_column + 1_400);
+
+        // A centered session that switches to rolling does not count its
+        // unlimited decode against the limit either.
+        let mut session = make_test_session();
+        session.target_position_seconds = 30.0;
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Centered);
+        session.columns_produced = 1_406 + 300;
+        assert_eq!(throttle_wait(&mut session, std::time::Instant::now()), None);
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Rolling);
+        let (least_lead, longest_wait) = simulate_rolling_resume(&mut session, 5.0);
+        assert!(longest_wait < 0.05, "waited {longest_wait} s");
+        assert!(
+            least_lead > 0,
+            "playback overtook the decoded columns by {least_lead}"
+        );
+    }
+
+    #[test]
+    fn rolling_sessions_decode_at_the_rate_limit_after_their_window() {
+        let mut session = make_test_session();
+        session.post_reset_unthrottled_columns = 0;
+        session.columns_produced = session.session_start_column;
+        let start = std::time::Instant::now();
+        assert_eq!(throttle_wait(&mut session, start), None);
+        // 94 columns are two seconds of audio, a second at twice realtime.
+        session.columns_produced += 94;
+        let wait = throttle_wait(&mut session, start + Duration::from_millis(250))
+            .expect("ahead of the limit");
+        assert!((wait.as_secs_f64() - 0.752).abs() < 0.01, "{wait:?}");
+        assert_eq!(
+            throttle_wait(&mut session, start + Duration::from_millis(1_010)),
+            None
+        );
+    }
+
     #[test]
     fn worker_publishes_eof_before_parking_and_after_a_backward_seek() {
         for mode in [
@@ -2293,6 +2563,7 @@ mod tests {
                     &AtomicU64::new(1),
                     &AtomicU64::new(0),
                     &AtomicU64::new(0),
+                    &unbounded().0,
                 )
             });
             let wait_for_eof = || {
@@ -2441,6 +2712,7 @@ mod tests {
                         &AtomicU64::new(1),
                         &AtomicU64::new(0),
                         &AtomicU64::new(0),
+                        &unbounded().0,
                     )
                 });
                 let reference = collect_session_columns(&event_rx);
@@ -2488,6 +2760,7 @@ mod tests {
                         &AtomicU64::new(1),
                         &AtomicU64::new(0),
                         &AtomicU64::new(0),
+                        &unbounded().0,
                     )
                 });
                 let actual = collect_session_columns(&event_rx);
@@ -2554,6 +2827,7 @@ mod tests {
     fn explicit_seek_command_forces_seek_even_inside_lookahead() {
         let mut session = SpectrogramSessionState {
             track_token: 1,
+            path: PathBuf::new(),
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
@@ -2579,7 +2853,7 @@ mod tests {
             chunk_start_index: 256,
             target_chunk_columns: 1,
             total_covered_samples: 0,
-            session_start_time: std::time::Instant::now(),
+            throttle_origin: None,
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
@@ -2589,6 +2863,8 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
+            rejected_continuation: None,
+            failure: None,
         };
 
         match handle_single_command(
@@ -2662,6 +2938,7 @@ mod tests {
     fn post_reset_window_tracks_decoded_columns() {
         let mut session = SpectrogramSessionState {
             track_token: 7,
+            path: PathBuf::new(),
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
@@ -2687,7 +2964,7 @@ mod tests {
             chunk_start_index: 400,
             target_chunk_columns: 1,
             total_covered_samples: 0,
-            session_start_time: std::time::Instant::now(),
+            throttle_origin: None,
             post_reset_unthrottled_columns: post_reset_unthrottled_columns(
                 SpectrogramDisplayMode::Rolling,
             ),
@@ -2699,6 +2976,8 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
+            rejected_continuation: None,
+            failure: None,
         };
 
         assert!(post_reset_window_active(&session));
@@ -2713,6 +2992,7 @@ mod tests {
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
         let mut session = SpectrogramSessionState {
             track_token: 7,
+            path: PathBuf::new(),
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
@@ -2738,7 +3018,7 @@ mod tests {
             chunk_start_index: 256,
             target_chunk_columns: 1,
             total_covered_samples: 0,
-            session_start_time: std::time::Instant::now(),
+            throttle_origin: None,
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
@@ -2748,6 +3028,8 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
+            rejected_continuation: None,
+            failure: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -2772,6 +3054,7 @@ mod tests {
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
         let mut session = SpectrogramSessionState {
             track_token: 7,
+            path: PathBuf::new(),
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
@@ -2797,7 +3080,7 @@ mod tests {
             chunk_start_index: 256,
             target_chunk_columns: 64,
             total_covered_samples: 0,
-            session_start_time: std::time::Instant::now(),
+            throttle_origin: None,
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
@@ -2807,6 +3090,8 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
+            rejected_continuation: None,
+            failure: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -2823,6 +3108,7 @@ mod tests {
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
         let mut session = SpectrogramSessionState {
             track_token: 7,
+            path: PathBuf::new(),
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
@@ -2848,7 +3134,7 @@ mod tests {
             chunk_start_index: 256,
             target_chunk_columns: 64,
             total_covered_samples: 0,
-            session_start_time: std::time::Instant::now(),
+            throttle_origin: None,
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: f64::INFINITY,
             lookahead_columns: 512,
@@ -2858,6 +3144,8 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
+            rejected_continuation: None,
+            failure: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -2905,6 +3193,7 @@ mod tests {
     fn make_test_session() -> SpectrogramSessionState {
         SpectrogramSessionState {
             track_token: 1,
+            path: PathBuf::new(),
             gen: 1,
             fft_size: 2_048,
             hop_size: 256,
@@ -2930,7 +3219,7 @@ mod tests {
             chunk_start_index: 256,
             target_chunk_columns: 1,
             total_covered_samples: 0,
-            session_start_time: std::time::Instant::now(),
+            throttle_origin: None,
             post_reset_unthrottled_columns: 0,
             decode_rate_limit: 2.0,
             lookahead_columns: 512,
@@ -2940,6 +3229,8 @@ mod tests {
             #[cfg(feature = "gst")]
             gst_duration_requeried: false,
             pending_continue: None,
+            rejected_continuation: None,
+            failure: None,
         }
     }
 
@@ -3932,15 +4223,18 @@ mod tests {
     }
 
     #[test]
-    fn a_continuation_fallback_does_not_drop_a_session_started_meanwhile() {
+    fn a_continuation_without_a_session_is_rejected_and_starts_nothing() {
         let path = write_tone_fixture("fallback", 1, 8_000);
-        // The continuation falls back to a new session from the worker
-        // (its file cannot be opened) while the session has ended and the
-        // worker is idle, or while it is parked at EOF.
+        let missing = path.with_extension("missing.wav");
+        // The continuation's file cannot be opened, and it arrives while the
+        // session has ended and the worker is idle, or while it is parked
+        // at EOF.  The analysis thread starts any session; the worker
+        // starts none of its own.
         for ended_first in [true, false] {
             let generation = Arc::new(AtomicU64::new(1));
             let (commands, command_rx) = unbounded();
             let (events, event_rx) = unbounded();
+            let (reports, report_rx) = unbounded();
             let worker_generation = Arc::clone(&generation);
             let worker = std::thread::spawn(move || {
                 spectrogram_worker_loop(
@@ -3949,6 +4243,7 @@ mod tests {
                     &worker_generation,
                     &AtomicU64::new(0),
                     &AtomicU64::new(0),
+                    &reports,
                 );
             });
             commands.send(session_on(&path, 1, 1)).unwrap();
@@ -3966,7 +4261,7 @@ mod tests {
             }
             commands
                 .send(SpectrogramWorkerCommand::ContinueWithFile {
-                    path: path.with_extension("missing.wav"),
+                    path: missing.clone(),
                     track_token: 2,
                 })
                 .unwrap();
@@ -3974,6 +4269,7 @@ mod tests {
 
             let seek_session = loop {
                 let chunk = next_chunk(&event_rx);
+                assert_ne!(chunk.track_token, 2, "ended_first={ended_first}");
                 if chunk.track_token == 3 {
                     break chunk;
                 }
@@ -3983,44 +4279,127 @@ mod tests {
             assert_eq!(generation.load(Ordering::Relaxed), 2);
             drop(commands);
             worker.join().expect("worker");
+            let rejected: Vec<_> = report_rx
+                .try_iter()
+                .filter(|report| matches!(report, SessionReport::ContinuationRejected { .. }))
+                .collect();
+            assert!(
+                matches!(rejected.as_slice(), [SessionReport::ContinuationRejected {
+                    path, format: None, ..
+                }] if *path == missing),
+                "ended_first={ended_first}: {rejected:?}"
+            );
+            assert!(
+                event_rx.try_iter().all(|chunk| !matches!(chunk,
+                    AnalysisEvent::PrecomputedSpectrogramChunk(chunk) if chunk.track_token == 2)),
+                "ended_first={ended_first}"
+            );
         }
         std::fs::remove_file(path).expect("remove fixture");
     }
 
     #[test]
-    fn a_continuation_fallback_continues_the_session_generation() {
+    fn a_continuation_that_does_not_fit_is_reported_with_its_format() {
         let path = write_tone_fixture("continuation", 1, 8_000);
-        let generation = AtomicU64::new(4);
-        let (commands, command_rx) = unbounded();
-        let (events, _event_rx) = unbounded();
-        commands
-            .send(SpectrogramWorkerCommand::ContinueWithFile {
-                path: path.with_extension("missing.wav"),
-                track_token: 2,
-            })
-            .unwrap();
-        let mut session = session_on(&path, 1, 4);
-        let fallback = run_spectrogram_session(
-            &mut session,
-            &command_rx,
-            &events,
-            &generation,
-            &AtomicU64::new(0),
-            &AtomicU64::new(0),
-        );
-        assert!(
-            matches!(
-                fallback,
-                Some(SpectrogramWorkerCommand::NewTrack {
-                    track_token: 2,
-                    generation: 4,
-                    ..
-                })
+        let faster = write_tone_fixture("continuation-faster", 1, 16_000);
+        let missing = path.with_extension("missing.wav");
+        let cases = [
+            (missing.clone(), None),
+            (
+                faster.clone(),
+                Some(TrackFormat::Known {
+                    sample_rate: 16_000,
+                    channels: 1,
+                }),
             ),
-            "{fallback:?}"
-        );
-        assert_eq!(generation.load(Ordering::Relaxed), 4);
+        ];
+        for (next, format) in cases {
+            // After the track switch, the session ends: positions on the
+            // continued timeline do not fit a session of the new file.
+            let generation = AtomicU64::new(4);
+            let (commands, command_rx) = unbounded();
+            let (events, event_rx) = unbounded();
+            let (reports, report_rx) = unbounded();
+            commands
+                .send(SpectrogramWorkerCommand::ContinueWithFile {
+                    path: next.clone(),
+                    track_token: 2,
+                })
+                .unwrap();
+            let mut session = session_on(&path, 1, 4);
+            let ended = run_spectrogram_session(
+                &mut session,
+                &command_rx,
+                &events,
+                &generation,
+                &AtomicU64::new(0),
+                &AtomicU64::new(0),
+                &reports,
+            );
+            assert!(ended.is_none(), "{ended:?}");
+            assert_eq!(generation.load(Ordering::Relaxed), 4);
+            let reports: Vec<_> = report_rx.try_iter().collect();
+            assert!(
+                matches!(reports.as_slice(), [
+                    SessionReport::Opened { generation: 4, track_token: 1, .. },
+                    SessionReport::ContinuationRejected { generation: 4, path: rejected, format: found, .. },
+                ] if *rejected == next && *found == format),
+                "{reports:?}"
+            );
+            assert!(event_rx.try_iter().all(|chunk| !matches!(chunk,
+                AnalysisEvent::PrecomputedSpectrogramChunk(chunk) if chunk.track_token == 2)));
+
+            // Before the switch, the outgoing track stays parked at its end
+            // for seeks; a switch to the rejected file then ends it.
+            let (commands, command_rx) = unbounded();
+            let (events, event_rx) = unbounded();
+            let (reports, report_rx) = unbounded();
+            commands
+                .send(SpectrogramWorkerCommand::ContinueWithFile {
+                    path: next.clone(),
+                    track_token: 1,
+                })
+                .unwrap();
+            let mut session = session_on(&path, 1, 4);
+            let session = std::thread::spawn(move || {
+                run_spectrogram_session(
+                    &mut session,
+                    &command_rx,
+                    &events,
+                    &AtomicU64::new(4),
+                    &AtomicU64::new(0),
+                    &AtomicU64::new(0),
+                    &reports,
+                )
+            });
+            loop {
+                match report_rx.recv_timeout(Duration::from_secs(10)) {
+                    Ok(SessionReport::ContinuationRejected { path, .. }) if path == next => break,
+                    Ok(_) => {}
+                    Err(error) => panic!("no rejection: {error}"),
+                }
+            }
+            commands
+                .send(SpectrogramWorkerCommand::Seek {
+                    position_seconds: 0.5,
+                })
+                .unwrap();
+            loop {
+                let chunk = next_chunk(&event_rx);
+                if chunk.buffer_reset {
+                    assert_eq!(chunk.track_token, 1);
+                    break;
+                }
+            }
+            commands
+                .send(SpectrogramWorkerCommand::UpdateTrackToken { track_token: 2 })
+                .unwrap();
+            assert!(session.join().expect("session").is_none());
+            assert!(event_rx.try_iter().all(|chunk| !matches!(chunk,
+                AnalysisEvent::PrecomputedSpectrogramChunk(chunk) if chunk.track_token == 2)));
+        }
         std::fs::remove_file(path).expect("remove fixture");
+        std::fs::remove_file(faster).expect("remove fixture");
     }
 
     #[test]
@@ -4038,6 +4417,7 @@ mod tests {
                 &worker_generation,
                 &AtomicU64::new(0),
                 &AtomicU64::new(0),
+                &unbounded().0,
             );
         });
         commands.send(session_on(&path, 7, 1)).unwrap();

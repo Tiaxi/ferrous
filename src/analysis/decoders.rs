@@ -156,6 +156,10 @@ pub(super) enum AudioFrameSource {
         track_id: u32,
         sample_buf: Option<SampleBuffer<f32>>,
         seek_frame: u64,
+        /// The file and format to read with `GStreamer` if Symphonia fails
+        /// or ends before decoding any audio; cleared once it decodes some.
+        #[cfg(feature = "gst")]
+        fallback: Option<GstFallback>,
     },
     #[cfg(feature = "gst")]
     Gst {
@@ -169,6 +173,14 @@ pub(super) enum AudioFrameSource {
     },
 }
 
+/// What a Symphonia source needs to read its file with `GStreamer` instead.
+#[cfg(feature = "gst")]
+pub(super) struct GstFallback {
+    path: std::path::PathBuf,
+    sample_rate: u64,
+    channels: usize,
+}
+
 impl AudioFrameSource {
     /// Read native samples with their absolute source position. Seek preroll is
     /// decoded but excluded, so callers never have to guess where a seek landed.
@@ -180,10 +192,24 @@ impl AudioFrameSource {
                 track_id,
                 sample_buf,
                 seek_frame,
-            } => (
-                read_symphonia_frames(format, decoder, *track_id, sample_buf)?,
-                *seek_frame,
-            ),
+                #[cfg(feature = "gst")]
+                fallback,
+            } => {
+                let read = read_symphonia_frames(format, decoder, *track_id, sample_buf);
+                #[cfg(feature = "gst")]
+                if matches!(read, Ok(AudioRead::Frames(_))) {
+                    *fallback = None;
+                } else if matches!(read, Err(_) | Ok(AudioRead::Eof)) {
+                    if let Some(source) = fallback
+                        .take()
+                        .and_then(|fallback| fallback.open(*seek_frame))
+                    {
+                        *self = source;
+                        return self.next_frames();
+                    }
+                }
+                (read?, *seek_frame)
+            }
             #[cfg(feature = "gst")]
             Self::Gst {
                 pipeline,
@@ -383,6 +409,12 @@ pub(super) fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usi
                 track_id: sf.track_id,
                 sample_buf: None,
                 seek_frame: 0,
+                #[cfg(feature = "gst")]
+                fallback: Some(GstFallback {
+                    path: path.to_path_buf(),
+                    sample_rate: sf.native_sample_rate,
+                    channels: sf.native_channels,
+                }),
             },
             sf.native_sample_rate,
             sf.native_channels,
@@ -398,6 +430,28 @@ pub(super) fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usi
     {
         profile_eprintln!("[spect-worker] GStreamer not available (gst feature disabled)");
         None
+    }
+}
+
+#[cfg(feature = "gst")]
+impl GstFallback {
+    /// The file read with `GStreamer` from `seek_frame`, if it has the format
+    /// Symphonia reported, which the caller has sized its work for.
+    fn open(self, seek_frame: u64) -> Option<AudioFrameSource> {
+        profile_eprintln!(
+            "[analysis] Symphonia decoded nothing of {}, trying GStreamer",
+            self.path.display()
+        );
+        let (mut source, rate, channels, _) = open_gstreamer_file(&self.path)?;
+        if rate != self.sample_rate || channels != self.channels {
+            return None;
+        }
+        if seek_frame > 0 {
+            source
+                .seek_to_frame(seek_frame, u32::try_from(rate).ok()?)
+                .ok()?;
+        }
+        Some(source)
     }
 }
 
