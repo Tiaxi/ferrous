@@ -20,7 +20,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::worker_thread::JoinableThread;
 
-pub(crate) use file_id::{file_id_columns, file_id_from_columns, identity_contradicts};
+pub(crate) use file_id::{file_id_columns, file_id_from_columns, identity_changed};
 #[cfg(test)]
 pub(crate) use publish::LibraryMirror;
 pub(crate) use publish::{AppliedChanges, LibraryChanges};

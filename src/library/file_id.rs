@@ -12,13 +12,38 @@
 //!
 //! Some file systems do not keep a file's identity: FUSE file systems
 //! without stable inode numbers, FAT, and the device numbers of network and
-//! FUSE mounts, which can change when they are mounted again. So an
-//! identity only breaks a tie (see [`identity_contradicts`]): it is
-//! compared when another file has the same size and time, the only case
-//! where size and time cannot tell the files apart. It can only turn a
-//! match into a miss, never make a row match another file, and on such a
-//! file system it costs a miss only for files that share their size and
-//! time with another.
+//! FUSE mounts, which can change when they are mounted again. Every file
+//! there takes another identity at once, which no single file can tell from
+//! its own replacement. So a changed identity means another file only with
+//! more evidence:
+//!
+//! - **A tie.** Another file the library or the waveform cache knows has
+//!   the same size and time, so only identities can tell the two apart, as
+//!   in a swap. The file is read or decoded again.
+//! - **A scan: the other files of the device kept theirs.** A scan counts,
+//!   by stored device, the unchanged files that kept their identity and
+//!   those that did not. Where most kept theirs, the identities are stable,
+//!   and a changed one means another file, such as one swapped in from
+//!   outside the library, which shares nothing with any known file. Where
+//!   most did not, the file system did not keep them: a full scan stores
+//!   the new ones without reading the files, and a scan of a few changed
+//!   paths, which cannot tell, leaves the rows to the next full scan.
+//! - **A saved waveform: the library's word.** A waveform whose identity
+//!   changed without a tie is used only once the library row at its path
+//!   has the file's current identity, which a scan stores without reading
+//!   the file only where identities are not kept. A scan that reads a file
+//!   again because it is another one deletes its saved waveform.
+//!
+//! A row with no identity yet, as from before identities were stored,
+//! takes the file's identity the next time it matches by size and time.
+//!
+//! What this cannot tell: on a device whose other unchanged files did not
+//! keep their identities either, or with no other unchanged file, a file
+//! replaced by another of the same size and time that no known file ties
+//! with is taken for the same file, as size and time alone took it before.
+//! And a saved waveform of a file outside the library whose identity
+//! changed is decoded again, as nothing vouches for it: once each time a
+//! file system that does not keep identities is mounted again.
 
 use crate::file_identity::FileId;
 
@@ -40,26 +65,12 @@ pub(crate) fn file_id_from_columns(device: Option<i64>, inode: Option<i64>) -> O
     ))
 }
 
-/// Whether `stored`, the identity a row has for the file at its path, tells
-/// that the file there now, of identity `current`, is another file, when
-/// their size and modification time are the same.
-///
-/// That is so only when both are known, they differ, and `tied` tells that
-/// another file has the same size and time. Without such a file, size and
-/// time already tell any other file apart, and a different identity is
-/// taken for one the file system did not keep (see the module comment): the
-/// row matches, and takes the current identity. An unknown identity, such
-/// as that of a row from before identities were stored, contradicts
-/// nothing.
-pub(crate) fn identity_contradicts(
-    stored: Option<FileId>,
-    current: Option<FileId>,
-    tied: impl FnOnce() -> bool,
-) -> bool {
-    match (stored, current) {
-        (Some(stored), Some(current)) if stored != current => tied(),
-        _ => false,
-    }
+/// Whether `stored`, the identity a row has for the file at its path,
+/// differs from `current`, that of the file there now. An unknown identity
+/// differs from none. What a change means is for the caller to tell; see
+/// the module comment.
+pub(crate) fn identity_changed(stored: Option<FileId>, current: Option<FileId>) -> bool {
+    matches!((stored, current), (Some(stored), Some(current)) if stored != current)
 }
 
 #[cfg(test)]
@@ -83,21 +94,15 @@ mod tests {
     }
 
     #[test]
-    fn an_identity_breaks_only_a_tie() {
+    fn only_two_known_identities_can_differ() {
         let (a, b) = (
             Some(FileId::from_numbers(1, 10)),
             Some(FileId::from_numbers(1, 11)),
         );
-        assert!(identity_contradicts(a, b, || true));
-        assert!(
-            !identity_contradicts(a, b, || false),
-            "not kept by the file system"
-        );
-        assert!(!identity_contradicts(a, a, || panic!(
-            "not asked when equal"
-        )));
-        assert!(!identity_contradicts(None, b, || panic!("unknown")));
-        assert!(!identity_contradicts(a, None, || panic!("unknown")));
+        assert!(identity_changed(a, b));
+        assert!(!identity_changed(a, a));
+        assert!(!identity_changed(None, b));
+        assert!(!identity_changed(a, None));
     }
 
     #[test]

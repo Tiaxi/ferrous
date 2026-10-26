@@ -21,6 +21,7 @@ mod waveform_window;
 
 pub(crate) use waveform_window::{decode_waveform_window_cancellable, WaveformWindow};
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -48,7 +49,8 @@ use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptio
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use track_io::{
-    format_from_name, spawn_track_io, FormatCache, TrackFormat, TrackIoReply, TrackIoRequest,
+    format_from_name, spawn_track_io, stamp_of, FormatCache, TrackFormat, TrackIoReply,
+    TrackIoRequest,
 };
 
 use crate::playback::{remap_path, PathRenames};
@@ -69,6 +71,21 @@ macro_rules! profile_eprintln {
 #[cfg(not(feature = "profiling-logs"))]
 macro_rules! profile_eprintln {
     ($($arg:tt)*) => {};
+}
+
+/// An update of the overview waveform decode of the active track.
+#[derive(Debug, Clone)]
+pub struct WaveformUpdate {
+    peaks: Vec<f32>,
+    coverage_seconds: f32,
+    /// Whether the decode reached the end of the file.
+    complete: bool,
+    /// Whether this is the decode's last update.
+    done: bool,
+    /// The stamp of the file the decode read, which may be another than the
+    /// one at the path when the track was loaded; `None` if not known, and
+    /// then the waveform is not saved.
+    source: Option<WaveformSourceStamp>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,10 +113,7 @@ pub enum AnalysisCommand {
     SeekPosition(f64),
     WaveformProgress {
         track_token: u64,
-        peaks: Vec<f32>,
-        coverage_seconds: f32,
-        complete: bool,
-        done: bool,
+        update: WaveformUpdate,
     },
     /// Prepare staged spectrogram data for a likely gapless successor.
     /// Sent from about-to-finish (~2 s before track end, same-format only).
@@ -311,8 +325,6 @@ struct AnalysisRuntimeState {
     spectrogram_active: bool,
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
-    /// Read by the file helper after a track change; `None` until then.
-    active_track_stamp: Option<WaveformSourceStamp>,
     /// Display mode (Rolling/Centered) — forwarded to decode worker for rate throttle.
     display_mode: SpectrogramDisplayMode,
     /// Does file and database work, so this thread never waits on it.
@@ -616,7 +628,6 @@ impl AnalysisRuntimeState {
             spectrogram_active: true,
             active_track_token: 0,
             active_track_path: None,
-            active_track_stamp: None,
             display_mode: SpectrogramDisplayMode::Rolling,
             track_io,
             #[cfg(test)]
@@ -800,18 +811,8 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::WaveformProgress {
                 track_token,
-                peaks,
-                coverage_seconds,
-                complete,
-                done,
-            } => self.handle_waveform_progress(
-                track_token,
-                peaks,
-                coverage_seconds,
-                complete,
-                done,
-                ctx.event_tx,
-            ),
+                update,
+            } => self.handle_waveform_progress(track_token, update, ctx.event_tx),
             AnalysisCommand::PrepareGaplessContinuation { path } => {
                 self.handle_prepare_gapless_continuation(path, ctx);
             }
@@ -1227,7 +1228,6 @@ impl AnalysisRuntimeState {
         self.active_track_token = track_token;
         ctx.waveform_decode_active_token
             .store(track_token, Ordering::Relaxed);
-        self.active_track_stamp = None;
         self.active_track_path = Some(path.clone());
         // Invalidate the duration published by the outgoing track's worker
         // session.  The new session's worker re-publishes after its file
@@ -1403,7 +1403,6 @@ impl AnalysisRuntimeState {
             return;
         }
         self.pending_track_load = None;
-        self.active_track_stamp = stamp;
         // The path may have been renamed since the helper read it.
         let Some(path) = self.active_track_path.clone() else {
             return;
@@ -1951,12 +1950,16 @@ impl AnalysisRuntimeState {
     fn handle_waveform_progress(
         &mut self,
         track_token: u64,
-        peaks: Vec<f32>,
-        coverage_seconds: f32,
-        complete: bool,
-        done: bool,
+        update: WaveformUpdate,
         event_tx: &dyn AnalysisEventOutput,
     ) {
+        let WaveformUpdate {
+            peaks,
+            coverage_seconds,
+            complete,
+            done,
+            source,
+        } = update;
         if track_token != self.active_track_token || peaks.is_empty() {
             return;
         }
@@ -1967,7 +1970,7 @@ impl AnalysisRuntimeState {
         // A decode stopped by an error shows what it covered, and the next
         // play decodes the file again.
         if done && complete {
-            self.save_active_waveform();
+            self.save_active_waveform(source);
         }
         self.waveform_dirty = true;
         if done || self.snapshot.waveform_peaks.len() >= 24 {
@@ -1975,13 +1978,16 @@ impl AnalysisRuntimeState {
         }
     }
 
-    fn save_active_waveform(&self) {
+    /// Saves the waveform decoded from the file of stamp `source`: the file
+    /// at the track's path may have been another when the track was loaded,
+    /// as when a swap came between.
+    fn save_active_waveform(&self, source: Option<WaveformSourceStamp>) {
         let Some(path) = self.active_track_path.clone() else {
             return;
         };
         let _ = self.track_io.send(TrackIoRequest::SaveWaveform {
             path,
-            stamp: self.active_track_stamp,
+            stamp: source,
             peaks: self.snapshot.waveform_peaks.clone(),
             coverage_seconds: self.snapshot.waveform_coverage_seconds,
         });
@@ -2020,19 +2026,24 @@ fn spawn_waveform_decode_worker(
                 closed.load(Ordering::Relaxed)
                     || waveform_decode_active_token.load(Ordering::Relaxed) != track_token
             };
+            let source = Cell::new(None);
             let _ = decode_waveform_peaks_stream(
                 &job.path,
                 1024,
+                &source,
                 |peaks, coverage_seconds, progress| {
                     if superseded() {
                         return false;
                     }
                     let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
                         track_token,
-                        peaks,
-                        coverage_seconds,
-                        complete: progress == OverviewProgress::Complete,
-                        done: progress != OverviewProgress::Partial,
+                        update: WaveformUpdate {
+                            peaks,
+                            coverage_seconds,
+                            complete: progress == OverviewProgress::Complete,
+                            done: progress != OverviewProgress::Partial,
+                            source: source.get(),
+                        },
                     });
                     true
                 },
@@ -2204,9 +2215,12 @@ fn emit_snapshot(
     *last_emit = std::time::Instant::now();
 }
 
+/// Decode the overview of the file at `path`. `source` tells, for each
+/// update, the stamp of the file the decode reads, or `None` if not known.
 fn decode_waveform_peaks_stream<F, C>(
     path: &Path,
     max_points: usize,
+    source: &Cell<Option<WaveformSourceStamp>>,
     mut on_update: F,
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
@@ -2214,14 +2228,23 @@ where
     F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
     C: FnMut() -> bool,
 {
+    source.set(None);
     #[cfg(feature = "gst")]
     if is_raw_surround_file(path) {
-        return decode_waveform_peaks_stream_gst(path, max_points, on_update, is_cancelled);
+        return decode_waveform_peaks_stream_gst_checked(
+            path,
+            max_points,
+            source,
+            on_update,
+            is_cancelled,
+        );
     }
 
     let unreadable = match File::open(path)
         .map_err(anyhow::Error::from)
         .and_then(|file| {
+            // The file this handle reads, whichever is at the path later.
+            source.set(file.metadata().ok().as_ref().and_then(stamp_of));
             decode_waveform_peaks_symphonia(
                 Box::new(file),
                 path.extension().and_then(|e| e.to_str()),
@@ -2242,10 +2265,42 @@ where
         if is_cancelled() {
             return Ok(());
         }
-        decode_waveform_peaks_stream_gst(path, max_points, on_update, is_cancelled)
+        decode_waveform_peaks_stream_gst_checked(path, max_points, source, on_update, is_cancelled)
     }
     #[cfg(not(feature = "gst"))]
     Err(unreadable)
+}
+
+/// Decode the overview with the `gst` pipeline, whose `filesrc` opens the
+/// file by its path after this has read its stamp. The file at the path when the
+/// decode ends is the one it read only if it still has that stamp; if not,
+/// as when another file was swapped in, `source` is `None` for the last
+/// update.
+#[cfg(feature = "gst")]
+fn decode_waveform_peaks_stream_gst_checked<F, C>(
+    path: &Path,
+    max_points: usize,
+    source: &Cell<Option<WaveformSourceStamp>>,
+    mut on_update: F,
+    is_cancelled: C,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
+    C: FnMut() -> bool,
+{
+    let before = track_io::source_stamp(path);
+    source.set(None);
+    decode_waveform_peaks_stream_gst(
+        path,
+        max_points,
+        |peaks, coverage_seconds, progress| {
+            if progress != OverviewProgress::Partial {
+                source.set(before.filter(|before| track_io::source_stamp(path) == Some(*before)));
+            }
+            on_update(peaks, coverage_seconds, progress)
+        },
+        is_cancelled,
+    )
 }
 
 /// Decode the overview with Symphonia. Returns whether it decoded audio
@@ -2398,6 +2453,7 @@ mod tests {
                 decode_waveform_peaks_stream(
                     &path,
                     1024,
+                    &Cell::new(None),
                     |peaks, _, progress| {
                         if progress == OverviewProgress::Complete {
                             maximum = peaks.iter().copied().fold(0.0_f32, f32::max);
@@ -2468,6 +2524,7 @@ mod tests {
         let _ = decode_waveform_peaks_stream(
             path,
             1024,
+            &Cell::new(None),
             |peaks, _, progress| {
                 if progress == OverviewProgress::Complete {
                     overview = Some(peaks);
@@ -2864,9 +2921,9 @@ mod tests {
         let mut state = AnalysisRuntimeState::new();
         state.active_track_token = 2;
         let (tx, rx) = unbounded();
-        state.handle_waveform_progress(1, vec![0.8; 12], 1.0, true, true, &tx);
+        state.handle_waveform_progress(1, done(vec![0.8; 12], 1.0, true), &tx);
         assert!(rx.try_recv().is_err());
-        state.handle_waveform_progress(2, vec![0.5; 12], 1.0, true, true, &tx);
+        state.handle_waveform_progress(2, done(vec![0.5; 12], 1.0, true), &tx);
         let AnalysisEvent::Snapshot(snapshot) = rx.try_recv().expect("completion without PCM wake")
         else {
             panic!("expected snapshot");
@@ -5455,9 +5512,9 @@ mod tests {
             };
             // A reply for a track that is no longer current changes nothing.
             state.handle_track_io_reply(loaded(3), &ctx);
-            assert_eq!(state.active_track_stamp, None);
+            assert_eq!(state.pending_track_load, Some(4));
             state.handle_track_io_reply(loaded(4), &ctx);
-            assert_eq!(state.active_track_stamp, Some(stamp));
+            assert_eq!(state.pending_track_load, None);
             assert_eq!(state.active_session_effective_rate, 44_100);
             if saved {
                 assert!(channels.waveform_job_rx.try_recv().is_err());
@@ -5495,7 +5552,7 @@ mod tests {
         channels.event_rx.try_iter().for_each(drop);
 
         // The decode stopped at an error 30 s into the file.
-        state.handle_waveform_progress(4, vec![0.5; 12], 30.0, false, true, ctx.event_tx);
+        state.handle_waveform_progress(4, done(vec![0.5; 12], 30.0, false), ctx.event_tx);
 
         let requests: Vec<_> = state.track_io_requests.try_iter().collect();
         assert!(requests.is_empty(), "saved: {requests:?}");
@@ -5505,13 +5562,148 @@ mod tests {
                     && (snapshot.waveform_coverage_seconds - 30.0).abs() < f32::EPSILON)));
 
         // A decode that reaches the end of the file is saved, with what it
-        // covered.
-        state.handle_waveform_progress(4, vec![0.25; 12], 180.0, true, true, ctx.event_tx);
+        // covered, and the stamp of the file it read.
+        state.handle_waveform_progress(4, done(vec![0.25; 12], 180.0, true), ctx.event_tx);
         assert!(matches!(
             only_track_io_request(&state),
-            TrackIoRequest::SaveWaveform { path: saved, peaks, coverage_seconds, .. }
-                if saved == path && peaks == [0.25; 12] && (coverage_seconds - 180.0).abs() < f32::EPSILON
+            TrackIoRequest::SaveWaveform { path: saved, peaks, coverage_seconds, stamp }
+                if saved == path && peaks == [0.25; 12]
+                    && (coverage_seconds - 180.0).abs() < f32::EPSILON
+                    && stamp == Some(decoded_stamp())
         ));
+    }
+
+    fn decoded_stamp() -> WaveformSourceStamp {
+        WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+            file_id: Some(crate::file_identity::FileId::from_numbers(1, 2)),
+        }
+    }
+
+    /// The last update of a decode of the file of [`decoded_stamp`].
+    fn done(peaks: Vec<f32>, coverage_seconds: f32, complete: bool) -> WaveformUpdate {
+        WaveformUpdate {
+            peaks,
+            coverage_seconds,
+            complete,
+            done: true,
+            source: Some(decoded_stamp()),
+        }
+    }
+
+    /// Two files of the same size and time, `a` and `b`, of decodable audio,
+    /// each with `extension`; and the folder they are in.
+    fn same_size_and_time(
+        name: &str,
+        audio: &[u8],
+        extension: &str,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let folder = crate::paths::test_root().join(format!("analysis-{name}"));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("folder");
+        let (a, b) = (
+            folder.join(format!("a.{extension}")),
+            folder.join(format!("b.{extension}")),
+        );
+        let time = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for path in [&a, &b] {
+            std::fs::write(path, audio).expect("audio");
+            File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(time))
+                .expect("modification time");
+        }
+        (a, b, folder)
+    }
+
+    fn swap(a: &Path, b: &Path) {
+        let aside = a.with_extension("aside");
+        std::fs::rename(a, &aside).expect("aside");
+        std::fs::rename(b, a).expect("b to a");
+        std::fs::rename(&aside, b).expect("a to b");
+    }
+
+    /// The stamps the overview decode of `path` reports with its updates,
+    /// with the files at `a` and `b` swapped after `before` it opens them,
+    /// as by another program; and whether it completed.
+    fn decoded_sources(
+        path: &Path,
+        b: &Path,
+        before_open: bool,
+    ) -> (Vec<Option<WaveformSourceStamp>>, bool) {
+        let source = Cell::new(None);
+        let mut sources = Vec::new();
+        let mut complete = false;
+        let mut swapped = false;
+        if before_open {
+            swap(path, b);
+            swapped = true;
+        }
+        decode_waveform_peaks_stream(
+            path,
+            64,
+            &source,
+            |_, _, progress| {
+                sources.push(source.get());
+                complete |= progress == OverviewProgress::Complete;
+                true
+            },
+            || {
+                if !swapped {
+                    swap(path, b);
+                    swapped = true;
+                }
+                false
+            },
+        )
+        .expect("decode");
+        (sources, complete)
+    }
+
+    #[test]
+    fn a_waveform_is_saved_with_the_stamp_of_the_file_the_decode_opened() {
+        let (a, b, folder) = same_size_and_time(
+            "decode-opened",
+            include_bytes!("fixtures/seek-tone.mp3"),
+            "mp3",
+        );
+        // The track was loaded when the file first at `a` was there; the
+        // decode opens the one swapped in since.
+        let loaded = track_io::source_stamp(&a).expect("stamp");
+        let (sources, complete) = decoded_sources(&a, &b, true);
+        assert!(complete);
+        let opened = track_io::source_stamp(&a).expect("stamp");
+        assert_ne!(opened, loaded);
+        assert!(sources.iter().all(|source| *source == Some(opened)));
+
+        // Swapped once the decode has the file open, it reads on, and tells
+        // the stamp of the file it opened.
+        let (sources, complete) = decoded_sources(&a, &b, false);
+        assert!(complete);
+        assert!(sources.iter().all(|source| *source == Some(opened)));
+        std::fs::remove_dir_all(folder).expect("cleanup");
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_waveform_gstreamer_decoded_from_a_file_swapped_in_after_its_stat_is_not_saved() {
+        let (a, b, folder) =
+            same_size_and_time("decode-gst", include_bytes!("fixtures/raw-tone.dts"), "dts");
+        // Swapped before the decode reads the stamp: the file it opens.
+        let (sources, complete) = decoded_sources(&a, &b, true);
+        assert!(complete);
+        assert_eq!(sources.last(), Some(&track_io::source_stamp(&a)));
+        assert!(sources.last().is_some_and(Option::is_some));
+
+        // Swapped after the stamp is read, before `filesrc` opens the file
+        // by its path: the stamp is not that of the file decoded.
+        let (sources, complete) = decoded_sources(&a, &b, false);
+        assert!(complete);
+        assert_eq!(sources.last(), Some(&None));
+        std::fs::remove_dir_all(folder).expect("cleanup");
     }
 
     /// A file source that fails to read past `limit` bytes, as a file on a

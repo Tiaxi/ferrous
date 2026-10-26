@@ -32,7 +32,7 @@ use super::schema::{
     stamp_from_column, stamp_to_column, u128_to_i64, u64_to_i64, usize_to_f32,
 };
 use super::{
-    file_id_columns, file_id_from_columns, identity_contradicts, CoverReadAt, IndexedTrack,
+    file_id_columns, file_id_from_columns, identity_changed, CoverReadAt, IndexedTrack,
     LibraryEvent, LibraryScanProgress, LibrarySnapshot, LibraryTrack, TrackFileFingerprint,
 };
 
@@ -1225,8 +1225,8 @@ impl RowState {
 
 /// Whether a library row other than that of `path` has a file of the same
 /// size and modification time, so that only identities tell the files
-/// apart; see [`identity_contradicts`]. A failed query counts as one, which
-/// only makes the scan read the file again.
+/// apart; see `super::file_id`. A failed query counts as one, which only
+/// makes the scan read the file again.
 fn shares_size_and_time(conn: &Connection, path: &str, size_bytes: i64, mtime_ns: i64) -> bool {
     conn.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM tracks \
@@ -2756,6 +2756,7 @@ struct TrackWriter<'conn> {
     state: rusqlite::CachedStatement<'conn>,
     cover: rusqlite::CachedStatement<'conn>,
     identity: rusqlite::CachedStatement<'conn>,
+    forget_waveform: rusqlite::CachedStatement<'conn>,
 }
 
 impl<'conn> TrackWriter<'conn> {
@@ -2781,6 +2782,12 @@ impl<'conn> TrackWriter<'conn> {
                      WHERE path = ?1 AND mtime_ns = ?4 AND size_bytes = ?5",
                 )
                 .map_err(|e| format!("failed to prepare track identity statement: {e}"))?,
+            forget_waveform: tx
+                .prepare_cached(
+                    "DELETE FROM waveform_cache WHERE path = ?1 AND file_device IS NOT NULL \
+                     AND (file_device <> ?2 OR file_inode <> ?3)",
+                )
+                .map_err(|e| format!("failed to prepare waveform statement: {e}"))?,
         })
     }
 
@@ -2901,6 +2908,20 @@ fn apply_metadata_result(
             file_inode,
         ])
         .map_err(|e| format!("failed to index '{}': {e}", task.path.display()))?;
+    // A saved waveform of a file of another identity is another file's; the
+    // analysis worker uses one whose identity alone changed once the row
+    // has the file's identity (see `super::file_id`), as it has now.
+    if file_device.is_some() {
+        writer
+            .forget_waveform
+            .execute(params![task.path_string.as_str(), file_device, file_inode])
+            .map_err(|e| {
+                format!(
+                    "failed to forget the waveform of '{}': {e}",
+                    task.path.display()
+                )
+            })?;
+    }
     Ok(Some((task, indexed)))
 }
 
@@ -2962,14 +2983,13 @@ fn apply_cover_update(
 }
 
 /// Writes the identity of an unchanged file to its row, which had none or
-/// one the file system did not keep (see [`identity_contradicts`]), unless
+/// one the file system did not keep (see `super::file_id`), unless
 /// the file's size or time changed since. The file is not read, nor is
 /// anything published: the row shows what it showed.
 ///
 /// A file that another one with the same size and time replaced
 /// meanwhile, as in a swap, gives its row a wrong identity, which only
-/// makes the next scan read the file again: the other file's row has the
-/// same size and time.
+/// makes the next scan read the file again.
 fn apply_identity_update(writer: &mut TrackWriter<'_>, task: &MetadataTask) -> Result<(), String> {
     let (file_device, file_inode) = file_id_columns(task.file_id);
     writer
@@ -3489,9 +3509,145 @@ struct RootScan<'a> {
     processed: usize,
     progress: ScanProgressReporter,
     read_failures: ReadFailures,
+    identities: IdentityCounts,
+}
+
+/// How a walked file's identity compares with its row's, for a file of the
+/// row's size and time; see `super::file_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityCheck {
+    /// The same, or not known; or the size or time changed, which tells.
+    Kept,
+    /// Changed, and another known file has the same size and time.
+    Tied,
+    /// Changed, and only the other files of the device can tell what that
+    /// means.
+    Unconfirmed,
+}
+
+/// By stored device, how many unchanged files a scan found that kept their
+/// identity, and how many did not.
+#[derive(Default)]
+struct IdentityCounts(HashMap<u64, (usize, usize)>);
+
+impl IdentityCounts {
+    fn note(&mut self, stored: FileId, kept: bool) {
+        let (kept_count, changed_count) = self.0.entry(stored.numbers().0).or_default();
+        if kept {
+            *kept_count += 1;
+        } else {
+            *changed_count += 1;
+        }
+    }
+
+    /// Whether most unchanged files of the device the row of `existing`
+    /// was stored on kept their identity, so that the device keeps them.
+    fn kept_on_device_of(&self, existing: &ExistingTrackScanState) -> bool {
+        existing.row.file_id.is_some_and(|stored| {
+            self.0
+                .get(&stored.numbers().0)
+                .is_some_and(|(kept, changed)| kept > changed)
+        })
+    }
 }
 
 impl RootScan<'_> {
+    /// Compares the identity of the file of `task` with its row's, counting
+    /// it for its device if the file's size and time are unchanged.
+    fn check_identity(
+        &mut self,
+        task: &MetadataTask,
+        existing: &ExistingTrackScanState,
+    ) -> IdentityCheck {
+        let (Some(stored), Some(_)) = (existing.row.file_id, task.file_id) else {
+            return IdentityCheck::Kept;
+        };
+        if existing.row.mtime_ns != task.mtime_ns || existing.row.size_bytes != task.size_bytes {
+            return IdentityCheck::Kept;
+        }
+        let changed = identity_changed(Some(stored), task.file_id);
+        self.identities.note(stored, !changed);
+        if !changed {
+            IdentityCheck::Kept
+        } else if shares_size_and_time(self.conn, &task.path_string, task.size_bytes, task.mtime_ns)
+        {
+            IdentityCheck::Tied
+        } else {
+            IdentityCheck::Unconfirmed
+        }
+    }
+
+    /// Has the file of `task` read if `read`; otherwise brings the row of
+    /// the unchanged file up to date: its cover, and its identity if it has
+    /// none or another (see `super::file_id`).
+    fn dispatch(
+        &mut self,
+        task: MetadataTask,
+        existing_state: Option<&ExistingTrackScanState>,
+        read: bool,
+        workers: &mut MetadataWorkerPool,
+        covers: Option<&'static EmbeddedCoverCache>,
+        sink: &mut dyn ScanSink,
+    ) -> Result<(), String> {
+        let cover_check = match existing_state {
+            Some(existing_state) if !read => self.check_cover(&task.path, existing_state),
+            _ => CoverCheck::Current,
+        };
+        if let CoverCheck::Update {
+            cover_path,
+            stamp,
+            read_at,
+        } = cover_check
+        {
+            self.accept_cover(
+                CoverUpdate {
+                    task,
+                    cover_path,
+                    stamp,
+                    read_at,
+                },
+                sink,
+            )
+        } else if read || cover_check == CoverCheck::Read {
+            match workers.submit(task) {
+                Ok(()) => Ok(()),
+                Err(task) => self.accept(read_scan_task(task, covers), sink),
+            }
+        } else if task.file_id.is_some()
+            && existing_state
+                .is_some_and(|existing_state| existing_state.row.file_id != task.file_id)
+        {
+            self.push(ScanRow::Identity(task), sink)
+        } else {
+            self.skip_unchanged(sink);
+            Ok(())
+        }
+    }
+
+    /// Takes the reads the workers finished, waiting while all are busy,
+    /// and writes the batch if it is due. Returns `false` if the scan is to
+    /// stop.
+    fn take_reads(
+        &mut self,
+        workers: &mut MetadataWorkerPool,
+        sink: &mut dyn ScanSink,
+    ) -> Result<bool, String> {
+        for result in workers.drain_ready()? {
+            self.accept(result, sink)?;
+        }
+        while workers.at_capacity() {
+            if sink.should_stop(self.conn) {
+                return Ok(false);
+            }
+            match workers.next_result(SCAN_POLL_INTERVAL)? {
+                Some(result) => self.accept(result, sink)?,
+                None => self.flush_if_due(sink)?,
+            }
+        }
+        self.flush_if_due(sink)?;
+        Ok(true)
+    }
+
     fn report(&mut self, sink: &mut dyn ScanSink, force: bool) {
         if let Some(progress) = self.progress.emit(force, self.discovered, self.processed) {
             sink.progress(self.conn, progress);
@@ -3798,6 +3954,7 @@ fn scan_root_in(
         processed: 0,
         progress: ScanProgressReporter::new(previous_index_count),
         read_failures: ReadFailures::default(),
+        identities: IdentityCounts::default(),
     };
     scan.report(sink, true);
 
@@ -3807,6 +3964,10 @@ fn scan_root_in(
         None => LibraryWalk::new(&root, &roots),
     };
 
+    // Unchanged files whose identity changed, with no other file of their
+    // size and time: decided once the walk has counted the identities their
+    // devices kept; see `super::file_id`.
+    let mut unconfirmed: Vec<(MetadataTask, &ExistingTrackScanState)> = Vec::new();
     let complete = 'scan: {
         for ScanCandidate {
             path,
@@ -3827,27 +3988,6 @@ fn scan_root_in(
             if existing_state.is_none() {
                 scan.note_row(&path_string)?;
             }
-            // Another file of the same size and time, such as the other
-            // file of a swap, has another identity.
-            let needs_update = existing_state.is_none_or(|existing_state| {
-                existing_state.row.mtime_ns != mtime_ns
-                    || existing_state.row.size_bytes != size_bytes
-                    || identity_contradicts(existing_state.row.file_id, file_id, || {
-                        shares_size_and_time(conn, &path_string, size_bytes, mtime_ns)
-                    })
-                    || !existing_state.has_cover_path
-                    || existing_state.suspicious_metadata
-            });
-            let cover_check = match existing_state {
-                Some(existing_state) if !needs_update => scan.check_cover(&path, existing_state),
-                _ => CoverCheck::Current,
-            };
-            // An unchanged file whose row has no identity yet, as after the
-            // migration to schema version 4, or one the file system did
-            // not keep.
-            let new_identity = file_id.is_some()
-                && existing_state
-                    .is_some_and(|existing_state| existing_state.row.file_id != file_id);
             let task = MetadataTask {
                 path,
                 path_string,
@@ -3855,45 +3995,52 @@ fn scan_root_in(
                 size_bytes,
                 file_id,
             };
+            let read = match existing_state {
+                None => true,
+                Some(existing_state) => {
+                    let identity = scan.check_identity(&task, existing_state);
+                    let stale = existing_state.row.mtime_ns != mtime_ns
+                        || existing_state.row.size_bytes != size_bytes
+                        || !existing_state.has_cover_path
+                        || existing_state.suspicious_metadata;
+                    if identity == IdentityCheck::Unconfirmed && !stale {
+                        unconfirmed.push((task, existing_state));
+                        continue;
+                    }
+                    stale || identity == IdentityCheck::Tied
+                }
+            };
+            scan.dispatch(task, existing_state, read, &mut workers, covers, sink)?;
+            if !scan.take_reads(&mut workers, sink)? {
+                break 'scan false;
+            }
+        }
 
-            if let CoverCheck::Update {
-                cover_path,
-                stamp,
-                read_at,
-            } = cover_check
-            {
-                scan.accept_cover(
-                    CoverUpdate {
-                        task,
-                        cover_path,
-                        stamp,
-                        read_at,
-                    },
+        for (task, existing_state) in std::mem::take(&mut unconfirmed) {
+            if sink.should_stop(conn) {
+                break 'scan false;
+            }
+            if scan.identities.kept_on_device_of(existing_state) {
+                // Another file, such as one swapped in from outside the
+                // library.
+                scan.dispatch(task, Some(existing_state), true, &mut workers, covers, sink)?;
+            } else if scope.is_none() {
+                // The file system did not keep the identities.
+                scan.dispatch(
+                    task,
+                    Some(existing_state),
+                    false,
+                    &mut workers,
+                    covers,
                     sink,
                 )?;
-            } else if needs_update || cover_check == CoverCheck::Read {
-                if let Err(task) = workers.submit(task) {
-                    scan.accept(read_scan_task(task, covers), sink)?;
-                }
-            } else if new_identity {
-                scan.push(ScanRow::Identity(task), sink)?;
             } else {
+                // A few changed paths cannot tell; the next full scan will.
                 scan.skip_unchanged(sink);
             }
-
-            for result in workers.drain_ready()? {
-                scan.accept(result, sink)?;
+            if !scan.take_reads(&mut workers, sink)? {
+                break 'scan false;
             }
-            while workers.at_capacity() {
-                if sink.should_stop(conn) {
-                    break 'scan false;
-                }
-                match workers.next_result(SCAN_POLL_INTERVAL)? {
-                    Some(result) => scan.accept(result, sink)?,
-                    None => scan.flush_if_due(sink)?,
-                }
-            }
-            scan.flush_if_due(sink)?;
         }
 
         workers.close_tasks();

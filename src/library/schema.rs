@@ -274,8 +274,8 @@ fn migrate_to_version_3(conn: &Connection) -> anyhow::Result<()> {
 
 /// Version 3 to 4: add the identity of each row's file to `tracks` and to
 /// the waveform cache, which [`migrate_to_version_3`] made sure of, NULL in
-/// every row, and index the tracks by size and time, which tell when an
-/// identity breaks a tie (see [`super::identity_contradicts`]).
+/// every row, and index the tracks by size and time, which tell when two
+/// files can be told apart only by their identities (see `super::file_id`).
 ///
 /// A row without an identity matches the file at its path by size and time
 /// alone, as before, and takes the file's identity then: a scan writes it

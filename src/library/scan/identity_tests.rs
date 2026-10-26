@@ -262,3 +262,119 @@ fn a_refreshed_row_takes_the_identity_of_the_file_an_edit_saved() {
     assert_eq!(stored_file_id(&conn, &path), file_id(&path));
     fs::remove_dir_all(root.parent().expect("dir")).expect("cleanup");
 }
+
+/// A root with `Alpha.flac` and other files, scanned, and `Bravo.flac`
+/// outside it, of Alpha's size and time; Alpha has a saved waveform.
+fn with_an_outside_twin(name: &str) -> (PathBuf, PathBuf, PathBuf, Connection, WorkerLibrary) {
+    let root = test_root(name);
+    let alpha = same_size_and_time(&root, &["Alpha"]).remove(0);
+    for title in ["One", "Twelve", "Thirteen", "Fourteen!"] {
+        crate::tag_write::write_test_flac(&root.join(format!("{title}.flac")), &[("TITLE", title)]);
+    }
+    let outside = root.parent().expect("dir").join("outside");
+    fs::create_dir_all(&outside).expect("outside");
+    let bravo = same_size_and_time(&outside, &["Bravo"]).remove(0);
+    let (conn, library) = scanned(&root);
+    let (device, inode) = file_id_columns(file_id(&alpha));
+    conn.execute(
+        "INSERT INTO waveform_cache(path, size_bytes, modified_secs, modified_nanos, \
+         format_version, peak_count, peaks_blob, updated_at, complete, file_device, file_inode) \
+         VALUES (?1, 0, 0, 0, 3, 1, x'0000003f', 0, 1, ?2, ?3)",
+        params![alpha.to_string_lossy(), device, inode],
+    )
+    .expect("saved waveform");
+    (root, alpha, bravo, conn, library)
+}
+
+fn swap(a: &Path, b: &Path) {
+    let aside = a.with_extension("aside");
+    fs::rename(a, &aside).expect("aside");
+    fs::rename(b, a).expect("b to a");
+    fs::rename(&aside, b).expect("a to b");
+}
+
+fn has_saved_waveform(conn: &Connection, path: &Path) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM waveform_cache WHERE path = ?1)",
+        params![path.to_string_lossy()],
+        |row| row.get(0),
+    )
+    .expect("query")
+}
+
+#[test]
+fn a_file_swapped_with_one_outside_the_library_is_read_again() {
+    let (root, alpha, bravo, conn, mut library) = with_an_outside_twin("outside-twin");
+    // While Ferrous was closed, with nothing of the library's size and
+    // time to tie with.
+    swap(&alpha, &bravo);
+
+    rescan(&conn, &mut library, &root);
+
+    // The other files kept their identities, so Alpha's changed one means
+    // another file.
+    assert_eq!(title(&conn, &alpha), "Bravo");
+    assert_eq!(reads_of(&alpha), 2);
+    assert_eq!(stored_file_id(&conn, &alpha), file_id(&alpha));
+    assert!(!has_saved_waveform(&conn, &alpha), "the other file's");
+    fs::remove_dir_all(root.parent().expect("dir")).expect("cleanup");
+}
+
+#[test]
+fn a_scan_of_changed_paths_leaves_an_identity_it_cannot_judge_to_a_full_scan() {
+    let (root, alpha, bravo, conn, mut library) = with_an_outside_twin("outside-twin-scoped");
+    let stored = stored_file_id(&conn, &alpha);
+    swap(&alpha, &bravo);
+
+    run(
+        &conn,
+        &mut library,
+        LibraryCommand::ScanPaths {
+            root: root.clone(),
+            paths: vec![alpha.clone()],
+        },
+    );
+
+    // One path cannot tell a swap from a file system that did not keep the
+    // identity: the row is left as it is, which the waveform cache does not
+    // take as the library's word for the new identity.
+    assert_eq!(reads_of(&alpha), 1);
+    assert_eq!(stored_file_id(&conn, &alpha), stored);
+    assert!(has_saved_waveform(&conn, &alpha));
+    rescan(&conn, &mut library, &root);
+    assert_eq!(title(&conn, &alpha), "Bravo");
+    fs::remove_dir_all(root.parent().expect("dir")).expect("cleanup");
+}
+
+#[test]
+fn a_root_whose_file_system_did_not_keep_identities_is_not_read_again() {
+    let (root, alpha, _bravo, conn, mut library) = with_an_outside_twin("not-kept-all");
+    let paths: Vec<PathBuf> = fs::read_dir(&root)
+        .expect("root")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    let before = reads(&paths);
+    forget_identities(&conn);
+
+    // A scan of a changed path cannot tell, and leaves the rows.
+    run(
+        &conn,
+        &mut library,
+        LibraryCommand::ScanPaths {
+            root: root.clone(),
+            paths: vec![alpha.clone()],
+        },
+    );
+    assert_eq!(reads(&paths), before);
+    assert_ne!(stored_file_id(&conn, &alpha), file_id(&alpha));
+
+    // A full scan finds that no file kept its identity, and stores each
+    // file's without reading it; the saved waveform stays.
+    rescan(&conn, &mut library, &root);
+    assert_eq!(reads(&paths), before);
+    for path in &paths {
+        assert_eq!(stored_file_id(&conn, path), file_id(path));
+    }
+    assert!(has_saved_waveform(&conn, &alpha));
+    fs::remove_dir_all(root.parent().expect("dir")).expect("cleanup");
+}

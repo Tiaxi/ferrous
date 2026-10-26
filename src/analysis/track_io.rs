@@ -278,14 +278,18 @@ pub(super) fn spawn_track_io(
 }
 
 pub(super) fn source_stamp(path: &Path) -> Option<WaveformSourceStamp> {
-    let meta = std::fs::metadata(path).ok()?;
+    stamp_of(&std::fs::metadata(path).ok()?)
+}
+
+/// The stamp of the file `meta` was read from, such as an open file's.
+pub(super) fn stamp_of(meta: &std::fs::Metadata) -> Option<WaveformSourceStamp> {
     let modified = meta.modified().ok()?;
     let since_epoch = modified.duration_since(UNIX_EPOCH).ok()?;
     Some(WaveformSourceStamp {
         size_bytes: meta.len(),
         modified_secs: since_epoch.as_secs(),
         modified_nanos: since_epoch.subsec_nanos(),
-        file_id: Some(FileId::of(&meta)),
+        file_id: Some(FileId::of(meta)),
     })
 }
 
