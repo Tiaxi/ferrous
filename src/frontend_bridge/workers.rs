@@ -66,7 +66,12 @@ fn run_apply_album_art_worker(
     event_tx: &Sender<ApplyAlbumArtEvent>,
 ) {
     while let Ok(request) = req_rx.recv() {
-        let event = match apply_artwork_to_track(&request.track_path, &request.artwork_path) {
+        // A track moved, deleted or replaced since the search is not the
+        // one the user chose artwork for, so nothing is written.
+        let applied =
+            crate::artwork::check_track_unchanged(&request.track_path, request.track_identity)
+                .and_then(|()| apply_artwork_to_track(&request.track_path, &request.artwork_path));
+        let event = match applied {
             Ok(outcome) => {
                 let failure_summary = outcome.failure_summary();
                 let mut affected_paths = outcome.affected_track_paths;

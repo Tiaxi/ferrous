@@ -745,6 +745,17 @@ QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QS
     return finalizeCommand(cmdId, payload);
 }
 
+QByteArray encodeCommandApplyAlbumArt(const QString &trackPath, const QString &artworkPath,
+                                      quint64 trackSize, qint64 trackModifiedMs) {
+    QByteArray payload;
+    if (!appendUtf8(payload, trackPath) || !appendUtf8(payload, artworkPath)) {
+        return {};
+    }
+    appendLe<quint64>(payload, trackSize);
+    appendLe<qint64>(payload, trackModifiedMs);
+    return finalizeCommand(CmdApplyAlbumArt, payload);
+}
+
 QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool flag) {
     QByteArray payload;
     if (!appendUtf8(payload, value)) {

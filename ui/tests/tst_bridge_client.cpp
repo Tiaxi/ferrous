@@ -230,8 +230,10 @@ private slots:
     void aClearedQueueComesBackThroughTheBackend();
     void tagEditorPreviewsRenamesWithoutRenaming();
     void aRenamePreviewOfRowsLoadedAgainIsOutOfDate();
-    void anUndoOfAClearWhileStoppedPlaysTheStoppedTrackNext();
+    void anUndoOfAClearWhileStoppedKeepsTheStoppedRowOfARepeatedTrack();
     void artworkGoesToTheTrackItWasSearchedForAfterPlaybackMovesOn();
+    void artworkForATrackMovedSinceTheSearchIsRefusedAndWritesNothing();
+    void aConfirmedRenameRunsOnlyThePreviewedRenames();
     void commandsOverTheBoundAreRefusedVisibly();
     void stringsPastTheOldLengthLimitCrossWhole();
     void playAtDoesNotEmitImmediateSnapshotChanged();
@@ -1886,60 +1888,64 @@ bool writeTestWav(const QString &path, int millis) {
 
 } // namespace
 
-void BridgeClientTest::anUndoOfAClearWhileStoppedPlaysTheStoppedTrackNext() {
+void BridgeClientTest::anUndoOfAClearWhileStoppedKeepsTheStoppedRowOfARepeatedTrack() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString base = QFileInfo(dir.path()).canonicalFilePath();
-    QStringList paths;
-    for (const char *name : {"a.wav", "b.wav", "c.wav"}) {
-        const QString path = base + QLatin1Char('/') + QLatin1String(name);
-        // Long enough not to end between Play and Pause.
-        QVERIFY(writeTestWav(path, 120000));
-        paths.push_back(path);
+    const QString a = base + QStringLiteral("/a.wav");
+    const QString b = base + QStringLiteral("/b.wav");
+    const QString c = base + QStringLiteral("/c.wav");
+    for (const QString &path : {a, b, c}) {
+        QVERIFY(writeTestWav(path, 2000));
     }
-    // The GStreamer backend, playing into the fake output CTest sets up.
+    const QStringList queue{a, b, a, c};
+    // The GStreamer backend, with the fake output CTest sets up. That
+    // output plays faster than real time, so nothing here plays: Next
+    // while stopped moves the current track without starting it, and each
+    // step is checked in a state that holds.
     BridgeClient bridge;
     QVERIFY(bridge.m_ffiBridge != nullptr);
     QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
     bridge.clearQueue();
-    bridge.appendPaths(paths);
+    bridge.appendPaths(queue);
     // This queue, not one an earlier test left in the saved session.
-    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 3 && bridge.queuePathAt(0) == paths[0]
-                                 && bridge.queuePathAt(2) == paths[2],
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 4 && bridge.queuePathAt(1) == b
+                                 && bridge.queuePathAt(3) == c && bridge.currentTrackPath() == a,
                              10000);
 
-    // B plays and is stopped, then C is selected without playing it. The
-    // fake output plays faster than real time, so each step ends in a state
-    // that holds: B is paused before it can end, then stopped.
-    bridge.playAt(1);
-    bridge.pause();
-    QTRY_VERIFY2_WITH_TIMEOUT(bridge.playbackState() == QStringLiteral("Paused")
-                                  && bridge.currentTrackPath() == paths[1],
-                              qPrintable(bridge.playbackState() + QLatin1Char(' ')
-                                         + bridge.currentTrackPath()),
-                              10000);
+    // The second A becomes current, then is stopped: the engine keeps A
+    // and reports no row, so the queue shows the first A's row.
+    bridge.next();
+    bridge.next();
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.playingQueueIndex() == 2, 10000);
     bridge.stop();
-    QTRY_COMPARE_WITH_TIMEOUT(bridge.playbackState(), QStringLiteral("Stopped"), 10000);
-    QCOMPARE(bridge.currentTrackPath(), paths[1]);
-    bridge.selectQueueIndex(2);
-    QTRY_COMPARE_WITH_TIMEOUT(bridge.selectedQueueIndex(), 2, 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.playingQueueIndex() == 0 && bridge.currentTrackPath() == a,
+                             10000);
+    QCOMPARE(bridge.playbackState(), QStringLiteral("Stopped"));
+    // B is selected, not played.
+    bridge.selectQueueIndex(1);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.selectedQueueIndex(), 1, 10000);
 
     bridge.clearQueue();
     QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 0
                                  && bridge.queueUndoKind() == BinaryBridgeCodec::QueueUndoCleared,
                              10000);
     bridge.undoQueueChange();
-    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 3, 10000);
-    QTRY_COMPARE_WITH_TIMEOUT(bridge.currentTrackPath(), paths[1], 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 4, 10000);
+    // The second A comes back as the current track, stopped, so Play would
+    // start it, and the track after it is C.
+    QTRY_VERIFY2_WITH_TIMEOUT(bridge.playingQueueIndex() == 2 && bridge.currentTrackPath() == a,
+                              qPrintable(QString::number(bridge.playingQueueIndex()) + QLatin1Char(' ')
+                                         + bridge.currentTrackPath()),
+                              10000);
     QCOMPARE(bridge.playbackState(), QStringLiteral("Stopped"));
-    QCOMPARE(bridge.selectedQueueIndex(), 2);
-
-    // Play starts B, the track that was current, not the selected C.
-    bridge.play();
-    bridge.pause();
-    QTRY_COMPARE_WITH_TIMEOUT(bridge.playbackState(), QStringLiteral("Paused"), 10000);
-    QCOMPARE(bridge.currentTrackPath(), paths[1]);
-    QCOMPARE(bridge.playingQueueIndex(), 1);
+    QCOMPARE(bridge.selectedQueueIndex(), 1);
+    bridge.next();
+    QTRY_VERIFY2_WITH_TIMEOUT(bridge.playingQueueIndex() == 3 && bridge.currentTrackPath() == c,
+                              qPrintable(QString::number(bridge.playingQueueIndex()) + QLatin1Char(' ')
+                                         + bridge.currentTrackPath()),
+                              10000);
+    QCOMPARE(bridge.playbackState(), QStringLiteral("Stopped"));
     QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
 
     bridge.clearQueue();
@@ -1970,14 +1976,24 @@ void BridgeClientTest::artworkGoesToTheTrackItWasSearchedForAfterPlaybackMovesOn
         snapshot.metadata.album = album;
         return snapshot;
     };
-    const QString a = QStringLiteral("/fixture/Album A/01 Song.flac");
-    const QString b = QStringLiteral("/fixture/Album B/01 Song.flac");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString a = dir.filePath(QStringLiteral("a.flac"));
+    const QString b = dir.filePath(QStringLiteral("b.flac"));
+    for (const QString &path : {a, b}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("stub"), qint64(4));
+    }
     QVERIFY(client.processBinarySnapshot(playing(a, QStringLiteral("Album A"))));
     QCOMPARE(client.currentTrackPath(), a);
 
-    // The dialog opens on A and searches for A's album.
+    // The dialog opens on A and searches for A's album; the file A is now
+    // is noted for the backend to compare.
     client.searchCurrentTrackArtworkSuggestions();
     QTRY_VERIFY_WITH_TIMEOUT(!client.itunesArtworkLoading(), 10000);
+    QTRY_VERIFY(client.m_itunesArtworkTarget.contains(QStringLiteral("identity")));
+    const QFileInfo aInfo(a);
     QCOMPARE(client.itunesArtworkTarget().value(QStringLiteral("album")).toString(),
              QStringLiteral("Album A"));
     client.m_itunesArtworkResults = {
@@ -1988,13 +2004,124 @@ void BridgeClientTest::artworkGoesToTheTrackItWasSearchedForAfterPlaybackMovesOn
     QCOMPARE(client.currentTrackPath(), b);
     client.applyItunesArtworkSuggestion(0);
     QCOMPARE(sent.size(), 1);
-    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandStringPair(
-                          BinaryBridgeCodec::CmdApplyAlbumArt, a,
-                          QStringLiteral("/fixture/cache/a.jpg")));
+    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandApplyAlbumArt(
+                          a, QStringLiteral("/fixture/cache/a.jpg"),
+                          static_cast<quint64>(aInfo.size()),
+                          aInfo.fileTime(QFileDevice::FileModificationTime).toMSecsSinceEpoch()));
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()), quint16(46));
 
     // Closing the dialog drops the target with the suggestions.
     client.clearItunesArtworkSuggestions();
     QVERIFY(client.itunesArtworkTarget().isEmpty());
+}
+
+void BridgeClientTest::artworkForATrackMovedSinceTheSearchIsRefusedAndWritesNothing() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    const QString track = base + QStringLiteral("/a.wav");
+    QVERIFY(writeTestWav(track, 2000));
+    // The folder's cover, which applied artwork would replace.
+    const QString cover = base + QStringLiteral("/cover.png");
+    QImage oldCover(4, 4, QImage::Format_RGB32);
+    oldCover.fill(Qt::red);
+    QVERIFY(oldCover.save(cover));
+    QFile coverFile(cover);
+    QVERIFY(coverFile.open(QIODevice::ReadOnly));
+    const QByteArray coverBytes = coverFile.readAll();
+    coverFile.close();
+    QTemporaryDir artworkDir;
+    QVERIFY(artworkDir.isValid());
+    const QString artwork = artworkDir.filePath(QStringLiteral("suggestion.png"));
+    QImage newCover(4, 4, QImage::Format_RGB32);
+    newCover.fill(Qt::blue);
+    QVERIFY(newCover.save(artwork));
+
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
+    bridge.clearQueue();
+    bridge.appendPaths({track});
+    // The loaded queue makes the track current, without playing it.
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.currentTrackPath(), track, 10000);
+
+    // The search notes the track; then the track is renamed in its folder.
+    bridge.searchCurrentTrackArtworkSuggestions();
+    QTRY_VERIFY(bridge.m_itunesArtworkTarget.value(QStringLiteral("identity")).toMap().size() == 2);
+    bridge.m_itunesArtworkResults = {
+        QVariantMap{{QStringLiteral("normalizedPath"), artwork}}};
+    QVERIFY(QFile::rename(track, base + QStringLiteral("/a renamed.wav")));
+    errors.clear();
+
+    bridge.applyItunesArtworkSuggestion(0);
+    QTRY_VERIFY_WITH_TIMEOUT(!errors.isEmpty(), 10000);
+    QVERIFY2(errors[0][0].toString().contains(QStringLiteral("moved, renamed or deleted")),
+             qPrintable(errors[0][0].toString()));
+    QCOMPARE(errors[0][1].toInt(), int(BinaryBridgeCodec::ErrorCategoryLibrary));
+    QVERIFY(coverFile.open(QIODevice::ReadOnly));
+    QCOMPARE(coverFile.readAll(), coverBytes);
+    coverFile.close();
+
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    isolateBridgeClient(bridge);
+}
+
+void BridgeClientTest::aConfirmedRenameRunsOnlyThePreviewedRenames() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    const QString x = base + QStringLiteral("/x.ac3");
+    const QString y = base + QStringLiteral("/y.ac3");
+    for (const QString &path : {x, y}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(QByteArray(128, '\0')), qint64(128));
+    }
+    BridgeClient bridge;
+    isolateBridgeClient(bridge);
+    TagEditorController editor(&bridge);
+    QVERIFY(editor.openForPaths({x, y}));
+    QTRY_VERIFY(!editor.loading());
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("One"));
+    editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("1"));
+    editor.setCell(1, QStringLiteral("title"), QStringLiteral("Two"));
+    editor.setCell(1, QStringLiteral("trackNo"), QStringLiteral("2"));
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QVERIFY(saved.first().first().toBool());
+    editor.selectAllRows();
+
+    // y's new name is taken by another file, so the preview renames x and
+    // says y keeps its name.
+    const QString xRenamed = base + QStringLiteral("/01 - One.ac3");
+    const QString blocker = base + QStringLiteral("/02 - Two.ac3");
+    QFile taken(blocker);
+    QVERIFY(taken.open(QIODevice::WriteOnly));
+    QCOMPARE(taken.write("not ours"), qint64(8));
+    taken.close();
+    QSignalSpy previewed(&editor, &TagEditorController::renamePreviewReady);
+    QVERIFY(editor.previewRenameSelectedFiles());
+    QTRY_COMPARE(previewed.size(), 1);
+    const QVariantList rows = previewed[0][0].toList();
+    QCOMPARE(rows.size(), 2);
+    QVERIFY(rows[0].toMap().value(QStringLiteral("ok")).toBool());
+    QCOMPARE(rows[0].toMap().value(QStringLiteral("newPath")).toString(), xRenamed);
+    QVERIFY(!rows[1].toMap().value(QStringLiteral("ok")).toBool());
+    QCOMPARE(rows[1].toMap().value(QStringLiteral("newPath")).toString(), blocker);
+
+    // The user frees y's new name in a file manager, then confirms.
+    QVERIFY(QFile::remove(blocker));
+    QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+    QVERIFY(editor.renamePreviewedFiles());
+    QTRY_COMPARE(renamed.size(), 1);
+    QVERIFY2(QFile::exists(xRenamed), qPrintable(editor.statusText() + " " + editor.statusDetails()));
+    QVERIFY(!QFile::exists(x));
+    // y keeps its name, as the preview said.
+    QVERIFY(QFile::exists(y));
+    QVERIFY(!QFile::exists(blocker));
+    QCOMPARE(QDir(base).entryList(QDir::Files).size(), 2);
 }
 
 void BridgeClientTest::queueDeltasChangeOnlyTheirRowsWithoutAReset() {

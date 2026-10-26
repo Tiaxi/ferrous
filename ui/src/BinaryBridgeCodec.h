@@ -400,6 +400,10 @@ QByteArray encodeCommandF32(quint16 cmdId, float value);
 QByteArray encodeCommandF64(quint16 cmdId, double value);
 QByteArray encodeCommandString(quint16 cmdId, const QString &value);
 QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QString &second);
+// CmdApplyAlbumArt: the track and artwork paths, then the track file's u64
+// size and i64 modification time in milliseconds when the search found it.
+QByteArray encodeCommandApplyAlbumArt(const QString &trackPath, const QString &artworkPath,
+                                      quint64 trackSize, qint64 trackModifiedMs);
 QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool flag);
 QByteArray encodeCommandLibraryViewState(
     quint16 cmdId,

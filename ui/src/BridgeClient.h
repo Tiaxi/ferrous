@@ -589,6 +589,10 @@ private:
     bool applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue);
     // After the snapshot's rows are in place.
     void applyQueueUndo(const BinaryBridgeCodec::DecodedQueueUndo &undo);
+    // Read the size and modification time of the artwork target's track,
+    // for the search of `generation`, into its "identity": empty if the file
+    // is not there.
+    void captureItunesArtworkTargetIdentity(quint64 generation);
     // Ask for the whole queue, once, after a section the rows cannot take.
     void requestQueueResync();
     void cancelItunesArtworkRequests();

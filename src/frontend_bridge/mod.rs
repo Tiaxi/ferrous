@@ -204,6 +204,9 @@ pub enum BridgeLibraryCommand {
     ApplyAlbumArt {
         track_path: PathBuf,
         artwork_path: PathBuf,
+        /// The track file as the artwork search found it; nothing is
+        /// written unless it is still that file.
+        track_identity: crate::artwork::TrackFileIdentity,
     },
     ShowTrackInLibrary(PathBuf),
     SetNodeExpanded {
@@ -537,6 +540,10 @@ pub(super) struct BridgeState {
     queue: Vec<PathBuf>,
     queue_sync: queue_sync::QueueSync,
     queue_undo: queue_undo::QueueUndo,
+    /// The row of the engine's current track as it last reported one, with
+    /// the queue revision then. A stopped engine reports the track but no
+    /// row, so this tells which of its rows it is.
+    last_current_row: Option<(u64, usize)>,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
     lastfm: LastFmRuntimeState,
@@ -588,6 +595,7 @@ struct PendingWaveformTrack {
 pub(super) struct ApplyAlbumArtRequest {
     pub(super) track_path: PathBuf,
     pub(super) artwork_path: PathBuf,
+    pub(super) track_identity: crate::artwork::TrackFileIdentity,
 }
 
 #[derive(Debug, Clone)]
@@ -3922,6 +3930,53 @@ mod tests {
         assert_eq!(runtime.state.selected_queue_index, Some(2));
         // B comes back as the current track, so Play starts B.
         assert_eq!(restored_queues(&engine_rx), vec![(queue, 1)]);
+    }
+
+    #[test]
+    fn an_undo_of_a_clear_while_stopped_brings_back_the_stopped_row_of_a_repeated_track() {
+        let _guard = test_guard();
+        for remove_first_row in [false, true] {
+            let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+            let (a, b, c) = (p("/music/a.flac"), p("/music/b.flac"), p("/music/c.flac"));
+            let queue = vec![a.clone(), b, a.clone(), c];
+            replace_queue(&mut runtime, &queue, &event_tx);
+            let engine = |state, row: Option<usize>| {
+                BridgeLoopWake::Playback(PlaybackEvent::Snapshot(PlaybackSnapshot {
+                    state,
+                    current: Some(a.clone()),
+                    current_queue_index: row,
+                    ..PlaybackSnapshot::default()
+                }))
+            };
+            // The second A plays, then stops: the engine keeps A but reports
+            // no row, as the GStreamer backend does.
+            runtime.handle_wake(engine(PlaybackState::Playing, Some(2)), &event_tx);
+            runtime.handle_wake(engine(PlaybackState::Stopped, None), &event_tx);
+            let mut expected = queue.clone();
+            let mut stopped_row = 2;
+            if remove_first_row {
+                // A row removed while stopped moves the stopped track up.
+                let shown = runtime.state.queue_sync.revision();
+                runtime.handle_command(ui_remove(shown, 0), &event_tx);
+                expected.remove(0);
+                stopped_row = 1;
+            }
+            runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+            let offer = runtime.state.snapshot(false).queue_undo.offer_id;
+            runtime.handle_wake(
+                BridgeLoopWake::Playback(PlaybackEvent::Snapshot(PlaybackSnapshot::default())),
+                &event_tx,
+            );
+            let _ = queue_ops(&engine_rx);
+
+            runtime.handle_command(ui_undo(offer), &event_tx);
+            assert_eq!(runtime.state.queue, expected);
+            assert_eq!(
+                restored_queues(&engine_rx),
+                vec![(expected, stopped_row)],
+                "the row of the A that stopped; removed first: {remove_first_row}"
+            );
+        }
     }
 
     #[test]

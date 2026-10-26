@@ -111,14 +111,20 @@ fn undoable_change(cmd: &BridgeQueueCommand, state: &mut BridgeState) -> Option<
 }
 
 /// The row of the track the engine has open, playing, paused or stopped.
-/// A stopped engine reports the track but no row, so the first row with its
-/// path stands for it, the row the queue view marks as current.
+/// A stopped engine reports the track but no row, so the row it last
+/// reported stands for it, followed through the edits since; the first row
+/// with its path only when that row is lost.
 fn current_row(state: &BridgeState) -> Option<usize> {
     let path = state.playback.current.as_ref();
+    let holds_path = |row: &usize| path.is_none_or(|path| state.queue.get(*row) == Some(path));
     state
         .playback
         .current_queue_index
-        .filter(|row| path.is_none_or(|path| state.queue.get(*row) == Some(path)))
+        .filter(holds_path)
+        .or_else(|| {
+            let (revision, row) = state.last_current_row?;
+            state.queue_sync.follow(revision, row).filter(holds_path)
+        })
         .or_else(|| path.and_then(|path| state.queue.iter().position(|queued| queued == path)))
 }
 

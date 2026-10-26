@@ -404,12 +404,14 @@ fn handle_library_view_command(
         BridgeLibraryCommand::ApplyAlbumArt {
             track_path,
             artwork_path,
+            track_identity,
         } => {
             if runtime
                 .apply_album_art_tx
                 .send(ApplyAlbumArtRequest {
                     track_path,
                     artwork_path,
+                    track_identity,
                 })
                 .is_err()
             {

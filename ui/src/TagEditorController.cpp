@@ -778,13 +778,14 @@ bool TagEditorController::previewRenameSelectedFiles() {
     m_renamePreview = {};
     m_pendingRenamePreview = request;
     runOperation(Operation::PreviewRename, request.payload, [this](const QByteArray &response) {
-        m_renamePreview = std::exchange(m_pendingRenamePreview, {});
-        applyRenamePreview(response);
+        applyRenamePreview(response, std::exchange(m_pendingRenamePreview, {}));
     });
     return true;
 }
 
-void TagEditorController::applyRenamePreview(const QByteArray &response) {
+void TagEditorController::applyRenamePreview(const QByteArray &response,
+                                             const RenameRequest &previewed) {
+    m_renamePreview = {};
     const QJsonDocument document = QJsonDocument::fromJson(response);
     if (!document.isObject()) {
         emit renamePreviewReady({}, QStringLiteral("failed to parse the file rename preview"));
@@ -793,6 +794,7 @@ void TagEditorController::applyRenamePreview(const QByteArray &response) {
     const QJsonObject object = document.object();
     const QString error = object.value(QStringLiteral("error")).toString();
     QVariantList rows;
+    QJsonObject planned;
     const QJsonArray results = object.value(QStringLiteral("results")).toArray();
     for (const QJsonValue &value : results) {
         const QJsonObject item = value.toObject();
@@ -812,6 +814,31 @@ void TagEditorController::applyRenamePreview(const QByteArray &response) {
         row.insert(QStringLiteral("unchanged"), ok && newPath == path);
         row.insert(QStringLiteral("error"), item.value(QStringLiteral("error")).toString());
         rows.push_back(row);
+        if (ok && !newPath.isEmpty() && newPath != path) {
+            planned.insert(path, newPath);
+        }
+    }
+    // Confirming renames only what the preview showed going ahead, from
+    // and to those paths; the backend refuses if the files changed since.
+    if (error.isEmpty() && !planned.isEmpty()) {
+        const QJsonArray previewedRows = QJsonDocument::fromJson(previewed.payload)
+                                             .object()
+                                             .value(QStringLiteral("rows"))
+                                             .toArray();
+        QJsonArray plannedRows;
+        QStringList fileNames;
+        for (qsizetype index = 0; index < previewedRows.size(); ++index) {
+            const QJsonObject row = previewedRows.at(index).toObject();
+            if (planned.contains(row.value(QStringLiteral("path")).toString())) {
+                plannedRows.push_back(row);
+                fileNames.push_back(previewed.fileNames.value(index));
+            }
+        }
+        QJsonObject request;
+        request.insert(QStringLiteral("rows"), plannedRows);
+        request.insert(QStringLiteral("plannedRenames"), planned);
+        m_renamePreview.payload = QJsonDocument(request).toJson(QJsonDocument::Compact);
+        m_renamePreview.fileNames = fileNames;
     }
     emit renamePreviewReady(rows, error);
 }

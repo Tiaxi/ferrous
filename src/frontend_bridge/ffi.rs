@@ -2011,9 +2011,15 @@ fn parse_library_collection_command(
         49 => BridgeLibraryCommand::AppendRootByPath {
             root: reader.read_string()?,
         },
+        // Then the track's u64 size and i64 modification time in
+        // milliseconds since the epoch, as the artwork search found them.
         46 => BridgeLibraryCommand::ApplyAlbumArt {
             track_path: PathBuf::from(reader.read_string()?),
             artwork_path: PathBuf::from(reader.read_string()?),
+            track_identity: crate::artwork::TrackFileIdentity {
+                len: reader.read_u64()?,
+                modified_ms: i64::from_le_bytes(reader.read_exact::<8>()?),
+            },
         },
         47 => BridgeLibraryCommand::RefreshEditedPaths(read_path_vec(reader)?),
         _ => return Ok(None),

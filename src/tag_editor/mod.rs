@@ -185,7 +185,17 @@ impl SaveRequestEnvelope {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RenameRequest {
     rows: Vec<TagEditorRow>,
+    /// The renames a preview showed, old path to new path. When set,
+    /// nothing is renamed unless the rows still plan exactly these, from
+    /// files that are all still there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planned_renames: Option<HashMap<String, String>>,
 }
+
+/// What a rename confirmed from a preview answers when the files changed.
+pub(crate) const RENAME_PLAN_CHANGED_MESSAGE: &str =
+    "The files changed after the rename preview, so nothing was renamed. \
+     Use Rename Files again to see the new names.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -195,10 +205,13 @@ enum RenameRequestEnvelope {
 }
 
 impl RenameRequestEnvelope {
-    fn into_rows(self) -> Vec<TagEditorRow> {
+    fn into_request(self) -> RenameRequest {
         match self {
-            Self::Request(request) => request.rows,
-            Self::Rows(rows) => rows,
+            Self::Request(request) => request,
+            Self::Rows(rows) => RenameRequest {
+                rows,
+                planned_renames: None,
+            },
         }
     }
 }
@@ -927,8 +940,7 @@ pub(crate) fn parse_save_request(blob: &[u8]) -> Result<SaveRequest, String> {
 
 pub(crate) fn parse_rename_request(blob: &[u8]) -> Result<RenameRequest, String> {
     serde_json::from_slice::<RenameRequestEnvelope>(blob)
-        .map(RenameRequestEnvelope::into_rows)
-        .map(|rows| RenameRequest { rows })
+        .map(RenameRequestEnvelope::into_request)
         .map_err(|error| format!("invalid tag editor rename request: {error}"))
 }
 
@@ -1101,6 +1113,21 @@ pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameRespons
         renames,
         renamed_pairs,
     } = plan_renames(&request.rows);
+    if let Some(planned) = &request.planned_renames {
+        let plan_holds = results.is_empty()
+            && renamed_pairs.len() == planned.len()
+            && renamed_pairs
+                .iter()
+                .all(|(old, new)| planned.get(old) == Some(new) && Path::new(old).exists());
+        if !plan_holds {
+            let response = RenameResponse {
+                results: Vec::new(),
+                successful_paths: Vec::new(),
+                error: Some(RENAME_PLAN_CHANGED_MESSAGE.to_string()),
+            };
+            return (response, TrackRefresh::default());
+        }
+    }
     let mut successful_paths = Vec::new();
 
     let refresh = match rename_indexed_metadata_paths(&renames) {

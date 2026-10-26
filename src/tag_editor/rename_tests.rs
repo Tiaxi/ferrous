@@ -74,6 +74,7 @@ fn rename_paths(paths: &[PathBuf]) -> RenameResponse {
     assert!(response.failures.is_empty(), "{:?}", response.failures);
     rename_rows(RenameRequest {
         rows: response.rows,
+        planned_renames: None,
     })
 }
 
@@ -373,7 +374,10 @@ fn a_rename_preview_lists_each_new_name_and_conflict_and_changes_nothing() {
     all.extend(blocked);
     let loaded = load_rows_for_paths(&all);
     assert!(loaded.failures.is_empty(), "{:?}", loaded.failures);
-    let preview = preview_rename_rows(&RenameRequest { rows: loaded.rows });
+    let preview = preview_rename_rows(&RenameRequest {
+        rows: loaded.rows,
+        planned_renames: None,
+    });
 
     let text = |path: &Path| path.to_string_lossy().into_owned();
     let summary: Vec<(String, Option<String>, bool)> = preview
@@ -406,5 +410,52 @@ fn a_rename_preview_lists_each_new_name_and_conflict_and_changes_nothing() {
     assert!(preview.successful_paths.is_empty());
     assert_eq!(file_names(&dir), before, "nothing was renamed");
     assert_eq!(track_rows(&dir), rows_before);
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+fn a_rename_confirmed_from_a_preview_runs_only_while_its_plan_holds() {
+    let dir = fixture_dir("planned");
+    let paths = indexed_fixtures(&dir, &[("x.flac", "One", "1"), ("y.flac", "Two", "2")]);
+    let text = |path: &Path| path.to_string_lossy().into_owned();
+    let request = |planned: &[(&PathBuf, PathBuf)]| {
+        let loaded = load_rows_for_paths(&paths[..1]);
+        assert!(loaded.failures.is_empty(), "{:?}", loaded.failures);
+        RenameRequest {
+            rows: loaded.rows,
+            planned_renames: Some(
+                planned
+                    .iter()
+                    .map(|(old, new)| (text(old), text(new)))
+                    .collect(),
+            ),
+        }
+    };
+    let renamed = dir.join("01 - One.flac");
+
+    // The destination was taken after the preview: nothing is renamed.
+    fs::write(&renamed, b"not ours").expect("taken destination");
+    let response = rename_rows(request(&[(&paths[0], renamed.clone())]));
+    assert_eq!(
+        response.error.as_deref(),
+        Some(super::RENAME_PLAN_CHANGED_MESSAGE)
+    );
+    assert!(response.results.is_empty() && response.successful_paths.is_empty());
+    assert_eq!(file_names(&dir), ["01 - One.flac", "x.flac", "y.flac"]);
+    fs::remove_file(&renamed).expect("free the destination");
+
+    // A plan that names another destination than the rows give.
+    let response = rename_rows(request(&[(&paths[0], dir.join("elsewhere.flac"))]));
+    assert_eq!(
+        response.error.as_deref(),
+        Some(super::RENAME_PLAN_CHANGED_MESSAGE)
+    );
+    assert_eq!(file_names(&dir), ["x.flac", "y.flac"]);
+
+    // The plan holds: exactly its rename runs.
+    let response = rename_rows(request(&[(&paths[0], renamed.clone())]));
+    assert_eq!(response.error, None);
+    assert_renamed(&response, std::slice::from_ref(&renamed));
+    assert_eq!(file_names(&dir), ["01 - One.flac", "y.flac"]);
     fs::remove_dir_all(dir).expect("cleanup");
 }

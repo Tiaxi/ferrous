@@ -3209,6 +3209,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
 
     cancelItunesArtworkRequests();
     m_itunesArtworkGeneration++;
+    captureItunesArtworkTargetIdentity(m_itunesArtworkGeneration);
     m_itunesArtworkCandidates.clear();
     m_itunesArtworkResults.clear();
 
@@ -3624,13 +3625,55 @@ void BridgeClient::applyItunesArtworkSuggestion(int index) {
         prepareItunesArtworkSuggestion(index);
         return;
     }
+    // The backend writes nothing unless the track is still the file the
+    // search found, which it compares with this.
+    const QVariant identity = m_itunesArtworkTarget.value(QStringLiteral("identity"));
+    if (!identity.isValid() || identity.toMap().isEmpty()) {
+        emit bridgeError(identity.isValid()
+                             ? QStringLiteral("The album art was not applied: the track was not "
+                                              "found when the artwork search started.")
+                             : QStringLiteral("The album art was not applied: the track is still "
+                                              "being checked. Try again in a moment."),
+                         BinaryBridgeCodec::ErrorCategoryLibrary,
+                         BinaryBridgeCodec::ErrorSeverityError, trackPath);
+        return;
+    }
+    const QVariantMap file = identity.toMap();
 
     // The new cover reaches the views with a new path or cover stamp from
     // the backend, which reloads it.
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringPair(
-        BinaryBridgeCodec::CmdApplyAlbumArt,
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandApplyAlbumArt(
         trackPath,
-        normalizedPath));
+        normalizedPath,
+        file.value(QStringLiteral("size")).toULongLong(),
+        file.value(QStringLiteral("modifiedMs")).toLongLong()));
+}
+
+void BridgeClient::captureItunesArtworkTargetIdentity(quint64 generation) {
+    const QString trackPath =
+        normalizeLocalPathArg(m_itunesArtworkTarget.value(QStringLiteral("trackPath")).toString());
+    if (trackPath.isEmpty()) {
+        return;
+    }
+    // Off the UI thread, since the file may be on a slow or stalled mount; a
+    // thread left behind by a stalled stat ends with the process.
+    QPointer<BridgeClient> self(this);
+    std::thread([self, trackPath, generation]() {
+        const QFileInfo info(trackPath);
+        QVariantMap identity;
+        if (info.exists()) {
+            identity = QVariantMap{
+                {QStringLiteral("size"), static_cast<quint64>(info.size())},
+                {QStringLiteral("modifiedMs"),
+                 info.fileTime(QFileDevice::FileModificationTime).toMSecsSinceEpoch()},
+            };
+        }
+        QMetaObject::invokeMethod(qApp, [self, generation, identity]() {
+            if (self != nullptr && self->m_itunesArtworkGeneration == generation) {
+                self->m_itunesArtworkTarget.insert(QStringLiteral("identity"), identity);
+            }
+        });
+    }).detach();
 }
 
 void BridgeClient::openInFileBrowser(const QString &path) {

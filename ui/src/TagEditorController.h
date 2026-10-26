@@ -127,7 +127,6 @@ private:
     void applyLoadResult(LoadResult result);
     void applySaveResult(const QByteArray &response);
     void applyRenameResult(const QByteArray &response);
-    void applyRenamePreview(const QByteArray &response);
     // The rename request for the selected rows and their file names; empty
     // when no row is selected.
     QByteArray buildRenameRequest(QStringList *fileNames) const;
@@ -138,8 +137,11 @@ private:
         QStringList fileNames;
     };
     RenameRequest m_pendingRenamePreview;
+    // The renames the latest preview showed going ahead, with their old
+    // and new paths; nothing else is renamed when the user confirms it.
     RenameRequest m_renamePreview;
     bool startRename(RenameRequest request);
+    void applyRenamePreview(const QByteArray &response, const RenameRequest &previewed);
     std::function<QByteArray(Operation, const QByteArray &, const RenameGate &)> m_executeOperation{
         executeOperation};
     quint64 m_operationGeneration{0};
