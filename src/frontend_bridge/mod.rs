@@ -50,7 +50,7 @@ mod workers;
 use commands::{handle_bridge_command, sync_queue_details, BridgeCommandContext};
 use config::{
     apply_session_restore, load_session_snapshot, load_settings_into, save_session_snapshot,
-    save_settings, session_snapshot_for_state, SaveFailure, SessionSnapshot,
+    save_settings, session_save_due, session_snapshot_for_state, SaveFailure, SessionSnapshot,
 };
 pub use errors::{BridgeError, ErrorCategory, ErrorSeverity};
 use events::{
@@ -612,6 +612,9 @@ pub(super) struct BridgeState {
     /// Renames sent to the playback engine that it has not acknowledged.
     /// Events it sent before the acknowledgement still carry the old paths.
     unacknowledged_engine_renames: VecDeque<Arc<PathRenames>>,
+    /// Keys of the restored session file that this build does not know,
+    /// saved again as they were.
+    session_unknown_keys: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The most recent `TrackChanged` event. The generation advances on every
@@ -999,6 +1002,9 @@ struct BridgeLoopRuntime {
     last_settings_save: Instant,
     last_session_save: Instant,
     last_saved_session: Option<SessionSnapshot>,
+    /// When the session, with the position of the current track, was last
+    /// saved.
+    last_position_save: Instant,
     save_errors: SaveErrors,
     quit_save: QuitSave,
     playing_poll_interval: Duration,
@@ -1247,6 +1253,7 @@ impl BridgeLoopRuntime {
             last_settings_save: Instant::now(),
             last_session_save: Instant::now(),
             last_saved_session: None,
+            last_position_save: Instant::now(),
             save_errors: SaveErrors::default(),
             quit_save: QuitSave::default(),
             playing_poll_interval,
@@ -2284,7 +2291,12 @@ impl BridgeLoopRuntime {
         }
         let session = session_snapshot_for_state(&self.state);
         let mut saved = true;
-        if self.last_saved_session.as_ref() != Some(&session) {
+        if session_save_due(
+            self.last_saved_session.as_ref(),
+            &session,
+            self.state.playback.state == PlaybackState::Playing,
+            self.last_position_save.elapsed(),
+        ) {
             saved = report_save(
                 save_session_snapshot(&session),
                 &mut self.save_errors.session,
@@ -2292,6 +2304,7 @@ impl BridgeLoopRuntime {
             );
             if saved {
                 self.last_saved_session = Some(session);
+                self.last_position_save = Instant::now();
             }
         }
         self.flags.session_dirty = !saved;
@@ -2327,6 +2340,7 @@ impl BridgeLoopRuntime {
                 self.flags.session_dirty = false;
                 self.save_errors.session = None;
                 self.last_saved_session = Some(session);
+                self.last_position_save = Instant::now();
             }
             Err(failure) => failures.push(failure.message),
         }
@@ -3001,6 +3015,65 @@ mod tests {
         assert!(runtime.state.queue.is_empty());
         assert!(runtime.state.selected_queue_index.is_none());
         assert!(runtime.state.playback.current.is_none());
+    }
+
+    #[test]
+    fn a_paused_track_saves_its_position_and_a_playing_one_waits_for_the_interval() {
+        let _guard = test_guard();
+        let _config = crate::paths::TestConfigDir::new();
+        let mut runtime = BridgeLoopRuntime::new(
+            BridgeRuntimeOptions {
+                persisted_state_enabled: true,
+                ..BridgeRuntimeOptions::default()
+            },
+            None,
+        );
+        let (event_tx, event_rx) = unbounded();
+        let stamp = crate::playback::FileStamp {
+            size: 10,
+            modified_ns: 20,
+        };
+        let saved_position = || {
+            let path = config::session_path().expect("session path");
+            let text = std::fs::read_to_string(path).expect("read the session");
+            config::parse_session_text(&text)
+                .expect("parse the session")
+                .position
+                .map(|saved| (saved.position, saved.file))
+        };
+        let persist_now = |runtime: &mut BridgeLoopRuntime| {
+            runtime.flags.session_dirty = true;
+            runtime.last_session_save = Instant::now()
+                .checked_sub(Duration::from_secs(3))
+                .expect("an earlier instant");
+            runtime.maybe_persist(&event_tx);
+        };
+        runtime.state.queue = vec![p("/music/a.flac")];
+        runtime.state.playback.current = Some(p("/music/a.flac"));
+        runtime.state.playback.current_queue_index = Some(0);
+        runtime.state.playback.current_file = Some(stamp);
+        runtime.state.playback.state = PlaybackState::Playing;
+        runtime.state.playback.position = Duration::from_secs(5);
+        persist_now(&mut runtime);
+        assert_eq!(saved_position(), Some((Duration::from_secs(5), stamp)));
+
+        // Playing on: not saved again until the interval has passed.
+        runtime.state.playback.position = Duration::from_secs(9);
+        persist_now(&mut runtime);
+        assert_eq!(saved_position(), Some((Duration::from_secs(5), stamp)));
+        runtime.last_position_save = Instant::now()
+            .checked_sub(config::PLAYING_POSITION_SAVE_INTERVAL)
+            .expect("an earlier instant");
+        persist_now(&mut runtime);
+        assert_eq!(saved_position(), Some((Duration::from_secs(9), stamp)));
+
+        // A pause saves where it paused.
+        runtime.state.playback.state = PlaybackState::Paused;
+        runtime.state.playback.position = Duration::from_secs(11);
+        persist_now(&mut runtime);
+        assert_eq!(saved_position(), Some((Duration::from_secs(11), stamp)));
+        assert!(!runtime.flags.session_dirty);
+        assert_eq!(error_messages(&event_rx), Vec::<String>::new());
     }
 
     fn lastfm_connected_as(username: &str) -> LastFmEvent {

@@ -28,8 +28,8 @@ use super::queue::{
 };
 use super::source_activation::SourceActivation;
 use super::{
-    EngineExit, PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
-    PlaybackSnapshot, PlaybackState, RepeatMode, TrackChangeKind,
+    EngineExit, FileStamp, PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome,
+    PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode, TrackChangeKind,
 };
 use crate::file_identity::{self, file_id, FileId, ResolvedPath, WatchedFile};
 
@@ -306,8 +306,12 @@ impl OutputSegments {
 struct SeekTarget {
     position: Duration,
     /// Serial of the newest `Seek` command that this seek carries out, or
-    /// 0 for a seek the engine makes to restart the track where it plays.
+    /// 0 for a seek the engine makes to restart the track where it plays,
+    /// or for a [`PlaybackCommand::Cue`].
     serial: u64,
+    /// Whether this is a [`PlaybackCommand::Cue`], which reports where it
+    /// landed although it takes no serial.
+    cue: bool,
 }
 
 /// Progress of a pipeline run that restarts the current track for a seek.
@@ -943,6 +947,7 @@ impl GstPlaybackRuntime {
         self.buffering_active = false;
         self.reset_channel_mute_state();
         self.snapshot.current = None;
+        self.snapshot.current_file = None;
         self.snapshot.current_queue_index = None;
         self.snapshot.current_bitrate_kbps = None;
         self.snapshot.track_token = 0;
@@ -1314,7 +1319,39 @@ impl GstPlaybackRuntime {
         } else {
             position.min(self.snapshot.duration)
         };
-        self.queue_seek(SeekTarget { position, serial });
+        self.queue_seek(SeekTarget {
+            position,
+            serial,
+            cue: false,
+        });
+    }
+
+    /// See [`PlaybackCommand::Cue`]. The stopped track starts a new run
+    /// that prerolls in Paused, takes the seek, and stays paused, as a
+    /// restarted run does: Play before the seek has landed plays once it
+    /// has, and a newer seek replaces it.
+    fn cue(&mut self, position: Duration, expected: FileStamp) {
+        if self.snapshot.current.is_none()
+            || self.snapshot.state != PlaybackState::Stopped
+            || self.snapshot.current_file != Some(expected)
+        {
+            return;
+        }
+        if let Ok(state) = self.queue_state.lock() {
+            self.snapshot.current_queue_index = state.current_index();
+        }
+        self.snapshot.state = PlaybackState::Paused;
+        self.startup_gain_ramp = false;
+        self.startup_ramp_hold_until = None;
+        self.queued_seek = Some(SeekTarget {
+            position,
+            serial: 0,
+            cue: true,
+        });
+        // Shown at the target until the seek lands.
+        self.set_position_sample(position, false);
+        self.restart_for_seek();
+        self.emit_snapshot();
     }
 
     /// Queue `seek` for the pipeline, replacing a seek that waits.
@@ -1450,6 +1487,10 @@ impl GstPlaybackRuntime {
                     .event_tx
                     .send(PlaybackEvent::Seeked { position: landing });
             }
+        } else if let (true, Some(landing)) = (seek.cue, landing) {
+            let _ = self
+                .event_tx
+                .send(PlaybackEvent::Seeked { position: landing });
         }
         if self.restarting() {
             self.restart = None;
@@ -1521,6 +1562,7 @@ impl GstPlaybackRuntime {
         self.queue_seek(SeekTarget {
             position,
             serial: 0,
+            cue: false,
         });
     }
 
@@ -1746,6 +1788,7 @@ impl GstPlaybackRuntime {
         self.abandon_seeks();
         self.clear_recent_seek_trace();
         self.snapshot.current = Some(committed.path.clone());
+        self.snapshot.current_file = FileStamp::of(&committed.path);
         self.snapshot.current_queue_index = Some(committed.index);
         self.snapshot.track_token = track_token;
         let advancing = self.pipeline_advancing();
@@ -2274,6 +2317,7 @@ impl GstPlaybackRuntime {
             PlaybackCommand::Pause => self.pause(),
             PlaybackCommand::Stop => self.stop(),
             PlaybackCommand::Seek(pos) => self.seek(pos, 1),
+            PlaybackCommand::Cue { position, expected } => self.cue(position, expected),
             PlaybackCommand::SetVolume(volume) => self.set_volume(volume),
             PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(mode),
             PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
@@ -2508,6 +2552,7 @@ impl GstPlaybackRuntime {
         self.begin_pipeline_run(false);
         self.set_run_uri(path, uri);
         self.snapshot.current = Some(path.to_path_buf());
+        self.snapshot.current_file = FileStamp::of(path);
         if was_playing {
             let _ = self.set_pipeline_state(gst::State::Playing);
             self.playing_state_requested_at = Some(Instant::now());
@@ -5593,6 +5638,99 @@ mod engine_tests {
     }
 
     #[test]
+    fn a_cue_opens_the_stopped_track_paused_at_its_position_and_play_goes_on_from_there() {
+        let fixtures = Fixtures::new("cue");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        // As a restored session does.
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.send(PlaybackCommand::PlayAt(1));
+        engine.send(PlaybackCommand::Cue {
+            position: millis(2_500),
+            expected: FileStamp::of(&b).expect("stamp"),
+        });
+        engine.wait_until("the cue did not land", |engine| !engine.seeked.is_empty());
+        assert!(
+            engine.seeked[0].abs_diff(millis(2_500)) < millis(50),
+            "{:?}",
+            engine.seeked
+        );
+        engine.wait_until("the cue did not report its landing", |engine| {
+            engine.snapshot.position.abs_diff(millis(2_500)) < millis(50)
+        });
+        assert_eq!(engine.snapshot.state, PlaybackState::Paused);
+        assert_eq!(engine.snapshot.current.as_deref(), Some(b.as_path()));
+        assert_eq!(engine.snapshot.current_queue_index, Some(1));
+        // A cue takes no seek serial, which the UI counts for its own seeks.
+        assert_eq!(engine.snapshot.seek_serial, 0);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+
+        // It stays paused there.
+        let paused_at = engine.snapshot.position;
+        let until = Instant::now() + millis(400);
+        engine.wait_until("time passed", |_| Instant::now() >= until);
+        assert_eq!(engine.snapshot.state, PlaybackState::Paused);
+        assert_eq!(engine.snapshot.position, paused_at);
+
+        // Play goes on from the position, not from the start.
+        let played_from = engine.snapshots.len();
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("playback did not advance", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+                && engine.snapshot.position >= millis(2_800)
+        });
+        assert!(
+            engine.snapshots[played_from..]
+                .iter()
+                .all(|snapshot| snapshot.position >= millis(2_400)),
+            "played from the start"
+        );
+        assert_eq!(engine.changes.len(), 2, "{:?}", engine.changes);
+    }
+
+    #[test]
+    fn a_cue_for_a_changed_file_leaves_the_track_stopped_at_its_start() {
+        let fixtures = Fixtures::new("cue-changed");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = Engine::start();
+        let saved = FileStamp::of(&a).expect("stamp");
+        // The file was replaced since its position was saved.
+        let changed = FileStamp {
+            size: saved.size + 1,
+            ..saved
+        };
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Cue {
+            position: millis(2_500),
+            expected: changed,
+        });
+        engine.wait_until("the track was not loaded", |engine| {
+            engine.snapshot.current.as_deref() == Some(a.as_path())
+        });
+        let until = Instant::now() + millis(400);
+        engine.wait_until("time passed", |_| Instant::now() >= until);
+        assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
+        assert_eq!(engine.snapshot.position, Duration::ZERO);
+        assert!(engine.seeked.is_empty());
+
+        // Nor does a cue move a track that plays.
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("playback did not start", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+        });
+        engine.send(PlaybackCommand::Cue {
+            position: millis(3_000),
+            expected: saved,
+        });
+        let until = Instant::now() + millis(300);
+        engine.wait_until("time passed", |_| Instant::now() >= until);
+        assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+        assert!(engine.snapshot.position < millis(2_000));
+        assert!(engine.seeked.is_empty());
+    }
+
+    #[test]
     fn gapless_successor_becomes_current_when_its_audio_starts() {
         let fixtures = Fixtures::new("commit");
         let a = fixtures.wav("a.wav", 4_000);
@@ -6098,7 +6236,8 @@ mod engine_tests {
             engine.runtime.queued_seek,
             Some(SeekTarget {
                 position: millis(3_000),
-                serial: 4
+                serial: 4,
+                cue: false,
             })
         );
         // The position stands where the first seek found it.
