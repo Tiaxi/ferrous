@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::BuildHasher;
@@ -220,13 +221,6 @@ impl FlatTreeRow {
     }
 }
 
-struct TrackOrderCandidate {
-    path: String,
-    title: String,
-    rank: u8,
-    number: u32,
-}
-
 struct AlbumRowConfig<'a, S> {
     artist_name: &'a str,
     root_path: &'a str,
@@ -241,15 +235,15 @@ fn root_row_key(root_path: &str) -> String {
     tree_key("root", &[root_path])
 }
 
-pub(super) fn artist_row_key(root_path: &str, artist_name: &str) -> String {
+pub(crate) fn artist_row_key(root_path: &str, artist_name: &str) -> String {
     tree_key("artist", &[root_path, artist_name])
 }
 
-pub(super) fn album_row_key(root_path: &str, artist_name: &str, folder_name: &str) -> String {
+pub(crate) fn album_row_key(root_path: &str, artist_name: &str, folder_name: &str) -> String {
     tree_key("album", &[root_path, artist_name, folder_name])
 }
 
-pub(super) fn section_row_key(
+pub(crate) fn section_row_key(
     root_path: &str,
     artist_name: &str,
     folder_name: &str,
@@ -1017,60 +1011,119 @@ fn order_tracks(tracks: &[TrackLeaf]) -> Vec<OrderedTrack> {
         return Vec::new();
     }
 
-    let mut keyed = tracks
+    let inputs = tracks
         .iter()
-        .map(|track| {
-            let path = track.path.to_string_lossy().to_string();
-            (CollationKey::new(&path), path, track)
+        .map(|track| TrackSortInput {
+            path: track.path.to_string_lossy(),
+            track_no: track.track_no,
+            filename_number: leading_track_number(&track.file_stem),
         })
         .collect::<Vec<_>>();
-    keyed.sort_by(|a, b| by_name((&a.0, &a.1), (&b.0, &b.1)));
+    let order = tree_track_order(&inputs);
 
-    let mut candidates = keyed
+    let max_number = order.iter().map(|(_, number)| *number).max().unwrap_or(0);
+    let width = std::cmp::max(2, max_number.to_string().len());
+
+    order
+        .into_iter()
+        .map(|(index, number)| OrderedTrack {
+            label: format!(
+                "{:0width$} - {}",
+                number,
+                tracks[index].title,
+                width = width
+            ),
+            path: inputs[index].path.to_string(),
+            number,
+        })
+        .collect()
+}
+
+/// What the tree orders the tracks of an album or section by.
+struct TrackSortInput<'a> {
+    path: Cow<'a, str>,
+    track_no: Option<u32>,
+    /// The number the file name starts with.
+    filename_number: Option<u32>,
+}
+
+impl<'a> TrackSortInput<'a> {
+    fn of(track: &'a LibraryTrack) -> Self {
+        Self {
+            path: track.path.to_string_lossy(),
+            track_no: track.track_no,
+            filename_number: track
+                .path
+                .file_stem()
+                .and_then(|stem| leading_track_number(&stem.to_string_lossy())),
+        }
+    }
+}
+
+/// The order the tree shows `tracks` in: those with a track number tag by
+/// it, then those whose file name starts with a number by that number,
+/// then the others by path; equal numbers by path. Returns each track's
+/// index in `tracks` and the number the tree shows for it, in that order.
+fn tree_track_order(tracks: &[TrackSortInput<'_>]) -> Vec<(usize, u32)> {
+    let keys = tracks
+        .iter()
+        .map(|track| CollationKey::new(&track.path))
+        .collect::<Vec<_>>();
+    let mut by_path = (0..tracks.len()).collect::<Vec<_>>();
+    by_path.sort_by(|&a, &b| by_name((&keys[a], &tracks[a].path), (&keys[b], &tracks[b].path)));
+
+    let mut order = by_path
         .into_iter()
         .enumerate()
-        .map(|(index, (_, path, track))| {
-            let filename_number = leading_track_number(&track.file_stem);
+        .map(|(position, index)| {
+            let track = &tracks[index];
             let number = track
                 .track_no
-                .or(filename_number)
-                .unwrap_or_else(|| u32::try_from(index + 1).unwrap_or(u32::MAX));
-            let rank = if track.track_no.is_some() {
+                .or(track.filename_number)
+                .unwrap_or_else(|| u32::try_from(position + 1).unwrap_or(u32::MAX));
+            let rank: u8 = if track.track_no.is_some() {
                 0
-            } else if filename_number.is_some() {
+            } else if track.filename_number.is_some() {
                 1
             } else {
                 2
             };
-            TrackOrderCandidate {
-                path,
-                title: track.title.clone(),
-                rank,
-                number,
-            }
+            (rank, number, index)
         })
         .collect::<Vec<_>>();
-
-    // A stable sort of paths already in order: equal ranks and numbers keep
-    // the order of their paths.
-    candidates.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.number.cmp(&b.number)));
-
-    let max_number = candidates.iter().map(|c| c.number).max().unwrap_or(0);
-    let width = std::cmp::max(2, max_number.to_string().len());
-
-    candidates
+    // A stable sort of tracks already in the order of their paths: equal
+    // ranks and numbers keep that order.
+    order.sort_by_key(|&(rank, number, _)| (rank, number));
+    order
         .into_iter()
-        .map(|candidate| OrderedTrack {
-            label: format!(
-                "{:0width$} - {}",
-                candidate.number,
-                candidate.title,
-                width = width
-            ),
-            path: candidate.path,
-            number: candidate.number,
-        })
+        .map(|(_, number, index)| (index, number))
         .collect()
+}
+
+/// Appends the paths of an album's main tracks to `out` in the order the
+/// tree plays them (see [`album_play_paths`]): the tracks in the album
+/// folder, then those of each disc section, the sections by name.
+pub(super) fn push_album_paths_in_tree_order(
+    root_tracks: &[&LibraryTrack],
+    sections: &mut [(Cow<'_, str>, Vec<&LibraryTrack>)],
+    out: &mut Vec<PathBuf>,
+) {
+    let mut push = |tracks: &[&LibraryTrack]| {
+        let inputs = tracks
+            .iter()
+            .map(|track| TrackSortInput::of(track))
+            .collect::<Vec<_>>();
+        out.extend(
+            tree_track_order(&inputs)
+                .into_iter()
+                .map(|(index, _)| tracks[index].path.clone()),
+        );
+    };
+    push(root_tracks);
+    sections.sort_by_cached_key(|(name, _)| (CollationKey::new(name), name.to_string()));
+    for (_, tracks) in sections.iter() {
+        push(tracks);
+    }
 }
 
 fn normalized_track_title(track: &LibraryTrack) -> String {
@@ -1222,8 +1275,11 @@ pub(crate) fn collect_artist_paths_tree_order(
         for artist in root_builder.artists.values() {
             let matches = if artist_selector_is_key {
                 let root_path = root_builder.root_path.to_string_lossy();
-                let key = format!("artist|{root_path}|{}", artist.artist_name);
-                key == artist_selector
+                tree_key_is(
+                    artist_selector,
+                    "artist",
+                    &[&root_path, &artist.artist_name],
+                )
             } else {
                 artist.artist_name == artist_selector
             };
@@ -1867,6 +1923,25 @@ mod tests {
                 PathBuf::from("/b/X/Y/1.flac"),
                 PathBuf::from("/a/X/Y/1.flac")
             ]
+        );
+    }
+
+    #[test]
+    fn an_artist_of_a_root_with_a_separator_is_queued_by_its_key() {
+        let root_path = "/music|archive";
+        let library = LibrarySnapshot {
+            roots: vec![root(root_path)],
+            tracks: crate::library::shared_tracks(vec![LibraryTrack {
+                root_path: PathBuf::from(root_path),
+                ..track("/music|archive/Artist/Album/01.flac", "", None, Some(1), "")
+            }]),
+            ..LibrarySnapshot::default()
+        };
+        let key = artist_row_key(root_path, "Artist");
+        assert_eq!(key, "artist|/music\\|archive|Artist");
+        assert_eq!(
+            collect_artist_paths_tree_order(&library, &key, LibrarySortMode::Year),
+            [PathBuf::from("/music|archive/Artist/Album/01.flac")]
         );
     }
 

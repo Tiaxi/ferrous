@@ -12,6 +12,7 @@ use lofty::tag::{ItemKey, Tag};
 use serde::{Deserialize, Serialize};
 
 use crate::file_edit_lock;
+use crate::frontend_bridge::library_tree::{album_row_key, section_row_key};
 use crate::library::{
     read_library_snapshot_from_db, rename_indexed_metadata_paths, LibraryRoot, LibrarySnapshot,
     TrackRefresh,
@@ -484,16 +485,18 @@ fn derive_library_path_context(
     let root_key = root.path.to_string_lossy();
     let album_folder = components[1].clone();
     let section_key = if components.len() >= 4 {
-        Some(format!(
-            "section|{}|{}|{}|{}",
-            root_key, artist_name, album_folder, components[2]
+        Some(section_row_key(
+            &root_key,
+            &artist_name,
+            &album_folder,
+            &components[2],
         ))
     } else {
         None
     };
 
     Some(LibraryPathContext {
-        album_key: Some(format!("album|{root_key}|{artist_name}|{album_folder}")),
+        album_key: Some(album_row_key(&root_key, &artist_name, &album_folder)),
         section_key,
         is_main_level_album_track: components.len() == 3,
     })
@@ -1145,6 +1148,51 @@ mod tests {
         write_test_flac as write_flac, write_test_monkeys_audio, write_test_mp3_with_id3v23,
         write_test_mp3_with_only_id3v1, write_test_mp4, write_test_opus, write_test_wavpack,
     };
+
+    #[test]
+    fn album_and_section_keys_with_a_separator_select_their_tracks() {
+        let root = PathBuf::from("/music|archive");
+        let track = |path: &str| crate::library::LibraryTrack {
+            path: root.join(path),
+            root_path: root.clone(),
+            ..crate::library::LibraryTrack::default()
+        };
+        let library = LibrarySnapshot {
+            roots: vec![crate::library::LibraryRoot {
+                path: root.clone(),
+                name: String::new(),
+            }],
+            tracks: crate::library::shared_tracks(vec![
+                track("A|B/C/01.flac"),
+                track("A/B|C/01.flac"),
+                track("A|B/C/Bonus/02.flac"),
+            ]),
+            ..LibrarySnapshot::default()
+        };
+        let selection = |row_type: &str, key: String| SelectionEntry {
+            path: None,
+            row_type: Some(row_type.to_string()),
+            key: Some(key),
+            artist: None,
+            name: None,
+            track_path: None,
+        };
+        let root_key = root.to_string_lossy();
+        assert_eq!(
+            resolve_library_selection_paths(
+                &library,
+                &selection("album", album_row_key(&root_key, "A|B", "C"))
+            ),
+            [root.join("A|B/C/01.flac")]
+        );
+        assert_eq!(
+            resolve_library_selection_paths(
+                &library,
+                &selection("section", section_row_key(&root_key, "A|B", "C", "Bonus"))
+            ),
+            [root.join("A|B/C/Bonus/02.flac")]
+        );
+    }
 
     pub(super) fn test_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()

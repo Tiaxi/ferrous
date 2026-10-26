@@ -5412,6 +5412,52 @@ mod tests {
     }
 
     #[test]
+    fn an_album_is_queued_in_the_order_the_tree_shows_it() {
+        let _guard = test_guard();
+        // Unnumbered files: the tree orders them by collated path, and the
+        // database by bytes, which put "Zebra" first.
+        let fixture_tracks = ["Zebra.mp3", "Éclair.mp3", "élan 10.mp3", "élan 9.mp3"];
+        let mut fixture = LibraryOrderFixture::new("collated", &fixture_tracks);
+        let expected = ["Éclair.mp3", "élan 9.mp3", "élan 10.mp3", "Zebra.mp3"];
+        let album = fixture.album_key();
+        assert_eq!(fixture.queued_by(album), expected);
+        let root = fixture.root.to_string_lossy().into_owned();
+        assert_eq!(
+            fixture.queued_by(BridgeLibraryCommand::AppendAlbumByKey {
+                artist: "Artist".to_string(),
+                album: "Album".to_string(),
+            }),
+            expected
+        );
+        for command in [
+            BridgeLibraryCommand::AppendArtistByKey {
+                artist: format!("artist|{root}|Artist"),
+            },
+            BridgeLibraryCommand::AppendRootByPath { root },
+            BridgeLibraryCommand::AppendAllTracks,
+        ] {
+            assert_eq!(fixture.queued_by(command), expected);
+        }
+        // The bridge keeps the database's order.
+        assert_eq!(
+            fixture
+                .runtime
+                .state
+                .library
+                .tracks
+                .iter()
+                .map(|track| track
+                    .path
+                    .file_name()
+                    .expect("name")
+                    .to_string_lossy()
+                    .into_owned())
+                .collect::<Vec<_>>(),
+            ["Zebra.mp3", "Éclair.mp3", "élan 10.mp3", "élan 9.mp3"]
+        );
+    }
+
+    #[test]
     fn a_renamed_track_is_queued_in_its_new_place() {
         let _guard = test_guard();
         let mut fixture = LibraryOrderFixture::new("rename", &["01.mp3", "02.mp3", "03.mp3"]);

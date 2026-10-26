@@ -4291,6 +4291,11 @@ void BridgeClientTest::searchResultsRankFilterAndHighlight() {
     QCOMPARE(model.highlightText(QString::fromUtf8("Straße"), "strasse"), QString::fromUtf8("<b>Straße</b>"));
     QCOMPARE(model.highlightText(QString::fromUtf8("Ægir Łódź"), "aegir lodz"),
              QString::fromUtf8("<b>Ægir</b> <b>Łódź</b>"));
+    // A match of part of a letter's spelling highlights the whole letter.
+    QCOMPARE(model.highlightText(QString::fromUtf8("Ægir"), "a"), QString::fromUtf8("<b>Æ</b>gir"));
+    QCOMPARE(model.highlightText(QString::fromUtf8("Ægir"), "eg"), QString::fromUtf8("<b>Æg</b>ir"));
+    QCOMPARE(model.highlightText(QString::fromUtf8("Œuvre"), "o"), QString::fromUtf8("<b>Œ</b>uvre"));
+    QCOMPARE(model.highlightText(QString::fromUtf8("Þór"), "t"), QString::fromUtf8("<b>Þ</b>ór"));
 }
 
 void BridgeClientTest::searchProtocolTotalsAndExpansion() {

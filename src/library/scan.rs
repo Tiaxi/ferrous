@@ -2820,9 +2820,8 @@ struct LibraryWalk {
     linked: VecDeque<(ScanCandidate, FileIdentity)>,
     /// Supported audio files encountered, including unreadable and duplicate ones.
     found: usize,
-    /// `AppleDouble` sidecars encountered, which are not tracks but show
-    /// that the root can be read.
-    sidecars: usize,
+    /// The `AppleDouble` sidecars encountered, which are not tracks.
+    sidecars: HashSet<PathBuf>,
     kept: HashSet<PathBuf>,
     /// The files found that have other names; see
     /// [`WorkerLibrary::hard_linked`].
@@ -2859,7 +2858,7 @@ impl LibraryWalk {
             claimed: HashSet::new(),
             linked: VecDeque::new(),
             found: 0,
-            sidecars: 0,
+            sidecars: HashSet::new(),
             kept: HashSet::new(),
             hard_linked: HashSet::new(),
             read_errors: 0,
@@ -3001,7 +3000,7 @@ impl LibraryWalk {
             return WalkStep::Continue;
         }
         if is_apple_double_sidecar(path) {
-            self.sidecars = self.sidecars.saturating_add(1);
+            self.sidecars.insert(path.to_path_buf());
             return WalkStep::Continue;
         }
 
@@ -3623,16 +3622,23 @@ fn scan_root_in(
         });
     }
 
+    // Rows of sidecars, indexed before sidecars were skipped (#201), are
+    // never tracks, so they go even when the root looks offline.
+    let sidecar_rows: Vec<String> = existing
+        .keys()
+        .filter(|p| walk.sidecars.contains(Path::new(p)))
+        .cloned()
+        .collect();
+    let previous_track_count = previous_index_count - sidecar_rows.len();
     // A root that previously had tracks but now has no audio files at all is
-    // most likely an unmounted or offline folder, not an emptied library. A
-    // scoped walk does not see the whole root, so it looks at the folder.
-    // Sidecars left behind by files moved away show the root is there.
+    // most likely an unmounted or offline folder, not an emptied library,
+    // even if a folder under its mount point holds sidecars. A scoped walk
+    // does not see the whole root, so it looks at the folder.
     let keep_all = walk.found == 0
-        && walk.sidecars == 0
-        && previous_index_count > 0
+        && previous_track_count > 0
         && (scope.is_none() || root_looks_offline(&root));
     let stale: Vec<String> = if keep_all {
-        Vec::new()
+        sidecar_rows
     } else {
         existing
             .keys()
@@ -3654,7 +3660,7 @@ fn scan_root_in(
             "found no audio files in '{}'; kept its {} in case the folder is offline. \
              Remove the root to drop them",
             root.display(),
-            count_label(previous_index_count, "indexed track", "indexed tracks")
+            count_label(previous_track_count, "indexed track", "indexed tracks")
         )),
         None => None,
     };
@@ -4613,33 +4619,47 @@ mod tests {
     }
 
     #[test]
-    fn sidecars_left_behind_by_moved_tracks_show_the_root_is_reachable() {
+    fn a_mount_point_with_only_sidecars_keeps_its_tracks_and_drops_the_sidecar_rows() {
         let mut conn = Connection::open_in_memory().expect("db");
         init_schema(&conn).expect("schema");
-        let root = test_dir("apple-double-moved");
-        fs::create_dir_all(&root).expect("mkdir");
+        let root = test_dir("apple-double-mount-point");
+        fs::create_dir_all(root.join("Album")).expect("mkdir");
         let root = root.canonicalize().expect("canonical root");
-        let track = root.join("01.mp3");
-        let sidecar = root.join("._01.mp3");
-        write_stub(&track, crate::tag_write::TEST_MP3);
+        let tracks = [root.join("Album/01.mp3"), root.join("Album/02.mp3")];
+        let sidecar = root.join("Album/._01.mp3");
+        for track in &tracks {
+            write_stub(track, crate::tag_write::TEST_MP3);
+        }
         write_test_apple_double(&sidecar);
         // As a scan before sidecars were skipped indexed them.
-        insert_indexed_tracks(&mut conn, &root, &[track.clone(), sidecar.clone()]);
-        // The tracks moved away; their sidecars stayed.
-        fs::remove_file(&track).expect("move the track away");
+        let mut indexed = tracks.to_vec();
+        indexed.push(sidecar.clone());
+        insert_indexed_tracks(&mut conn, &root, &indexed);
+        // The share is unmounted: its mount point shows the folder below,
+        // where sidecars were left behind.
+        for track in &tracks {
+            fs::remove_file(track).expect("unmount");
+        }
 
         let outcome = scan(&conn, &root);
 
-        assert!(indexed_paths(&conn).is_empty());
-        let mut removed = outcome.removed.clone();
-        removed.sort();
-        assert_eq!(
-            removed,
-            [
-                sidecar.to_string_lossy().to_string(),
-                track.to_string_lossy().to_string()
-            ]
+        assert_eq!(indexed_paths(&conn), tracks);
+        assert_eq!(outcome.removed, [sidecar.to_string_lossy().to_string()]);
+        let problem = outcome.problem.expect("the offline root is reported");
+        assert!(
+            problem.contains("found no audio files")
+                && problem.contains("kept its 2 indexed tracks"),
+            "{problem}"
         );
+
+        // Once the share is back, a sidecar row left over is removed too.
+        for track in &tracks {
+            write_stub(track, crate::tag_write::TEST_MP3);
+        }
+        insert_indexed_tracks(&mut conn, &root, std::slice::from_ref(&sidecar));
+        let outcome = scan(&conn, &root);
+        assert_eq!(indexed_paths(&conn), tracks);
+        assert_eq!(outcome.removed, [sidecar.to_string_lossy().to_string()]);
         assert_eq!(outcome.problem, None);
         fs::remove_dir_all(root).expect("cleanup");
     }

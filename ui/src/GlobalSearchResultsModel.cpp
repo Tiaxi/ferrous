@@ -532,7 +532,11 @@ QString GlobalSearchResultsModel::highlightText(const QString &text, const QStri
         qsizetype offset = 0;
         while ((offset = normalized.indexOf(term, offset)) >= 0) {
             const auto end = offset + term.size();
-            const auto originalEnd = end < positions.size() ? positions[end] : text.size();
+            // Every original character the match covers part of, so "a"
+            // highlights the whole "Æ" it matches the start of, and the marks
+            // that fold away after it, as in "e" + U+0301.
+            const auto nextStart = end < positions.size() ? positions[end] : text.size();
+            const auto originalEnd = std::max(positions[end - 1] + 1, nextStart);
             for (auto i = positions[offset]; i < originalEnd; ++i) matched[i] = true;
             offset = end;
         }

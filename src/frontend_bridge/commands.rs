@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, Cursor};
@@ -23,7 +24,7 @@ use super::imports::{QueueRequest, RenamedDetails};
 use super::library_tree::tree_key_is;
 use super::queue::handle_queue_command;
 use super::queue_sync::QueueEdit;
-use super::search::{keyed_roots, tree_path_parts};
+use super::search::{keyed_roots, tree_path_parts, TreePathParts};
 use super::{
     library_tree, try_send_event, ApplyAlbumArtRequest, BridgeAnalysisCommand, BridgeCommand,
     BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
@@ -595,9 +596,9 @@ fn normalized_library_album(track: &LibraryTrack) -> &str {
     }
 }
 
-/// The library tracks of the album selected by `artist` and `album`. Every
-/// library track is matched, so the match borrows from the tracks instead of
-/// building their tree keys.
+/// The library tracks of the album selected by `artist` and `album`, in the
+/// order the tree plays them. Every library track is matched, so the match
+/// borrows from the tracks instead of building their tree keys.
 fn collect_album_paths_for_queue(
     library: &crate::library::LibrarySnapshot,
     artist: &str,
@@ -612,59 +613,106 @@ fn collect_album_paths_for_queue(
     let album_selector_is_key = album_selector.starts_with("album|");
     let roots = keyed_roots(&library.roots);
 
-    library
-        .tracks
-        .iter()
-        .filter(|track| {
-            let parts = tree_path_parts(&track.path, &roots, &track.artist);
-
-            if album_selector_is_key {
-                let Some(parts) = parts else {
-                    return false;
-                };
-                let Some(album_folder) = parts.album_folder.as_deref() else {
-                    return false;
-                };
-                if !tree_key_is(
-                    album_selector,
-                    "album",
-                    &[parts.root_key, &parts.artist_name, album_folder],
-                ) {
-                    return false;
-                }
-                // Only include root album tracks and recognised disc
-                // sections (Disc 1, CD 2, …).  Exclude bonus/extra
-                // subfolders so the queue represents the main album.
-                return parts.is_main_level_album_track || parts.is_disc_section_album_track();
+    let mut albums: Vec<AlbumMatch<'_>> = Vec::new();
+    // Tracks outside every root, matched by their tags, in library order.
+    let mut untreed = Vec::new();
+    for track in &library.tracks {
+        let parts = tree_path_parts(&track.path, &roots, &track.artist);
+        let Some(parts) = parts else {
+            if !album_selector_is_key
+                && !artist_selector_is_key
+                && normalized_library_artist(track) == artist_selector
+                && normalized_library_album(track) == album_selector
+            {
+                untreed.push(track.path.clone());
             }
-
+            continue;
+        };
+        let in_album = parts.is_main_level_album_track || parts.is_disc_section_album_track();
+        let Some(album_folder) = parts.album_folder.as_deref() else {
+            continue;
+        };
+        let matches = if album_selector_is_key {
+            tree_key_is(
+                album_selector,
+                "album",
+                &[parts.root_key, &parts.artist_name, album_folder],
+            )
+        } else {
             let artist_matches = if artist_selector_is_key {
-                parts.as_ref().is_some_and(|parts| {
-                    tree_key_is(
-                        artist_selector,
-                        "artist",
-                        &[parts.root_key, &parts.artist_name],
-                    )
-                })
-            } else if let Some(parts) = parts.as_ref() {
-                parts.artist_name == artist_selector
+                tree_key_is(
+                    artist_selector,
+                    "artist",
+                    &[parts.root_key, &parts.artist_name],
+                )
             } else {
-                normalized_library_artist(track) == artist_selector
+                parts.artist_name == artist_selector
             };
-            if !artist_matches {
-                return false;
-            }
+            artist_matches && album_folder == album_selector
+        };
+        // Only root album tracks and recognised disc sections (Disc 1,
+        // CD 2, …); bonus/extra subfolders are not the main album.
+        if !matches || !in_album {
+            continue;
+        }
+        AlbumMatch::add(&mut albums, &parts, track);
+    }
 
-            if let Some(parts) = parts {
-                if parts.album_folder.as_deref().unwrap_or("Unknown Album") != album_selector {
-                    return false;
+    let mut out = Vec::new();
+    for mut album in albums {
+        library_tree::push_album_paths_in_tree_order(
+            &album.root_tracks,
+            &mut album.sections,
+            &mut out,
+        );
+    }
+    out.extend(untreed);
+    out
+}
+
+/// The matched tracks of one album of the tree; see
+/// [`collect_album_paths_for_queue`].
+struct AlbumMatch<'a> {
+    root_key: &'a str,
+    artist_name: Cow<'a, str>,
+    album_folder: Cow<'a, str>,
+    root_tracks: Vec<&'a LibraryTrack>,
+    sections: Vec<(Cow<'a, str>, Vec<&'a LibraryTrack>)>,
+}
+
+impl<'a> AlbumMatch<'a> {
+    fn add(albums: &mut Vec<Self>, parts: &TreePathParts<'a>, track: &'a LibraryTrack) {
+        let Some(album_folder) = parts.album_folder.as_ref() else {
+            return;
+        };
+        let index = albums
+            .iter()
+            .position(|album| {
+                album.root_key == parts.root_key
+                    && album.artist_name == parts.artist_name
+                    && album.album_folder == *album_folder
+            })
+            .unwrap_or_else(|| {
+                albums.push(Self {
+                    root_key: parts.root_key,
+                    artist_name: parts.artist_name.clone(),
+                    album_folder: album_folder.clone(),
+                    root_tracks: Vec::new(),
+                    sections: Vec::new(),
+                });
+                albums.len() - 1
+            });
+        let album = &mut albums[index];
+        match parts.section() {
+            Some(section) if !parts.is_main_level_album_track => {
+                match album.sections.iter_mut().find(|(name, _)| name == section) {
+                    Some((_, tracks)) => tracks.push(track),
+                    None => album.sections.push((section.clone(), vec![track])),
                 }
-                return parts.is_main_level_album_track || parts.is_disc_section_album_track();
             }
-            normalized_library_album(track) == album_selector
-        })
-        .map(|track| track.path.clone())
-        .collect()
+            _ => album.root_tracks.push(track),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1765,11 +1813,15 @@ mod tests {
 
         let outcome = expand_import_paths(vec![root.clone()]);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
-        assert_eq!(outcome.tracks, vec![own, outside]);
+        // Root, or a process with CAP_DAC_OVERRIDE, reads the folder anyway.
+        let (tracks, unreadable) = if readable {
+            (vec![own, outside, locked.join("04.flac")], 0)
+        } else {
+            (vec![own, outside], 1)
+        };
+        assert_eq!(outcome.tracks, tracks);
+        assert_eq!(outcome.unreadable_count, unreadable);
         assert_eq!(outcome.enclosing_link_count, 1);
-        if !readable {
-            assert_eq!(outcome.unreadable_count, 1);
-        }
         let warning = format_import_warning("folder", &outcome).expect("warning");
         assert!(
             warning.contains("1 link to a folder that holds the imported folder"),
@@ -2313,18 +2365,21 @@ mod tests {
             ("A", "  "),
         ];
         for (artist, album) in selections {
-            assert_eq!(
-                collect_album_paths_for_queue(&library, artist, album),
-                album_paths_through_tree_contexts(&library, artist, album),
-                "{artist:?} / {album:?}"
-            );
+            // The same tracks; the order is the tree's, checked below.
+            let mut collected = collect_album_paths_for_queue(&library, artist, album);
+            let mut expected = album_paths_through_tree_contexts(&library, artist, album);
+            collected.sort();
+            expected.sort();
+            assert_eq!(collected, expected, "{artist:?} / {album:?}");
         }
+        // The album folder's tracks, then the disc sections by name, as the
+        // tree plays the album.
         assert_eq!(
             collect_album_paths_for_queue(&library, "artist|/music|A", "album|/music|A|Album"),
             vec![
                 p("/music/A/Album/01.flac"),
-                p("/music/A/Album/Disc 1/01.flac"),
                 p("/music/A/Album/CD2/01.flac"),
+                p("/music/A/Album/Disc 1/01.flac"),
             ]
         );
     }
@@ -2361,10 +2416,11 @@ mod tests {
             let paths = collect_album_paths_for_queue(&library, artist, album);
             let allocations = crate::test_alloc::allocations() - before;
             assert_eq!(paths.len(), 10);
-            // The paths of the album's tracks, the vector that holds them, and
-            // the root's key; nothing for the other 1,990 tracks.
+            // For each of the album's tracks its path and the key it is
+            // sorted by, and a few vectors; nothing for the other 1,990
+            // tracks.
             assert!(
-                allocations <= paths.len() + 8,
+                allocations <= 2 * paths.len() + 24,
                 "{allocations} allocations for {artist:?} / {album:?}"
             );
         }

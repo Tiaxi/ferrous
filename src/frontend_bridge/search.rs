@@ -680,7 +680,13 @@ pub(super) struct TreePathParts<'a> {
     pub(super) is_main_level_album_track: bool,
 }
 
-impl TreePathParts<'_> {
+impl<'a> TreePathParts<'a> {
+    /// The folder between the album folder and the track, for tracks one
+    /// level below the album folder.
+    pub(super) fn section(&self) -> Option<&Cow<'a, str>> {
+        self.section.as_ref()
+    }
+
     /// Whether the track is in a disc section (Disc 1, CD 2, …) directly
     /// below its album folder.
     pub(super) fn is_disc_section_album_track(&self) -> bool {
