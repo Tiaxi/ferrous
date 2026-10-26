@@ -8,6 +8,7 @@ use rusqlite::Connection;
 
 use super::*;
 use crate::library::scan::scan_test_hooks::{hold_read, scans_of};
+use crate::library::scan::write_test_track;
 use crate::library::scan::ScanTuning;
 use crate::library::schema::{user_version, SCHEMA_VERSION};
 use crate::library::test_fixtures::{build_version_0_library, schema_objects};
@@ -262,7 +263,7 @@ impl Fixture {
         fs::create_dir_all(&root).expect("library folder");
         let root = root.canonicalize().expect("canonical root");
         for track in tracks {
-            fs::write(root.join(track), track.as_bytes()).expect("track");
+            write_test_track(&root.join(track), track.as_bytes());
         }
         Self {
             db: folder.join("library.sqlite3"),
@@ -440,7 +441,7 @@ fn rescans_requested_during_a_scan_of_the_root_merge_with_it() {
         name: String::new(),
     });
     next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 3));
-    fs::write(fixture.track("b.mp3"), b"changed").expect("change a track");
+    write_test_track(&fixture.track("b.mp3"), b"changed");
     let (started, release) = hold_read(&fixture.track("b.mp3"));
     service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
     started
@@ -487,8 +488,8 @@ fn a_rescan_asked_for_after_a_running_scan_passed_the_change_finds_it() {
     let fixture = Fixture::new("passed", &[]);
     fs::create_dir_all(fixture.root.join("a")).expect("folder");
     fs::create_dir_all(fixture.root.join("z")).expect("folder");
-    fs::write(fixture.track("a/1.mp3"), b"a1").expect("track");
-    fs::write(fixture.track("z/2.mp3"), b"z2").expect("track");
+    write_test_track(&fixture.track("a/1.mp3"), b"a1");
+    write_test_track(&fixture.track("z/2.mp3"), b"z2");
     let (service, mut events) = fixture.start();
     service.command(LibraryCommand::AddRoot {
         path: fixture.root.clone(),
@@ -496,7 +497,7 @@ fn a_rescan_asked_for_after_a_running_scan_passed_the_change_finds_it() {
     });
     next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 2));
     // The rescan reads z/2.mp3 after walking past a/.
-    fs::write(fixture.track("z/2.mp3"), b"z2 changed").expect("change");
+    write_test_track(&fixture.track("z/2.mp3"), b"z2 changed");
     let (started, release) = hold_read(&fixture.track("z/2.mp3"));
     service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
     started
@@ -505,7 +506,7 @@ fn a_rescan_asked_for_after_a_running_scan_passed_the_change_finds_it() {
 
     // Added where the running scan has been, and a rescan asked for, as the
     // watcher does when it lost track of the changes.
-    fs::write(fixture.track("a/new.mp3"), b"new").expect("track");
+    write_test_track(&fixture.track("a/new.mp3"), b"new");
     service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
     // Applied while the scan runs, so the rescan before it was received then
     // too.
@@ -534,7 +535,7 @@ fn rescanning_an_outer_root_keeps_an_inner_roots_hard_links() {
     let fixture = Fixture::new("hard-links", &["x.mp3"]);
     let inner = fixture.root.join("inner");
     fs::create_dir_all(&inner).expect("inner root");
-    fs::write(inner.join("a.mp3"), b"a").expect("track");
+    write_test_track(&inner.join("a.mp3"), b"a");
     fs::hard_link(inner.join("a.mp3"), inner.join("b.mp3")).expect("hard link");
     let (service, mut events) = fixture.start();
     service.command(LibraryCommand::AddRoot {
@@ -735,9 +736,9 @@ fn a_rescan_publishes_only_the_rows_that_changed() {
     next_snapshot(&mut events, |snapshot| idle_with_tracks(snapshot, 40));
     events.mirror.drain(&events.rx);
     // The scan reads this file again, but its row stays the same.
-    fs::write(fixture.track("07.mp3"), b"changed, and longer").expect("change a track");
+    write_test_track(&fixture.track("07.mp3"), b"changed, and longer");
     fs::remove_file(fixture.track("08.mp3")).expect("remove a track");
-    fs::write(fixture.track("new.mp3"), b"new").expect("add a track");
+    write_test_track(&fixture.track("new.mp3"), b"new");
 
     service.command(LibraryCommand::RescanRoot(fixture.root.clone()));
     let rescan = events_until_idle(&mut events);
@@ -821,7 +822,7 @@ fn each_root_of_a_scan_is_numbered_before_its_reads() {
     fs::create_dir_all(&next).expect("second root");
     let next = next.canonicalize().expect("canonical root");
     for name in ["c.mp3", "d.mp3"] {
-        fs::write(next.join(name), name.as_bytes()).expect("track");
+        write_test_track(&next.join(name), name.as_bytes());
     }
     let (service, mut events) = fixture.start();
     for root in [&fixture.root, &next] {
@@ -833,7 +834,7 @@ fn each_root_of_a_scan_is_numbered_before_its_reads() {
     next_snapshot(&mut events, |view| idle_with_tracks(view, 4));
 
     // The rescan waits in the first root.
-    fs::write(fixture.track("a.mp3"), b"a.mp3, changed").expect("change a");
+    write_test_track(&fixture.track("a.mp3"), b"a.mp3, changed");
     let (started, release) = hold_read(&fixture.track("a.mp3"));
     let before_scan = crate::library::next_file_sequence();
     service.command(LibraryCommand::RescanAll);
@@ -844,7 +845,7 @@ fn each_root_of_a_scan_is_numbered_before_its_reads() {
     // did; they change after it.
     let renamed = crate::library::next_file_sequence();
     let (added, deleted) = (next.join("e.mp3"), next.join("d.mp3"));
-    fs::write(&added, b"e.mp3").expect("add a track");
+    write_test_track(&added, b"e.mp3");
     fs::remove_file(&deleted).expect("delete a track");
     drop(release);
 
