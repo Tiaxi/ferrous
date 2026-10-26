@@ -49,6 +49,10 @@ where
         (self.on_poll)(conn, self.polls)
     }
 
+    fn defer_walk(&mut self, _root: &Path) -> bool {
+        false
+    }
+
     fn external_writes(&mut self, conn: &Connection) -> bool {
         self.external.since_last_check(conn)
     }

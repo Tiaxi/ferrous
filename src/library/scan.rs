@@ -509,6 +509,11 @@ pub(super) trait ScanControl {
         remaining: &[PathBuf],
     ) -> ScanDirective;
 
+    /// Called before `root` is walked, after [`ScanControl::poll`]: whether
+    /// to leave it for later, because changes to it are not watched for
+    /// yet. A command queued meanwhile then scans it.
+    fn defer_walk(&mut self, root: &Path) -> bool;
+
     /// Whether another connection, such as a tag edit's, committed to the
     /// database since the last call, so that `library` must be read again
     /// before it is published.
@@ -552,6 +557,10 @@ impl ScanControl for Uninterrupted {
         _remaining: &[PathBuf],
     ) -> ScanDirective {
         ScanDirective::Continue
+    }
+
+    fn defer_walk(&mut self, _root: &Path) -> bool {
+        false
     }
 
     fn external_writes(&mut self, _conn: &Connection) -> bool {
@@ -688,6 +697,9 @@ impl ScanRun<'_> {
                     ..RootScanEnd::default()
                 }
             }
+        }
+        if self.control.defer_walk(root) {
+            return RootScanEnd::default();
         }
         let mut sink = SnapshotSink::new(
             self.library,

@@ -7,7 +7,8 @@
 //!
 //! A root the watcher was just told about is walked only once its watches
 //! are set up: a change made after that is seen by the walk or by the
-//! watches, and none made before the walk is missed.
+//! watches, and none made before the walk is missed. Until then, its walk
+//! waits in the queue, and other commands run.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,9 @@ pub(super) struct Inputs {
     pub(super) roots: WatchHandle,
     /// How many of the roots messages the watcher has handled, after each.
     pub(super) roots_watched: Receiver<u64>,
+    /// Whether to watch the roots. The worker passes it on to the watcher,
+    /// in order with the roots.
+    pub(super) watching: Receiver<bool>,
 }
 
 /// Runs the library worker until its commands close.
@@ -60,6 +64,7 @@ pub(super) fn run(
     control.changes = inputs.changes;
     control.watcher = Some(inputs.roots);
     control.roots_watched = inputs.roots_watched;
+    control.watching = inputs.watching;
     prepare_library(&conn, &mut library, event_tx, &mut control, notice);
     // The watcher starts watching, and rescans the roots, only now.
     control.tell_watcher_roots(&library);
@@ -194,7 +199,8 @@ pub(super) fn handle_command(
     } else {
         library.set_roots(load_roots(conn));
     }
-    library.status.scan_in_progress = false;
+    // A walk waiting for the watches of its root is a scan yet to run.
+    library.status.scan_in_progress = control.walks_deferred();
     library.status.scan_progress = None;
     library.publish(event_tx);
 }
@@ -224,6 +230,10 @@ pub(super) struct Control {
     /// The roots that the watcher may not watch yet, with the number of the
     /// message that first told it about each.
     unconfirmed: HashMap<PathBuf, u64>,
+    /// The service's watching setting; `never` once the service is gone.
+    watching: Receiver<bool>,
+    /// Whether the watcher was last told to watch.
+    watching_on: bool,
     /// Roots removed while the command ran, which its scans skip.
     removed: HashSet<PathBuf>,
     /// Failures of the commands run during the command.
@@ -247,6 +257,8 @@ impl Control {
             roots_watched: never(),
             roots_handled: 0,
             unconfirmed: HashMap::new(),
+            watching: never(),
+            watching_on: false,
             removed: HashSet::new(),
             errors: Vec::new(),
             external: ExternalWrites::default(),
@@ -319,41 +331,36 @@ impl Control {
         self.roots_handled = u64::MAX;
     }
 
-    /// Waits until the watcher has set up the watches of `root`, if it was
-    /// told about the root and has not done so yet, so that the scan of
-    /// `root` that follows sees every change that the watches miss. Watches
-    /// already being set up for other roots are waited for too, since the
-    /// watcher handles its messages in order. The commands that arrive
-    /// meanwhile are queued as for the running scan, which has `remaining`
-    /// left; shutting down ends the wait.
-    fn wait_for_watches(&mut self, root: &Path, remaining: &[PathBuf]) {
-        self.note_roots_watched();
-        let Some(&told_in) = self.unconfirmed.get(root) else {
-            return;
-        };
-        #[cfg(test)]
-        super::watch::watch_test_hooks::note_scan_wait(root);
-        while self.roots_handled < told_in && !self.shutting_down {
-            select! {
-                recv(self.roots_watched) -> handled => match handled {
-                    Ok(handled) => self.roots_handled = handled,
-                    Err(_) => self.watcher_gone(),
-                },
-                recv(self.commands) -> cmd => match cmd {
-                    Ok(cmd) => self
-                        .queue
-                        .push(resolve_command(cmd), Some(RunningScan { remaining })),
-                    Err(_) => self.shutting_down = true,
-                },
-            }
+    /// Tells the watcher whether to watch, after the roots told so far.
+    fn set_watching(&mut self, enabled: bool) {
+        if let Some(watcher) = &self.watcher {
+            watcher.set_enabled(enabled);
         }
-        let handled = self.roots_handled;
-        self.unconfirmed.retain(|_, told_in| *told_in > handled);
+        self.watching_on = enabled;
+    }
+
+    /// Whether a queued walk waits for the watches of its root.
+    fn walks_deferred(&self) -> bool {
+        self.queue
+            .normal
+            .iter()
+            .any(|cmd| waits_for_watches(cmd, self.watching_on, &self.unconfirmed))
     }
 
     /// Queues the commands that have arrived, merging them with those
     /// queued and with `running`.
     fn receive(&mut self, running: Option<RunningScan<'_>>) {
+        self.note_roots_watched();
+        loop {
+            match self.watching.try_recv() {
+                Ok(enabled) => self.set_watching(enabled),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.watching = never();
+                    break;
+                }
+            }
+        }
         loop {
             match self.commands.try_recv() {
                 Ok(cmd) => self.queue.push(resolve_command(cmd), running),
@@ -377,11 +384,15 @@ impl Control {
     }
 
     /// The next command to run, waiting for one. `None` once the service is
-    /// gone and the commands left are run.
+    /// gone and the commands left are run. A walk waiting for the watches
+    /// of its root stays queued, and the commands after it run.
     fn next_command(&mut self) -> Option<LibraryCommand> {
         loop {
             self.receive(None);
-            if let Some(cmd) = self.queue.pop(self.shutting_down) {
+            let (watching_on, unconfirmed) = (self.watching_on, &self.unconfirmed);
+            if let Some(cmd) = self.queue.pop(self.shutting_down, |cmd| {
+                waits_for_watches(cmd, watching_on, unconfirmed)
+            }) {
                 return Some(cmd);
             }
             if self.shutting_down {
@@ -395,6 +406,14 @@ impl Control {
                 recv(self.changes) -> cmd => match cmd {
                     Ok(cmd) => self.queue.push(cmd, None),
                     Err(_) => self.changes = never(),
+                },
+                recv(self.roots_watched) -> handled => match handled {
+                    Ok(handled) => self.roots_handled = handled,
+                    Err(_) => self.watcher_gone(),
+                },
+                recv(self.watching) -> enabled => match enabled {
+                    Ok(enabled) => self.set_watching(enabled),
+                    Err(_) => self.watching = never(),
                 },
             }
         }
@@ -427,32 +446,6 @@ impl Control {
             self.errors.push(err);
         }
     }
-
-    /// Runs the queued commands that must not wait for the running scan,
-    /// and publishes what they changed.
-    fn run_priority_commands(
-        &mut self,
-        conn: &Connection,
-        library: &mut WorkerLibrary,
-        event_tx: &Sender<LibraryEvent>,
-    ) {
-        if self.queue.priority.is_empty() {
-            return;
-        }
-        let mut removed_any = false;
-        while let Some(cmd) = self.queue.priority.pop_front() {
-            removed_any |= matches!(cmd, LibraryCommand::RemoveRoot(_));
-            self.run_priority(conn, library, cmd);
-        }
-        if removed_any {
-            self.external_writes(conn);
-            library.reload(conn);
-        } else {
-            library.set_roots(load_roots(conn));
-        }
-        library.status.last_error = joined(&self.errors);
-        library.publish(event_tx);
-    }
 }
 
 impl ScanControl for Control {
@@ -465,15 +458,23 @@ impl ScanControl for Control {
         remaining: &[PathBuf],
     ) -> ScanDirective {
         self.receive(Some(RunningScan { remaining }));
-        self.run_priority_commands(conn, library, event_tx);
-        // An added root is watched before it is walked.
-        self.tell_watcher_roots(library);
-        if !self.removed.contains(scanning) {
-            self.wait_for_watches(scanning, remaining);
-            // Those that arrived meanwhile.
-            self.run_priority_commands(conn, library, event_tx);
-            self.tell_watcher_roots(library);
+        if !self.queue.priority.is_empty() {
+            let mut removed_any = false;
+            while let Some(cmd) = self.queue.priority.pop_front() {
+                removed_any |= matches!(cmd, LibraryCommand::RemoveRoot(_));
+                self.run_priority(conn, library, cmd);
+            }
+            if removed_any {
+                self.external_writes(conn);
+                library.reload(conn);
+            } else {
+                library.set_roots(load_roots(conn));
+            }
+            library.status.last_error = joined(&self.errors);
+            library.publish(event_tx);
         }
+        // An added root is told before it is walked; see `defer_walk`.
+        self.tell_watcher_roots(library);
         if self.shutting_down {
             ScanDirective::StopAll
         } else if self.removed.contains(scanning) {
@@ -483,8 +484,43 @@ impl ScanControl for Control {
         }
     }
 
+    /// Leaves the walk of `root` for later while the watcher may not watch
+    /// it yet: it is queued as a rescan, which runs once the watches are
+    /// set up or watching is turned off. Removing the root drops it.
+    fn defer_walk(&mut self, root: &Path) -> bool {
+        self.note_roots_watched();
+        if !waits_for_watches(
+            &LibraryCommand::RescanRoot(root.to_path_buf()),
+            self.watching_on,
+            &self.unconfirmed,
+        ) {
+            return false;
+        }
+        #[cfg(test)]
+        super::watch::watch_test_hooks::note_walk_deferred(root);
+        self.queue
+            .push(LibraryCommand::RescanRoot(root.to_path_buf()), None);
+        true
+    }
+
     fn external_writes(&mut self, conn: &Connection) -> bool {
         self.external.since_last_check(conn)
+    }
+}
+
+/// Whether `cmd` walks a root that the watcher may not watch yet: one in
+/// `unconfirmed` while watching is on. With watching off, nothing is
+/// watched, and turning it on rescans every root once it is watched.
+fn waits_for_watches(
+    cmd: &LibraryCommand,
+    watching_on: bool,
+    unconfirmed: &HashMap<PathBuf, u64>,
+) -> bool {
+    match cmd {
+        LibraryCommand::RescanRoot(root) | LibraryCommand::ScanPaths { root, .. } => {
+            watching_on && unconfirmed.contains_key(root)
+        }
+        _ => false,
     }
 }
 
@@ -718,25 +754,28 @@ impl CommandQueue {
         }
     }
 
-    /// The next command to run. Once shutting down, scans are dropped.
-    fn pop(&mut self, shutting_down: bool) -> Option<LibraryCommand> {
+    /// The next command to run, skipping those that `waits`. Once shutting
+    /// down, scans are dropped.
+    fn pop(
+        &mut self,
+        shutting_down: bool,
+        waits: impl Fn(&LibraryCommand) -> bool,
+    ) -> Option<LibraryCommand> {
         if let Some(cmd) = self.priority.pop_front() {
             return Some(cmd);
         }
-        while let Some(cmd) = self.normal.pop_front() {
-            if shutting_down
-                && matches!(
+        if shutting_down {
+            self.normal.retain(|cmd| {
+                !matches!(
                     cmd,
                     LibraryCommand::RescanRoot(_)
                         | LibraryCommand::RescanAll
                         | LibraryCommand::ScanPaths { .. }
                 )
-            {
-                continue;
-            }
-            return Some(cmd);
+            });
         }
-        None
+        let index = self.normal.iter().position(|cmd| !waits(cmd))?;
+        self.normal.remove(index)
     }
 }
 

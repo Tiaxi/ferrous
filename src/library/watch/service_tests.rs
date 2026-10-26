@@ -8,7 +8,7 @@ use std::fs;
 use std::sync::atomic::AtomicUsize;
 
 use super::watch_test_hooks::{
-    fail_watches, hold_changes, hold_watching, observe_pending, observe_scan_waits,
+    fail_watches, hold_changes, hold_watching, observe_deferred_walks, observe_pending,
     observe_watched, set_fs_type,
 };
 use super::*;
@@ -506,7 +506,7 @@ fn a_file_written_before_an_added_roots_watches_are_set_up_is_indexed() {
     let fixture = Fixture::new("added-before-watched");
     fixture.write("a.mp3");
     let watched = observe_watched(&fixture.root);
-    let waits = observe_scan_waits(&fixture.root);
+    let deferred = observe_deferred_walks(&fixture.root);
     let mut running = fixture.start(tuning(Duration::from_secs(3600)));
     running.service.set_watching(true);
     let held = hold_watching(&fixture.root);
@@ -517,9 +517,9 @@ fn a_file_written_before_an_added_roots_watches_are_set_up_is_indexed() {
     held.reached
         .recv_timeout(WAIT)
         .expect("the watcher about to watch the added root");
-    // The first scan waits for the watches; without that, it would have
+    // The first walk waits for the watches; without that, it would have
     // walked past the root's folder before this file is written.
-    running.wait_for_or(&waits, "the first scan, or its wait", |mirror| {
+    running.wait_for_or(&deferred, "the first scan, or its deferral", |mirror| {
         mirror.paths().contains(&fixture.path("a.mp3")) && !mirror.status.scan_in_progress
     });
     fixture.write("b.mp3");
@@ -579,22 +579,109 @@ fn a_file_written_before_the_watches_are_set_up_when_watching_is_turned_on_is_in
     );
 }
 
-/// The worker stops while an added root waits for its watches.
-#[test]
-fn the_worker_stops_while_an_added_root_waits_for_its_watches() {
-    let fixture = Fixture::new("stop-before-watched");
-    fixture.write("a.mp3");
-    let waits = observe_scan_waits(&fixture.root);
-    let mut running = fixture.start(tuning(Duration::from_secs(3600)));
+/// The service with watching on, and `fixture`'s root added while the
+/// watcher is held before it watches the root, once the root's first walk
+/// is left for later.
+fn add_root_while_watching_is_held(
+    fixture: &Fixture,
+    running: &mut Running,
+) -> super::watch_test_hooks::HeldWatching {
+    let deferred = observe_deferred_walks(&fixture.root);
     running.service.set_watching(true);
     let held = hold_watching(&fixture.root);
     running.service.command(LibraryCommand::AddRoot {
         path: fixture.root.clone(),
         name: String::new(),
     });
-    waits
+    deferred
         .recv_timeout(WAIT)
-        .expect("the first scan waiting for the watches");
+        .expect("the first walk left for when the root is watched");
+    held
+}
+
+/// Removing a root whose first walk waits for its watches is published at
+/// once, and drops the walk.
+#[test]
+fn removing_an_added_root_waiting_for_its_watches_is_published_at_once() {
+    let fixture = Fixture::new("remove-before-watched");
+    fixture.write("a.mp3");
+    let mut running = fixture.start(tuning(Duration::from_secs(3600)));
+    let held = add_root_while_watching_is_held(&fixture, &mut running);
+    running.wait_for("the root added", |mirror| mirror.snapshot.roots.len() == 1);
+    assert!(running.mirror.status.scan_in_progress, "its walk is due");
+
+    running
+        .service
+        .command(LibraryCommand::RemoveRoot(fixture.root.clone()));
+    running.wait_for("the removal, with the watcher still held", |mirror| {
+        mirror.snapshot.roots.is_empty() && !mirror.status.scan_in_progress
+    });
+    assert!(running.mirror.paths().is_empty());
+    assert_eq!(scans_of(&fixture.root), 0);
+    drop(held);
+}
+
+/// Other roots are rescanned while an added root waits for its watches.
+#[test]
+fn other_roots_are_rescanned_while_an_added_root_waits_for_its_watches() {
+    let fixture = Fixture::new("rescan-before-watched");
+    fixture.write("a.mp3");
+    let other = fixture.folder.join("other");
+    fs::create_dir_all(&other).expect("other root");
+    let other = other.canonicalize().expect("canonical other root");
+    fs::write(other.join("x.mp3"), b"x").expect("track");
+    let mut running = fixture.start(tuning(Duration::from_secs(3600)));
+    running.service.command(LibraryCommand::AddRoot {
+        path: other.clone(),
+        name: String::new(),
+    });
+    running.wait_for("the other root added", |mirror| {
+        mirror.paths() == vec![other.join("x.mp3")] && !mirror.status.scan_in_progress
+    });
+    let held = add_root_while_watching_is_held(&fixture, &mut running);
+
+    // The held watcher sees nothing; only the rescan finds this.
+    fs::write(other.join("y.mp3"), b"y").expect("track");
+    running
+        .service
+        .command(LibraryCommand::RescanRoot(other.clone()));
+    running.wait_for(
+        "the other root rescanned, with the watcher still held",
+        |mirror| mirror.paths().contains(&other.join("y.mp3")),
+    );
+    assert!(!running.has(&fixture.path("a.mp3")));
+    assert_eq!(scans_of(&fixture.root), 0);
+
+    drop(held);
+    running.wait_for("the added root walked once watched", |mirror| {
+        mirror.paths().contains(&fixture.path("a.mp3")) && !mirror.status.scan_in_progress
+    });
+    assert_eq!(scans_of(&fixture.root), 1);
+}
+
+/// Turning watching off walks an added root that waits for its watches:
+/// none are needed then.
+#[test]
+fn turning_watching_off_walks_an_added_root_waiting_for_its_watches() {
+    let fixture = Fixture::new("off-before-watched");
+    fixture.write("a.mp3");
+    let mut running = fixture.start(tuning(Duration::from_secs(3600)));
+    let held = add_root_while_watching_is_held(&fixture, &mut running);
+
+    running.service.set_watching(false);
+    running.wait_for("the walk, with the watcher still held", |mirror| {
+        mirror.paths().contains(&fixture.path("a.mp3")) && !mirror.status.scan_in_progress
+    });
+    drop(held);
+}
+
+/// The worker stops while an added root waits for its watches.
+#[test]
+fn the_worker_stops_while_an_added_root_waits_for_its_watches() {
+    let fixture = Fixture::new("stop-before-watched");
+    fixture.write("a.mp3");
+    let mut running = fixture.start(tuning(Duration::from_secs(3600)));
+    let held = add_root_while_watching_is_held(&fixture, &mut running);
 
     running.service.tx = None;
     let worker = running.service.thread.take().expect("the worker");

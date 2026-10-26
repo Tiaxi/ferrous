@@ -328,6 +328,8 @@ pub(crate) const LIBRARY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct LibraryService {
     tx: Option<Sender<LibraryCommand>>,
+    /// The watching setting, which the worker passes on to the watcher.
+    watching: Sender<bool>,
     thread: Option<JoinableThread>,
     watcher: watch::WatchService,
 }
@@ -393,6 +395,7 @@ impl LibraryService {
         let (event_tx, event_rx) = unbounded::<LibraryEvent>();
         let (watcher, changes, roots_watched) = watch::WatchService::spawn(watching);
         let roots = watcher.handle();
+        let (watching_tx, watching_rx) = unbounded::<bool>();
 
         let thread = crate::worker_thread::spawn_worker("ferrous-library", move || {
             configure();
@@ -404,6 +407,7 @@ impl LibraryService {
                     changes,
                     roots,
                     roots_watched,
+                    watching: watching_rx,
                 },
                 &event_tx,
             );
@@ -412,6 +416,7 @@ impl LibraryService {
         (
             Self {
                 tx: Some(cmd_tx),
+                watching: watching_tx,
                 thread,
                 watcher,
             },
@@ -429,7 +434,7 @@ impl LibraryService {
     /// first time too, also rescans every root, so that changes made while
     /// it was off appear.
     pub fn set_watching(&self, enabled: bool) {
-        self.watcher.set_enabled(enabled);
+        let _ = self.watching.send(enabled);
     }
 }
 

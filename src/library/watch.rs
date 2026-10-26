@@ -14,7 +14,8 @@
 //!   is rescanned, so that changes made meanwhile appear.
 //! - The worker is told when the roots it sent are watched, and walks a
 //!   root it added only then: a change after the watches are set up is
-//!   seen by the walk or by them.
+//!   seen by the walk or by them. The worker also passes on the watching
+//!   setting, so that it comes in order with the roots.
 //! - A root that cannot be watched (a network or FUSE file system, the
 //!   inotify watch limit, a folder that is gone) is rescanned every
 //!   [`WatchTuning::periodic`] instead, and the worker publishes it, with
@@ -116,6 +117,11 @@ impl WatchHandle {
         self.send(WatchMessage::Roots(roots));
     }
 
+    /// Turns watching on or off.
+    pub(super) fn set_enabled(&self, enabled: bool) {
+        self.send(WatchMessage::Enabled(enabled));
+    }
+
     fn send(&self, message: WatchMessage) {
         if self.tx.send(message).is_ok() {
             if let Some(waker) = &self.waker {
@@ -160,10 +166,6 @@ impl WatchService {
 
     pub(super) fn handle(&self) -> WatchHandle {
         self.handle.clone()
-    }
-
-    pub(super) fn set_enabled(&self, enabled: bool) {
-        self.handle.send(WatchMessage::Enabled(enabled));
     }
 
     /// Tells the watcher to stop, also in the middle of adding watches.
@@ -1280,7 +1282,7 @@ pub(crate) mod watch_test_hooks {
     /// A held root: the sender told when watching it waits, and the
     /// receiver that releases it.
     static HELD_WATCHING: Mutex<Vec<(PathBuf, Sender<()>, Receiver<()>)>> = Mutex::new(Vec::new());
-    static SCAN_WAITS: Mutex<Vec<(PathBuf, Sender<()>)>> = Mutex::new(Vec::new());
+    static DEFERRED_WALKS: Mutex<Vec<(PathBuf, Sender<()>)>> = Mutex::new(Vec::new());
 
     fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -1403,16 +1405,16 @@ pub(crate) mod watch_test_hooks {
         }
     }
 
-    /// Receives a message whenever the worker waits for the watches of
-    /// `root` before it scans the root.
-    pub(crate) fn observe_scan_waits(root: &Path) -> Receiver<()> {
+    /// Receives a message whenever the worker leaves the walk of `root` for
+    /// when its watches are set up.
+    pub(crate) fn observe_deferred_walks(root: &Path) -> Receiver<()> {
         let (tx, rx) = unbounded();
-        lock(&SCAN_WAITS).push((root.to_path_buf(), tx));
+        lock(&DEFERRED_WALKS).push((root.to_path_buf(), tx));
         rx
     }
 
-    pub(in crate::library) fn note_scan_wait(root: &Path) {
-        for (observed, tx) in lock(&SCAN_WAITS).iter() {
+    pub(in crate::library) fn note_walk_deferred(root: &Path) {
+        for (observed, tx) in lock(&DEFERRED_WALKS).iter() {
             if observed == root {
                 let _ = tx.send(());
             }
