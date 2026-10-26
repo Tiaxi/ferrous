@@ -38,31 +38,42 @@ ToolBar {
     topPadding: 4
     bottomPadding: 4
 
-    // A slider whose held arrow key is one gesture, as a drag is. Qt's
+    // A slider whose held arrow keys are one gesture, as a drag is. Qt's
     // autorepeat clears `pressed` at each repeat, but not `adjusting`.
     component GestureSlider: Slider {
-        // The arrow key held down, or 0.
-        property int heldKey: 0
-        readonly property bool adjusting: pressed || heldKey !== 0
+        // The arrow keys held down.
+        property var heldKeys: []
+        readonly property bool adjusting: pressed || heldKeys.length > 0
 
-        // The slider handles the keys after these, as they leave them
-        // unaccepted.
+        // The mouse's or a touch's hold. Its passive grab leaves the drag
+        // to the slider.
+        PointHandler {
+            id: pointerHold
+        }
+
+        // The slider handles the keys after these, unless they accept them.
         Keys.onPressed: function(event) {
-            if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
-                heldKey = event.key
+            if ((event.key === Qt.Key_Left || event.key === Qt.Key_Right)
+                    && !heldKeys.includes(event.key)) {
+                heldKeys = heldKeys.concat([event.key])
             }
         }
         Keys.onReleased: function(event) {
-            if (!event.isAutoRepeat && event.key === heldKey) {
-                heldKey = 0
+            if (!event.isAutoRepeat && heldKeys.includes(event.key)) {
+                heldKeys = heldKeys.filter(key => key !== event.key)
             }
+            // The slider clears `pressed` at any key's release, which would
+            // end the pointer's drag.
+            event.accepted = pointerHold.active
         }
-        // The key's release goes elsewhere then, so the slider would stay
-        // pressed by the key.
+        // The keys' releases go elsewhere then, so the slider would stay
+        // pressed by the keys.
         onActiveFocusChanged: {
-            if (!activeFocus && heldKey !== 0) {
-                heldKey = 0
-                pressed = false
+            if (!activeFocus && heldKeys.length > 0) {
+                heldKeys = []
+                if (!pointerHold.active) {
+                    pressed = false
+                }
             }
         }
     }
