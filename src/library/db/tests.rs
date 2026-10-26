@@ -90,6 +90,12 @@ fn a_version_0_library_migrates_without_losing_a_row_and_a_second_run_changes_no
     for row in &mut before[1] {
         row.push(Value::Null);
     }
+    // Every saved waveform is decoded again, once, since nothing tells
+    // whether its decode reached the end of the file; see
+    // `migrate_to_version_3`.
+    for row in &mut before[3] {
+        row.extend([Value::Integer(0), Value::Null]);
+    }
     assert_eq!(library_rows(&conn), before, "every row and cover is kept");
     let indexes: Vec<String> = schema_objects(&conn)
         .into_iter()

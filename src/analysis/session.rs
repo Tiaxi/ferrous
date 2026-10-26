@@ -12,8 +12,8 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use super::cache::WaveformSourceStamp;
 use super::decoders::{
-    deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource, AudioRead,
-    AudioTimeline,
+    deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource, AudioFrames,
+    AudioRead, AudioTimeline,
 };
 use super::fft::{PeakHoldResampler, StftComputer};
 use super::output::{AnalysisEventOutput, AnalysisOutputs};
@@ -134,6 +134,71 @@ fn stft_seek_grid(
     let output_frame = column.saturating_mul(usize_to_u64(effective_hop));
     let input_hop = usize_to_u64(hop.max(1));
     (column, output_frame / input_hop * input_hop)
+}
+
+/// Where to start reading audio for an STFT grid whose first window belongs
+/// to the column at `grid_frame`. Each window is centred on its column's
+/// time, so that a sound shows in the column of the time it plays, and
+/// starts half an FFT before it; before the start of the file it reads
+/// silence. Returns the frame to read from and the frames of silence that
+/// come first.
+fn centred_window_start(grid_frame: u64, fft_size: usize) -> (u64, usize) {
+    let half = usize_to_u64(fft_size / 2);
+    let start = grid_frame.saturating_sub(half);
+    let silence = half - (grid_frame - start);
+    (start, usize::try_from(silence).unwrap_or(0))
+}
+
+/// Feed `frames` of silence to each STFT before its audio; see
+/// [`centred_window_start`].
+fn enqueue_leading_silence(stfts: &mut [StftComputer], frames: usize) {
+    if frames == 0 {
+        return;
+    }
+    let silence = vec![0.0; frames];
+    for stft in stfts {
+        stft.enqueue_samples(&silence);
+    }
+}
+
+/// The most audio an STFT may hold beyond one window: a decoded batch, of
+/// which the decode loops drain every row before reading the next.
+const MAX_PENDING_FRAMES: usize = 1 << 20;
+
+/// Feed a decoded batch to the per-channel STFTs. Every STFT gets one sample
+/// per frame, whatever the batch's channel count, so their windows stay in
+/// step; see [`deinterleave_samples`]. Fails if an STFT holds more audio than
+/// a batch, which would grow without producing columns.
+fn enqueue_audio(
+    stfts: &mut [StftComputer],
+    audio: &AudioFrames,
+    view_mode: SpectrogramViewMode,
+) -> Result<(), String> {
+    let per_channel = deinterleave_samples(
+        &audio.samples,
+        audio.frames,
+        audio.channels,
+        stfts.len(),
+        view_mode,
+    );
+    for (stft, samples) in stfts.iter_mut().zip(&per_channel) {
+        stft.enqueue_samples(samples);
+        if stft.pending_len() > stft.fft_size() + MAX_PENDING_FRAMES {
+            return Err(format!(
+                "its analysis fell behind the decoded audio ({} frames queued)",
+                stft.pending_len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The total-columns estimate of a file continued at column `start_column`
+/// of a session: the file's own estimate, `total_columns` reference-hop
+/// columns, after the columns before it.
+fn continued_columns_estimate(start_column: u64, total_columns: u32, effective_hop: usize) -> u32 {
+    let file_columns = u64::from(scale_columns_estimate(total_columns, effective_hop));
+    u64_to_u32_saturating(start_column.saturating_add(file_columns))
 }
 
 /// Compute the effective hop size from a fractional output interval.
@@ -586,6 +651,8 @@ fn centered_staging_decode(
         path.file_name().unwrap_or_default().to_string_lossy(),
     );
 
+    let (_, leading_silence) = centred_window_start(0, fft_size);
+    enqueue_leading_silence(&mut stfts, leading_silence);
     let mut timeline = AudioTimeline::new(0);
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -607,24 +674,10 @@ fn centered_staging_decode(
             }
         };
 
-        let effective_frames = audio.frames;
-        let per_channel = deinterleave_samples(
-            &audio.samples,
-            audio.frames,
-            audio.channels,
-            channel_count,
-            view_mode,
-        );
-
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            state.total_covered_samples += effective_frames as u64;
-        }
-
-        for (ch, channel_samples) in per_channel.iter().enumerate() {
-            if let Some(stft) = stfts.get_mut(ch) {
-                stft.enqueue_samples(channel_samples);
-            }
+        state.total_covered_samples += usize_to_u64(audio.frames);
+        if let Err(error) = enqueue_audio(&mut stfts, &audio, view_mode) {
+            eprintln!("[analysis] staging decode failed: {error}");
+            return;
         }
 
         if !staging_drain_stft_rows(&mut stfts, &mut resamplers, &mut state, tx) {
@@ -1162,8 +1215,9 @@ fn run_spectrogram_session(
         f64::INFINITY
     };
 
-    let (start_column, seek_frame) =
+    let (start_column, grid_frame) =
         stft_seek_grid(start_seconds, effective_rate, hop_size, effective_hop);
+    let (seek_frame, leading_silence) = centred_window_start(grid_frame, fft_size);
     if seek_frame > 0 {
         if let Err(error) = source.seek_to_frame(seek_frame, effective_rate) {
             fail_session(
@@ -1232,6 +1286,7 @@ fn run_spectrogram_session(
         failure: None,
         queued_commands,
     };
+    enqueue_leading_silence(&mut session.stfts, leading_silence);
 
     // Send initial metadata chunk (0 columns, carries estimates + transition semantics).
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
@@ -1339,7 +1394,12 @@ fn run_spectrogram_session(
                 session.timeline = AudioTimeline::new(0);
                 session.track_token = track_token;
                 session.path = path;
-                session.total_columns_estimate = new_est;
+                // The session's columns go on from the outgoing track's.
+                session.total_columns_estimate = continued_columns_estimate(
+                    session.columns_produced,
+                    new_est,
+                    session.effective_hop,
+                );
                 // handle_track_change invalidates the outgoing duration
                 // before dispatching ContinueWithFile.  A compatible
                 // continuation stays inside this worker session, so it
@@ -1643,26 +1703,10 @@ fn session_decode_loop(
         };
         session.packet_counter += 1;
 
-        let frames = audio.frames;
-        let effective_frames = frames;
-
-        let per_channel = deinterleave_samples(
-            &audio.samples,
-            frames,
-            audio.channels,
-            session.channel_count,
-            session.view_mode,
-        );
-
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            session.total_covered_samples += effective_frames as u64;
-        }
-
-        for (ch, channel_samples) in per_channel.iter().enumerate() {
-            if let Some(stft) = session.stfts.get_mut(ch) {
-                stft.enqueue_samples(channel_samples);
-            }
+        session.total_covered_samples += usize_to_u64(audio.frames);
+        if let Err(error) = enqueue_audio(&mut session.stfts, &audio, session.view_mode) {
+            session.failure = Some(error);
+            return None;
         }
 
         // 5. Drain STFT rows and emit chunks.
@@ -1929,18 +1973,20 @@ fn handle_session_seek(
     session.chunk_buf.clear();
     session.chunk_columns = 0;
 
-    let (new_column, frame) = stft_seek_grid(
+    let (new_column, grid_frame) = stft_seek_grid(
         position_seconds,
         session.effective_rate,
         session.hop_size,
         session.effective_hop,
     );
+    let (frame, leading_silence) = centred_window_start(grid_frame, session.fft_size);
     source.seek_to_frame(frame, session.effective_rate)?;
     session.source_reached_eof = false;
     session.timeline = AudioTimeline::new(frame);
     for stft in &mut session.stfts {
         stft.reset();
     }
+    enqueue_leading_silence(&mut session.stfts, leading_silence);
     for resampler in &mut session.resamplers {
         resampler.reset_at_column(new_column, session.hop_size, session.effective_hop);
     }
@@ -3933,7 +3979,6 @@ mod tests {
 
     #[test]
     fn timestamped_gaps_and_overlaps_preserve_absolute_spectral_columns() {
-        use super::super::decoders::AudioFrames;
         let mut packets = vec![
             AudioFrames {
                 samples: vec![0.5; 1024],
@@ -5032,5 +5077,321 @@ mod tests {
             ),
             "the seek was dropped"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Column timing
+    // ---------------------------------------------------------------
+
+    /// A mono 16-bit WAV of `seconds` at `rate`, silent but for one-sample
+    /// clicks at `clicks`.
+    fn write_click_track(name: &str, rate: u32, seconds: u32, clicks: &[u32]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-session-clicks-{name}-{}.wav",
+            std::process::id()
+        ));
+        let frames = rate * seconds;
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x01\0");
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(b"\x02\0\x10\0data");
+        bytes.extend_from_slice(&(frames * 2).to_le_bytes());
+        for frame in 0..frames {
+            let sample: i16 = if clicks.contains(&frame) { 30_000 } else { 0 };
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).expect("write fixture");
+        path
+    }
+
+    /// The columns a worker publishes for `commands` until its file ends,
+    /// by absolute column; a seek's columns replace those before it.
+    fn columns_until_eof(
+        commands: Vec<SpectrogramWorkerCommand>,
+    ) -> std::collections::BTreeMap<u32, Vec<u8>> {
+        let worker = QueuedWorker::start(commands);
+        let mut columns = std::collections::BTreeMap::new();
+        for chunk in worker.chunks_until(|chunk| chunk.complete) {
+            let width = usize::from(chunk.bins_per_column) * usize::from(chunk.channel_count);
+            if width == 0 {
+                continue;
+            }
+            for (offset, column) in chunk.columns_u8.chunks_exact(width).enumerate() {
+                columns.insert(
+                    chunk.start_column_index + u32::try_from(offset).unwrap(),
+                    column.to_vec(),
+                );
+            }
+        }
+        worker.finish();
+        columns
+    }
+
+    /// The loudest column within `reach` columns of `near`.
+    fn loudest_column(
+        columns: &std::collections::BTreeMap<u32, Vec<u8>>,
+        near: u32,
+        reach: u32,
+    ) -> u32 {
+        columns
+            .range(near.saturating_sub(reach)..=near + reach)
+            .max_by_key(|(_, bins)| bins.iter().map(|&bin| u32::from(bin)).sum::<u32>())
+            .map(|(&column, _)| column)
+            .expect("columns near the click")
+    }
+
+    /// A session of `path` with `fft_size`, `hop_size` and `zoom_level`.
+    fn timing_session(
+        path: &Path,
+        fft_size: usize,
+        hop_size: usize,
+        zoom_level: f32,
+        display_mode: SpectrogramDisplayMode,
+        start_seconds: f64,
+    ) -> SpectrogramWorkerCommand {
+        let mut command = session_on(path, 1, 1);
+        if let SpectrogramWorkerCommand::NewTrack {
+            fft_size: fft,
+            hop_size: hop,
+            zoom_level: zoom,
+            display_mode: mode,
+            start_seconds: start,
+            target_position_seconds,
+            ..
+        } = &mut command
+        {
+            *fft = fft_size;
+            *hop = hop_size;
+            *zoom = zoom_level;
+            *mode = display_mode;
+            *start = start_seconds;
+            *target_position_seconds = start_seconds;
+        }
+        command
+    }
+
+    #[test]
+    fn a_click_shows_in_the_column_of_the_time_it_plays() {
+        // 16 kHz clicks, each in the middle of a 1024-frame column at zoom 1
+        // and on a 64-frame column of the faster grid.
+        let clicks = [8_704_u32, 16_896, 25_088];
+        let path = write_click_track("timing", 16_000, 2, &clicks);
+        // (FFT size, STFT hop, zoom, column hop)
+        for (fft_size, hop_size, zoom, column_hop) in [(512, 64, 2.0, 64), (2_048, 256, 1.0, 1_024)]
+        {
+            for mode in [
+                SpectrogramDisplayMode::Rolling,
+                SpectrogramDisplayMode::Centered,
+            ] {
+                // From the start, and from a seek at the start and in the
+                // session, which start the grid half a second in.
+                let start =
+                    |seconds| timing_session(&path, fft_size, hop_size, zoom, mode, seconds);
+                for (case, commands) in [
+                    ("start", vec![start(0.0)]),
+                    ("started at 0.5 s", vec![start(0.5)]),
+                    (
+                        "seek to 0.5 s",
+                        vec![
+                            start(0.0),
+                            SpectrogramWorkerCommand::Seek {
+                                position_seconds: 0.5,
+                            },
+                        ],
+                    ),
+                ] {
+                    let columns = columns_until_eof(commands);
+                    for click in clicks {
+                        let expected = click / column_hop;
+                        let reach = 8_000 / column_hop;
+                        assert_eq!(
+                            loudest_column(&columns, expected, reach),
+                            expected,
+                            "FFT {fft_size} at zoom {zoom}, {mode:?}, {case}: click at {click}"
+                        );
+                    }
+                }
+            }
+        }
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_click_shows_in_its_column_in_a_staged_centered_successor() {
+        let clicks = [8_704_u32, 16_896];
+        let path = write_click_track("staged", 16_000, 2, &clicks);
+        let (tx, rx) = unbounded();
+        centered_staging_decode(
+            &path,
+            512,
+            64,
+            2.0,
+            SpectrogramViewMode::Downmix,
+            &AtomicBool::new(false),
+            &tx,
+        );
+        drop(tx);
+        let mut columns = std::collections::BTreeMap::new();
+        for chunk in rx.try_iter() {
+            let width = usize::from(chunk.bins_per_column) * usize::from(chunk.channel_count);
+            for (offset, column) in chunk.columns_u8.chunks_exact(width).enumerate() {
+                columns.insert(
+                    chunk.start_column_index + u32::try_from(offset).unwrap(),
+                    column.to_vec(),
+                );
+            }
+        }
+        for click in clicks {
+            assert_eq!(loudest_column(&columns, click / 64, 125), click / 64);
+        }
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn an_mp3_click_shows_at_its_playback_time_after_the_encoder_delay_is_trimmed() {
+        // A click at 0.2 s of a 0.4 s 44.1 kHz MP3 with a LAME tag, which
+        // gives its encoder delay; GStreamer plays it at 0.2 s.
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-session-gapless-click-{}.mp3",
+            std::process::id()
+        ));
+        std::fs::write(&path, include_bytes!("fixtures/gapless-click.mp3")).expect("fixture");
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            let columns = columns_until_eof(vec![timing_session(&path, 512, 64, 2.0, mode, 0.0)]);
+            let column = loudest_column(&columns, 8_820 / 64, 40);
+            let time = i64::from(column) * 64;
+            assert!(
+                (time - 8_820).abs() <= 32,
+                "{mode:?}: the click shows at frame {time}"
+            );
+        }
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    // ---------------------------------------------------------------
+    // Channel-count changes
+    // ---------------------------------------------------------------
+
+    /// The decoder of `channel-change.mp3`, 0.25 s of stereo and then 0.25 s
+    /// of mono 22.05 kHz MP3 frames, changes its caps from two channels to
+    /// one. Every
+    /// frame of both parts is analysed, in step on both channels.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_channel_count_change_mid_stream_neither_stalls_nor_grows() {
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-session-channel-change-{}.mp3",
+            std::process::id()
+        ));
+        std::fs::write(&path, include_bytes!("fixtures/channel-change.mp3")).expect("fixture");
+        let (mut source, rate, channels, _) =
+            super::super::decoders::open_gstreamer_file(&path).expect("GStreamer opens it");
+        assert_eq!((rate, channels), (22_050, 2));
+
+        let mut session = make_test_session();
+        session.fft_size = 512;
+        session.hop_size = 64;
+        session.effective_hop = 64;
+        session.zoom_level = 2.0;
+        session.view_mode = SpectrogramViewMode::PerChannel;
+        session.display_mode = SpectrogramDisplayMode::Centered;
+        session.decode_rate_limit = f64::INFINITY;
+        session.channel_count = 2;
+        session.bins_per_column = 257;
+        session.effective_rate = 22_050;
+        session.cols_per_second = 22_050.0 / 64.0;
+        session.target_position_seconds = 0.0;
+        session.columns_produced = 0;
+        session.chunk_start_index = 0;
+        session.lookahead_columns = u64::MAX;
+        session.stfts = (0..2).map(|_| StftComputer::new(512, 64)).collect();
+        session.resamplers = (0..2).map(|_| PeakHoldResampler::new(1.0)).collect();
+        // No commands: the session ends when it parks at the end.
+        let command_rx = unbounded::<SpectrogramWorkerCommand>().1;
+        let (events, event_rx) = unbounded();
+
+        let result = session_decode_loop(
+            &mut session,
+            &mut source,
+            &command_rx,
+            &events,
+            &AtomicU64::new(1),
+            &AtomicU64::new(0),
+        );
+
+        assert!(result.is_none(), "{result:?}");
+        assert_eq!(session.failure, None);
+        assert!(session.source_reached_eof, "the decode reached the end");
+        // GStreamer decodes 24 MPEG-2 frames of 576 samples.
+        assert_eq!(session.total_covered_samples, 13_824);
+        let analysed = session.columns_produced * 64;
+        assert!(
+            (13_824 - 512..=13_824).contains(&analysed),
+            "analysed {analysed} frames"
+        );
+        for stft in &session.stfts {
+            assert!(stft.pending_len() < 512, "{} queued", stft.pending_len());
+        }
+        drop(event_rx);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    // ---------------------------------------------------------------
+    // Column estimate across gapless continuations
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn the_column_estimate_stays_put_over_gapless_continuations() {
+        let files: Vec<PathBuf> = (0..4)
+            .map(|index| write_tone_fixture(&format!("estimate-{index}"), 1, 8_000))
+            .collect();
+        let worker = QueuedWorker::start(vec![fast_session(
+            &files[0],
+            SpectrogramDisplayMode::Rolling,
+        )]);
+        let mut chunks = Vec::new();
+        for (token, next) in (1..).zip(&files[1..]) {
+            chunks
+                .extend(worker.chunks_until(|chunk| chunk.track_token == token && chunk.complete));
+            worker
+                .commands
+                .send(SpectrogramWorkerCommand::ContinueWithFile {
+                    path: next.clone(),
+                    track_token: token + 1,
+                })
+                .unwrap();
+        }
+        chunks.extend(worker.chunks_until(|chunk| chunk.track_token == 4 && chunk.complete));
+        worker.finish();
+
+        // Each file is 125 columns of 8 kHz audio at a 64-frame hop, and is
+        // estimated from its header as 1,136, with the usual allowance.
+        let mut track_start = 0;
+        for token in 1..=4 {
+            let estimates: std::collections::BTreeSet<u32> = chunks
+                .iter()
+                .filter(|chunk| chunk.track_token == token && !chunk.complete)
+                .map(|chunk| chunk.total_columns_estimate)
+                .collect();
+            assert_eq!(
+                estimates.into_iter().collect::<Vec<_>>(),
+                [track_start + 1_136],
+                "track {token}"
+            );
+            let end = chunks
+                .iter()
+                .find(|chunk| chunk.track_token == token && chunk.complete)
+                .expect("finalize chunk");
+            assert!(end.total_columns_estimate > track_start);
+            track_start = end.total_columns_estimate;
+        }
+        for file in files {
+            std::fs::remove_file(file).expect("remove fixture");
+        }
     }
 }

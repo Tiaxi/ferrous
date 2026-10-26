@@ -31,3 +31,30 @@ ffmpeg -f lavfi -i sine=frequency=440:sample_rate=8000:duration=0.1 -ac 1 \
   -c:a wavpack -map_metadata -1 -fflags +bitexact -flags:a +bitexact \
   tag-tone.wv
 ```
+
+`gapless-click.mp3` is 0.4 s of 44.1 kHz mono silence with a single click at
+0.2 s (frame 8,820), in 64 kbps MP3 with a LAME tag that gives the encoder
+delay and padding. Playback (GStreamer) and analysis cut both, so the click
+plays and shows at frame 8,820; uncut, it is 1,105 frames later. The frame of
+the tag must be large enough to hold it, hence 64 kbps. It was made with
+FFmpeg 8.1 and LAME 3.100:
+
+```bash
+ffmpeg -f lavfi -i "aevalsrc='if(eq(n\,8820)\,0.9\,0)':s=44100:d=0.4" \
+  -c:a pcm_s16le click.wav
+lame -b 64 --resample 44.1 -m m click.wav gapless-click.mp3
+```
+
+`channel-change.mp3` is 0.25 s of a stereo 440 Hz tone followed by 0.25 s of
+a mono 880 Hz tone, as 22.05 kHz MP3 frames without tags, so a decoder's
+channel count changes mid-stream:
+
+```bash
+ffmpeg -f lavfi -i sine=frequency=440:sample_rate=22050:duration=0.25 -ac 2 \
+  -c:a pcm_s16le stereo.wav
+ffmpeg -f lavfi -i sine=frequency=880:sample_rate=22050:duration=0.25 -ac 1 \
+  -c:a pcm_s16le mono.wav
+lame -t -b 64 --resample 22.05 -m j stereo.wav stereo.mp3
+lame -t -b 32 --resample 22.05 -m m mono.wav mono.mp3
+cat stereo.mp3 mono.mp3 > channel-change.mp3
+```

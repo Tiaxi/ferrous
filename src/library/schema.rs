@@ -18,7 +18,13 @@ use super::LibraryTrack;
 /// - 2: `tracks.cover_stamp`, the stamp of the folder images a row's cover
 ///   was chosen from. Rows from before have none, so the next scan checks
 ///   their covers again, once, by the current rule.
-pub(super) const SCHEMA_VERSION: i32 = 2;
+/// - 3: the waveform cache, which the analysis worker keeps in the same file,
+///   belongs to the schema, and its rows tell whether the decode reached the
+///   end of the file (`complete`) and how much of the audio it covered
+///   (`coverage_seconds`). Rows from before tell neither, since a decode
+///   error could have cut them short, so the next play of each track decodes
+///   its waveform again, once. `updated_at` is the time of the last use.
+pub(super) const SCHEMA_VERSION: i32 = 3;
 
 /// How long a connection waits for another connection's write lock.
 pub(super) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,6 +102,19 @@ const CREATE_TABLES: &str = r"
         indexed_at INTEGER NOT NULL,
         search_tags TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS waveform_cache (
+        path TEXT PRIMARY KEY,
+        size_bytes INTEGER NOT NULL,
+        modified_secs INTEGER NOT NULL,
+        modified_nanos INTEGER NOT NULL,
+        format_version INTEGER NOT NULL,
+        peak_count INTEGER NOT NULL,
+        peaks_blob BLOB NOT NULL,
+        updated_at INTEGER NOT NULL,
+        complete INTEGER NOT NULL DEFAULT 0,
+        coverage_seconds REAL
+    );
 ";
 
 /// Columns that later versions added, with the definitions that add them.
@@ -117,6 +136,8 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("external_tracks", "track_no", "INTEGER"),
     ("external_tracks", "duration_secs", "REAL"),
     ("external_tracks", "search_tags", "TEXT"),
+    ("waveform_cache", "complete", "INTEGER NOT NULL DEFAULT 0"),
+    ("waveform_cache", "coverage_seconds", "REAL"),
 ];
 
 const CREATE_INDEXES: &str = r"
@@ -128,6 +149,7 @@ const CREATE_INDEXES: &str = r"
     CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
     CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks(genre);
     CREATE INDEX IF NOT EXISTS idx_external_tracks_indexed_at ON external_tracks(indexed_at);
+    CREATE INDEX IF NOT EXISTS idx_waveform_cache_updated_at ON waveform_cache(updated_at);
 ";
 
 /// The full-text index of version 0 and the triggers that kept it in step
@@ -168,6 +190,9 @@ pub(super) fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     if version < 2 {
         migrate_to_version_2(&tx)?;
     }
+    if version < 3 {
+        migrate_to_version_3(&tx)?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -205,6 +230,17 @@ fn migrate_to_version_1(conn: &Connection) -> anyhow::Result<()> {
 /// has the column from [`migrate_to_version_1`].
 fn migrate_to_version_2(conn: &Connection) -> anyhow::Result<()> {
     add_missing_columns(conn)
+}
+
+/// Version 2 to 3: create the waveform cache if the analysis worker has not
+/// yet, and add `complete` and `coverage_seconds`: 0 and NULL in every row,
+/// so each saved waveform is decoded again, once; see [`SCHEMA_VERSION`].
+/// A database from version 0 already has them from [`migrate_to_version_1`].
+fn migrate_to_version_3(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(CREATE_TABLES)?;
+    add_missing_columns(conn)?;
+    conn.execute_batch(CREATE_INDEXES)?;
+    Ok(())
 }
 
 fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
@@ -398,7 +434,7 @@ mod tests {
 
         init_schema(&conn).expect("migration");
 
-        assert_eq!(user_version(&conn).expect("version"), 2);
+        assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
         let (cover, stamp): (String, Option<i64>) = conn
             .query_row("SELECT cover_path, cover_stamp FROM tracks", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))
@@ -409,5 +445,125 @@ mod tests {
         let mut snapshot = super::super::LibrarySnapshot::default();
         load_snapshot(&conn, &mut snapshot);
         assert_eq!(snapshot.tracks[0].cover_stamp, 0, "a stamp no folder has");
+    }
+
+    /// The waveform cache as the analysis worker created it before version
+    /// 3, outside the schema.
+    const VERSION_2_WAVEFORM_CACHE: &str = r"
+        CREATE TABLE IF NOT EXISTS waveform_cache (
+            path TEXT PRIMARY KEY,
+            size_bytes INTEGER NOT NULL,
+            modified_secs INTEGER NOT NULL,
+            modified_nanos INTEGER NOT NULL,
+            format_version INTEGER NOT NULL,
+            peak_count INTEGER NOT NULL,
+            peaks_blob BLOB NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_waveform_cache_updated_at
+            ON waveform_cache(updated_at);
+    ";
+
+    /// A version 2 database, with the waveform cache if `waveforms`, holding
+    /// a track and, then, two waveforms.
+    fn version_2_database(waveforms: bool) -> Connection {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        conn.execute_batch("DROP TABLE waveform_cache; PRAGMA user_version = 2;")
+            .expect("version 2 schema");
+        conn.execute(
+            "INSERT INTO tracks(path, title, artist, album, mtime_ns, size_bytes, indexed_at, \
+             cover_stamp) VALUES ('/music/a.flac', 'A', 'Artist', 'Album', 1, 2, 3, 77)",
+            [],
+        )
+        .expect("track row");
+        if waveforms {
+            conn.execute_batch(VERSION_2_WAVEFORM_CACHE)
+                .expect("waveform cache");
+            for (path, updated_at) in [("/music/a.flac", 100), ("/music/b.flac", 200)] {
+                conn.execute(
+                    "INSERT INTO waveform_cache(path, size_bytes, modified_secs, \
+                     modified_nanos, format_version, peak_count, peaks_blob, updated_at) \
+                     VALUES (?1, 10, 1, 0, 2, 1, x'0000003f', ?2)",
+                    params![path, updated_at],
+                )
+                .expect("waveform row");
+            }
+        }
+        conn
+    }
+
+    fn rows(conn: &Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = conn
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .expect("prepare");
+        let columns = stmt.column_count();
+        stmt.query_map([], |row| {
+            (0..columns)
+                .map(|column| row.get(column))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("query")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("rows")
+    }
+
+    #[test]
+    fn version_2_waveforms_are_kept_and_marked_for_one_more_decode() {
+        use rusqlite::types::Value;
+        let conn = version_2_database(true);
+        let tracks = rows(&conn, "tracks");
+        let mut waveforms = rows(&conn, "waveform_cache");
+
+        init_schema(&conn).expect("migration");
+
+        assert_eq!(user_version(&conn).expect("version"), 3);
+        assert_eq!(rows(&conn, "tracks"), tracks);
+        // Not known to be complete, and of unknown coverage.
+        for row in &mut waveforms {
+            row.extend([Value::Integer(0), Value::Null]);
+        }
+        assert_eq!(rows(&conn, "waveform_cache"), waveforms);
+
+        // A second run changes nothing.
+        let schema: Vec<String> = conn
+            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("schema")
+            .collect::<rusqlite::Result<_>>()
+            .expect("schema rows");
+        let changes = conn.total_changes();
+        init_schema(&conn).expect("second run");
+        assert_eq!(conn.total_changes(), changes);
+        assert_eq!(rows(&conn, "waveform_cache"), waveforms);
+        let after: Vec<String> = conn
+            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("schema")
+            .collect::<rusqlite::Result<_>>()
+            .expect("schema rows");
+        assert_eq!(after, schema);
+    }
+
+    #[test]
+    fn a_version_2_database_without_waveforms_gets_the_waveform_cache() {
+        let conn = version_2_database(false);
+
+        init_schema(&conn).expect("migration");
+
+        assert_eq!(user_version(&conn).expect("version"), 3);
+        let columns = table_columns(&conn, "waveform_cache").expect("columns");
+        assert!(columns.contains("complete") && columns.contains("coverage_seconds"));
+        let index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_waveform_cache_updated_at'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("index");
+        assert_eq!(index, 1);
+        assert_eq!(rows(&conn, "tracks").len(), 1);
     }
 }

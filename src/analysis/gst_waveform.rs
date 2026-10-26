@@ -7,7 +7,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 
 use super::cache::usize_to_u64;
-use super::fft::reduce_waveform_peaks;
+use super::fft::{reduce_waveform_peaks, OverviewProgress};
 use crate::raw_audio::{configure_raw_surround_decoding, filter_raw_surround_source};
 
 pub(super) struct GstWaveformAccumulator {
@@ -184,7 +184,7 @@ pub(super) fn decode_waveform_peaks_stream_gst<F, C>(
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
 where
-    F: FnMut(Vec<f32>, f32, bool) -> bool,
+    F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
     C: FnMut() -> bool,
 {
     if is_cancelled() {
@@ -220,7 +220,7 @@ where
                             && !on_update(
                                 waveform.take_preview(),
                                 waveform.coverage_seconds(),
-                                false,
+                                OverviewProgress::Partial,
                             )
                         {
                             return Ok(());
@@ -246,7 +246,7 @@ where
     drop(shutdown);
 
     if !is_cancelled() {
-        let _ = on_update(peaks, coverage_seconds, true);
+        let _ = on_update(peaks, coverage_seconds, OverviewProgress::Complete);
     }
     Ok(())
 }
@@ -408,8 +408,8 @@ mod tests {
             let result = decode_waveform_peaks_stream_gst(
                 &path,
                 64,
-                |peaks, coverage, done| {
-                    if done {
+                |peaks, coverage, progress| {
+                    if progress == OverviewProgress::Complete {
                         finished = Some((peaks, coverage));
                     }
                     true
