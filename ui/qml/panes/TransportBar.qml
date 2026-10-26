@@ -38,6 +38,35 @@ ToolBar {
     topPadding: 4
     bottomPadding: 4
 
+    // A slider whose held arrow key is one gesture, as a drag is. Qt's
+    // autorepeat clears `pressed` at each repeat, but not `adjusting`.
+    component GestureSlider: Slider {
+        // The arrow key held down, or 0.
+        property int heldKey: 0
+        readonly property bool adjusting: pressed || heldKey !== 0
+
+        // The slider handles the keys after these, as they leave them
+        // unaccepted.
+        Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
+                heldKey = event.key
+            }
+        }
+        Keys.onReleased: function(event) {
+            if (!event.isAutoRepeat && event.key === heldKey) {
+                heldKey = 0
+            }
+        }
+        // The key's release goes elsewhere then, so the slider would stay
+        // pressed by the key.
+        onActiveFocusChanged: {
+            if (!activeFocus && heldKey !== 0) {
+                heldKey = 0
+                pressed = false
+            }
+        }
+    }
+
     contentItem: RowLayout {
         anchors.fill: parent
         anchors.leftMargin: root.leftPadding
@@ -88,7 +117,7 @@ ToolBar {
             }
         }
 
-        Slider {
+        GestureSlider {
             id: seekSlider
             objectName: "seekSlider"
             // A drag leaves the focus where it was, so the arrow keys keep
@@ -113,16 +142,27 @@ ToolBar {
                     + FormatUtils.formatSeekTime(root.uiBridge.durationSeconds)
                 : "No track playing"
 
-            onPressedChanged: {
-                if (!pressed && seekAllowed) {
+            // Where the current gesture moved the slider, or NaN. The
+            // position's Binding may write the value first when it ends.
+            property real gestureValue: NaN
+
+            // A drag or a held key seeks once, when it ends, so the backend
+            // gets no seek per autorepeat; other moves, such as the wheel's,
+            // seek at once.
+            onMoved: {
+                if (adjusting) {
+                    gestureValue = value
+                } else if (seekAllowed) {
                     root.seekCommitted(value)
                 }
             }
-            // The arrow keys and drags press the slider and seek on release;
-            // other moves, such as the wheel's, seek at once.
-            onMoved: {
-                if (!pressed && seekAllowed) {
-                    root.seekCommitted(value)
+            onAdjustingChanged: {
+                if (!adjusting && !isNaN(gestureValue)) {
+                    const target = gestureValue
+                    gestureValue = NaN
+                    if (seekAllowed) {
+                        root.seekCommitted(target)
+                    }
                 }
             }
 
@@ -194,7 +234,7 @@ ToolBar {
 
             Item {
                 id: seekDragOverlay
-                visible: seekSlider.pressed && seekSlider.seekAllowed
+                visible: seekSlider.adjusting && seekSlider.seekAllowed
                 z: 20
                 property real playheadX: seekSlider.leftPadding
                     + seekSlider.stableVisualPosition * seekSlider.availableWidth
@@ -232,9 +272,10 @@ ToolBar {
             target: seekSlider
             property: "value"
             value: seekSlider.durationKnown ? root.displayedPositionSeconds : 0
-            when: !seekSlider.pressed
-            // A press keeps the position it starts from; restoring the value
-            // from before the binding would make the arrow keys step from it.
+            when: !seekSlider.adjusting
+            // A gesture keeps the position it starts from; restoring the
+            // value from before the binding would make the arrow keys step
+            // from it.
             restoreMode: Binding.RestoreNone
         }
 
@@ -270,7 +311,7 @@ ToolBar {
             onClicked: root.toggleMutedVolume()
         }
 
-        Slider {
+        GestureSlider {
             id: volumeSlider
             objectName: "volumeSlider"
             focusPolicy: Qt.TabFocus
@@ -280,19 +321,16 @@ ToolBar {
             stepSize: 0
             Accessible.name: "Volume"
             Accessible.description: Math.round(value * 100) + "%"
+            // Every move, including a release's, sends its value, so the
+            // volume follows a drag or a held key.
             onMoved: root.setAppVolume(value)
-            onPressedChanged: {
-                if (!pressed) {
-                    root.setAppVolume(value)
-                }
-            }
         }
 
         Binding {
             target: volumeSlider
             property: "value"
             value: root.uiBridge.volume
-            when: !volumeSlider.pressed
+            when: !volumeSlider.adjusting
             // As for the seek slider.
             restoreMode: Binding.RestoreNone
         }

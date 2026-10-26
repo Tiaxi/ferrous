@@ -263,6 +263,9 @@ private slots:
     void bridgeEchoesWaitForTheVolumeGesture();
     void arrowKeysSeekFromThePlaybackPosition();
     void seekDragSeeksOnceOnRelease();
+    void heldArrowKeysAccumulateVolumeSteps();
+    void heldArrowKeysSeekOnceWhenReleased();
+    void seekClickSeeksOnce();
     void transportBarHasNoWarnings();
     void transportBarHasNoWarningsUnderTheBasicStyle();
     void clicksLeaveSpaceToPlayOrPause();
@@ -580,8 +583,9 @@ bool tabTo(QQuickWindow *window, QQuickItem *target) {
 
 } // namespace
 
-// The transport bar alone. Its bridge is updated only by the test, as the
-// real bridge's echo comes later, and the harness records what it sends.
+// The transport bar alone. The harness records what the bar sends. Its
+// bridge is updated by the test, as the real bridge's echo comes later, or
+// with `echoLags` by the bar's sends, one new value behind.
 static QByteArray transportHarnessQml() {
     return QByteArrayLiteral(R"QML(
 import QtQuick 2.15
@@ -600,6 +604,7 @@ ApplicationWindow {
     // What the transport bar sent, in order.
     property var seeks: []
     property var volumes: []
+    property bool echoLags: false
 
     Components.UiPalette {
         id: uiPalette
@@ -644,9 +649,23 @@ ApplicationWindow {
             keyboardSeekStepSeconds: 5
             displayedPositionSeconds: harness.positionSeconds
             toggleMutedVolume: function() {}
-            setAppVolume: function(value) { harness.volumes = harness.volumes.concat([value]) }
+            setAppVolume: function(value) {
+                const last = harness.volumes.length > 0
+                    ? harness.volumes[harness.volumes.length - 1]
+                    : bridge.volume
+                // A repeated value brings no newer echo.
+                if (harness.echoLags && value !== last) {
+                    bridge.volume = last
+                }
+                harness.volumes = harness.volumes.concat([value])
+            }
             normalizedVolumeValue: function(value) { return value }
-            seekCommitted: function(value) { harness.seeks = harness.seeks.concat([value]) }
+            seekCommitted: function(value) {
+                if (harness.echoLags && harness.seeks.length > 0) {
+                    harness.positionSeconds = harness.seeks[harness.seeks.length - 1]
+                }
+                harness.seeks = harness.seeks.concat([value])
+            }
         }
     }
 }
@@ -674,6 +693,27 @@ bool onlyRecordedSince(QObject *harness, const char *name, qsizetype from, doubl
     return !values.isEmpty()
         && std::all_of(values.begin(), values.end(),
                        [expected](double value) { return fuzzyEqual(value, expected); });
+}
+
+bool sameValues(const QList<double> &actual, const QList<double> &expected) {
+    return actual.size() == expected.size()
+        && std::equal(actual.begin(), actual.end(), expected.begin(), fuzzyEqual);
+}
+
+// Holds `key` down for `steps` steps as Qt sends autorepeat: a press,
+// autorepeat release and press pairs, and the final release.
+void holdKey(QQuickWindow *window, Qt::Key key, int steps) {
+    const auto send = [window, key](QEvent::Type type, bool autoRepeat) {
+        QKeyEvent event(type, key, Qt::NoModifier, QString(), autoRepeat);
+        QSpontaneKeyEvent::setSpontaneous(&event);
+        QCoreApplication::sendEvent(window, &event);
+    };
+    send(QEvent::KeyPress, false);
+    for (int step = 1; step < steps; ++step) {
+        send(QEvent::KeyRelease, true);
+        send(QEvent::KeyPress, true);
+    }
+    send(QEvent::KeyRelease, false);
 }
 
 QString describeValues(const QList<double> &values) {
@@ -837,6 +877,78 @@ void AccessibilityTest::seekDragSeeksOnceOnRelease() {
     QCOMPARE(seek->property("value").toDouble(), dragged);
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
     QCOMPARE(recordedValues(root.data(), "seeks"), (QList<double>{dragged}));
+}
+
+void AccessibilityTest::heldArrowKeysAccumulateVolumeSteps() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
+    QVERIFY(bridge != nullptr && volume != nullptr);
+    bridge->setProperty("volume", 0.2);
+    root->setProperty("echoLags", true);
+    QVERIFY(tabTo(window, volume));
+
+    // Each step is sent once, from the one before, though the echo lags.
+    holdKey(window, Qt::Key_Right, 6);
+    const QList<double> volumes = recordedValues(root.data(), "volumes");
+    QVERIFY2(sameValues(volumes, {0.3, 0.4, 0.5, 0.6, 0.7, 0.8}), qPrintable(describeValues(volumes)));
+    bridge->setProperty("volume", 0.8);
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.8));
+
+    holdKey(window, Qt::Key_Left, 3);
+    const QList<double> after = recordedValues(root.data(), "volumes").mid(6);
+    QVERIFY2(sameValues(after, {0.7, 0.6, 0.5}), qPrintable(describeValues(after)));
+}
+
+void AccessibilityTest::heldArrowKeysSeekOnceWhenReleased() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QVERIFY(seek != nullptr);
+    root->setProperty("echoLags", true);
+    QVERIFY(tabTo(window, seek));
+    const auto seeks = [&root]() { return recordedValues(root.data(), "seeks"); };
+
+    // The steps add up, and the hold seeks once, when it ends.
+    holdKey(window, Qt::Key_Right, 6);
+    QCOMPARE(seeks(), (QList<double>{80.0}));
+    root->setProperty("positionSeconds", 80.0);
+    holdKey(window, Qt::Key_Left, 3);
+    QCOMPARE(seeks(), (QList<double>{80.0, 65.0}));
+
+    // Losing the focus while the key is held ends the hold where it was.
+    root->setProperty("positionSeconds", 65.0);
+    QTest::keyPress(window, Qt::Key_Right);
+    QCOMPARE(seek->property("value").toDouble(), 70.0);
+    auto *start = qvariant_cast<QQuickItem *>(root->property("startButton"));
+    start->forceActiveFocus(Qt::TabFocusReason);
+    QCOMPARE(seeks(), (QList<double>{80.0, 65.0, 70.0}));
+    root->setProperty("positionSeconds", 71.0);
+    QCOMPARE(seek->property("value").toDouble(), 71.0);
+    QTest::keyRelease(window, Qt::Key_Right);
+    QCOMPARE(seeks(), (QList<double>{80.0, 65.0, 70.0}));
+}
+
+void AccessibilityTest::seekClickSeeksOnce() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QVERIFY(seek != nullptr);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      seek->mapToScene(QPointF(seek->width() * 0.75, seek->height() / 2)).toPoint());
+    const QList<double> seeks = recordedValues(root.data(), "seeks");
+    QVERIFY2(seeks.size() == 1 && seeks.constFirst() > 130.0 && seeks.constFirst() < 170.0,
+             qPrintable(describeValues(seeks)));
 }
 
 void AccessibilityTest::transportBarHasNoWarnings() {
