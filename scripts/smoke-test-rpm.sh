@@ -55,8 +55,8 @@ if ! command -v podman >/dev/null 2>&1; then
     exit 1
 fi
 
-if [[ -z "${rpm_path}" ]]; then
-    rpm_path="$(find "${RPM_ROOT}" -type f -name 'ferrous-[0-9]*.rpm' -printf '%T@ %p\n' 2>/dev/null \
+if [[ -z "${rpm_path}" && -d "${RPM_ROOT}" ]]; then
+    rpm_path="$(find "${RPM_ROOT}" -type f -name 'ferrous-[0-9]*.rpm' -printf '%T@ %p\n' \
         | sort -n | tail -1 | cut -d' ' -f2-)"
 fi
 if [[ -z "${rpm_path}" || ! -f "${rpm_path}" ]]; then
