@@ -264,6 +264,7 @@ ApplicationWindow {
         property int globalSearchSeq: 0
         property var globalSearchModel: globalSearchModelFallback
         property var itunesArtworkResults: []
+        property var itunesArtworkTarget: ({})
         property bool itunesArtworkLoading: false
         property string itunesArtworkStatusText: ""
         property string diagnosticsText: ""
@@ -329,10 +330,20 @@ ApplicationWindow {
         function disconnectLastFm() {}
         function playAt(index) {}
         function selectQueueIndex(index) {}
-        function removeAt(index) {}
-        function removeIndices(indices) {}
+        // The queue edits asked for, for tests.
+        property var queueCommands: []
+        function removeAt(index) { queueCommands = queueCommands.concat(["remove " + index]) }
+        function removeIndices(indices) {
+            queueCommands = queueCommands.concat(["remove " + indices.join(",")])
+        }
         function moveQueue(from, to) {}
-        function clearQueue() {}
+        function clearQueue() { queueCommands = queueCommands.concat(["clear"]) }
+        // The queue change the user can undo; see BridgeClient.
+        property double queueUndoId: 0
+        property int queueUndoKind: 0
+        property int queueUndoTrackCount: 0
+        signal queueUndoRestored(var rows)
+        function undoQueueChange() { queueCommands = queueCommands.concat(["undo " + queueUndoId]) }
         function replaceAlbumAt(index) {}
         function appendAlbumAt(index) {}
         function playTrack(path) {}
@@ -405,12 +416,15 @@ ApplicationWindow {
         property var operationFiles: []
         property var tableModel: []
         signal statusChanged()
+        signal renamePreviewReady(var rows, string error)
         function openSelection(selections) { return false }
         function openForPaths(paths) { return false }
         function close() {}
         function reload() {}
         function save() { return false }
         function renameSelectedFiles() { return false }
+        function previewRenameSelectedFiles() { return false }
+        function renamePreviewedFiles() { return false }
         function setSelectedRows(rows) {}
         function selectedRows() { return [] }
         function selectRange(first, last) {}
@@ -622,12 +636,33 @@ ApplicationWindow {
         enabled: !root.viewerOpen
         onTriggered: preferencesDialog.open()
     }
+    // Delete removes the selected tracks while the queue has focus; the
+    // queue view handles it, so it is not a window-wide shortcut.
     Action {
         id: removeSelectedTrackAction
         text: "&Remove Selected Track"
-        shortcut: "Delete"
         enabled: queueController.selectionCount() > 0 && !root.viewerOpen
         onTriggered: queueController.removeSelectedTrack()
+    }
+    Action {
+        id: undoQueueChangeAction
+        objectName: "undoQueueChangeAction"
+        text: {
+            switch (uiBridge.queueUndoKind) {
+            case 1:
+                return "&Undo Clear Playlist"
+            case 2:
+                return "&Undo Remove Tracks"
+            case 3:
+                return "&Undo Replace Queue"
+            default:
+                return "&Undo"
+            }
+        }
+        // Text fields keep Ctrl+Z for their own text.
+        shortcut: StandardKey.Undo
+        enabled: uiBridge.queueUndoId > 0 && !root.viewerOpen
+        onTriggered: uiBridge.undoQueueChange()
     }
     Action {
         id: selectPreviousTrackAction
@@ -883,6 +918,7 @@ ApplicationWindow {
         Menu {
             title: "&Edit"
             width: root.menuPopupWidth([
+                { label: undoQueueChangeAction.text, shortcut: String(undoQueueChangeAction.shortcut || "") },
                 { label: removeSelectedTrackAction.text, shortcut: String(removeSelectedTrackAction.shortcut || "") },
                 { label: moveTrackUpAction.text, shortcut: String(moveTrackUpAction.shortcut || "") },
                 { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut || "") },
@@ -897,6 +933,8 @@ ApplicationWindow {
             exit: Transition {
                 NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
             }
+            MenuItem { action: undoQueueChangeAction }
+            MenuSeparator {}
             MenuItem { action: removeSelectedTrackAction }
             MenuItem { action: moveTrackUpAction }
             MenuItem { action: moveTrackDownAction }

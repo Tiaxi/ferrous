@@ -33,6 +33,57 @@ pub struct NormalizedArtwork {
     pub mime_type: MimeType,
 }
 
+/// A track file's size and modification time, to tell whether it is still
+/// the file that was seen earlier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackFileIdentity {
+    pub len: u64,
+    /// Milliseconds since the Unix epoch.
+    pub modified_ms: i64,
+}
+
+impl TrackFileIdentity {
+    /// The identity of the file at `path` now.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read.
+    pub fn of(path: &Path) -> std::io::Result<Self> {
+        let metadata = fs::metadata(path)?;
+        let modified = metadata.modified()?;
+        let modified_ms = match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
+            Err(before) => i64::try_from(before.duration().as_millis()).map_or(i64::MIN, |ms| -ms),
+        };
+        Ok(Self {
+            len: metadata.len(),
+            modified_ms,
+        })
+    }
+}
+
+/// Check that `track_path` is still the file `expected` describes.
+///
+/// # Errors
+///
+/// Returns an error for the user when the file is gone, or is another file
+/// or a changed one.
+pub fn check_track_unchanged(track_path: &Path, expected: TrackFileIdentity) -> Result<()> {
+    match TrackFileIdentity::of(track_path) {
+        Ok(identity) if identity == expected => Ok(()),
+        Ok(_) => bail!(
+            "{} changed after the artwork search, so nothing was changed; \
+             search again to apply artwork to it",
+            file_label(track_path)
+        ),
+        Err(_) => bail!(
+            "{} was moved, renamed or deleted after the artwork search, so nothing \
+             was changed; play it and search again to apply artwork to it",
+            file_label(track_path)
+        ),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyArtworkOutcome {
     /// Tracks whose cover changed.
@@ -565,6 +616,35 @@ mod tests {
         );
         // The library shows the new cover rather than the scans.
         assert_eq!(find_folder_cover(&album), Some(cover));
+        fs::remove_dir_all(root).expect("remove test dir");
+    }
+
+    #[test]
+    fn a_track_moved_or_changed_since_the_search_is_refused() {
+        let root = test_dir("moved-track");
+        let track = root.join("01.flac");
+        write_test_flac(&track, &[("ALBUM", "Album")]);
+        let identity = TrackFileIdentity::of(&track).expect("identity");
+        check_track_unchanged(&track, identity).expect("the same file");
+
+        let changed = TrackFileIdentity {
+            len: identity.len + 1,
+            ..identity
+        };
+        let error = check_track_unchanged(&track, changed).expect_err("another file");
+        assert!(
+            error
+                .to_string()
+                .contains("changed after the artwork search"),
+            "{error}"
+        );
+
+        fs::rename(&track, root.join("02.flac")).expect("rename track");
+        let error = check_track_unchanged(&track, identity).expect_err("moved file");
+        assert!(
+            error.to_string().contains("moved, renamed or deleted"),
+            "{error}"
+        );
         fs::remove_dir_all(root).expect("remove test dir");
     }
 

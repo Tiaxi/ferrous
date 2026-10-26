@@ -19,6 +19,8 @@ Dialog {
     readonly property int selectedCount: root.tagEditorApi.selectedCount || 0
     property bool operationInFlight: false
     property string operationText: ""
+    // A rename preview runs; a load started meanwhile drops its answer.
+    property bool renamePreviewPending: false
     property bool closeAfterSave: false
     // Ferrous is waiting to quit until the edits here are saved or dropped.
     property bool quitPending: false
@@ -114,12 +116,26 @@ Dialog {
         return true
     }
 
+    // Rename Files shows the new names first; renameNow renames once the
+    // user agrees.
     function triggerRename() {
         if (root.tagEditorApi.loading || root.tagEditorApi.saving || root.selectedCount === 0) return
         root.commitPendingEditorEdits()
         root.operationInFlight = true
+        root.operationText = "Checking new file names..."
+        root.renamePreviewPending = root.tagEditorApi.previewRenameSelectedFiles()
+        if (!root.renamePreviewPending) {
+            root.operationInFlight = false
+            root.operationText = ""
+        }
+    }
+
+    // Renames what the preview showed, even if the selection changed since.
+    function renameNow() {
+        if (root.tagEditorApi.loading || root.tagEditorApi.saving) return
+        root.operationInFlight = true
         root.operationText = "Renaming files..."
-        if (!root.tagEditorApi.renameSelectedFiles()) {
+        if (!root.tagEditorApi.renamePreviewedFiles()) {
             root.operationInFlight = false
             root.operationText = ""
         }
@@ -334,6 +350,7 @@ Dialog {
     }
     onClosed: {
         root.clearSelection()
+        root.renamePreviewPending = false
         root.operationInFlight = false
         root.operationText = ""
         tagEditorStatusFlash.stop()
@@ -353,6 +370,11 @@ Dialog {
         }
 
         function onLoadingChanged() {
+            if (root.tagEditorApi.loading && root.renamePreviewPending) {
+                root.renamePreviewPending = false
+                root.operationInFlight = false
+                root.operationText = ""
+            }
             if (!root.tagEditorApi.loading) root.initializeSelection()
         }
         function onSaveFinished(success) {
@@ -367,6 +389,18 @@ Dialog {
             root.closeAfterSave = false
             tagEditorStatusFlash.restart()
             root.continueQuit(success)
+        }
+        function onRenamePreviewReady(rows, error) {
+            // A closed editor has nothing to rename.
+            if (!root.renamePreviewPending || !root.visible) {
+                return
+            }
+            root.renamePreviewPending = false
+            root.operationInFlight = false
+            root.operationText = ""
+            renamePreviewDialog.rows = rows
+            renamePreviewDialog.errorText = error
+            renamePreviewDialog.open()
         }
         function onRenameFinished() {
             root.stopWaitingForOperation()
@@ -398,6 +432,14 @@ Dialog {
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
         windowRoot: root.windowRoot
+    }
+
+    Dialogs.RenamePreviewDialog {
+        id: renamePreviewDialog
+        uiPalette: root.uiPalette
+        windowRoot: root.windowRoot
+        onRenameRequested: root.renameNow()
+        onClosed: rows = []
     }
 
     Dialogs.TagEditorCloseConfirmDialog {
@@ -591,7 +633,8 @@ Dialog {
                 onClicked: autoNumberDialog.open()
             }
             Button {
-                text: "Rename Files"
+                objectName: "tagEditorRenameButton"
+                text: "Rename Files..."
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.selectedCount > 0
                 onClicked: root.triggerRename()
             }

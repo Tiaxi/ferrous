@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
@@ -37,6 +38,10 @@ enum SnapshotSection : quint16 {
     // carried, a u8, 1 if the save succeeded, and a string with what to show
     // the user otherwise.
     SectionStateSaved = 1u << 9,
+    // The queue change the user can undo, and the rows the latest undo
+    // brought back; every snapshot carries it. The layout is described at
+    // SECTION_QUEUE_UNDO in src/frontend_bridge/ffi.rs.
+    SectionQueueUndo = 1u << 10,
 };
 
 // What part of Ferrous an error concerns. Mirrors ErrorCategory in
@@ -130,6 +135,9 @@ enum CommandId : quint16 {
     // Payload: a u32 request ID, echoed in SectionStateSaved.
     CmdSaveState = 66,
     CmdSetLibraryWatchEnabled = 67,
+    // Payload: the u64 offer ID of SectionQueueUndo. The backend refuses,
+    // with an error, an ID it no longer offers.
+    CmdUndoQueueChange = 68,
 };
 
 struct DecodedPlayback {
@@ -227,6 +235,8 @@ struct DecodedLibraryRoot {
     QString unwatchedReason;
     // What the latest scan of the root could not do; empty if nothing.
     QString scanProblem;
+    // The tracks that removing the root takes out of the library.
+    int trackCount{0};
 };
 
 struct DecodedLibraryMeta {
@@ -307,6 +317,26 @@ struct DecodedLastFm {
     QString authUrl;
 };
 
+enum QueueUndoKind : quint8 {
+    QueueUndoNone = 0,
+    QueueUndoCleared = 1,
+    QueueUndoRemoved = 2,
+    QueueUndoReplaced = 3,
+};
+
+struct DecodedQueueUndo {
+    bool present{false};
+    // 0 when there is nothing to undo.
+    quint64 offerId{0};
+    int kind{QueueUndoNone};
+    int trackCount{0};
+    // The offer the latest undo restored, 0 for none; the queue revision it
+    // left; and the rows it brought back, as ascending (start, count) pairs.
+    quint64 restoredId{0};
+    quint64 restoredRevision{0};
+    QVector<QPair<int, int>> restoredRanges;
+};
+
 struct DecodedSnapshot {
     quint16 sectionMask{0};
     bool hasStopped{false};
@@ -324,6 +354,7 @@ struct DecodedSnapshot {
     DecodedMetadata metadata;
     DecodedSettings settings;
     DecodedLastFm lastfm;
+    DecodedQueueUndo queueUndo;
 };
 
 enum SearchRowType : quint8 {
@@ -364,10 +395,15 @@ QByteArray encodeCommandNoPayload(quint16 cmdId);
 QByteArray encodeCommandU8(quint16 cmdId, quint8 value);
 QByteArray encodeCommandI32(quint16 cmdId, qint32 value);
 QByteArray encodeCommandU32(quint16 cmdId, quint32 value);
+QByteArray encodeCommandU64(quint16 cmdId, quint64 value);
 QByteArray encodeCommandF32(quint16 cmdId, float value);
 QByteArray encodeCommandF64(quint16 cmdId, double value);
 QByteArray encodeCommandString(quint16 cmdId, const QString &value);
 QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QString &second);
+// CmdApplyAlbumArt: the track and artwork paths, then the track file's u64
+// size and i64 modification time in milliseconds when the search found it.
+QByteArray encodeCommandApplyAlbumArt(const QString &trackPath, const QString &artworkPath,
+                                      quint64 trackSize, qint64 trackModifiedMs);
 QByteArray encodeCommandStringBool(quint16 cmdId, const QString &value, bool flag);
 QByteArray encodeCommandLibraryViewState(
     quint16 cmdId,

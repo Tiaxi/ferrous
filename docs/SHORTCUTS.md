@@ -22,7 +22,7 @@ These work in the main window only:
 | --- | --- |
 | Open files | Ctrl+O |
 | Global search | Ctrl+F |
-| Remove the selected tracks from the queue | Delete |
+| Undo the latest Clear Playlist, removal of queue tracks, or replacement of the queue | Ctrl+Z |
 | Select the previous or next track in the queue | Ctrl+Up, Ctrl+Down |
 | Move the selected tracks up or down the queue | Ctrl+Shift+Up, Ctrl+Shift+Down |
 
@@ -36,9 +36,12 @@ Alt and an underlined letter open a menu, such as Alt+P for **Playback**. [Globa
 | Extend the selection | Shift with the keys above |
 | Expand or collapse a library row | Right, Left |
 | Play the selection | Enter |
+| Remove the selected tracks (queue only) | Delete |
 | Open the context menu | Menu, Shift+F10 |
 
 In the library, typing the start of an artist's name selects that artist.
+
+Delete acts only while the queue has focus. Playing from the library or global search replaces the queue. After Clear Playlist, Delete, or a replacement, a message under the queue offers **Undo**, as does Undo in the **Edit** menu (Ctrl+Z), until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start.
 
 ## Viewers
 

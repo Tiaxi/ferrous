@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <utility>
 #include <QFutureWatcher>
 #include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
@@ -392,6 +393,9 @@ QByteArray TagEditorController::executeOperation(Operation operation, const QByt
         raw = renameGate ? ferrous_ffi_rename_gate_rename(renameGate.get(), data, size, &len)
                          : ferrous_ffi_tag_editor_rename(data, size, &len);
         break;
+    case Operation::PreviewRename:
+        raw = ferrous_ffi_tag_editor_preview_rename(data, size, &len);
+        break;
     }
     QByteArray response;
     if (raw != nullptr) {
@@ -553,6 +557,8 @@ TagEditorController::LoadResult TagEditorController::parseLoadResponse(const QBy
 }
 
 void TagEditorController::applyLoadResult(LoadResult result) {
+    // A preview of the rows replaced here is out of date.
+    m_renamePreview = {};
     const QString &errorText = result.errorText;
     m_tableModel.setRows(std::move(result.rows));
     m_loadedPaths = std::move(result.resolvedPaths);
@@ -575,6 +581,7 @@ void TagEditorController::applyLoadResult(LoadResult result) {
 void TagEditorController::close() {
     if (m_saving) return;
     ++m_operationGeneration;
+    m_renamePreview = {};
     if (m_loading) { m_loading = false; emit loadingChanged(); }
     const bool wasOpen = m_open;
     m_open = false;
@@ -689,11 +696,7 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
     emit saveFinished(success);
 }
 
-bool TagEditorController::renameSelectedFiles() {
-    if (m_loading || m_saving || m_bridge == nullptr || m_selectedRows.isEmpty()) {
-        return false;
-    }
-
+QByteArray TagEditorController::buildRenameRequest(QStringList *fileNames) const {
     QVector<int> rows;
     rows.reserve(m_selectedRows.size());
     for (int row : m_selectedRows) {
@@ -702,9 +705,6 @@ bool TagEditorController::renameSelectedFiles() {
         }
     }
     std::sort(rows.begin(), rows.end());
-    if (rows.isEmpty()) {
-        return false;
-    }
 
     QJsonArray rowArray;
     for (int rowIndex : rows) {
@@ -713,23 +713,134 @@ bool TagEditorController::renameSelectedFiles() {
             continue;
         }
         rowArray.push_back(rowToJson(*row));
+        if (fileNames != nullptr) {
+            fileNames->push_back(row->fileName);
+        }
     }
     if (rowArray.isEmpty()) {
-        return false;
+        return {};
     }
-
     QJsonObject root;
     root.insert(QStringLiteral("rows"), rowArray);
-    m_operationFiles.clear();
-    for (int rowIndex : rows) {
-        m_operationFiles.push_back(m_tableModel.rowAt(rowIndex)->fileName);
+    return QJsonDocument(root).toJson(QJsonDocument::Compact);
+}
+
+bool TagEditorController::renameSelectedFiles() {
+    if (m_loading || m_saving || m_bridge == nullptr || m_selectedRows.isEmpty()) {
+        return false;
     }
+    RenameRequest request;
+    request.payload = buildRenameRequest(&request.fileNames);
+    return startRename(std::move(request));
+}
+
+bool TagEditorController::renamePreviewedFiles() {
+    if (m_loading || m_saving || m_bridge == nullptr) {
+        return false;
+    }
+    RenameRequest request = std::exchange(m_renamePreview, {});
+    if (request.payload.isEmpty()) {
+        setStatusText(QStringLiteral("The rename preview is out of date, so nothing was renamed. "
+                                     "Use Rename Files again."),
+                      QString(), true);
+        return false;
+    }
+    return startRename(std::move(request));
+}
+
+bool TagEditorController::startRename(RenameRequest request) {
+    if (request.payload.isEmpty()) {
+        return false;
+    }
+    m_renamePreview = {};
+    m_operationFiles = std::move(request.fileNames);
     m_saving = true;
     emit savingChanged();
-    runOperation(Operation::Rename, QJsonDocument(root).toJson(QJsonDocument::Compact), [this](const QByteArray &response) {
+    runOperation(Operation::Rename, request.payload, [this](const QByteArray &response) {
         applyRenameResult(response);
     });
     return true;
+}
+
+bool TagEditorController::previewRenameSelectedFiles() {
+    if (m_loading || m_saving || m_selectedRows.isEmpty()) {
+        return false;
+    }
+    RenameRequest request;
+    request.payload = buildRenameRequest(&request.fileNames);
+    if (request.payload.isEmpty()) {
+        return false;
+    }
+    // Nothing is written. Another operation started meanwhile supersedes
+    // the preview, whose answer is then dropped. The rows are captured now,
+    // so the rename the user confirms is the one previewed, whatever the
+    // selection or the tags are by then.
+    m_renamePreview = {};
+    m_pendingRenamePreview = request;
+    runOperation(Operation::PreviewRename, request.payload, [this](const QByteArray &response) {
+        applyRenamePreview(response, std::exchange(m_pendingRenamePreview, {}));
+    });
+    return true;
+}
+
+void TagEditorController::applyRenamePreview(const QByteArray &response,
+                                             const RenameRequest &previewed) {
+    m_renamePreview = {};
+    const QJsonDocument document = QJsonDocument::fromJson(response);
+    if (!document.isObject()) {
+        emit renamePreviewReady({}, QStringLiteral("failed to parse the file rename preview"));
+        return;
+    }
+    const QJsonObject object = document.object();
+    const QString error = object.value(QStringLiteral("error")).toString();
+    QVariantList rows;
+    QJsonObject planned;
+    const QJsonArray results = object.value(QStringLiteral("results")).toArray();
+    for (const QJsonValue &value : results) {
+        const QJsonObject item = value.toObject();
+        const QString path = item.value(QStringLiteral("path")).toString();
+        if (path.isEmpty()) {
+            continue;
+        }
+        const QString newPath = item.value(QStringLiteral("newPath")).toString();
+        QVariantMap row;
+        row.insert(QStringLiteral("path"), path);
+        row.insert(QStringLiteral("newPath"), newPath);
+        row.insert(QStringLiteral("oldName"), displayNameForPath(path));
+        row.insert(QStringLiteral("newName"),
+                   newPath.isEmpty() ? QString() : displayNameForPath(newPath));
+        const bool ok = item.value(QStringLiteral("ok")).toBool();
+        row.insert(QStringLiteral("ok"), ok);
+        row.insert(QStringLiteral("unchanged"), ok && newPath == path);
+        row.insert(QStringLiteral("error"), item.value(QStringLiteral("error")).toString());
+        rows.push_back(row);
+        if (ok && !newPath.isEmpty() && newPath != path) {
+            planned.insert(path, newPath);
+        }
+    }
+    // Confirming renames only what the preview showed going ahead, from
+    // and to those paths; the backend refuses if the files changed since.
+    if (error.isEmpty() && !planned.isEmpty()) {
+        const QJsonArray previewedRows = QJsonDocument::fromJson(previewed.payload)
+                                             .object()
+                                             .value(QStringLiteral("rows"))
+                                             .toArray();
+        QJsonArray plannedRows;
+        QStringList fileNames;
+        for (qsizetype index = 0; index < previewedRows.size(); ++index) {
+            const QJsonObject row = previewedRows.at(index).toObject();
+            if (planned.contains(row.value(QStringLiteral("path")).toString())) {
+                plannedRows.push_back(row);
+                fileNames.push_back(previewed.fileNames.value(index));
+            }
+        }
+        QJsonObject request;
+        request.insert(QStringLiteral("rows"), plannedRows);
+        request.insert(QStringLiteral("plannedRenames"), planned);
+        m_renamePreview.payload = QJsonDocument(request).toJson(QJsonDocument::Compact);
+        m_renamePreview.fileNames = fileNames;
+    }
+    emit renamePreviewReady(rows, error);
 }
 
 void TagEditorController::applyRenameResult(const QByteArray &response) {

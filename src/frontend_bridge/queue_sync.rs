@@ -314,6 +314,15 @@ impl QueueSync {
     }
 
     /// Where the row at `index` at `revision` is now, if it is still in
+    /// the queue and the journal reaches back to `revision`.
+    pub(super) fn follow(&self, revision: u64, index: usize) -> Option<usize> {
+        if revision > self.revision || revision < self.journal_floor {
+            return None;
+        }
+        self.map_index(revision, index)
+    }
+
+    /// Where the row at `index` at `revision` is now, if it is still in
     /// the queue.
     fn map_index(&self, revision: u64, index: usize) -> Option<usize> {
         self.journal

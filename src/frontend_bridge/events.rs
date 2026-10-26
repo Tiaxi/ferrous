@@ -334,6 +334,11 @@ fn process_playback_snapshot_event(
         urgency = playback_snapshot_urgency(&state.playback, &snapshot);
         state.playback = snapshot;
     }
+    match (state.playback.current_queue_index, &state.playback.current) {
+        (Some(row), _) => state.last_current_row = Some((state.queue_sync.revision(), row)),
+        (None, None) => state.last_current_row = None,
+        (None, Some(_)) => {}
+    }
     if next_state == PlaybackState::Playing && previous_playback.state == PlaybackState::Stopped {
         // Queued files may have changed on disk while nothing played.
         super::sync_queue_details(state);

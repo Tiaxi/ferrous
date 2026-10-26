@@ -441,6 +441,39 @@ impl GaplessQueue {
         cancelled
     }
 
+    /// Replace the queue with `queue`, in which the committed track is row
+    /// `current`, such as when an undo puts removed rows back around it.
+    /// Staged successors stay while they are still the tracks that would
+    /// follow; the rest are dropped.
+    pub(crate) fn restore(
+        &mut self,
+        queue: Vec<PathBuf>,
+        current: usize,
+    ) -> Option<CancelledAdvance> {
+        self.queue = queue;
+        self.cursor.index = current;
+        let random = self.rules().random_successor();
+        let mut previous = current;
+        let mut rows = Vec::with_capacity(self.pending.len());
+        for pending in &self.pending {
+            let row = if random {
+                self.queue.iter().position(|path| *path == pending.path)
+            } else {
+                self.sequential_successor(previous)
+            };
+            // No row fails the check below, which drops the successor.
+            let row = row.unwrap_or(usize::MAX);
+            rows.push(row);
+            previous = row;
+        }
+        for (pending, row) in self.pending.iter_mut().zip(rows) {
+            pending.cursor.index = row;
+        }
+        let len = self.queue.len();
+        self.for_each_cursor(|cursor| cursor.reset_navigation(len));
+        self.revalidate_pending()
+    }
+
     /// Rename entries in place, including staged successors. Indices and
     /// shuffle history stay valid.
     pub(crate) fn remap_paths(&mut self, renames: &PathRenames) {
@@ -948,6 +981,40 @@ mod tests {
             HANDED,
             "nothing follows the last row"
         );
+    }
+
+    #[test]
+    fn restoring_rows_around_the_current_track_keeps_a_successor_that_still_follows() {
+        // Rows 0 and 3 come back around the committed track, which was row
+        // 0 of the shorter queue; its successor still follows it.
+        let short = vec![PathBuf::from("/b.flac"), PathBuf::from("/c.flac")];
+        let mut queue = GaplessQueue::new();
+        queue.set_queue(short);
+        queue.stage_natural(gapless);
+        let restored = ["/a.flac", "/b.flac", "/c.flac", "/d.flac"]
+            .map(PathBuf::from)
+            .to_vec();
+        assert_eq!(queue.restore(restored.clone(), 1), None);
+        assert_eq!(queue.current(), Some(restored[1].clone()));
+        let committed = queue.commit_gapless().expect("commit");
+        assert_eq!((committed.path, committed.index), (restored[2].clone(), 2));
+
+        // A row restored between the committed track and its successor
+        // follows it now, so the successor goes.
+        let mut queue = GaplessQueue::new();
+        queue.set_queue(vec![PathBuf::from("/a.flac"), PathBuf::from("/c.flac")]);
+        queue.stage_natural(gapless);
+        assert_eq!(queue.restore(restored[..3].to_vec(), 0), HANDED);
+        assert_eq!(queue.stage_natural(gapless).unwrap().path, restored[1]);
+
+        // With repeat-one, the committed track follows itself wherever its
+        // row is now.
+        let mut queue = GaplessQueue::new();
+        queue.set_queue(vec![PathBuf::from("/b.flac")]);
+        queue.set_repeat_mode(RepeatMode::One);
+        queue.stage_natural(gapless);
+        assert_eq!(queue.restore(restored.clone(), 1), None);
+        assert_eq!(committed_index(&mut queue), Some(1));
     }
 
     #[test]

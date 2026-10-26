@@ -99,6 +99,16 @@ pub enum PlaybackCommand {
     /// started again from its new path. The engine answers with
     /// [`PlaybackEvent::PathsRemapped`].
     RemapPaths(Arc<PathRenames>),
+    /// Replace the queue with `paths`, as an undo of a queue change does.
+    /// When the track the engine has open, playing, paused or stopped, is
+    /// in `paths`, it stays open undisturbed: at row `current` when that is
+    /// its path, otherwise at its first row. Otherwise playback stops and
+    /// row `current` becomes the current track, stopped at its start. The
+    /// engine never starts playback for this command.
+    RestoreQueue {
+        paths: Vec<PathBuf>,
+        current: usize,
+    },
     RemoveAt(usize),
     RemoveMany(Vec<usize>),
     MoveQueue {
@@ -690,6 +700,43 @@ mod tests {
         let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("replacement track");
         assert_eq!(snapshot.current, Some(paths[1].clone()));
         assert_eq!(snapshot.current_queue_index, Some(0));
+        assert_eq!(snapshot.position, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_restored_queue_keeps_the_open_track_or_stops_at_its_current_row() {
+        let (engine, rx) = make_test_engine();
+        let paths: Vec<_> = (0..4)
+            .map(|index| PathBuf::from(format!("/fixture/{index}.flac")))
+            .collect();
+        engine.command(PlaybackCommand::LoadQueue(paths[1..3].to_vec()));
+        engine.command(PlaybackCommand::PlayAt(1));
+        engine.command(PlaybackCommand::Play);
+        // Paused, so the simulated position stays where the seek put it.
+        engine.command(PlaybackCommand::Pause);
+        engine.command(PlaybackCommand::Seek(Duration::from_secs(42)));
+        engine.command(PlaybackCommand::RestoreQueue {
+            paths: paths.clone(),
+            current: 2,
+        });
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("kept track");
+        assert_eq!(snapshot.current, Some(paths[2].clone()));
+        assert_eq!(snapshot.current_queue_index, Some(2));
+        assert_eq!(snapshot.position, Duration::from_secs(42));
+        assert_eq!(snapshot.state, PlaybackState::Paused);
+
+        // The playing track is not in this queue: playback stops at row 1.
+        let other = vec![
+            PathBuf::from("/fixture/x.flac"),
+            PathBuf::from("/fixture/y.flac"),
+        ];
+        engine.command(PlaybackCommand::RestoreQueue {
+            paths: other.clone(),
+            current: 1,
+        });
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("stopped");
+        assert_eq!(snapshot.current, Some(other[1].clone()));
+        assert_eq!(snapshot.state, PlaybackState::Stopped);
         assert_eq!(snapshot.position, Duration::ZERO);
     }
 

@@ -1031,6 +1031,49 @@ impl GstPlaybackRuntime {
         self.continue_after_cancelled_advance(cancelled);
     }
 
+    /// See [`PlaybackCommand::RestoreQueue`].
+    fn restore_queue(&mut self, paths: Vec<PathBuf>, current: usize) {
+        let Some(last) = paths.len().checked_sub(1) else {
+            return;
+        };
+        let current = current.min(last);
+        let open_row = self.snapshot.current.as_ref().and_then(|open| {
+            if paths.get(current) == Some(open) {
+                Some(current)
+            } else {
+                paths.iter().position(|path| path == open)
+            }
+        });
+        let Ok(mut state) = self.queue_state.lock() else {
+            return;
+        };
+        let Some(row) = open_row else {
+            let cancelled = state.set_queue(paths);
+            let target = state.set_current(current);
+            let (repeat_mode, shuffle_enabled) = (state.repeat_mode(), state.shuffle_enabled());
+            drop(state);
+            self.set_queue_flags(repeat_mode, shuffle_enabled);
+            self.release_staged_spectrogram(cancelled, false);
+            if self.snapshot.state != PlaybackState::Stopped {
+                self.stop();
+            }
+            if let Some(target) = target {
+                self.switch_to_path(target.path, target.index, TrackChangeKind::Manual, false);
+            }
+            return;
+        };
+        let cancelled = state.restore(paths, row);
+        let (repeat_mode, shuffle_enabled) = (state.repeat_mode(), state.shuffle_enabled());
+        drop(state);
+        self.set_queue_flags(repeat_mode, shuffle_enabled);
+        // A stopped track has no row until it plays again; see `enter_stopped`.
+        if self.snapshot.state != PlaybackState::Stopped {
+            self.snapshot.current_queue_index = Some(row);
+        }
+        self.continue_after_cancelled_advance(cancelled);
+        self.emit_snapshot();
+    }
+
     fn clear_queue(&mut self) {
         let flags = if let Ok(mut state) = self.queue_state.lock() {
             Some((state.clear(), state.repeat_mode(), state.shuffle_enabled()))
@@ -2164,6 +2207,7 @@ impl GstPlaybackRuntime {
             PlaybackCommand::LoadQueue(paths) => self.load_queue(paths),
             PlaybackCommand::AddToQueue(paths) => self.add_to_queue(paths),
             PlaybackCommand::RemapPaths(renames) => self.remap_paths(&renames),
+            PlaybackCommand::RestoreQueue { paths, current } => self.restore_queue(paths, current),
             PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
             PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
             PlaybackCommand::MoveQueue { from, to } => self.move_queue_item(from, to),
@@ -5671,6 +5715,91 @@ mod engine_tests {
             .snapshots
             .iter()
             .any(|snapshot| snapshot.duration.abs_diff(millis(4_500)) < millis(100)));
+    }
+
+    #[test]
+    fn restoring_rows_inside_the_window_keeps_the_audible_track_and_its_successor() {
+        let fixtures = Fixtures::new("restore-keep");
+        let removed = fixtures.wav("removed.wav", 3_000);
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_settled_window(&b);
+        let changes = engine.changes.len();
+        // An undo puts a removed row back before the audible track.
+        engine.send(PlaybackCommand::RestoreQueue {
+            paths: vec![removed, a.clone(), b.clone()],
+            current: 1,
+        });
+        engine.wait_until(
+            "the restored row did not move the current track",
+            |engine| engine.snapshot.current_queue_index == Some(1),
+        );
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &b,
+            2,
+            Expect::Gapless,
+        );
+        assert_eq!(engine.cancelled_staging, 0);
+    }
+
+    #[test]
+    fn restoring_a_row_after_the_audible_track_stages_it_next() {
+        let fixtures = Fixtures::new("restore-between");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let c = fixtures.wav("c.wav", 5_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), c.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_settled_window(&c);
+        let changes = engine.changes.len();
+        engine.send(PlaybackCommand::RestoreQueue {
+            paths: vec![a.clone(), b.clone(), c],
+            current: 0,
+        });
+        engine.wait_until("the staged successor was not cancelled", |engine| {
+            engine.cancelled_staging == 1
+        });
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &b,
+            1,
+            Expect::Gapless,
+        );
+        engine.wait_for_playing(1, millis(4_500));
+    }
+
+    #[test]
+    fn restoring_a_queue_without_the_playing_track_stops_at_its_current_row() {
+        let fixtures = Fixtures::new("restore-stop");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let replacement = fixtures.wav("replacement.wav", 5_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![replacement]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(5_000));
+        // The undo of a replacement: the replacement plays, and is not in
+        // the queue that comes back.
+        engine.send(PlaybackCommand::RestoreQueue {
+            paths: vec![a, b.clone()],
+            current: 1,
+        });
+        engine.wait_until("the restored current track was not loaded", |engine| {
+            engine.snapshot.current.as_deref() == Some(b.as_path())
+        });
+        assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
+        assert_eq!(engine.snapshot.position, Duration::ZERO);
+        // It stays stopped; Play starts the restored current track.
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(1, millis(4_500));
     }
 
     #[test]

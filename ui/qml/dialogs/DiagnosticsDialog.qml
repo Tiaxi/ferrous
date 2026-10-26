@@ -5,6 +5,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import "../components" as Components
+import "." as Dialogs
 
 Dialog {
     id: root
@@ -80,11 +81,10 @@ Dialog {
             }
 
             Button {
-                text: "Clear"
-                onClicked: {
-                    root.uiBridge.clearDiagnostics()
-                    root.syncDiagnosticsText()
-                }
+                objectName: "diagnosticsClearButton"
+                text: "Clear..."
+                enabled: (root.diagnosticsText || "").length > 0
+                onClicked: clearDiagnosticsConfirmDialog.open()
             }
 
             Item { Layout.fillWidth: true }
@@ -163,6 +163,23 @@ Dialog {
                     }
                 }
             }
+        }
+    }
+
+    // Clearing deletes the log file, so it asks first.
+    Dialogs.ConfirmDialog {
+        id: clearDiagnosticsConfirmDialog
+        objectName: "clearDiagnosticsConfirmDialog"
+        uiPalette: root.uiPalette
+        windowRoot: root.windowRoot
+        title: "Clear Diagnostics"
+        message: "Delete the diagnostics log?"
+        details: "Ferrous deletes the log file and starts a new one. Use Copy All first to keep "
+            + "what it holds, for example for a bug report."
+        confirmText: "Delete Log"
+        onConfirmed: {
+            root.uiBridge.clearDiagnostics()
+            root.syncDiagnosticsText()
         }
     }
 }

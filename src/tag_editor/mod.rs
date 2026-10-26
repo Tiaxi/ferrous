@@ -185,7 +185,17 @@ impl SaveRequestEnvelope {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RenameRequest {
     rows: Vec<TagEditorRow>,
+    /// The renames a preview showed, old path to new path. When set,
+    /// nothing is renamed unless the rows still plan exactly these, from
+    /// files that are all still there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planned_renames: Option<HashMap<String, String>>,
 }
+
+/// What a rename confirmed from a preview answers when the files changed.
+pub(crate) const RENAME_PLAN_CHANGED_MESSAGE: &str =
+    "The files changed after the rename preview, so nothing was renamed. \
+     Use Rename Files again to see the new names.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -195,10 +205,13 @@ enum RenameRequestEnvelope {
 }
 
 impl RenameRequestEnvelope {
-    fn into_rows(self) -> Vec<TagEditorRow> {
+    fn into_request(self) -> RenameRequest {
         match self {
-            Self::Request(request) => request.rows,
-            Self::Rows(rows) => rows,
+            Self::Request(request) => request,
+            Self::Rows(rows) => RenameRequest {
+                rows,
+                planned_renames: None,
+            },
         }
     }
 }
@@ -927,8 +940,7 @@ pub(crate) fn parse_save_request(blob: &[u8]) -> Result<SaveRequest, String> {
 
 pub(crate) fn parse_rename_request(blob: &[u8]) -> Result<RenameRequest, String> {
     serde_json::from_slice::<RenameRequestEnvelope>(blob)
-        .map(RenameRequestEnvelope::into_rows)
-        .map(|rows| RenameRequest { rows })
+        .map(RenameRequestEnvelope::into_request)
         .map_err(|error| format!("invalid tag editor rename request: {error}"))
 }
 
@@ -978,23 +990,25 @@ pub(crate) fn rename_rows(request: RenameRequest) -> RenameResponse {
     rename_rows_with_refresh(request).0
 }
 
-/// [`rename_rows`], also returning what the library index holds for the
-/// renamed files once they are renamed.
-// Sequential file-rename pipeline — splitting would fragment the transactional logic.
-#[allow(clippy::too_many_lines)]
-pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameResponse, TrackRefresh) {
+/// What renaming `rows` would do: the rows refused or left as they are,
+/// with their results, and the renames to make.
+struct RenamePlan {
+    results: Vec<RenameResultRow>,
+    renames: Vec<(PathBuf, PathBuf)>,
+    renamed_pairs: Vec<(String, String)>,
+}
+
+fn plan_renames(rows: &[TagEditorRow]) -> RenamePlan {
     let mut results = Vec::new();
-    let mut successful_paths = Vec::new();
     let mut renames = Vec::new();
     let mut renamed_pairs = Vec::new();
-    let source_paths = request
-        .rows
+    let source_paths = rows
         .iter()
         .map(|row| PathBuf::from(&row.path))
         .collect::<HashSet<_>>();
     let mut claimed_targets = HashMap::<PathBuf, String>::new();
 
-    for row in &request.rows {
+    for row in rows {
         let current_path = PathBuf::from(&row.path);
         let target_path = match rename_target_path_for_row(row) {
             Ok(path) => path,
@@ -1053,6 +1067,68 @@ pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameRespons
         renames.push((current_path, target_path.clone()));
         renamed_pairs.push((row.path.clone(), target_path.to_string_lossy().into_owned()));
     }
+    RenamePlan {
+        results,
+        renames,
+        renamed_pairs,
+    }
+}
+
+/// What [`rename_rows`] would do, without changing any file: each row's
+/// new path, or why it would not be renamed, in the order of the request.
+pub(crate) fn preview_rename_rows(request: &RenameRequest) -> RenameResponse {
+    let plan = plan_renames(&request.rows);
+    let mut by_path: HashMap<String, RenameResultRow> = plan
+        .results
+        .into_iter()
+        .chain(
+            plan.renamed_pairs
+                .into_iter()
+                .map(|(path, new_path)| RenameResultRow {
+                    path,
+                    new_path: Some(new_path),
+                    ok: true,
+                    error: None,
+                }),
+        )
+        .map(|result| (result.path.clone(), result))
+        .collect();
+    let results = request
+        .rows
+        .iter()
+        .filter_map(|row| by_path.remove(&row.path))
+        .collect();
+    RenameResponse {
+        results,
+        successful_paths: Vec::new(),
+        error: None,
+    }
+}
+
+/// [`rename_rows`], also returning what the library index holds for the
+/// renamed files once they are renamed.
+pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameResponse, TrackRefresh) {
+    let RenamePlan {
+        mut results,
+        renames,
+        renamed_pairs,
+    } = plan_renames(&request.rows);
+    if let Some(planned) = &request.planned_renames {
+        let plan_holds = results.is_empty()
+            && renamed_pairs.len() == planned.len()
+            && renamed_pairs
+                .iter()
+                .all(|(old, new)| planned.get(old) == Some(new) && Path::new(old).exists());
+        if !plan_holds {
+            let response = RenameResponse {
+                results: Vec::new(),
+                successful_paths: Vec::new(),
+                error: Some(RENAME_PLAN_CHANGED_MESSAGE.to_string()),
+            };
+            return (response, TrackRefresh::default());
+        }
+    }
+    let mut successful_paths = Vec::new();
 
     let refresh = match rename_indexed_metadata_paths(&renames) {
         Ok(refresh) => refresh,

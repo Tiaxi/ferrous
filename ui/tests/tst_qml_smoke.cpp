@@ -853,6 +853,13 @@ private slots:
     void spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent();
     void wheelScrollsListsByTheWheelDelta();
     void queueKeysReachBothEndsAndOpenTheContextMenu();
+    void deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus();
+    void queueRemovalOffersAnUndoThatSelectsTheRestoredRows();
+    void removingALibraryRootAsksFirstAndNamesIt();
+    void replacingAlbumArtAsksFirstWhenTheTrackHasArt();
+    void renameFilesShowsTheNewNamesAndCancelRenamesNothing();
+    void renameRenamesThePreviewedFilesAfterTheSelectionChanged();
+    void clearingDiagnosticsAsksFirst();
     void albumArtZoomFollowsTheWheelDelta();
     void spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll();
     void spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData();
@@ -9476,9 +9483,9 @@ Item {
         openTagEditorDialog: function() {}
         autoCenterSelection: false
     }
-    // The Delete shortcut runs only while something is highlighted.
+    // Delete as the focused queue view gets it.
     function pressDelete() {
-        if (controller.selectionCount() > 0) controller.removeSelectedTrack()
+        controller.handlePlaylistKeyPress({ key: Qt.Key_Delete, modifiers: Qt.NoModifier })
     }
     function pressEnter() {
         controller.handlePlaylistKeyPress({ key: Qt.Key_Return, modifiers: Qt.NoModifier })
@@ -13160,6 +13167,515 @@ void QmlSmokeTest::fullscreenErrorTextScrollsWithTheKeyboard() {
     }
     QVERIFY(finishIncubation(engine));
     takeCapturedMessagesText();
+}
+
+namespace {
+
+QStringList queueCommands(QObject *bridge) {
+    return bridge->property("queueCommands").toStringList();
+}
+
+// The visible button named `objectName` in `window`, clicked as a user would.
+bool clickVisibleButton(QQuickWindow *window, const QString &objectName) {
+    QQuickItem *button = visibleItemNamed(window, objectName);
+    if (button == nullptr || !button->isEnabled()) {
+        return false;
+    }
+    const QPointF center = button->mapToScene(QPointF(button->width() / 2, button->height() / 2));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, center.toPoint());
+    return true;
+}
+
+} // namespace
+
+void QmlSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("queueRows", sampleQueueRows(5));
+    bridge->setProperty("queueLength", 5);
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
+    auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    auto *libraryView = qvariant_cast<QQuickItem *>(window->property("libraryViewRef"));
+    QVERIFY(controller != nullptr && queueView != nullptr && libraryView != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 1)));
+
+    // The library has focus, as after a click on one of its rows: Delete
+    // leaves the queue alone, also with every queue row highlighted.
+    QVERIFY(QMetaObject::invokeMethod(libraryView, "forceActiveFocus"));
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Delete);
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectAllItems"));
+    QTest::keyClick(window, Qt::Key_Delete);
+    QCoreApplication::processEvents();
+    QCOMPARE(queueCommands(bridge), QStringList{});
+
+    // So does a text field.
+    QObject *search = nullptr;
+    for (QObject *action : window->findChildren<QObject *>()) {
+        if (action->property("text").toString() == QStringLiteral("&Global Search...")) {
+            search = action;
+            break;
+        }
+    }
+    QVERIFY(search != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(search, "trigger"));
+    auto *field = window->findChild<QQuickItem *>(QStringLiteral("globalSearchQueryField"));
+    QVERIFY(field != nullptr);
+    QTRY_VERIFY(field->hasActiveFocus());
+    QTest::keyClick(window, 'a');
+    QTest::keyClick(window, Qt::Key_Home);
+    QTest::keyClick(window, Qt::Key_Delete);
+    QTRY_COMPARE(field->property("text").toString(), QString());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QCOMPARE(queueCommands(bridge), QStringList{});
+
+    // With the queue focused, Delete removes the highlighted rows.
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 1)));
+    QVERIFY(QMetaObject::invokeMethod(queueView, "forceActiveFocus"));
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Delete);
+    QCOMPARE(queueCommands(bridge), QStringList{QStringLiteral("remove 1")});
+    // The Edit menu's Remove acts on the queue's selection wherever the
+    // focus is, since the user chose it there.
+    QObject *remove = nullptr;
+    for (QObject *action : window->findChildren<QObject *>()) {
+        if (action->property("text").toString() == QStringLiteral("&Remove Selected Track")) {
+            remove = action;
+            break;
+        }
+    }
+    QVERIFY(remove != nullptr);
+    QCOMPARE(remove->property("shortcut").value<QKeySequence>(), QKeySequence());
+}
+
+void QmlSmokeTest::queueRemovalOffersAnUndoThatSelectsTheRestoredRows() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("queueRows", sampleQueueRows(5));
+    bridge->setProperty("queueLength", 5);
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QObject *notice = window->findChild<QObject *>(QStringLiteral("queueUndoNotice"));
+    QObject *undoAction = window->findChild<QObject *>(QStringLiteral("undoQueueChangeAction"));
+    auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(controller != nullptr && notice != nullptr && undoAction != nullptr && queueView != nullptr);
+    QVERIFY(!notice->property("visible").toBool());
+    QVERIFY(!undoAction->property("enabled").toBool());
+
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 1)));
+    QVERIFY(QMetaObject::invokeMethod(controller, "toggleSelection", Q_ARG(QVariant, 3)));
+    QVERIFY(QMetaObject::invokeMethod(queueView, "forceActiveFocus"));
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Delete);
+    QCOMPARE(queueCommands(bridge), QStringList{QStringLiteral("remove 3,1")});
+    // The backend removed the rows and offers to undo it.
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    bridge->setProperty("queueUndoKind", 2);
+    bridge->setProperty("queueUndoTrackCount", 2);
+    bridge->setProperty("queueUndoId", 7.0);
+    QTRY_VERIFY(notice->property("visible").toBool());
+    auto *text = window->findChild<QQuickItem *>(QStringLiteral("queueUndoNoticeText"));
+    QVERIFY(text != nullptr);
+    QCOMPARE(text->property("text").toString(), QStringLiteral("Removed 2 tracks from the queue."));
+    QVERIFY(undoAction->property("enabled").toBool());
+    QCOMPARE(undoAction->property("text").toString(), QStringLiteral("&Undo Remove Tracks"));
+
+    QVERIFY(clickVisibleButton(window, QStringLiteral("queueUndoButton")));
+    QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 7"));
+    QTRY_VERIFY(!notice->property("visible").toBool());
+    // The rows come back, and with them their highlight.
+    bridge->setProperty("queueRows", sampleQueueRows(5));
+    bridge->setProperty("queueLength", 5);
+    bridge->setProperty("queueUndoId", 0.0);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "queueUndoRestored",
+        Q_ARG(QVariant, QVariant(QVariantList{1, 3}))));
+    QCOMPARE(controller->property("selectedIndices").toList(), (QVariantList{1, 3}));
+    QVERIFY(!undoAction->property("enabled").toBool());
+
+    // Clear Playlist is offered too, and Ctrl+Z undoes it. A dismissed
+    // offer stays hidden; the next one shows again.
+    bridge->setProperty("queueUndoKind", 1);
+    bridge->setProperty("queueUndoTrackCount", 5);
+    bridge->setProperty("queueUndoId", 8.0);
+    QTRY_VERIFY(notice->property("visible").toBool());
+    QCOMPARE(text->property("text").toString(), QStringLiteral("Queue cleared (5 tracks)."));
+    QVERIFY(clickVisibleButton(window, QStringLiteral("queueUndoDismissButton")));
+    QTRY_VERIFY(!notice->property("visible").toBool());
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 8"));
+    bridge->setProperty("queueUndoKind", 3);
+    bridge->setProperty("queueUndoTrackCount", 1);
+    bridge->setProperty("queueUndoId", 9.0);
+    QTRY_VERIFY(notice->property("visible").toBool());
+    QCOMPARE(text->property("text").toString(),
+             QStringLiteral("Queue replaced; the previous queue had 1 track."));
+}
+
+void QmlSmokeTest::removingALibraryRootAsksFirstAndNamesIt() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "preferences" as Preferences
+ApplicationWindow {
+    id: window
+    width: 900
+    height: 700
+    visible: true
+    property var removed: []
+    Components.UiPalette { id: palette; windowRoot: window }
+    QtObject {
+        id: bridge
+        property bool libraryWatchEnabled: true
+        property var libraryRootEntries: [{
+            path: "/fixture/Music/Jazz", name: "Jazz", displayName: "Jazz",
+            unwatchedReason: "", trackCount: 1234
+        }]
+        function removeLibraryRoot(path) { window.removed = window.removed.concat([path]) }
+        function setLibraryWatchEnabled(value) {}
+        function openInFileBrowser(path) {}
+        function rescanLibraryRoot(path) {}
+        function rescanAllLibraryRoots() {}
+    }
+    Preferences.LibraryPage {
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: window
+        promptAddLibraryRoot: function() {}
+        openLibraryRootNameDialog: function() {}
+        stepScrollView: function() {}
+        snappyScrollFlickDeceleration: 18000
+        snappyScrollMaxFlickVelocity: 1400
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QObject *confirm = root->findChild<QObject *>(QStringLiteral("removeLibraryRootConfirmDialog"));
+    QVERIFY(confirm != nullptr);
+
+    QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QCOMPARE(root->property("removed").toStringList(), QStringList{});
+    const QString message = confirm->property("message").toString();
+    QVERIFY2(message.contains(QStringLiteral("Jazz"))
+                 && message.contains(QStringLiteral("/fixture/Music/Jazz")),
+             qPrintable(message));
+    const QString details = confirm->property("details").toString();
+    QVERIFY2(details.contains(QStringLiteral("1234 tracks"))
+                 && details.contains(QStringLiteral("stay on disk")),
+             qPrintable(details));
+
+    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogCancelButton")));
+    QTRY_VERIFY(!confirm->property("visible").toBool());
+    QCOMPARE(root->property("removed").toStringList(), QStringList{});
+
+    QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
+    QTRY_COMPARE(root->property("removed").toStringList(),
+                 QStringList{QStringLiteral("/fixture/Music/Jazz")});
+}
+
+void QmlSmokeTest::replacingAlbumArtAsksFirstWhenTheTrackHasArt() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "dialogs" as Dialogs
+ApplicationWindow {
+    id: window
+    width: 1000
+    height: 760
+    visible: true
+    property var applied: []
+    property alias dialog: dialog
+    Components.UiPalette { id: palette; windowRoot: window }
+    QtObject {
+        id: bridge
+        property string currentTrackPath: "/fixture/Album A/01 Song.flac"
+        property string currentTrackCoverPath: ""
+        property var itunesArtworkTarget: ({})
+        property var itunesArtworkResults: [{ normalizedPath: "/fixture/cache/suggestion.jpg" }]
+        property bool itunesArtworkLoading: false
+        property string itunesArtworkStatusText: ""
+        signal itunesArtworkChanged()
+        signal imageFileDetailsChanged(string path)
+        signal snapshotChanged()
+        function itunesArtworkResultAt(index) { return itunesArtworkResults[index] || ({}) }
+        function applyItunesArtworkSuggestion(index) { window.applied = window.applied.concat([index]) }
+        function prepareItunesArtworkSuggestion(index) {}
+        function requestImageFileDetails(path) {}
+        function cachedImageFileDetails(path) { return ({}) }
+        function clearItunesArtworkSuggestions() {}
+    }
+    Dialogs.ItunesArtworkDialog {
+        id: dialog
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: window
+        openAlbumArtViewerForSuggestion: function(row) {}
+        openAlbumArtViewerForCurrentArt: function() {}
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
+    QObject *confirm = root->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog"));
+    QVERIFY(dialog != nullptr && confirm != nullptr);
+    const auto applied = [&root]() { return root->property("applied").toList(); };
+    QObject *bridge = dialog->property("uiBridge").value<QObject *>();
+    QVERIFY(bridge != nullptr);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString cover = dir.filePath(QStringLiteral("cover.png"));
+    QImage image(4, 4, QImage::Format_RGB32);
+    image.fill(Qt::darkGreen);
+    QVERIFY(image.save(cover));
+    const QString coverUrl = QUrl::fromLocalFile(cover).toString();
+    bridge->setProperty("currentTrackCoverPath", coverUrl);
+    // The suggestions were searched for album A, which has art.
+    bridge->setProperty("itunesArtworkTarget", QVariantMap{
+        {QStringLiteral("trackPath"), QStringLiteral("/fixture/Album A/01 Song.flac")},
+        {QStringLiteral("album"), QStringLiteral("Album A")},
+        {QStringLiteral("artist"), QStringLiteral("Artist A")},
+        {QStringLiteral("coverPath"), coverUrl},
+    });
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+
+    // The album has art: Apply asks, naming it, and Cancel keeps the art.
+    QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionApply", Q_ARG(QVariant, 0)));
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QCOMPARE(confirm->property("message").toString(),
+             QStringLiteral("Replace the album art of “Album A” by Artist A?"));
+    QVERIFY(applied().isEmpty());
+    QVERIFY2(confirm->property("details").toString().contains(QStringLiteral("keeps no copy")),
+             qPrintable(confirm->property("details").toString()));
+    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogCancelButton")));
+    QTRY_VERIFY(!confirm->property("visible").toBool());
+    QVERIFY(applied().isEmpty());
+    QVERIFY(dialog->property("visible").toBool());
+
+    QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionApply", Q_ARG(QVariant, 0)));
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    // Playback moves on to a track without art: the question stands, for
+    // album A, and the dialog still shows A's art.
+    bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/Album B/01 Song.flac"));
+    bridge->setProperty("currentTrackCoverPath", QString());
+    QVERIFY(QMetaObject::invokeMethod(bridge, "snapshotChanged"));
+    QVERIFY(confirm->property("visible").toBool());
+    QCOMPARE(dialog->property("currentArtworkSource").toString(), coverUrl);
+    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
+    QTRY_COMPARE(applied(), (QVariantList{0}));
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+
+    // Without art there is nothing to lose, so it applies at once.
+    bridge->setProperty("itunesArtworkTarget", QVariantMap{
+        {QStringLiteral("trackPath"), QStringLiteral("/fixture/Album B/01 Song.flac")},
+        {QStringLiteral("album"), QStringLiteral("Album B")},
+        {QStringLiteral("coverPath"), QString()},
+    });
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionApply", Q_ARG(QVariant, 0)));
+    QTRY_COMPARE(applied(), (QVariantList{0, 0}));
+    QVERIFY(!confirm->property("visible").toBool());
+}
+
+void QmlSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, false));
+    std::atomic<int> renames{0};
+    const QByteArray loadResponse = tagEditorLoadResponse(2);
+    const QByteArray preview(R"({"results":[)"
+        R"({"path":"/fixture/Album 000/01 Song.flac","newPath":"/fixture/Album 000/01 Intro.flac","ok":true},)"
+        R"({"path":"/fixture/Album 000/02 Song.flac","newPath":"/fixture/Album 000/01 Intro.flac",)"
+        R"("ok":false,"error":"target conflicts with another selected file"}],"successfulPaths":[]})");
+    fixture.editor.m_executeOperation = [&](TagEditorController::Operation operation,
+                                            const QByteArray &,
+                                            const TagEditorController::RenameGate &) {
+        switch (operation) {
+        case TagEditorController::Operation::PreviewRename:
+            return preview;
+        case TagEditorController::Operation::Rename:
+            ++renames;
+            return QByteArray(R"({"results":[],"successfulPaths":[]})");
+        default:
+            return loadResponse;
+        }
+    };
+    fixture.editor.selectAllRows();
+    QObject *previewDialog = fixture.window->findChild<QObject *>(QStringLiteral("renamePreviewDialog"));
+    QVERIFY(previewDialog != nullptr);
+
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+    QTRY_VERIFY(previewDialog->property("opened").toBool());
+    QCOMPARE(renames.load(), 0);
+    auto *summary = fixture.window->findChild<QQuickItem *>(QStringLiteral("renamePreviewSummary"));
+    QVERIFY(summary != nullptr);
+    QCOMPARE(summary->property("text").toString(),
+             QStringLiteral("1 file will be renamed. 1 file can't be renamed and keeps its name."));
+    const QVariantList rows = previewDialog->property("rows").toList();
+    QCOMPARE(rows.size(), 2);
+    QCOMPARE(rows[0].toMap().value(QStringLiteral("oldName")).toString(), QStringLiteral("01 Song.flac"));
+    QCOMPARE(rows[0].toMap().value(QStringLiteral("newName")).toString(), QStringLiteral("01 Intro.flac"));
+    QVERIFY(!rows[1].toMap().value(QStringLiteral("ok")).toBool());
+    QVERIFY(rows[1].toMap().value(QStringLiteral("error")).toString().contains(QStringLiteral("conflicts")));
+    QVERIFY(visibleItemNamed(fixture.window, QStringLiteral("renamePreviewList")) != nullptr);
+
+    QVERIFY(clickVisibleButton(fixture.window, QStringLiteral("renamePreviewCancelButton")));
+    QTRY_VERIFY(!previewDialog->property("visible").toBool());
+    QTest::qWait(50);
+    QCOMPARE(renames.load(), 0);
+    QVERIFY(!fixture.editor.saving());
+
+    // Rename goes on to rename the files, which needs the bridge this
+    // fixture lacks; BridgeClientTest covers the rename itself.
+    QSignalSpy renameRequested(previewDialog, SIGNAL(renameRequested()));
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+    QTRY_VERIFY(previewDialog->property("opened").toBool());
+    QVERIFY(clickVisibleButton(fixture.window, QStringLiteral("renamePreviewRenameButton")));
+    QCOMPARE(renameRequested.count(), 1);
+    QTRY_VERIFY(!previewDialog->property("visible").toBool());
+}
+
+void QmlSmokeTest::renameRenamesThePreviewedFilesAfterTheSelectionChanged() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, false));
+    // Renames need a bridge, whose rename gate the fake backend ignores.
+    BridgeClient bridge;
+    fixture.editor.m_bridge = &bridge;
+    const QByteArray loadResponse = tagEditorLoadResponse(2);
+    const QString first = QStringLiteral("/fixture/Album 000/01 Song.flac");
+    const QString second = QStringLiteral("/fixture/Album 000/02 Song.flac");
+    const QByteArray preview(R"({"results":[{"path":"/fixture/Album 000/01 Song.flac",)"
+        R"("newPath":"/fixture/Album 000/01 Intro.flac","ok":true}],"successfulPaths":[]})");
+    auto release = std::make_shared<QSemaphore>();
+    auto renamed = std::make_shared<QList<QByteArray>>();
+    auto renamedMutex = std::make_shared<QMutex>();
+    fixture.editor.m_executeOperation = [=](TagEditorController::Operation operation,
+                                            const QByteArray &payload,
+                                            const TagEditorController::RenameGate &) {
+        switch (operation) {
+        case TagEditorController::Operation::PreviewRename:
+            // A large batch: the check takes a while.
+            release->tryAcquire(1, 10000);
+            return preview;
+        case TagEditorController::Operation::Rename: {
+            QMutexLocker locker(renamedMutex.get());
+            renamed->push_back(payload);
+            return QByteArray(R"({"results":[],"successfulPaths":[]})");
+        }
+        default:
+            return loadResponse;
+        }
+    };
+    const auto renames = [=]() {
+        QMutexLocker locker(renamedMutex.get());
+        return *renamed;
+    };
+    QObject *previewDialog = fixture.window->findChild<QObject *>(QStringLiteral("renamePreviewDialog"));
+    QVERIFY(previewDialog != nullptr);
+
+    // The preview of the first file runs while the user selects the second.
+    fixture.editor.setSelectedRows({0});
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+    fixture.editor.setSelectedRows({1});
+    release->release();
+    QTRY_VERIFY(previewDialog->property("opened").toBool());
+    QVERIFY(clickVisibleButton(fixture.window, QStringLiteral("renamePreviewRenameButton")));
+
+    // The rename is the one previewed: the first file, never the second.
+    QTRY_COMPARE(renames().size(), 1);
+    const QJsonArray rows = QJsonDocument::fromJson(renames().first())
+        .object().value(QStringLiteral("rows")).toArray();
+    QCOMPARE(rows.size(), 1);
+    QCOMPARE(rows[0].toObject().value(QStringLiteral("path")).toString(), first);
+    QVERIFY(!renames().first().contains(second.toUtf8()));
+    QTRY_VERIFY(!fixture.editor.saving());
+    fixture.editor.m_bridge = nullptr;
+}
+
+void QmlSmokeTest::clearingDiagnosticsAsksFirst() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "dialogs" as Dialogs
+ApplicationWindow {
+    id: window
+    width: 1100
+    height: 800
+    visible: true
+    property int clears: 0
+    property alias dialog: dialog
+    Components.UiPalette { id: palette; windowRoot: window }
+    QtObject {
+        id: bridge
+        property string diagnosticsText: "a line worth keeping"
+        property string diagnosticsLogPath: "/fixture/diagnostics.log"
+        signal diagnosticsChanged()
+        function reloadDiagnosticsFromDisk() {}
+        function clearDiagnostics() { window.clears++; diagnosticsText = "" }
+        function openContainingFolder(path) {}
+    }
+    Dialogs.DiagnosticsDialog {
+        id: dialog
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: window
+        popupTransitionMs: 0
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
+    QObject *confirm = root->findChild<QObject *>(QStringLiteral("clearDiagnosticsConfirmDialog"));
+    QVERIFY(dialog != nullptr && confirm != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+
+    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QCOMPARE(root->property("clears").toInt(), 0);
+    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogCancelButton")));
+    QTRY_VERIFY(!confirm->property("visible").toBool());
+    QCOMPARE(root->property("clears").toInt(), 0);
+    QCOMPARE(dialog->property("diagnosticsText").toString(), QStringLiteral("a line worth keeping"));
+
+    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
+    QTRY_COMPARE(root->property("clears").toInt(), 1);
+    QCOMPARE(dialog->property("diagnosticsText").toString(), QString());
 }
 
 int main(int argc, char **argv) {
