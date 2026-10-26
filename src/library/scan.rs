@@ -3528,8 +3528,16 @@ fn delete_stale_rows(
     if stale.is_empty() {
         return Ok(stale);
     }
-    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
-        .map_err(|e| format!("failed to begin removing deleted tracks: {e}"))?;
+    delete_stale_rows_in(begin_removing_rows(conn)?, stale, existing)
+}
+
+/// Removes `stale` rows as [`delete_stale_rows`] does, in `tx`, which it
+/// commits.
+fn delete_stale_rows_in(
+    tx: rusqlite::Transaction<'_>,
+    stale: Vec<String>,
+    existing: &HashMap<String, ExistingTrackScanState>,
+) -> Result<Vec<String>, String> {
     let mut removed = Vec::with_capacity(stale.len());
     for path in stale {
         let Some(seen) = existing.get(&path) else {
@@ -3548,6 +3556,13 @@ fn delete_stale_rows(
     tx.commit()
         .map_err(|e| format!("failed to finalize removing deleted tracks: {e}"))?;
     Ok(removed)
+}
+
+/// Begins the transaction that removes a scan's stale rows, taking the write
+/// lock up front.
+fn begin_removing_rows(conn: &Connection) -> Result<rusqlite::Transaction<'_>, String> {
+    rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| format!("failed to begin removing deleted tracks: {e}"))
 }
 
 /// Scans one root; see [`scan_root_in`].
@@ -3731,7 +3746,7 @@ fn scan_root_in(
     // root was added, duplicate its rows; the walk skips those links, so a
     // root holding only such links finds no audio files. A walk that found
     // audio files removes them as stale.
-    let linked_rows = if walk.found == 0 {
+    let linked_candidates = if walk.found == 0 {
         match linked_duplicate_rows(conn, &walk, &existing, sink)? {
             Some(rows) => rows,
             None => return Ok(RootScanOutcome::stopped()),
@@ -3739,14 +3754,29 @@ fn scan_root_in(
     } else {
         Vec::new()
     };
-    let previous_track_count = previous_index_count - sidecar_rows.len() - linked_rows.len();
     // A root that previously had tracks but now has no audio files at all is
     // most likely an unmounted or offline folder, not an emptied library,
     // even if a folder under its mount point holds sidecars. A scoped walk
-    // does not see the whole root, so it looks at the folder.
-    let keep_all = walk.found == 0
-        && previous_track_count > 0
+    // does not see the whole root, so it looks at the folder, before the
+    // write lock is taken.
+    let looks_offline = walk.found == 0
+        && previous_index_count > sidecar_rows.len()
         && (scope.is_none() || root_looks_offline(&root));
+    // The commands checked while the candidates were collected can remove
+    // the other root with its rows, and other connections can write, so
+    // each replacement is checked again in the transaction that removes the
+    // rows. A row whose replacement is gone is kept and counts as a track.
+    let tx = if linked_candidates.is_empty() {
+        None
+    } else {
+        Some(begin_removing_rows(conn)?)
+    };
+    let linked_rows = match &tx {
+        Some(tx) => still_duplicated(tx, linked_candidates)?,
+        None => Vec::new(),
+    };
+    let previous_track_count = previous_index_count - sidecar_rows.len() - linked_rows.len();
+    let keep_all = looks_offline && previous_track_count > 0;
     let stale: Vec<String> = if keep_all {
         sidecar_rows.into_iter().chain(linked_rows).collect()
     } else {
@@ -3756,7 +3786,10 @@ fn scan_root_in(
             .cloned()
             .collect()
     };
-    let removed = delete_stale_rows(conn, stale, &existing)?;
+    let removed = match tx {
+        Some(tx) => delete_stale_rows_in(tx, stale, &existing)?,
+        None => delete_stale_rows(conn, stale, &existing)?,
+    };
 
     scan.report(sink, true);
 
@@ -3795,8 +3828,39 @@ fn scan_root_in(
     })
 }
 
+/// A row reached through a link: its path resolves to `target`, a file that
+/// the root `owner` has a row for.
+struct LinkedDuplicate {
+    path: String,
+    target: String,
+    owner: String,
+}
+
+/// Whether the root `owner` has a row for the file at `path`.
+fn root_has_row(conn: &Connection, path: &str, owner: &str) -> Result<bool, String> {
+    conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM tracks WHERE path = ?1 AND root_path = ?2)")
+        .and_then(|mut stmt| stmt.query_row(params![path, owner], |row| row.get(0)))
+        .map_err(|e| e.to_string())
+}
+
+/// The paths of the `candidates` whose other root still has a row for their
+/// target.
+fn still_duplicated(
+    conn: &Connection,
+    candidates: Vec<LinkedDuplicate>,
+) -> Result<Vec<String>, String> {
+    let mut duplicates = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if root_has_row(conn, &candidate.target, &candidate.owner)? {
+            duplicates.push(candidate.path);
+        }
+    }
+    Ok(duplicates)
+}
+
 /// The rows of `existing` that duplicate another root's rows through links,
-/// after a walk that found no audio files.
+/// after a walk that found no audio files. Recheck them with
+/// [`still_duplicated`] in the transaction that removes them.
 ///
 /// The walk does not follow a link into another root (see
 /// [`LibraryWalk::follows_link`]), so a row indexed through one before that
@@ -3815,7 +3879,7 @@ fn linked_duplicate_rows(
     walk: &LibraryWalk,
     existing: &HashMap<String, ExistingTrackScanState>,
     sink: &mut dyn ScanSink,
-) -> Result<Option<Vec<String>>, String> {
+) -> Result<Option<Vec<LinkedDuplicate>>, String> {
     let mut indexed_roots: Vec<&Path> = Vec::new();
     for other in &walk.other_roots {
         let has_rows: bool = conn
@@ -3863,14 +3927,12 @@ fn linked_duplicate_rows(
         let (Some(target), Some(owner)) = (target.to_str(), owner.to_str()) else {
             continue;
         };
-        let indexed: bool = conn
-            .prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM tracks WHERE path = ?1 AND root_path = ?2)",
-            )
-            .and_then(|mut stmt| stmt.query_row(params![target, owner], |row| row.get(0)))
-            .map_err(|e| e.to_string())?;
-        if indexed {
-            duplicates.push(path.clone());
+        if root_has_row(conn, target, owner)? {
+            duplicates.push(LinkedDuplicate {
+                path: path.clone(),
+                target: target.to_owned(),
+                owner: owner.to_owned(),
+            });
         }
     }
     Ok(Some(duplicates))
@@ -6382,6 +6444,55 @@ mod tests {
             a.to_string_lossy()
         );
         assert_eq!(root_of(&conn, &b.join("Album/01.mp3")), b.to_string_lossy());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A sink that removes `root`, as the scan's command check does, the
+    /// second time it is asked, after the first row was looked up.
+    struct RemovingRootSink {
+        root: PathBuf,
+        asked: usize,
+    }
+
+    impl ScanSink for RemovingRootSink {
+        fn progress(&mut self, _conn: &Connection, _progress: RootScanProgress) {}
+
+        fn committed(&mut self, _root: &Path, _rows: Vec<(MetadataTask, IndexedTrack)>) {}
+
+        fn should_stop(&mut self, conn: &Connection) -> bool {
+            self.asked += 1;
+            if self.asked == 2 {
+                remove_root_and_purge(conn, &self.root).expect("remove root");
+            }
+            false
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_removed_while_another_looks_for_linked_duplicates_leaves_its_rows() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let [base, a, b] = index_through_a_link_then_add_its_target(&conn, "remove-link-check");
+        let linked = [a.join("Linked/01.mp3"), a.join("Linked/02.mp3")];
+
+        let mut sink = RemovingRootSink {
+            root: b.clone(),
+            asked: 0,
+        };
+        let outcome = scan_root_in(&conn, &a, None, None, &mut sink).expect("scan");
+
+        // `b` went after the first row was found to duplicate its row, so
+        // neither row has a replacement left.
+        assert_eq!(sink.asked, 2);
+        assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+        let problem = outcome.problem.expect("the kept tracks are reported");
+        assert!(
+            problem.contains("found no audio files")
+                && problem.contains("kept its 2 indexed tracks"),
+            "{problem}"
+        );
+        assert_eq!(indexed_paths(&conn), linked);
         let _ = fs::remove_dir_all(base);
     }
 
