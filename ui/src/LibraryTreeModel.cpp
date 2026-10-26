@@ -243,6 +243,7 @@ LibraryTreeModel::LibraryTreeModel(QObject *parent)
             return;
         }
         m_tree = m_parseWatcher.result();
+        m_hasTree = true;
         rebuildRows();
         if (wasParsing) {
             emit parsingChanged();
@@ -333,6 +334,9 @@ QVariant LibraryTreeModel::data(const QModelIndex &index, int role) const {
     if (role == PlayPathsRole) {
         return item.playPaths;
     }
+    if (role == SelectedRole) {
+        return !m_selectedKeys.isEmpty() && m_selectedKeys.contains(item.selectionKey);
+    }
     return {};
 }
 
@@ -354,6 +358,7 @@ QHash<int, QByteArray> LibraryTreeModel::roleNames() const {
         {DepthRole, "depth"},
         {OpenPathRole, "openPath"},
         {PlayPathsRole, "playPaths"},
+        {SelectedRole, "selected"},
     };
 }
 
@@ -365,10 +370,33 @@ bool LibraryTreeModel::parsing() const {
     return m_parseInFlight;
 }
 
+int LibraryTreeModel::selectionCount() const {
+    return static_cast<int>(m_selectedKeys.size());
+}
+
+bool LibraryTreeModel::selectionActionable() const {
+    if (m_actionableCache < 0) {
+        m_actionableCache = 0;
+        for (const QString &key : m_selectedKeys) {
+            const int row = indexForSelectionKey(key);
+            if (row >= 0 && isActionable(rowAt(row))) {
+                m_actionableCache = 1;
+                break;
+            }
+        }
+    }
+    return m_actionableCache == 1;
+}
+
+bool LibraryTreeModel::revealPending() const {
+    return !m_revealKey.isEmpty();
+}
+
 void LibraryTreeModel::setLibraryTreeFromBinary(const QByteArray &treeBytes) {
     if (!m_parseInFlight && treeBytes.size() <= 16 * 1024) {
         ++m_parseGeneration;
         m_tree = parseTreeNodesFromBinary(treeBytes);
+        m_hasTree = true;
         rebuildRows();
         return;
     }
@@ -485,6 +513,10 @@ int LibraryTreeModel::indexForSelectionKey(const QString &selectionKey) const {
     if (selectionKey.isEmpty()) {
         return -1;
     }
+    if (m_stagedNext == nullptr) {
+        return m_rowByKey.value(selectionKey, -1);
+    }
+    // The index describes the rows before the update being applied.
     for (int i = 0; i < rowTotal(); ++i) {
         if (rowAt(i).selectionKey == selectionKey) {
             return i;
@@ -552,6 +584,321 @@ QVariantMap LibraryTreeModel::rowDataForRow(int row) const {
     return out;
 }
 
+bool LibraryTreeModel::isActionable(const FlatRow &row) {
+    if (row.rowType == QStringLiteral("track")) {
+        return !row.trackPath.isEmpty();
+    }
+    if (row.rowType == QStringLiteral("album")) {
+        return !row.artist.isEmpty() && !row.name.isEmpty() && !row.playPaths.isEmpty();
+    }
+    if (row.rowType == QStringLiteral("artist")) {
+        return !row.artist.isEmpty();
+    }
+    if (row.rowType == QStringLiteral("root")) {
+        return !row.openPath.isEmpty();
+    }
+    return !row.playPaths.isEmpty();
+}
+
+void LibraryTreeModel::appendQueueItem(const FlatRow &row, BinaryBridgeCodec::LibraryQueueItems *out) {
+    if (!isActionable(row)) {
+        return;
+    }
+    using Item = BinaryBridgeCodec::LibraryQueueItem;
+    Item item;
+    if (row.rowType == QStringLiteral("track")) {
+        item.paths = QStringList{row.trackPath};
+    } else if (row.rowType == QStringLiteral("artist")) {
+        item.kind = Item::Artist;
+        item.value = row.selectionKey.isEmpty() ? row.artist : row.selectionKey;
+    } else if (row.rowType == QStringLiteral("root")) {
+        item.kind = Item::Root;
+        item.value = row.openPath;
+    } else {
+        // Albums and sections carry the tracks they play.
+        item.paths = row.playPaths;
+    }
+    out->push_back(std::move(item));
+}
+
+QVariant LibraryTreeModel::queueItemsForRows(const QVector<int> &rows) const {
+    BinaryBridgeCodec::LibraryQueueItems items;
+    items.reserve(rows.size());
+    for (int row : rows) {
+        if (row >= 0 && row < rowTotal()) {
+            appendQueueItem(rowAt(row), &items);
+        }
+    }
+    return QVariant::fromValue(items);
+}
+
+QVector<int> LibraryTreeModel::selectedRowsSorted() const {
+    QVector<int> rows;
+    rows.reserve(m_selectedKeys.size());
+    for (const QString &key : m_selectedKeys) {
+        const int row = indexForSelectionKey(key);
+        if (row >= 0) {
+            rows.push_back(row);
+        }
+    }
+    std::sort(rows.begin(), rows.end());
+    return rows;
+}
+
+void LibraryTreeModel::notifyRowsChanged(QVector<int> rows, const QVector<int> &roles) {
+    std::sort(rows.begin(), rows.end());
+    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    for (qsizetype i = 0; i < rows.size();) {
+        qsizetype end = i + 1;
+        while (end < rows.size() && rows[end] == rows[end - 1] + 1) {
+            ++end;
+        }
+        emit dataChanged(index(rows[i]), index(rows[end - 1]), roles);
+        i = end;
+    }
+}
+
+void LibraryTreeModel::setSelection(QSet<QString> keys, const QVector<int> &changedRows) {
+    if (keys == m_selectedKeys) {
+        return;
+    }
+    m_selectedKeys = std::move(keys);
+    m_actionableCache = -1;
+    notifyRowsChanged(changedRows, {SelectedRole});
+    emit selectionChanged();
+}
+
+void LibraryTreeModel::selectRow(int row) {
+    if (row < 0 || row >= rowTotal() || rowAt(row).selectionKey.isEmpty()) {
+        return;
+    }
+    const QString key = rowAt(row).selectionKey;
+    QVector<int> changed = selectedRowsSorted();
+    changed.push_back(row);
+    m_anchorKey = key;
+    setSelection(QSet<QString>{key}, changed);
+}
+
+void LibraryTreeModel::selectRange(int row) {
+    if (row < 0 || row >= rowTotal() || rowAt(row).selectionKey.isEmpty()) {
+        return;
+    }
+    int anchor = anchorRow();
+    if (anchor < 0) {
+        anchor = row;
+        m_anchorKey = rowAt(row).selectionKey;
+    }
+    const int first = std::min(anchor, row);
+    const int last = std::max(anchor, row);
+    QSet<QString> keys;
+    keys.reserve(last - first + 1);
+    QVector<int> changed = selectedRowsSorted();
+    changed.reserve(changed.size() + last - first + 1);
+    for (int i = first; i <= last; ++i) {
+        const QString &key = rowAt(i).selectionKey;
+        if (!key.isEmpty()) {
+            keys.insert(key);
+            changed.push_back(i);
+        }
+    }
+    setSelection(std::move(keys), changed);
+}
+
+void LibraryTreeModel::toggleRowSelected(int row) {
+    if (row < 0 || row >= rowTotal() || rowAt(row).selectionKey.isEmpty()) {
+        return;
+    }
+    const QString key = rowAt(row).selectionKey;
+    QSet<QString> keys = m_selectedKeys;
+    if (!keys.remove(key)) {
+        keys.insert(key);
+    }
+    m_anchorKey = key;
+    setSelection(std::move(keys), {row});
+}
+
+void LibraryTreeModel::clearSelection() {
+    m_anchorKey.clear();
+    setSelection({}, selectedRowsSorted());
+}
+
+bool LibraryTreeModel::isRowSelected(int row) const {
+    return row >= 0 && row < rowTotal() && !m_selectedKeys.isEmpty()
+        && m_selectedKeys.contains(rowAt(row).selectionKey);
+}
+
+bool LibraryTreeModel::isKeySelected(const QString &selectionKey) const {
+    return !selectionKey.isEmpty() && m_selectedKeys.contains(selectionKey);
+}
+
+int LibraryTreeModel::anchorRow() const {
+    return indexForSelectionKey(m_anchorKey);
+}
+
+int LibraryTreeModel::firstSelectedRow() const {
+    int first = -1;
+    for (const QString &key : m_selectedKeys) {
+        const int row = indexForSelectionKey(key);
+        if (row >= 0 && (first < 0 || row < first)) {
+            first = row;
+        }
+    }
+    return first;
+}
+
+QStringList LibraryTreeModel::selectedKeys() const {
+    QStringList keys;
+    const QVector<int> rows = selectedRowsSorted();
+    keys.reserve(rows.size());
+    for (int row : rows) {
+        keys.push_back(rowAt(row).selectionKey);
+    }
+    return keys;
+}
+
+QVariantList LibraryTreeModel::selectedRowData() const {
+    QVariantList out;
+    const QVector<int> rows = selectedRowsSorted();
+    out.reserve(rows.size());
+    for (int row : rows) {
+        out.push_back(rowDataForRow(row));
+    }
+    return out;
+}
+
+QVariant LibraryTreeModel::queueItemsForSelection() const {
+    return queueItemsForRows(selectedRowsSorted());
+}
+
+QVariant LibraryTreeModel::queueItemsForKey(const QString &selectionKey) const {
+    const int row = indexForSelectionKey(selectionKey);
+    if (row < 0) {
+        return queueItemsForRows({});
+    }
+    if (m_selectedKeys.size() > 1 && m_selectedKeys.contains(selectionKey)) {
+        return queueItemsForSelection();
+    }
+    return queueItemsForRows({row});
+}
+
+void LibraryTreeModel::pruneSelection() {
+    bool changed = false;
+    for (auto it = m_selectedKeys.begin(); it != m_selectedKeys.end();) {
+        if (m_rowByKey.contains(*it)) {
+            ++it;
+        } else {
+            it = m_selectedKeys.erase(it);
+            changed = true;
+        }
+    }
+    if (!m_anchorKey.isEmpty() && !m_rowByKey.contains(m_anchorKey)) {
+        m_anchorKey.clear();
+    }
+    // The rows changed, and with them what the selection can play.
+    m_actionableCache = -1;
+    if (changed || !m_selectedKeys.isEmpty()) {
+        emit selectionChanged();
+    }
+}
+
+int LibraryTreeModel::revealKey(const QStringList &expandKeys, const QString &selectionKey) {
+    const bool wasPending = revealPending();
+    m_revealKey.clear();
+    m_revealExpandKeys.clear();
+    QStringList keys;
+    keys.reserve(expandKeys.size());
+    bool expanded = false;
+    for (const QString &raw : expandKeys) {
+        const QString key = raw.trimmed();
+        if (key.isEmpty()) {
+            continue;
+        }
+        keys.push_back(key);
+        const bool isRoot = key.startsWith(QStringLiteral("root|"));
+        if (m_expandedByKey.value(key, isRoot)) {
+            continue;
+        }
+        m_expandedByKey.insert(key, true);
+        expanded = true;
+        // The backend sends the rows of an artist or album once it knows the
+        // row is expanded; roots are always sent whole.
+        if (!isRoot) {
+            emit nodeExpansionRequested(key, true);
+        }
+    }
+    if (expanded && m_hasTree) {
+        rebuildRows();
+    }
+    const QString target = selectionKey.trimmed();
+    const int row = indexForSelectionKey(target);
+    if (target.isEmpty() || row >= 0 || revealAnswered(keys)) {
+        if (wasPending) {
+            emit revealPendingChanged();
+        }
+        return row;
+    }
+    m_revealKey = target;
+    m_revealExpandKeys = keys;
+    if (!wasPending) {
+        emit revealPendingChanged();
+    }
+    return -1;
+}
+
+void LibraryTreeModel::cancelReveal() {
+    if (!revealPending()) {
+        return;
+    }
+    m_revealKey.clear();
+    m_revealExpandKeys.clear();
+    emit revealPendingChanged();
+}
+
+// Whether the tree shows all it will of `expandKeys`: every row of them
+// that has children has them loaded. Until then, the backend still sends
+// rows that a reveal may be waiting for.
+bool LibraryTreeModel::revealAnswered(const QStringList &expandKeys) const {
+    if (!m_hasTree || m_parseInFlight || m_hasQueuedTree) {
+        return false;
+    }
+    for (const QString &key : expandKeys) {
+        const int row = indexForSelectionKey(key);
+        if (row < 0) {
+            continue;
+        }
+        const FlatRow &item = rowAt(row);
+        if (item.hasChildren && item.expanded && !item.childrenLoaded) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void LibraryTreeModel::settleReveal() {
+    if (m_revealKey.isEmpty()) {
+        return;
+    }
+    const int row = indexForSelectionKey(m_revealKey);
+    if (row < 0 && !revealAnswered(m_revealExpandKeys)) {
+        return;
+    }
+    const QString key = std::move(m_revealKey);
+    m_revealKey.clear();
+    m_revealExpandKeys.clear();
+    emit revealPendingChanged();
+    emit revealFinished(key, row);
+}
+
+void LibraryTreeModel::rebuildRowIndex() {
+    m_rowByKey.clear();
+    m_rowByKey.reserve(m_rows.size());
+    // Last row first, so a key on several rows ends at its first, as a
+    // search of the rows finds it.
+    for (int i = static_cast<int>(m_rows.size()) - 1; i >= 0; --i) {
+        m_rowByKey.insert(m_rows[i].selectionKey, i);
+    }
+}
+
 QString LibraryTreeModel::toLower(const QString &text) {
     return text.toLower();
 }
@@ -573,7 +920,8 @@ bool LibraryTreeModel::rowsEqual(const FlatRow &a, const FlatRow &b) {
         && a.coverStamp == b.coverStamp
         && a.playPaths == b.playPaths
         && a.depth == b.depth
-        && a.hasChildren == b.hasChildren;
+        && a.hasChildren == b.hasChildren
+        && a.childrenLoaded == b.childrenLoaded;
 }
 
 QVector<LibraryTreeModel::TreeNode> LibraryTreeModel::parseTreeNodesFromBinary(const QByteArray &treeBytes) {
@@ -730,6 +1078,7 @@ void LibraryTreeModel::appendFlatRows(
         row.hasChildren = !node.children.isEmpty()
             || (node.rowType != QStringLiteral("track") && node.count > 0);
         row.expanded = isExpanded(node, autoExpand);
+        row.childrenLoaded = !node.children.isEmpty();
         rows->push_back(std::move(row));
 
         if (!node.children.isEmpty() && rows->back().expanded) {
@@ -874,6 +1223,7 @@ bool LibraryTreeModel::applyRowsIncremental(const QVector<FlatRow> &nextRows) {
     }
     m_stagedNext = nullptr;
     m_rows = nextRows;
+    rebuildRowIndex();
 
     for (size_t i = 0; i < changedRows.size();) {
         size_t end = i + 1;
@@ -892,14 +1242,18 @@ void LibraryTreeModel::applyRows(QVector<FlatRow> nextRows) {
     }
     beginResetModel();
     m_rows = std::move(nextRows);
+    rebuildRowIndex();
     endResetModel();
 }
 
 void LibraryTreeModel::rebuildRows() {
     const int oldCount = count();
     applyRows(buildFlatRows());
+    pruneSelection();
     if (oldCount != count()) {
         emit countChanged();
     }
     emit treeApplied();
+    // After the views took the rows and their positions.
+    settleReveal();
 }

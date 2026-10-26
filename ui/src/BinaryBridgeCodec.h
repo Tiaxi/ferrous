@@ -7,6 +7,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
+#include <QMetaType>
 #include <QVector>
 #include <limits>
 
@@ -64,8 +65,9 @@ enum ErrorSeverity : quint8 {
 };
 
 // Queue commands that name rows (CmdPlayAt, CmdSelectQueue, CmdRemoveAt,
-// CmdMoveQueue, CmdRemoveMany) start with the u64 queue revision the rows
-// showed, so the backend can carry them across edits made since.
+// CmdMoveQueue, CmdRemoveMany, CmdMoveQueueRows) start with the u64 queue
+// revision the rows showed, so the backend can carry them across edits made
+// since.
 enum CommandId : quint16 {
     CmdPlay = 1,
     CmdPause = 2,
@@ -138,7 +140,48 @@ enum CommandId : quint16 {
     // Payload: the u64 offer ID of SectionQueueUndo. The backend refuses,
     // with an error, an ID it no longer offers.
     CmdUndoQueueChange = 68,
+    // Library rows to queue as one change; see encodeCommandQueueLibraryItems.
+    CmdQueueLibraryItems = 69,
+    // Rows to move together; see encodeCommandMoveQueueRows.
+    CmdMoveQueueRows = 70,
 };
+
+// Where CmdQueueLibraryItems puts its tracks.
+enum QueuePlacement : quint8 {
+    QueuePlacementAppend = 0,
+    // Replace the queue and start playing.
+    QueuePlacementReplace = 1,
+    // Before a row of the queue at a revision.
+    QueuePlacementInsert = 2,
+};
+
+// Where CmdMoveQueueRows moves its rows.
+enum QueueRowsMove : quint8 {
+    // Together, in their order, before a row (the row count for the end).
+    QueueRowsMoveBefore = 0,
+    // Each run of rows one row up or down; a run at the end stays.
+    QueueRowsMoveUp = 1,
+    QueueRowsMoveDown = 2,
+};
+
+// A library row for CmdQueueLibraryItems. Mirrors LibraryQueueItem in
+// src/frontend_bridge/mod.rs.
+struct LibraryQueueItem {
+    enum Kind : quint8 {
+        // Tracks, such as a track's or an album's paths.
+        Paths = 0,
+        // Every track of the artist with this tree key or name.
+        Artist = 1,
+        // Every track under this library root.
+        Root = 2,
+    };
+    Kind kind{Paths};
+    QStringList paths;
+    QString value;
+
+    bool operator==(const LibraryQueueItem &other) const = default;
+};
+using LibraryQueueItems = QVector<LibraryQueueItem>;
 
 struct DecodedPlayback {
     bool present{false};
@@ -201,6 +244,9 @@ enum QueueOpType : quint8 {
     QueueOpMove = 3,
     // Row `index` is now `tracks[0]`.
     QueueOpUpdate = 4,
+    // Take the `count` rows from `index` on out and put them back, in their
+    // order, from `to` on.
+    QueueOpMoveRows = 5,
 };
 
 struct DecodedQueueOp {
@@ -417,6 +463,15 @@ QByteArray encodeCommandQueueRow(quint16 cmdId, quint64 revision, quint32 index)
 QByteArray encodeCommandSelectQueue(quint64 revision, qint32 index);
 QByteArray encodeCommandMoveQueue(quint64 revision, quint32 from, quint32 to);
 QByteArray encodeCommandRemoveMany(quint64 revision, const QList<quint32> &indices);
+// CmdMoveQueueRows: the u64 revision, a u8 QueueRowsMove, the u32 row a
+// move before goes before, and a u32 count of u32 rows.
+QByteArray encodeCommandMoveQueueRows(
+    quint64 revision, QueueRowsMove how, quint32 before, const QList<quint32> &rows);
+// CmdQueueLibraryItems: a u8 QueuePlacement, the u64 revision and u32 row an
+// insertion goes before, and a u32 count of rows, each a u8 kind and its
+// value: the paths as a list of strings, or the artist or root as a string.
+QByteArray encodeCommandQueueLibraryItems(
+    QueuePlacement placement, quint64 revision, quint32 before, const LibraryQueueItems &items);
 
 bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QString *errorMessage);
 bool decodeSearchResultsFrame(
@@ -425,3 +480,6 @@ bool decodeSearchResultsFrame(
     QString *errorMessage);
 
 } // namespace BinaryBridgeCodec
+
+// Passed through QML from the library model to the bridge client.
+Q_DECLARE_METATYPE(BinaryBridgeCodec::LibraryQueueItems)

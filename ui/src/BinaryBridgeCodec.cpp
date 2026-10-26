@@ -296,6 +296,18 @@ bool readQueueOp(Reader &reader, DecodedQueueOp *out) {
         return true;
     case QueueOpUpdate:
         return readQueueTracks(reader, 1, &out->tracks);
+    case QueueOpMoveRows: {
+        quint32 count = 0;
+        quint32 to = 0;
+        if (!reader.readU32(&count) || !reader.readU32(&to)
+            || count > static_cast<quint32>(std::numeric_limits<int>::max())
+            || to > static_cast<quint32>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+        out->count = static_cast<int>(count);
+        out->to = static_cast<int>(to);
+        return true;
+    }
     default:
         return false;
     }
@@ -843,6 +855,51 @@ QByteArray encodeCommandRemoveMany(quint64 revision, const QList<quint32> &indic
     appendLe<quint32>(payload, static_cast<quint32>(indices.size()));
     for (quint32 index : indices) appendLe<quint32>(payload, index);
     return finalizeCommand(CmdRemoveMany, payload);
+}
+
+QByteArray encodeCommandMoveQueueRows(
+    quint64 revision, QueueRowsMove how, quint32 before, const QList<quint32> &rows) {
+    if (rows.size() > static_cast<qsizetype>((kMaxCommandPayloadBytes - 17) / 4)) {
+        return {};
+    }
+    QByteArray payload;
+    payload.reserve(17 + 4 * rows.size());
+    appendLe<quint64>(payload, revision);
+    payload.append(static_cast<char>(how));
+    appendLe<quint32>(payload, before);
+    appendLe<quint32>(payload, static_cast<quint32>(rows.size()));
+    for (quint32 row : rows) appendLe<quint32>(payload, row);
+    return finalizeCommand(CmdMoveQueueRows, payload);
+}
+
+QByteArray encodeCommandQueueLibraryItems(
+    QueuePlacement placement, quint64 revision, quint32 before, const LibraryQueueItems &items) {
+    QByteArray payload;
+    payload.append(static_cast<char>(placement));
+    appendLe<quint64>(payload, revision);
+    appendLe<quint32>(payload, before);
+    appendLe<quint32>(payload, static_cast<quint32>(items.size()));
+    for (const LibraryQueueItem &item : items) {
+        payload.append(static_cast<char>(item.kind));
+        bool appended = true;
+        if (item.kind == LibraryQueueItem::Paths) {
+            appendLe<quint32>(payload, static_cast<quint32>(item.paths.size()));
+            for (const QString &path : item.paths) {
+                if (!appendUtf8(payload, path)
+                    || payload.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes)) {
+                    appended = false;
+                    break;
+                }
+            }
+        } else {
+            appended = appendUtf8(payload, item.value);
+        }
+        // Stop at the bound rather than build a list that cannot be sent.
+        if (!appended || payload.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes)) {
+            return {};
+        }
+    }
+    return finalizeCommand(CmdQueueLibraryItems, payload);
 }
 
 bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QString *errorMessage) {

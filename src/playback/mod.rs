@@ -115,6 +115,17 @@ pub enum PlaybackCommand {
         from: usize,
         to: usize,
     },
+    /// Put the rows in this order, which names for each new row the row it
+    /// was before. The committed track stays open and keeps its row's
+    /// identity; staged successors stay while they still follow it. An
+    /// order that does not name every row once is ignored.
+    ReorderQueue(Vec<usize>),
+    /// Insert `paths` before row `at`, or after the last row when `at` is
+    /// past it. The committed track stays open.
+    InsertIntoQueue {
+        at: usize,
+        paths: Vec<PathBuf>,
+    },
     ClearQueue,
     PlayAt(usize),
     /// Move to the next track. A burst of Next and Previous presses moves
@@ -235,6 +246,24 @@ pub(crate) fn remap_path(path: &mut PathBuf, renames: &PathRenames) -> bool {
         }
         _ => false,
     }
+}
+
+/// For a reorder of `len` rows into `order`, which names for each new row
+/// the row it was before, the new row of each old row. `None` unless
+/// `order` names every row exactly once.
+pub(crate) fn reorder_positions(order: &[usize], len: usize) -> Option<Vec<usize>> {
+    if order.len() != len {
+        return None;
+    }
+    let mut positions = vec![usize::MAX; len];
+    for (position, index) in order.iter().enumerate() {
+        let slot = positions.get_mut(*index)?;
+        if *slot != usize::MAX {
+            return None;
+        }
+        *slot = position;
+    }
+    Some(positions)
 }
 
 /// Remove a batch in one retain pass and remap the current/selected index.

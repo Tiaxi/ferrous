@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use super::BridgeQueueCommand;
+use super::{BridgeQueueCommand, RowsMove};
 
 /// A change to the queue's rows, in the order the bridge made them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,13 @@ pub enum QueueEdit {
     Remove(Vec<usize>),
     /// The row at `from` was taken out and put back at `to`.
     Move { from: usize, to: usize },
+    /// The `count` rows from `from` on were taken out and put back, in
+    /// their order, from `to` on.
+    MoveRows {
+        from: usize,
+        count: usize,
+        to: usize,
+    },
     /// These rows hold new paths, such as after a rename.
     SetPaths(Vec<(usize, PathBuf)>),
     /// The details shown for any row may have changed.
@@ -59,6 +66,13 @@ impl QueueEdit {
                 let path = paths.remove(*from);
                 paths.insert(*to, path);
             }
+            Self::MoveRows { from, count, to } => {
+                if from + count > paths.len() || to + count > paths.len() {
+                    return false;
+                }
+                let moved: Vec<PathBuf> = paths.drain(*from..*from + *count).collect();
+                paths.splice(*to..*to, moved);
+            }
             Self::SetPaths(renamed) => {
                 if renamed.iter().any(|(index, _)| *index >= paths.len()) {
                     return false;
@@ -79,7 +93,7 @@ impl QueueEdit {
             Self::Insert { paths, .. } => paths.len(),
             Self::Remove(indices) => indices.len(),
             Self::SetPaths(renamed) => renamed.len(),
-            Self::Move { .. } | Self::Refresh => 1,
+            Self::Move { .. } | Self::MoveRows { .. } | Self::Refresh => 1,
         }
     }
 }
@@ -128,6 +142,8 @@ pub(super) const STALE_QUEUE_COMMAND_MESSAGE: &str =
 const PLAY_REMOVED_ROW_MESSAGE: &str = "The track you chose to play is no longer in the queue.";
 const MOVE_REMOVED_ROW_MESSAGE: &str =
     "The queue changed before the track could be moved, so it was not moved.";
+const MOVE_REMOVED_TARGET_MESSAGE: &str =
+    "The queue changed before the tracks could be moved, so they were not moved.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
@@ -149,6 +165,11 @@ enum RowMap {
     Remove(Vec<usize>),
     Move {
         from: usize,
+        to: usize,
+    },
+    MoveRows {
+        from: usize,
+        count: usize,
         to: usize,
     },
     /// Every row was replaced.
@@ -174,7 +195,32 @@ impl RowMap {
             } else {
                 index
             }),
+            Self::MoveRows { from, count, to } => Some(if (*from..from + count).contains(&index) {
+                to + (index - from)
+            } else {
+                let index = if index >= from + count {
+                    index - count
+                } else {
+                    index
+                };
+                if index >= *to {
+                    index + count
+                } else {
+                    index
+                }
+            }),
             Self::Reset => None,
+        }
+    }
+
+    /// Where the gap before the row at `gap` before the edit is after it,
+    /// which is where rows dropped there go: before that row wherever it
+    /// went. The gap before a removed row closes up where it was, and the
+    /// gap after the last row stays there.
+    fn map_gap(&self, gap: usize) -> Option<usize> {
+        match self {
+            Self::Remove(indices) => Some(gap - indices.partition_point(|index| *index < gap)),
+            _ => self.map(gap),
         }
     }
 
@@ -231,6 +277,11 @@ impl QueueSync {
             QueueEdit::Remove(indices) => Some(RowMap::Remove(indices.clone())),
             QueueEdit::Move { from, to } => Some(RowMap::Move {
                 from: *from,
+                to: *to,
+            }),
+            QueueEdit::MoveRows { from, count, to } => Some(RowMap::MoveRows {
+                from: *from,
+                count: *count,
                 to: *to,
             }),
             QueueEdit::SetPaths(_) | QueueEdit::Refresh => None,
@@ -322,6 +373,18 @@ impl QueueSync {
         self.map_index(revision, index)
     }
 
+    /// Where the gap before row `gap` at `revision` is now, for rows to be
+    /// inserted there, if the journal reaches back to `revision`.
+    pub(super) fn follow_gap(&self, revision: u64, gap: usize) -> Option<usize> {
+        if revision > self.revision || revision < self.journal_floor {
+            return None;
+        }
+        self.journal
+            .iter()
+            .filter(|(edit_revision, _)| *edit_revision > revision)
+            .try_fold(gap, |gap, (_, row_map)| row_map.map_gap(gap))
+    }
+
     /// Where the row at `index` at `revision` is now, if it is still in
     /// the queue.
     fn map_index(&self, revision: u64, index: usize) -> Option<usize> {
@@ -380,6 +443,20 @@ impl QueueSync {
                     from: moved_to.0,
                     to: moved_to.1,
                 }
+            }
+            BridgeQueueCommand::MoveRows { rows, to } => {
+                let rows: Vec<usize> = rows.into_iter().filter_map(map).collect();
+                if rows.is_empty() {
+                    return Ok(None);
+                }
+                let to = match to {
+                    RowsMove::Before(gap) => RowsMove::Before(
+                        self.follow_gap(revision, gap)
+                            .ok_or(MOVE_REMOVED_TARGET_MESSAGE)?,
+                    ),
+                    other => other,
+                };
+                BridgeQueueCommand::MoveRows { rows, to }
             }
             other => other,
         }))
@@ -679,5 +756,85 @@ mod tests {
             sync.resolve(1, BridgeQueueCommand::PlayAt(1)),
             Ok(Some(BridgeQueueCommand::PlayAt(1)))
         ));
+    }
+
+    #[test]
+    fn row_moves_carry_stale_rows_and_drop_points_to_where_they_are_now() {
+        let mut sync = sent();
+        // [0 1 2 3 4 5] becomes [0 3 4 1 2 5]: rows 1 and 2 go after 4.
+        sync.record(
+            QueueEdit::MoveRows {
+                from: 1,
+                count: 2,
+                to: 3,
+            },
+            6,
+        );
+        let rows: Vec<Option<usize>> = (0..6).map(|row| sync.follow(1, row)).collect();
+        assert_eq!(
+            rows,
+            vec![Some(0), Some(3), Some(4), Some(1), Some(2), Some(5)]
+        );
+        // The gap before a row follows the row, and the end stays the end.
+        let gaps: Vec<Option<usize>> = (0..=6).map(|gap| sync.follow_gap(1, gap)).collect();
+        let mut expected = rows;
+        expected.push(Some(6));
+        assert_eq!(gaps, expected);
+        sync.record(
+            QueueEdit::Insert {
+                at: 0,
+                paths: vec![p("/x")],
+            },
+            7,
+        );
+        sync.record(QueueEdit::Remove(vec![4]), 6);
+        // [x 0 3 4 2 5]: a drop before 5 in the first queue lands before
+        // 5, and one before the removed 1 where it was.
+        assert_eq!(sync.follow_gap(1, 5), Some(5));
+        assert_eq!(sync.follow_gap(1, 1), Some(4));
+        assert!(matches!(
+            sync.resolve(
+                1,
+                BridgeQueueCommand::MoveRows {
+                    rows: vec![1, 2, 0],
+                    to: RowsMove::Before(5),
+                },
+            ),
+            // Row 1 was removed; 2 and 0 are rows 4 and 1 now.
+            Ok(Some(BridgeQueueCommand::MoveRows { rows, to: RowsMove::Before(5) }))
+                if rows == vec![4, 1]
+        ));
+        // Every row of the move is gone: nothing is left to move.
+        assert!(matches!(
+            sync.resolve(
+                3,
+                BridgeQueueCommand::MoveRows {
+                    rows: vec![4],
+                    to: RowsMove::Up,
+                },
+            ),
+            Ok(None)
+        ));
+        sync.reset();
+        assert!(sync.follow_gap(2, 0).is_none());
+    }
+
+    #[test]
+    fn a_row_range_move_applies_to_paths_only_when_it_fits() {
+        let mut paths = vec![p("/0"), p("/1"), p("/2"), p("/3")];
+        let edit = QueueEdit::MoveRows {
+            from: 0,
+            count: 2,
+            to: 2,
+        };
+        assert!(edit.apply_to(&mut paths));
+        assert_eq!(paths, vec![p("/2"), p("/3"), p("/0"), p("/1")]);
+        let too_far = QueueEdit::MoveRows {
+            from: 3,
+            count: 2,
+            to: 0,
+        };
+        assert!(!too_far.apply_to(&mut paths));
+        assert_eq!(paths.len(), 4);
     }
 }

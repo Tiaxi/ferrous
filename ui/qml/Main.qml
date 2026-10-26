@@ -356,6 +356,12 @@ ApplicationWindow {
         function appendAllLibraryTracks() {}
         function replaceWithPaths(paths) {}
         function appendPaths(paths) {}
+        function insertPaths(paths, row) {}
+        function playLibraryItems(items) {}
+        function appendLibraryItems(items) {}
+        function insertLibraryItems(items, row) {}
+        function moveQueueRows(rows, before) {}
+        function shiftQueueRows(rows, direction) {}
         function libraryAlbumCoverAt(index) { return "" }
         function libraryThumbnailSource(path) { return "" }
         function queueTrackNumberAt(index) { return null }
@@ -558,6 +564,21 @@ ApplicationWindow {
         scanFolderDialog.open()
     }
 
+    // A folder chosen in the folder dialog: added to the queue, or, named
+    // first, to the library.
+    function takeChosenFolder(localPath) {
+        const context = pendingFolderDialogContext
+        pendingFolderDialogContext = ""
+        if (localPath.length === 0) {
+            return
+        }
+        if (context === "append-external-folder") {
+            root.submitExternalImport([localPath], false)
+        } else {
+            root.openLibraryRootNameDialog("add", localPath, "")
+        }
+    }
+
     function promptAddLibraryRoot(contextValue) {
         pendingFolderDialogContext = contextValue || ""
         scanFolderDialog.open()
@@ -588,10 +609,18 @@ ApplicationWindow {
         text: "&Add File(s)..."
         onTriggered: root.addExternalFiles()
     }
+    // The folder dialog picks one folder.
     Action {
         id: addFolderAction
-        text: "Add &Folder(s)..."
+        text: "Add &Folder to Queue..."
         onTriggered: root.addExternalFolder()
+    }
+    // As Preferences > Library adds one.
+    Action {
+        id: addLibraryFolderAction
+        objectName: "addLibraryFolderAction"
+        text: "Add Library Fol&der..."
+        onTriggered: root.promptAddLibraryRoot("add-library-root")
     }
     Action {
         id: quitAction
@@ -658,6 +687,8 @@ ApplicationWindow {
                 return "&Undo Remove Tracks"
             case 3:
                 return "&Undo Replace Queue"
+            case 4:
+                return "&Undo Move Tracks"
             default:
                 return "&Undo"
             }
@@ -895,6 +926,7 @@ ApplicationWindow {
                 { label: openFilesAction.text, shortcut: String(openFilesAction.shortcut || "") },
                 { label: addFilesAction.text, shortcut: String(addFilesAction.shortcut || "") },
                 { label: addFolderAction.text, shortcut: String(addFolderAction.shortcut || "") },
+                { label: addLibraryFolderAction.text, shortcut: String(addLibraryFolderAction.shortcut || "") },
                 { label: playLibrarySelectionAction.text, shortcut: String(playLibrarySelectionAction.shortcut || "") },
                 { label: appendLibrarySelectionAction.text, shortcut: String(appendLibrarySelectionAction.shortcut || "") },
                 { label: playAllLibraryTracksAction.text, shortcut: String(playAllLibraryTracksAction.shortcut || "") },
@@ -910,6 +942,7 @@ ApplicationWindow {
             MenuItem { action: openFilesAction }
             MenuItem { action: addFilesAction }
             MenuItem { action: addFolderAction }
+            MenuItem { action: addLibraryFolderAction }
             MenuSeparator {}
             MenuItem { action: playLibrarySelectionAction }
             MenuItem { action: appendLibrarySelectionAction }
@@ -1057,6 +1090,7 @@ ApplicationWindow {
 
     Dialogs.LibraryRootNameDialog {
         id: libraryRootNameDialog
+        objectName: "libraryRootNameDialog"
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
         windowRoot: root
@@ -1105,20 +1139,11 @@ ApplicationWindow {
 
     Platform.FolderDialog {
         id: scanFolderDialog
+        objectName: "scanFolderDialog"
         title: pendingFolderDialogContext === "append-external-folder"
-            ? "Add Folder"
-            : "Select Music Folder to Scan"
-        onAccepted: {
-            const localPath = PathUtils.folderDialogPath(scanFolderDialog)
-            if (localPath.length > 0) {
-                if (pendingFolderDialogContext === "append-external-folder") {
-                    root.submitExternalImport([localPath], false)
-                } else {
-                    root.openLibraryRootNameDialog("add", localPath, "")
-                }
-            }
-            pendingFolderDialogContext = ""
-        }
+            ? "Add Folder to Queue"
+            : "Add Library Folder"
+        onAccepted: root.takeChosenFolder(PathUtils.folderDialogPath(scanFolderDialog))
         onRejected: pendingFolderDialogContext = ""
     }
 
@@ -1196,6 +1221,7 @@ ApplicationWindow {
                 stepScrollView: root.stepScrollView
                 playAllLibraryTracksAction: playAllLibraryTracksAction
                 appendAllLibraryTracksAction: appendAllLibraryTracksAction
+                addLibraryFolderAction: addLibraryFolderAction
             }
 
             SplitView {
@@ -1218,7 +1244,6 @@ ApplicationWindow {
                     snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
                     snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
                     droppedExternalPaths: PathUtils.droppedExternalPaths
-                    submitExternalImport: root.submitExternalImport
                 }
 
                 Panes.SpectrogramPane {
@@ -1591,7 +1616,6 @@ ApplicationWindow {
         target: libraryModel
         function onTreeApplied() {
             libraryController.finishPendingTreeApply()
-            libraryController.applyPendingReveal()
             libraryController.tryApplyPersistedViewState()
         }
         function onNodeExpansionRequested(key, expanded) {

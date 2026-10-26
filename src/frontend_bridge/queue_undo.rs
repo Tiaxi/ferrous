@@ -2,8 +2,9 @@
 
 //! The undo of the latest destructive queue change.
 //!
-//! Clearing the queue, removing rows, and replacing a queue that had rows
-//! keep what they changed here, under a new ID that the UI offers to undo.
+//! Clearing the queue, removing rows, replacing a queue that had rows, and
+//! moving rows keep what they changed here, under a new ID that the UI
+//! offers to undo.
 //! The undo applies only to the queue that change left: any later change to
 //! the rows withdraws it, and a later destructive change replaces it. An
 //! undo with an ID that is no longer offered is refused, so it never
@@ -27,6 +28,7 @@ pub enum QueueUndoKind {
     Cleared = 1,
     Removed = 2,
     Replaced = 3,
+    Moved = 4,
 }
 
 /// What a destructive change took from the queue.
@@ -36,6 +38,12 @@ pub(super) enum Before {
     Queue(Vec<PathBuf>),
     /// The removed rows with their indices before the removal, ascending.
     Rows(Vec<(usize, PathBuf)>),
+    /// A reorder: for each row after it, the row it was before, and the
+    /// rows that moved, ascending, as they were before.
+    Order {
+        order: Vec<usize>,
+        moved: Vec<usize>,
+    },
 }
 
 /// A destructive change, with what to restore.
@@ -55,6 +63,7 @@ impl Change {
         match &self.before {
             Before::Queue(paths) => paths.len(),
             Before::Rows(rows) => rows.len(),
+            Before::Order { moved, .. } => moved.len(),
         }
     }
 }
@@ -152,6 +161,8 @@ impl QueueUndo {
                     remap_path(path, renames);
                 }
             }
+            // A reorder names rows, not paths.
+            Before::Order { .. } => {}
         }
     }
 

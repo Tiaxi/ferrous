@@ -82,6 +82,9 @@ public:
     bool removeRowsAt(int start, int count);
     // Take the row at `from` out and put it back at `to`.
     bool moveRow(int from, int to);
+    // Take the `count` rows from `from` on out and put them back, in their
+    // order, from `to` on.
+    bool moveRows(int from, int count, int to);
     bool updateRow(int index, QueueRowData row);
     const QueueRowData *rowAt(int index) const;
     QVariant trackNumberAt(int index) const;
@@ -354,6 +357,11 @@ public:
     Q_INVOKABLE void removeAt(int index);
     Q_INVOKABLE void removeIndices(const QVariantList &indices);
     Q_INVOKABLE void moveQueue(int from, int to);
+    // Move `rows` together, in their order, before row `before` (the queue
+    // length for the end), as one change to undo.
+    Q_INVOKABLE void moveQueueRows(const QVariantList &rows, int before);
+    // Move each run of `rows` one row up (`direction` < 0) or down.
+    Q_INVOKABLE void shiftQueueRows(const QVariantList &rows, int direction);
     Q_INVOKABLE void clearQueue();
     // Undo the change of queueUndoId. The backend refuses, with an error,
     // one that a newer change has withdrawn.
@@ -372,6 +380,13 @@ public:
     Q_INVOKABLE void appendAllLibraryTracks();
     Q_INVOKABLE void replaceWithPaths(const QStringList &paths);
     Q_INVOKABLE void appendPaths(const QStringList &paths);
+    // Files, folders or playlists, inserted before row `row`.
+    Q_INVOKABLE void insertPaths(const QStringList &paths, int row);
+    // Library rows, as the library model's queue items, as one change to the
+    // queue: replacing it and playing, appending, or inserting before `row`.
+    Q_INVOKABLE void playLibraryItems(const QVariant &items);
+    Q_INVOKABLE void appendLibraryItems(const QVariant &items);
+    Q_INVOKABLE void insertLibraryItems(const QVariant &items, int row);
     Q_INVOKABLE QString libraryAlbumCoverAt(int index) const;
     // stamp is the library tree's coverStamp role.
     Q_INVOKABLE QString libraryThumbnailSource(
@@ -651,6 +666,12 @@ private:
                      BinaryBridgeCodec::ErrorSeverity severity =
                          BinaryBridgeCodec::ErrorSeverityError);
     void sendPathListCommand(quint16 cmdId, const QStringList &paths, const QString &tooLargeMessage);
+    void sendLibraryItems(
+        BinaryBridgeCodec::QueuePlacement placement,
+        BinaryBridgeCodec::LibraryQueueItems items,
+        int row);
+    // The distinct rows of `rows` that the queue has, ascending.
+    QList<quint32> queueRowList(const QVariantList &rows) const;
     void sendLibraryRootCommand(quint16 cmdId, const QString &path);
     void sendLibraryRootCommand(quint16 cmdId, const QString &path, const QString &name);
     static QString formatSeconds(double seconds);

@@ -326,6 +326,38 @@ QtObject {
         }
     }
 
+    // A press on one of several highlighted rows may start a drag of all
+    // of them, so the highlight stays until the press turns out to be a
+    // click, as in file managers.
+    property int _clickCollapseIndex: -1
+
+    function pressRow(index, button, modifiers) {
+        const plain = (modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) === 0
+        if (button === Qt.LeftButton && plain
+                && root.isIndexSelected(index) && root.selectedIndices.length > 1) {
+            root._clickCollapseIndex = index
+            root.selectionAnchorIndex = index
+            root.uiBridge.selectQueueIndex(index)
+            return
+        }
+        root._clickCollapseIndex = -1
+        root.handleRowSelection(index, button, modifiers)
+    }
+
+    // The press on row `index` ended: a click that was not a drag selects
+    // the row alone.
+    function releaseRow(index, dragged) {
+        const collapse = root._clickCollapseIndex
+        root._clickCollapseIndex = -1
+        if (!dragged && collapse >= 0 && collapse === index) {
+            root.setSingleSelection(index)
+        }
+    }
+
+    function cancelRowPress() {
+        root._clickCollapseIndex = -1
+    }
+
     function handleRowSelection(index, button, modifiers) {
         const shift = (modifiers & Qt.ShiftModifier) !== 0
         const ctrl = (modifiers & Qt.ControlModifier) !== 0
@@ -380,15 +412,59 @@ QtObject {
         root.setSingleSelection(nextIdx)
     }
 
+    // Move every highlighted row one row up (`delta` < 0) or down; each run
+    // of rows moves as a whole and stops at the end of the queue.
     function moveSelected(delta) {
-        const from = root.primarySelectedIndex()
-        if (from < 0 || root.uiBridge.queueLength <= 0) {
+        if (root.selectedIndices.length === 0 || delta === 0) {
             return
         }
-        const to = Math.max(0, Math.min(root.uiBridge.queueLength - 1, from + delta))
-        if (to !== from) {
-            root.uiBridge.moveQueue(from, to)
+        root.uiBridge.shiftQueueRows(root.selectedIndices.slice(), delta)
+    }
+
+    // The rows an action on row `index` moves: the highlighted rows when it
+    // is one of them, otherwise the row.
+    function rowsFor(index) {
+        if (root.isIndexSelected(index) && root.selectedIndices.length > 1) {
+            return root.selectedIndices.slice()
         }
+        return [index]
+    }
+
+    function moveRowsOf(index, delta) {
+        if (index < 0 || index >= root.uiBridge.queueLength || delta === 0) {
+            return
+        }
+        root.uiBridge.shiftQueueRows(root.rowsFor(index), delta)
+    }
+
+    // Drops before row `insertIndex`, the queue length for after the last
+    // row: queue rows dragged from row `from` move there, as one change to
+    // undo; library rows and files are inserted there.
+    function dropQueueRows(from, insertIndex) {
+        if (from < 0 || from >= root.uiBridge.queueLength || insertIndex < 0) {
+            return
+        }
+        root.uiBridge.moveQueueRows(root.rowsFor(from), insertIndex)
+    }
+
+    function dropLibraryRow(libraryController, rowMap, insertIndex) {
+        libraryController.insertRowItems(rowMap, insertIndex)
+    }
+
+    function dropExternalPaths(paths, insertIndex) {
+        if (paths.length > 0) {
+            root.uiBridge.insertPaths(paths, insertIndex)
+        }
+    }
+
+    // Where rows dropped `y` below the first row's top go: before the row
+    // whose upper half it is in, after the last row past it.
+    function dropInsertIndex(y, rowHeight) {
+        if (rowHeight <= 0) {
+            return root.uiBridge.queueLength
+        }
+        const index = Math.floor((y + rowHeight * 0.5) / rowHeight)
+        return Math.max(0, Math.min(root.uiBridge.queueLength, index))
     }
 
     function openTagEditorForRow(rowIndex) {

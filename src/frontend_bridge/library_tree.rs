@@ -1276,11 +1276,21 @@ pub(crate) fn collect_artist_paths_tree_order(
     artist_selector: &str,
     sort_mode: LibrarySortMode,
 ) -> Vec<PathBuf> {
-    let artist_selector_is_key = artist_selector.starts_with("artist|");
-
     let builders = build_root_builders(&library.roots, &library.tracks);
     let mut out = Vec::new();
+    emit_selected_artist_paths(&builders, artist_selector, sort_mode, &mut out);
+    out
+}
 
+/// Appends the paths of the artists `artist_selector` names, a tree key
+/// or a name, in tree order.
+fn emit_selected_artist_paths(
+    builders: &BTreeMap<String, RootNodeBuilder>,
+    artist_selector: &str,
+    sort_mode: LibrarySortMode,
+    out: &mut Vec<PathBuf>,
+) {
+    let artist_selector_is_key = artist_selector.starts_with("artist|");
     for root_builder in builders.values() {
         for artist in root_builder.artists.values() {
             let matches = if artist_selector_is_key {
@@ -1297,7 +1307,37 @@ pub(crate) fn collect_artist_paths_tree_order(
                 continue;
             }
 
-            emit_artist_paths(artist, sort_mode, &mut out);
+            emit_artist_paths(artist, sort_mode, out);
+        }
+    }
+}
+
+/// The tracks of library rows to queue, in their order: each row's tracks
+/// in tree order. The library is grouped into its tree once, however many
+/// artists and roots the rows name.
+pub(crate) fn collect_queue_item_paths(
+    library: &LibrarySnapshot,
+    items: &[super::LibraryQueueItem],
+    sort_mode: LibrarySortMode,
+) -> Vec<PathBuf> {
+    use super::LibraryQueueItem;
+    let mut builders = None;
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            LibraryQueueItem::Paths(paths) => out.extend(paths.iter().cloned()),
+            LibraryQueueItem::Artist(selector) => {
+                let builders = builders
+                    .get_or_insert_with(|| build_root_builders(&library.roots, &library.tracks));
+                emit_selected_artist_paths(builders, selector.trim(), sort_mode, &mut out);
+            }
+            LibraryQueueItem::Root(root) => {
+                let builders = builders
+                    .get_or_insert_with(|| build_root_builders(&library.roots, &library.tracks));
+                if let Some(root_builder) = builders.get(root.as_str()) {
+                    emit_root_artists_paths(root_builder, sort_mode, &mut out);
+                }
+            }
         }
     }
     out
@@ -2759,6 +2799,60 @@ mod tests {
                 PathBuf::from("/music/Beta/Album Y/01.flac"),
                 PathBuf::from("/music/Beta/Album Z/01.flac"),
             ]
+        );
+    }
+
+    #[test]
+    fn queued_rows_keep_their_order_and_each_its_tree_order() {
+        use super::super::LibraryQueueItem;
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: crate::library::shared_tracks(vec![
+                track(
+                    "/music/Beta/Album Y/02.flac",
+                    "Album Y",
+                    None,
+                    Some(2),
+                    "Two",
+                ),
+                track(
+                    "/music/Beta/Album Y/01.flac",
+                    "Album Y",
+                    None,
+                    Some(1),
+                    "One",
+                ),
+                track(
+                    "/music/Alpha/Album X/01.flac",
+                    "Album X",
+                    None,
+                    Some(1),
+                    "One",
+                ),
+            ]),
+            ..LibrarySnapshot::default()
+        };
+        let paths = collect_queue_item_paths(
+            &library,
+            &[
+                LibraryQueueItem::Artist("Beta".to_string()),
+                LibraryQueueItem::Paths(vec![PathBuf::from("/elsewhere/song.flac")]),
+                LibraryQueueItem::Root("/music".to_string()),
+                LibraryQueueItem::Root("/not-a-root".to_string()),
+            ],
+            LibrarySortMode::Year,
+        );
+        assert_eq!(
+            paths,
+            [
+                "/music/Beta/Album Y/01.flac",
+                "/music/Beta/Album Y/02.flac",
+                "/elsewhere/song.flac",
+                "/music/Alpha/Album X/01.flac",
+                "/music/Beta/Album Y/01.flac",
+                "/music/Beta/Album Y/02.flac",
+            ]
+            .map(PathBuf::from)
         );
     }
 

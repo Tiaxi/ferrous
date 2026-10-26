@@ -531,6 +531,21 @@ pub(super) fn queue_request(cmd: &BridgeCommand, state: &BridgeState) -> Option<
                 replace: matches!(library, BridgeLibraryCommand::PlayTrack(_)),
             });
         }
+        BridgeLibraryCommand::QueueItems { items, placement } => {
+            // The files are read on the import worker, as for an album's
+            // paths, so the rows become one change to the queue.
+            let paths = library_tree::collect_queue_item_paths(&state.library, items, sort_mode);
+            if paths.is_empty() {
+                return Some(QueueRequest::Tracks {
+                    tracks: Vec::new(),
+                    replace: false,
+                });
+            }
+            return Some(QueueRequest::Placed {
+                paths,
+                placement: *placement,
+            });
+        }
         BridgeLibraryCommand::ReplaceWithAlbum(paths)
         | BridgeLibraryCommand::AppendAlbum(paths) => {
             return Some(QueueRequest::Import {

@@ -109,6 +109,16 @@ impl MockPlaybackRuntime {
                 self.continue_after_cancelled_advance(cancelled);
                 self.snapshot.current_queue_index = self.queue.current_index();
             }
+            PlaybackCommand::ReorderQueue(order) => {
+                let cancelled = self.queue.reorder(&order);
+                self.continue_after_cancelled_advance(cancelled);
+                self.snapshot.current_queue_index = self.queue.current_index();
+            }
+            PlaybackCommand::InsertIntoQueue { at, paths } => {
+                let cancelled = self.queue.insert(at, paths);
+                self.continue_after_cancelled_advance(cancelled);
+                self.snapshot.current_queue_index = self.queue.current_index();
+            }
             PlaybackCommand::ClearQueue => {
                 let _ = self.queue.clear();
                 self.stop_with_empty_queue();

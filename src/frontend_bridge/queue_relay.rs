@@ -18,8 +18,10 @@
 //!   the operations, in order: u8 1 inserts (u32 at, u32 count, the rows),
 //!   2 removes (u32 start, u32 count), 3 moves a row (u32 from, u32 to; the
 //!   row is taken out, then put back at `to`), 4 updates a row (u32 index,
-//!   the row). Removals of several ranges come last range first, so each
-//!   start holds when it is applied.
+//!   the row), 5 moves rows (u32 from, u32 count, u32 to; the `count` rows
+//!   from `from` on are taken out, then put back from `to` on). Removals of
+//!   several ranges come last range first, so each start holds when it is
+//!   applied.
 //! - Resync (2): the relay lost track of the queue; the UI asks for it whole.
 //!
 //! A row is the title, artist, album, cover path and genre (strings), an
@@ -41,6 +43,7 @@ const OP_INSERT: u8 = 1;
 const OP_REMOVE: u8 = 2;
 const OP_MOVE: u8 = 3;
 const OP_UPDATE: u8 = 4;
+const OP_MOVE_ROWS: u8 = 5;
 /// The header every kind starts with.
 const HEADER_BYTES: usize = 1 + 8 + 4 + 4 + 8 + 4;
 /// Where a delta's base revision, operation count and operations start.
@@ -257,6 +260,21 @@ impl QueueRelay {
                 self.paths.insert(*to, path);
                 let row = self.rows.remove(*from);
                 self.rows.insert(*to, row);
+            }
+            QueueEdit::MoveRows { from, count, to } => {
+                if *count == 0 || from + count > len || to + count > len {
+                    return false;
+                }
+                push_op(batch, |out| {
+                    out.push(OP_MOVE_ROWS);
+                    push_u32(out, clamp_u32(*from));
+                    push_u32(out, clamp_u32(*count));
+                    push_u32(out, clamp_u32(*to));
+                });
+                let paths: Vec<PathBuf> = self.paths.drain(*from..*from + *count).collect();
+                self.paths.splice(*to..*to, paths);
+                let rows: Vec<EncodedQueueTrack> = self.rows.drain(*from..*from + *count).collect();
+                self.rows.splice(*to..*to, rows);
             }
             QueueEdit::SetPaths(renamed) => {
                 if renamed.iter().any(|(index, _)| *index >= len) {

@@ -23,7 +23,6 @@ Rectangle {
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
     required property var droppedExternalPaths
-    required property var submitExternalImport
 
     // The columns, which the header and the rows share. The title takes the
     // width the others leave; the others follow the font size.
@@ -156,7 +155,15 @@ Rectangle {
 
                 Component.onCompleted: root.controller.registerView(playlistView)
 
+                // The row being dragged, which Escape stops.
+                property var draggingRow: null
+
                 Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Escape && playlistView.draggingRow) {
+                        playlistView.draggingRow.cancelDrag()
+                        event.accepted = true
+                        return
+                    }
                     if (event.key === Qt.Key_Menu
                             || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
                         playlistView.openContextMenuForSelection()
@@ -221,12 +228,6 @@ Rectangle {
 
                     width: Math.max(0, ListView.view.width - (playlistView.reservedRightPadding || 0))
                     height: playlistView.rowHeight
-                    Drag.active: playlistRowMouseArea.drag.active
-                    Drag.source: playlistRow
-                    Drag.hotSpot.x: width * 0.5
-                    Drag.hotSpot.y: height * 0.5
-                    Drag.dragType: Drag.Automatic
-                    Drag.supportedActions: Qt.MoveAction
                     color: rowSelected
                         ? root.uiPalette.uiSelectionColor
                         : (index % 2 === 0 ? root.uiPalette.uiSurfaceRaisedColor
@@ -334,17 +335,67 @@ Rectangle {
                         drag.target: (pressedButtons & Qt.LeftButton) ? playlistDragProxy : null
                         drag.smoothed: false
 
-                        onReleased: {
+                        // Escape stopped this press's drag; the rest of the
+                        // press does nothing.
+                        property bool dragCancelled: false
+
+                        function endDrag() {
                             playlistDragProxy.x = 0
                             playlistDragProxy.y = 0
+                            if (playlistView.draggingRow === playlistRowMouseArea) {
+                                playlistView.draggingRow = null
+                            }
+                        }
+
+                        // Drops nothing and keeps the highlight.
+                        function cancelDrag() {
+                            dragCancelled = true
+                            if (playlistDragProxy.Drag.active) {
+                                playlistDragProxy.Drag.cancel()
+                            }
+                            root.controller.cancelRowPress()
+                            endDrag()
                         }
 
                         onPressed: function(mouse) {
+                            dragCancelled = false
                             playlistView.forceActiveFocus()
-                            root.controller.handleRowSelection(
+                            // The proxy starts under the pointer, so it is
+                            // where the drag drops.
+                            playlistDragProxy.x = mouse.x
+                            playlistDragProxy.y = mouse.y
+                            root.controller.pressRow(
                                 index,
                                 mouse.button,
                                 mouse.modifiers || Qt.NoModifier)
+                        }
+
+                        onPositionChanged: {
+                            if (drag.active && !dragCancelled && !playlistDragProxy.Drag.active) {
+                                playlistDragProxy.Drag.active = true
+                                playlistView.draggingRow = playlistRowMouseArea
+                            }
+                        }
+
+                        onReleased: function(mouse) {
+                            if (dragCancelled) {
+                                endDrag()
+                                return
+                            }
+                            const dragged = playlistDragProxy.Drag.active
+                            if (dragged) {
+                                playlistDragProxy.Drag.drop()
+                            }
+                            root.controller.releaseRow(index, dragged)
+                            endDrag()
+                        }
+
+                        onCanceled: {
+                            if (playlistDragProxy.Drag.active) {
+                                playlistDragProxy.Drag.cancel()
+                            }
+                            root.controller.cancelRowPress()
+                            endDrag()
                         }
 
                         onClicked: function(mouse) {
@@ -361,6 +412,9 @@ Rectangle {
                         }
                     }
 
+                    // Queue rows drop only on the queue, so they drag within
+                    // the window, where the drop area sees each move. The
+                    // pointer moves the proxy; the row is what is dropped.
                     Item {
                         id: playlistDragProxy
                         x: 0
@@ -368,6 +422,8 @@ Rectangle {
                         width: 1
                         height: 1
                         visible: false
+                        Drag.source: playlistRow
+                        Drag.supportedActions: Qt.MoveAction
                     }
                 }
 
@@ -435,24 +491,14 @@ Rectangle {
                     MenuItem {
                         text: "Move Up"
                         enabled: playlistContextMenu.rowIndex > 0
-                        onTriggered: {
-                            const from = playlistContextMenu.rowIndex
-                            if (from > 0) {
-                                root.uiBridge.moveQueue(from, from - 1)
-                            }
-                        }
+                        onTriggered: root.controller.moveRowsOf(playlistContextMenu.rowIndex, -1)
                     }
 
                     MenuItem {
                         text: "Move Down"
                         enabled: playlistContextMenu.rowIndex >= 0
                             && playlistContextMenu.rowIndex < root.uiBridge.queueLength - 1
-                        onTriggered: {
-                            const from = playlistContextMenu.rowIndex
-                            if (from >= 0 && from < root.uiBridge.queueLength - 1) {
-                                root.uiBridge.moveQueue(from, from + 1)
-                            }
-                        }
+                        onTriggered: root.controller.moveRowsOf(playlistContextMenu.rowIndex, 1)
                     }
 
                     MenuSeparator {}
@@ -498,30 +544,49 @@ Rectangle {
                 }
             }
 
+            // Queue rows, library rows and files all go where they are
+            // dropped, which a line between the rows shows.
             DropArea {
                 id: playlistDropArea
+                objectName: "playlistDropArea"
                 anchors.fill: parent
-                property bool queueReorderDragActive: false
+                property bool queueDropAccepted: false
                 property int queueDropInsertIndex: -1
                 property real queueDropIndicatorY: 0
 
+                function acceptsDrop(drop) {
+                    const src = drop.source
+                    if (!src) {
+                        return drop.hasUrls
+                    }
+                    return !!(src.draggableQueueItem || src.draggableLibraryItem)
+                }
+
+                // Rows sit from the view's origin on, which edits above a
+                // scrolled view move, so a drop is placed in the rows'
+                // own coordinates.
                 function updateQueueDropIndicator(dropY) {
                     const rowHeight = playlistView.rowHeight
-                    const yInList = dropY - playlistView.y + playlistView.contentY
-                    let insertIndex = Math.floor((yInList + rowHeight * 0.5) / rowHeight)
-                    insertIndex = Math.max(0, Math.min(root.uiBridge.queueLength, insertIndex))
+                    const content = playlistView.contentItem
+                    const dropContentY = content.mapFromItem(playlistDropArea, 0, dropY).y
+                    const insertIndex = root.controller.dropInsertIndex(
+                        dropContentY - playlistView.originY, rowHeight)
                     queueDropInsertIndex = insertIndex
 
-                    const contentLineY = insertIndex * rowHeight
-                    const viewLineY = playlistView.y + contentLineY - playlistView.contentY
-                    const minY = playlistView.y
-                    const maxY = playlistView.y + playlistView.height - 2
-                    queueDropIndicatorY = Math.max(minY, Math.min(maxY, viewLineY))
+                    const contentLineY = playlistView.originY + insertIndex * rowHeight
+                    const lineY = playlistDropArea.mapFromItem(content, 0, contentLineY).y
+                    const top = playlistDropArea.mapFromItem(playlistView, 0, 0).y
+                    queueDropIndicatorY = Math.max(top, Math.min(top + playlistView.height - 2, lineY))
+                }
+
+                function finishDrop() {
+                    queueDropAccepted = false
+                    queueDropInsertIndex = -1
                 }
 
                 onEntered: function(drop) {
-                    queueReorderDragActive = !!(drop.source && drop.source.draggableQueueItem)
-                    if (queueReorderDragActive) {
+                    queueDropAccepted = acceptsDrop(drop)
+                    if (queueDropAccepted) {
                         updateQueueDropIndicator(drop.y)
                     } else {
                         queueDropInsertIndex = -1
@@ -529,93 +594,52 @@ Rectangle {
                 }
 
                 onPositionChanged: function(drop) {
-                    if (queueReorderDragActive) {
+                    if (queueDropAccepted) {
                         updateQueueDropIndicator(drop.y)
                     }
                 }
 
-                onExited: {
-                    queueReorderDragActive = false
-                    queueDropInsertIndex = -1
-                }
+                onExited: finishDrop()
 
                 onDropped: function(drop) {
+                    updateQueueDropIndicator(drop.y)
+                    const insertIndex = queueDropInsertIndex
                     const src = drop.source
+                    finishDrop()
                     if (!src) {
                         const externalPaths = root.droppedExternalPaths(drop)
-                        if (externalPaths.length > 0
-                                && root.submitExternalImport(externalPaths, false)) {
-                            queueReorderDragActive = false
-                            queueDropInsertIndex = -1
+                        if (externalPaths.length > 0) {
+                            root.controller.dropExternalPaths(externalPaths, insertIndex)
                             drop.acceptProposedAction()
                         }
                         return
                     }
                     if (src.draggableQueueItem) {
-                        const from = src.queueRowIndex !== undefined ? src.queueRowIndex : -1
-                        if (from < 0 || root.uiBridge.queueLength <= 1) {
-                            return
-                        }
-                        let insertIndex = queueDropInsertIndex
-                        if (insertIndex < 0) {
-                            updateQueueDropIndicator(drop.y)
-                            insertIndex = queueDropInsertIndex
-                        }
-                        let to = insertIndex > from ? insertIndex - 1 : insertIndex
-                        to = Math.max(0, Math.min(root.uiBridge.queueLength - 1, to))
-                        if (to !== from) {
-                            root.uiBridge.moveQueue(from, to)
-                        }
-                        queueReorderDragActive = false
-                        queueDropInsertIndex = -1
+                        root.controller.dropQueueRows(
+                            src.queueRowIndex !== undefined ? src.queueRowIndex : -1, insertIndex)
                         drop.acceptProposedAction()
                         return
                     }
-                    if (!src.draggableLibraryItem) {
-                        return
-                    }
-                    const rowMap = {
-                        selectionKey: src.selectionKeyResolved || "",
-                        sourceIndex: src.sourceIndexResolved !== undefined ? src.sourceIndexResolved : -1,
-                        rowType: src.rowTypeResolved || "",
-                        artist: src.artistResolved || "",
-                        name: src.nameResolved || "",
-                        title: src.rowTitle || "",
-                        trackPath: src.trackPathResolved || "",
-                        openPath: src.openPathResolved || "",
-                        playPaths: src.playPathsResolved || []
-                    }
-                    const rows = root.libraryController.rowsForAction(rowMap)
-                    if (rows.length > 0) {
-                        root.libraryController.appendRows(rows)
-                        queueReorderDragActive = false
-                        queueDropInsertIndex = -1
+                    if (src.draggableLibraryItem) {
+                        root.controller.dropLibraryRow(
+                            root.libraryController,
+                            { selectionKey: src.selectionKeyResolved || "" },
+                            insertIndex)
                         drop.acceptProposedAction()
                     }
                 }
-            }
-
-            Rectangle {
-                anchors.fill: parent
-                color: "transparent"
-                border.width: playlistDropArea.containsDrag
-                    && !playlistDropArea.queueReorderDragActive
-                    ? 2
-                    : 0
-                border.color: Kirigami.Theme.highlightColor
-                visible: playlistDropArea.containsDrag
-                    && !playlistDropArea.queueReorderDragActive
             }
 
             Rectangle {
                 x: playlistView.x + 4
                 width: Math.max(0, playlistView.width - (playlistView.reservedRightPadding || 0) - 8)
                 height: 2
+                objectName: "queueDropIndicator"
                 y: playlistDropArea.queueDropIndicatorY
                 radius: 1
                 color: Kirigami.Theme.highlightColor
                 visible: playlistDropArea.containsDrag
-                    && playlistDropArea.queueReorderDragActive
+                    && playlistDropArea.queueDropAccepted
                     && playlistDropArea.queueDropInsertIndex >= 0
             }
 
@@ -627,7 +651,7 @@ Rectangle {
                 radius: 3
                 color: Kirigami.Theme.highlightColor
                 visible: playlistDropArea.containsDrag
-                    && playlistDropArea.queueReorderDragActive
+                    && playlistDropArea.queueDropAccepted
                     && playlistDropArea.queueDropInsertIndex >= 0
             }
         }

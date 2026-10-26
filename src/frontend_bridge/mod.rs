@@ -154,11 +154,63 @@ pub enum BridgeQueueCommand {
         from: usize,
         to: usize,
     },
+    /// Move the rows at these indices together, as `to` says. The rows
+    /// keep their order, and one undo puts them all back.
+    MoveRows {
+        rows: Vec<usize>,
+        to: RowsMove,
+    },
+    /// Insert `tracks` before row `at` of the queue at `revision`, which
+    /// the bridge carries across the edits made since; after the last row
+    /// when that row is gone.
+    InsertAt {
+        revision: u64,
+        at: usize,
+        tracks: Vec<PathBuf>,
+    },
     Select(Option<usize>),
     Clear,
     /// Undo the destructive queue change the UI was offered under this ID;
     /// see [`queue_undo`].
     Undo(u64),
+}
+
+/// Where [`BridgeQueueCommand::MoveRows`] moves its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowsMove {
+    /// Together, in their order, before the row now at this index, or
+    /// after the last row when it is past it.
+    Before(usize),
+    /// Each run of rows one row up, keeping the gaps between runs; a run
+    /// at the top stays.
+    Up,
+    /// Each run of rows one row down; a run at the bottom stays.
+    Down,
+}
+
+/// A library row to queue, as [`BridgeLibraryCommand::QueueItems`] names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryQueueItem {
+    /// Tracks, files or folders, such as a track's or an album's paths.
+    Paths(Vec<PathBuf>),
+    /// Every track of the artist with this tree key or name.
+    Artist(String),
+    /// Every track under this library root.
+    Root(String),
+}
+
+/// Where queued tracks go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuePlacement {
+    Append,
+    /// Replace the queue and start playing.
+    Replace,
+    /// Before row `at` of the queue at `revision`; see
+    /// [`BridgeQueueCommand::InsertAt`].
+    Insert {
+        revision: u64,
+        at: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +253,12 @@ pub enum BridgeLibraryCommand {
     },
     ReplaceAllTracks,
     AppendAllTracks,
+    /// Queue library rows, in order, as one change to the queue: replacing
+    /// it with a selection is one change to undo.
+    QueueItems {
+        items: Vec<LibraryQueueItem>,
+        placement: QueuePlacement,
+    },
     ApplyAlbumArt {
         track_path: PathBuf,
         artwork_path: PathBuf,
@@ -4100,6 +4158,255 @@ mod tests {
         // the hint is the row that was current before; the engine stops
         // there since the album track it plays is not in that queue.
         assert_eq!(restored_queues(&engine_rx), vec![(queue, 1)]);
+    }
+
+    /// A move of `rows` as the UI sends it: `how` 0 before row `at`, 1 up,
+    /// 2 down.
+    fn ui_move_rows(revision: u64, how: u8, at: u32, rows: &[u32]) -> BridgeCommand {
+        let mut payload = revision.to_le_bytes().to_vec();
+        payload.push(how);
+        payload.extend_from_slice(&at.to_le_bytes());
+        payload.extend_from_slice(&u32::try_from(rows.len()).expect("count").to_le_bytes());
+        for row in rows {
+            payload.extend_from_slice(&row.to_le_bytes());
+        }
+        let mut command = 70_u16.to_le_bytes().to_vec();
+        command.extend_from_slice(&u32::try_from(payload.len()).expect("len").to_le_bytes());
+        command.extend_from_slice(&payload);
+        ffi::parse_binary_command(&command)
+            .expect("a valid command")
+            .expect("a command")
+    }
+
+    fn reorders(engine_rx: &Receiver<PlaybackCommand>) -> Vec<Vec<usize>> {
+        engine_rx
+            .try_iter()
+            .filter_map(|command| match command {
+                PlaybackCommand::ReorderQueue(order) => Some(order),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn moving_rows_moves_them_all_and_one_undo_puts_them_back() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, _event_tx, _album) = queue_order_runtime();
+        // Snapshots reach the UI, so edits travel as edits.
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(64);
+        let (a, b, c, d, e) = (
+            p("/music/a.flac"),
+            p("/music/b.flac"),
+            p("/music/c.flac"),
+            p("/music/d.flac"),
+            p("/music/e.flac"),
+        );
+        // A is queued twice; the second A plays.
+        let queue = vec![
+            a.clone(),
+            b.clone(),
+            a.clone(),
+            c.clone(),
+            d.clone(),
+            e.clone(),
+        ];
+        replace_queue(&mut runtime, &queue, &event_tx);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Select(Some(3))),
+            &event_tx,
+        );
+        runtime.state.playback.current = Some(a.clone());
+        runtime.state.playback.current_queue_index = Some(2);
+        assert!(runtime.emit_snapshot(&event_tx));
+        let mut ui = runtime.state.queue.clone();
+        let shown = runtime.state.queue_sync.revision();
+        let _ = queue_ops(&engine_rx);
+
+        // The first A and C, not next to each other, are dropped before E.
+        runtime.handle_command(ui_move_rows(shown, 0, 5, &[3, 0]), &event_tx);
+        let moved = vec![
+            b.clone(),
+            a.clone(),
+            d.clone(),
+            a.clone(),
+            c.clone(),
+            e.clone(),
+        ];
+        assert_eq!(runtime.state.queue, moved);
+        // The engine reorders its rows in one step, keeping the playing A,
+        // which is row 1 now, not the moved A at row 3.
+        assert_eq!(reorders(&engine_rx), vec![vec![1, 2, 4, 0, 3, 5]]);
+        assert_eq!(runtime.state.playback.current_queue_index, Some(1));
+        assert_eq!(runtime.state.selected_queue_index, Some(4));
+        // The UI gets row moves, so it keeps its rows and selection.
+        let snapshot = runtime.state.snapshot(false);
+        let Some(QueueUpdate::Edits { edits, .. }) = &snapshot.queue_update else {
+            panic!("row moves, got {:?}", snapshot.queue_update);
+        };
+        assert!(edits.len() <= 2, "{edits:?}");
+        for edit in edits {
+            assert!(edit.apply_to(&mut ui));
+        }
+        assert_eq!(ui, moved);
+        let offer = snapshot.queue_undo;
+        assert_eq!(offer.kind, Some(QueueUndoKind::Moved));
+        assert_eq!(offer.track_count, 2);
+        assert!(runtime.emit_snapshot(&event_tx));
+
+        runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(reorders(&engine_rx), vec![vec![3, 0, 1, 4, 2, 5]]);
+        assert_eq!(runtime.state.playback.current_queue_index, Some(2));
+        assert_eq!(runtime.state.selected_queue_index, Some(3));
+        let snapshot = runtime.state.snapshot(false);
+        let Some(QueueUpdate::Edits { edits, .. }) = &snapshot.queue_update else {
+            panic!("row moves, got {:?}", snapshot.queue_update);
+        };
+        for edit in edits {
+            assert!(edit.apply_to(&mut ui));
+        }
+        assert_eq!(ui, queue);
+        assert_eq!(snapshot.queue_undo.offer_id, 0, "an undo applies once");
+        // The moved rows are selected again.
+        assert_eq!(
+            snapshot.queue_undo.restored.expect("restored").ranges,
+            vec![(0, 1), (3, 1)]
+        );
+    }
+
+    #[test]
+    fn rows_moved_up_down_or_from_an_older_queue_land_where_the_user_saw_them() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let tracks: Vec<PathBuf> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|name| p(&format!("/music/{name}.flac")))
+            .collect();
+        replace_queue(&mut runtime, &tracks, &event_tx);
+        let shown = runtime.state.queue_sync.revision();
+        // B and D move up a row each.
+        runtime.handle_command(ui_move_rows(shown, 1, 0, &[1, 3]), &event_tx);
+        let names = |queue: &[PathBuf]| {
+            queue
+                .iter()
+                .map(|path| {
+                    path.file_stem()
+                        .expect("stem")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<String>()
+        };
+        assert_eq!(names(&runtime.state.queue), "badce");
+        // B and D move down again.
+        runtime.handle_command(
+            ui_move_rows(runtime.state.queue_sync.revision(), 2, 0, &[0, 2]),
+            &event_tx,
+        );
+        assert_eq!(names(&runtime.state.queue), "abcde");
+        // A row arrives at the top before a drag the UI started on "abcde":
+        // C goes before E all the same.
+        let shown = runtime.state.queue_sync.revision();
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::InsertAt {
+                revision: shown,
+                at: 0,
+                tracks: vec![p("/music/x.flac")],
+            }),
+            &event_tx,
+        );
+        assert_eq!(names(&runtime.state.queue), "xabcde");
+        runtime.handle_command(ui_move_rows(shown, 0, 4, &[2]), &event_tx);
+        assert_eq!(names(&runtime.state.queue), "xabdce");
+        let ops = queue_ops(&engine_rx);
+        assert!(
+            ops.iter()
+                .any(|op| op.starts_with("InsertIntoQueue { at: 0")),
+            "{ops:?}"
+        );
+    }
+
+    #[test]
+    fn a_library_selection_replaces_the_queue_as_one_change_to_undo() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let (dir, _) = import_fixture("library-selection");
+        let root = std::fs::canonicalize(&dir).expect("root");
+        let track_path = |relative: &str| {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, b"stub").expect("track");
+            path
+        };
+        let first = track_path("Artist/Album/01.flac");
+        let second = track_path("Artist/Album/02.flac");
+        let other = track_path("Other/Album/01.flac");
+        runtime.state.library = Arc::new(LibrarySnapshot {
+            roots: vec![library_root(&root)],
+            tracks: [&first, &second, &other]
+                .iter()
+                .enumerate()
+                .map(|(index, path)| {
+                    let artist = if index == 2 { "Other" } else { "Artist" };
+                    Arc::new(library_track(
+                        &path.to_string_lossy(),
+                        &root,
+                        artist,
+                        "Album",
+                        None,
+                        u32::try_from(index + 1).ok(),
+                    ))
+                })
+                .collect(),
+            ..LibrarySnapshot::default()
+        });
+        let queue = vec![p("/music/a.flac")];
+        replace_queue(&mut runtime, &queue, &event_tx);
+        let _ = queue_ops(&engine_rx);
+
+        // A track row and an artist row, played together.
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::QueueItems {
+                items: vec![
+                    LibraryQueueItem::Paths(vec![other.clone()]),
+                    LibraryQueueItem::Artist("Artist".to_string()),
+                ],
+                placement: QueuePlacement::Replace,
+            }),
+            &event_tx,
+        );
+        apply_next_import_result(&mut runtime, &event_tx);
+        let selection = vec![other.clone(), first.clone(), second.clone()];
+        assert_eq!(runtime.state.queue, selection);
+        assert_eq!(
+            queue_ops(&engine_rx),
+            vec![
+                format!("load {selection:?}"),
+                "play at 0".to_string(),
+                "play".to_string(),
+            ]
+        );
+        // One undo brings back the queue the selection replaced.
+        let offer = runtime.state.snapshot(false).queue_undo;
+        assert_eq!(offer.kind, Some(QueueUndoKind::Replaced));
+        runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+
+        // Rows dropped onto the queue go where they were dropped.
+        let shown = runtime.state.queue_sync.revision();
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::QueueItems {
+                items: vec![LibraryQueueItem::Paths(vec![first.clone()])],
+                placement: QueuePlacement::Insert {
+                    revision: shown,
+                    at: 0,
+                },
+            }),
+            &event_tx,
+        );
+        apply_next_import_result(&mut runtime, &event_tx);
+        assert_eq!(runtime.state.queue, vec![first.clone(), queue[0].clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

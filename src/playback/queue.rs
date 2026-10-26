@@ -570,6 +570,47 @@ impl GaplessQueue {
         self.revalidate_pending()
     }
 
+    /// Put the rows in `order`, which names for each new row the row it was
+    /// before. Every cursor follows its row, so the committed track keeps
+    /// its identity even when the queue holds its path more than once.
+    /// Returns `None`, changing nothing, unless `order` names every row once.
+    pub(crate) fn reorder(&mut self, order: &[usize]) -> Option<CancelledAdvance> {
+        let len = self.queue.len();
+        let positions = super::reorder_positions(order, len)?;
+        let mut old = std::mem::take(&mut self.queue);
+        self.queue = order
+            .iter()
+            .map(|index| std::mem::take(&mut old[*index]))
+            .collect();
+        self.for_each_cursor(|cursor| {
+            if let Some(position) = positions.get(cursor.index) {
+                cursor.index = *position;
+            }
+            cursor.reset_navigation(len);
+        });
+        self.revalidate_pending()
+    }
+
+    /// Insert `items` before row `at`, or after the last row when `at` is
+    /// past it. Rows from `at` on, and their cursors, move down.
+    pub(crate) fn insert(&mut self, at: usize, items: Vec<PathBuf>) -> Option<CancelledAdvance> {
+        if items.is_empty() {
+            return None;
+        }
+        let at = at.min(self.queue.len());
+        let count = items.len();
+        let was_empty = self.queue.is_empty();
+        self.queue.splice(at..at, items);
+        let len = self.queue.len();
+        self.for_each_cursor(|cursor| {
+            if !was_empty && cursor.index >= at {
+                cursor.index += count;
+            }
+            cursor.reset_navigation(len);
+        });
+        self.revalidate_pending()
+    }
+
     pub(crate) fn set_repeat_mode(&mut self, mode: RepeatMode) -> Option<CancelledAdvance> {
         self.repeat_mode = mode;
         self.revalidate_pending()
@@ -1015,6 +1056,74 @@ mod tests {
         queue.stage_natural(gapless);
         assert_eq!(queue.restore(restored.clone(), 1), None);
         assert_eq!(committed_index(&mut queue), Some(1));
+    }
+
+    #[test]
+    fn reordering_rows_keeps_the_committed_row_and_a_successor_that_still_follows() {
+        // The committed track is the second of two rows with its path.
+        let mut queue = GaplessQueue::new();
+        let a = PathBuf::from("/a.flac");
+        let rows = vec![
+            a.clone(),
+            PathBuf::from("/b.flac"),
+            a.clone(),
+            PathBuf::from("/c.flac"),
+        ];
+        queue.set_queue(rows.clone());
+        queue.set_current(2);
+        queue.stage_natural(gapless);
+        // The first A moves after C; the committed A and its successor C
+        // stay together.
+        assert_eq!(queue.reorder(&[1, 2, 3, 0]), None);
+        assert_eq!(queue.current_index(), Some(1));
+        let committed = queue.commit_gapless().expect("commit");
+        assert_eq!((committed.path, committed.index), (rows[3].clone(), 2));
+
+        // B moves between the committed track and its successor: the
+        // successor goes, and B follows now.
+        let (mut queue, paths) = queue_of(4);
+        queue.stage_natural(gapless);
+        assert_eq!(queue.reorder(&[0, 2, 1, 3]), HANDED);
+        assert_eq!(queue.stage_natural(gapless).unwrap().path, paths[2]);
+
+        // With repeat-one, the committed track follows itself wherever its
+        // row goes.
+        let (mut queue, _) = queue_of(3);
+        queue.set_repeat_mode(RepeatMode::One);
+        queue.stage_natural(gapless);
+        assert_eq!(queue.reorder(&[2, 1, 0]), None);
+        assert_eq!(committed_index(&mut queue), Some(2));
+
+        // An order that does not name every row once changes nothing.
+        let (mut queue, paths) = queue_of(3);
+        assert_eq!(queue.reorder(&[0, 0, 1]), None);
+        assert_eq!(queue.reorder(&[0, 1]), None);
+        assert_eq!(queue.reorder(&[0, 1, 5]), None);
+        assert_eq!(queue.queue, paths);
+    }
+
+    #[test]
+    fn inserting_rows_moves_the_committed_row_down_and_drops_a_successor_they_displace() {
+        let (mut queue, paths) = queue_of(3);
+        queue.set_current(1);
+        queue.stage_natural(gapless);
+        let new = vec![PathBuf::from("/x.flac"), PathBuf::from("/y.flac")];
+        // Before the committed track: its successor still follows it.
+        assert_eq!(queue.insert(0, new.clone()), None);
+        assert_eq!(queue.current_index(), Some(3));
+        assert_eq!(queue.current(), Some(paths[1].clone()));
+        let committed = queue.commit_gapless().expect("commit");
+        assert_eq!((committed.path, committed.index), (paths[2].clone(), 4));
+
+        // Right after it: the inserted rows follow now.
+        let (mut queue, _) = queue_of(3);
+        queue.stage_natural(gapless);
+        assert_eq!(queue.insert(1, new.clone()), HANDED);
+        assert_eq!(queue.stage_natural(gapless).unwrap().path, new[0]);
+        // Past the end, after the last row.
+        assert_eq!(queue.insert(99, vec![PathBuf::from("/z.flac")]), None);
+        assert_eq!(queue.queue.last(), Some(&PathBuf::from("/z.flac")));
+        assert_eq!(queue.insert(0, Vec::new()), None);
     }
 
     #[test]
