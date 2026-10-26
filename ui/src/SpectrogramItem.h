@@ -49,14 +49,18 @@ private:
     int m_bins{0};
 };
 
-// What a rasterization draws: the canvas's size and the display columns it
-// shows, and what they are drawn from.
+// What a rasterization draws: the canvas's size in device pixels and the
+// display columns it shows, and what they are drawn from.
 struct SpectrogramRasterTarget {
     int width{0};
     int height{0};
+    // Device pixels per logical pixel.
+    double scale{1.0};
     qint64 displayLeft{0};
     qint64 displayRight{-1};
     bool rollingMode{false};
+    // Canvas pixels per display column: the zoom's logical pixels, times
+    // the scale.
     double effectiveZoom{1.0};
     double columnsPerSecond{0.0};
     qint64 epoch{0};
@@ -75,6 +79,31 @@ struct SpectrogramRasterJob {
     SpectrogramRingStorage ring;
     // The slot of display column target.displayLeft + i, or -1 without it.
     std::vector<int> columnSlots;
+};
+
+// A small image an overlay places on the pane: a label, or a crosshair's
+// dotted line. The scene node keeps its texture while the overlay shows it.
+struct SpectrogramOverlayImage {
+    enum Kind { GridLabel, CrosshairLabel, DottedColumn, DottedRow };
+    Kind kind{GridLabel};
+    // A label's text, or a dotted line's length in device pixels.
+    QString text;
+    int length{0};
+    // Where it goes, in logical pixels: one texel to a device pixel.
+    QRectF rect;
+    // The name of its texture, at the scale it was laid out for.
+    QString key;
+};
+
+// What an overlay draws: solid lines, in device pixels, and small images.
+// Nothing as large as the pane is drawn, so laying one out costs little at
+// any device pixel ratio.
+struct SpectrogramOverlayLayout {
+    bool valid{false};
+    // The device pixels it was laid out for.
+    QSize size;
+    QVector<QRect> lines;
+    QVector<SpectrogramOverlayImage> images;
 };
 
 struct SpectrogramRasterResult {
@@ -207,6 +236,7 @@ signals:
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+    void itemChange(ItemChange change, const ItemChangeData &value) override;
     void hoverMoveEvent(QHoverEvent *event) override;
     void hoverEnterEvent(QHoverEvent *event) override;
     void hoverLeaveEvent(QHoverEvent *event) override;
@@ -279,9 +309,9 @@ private:
         double viewDrawX,
         qint64 displayLeft,
         bool rollingMode,
-        double effectiveZoom,
+        double canvasViewZoom,
         double columnsPerSecond) const;
-    int maxSyncAppendPixelsLocked(int canvasWidth, double effectiveZoom) const;
+    int maxSyncAppendPixelsLocked(int canvasWidth, double canvasZoom) const;
     bool advancePrecomputedCanvasLocked(
         qint64 displayLeft,
         qint64 displayRight,
@@ -291,26 +321,18 @@ private:
         qint64 displayIndex,
         bool rollingMode,
         const SpectrogramProjection &projection);
-    void drawPeakHoldColumnRangeLocked(
-        int x,
-        qint64 colFirst,
-        qint64 colLast,
-        bool rollingMode,
-        const SpectrogramProjection &projection);
-    void drawInterpolatedColumnAtLocked(
-        int x,
-        qint64 displayIndexL,
-        qint64 displayIndexR,
-        double t,
-        bool rollingMode,
-        const SpectrogramProjection &projection);
-    void drawPrecomputedPixelAtLocked(
-        int canvasX,
-        int pixelX,
+    // Canvas pixels firstPixel to endPixel - 1 of the view from display
+    // column displayLeft, into canvas columns from firstCanvasX on, wrapping.
+    // The canvas has scrolled subpixelOffset pixels past that column.
+    void drawPrecomputedPixelsLocked(
+        int firstCanvasX,
+        int firstPixel,
+        int endPixel,
+        double subpixelOffset,
         qint64 displayLeft,
         qint64 displayRight,
         bool rollingMode,
-        double effectiveZoom,
+        double canvasZoom,
         const SpectrogramProjection &projection);
     int ringSlotForDisplayIndexLocked(
         qint64 displayIndex,
@@ -329,12 +351,23 @@ private:
         int width, int height,
         qint64 displayLeft, bool rollingMode,
         double columnsPerSecond, double drawX);
+    // The device column (or row) of `logical`, clamped to the overlay.
+    int crosshairDeviceColumnLocked(double logical, int devicePixelCount) const;
+    // Names the layout's images' textures, at the canvas scale.
+    void nameOverlayImagesLocked(SpectrogramOverlayLayout &layout) const;
     void updateFreqGridOverlayLocked(int width, int height);
     void updateTimeGridOverlayLocked(
         int width, int height, int padding,
         qint64 displayLeft,
         bool rollingMode, double columnsPerSecond, double drawX);
     double effectiveZoomLocked() const;
+    // Canvas pixels per display column.
+    double canvasZoomLocked() const;
+    int canvasWidthLocked() const;
+    int canvasHeightLocked() const;
+    // The window's device pixel ratio, or the current one without a window.
+    double windowDevicePixelRatio() const;
+    void applyCanvasScaleLocked(double scale);
     double minimumZoomLevelLocked() const;
     double backendZoomForRequestLocked() const;
     int columnHopForZoomLocked(double zoom) const;
@@ -381,6 +414,10 @@ private:
     int m_mappingHeight{-1};
     int m_lowResEnd{0};
 
+    // The canvas and the overlays are in device pixels: this many to a
+    // logical pixel. The time axis stays in logical pixels, so a display
+    // column at a zoom is this many times as many canvas pixels.
+    double m_canvasScale{1.0};
     QImage m_canvas;
     bool m_canvasDirty{true};
     QImage m_overlayImage;
@@ -497,7 +534,14 @@ private:
     qint64 m_precomputedCanvasDisplayRight{-1};
     bool m_precomputedCanvasRolling{false};
     bool m_precomputedCanvasDirty{true};
+    // How far the canvas has scrolled past its first display column, in
+    // part of a canvas pixel: its pixel x starts at x minus this.
     double m_precomputedCanvasSubpixelOffset{0.0};
+    // The display range's right end the canvas was drawn for, which its
+    // last pixels may not reach.
+    qint64 m_precomputedCanvasViewRight{-1};
+    // The scale the canvas was drawn at.
+    double m_precomputedCanvasScale{1.0};
     int m_displayMode{0}; // 0=Rolling, 1=Centered
     double m_zoomLevel{1.0};
     double m_renderZoomLevel{1.0};
@@ -507,6 +551,7 @@ private:
     // session restart changes the hop; cleared when the ring covers
     // the display.  updatePaintNode skips canvas updates while active.
     bool m_zoomFillActive{false};
+    // The canvas's pixels per display column.
     double m_precomputedCanvasZoomLevel{1.0};
     // Restarting the backend for every wheel step would decode the same
     // window again and again, so zoom requests reach it after a pause.
@@ -519,7 +564,7 @@ private:
     // canvas is shown scaled to m_zoomLevel.
     bool m_awaitingZoomData{false};
     // Where the canvas content is in time: its columns per second, the
-    // rolling epoch it was drawn with, and its pixels per second.
+    // rolling epoch it was drawn with, and its logical pixels per second.
     double m_precomputedCanvasColumnsPerSecond{0.0};
     qint64 m_precomputedCanvasEpoch{0};
     double m_precomputedCanvasPixelsPerSecond{0.0};
@@ -541,7 +586,9 @@ private:
     bool m_hoverActive{false};
     QPointF m_hoverPosition;
     double m_crosshairSharedX{-1.0};
-    QImage m_crosshairImage;
+    // Its dotted lines are images; their rects below are in device pixels,
+    // its labels' in logical ones.
+    SpectrogramOverlayLayout m_crosshair;
     bool m_crosshairDirty{true};
     qint64 m_crosshairCachedDisplayLeft{0};
     double m_crosshairCachedDrawX{0.0};
@@ -557,17 +604,18 @@ private:
     bool m_showTimeLabels{false};
 
     // Frequency grid: horizontal lines + labels. Only depends on
-    // height/sampleRate/binsPerColumn/logScale. Never rebuilt during playback.
-    QImage m_freqGridImage;
+    // height/sampleRate/binsPerColumn/logScale. Never laid out again during
+    // playback.
+    SpectrogramOverlayLayout m_freqGrid;
     bool m_freqGridDirty{true};
     int m_freqGridCachedSampleRateHz{0};
     int m_freqGridCachedBinsPerColumn{0};
 
-    // Time grid: vertical lines + labels (bottom pane only). Rendered
-    // wider than the widget with right-side padding so the texture
-    // source rect can be shifted cheaply on each frame. Only rebuilt
-    // when the shift exhausts the padding (~every 8-10 seconds).
-    QImage m_timeGridImage;
+    // Time grid: vertical lines + labels (bottom pane only). Laid out
+    // wider than the widget, with right-side padding, from where the view
+    // was then; each frame shifts it by how far the view has moved since,
+    // and it is laid out again once the shift exhausts the padding.
+    SpectrogramOverlayLayout m_timeGrid;
     bool m_timeGridDirty{true};
     qint64 m_timeGridRenderDisplayLeft{0};
     double m_timeGridRenderDrawX{0.0};

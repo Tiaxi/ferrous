@@ -116,6 +116,10 @@ FERROUS_BENCHMARK_SPECTROGRAM=1 QT_QPA_PLATFORM=offscreen \
 
 This optional benchmark covers two FFT sizes, two pane heights, and linear/logarithmic frequency scales at 3440 pixels wide. For each, it reports the time to rasterize a full canvas on a worker (`raster_ms`), the render sync's time to hand that work to a worker (`request_ms`), the UI thread's time to put the result in place (`install_ms`), the render sync's time to pass its tiles on for upload (`handoff_ms`), and an image checksum. It excludes decoding, transport, and GPU uploads. Use the same optimized build and machine for comparisons; normal test runs skip it.
 
+The canvas is drawn at device pixels. Add `FERROUS_BENCHMARK_SPECTROGRAM_SCALE=2` (or `1.5`, `1.25`) to measure it at that device pixel ratio: the panes keep their logical size and the canvas gets that many device pixels to a logical one. Under `QT_QPA_PLATFORM=offscreen`, the smoke tests add offscreen screens at 2, 1.5 and 1.25 beside the default one, which the HiDPI tests and the windowed parts of this benchmark move their windows to; they skip without them.
+
+`spectrogramOverlayBenchmark` takes the same two variables. It measures the render sync's share of a 3440×719 pane's grid and crosshair overlays, with both grids and their labels shown: an ordinary frame, a time-grid refresh, a refresh of both grids, a crosshair move and a resize frame, as `mean_ms` and `worst_ms`.
+
 To compare waveform CPU painting with scene graph preparation using synthetic resident data:
 
 ```bash

@@ -46,6 +46,9 @@ public:
 
     void paint(QPainter *painter) override;
 
+protected:
+    void itemChange(ItemChange change, const ItemChangeData &value) override;
+
 signals:
     void peaksDataChanged();
     void generatedSecondsChanged();
@@ -60,7 +63,8 @@ private:
     int currentHeightLocked() const;
     int drawnWidthLocked(double generatedSeconds, bool waveformComplete, double durationSeconds) const;
     int xForPeakIndexLocked(int peakIndex, int peakCount, int drawWidth) const;
-    void ensureCacheLocked(int width, int height);
+    // The cache is in device pixels, `scale` to a logical pixel.
+    void ensureCacheLocked(double scale);
     void markDirtyRangeLocked(int x0, int x1);
     void markDirtyAllLocked();
     void updateWaveformCacheLocked();
@@ -72,6 +76,7 @@ private:
     double m_positionSeconds{0.0};
     double m_durationSeconds{0.0};
     QImage m_waveformCache;
+    // In logical pixels.
     QRect m_dirtyRect;
     QColor m_barColor{0x0f, 0x2e, 0x5d};
     QColor m_bgColor{Qt::white};

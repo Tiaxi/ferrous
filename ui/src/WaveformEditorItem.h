@@ -131,6 +131,7 @@ signals:
 protected:
     QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+    void itemChange(ItemChange change, const ItemChangeData &value) override;
     void hoverMoveEvent(QHoverEvent *event) override;
     void hoverEnterEvent(QHoverEvent *event) override;
     void hoverLeaveEvent(QHoverEvent *event) override;
@@ -221,7 +222,10 @@ private:
     double requiredVisibleDetailPointsLocked(double visibleSpan) const;
     double detailRequestMarginLocked(double visibleSpan) const;
     int detailRequestPointCountLocked(double requestStart, double requestEnd) const;
+    // Device pixels to a logical pixel, and the caches' size in them.
+    double renderScaleLocked() const;
     int renderPixelWidthLocked() const;
+    int renderPixelHeightLocked() const;
     CacheGrid cacheGridForRangeLocked(
         double visibleStart, double visibleEnd,
         double sourceStart, double sourceEnd) const;
@@ -267,7 +271,7 @@ private:
     bool playbackTilesCoverLocked(
         double visibleStart, double visibleEnd) const;
     std::vector<PlaybackTilePaint> playbackTilePaintsLocked(
-        double visibleStart, double visibleEnd, int canvasWidth) const;
+        double visibleStart, double visibleEnd, int canvasWidth, int canvasHeight) const;
     void drawGridLocked(QPainter &painter, int width, int height,
                         double visibleStart, double visibleEnd, int channels) const;
     static void drawChannelSeparators(
@@ -280,13 +284,16 @@ private:
     static std::pair<QRect, QRect> crosshairLabelRects(
         int width, int height, int x, int y,
         int valueTextWidth, int timeTextWidth, int textHeight);
+    // These draw in the painter's pixels, pixelScale to a logical pixel.
     void drawOverviewLocked(QPainter &painter, int width, int height,
-                            double visibleStart, double visibleEnd, int channels) const;
+                            double visibleStart, double visibleEnd, int channels,
+                            double pixelScale = 1.0) const;
     void drawDetailLocked(QPainter &painter, int width, int height,
-                          double visibleStart, double visibleEnd, int channels) const;
+                          double visibleStart, double visibleEnd, int channels,
+                          double pixelScale = 1.0) const;
     void drawDetailSliceLocked(QPainter &painter, int width, int height,
                                double visibleStart, double visibleEnd, int channels,
-                               int firstX, int lastX) const;
+                               int firstX, int lastX, double pixelScale = 1.0) const;
     void drawCrosshair(QPainter &painter, int width, int height,
                        double visibleStart, double visibleEnd) const;
     static void drawFpsOverlay(QPainter &painter, int width, int fpsValue);
@@ -321,6 +328,8 @@ private:
     QPointF m_hoverPosition;
     DetailWindow m_detail;
     bool m_zoomFallbackToOverview{false};
+    // The cache, the staged cache and the playback tiles are in device
+    // pixels.
     QImage m_cache;
     bool m_cacheDirty{true};
     int m_cachedViewportWidth{0};
@@ -337,6 +346,9 @@ private:
     quint32 m_stagedCacheFramesPerPoint{0};
     int m_stagedCacheDisplayedChannels{0};
     int m_stagedCacheNextX{0};
+    // The viewport the staged cache is for, in device pixels.
+    int m_stagedCacheViewportWidth{0};
+    int m_stagedCacheViewportHeight{0};
     bool m_stagedCacheCommitsDeferredZoom{false};
     std::map<qint64, PlaybackTile> m_playbackTiles;
     double m_playbackTileSecondsPerPixel{0.0};
