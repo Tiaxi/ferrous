@@ -19,6 +19,8 @@
 #include <QSGSimpleTextureNode>
 #include <QSGTexture>
 #include <QString>
+#include <QThread>
+#include <QThreadPool>
 
 #include <algorithm>
 #include <array>
@@ -27,6 +29,7 @@
 #include <cstdio>
 #include <map>
 #include <tuple>
+#include <utility>
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 #define FERROUS_SPECTROGRAM_LOGF(...)               \
@@ -62,6 +65,15 @@ struct SpectrogramZoomPreview {
     double map(double x) const {
         return active ? toX + (x - fromX) * scale : x;
     }
+};
+
+// How rasterizations reach their item, which may be gone by then. The item
+// clears `owner` when it is destroyed; `latestSerial` is the one
+// rasterization whose result it still wants.
+struct SpectrogramRasterMailbox {
+    QMutex mutex;
+    SpectrogramItem *owner{nullptr};
+    std::atomic<quint64> latestSerial{0};
 };
 
 namespace {
@@ -503,6 +515,243 @@ double selectGridInterval(
     return candidates[candidateCount - 1];
 }
 
+// Rasterizations run here, off the UI and render threads. Each item has at
+// most one that it still wants; the others stop at their next check.
+class SpectrogramRasterPool final : public QThreadPool {
+public:
+    SpectrogramRasterPool() {
+        setObjectName(QStringLiteral("SpectrogramRaster"));
+        setMaxThreadCount(std::clamp(QThread::idealThreadCount() / 2, 1, 4));
+    }
+};
+
+QThreadPool &spectrogramRasterPool() {
+    static SpectrogramRasterPool pool;
+    return pool;
+}
+
+// The display columns a canvas draws from, by display index: nullptr where
+// a column is missing.
+template <typename Lookup>
+struct SpectrogramColumns {
+    Lookup lookup;
+    const quint8 *column(qint64 displayIndex) const { return lookup(displayIndex); }
+};
+
+template <typename Lookup>
+SpectrogramColumns<Lookup> spectrogramColumns(Lookup lookup) {
+    return {std::move(lookup)};
+}
+
+struct CanvasColumn {
+    QRgb *destination;
+    qsizetype rowStride;
+    int height;
+
+    void set(int y, QRgb color) const {
+        destination[static_cast<qsizetype>(y) * rowStride] = color;
+    }
+};
+
+CanvasColumn canvasColumn(QImage &canvas, int x) {
+    // Detach once per column, not once for every pixel written.
+    return {
+        reinterpret_cast<QRgb *>(canvas.bits()) + x,
+        canvas.bytesPerLine() / static_cast<qsizetype>(sizeof(QRgb)),
+        canvas.height()};
+}
+
+bool canvasColumnDrawable(
+    const QImage &canvas, int x, const SpectrogramProjection &projection) {
+    return !canvas.isNull()
+        && x >= 0
+        && x < canvas.width()
+        && static_cast<int>(projection.binRanges.size()) == canvas.height();
+}
+
+void fillCanvasColumn(const CanvasColumn &column) {
+    const QRgb background = kBackgroundColor.rgba();
+    for (int y = 0; y < column.height; ++y) {
+        column.set(y, background);
+    }
+}
+
+template <typename Source>
+void rasterColumn(
+    QImage &canvas,
+    int x,
+    qint64 displayIndex,
+    const Source &source,
+    const SpectrogramProjection &projection) {
+    const CanvasColumn out = canvasColumn(canvas, x);
+    const quint8 *bins = source.column(displayIndex);
+    if (bins == nullptr) {
+        fillCanvasColumn(out);
+        return;
+    }
+    for (int y = 0; y < out.height; ++y) {
+        const auto [binLo, binHi] = projection.binRanges[static_cast<size_t>(y)];
+        quint8 rawMax = 0;
+        for (int b = binLo; b <= binHi; ++b) {
+            rawMax = std::max(rawMax, bins[b]);
+        }
+        out.set(y, projection.colors[static_cast<size_t>(rawMax)]);
+    }
+}
+
+// The loudest of up to 64 display columns that share one pixel.
+template <typename Source>
+void rasterPeakHold(
+    QImage &canvas,
+    int x,
+    qint64 colFirst,
+    qint64 colLast,
+    const Source &source,
+    const SpectrogramProjection &projection) {
+    if (colFirst == colLast) {
+        rasterColumn(canvas, x, colFirst, source, projection);
+        return;
+    }
+    // Cap to a reasonable max to avoid pathological cases.
+    const int rangeCols = static_cast<int>(
+        std::min(colLast - colFirst + 1, static_cast<qint64>(64)));
+    std::array<const quint8 *, 64> columns{};
+    int validCount = 0;
+    for (int i = 0; i < rangeCols; ++i) {
+        if (const quint8 *bins = source.column(colFirst + i)) {
+            columns[static_cast<size_t>(validCount++)] = bins;
+        }
+    }
+    const CanvasColumn out = canvasColumn(canvas, x);
+    if (validCount == 0) {
+        fillCanvasColumn(out);
+        return;
+    }
+    for (int y = 0; y < out.height; ++y) {
+        const auto [binLo, binHi] = projection.binRanges[static_cast<size_t>(y)];
+        quint8 rawMax = 0;
+        for (int c = 0; c < validCount; ++c) {
+            const quint8 *bins = columns[static_cast<size_t>(c)];
+            for (int b = binLo; b <= binHi; ++b) {
+                rawMax = std::max(rawMax, bins[b]);
+            }
+        }
+        out.set(y, projection.colors[static_cast<size_t>(rawMax)]);
+    }
+}
+
+// A pixel between two display columns, when zoomed in.
+template <typename Source>
+void rasterInterpolated(
+    QImage &canvas,
+    int x,
+    qint64 displayIndexL,
+    qint64 displayIndexR,
+    double t,
+    const Source &source,
+    const SpectrogramProjection &projection) {
+    const quint8 *left = source.column(displayIndexL);
+    const quint8 *right = source.column(displayIndexR);
+    if (left == nullptr && right == nullptr) {
+        fillCanvasColumn(canvasColumn(canvas, x));
+        return;
+    }
+    if (left == nullptr || right == nullptr) {
+        rasterColumn(
+            canvas, x, left == nullptr ? displayIndexR : displayIndexL, source, projection);
+        return;
+    }
+    const CanvasColumn out = canvasColumn(canvas, x);
+    const double oneMinusT = 1.0 - t;
+    for (int y = 0; y < out.height; ++y) {
+        const auto [binLo, binHi] = projection.binRanges[static_cast<size_t>(y)];
+        quint8 rawMaxL = 0;
+        quint8 rawMaxR = 0;
+        for (int b = binLo; b <= binHi; ++b) {
+            rawMaxL = std::max(rawMaxL, left[b]);
+            rawMaxR = std::max(rawMaxR, right[b]);
+        }
+        const auto rawBlended = static_cast<quint8>(std::lround(
+            static_cast<double>(rawMaxL) * oneMinusT
+            + static_cast<double>(rawMaxR) * t));
+        out.set(y, projection.colors[static_cast<size_t>(rawBlended)]);
+    }
+}
+
+// Pixel `pixelX` of a view whose left edge is display column displayLeft,
+// drawn into canvas column canvasX.
+template <typename Source>
+void rasterPixel(
+    QImage &canvas,
+    int canvasX,
+    int pixelX,
+    qint64 displayLeft,
+    qint64 displayRight,
+    double effectiveZoom,
+    const Source &source,
+    const SpectrogramProjection &projection) {
+    if (effectiveZoom <= 0.0 || displayRight < displayLeft) {
+        return;
+    }
+    const double columnsPerPixel = 1.0 / effectiveZoom;
+    const double rangeStart = static_cast<double>(pixelX) * columnsPerPixel;
+    const double rangeEnd = static_cast<double>(pixelX + 1) * columnsPerPixel;
+    const qint64 colFirst = std::min(
+        displayLeft + static_cast<qint64>(std::floor(rangeStart)),
+        displayRight);
+    const qint64 colLast = std::min(
+        displayLeft + static_cast<qint64>(std::ceil(rangeEnd - 1.0)),
+        displayRight);
+
+    const bool interpolate = effectiveZoom > 1.001;
+    if (colFirst < colLast && !interpolate) {
+        rasterPeakHold(canvas, canvasX, colFirst, colLast, source, projection);
+    } else if (interpolate) {
+        const double t = rangeStart - std::floor(rangeStart);
+        if (t > 0.001) {
+            const qint64 colR = std::min(colFirst + 1, displayRight);
+            if (colR != colFirst) {
+                rasterInterpolated(canvas, canvasX, colFirst, colR, t, source, projection);
+                return;
+            }
+        }
+        rasterColumn(canvas, canvasX, colFirst, source, projection);
+    } else {
+        rasterColumn(canvas, canvasX, colFirst, source, projection);
+    }
+}
+
+// How many pixels a full rasterization of display columns
+// [displayLeft, displayRight] fills.
+int rasterDrawPixels(int width, qint64 displayLeft, qint64 displayRight, double effectiveZoom) {
+    if (width <= 0 || displayRight < displayLeft || effectiveZoom <= 0.0) {
+        return 0;
+    }
+    const qint64 sourceColumns = displayRight - displayLeft + 1;
+    int drawPixels = std::min(width,
+        static_cast<int>(std::ceil(
+            static_cast<double>(sourceColumns) * effectiveZoom)));
+    // At max zoom-out, hop rounding can produce a few fewer columns
+    // than the canvas width.  Pad to width when the display covers
+    // nearly all the content — the colFirst clamping in the loop
+    // repeats the last column for the extra pixels.
+    if (drawPixels < width
+        && displayLeft == 0
+        && sourceColumns + 5 >= static_cast<qint64>(width)) {
+        drawPixels = width;
+    }
+    return drawPixels;
+}
+
+// The last display column a rasterization of `drawPixels` pixels shows.
+qint64 rasterDisplayRight(qint64 displayLeft, int drawPixels, double effectiveZoom) {
+    const double columnsPerPixel = 1.0 / effectiveZoom;
+    return drawPixels > 0
+        ? (displayLeft + static_cast<qint64>(
+               static_cast<double>(drawPixels) * columnsPerPixel) - 1)
+        : (displayLeft - 1);
+}
+
 } // namespace
 
 // Shared across all SpectrogramItem instances so the ring-cap floor
@@ -511,8 +760,64 @@ double selectGridInterval(
 // side in AnalysisRuntimeState.
 int SpectrogramItem::s_maxWidgetWidthSeen = 0;
 
+void SpectrogramRingStorage::clear() {
+    m_blocks.clear();
+    m_bins = 0;
+}
+
+void SpectrogramRingStorage::allocate(int capacity, int bins) {
+    m_blocks.clear();
+    m_bins = std::max(0, bins);
+    if (capacity <= 0 || m_bins <= 0) {
+        return;
+    }
+    const int blockCount = (capacity + kColumnsPerBlock - 1) / kColumnsPerBlock;
+    m_blocks.reserve(static_cast<size_t>(blockCount));
+    for (int block = 0; block < blockCount; ++block) {
+        const int columns = std::min(kColumnsPerBlock, capacity - block * kColumnsPerBlock);
+        m_blocks.emplace_back(static_cast<qsizetype>(columns) * m_bins, '\0');
+    }
+}
+
+qint64 SpectrogramRingStorage::byteSize() const {
+    qint64 bytes = 0;
+    for (const QByteArray &block : m_blocks) {
+        bytes += block.size();
+    }
+    return bytes;
+}
+
+const quint8 *SpectrogramRingStorage::column(int slot) const {
+    const size_t block = static_cast<size_t>(slot / kColumnsPerBlock);
+    if (slot < 0 || block >= m_blocks.size()) {
+        return nullptr;
+    }
+    const qsizetype offset = static_cast<qsizetype>(slot % kColumnsPerBlock) * m_bins;
+    if (offset + m_bins > m_blocks[block].size()) {
+        return nullptr;
+    }
+    return reinterpret_cast<const quint8 *>(m_blocks[block].constData()) + offset;
+}
+
+quint8 *SpectrogramRingStorage::writableColumn(int slot) {
+    const size_t block = static_cast<size_t>(slot / kColumnsPerBlock);
+    if (slot < 0 || block >= m_blocks.size()) {
+        return nullptr;
+    }
+    const qsizetype offset = static_cast<qsizetype>(slot % kColumnsPerBlock) * m_bins;
+    if (offset + m_bins > m_blocks[block].size()) {
+        return nullptr;
+    }
+    // data() copies the block first while a rasterization still holds it.
+    return reinterpret_cast<quint8 *>(m_blocks[block].data()) + offset;
+}
+
 SpectrogramItem::SpectrogramItem(QQuickItem *parent)
-    : QQuickItem(parent) {
+    : QQuickItem(parent)
+    , m_rasterMailbox(std::make_shared<SpectrogramRasterMailbox>()) {
+    m_rasterMailbox->owner = this;
+    // Created on the UI thread, which outlives the render threads using it.
+    spectrogramRasterPool();
     setFlag(ItemHasContents, true);
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
@@ -560,6 +865,14 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     });
 }
 
+SpectrogramItem::~SpectrogramItem() {
+    // A rasterization still running stops at its next check, and none
+    // delivers to this item from now on.
+    QMutexLocker lock(&m_rasterMailbox->mutex);
+    m_rasterMailbox->owner = nullptr;
+    m_rasterMailbox->latestSerial.store(0, std::memory_order_relaxed);
+}
+
 double SpectrogramItem::dbRange() const {
     return m_dbRange;
 }
@@ -572,7 +885,7 @@ void SpectrogramItem::setDbRange(double value) {
     }
     m_dbRange = clamped;
     emit dbRangeChanged();
-    invalidateCanvas();
+    markCanvasStaleLocked();
     update();
 }
 
@@ -588,7 +901,7 @@ void SpectrogramItem::setLogScale(bool value) {
     m_logScale = value;
     emit logScaleChanged();
     invalidateMapping();
-    invalidateCanvas();
+    markCanvasStaleLocked();
     m_freqGridDirty = true;
     m_timeGridDirty = true;
     m_crosshairDirty = true;
@@ -631,7 +944,7 @@ void SpectrogramItem::setSampleRateHz(int value) {
     m_sampleRateHz = clamped;
     emit sampleRateHzChanged();
     invalidateMapping();
-    invalidateCanvas();
+    markCanvasStaleLocked();
     m_freqGridDirty = true;
     m_timeGridDirty = true;
     m_crosshairDirty = true;
@@ -653,7 +966,7 @@ void SpectrogramItem::setMaxColumns(int value) {
     while (static_cast<int>(m_columns.size()) > m_maxColumns) {
         m_columns.pop_front();
     }
-    invalidateCanvas();
+    markCanvasStaleLocked();
     update();
 }
 
@@ -888,6 +1201,7 @@ void SpectrogramItem::setDisplayMode(int value) {
     if (m_displayMode == clamped) {
         return;
     }
+    bool redraw = false;
     {
         QMutexLocker lock(&m_stateMutex);
         const int previousMode = m_displayMode;
@@ -895,11 +1209,14 @@ void SpectrogramItem::setDisplayMode(int value) {
         if (previousMode == 1 && clamped == 0) {
             reanchorRollingEpochForCurrentDataLocked(std::chrono::steady_clock::now());
         }
+        if (m_precomputedReady) {
+            m_precomputedLastRightCol = -1;
+            markCanvasStaleLocked();
+            redraw = true;
+        }
     }
     emit displayModeChanged();
-    if (m_precomputedReady) {
-        m_precomputedLastRightCol = -1;
-        invalidateCanvas();
+    if (redraw) {
         update();
     }
 }
@@ -986,14 +1303,12 @@ void SpectrogramItem::setChannelMuted(bool muted) {
     if (m_channelMuted == muted) {
         return;
     }
-    m_channelMuted = muted;
-    emit channelMutedChanged();
     {
         QMutexLocker lock(&m_stateMutex);
-        markAllTilesDirtyLocked();
-        m_canvasDirty = true;
-        m_precomputedCanvasDirty = true;
+        m_channelMuted = muted;
+        markCanvasStaleLocked();
     }
+    emit channelMutedChanged();
     update();
 }
 
@@ -1496,11 +1811,13 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_ringWriteSeq = 0;
         m_ringOldestSeq = 0;
         m_ringCapacity = 0;
-        m_ringBuffer.clear();
+        m_ring.clear();
         m_ringColumnId.clear();
         m_ringSequenceId.clear();
         m_ringTrackToken.clear();
         m_trackColumnToSeqByToken.clear();
+        ++m_ringGeneration;
+        cancelPendingRasterLocked();
         m_precomputedMaxColumnIndex = -1;
         m_precomputedCanvasDirty = true;
         m_awaitingWorkerReset = true;
@@ -1546,6 +1863,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_zoomFillActive = false;
         applyPrecomputedResetLocked(
             startIndex, bins, trackToken, generation, clearHistoryOnReset);
+        invalidateCanvas();
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;
@@ -1838,15 +2156,14 @@ void SpectrogramItem::feedPrecomputedChunk(
             static_cast<double>(static_cast<float>(m_zoomLevel)), m_displayMode == 1));
 
         // Check if we need to (re)allocate: either more columns, or
-        // bins_per_column changed (e.g. FFT size switch).
-        const qint64 neededBytes =
-            static_cast<qint64>(neededCapacity) * bins;
+        // more bins_per_column (e.g. FFT size switch).
         const bool mustRealloc =
-            neededBytes > m_ringBuffer.size()
+            bins > m_ring.bins()
             || neededCapacity > m_ringCapacity;
 
         if (mustRealloc) {
-            QByteArray newBuf(static_cast<int>(neededBytes), '\0');
+            SpectrogramRingStorage newRing;
+            newRing.allocate(neededCapacity, bins);
             std::vector<qint32> newColId(
                 static_cast<size_t>(neededCapacity), -1);
             std::vector<qint64> newSeqId(
@@ -1859,8 +2176,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             // history stays contiguous after growth.
             const bool binsMatch =
                 m_ringCapacity > 0
-                && m_ringBuffer.size()
-                    == static_cast<qint64>(m_ringCapacity) * bins;
+                && m_ring.bins() == bins;
             if (binsMatch
                 && !m_ringColumnId.empty()
                 && !m_ringSequenceId.empty()
@@ -1879,16 +2195,19 @@ void SpectrogramItem::feedPrecomputedChunk(
                         continue;
                     }
                     const int newSlot = static_cast<int>(seq % neededCapacity);
-                    memcpy(newBuf.data() + newSlot * bins,
-                        m_ringBuffer.constData() + oldSlot * bins,
-                        static_cast<size_t>(bins));
+                    const quint8 *source = m_ring.column(oldSlot);
+                    quint8 *destination = newRing.writableColumn(newSlot);
+                    if (source == nullptr || destination == nullptr) {
+                        continue;
+                    }
+                    memcpy(destination, source, static_cast<size_t>(bins));
                     newColId[static_cast<size_t>(newSlot)] = trackCol;
                     newSeqId[static_cast<size_t>(newSlot)] = seq;
                     newTrackToken[static_cast<size_t>(newSlot)] = token;
                     newTrackColumnToSeqByToken[token].insert(trackCol, seq);
                 }
             }
-            m_ringBuffer = std::move(newBuf);
+            m_ring = std::move(newRing);
             m_ringColumnId = std::move(newColId);
             m_ringSequenceId = std::move(newSeqId);
             m_ringTrackToken = std::move(newTrackToken);
@@ -1948,9 +2267,9 @@ void SpectrogramItem::feedPrecomputedChunk(
                     }
                 }
             }
-            memcpy(m_ringBuffer.data() + slot * bins,
-                   srcData + srcOff,
-                   static_cast<size_t>(bins));
+            if (quint8 *destination = m_ring.writableColumn(slot)) {
+                memcpy(destination, srcData + srcOff, static_cast<size_t>(bins));
+            }
             m_ringColumnId[static_cast<size_t>(slot)] = trackCol;
             if (!m_ringSequenceId.empty()) {
                 m_ringSequenceId[static_cast<size_t>(slot)] = m_ringWriteSeq;
@@ -2009,41 +2328,14 @@ void SpectrogramItem::feedPrecomputedChunk(
         && !m_canvas.isNull()
         && m_precomputedBinsPerColumn > 0) {
         // Centered mode with existing canvas: draw new columns in-place
-        // using the same column-to-pixel mapping as the rebuild path.
-        // This avoids costly full rebuilds (20-50 ms at 3440x719) while
-        // the growing edge fills in during initial decode.
-        const qint32 chunkEnd =
-            static_cast<qint32>(startIndex) + columns - 1;
-        const qint32 dispL =
-            static_cast<qint32>(m_precomputedCanvasDisplayLeft);
-        const qint32 dispR =
-            static_cast<qint32>(m_precomputedCanvasDisplayRight);
-        const bool overlapsVisible =
-            static_cast<qint32>(startIndex) <= dispR
-            && chunkEnd >= dispL;
-        if (overlapsVisible) {
-            const auto projectionOwner = precomputedProjectionLocked();
-            const auto &projection = *projectionOwner;
-            const double ez = effectiveZoomLocked();
-            const int canvasWidth = m_canvas.width();
-            const int drawCols = std::min(m_canvasFilledCols, canvasWidth);
-            const int canvasStart =
-                (m_canvasWriteX - drawCols + canvasWidth) % canvasWidth;
-            for (qint32 col = std::max(static_cast<qint32>(startIndex), dispL);
-                 col <= std::min(chunkEnd, dispR); ++col) {
-                // Use the rebuild's logical mapping, then translate through
-                // the circular canvas offset. Once centered playback starts
-                // scrolling, logical x=0 no longer lives at physical x=0.
-                // Writing late right-edge data directly to logical x leaves
-                // the visible circular slot permanently black.
-                const int logicalX = static_cast<int>(
-                    static_cast<double>(col - dispL) * ez);
-                if (logicalX >= 0 && logicalX < canvasWidth) {
-                    const int canvasX = (canvasStart + logicalX) % canvasWidth;
-                    drawPrecomputedColumnAtLocked(
-                        canvasX, static_cast<qint64>(col), false, projection);
-                }
-            }
+        // using the same column-to-pixel mapping as the rasterization.
+        // This avoids full rasterizations while the growing edge fills
+        // in during initial decode. A rasterization in progress draws
+        // these columns in once it arrives.
+        if (columns > 0) {
+            drawCenteredColumnsInPlaceLocked(
+                startIndex, static_cast<qint64>(startIndex) + columns - 1,
+                effectiveZoomLocked());
         }
     } else if (m_displayMode == 0
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
@@ -2144,7 +2436,8 @@ void SpectrogramItem::clearPrecomputed() {
     FERROUS_SPECTROGRAM_LOGF(stderr, "[Qt-clearPrecomputed] ringCap=%d ready=%d\n",
         m_ringCapacity, m_precomputedReady ? 1 : 0);
     QMutexLocker lock(&m_stateMutex);
-    m_ringBuffer.clear();
+    m_ring.clear();
+    ++m_ringGeneration;
     m_ringColumnId.clear();
     m_ringSequenceId.clear();
     m_ringTrackToken.clear();
@@ -2200,6 +2493,24 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_precomputedSessionGeneration = generation;
         m_precomputedCommittedGeneration = std::max(m_precomputedCommittedGeneration, generation);
     }
+    // A rasterization of the columns before the reset is obsolete.
+    cancelPendingRasterLocked();
+    const bool preserveRollingHistory =
+        !clearHistoryOnReset &&
+        m_displayMode == 0
+        && m_ringCapacity > 0
+        && m_precomputedBinsPerColumn > 0
+        && bins == m_precomputedBinsPerColumn;
+    if (!preserveRollingHistory) {
+        ++m_ringGeneration;
+    }
+    // The canvas stays on screen until the rasterization replacing it
+    // arrives when it shows rolling history that keeps its write sequences,
+    // or when the zoom preview shows it while waiting for this data.
+    const bool hasCanvas = !m_canvas.isNull()
+        && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft;
+    const bool keepCanvas = hasCanvas
+        && ((preserveRollingHistory && m_precomputedCanvasRolling) || m_awaitingZoomData);
     // A reset (seek or manual track change) breaks the continuous
     // gapless coordinate space — clear the accumulated offset,
     // per-track column tracking, and canvas display range so the
@@ -2207,16 +2518,10 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     m_gaplessPositionOffset = 0.0;
     m_gaplessContinuationPending = false;
     m_precomputedMaxColumnIndex = -1;
-    if (!m_zoomFillActive) {
+    if (!m_zoomFillActive && !keepCanvas) {
         m_precomputedCanvasDisplayLeft = 0;
         m_precomputedCanvasDisplayRight = -1;
     }
-    const bool preserveRollingHistory =
-        !clearHistoryOnReset &&
-        m_displayMode == 0
-        && m_ringCapacity > 0
-        && m_precomputedBinsPerColumn > 0
-        && bins == m_precomputedBinsPerColumn;
     if (!preserveRollingHistory) {
         m_ringOldestSeq = 0;
         m_ringWriteSeq = 0;
@@ -2231,7 +2536,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_rollingEpoch = m_displayMode == 0
             ? -static_cast<qint64>(startIndex)
             : 0;
-        m_ringBuffer.clear();
+        m_ring.clear();
         m_ringColumnId.clear();
         m_ringSequenceId.clear();
         m_ringTrackToken.clear();
@@ -2255,6 +2560,8 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     if (m_zoomFillActive && !m_canvas.isNull()) {
         // Keep old canvas — canvasFreeze in updatePaintNode will
         // prevent rebuild/advance until the ring covers the display.
+    } else if (keepCanvas) {
+        m_precomputedCanvasDirty = true;
     } else {
         invalidateCanvas();
     }
@@ -2459,7 +2766,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     int srcStart = 0;
     int latestX = 0;
     double scrollOffset = 0.0;
+    // Where the view starts, and where the canvas on screen goes as drawn.
     double drawX = 0.0;
+    double canvasDrawX = 0.0;
     bool showPlayhead = false;
     QRectF playheadRect;
     SpectrogramZoomPreview preview;
@@ -2614,15 +2923,35 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 displayRight = range.right;
                 centeredDecodedTailLooksFinalForFrame = range.decodedTailLooksFinal;
 
-                // Jitter prevention: only apply when zoom hasn't changed
+                // Jitter prevention: only apply when zoom hasn't changed,
+                // against the canvas being rasterized if there is one.
+                qint64 referenceLeft = m_precomputedCanvasDisplayLeft;
+                qint64 referenceRight = m_precomputedCanvasDisplayRight;
+                double referenceZoom = m_precomputedCanvasZoomLevel;
+                bool referenceComparable = !m_precomputedCanvasRolling
+                    && m_canvas.width() == w
+                    && m_canvas.height() == h;
+                if (m_rasterPending) {
+                    referenceLeft = m_rasterTarget.displayLeft;
+                    referenceZoom = m_rasterTarget.effectiveZoom;
+                    referenceRight = rasterDisplayRight(
+                        referenceLeft,
+                        rasterDrawPixels(m_rasterTarget.width, referenceLeft,
+                            m_rasterTarget.displayRight, referenceZoom),
+                        referenceZoom);
+                    referenceComparable = !m_rasterTarget.rollingMode
+                        && m_rasterTarget.width == w
+                        && m_rasterTarget.height == h;
+                }
                 const bool isSeekJump =
-                    m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
-                    && displayLeft < m_precomputedCanvasDisplayLeft - 2;
+                    referenceRight >= referenceLeft
+                    && displayLeft < referenceLeft - 2;
                 if (!isSeekJump
-                    && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft
-                    && std::abs(effectiveZoom - m_precomputedCanvasZoomLevel) < 0.001) {
-                    displayLeft = std::max(displayLeft, m_precomputedCanvasDisplayLeft);
-                    displayRight = std::max(displayRight, m_precomputedCanvasDisplayRight);
+                    && referenceComparable
+                    && referenceRight >= referenceLeft
+                    && std::abs(effectiveZoom - referenceZoom) < 0.001) {
+                    displayLeft = std::max(displayLeft, referenceLeft);
+                    displayRight = std::max(displayRight, referenceRight);
                 }
 
                 playheadPixel = static_cast<int>(std::round(
@@ -2708,9 +3037,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && m_precomputedCanvasDisplayRight
                     >= m_precomputedCanvasDisplayLeft;
 
+            // Full rasterizations happen on a worker; until one arrives,
+            // the canvas on screen stays there, aligned to this view.
             if (visibleCols > 0 && !canvasFreeze) {
-                if (needsFullRebuild || m_precomputedCanvasDirty) {
-                    rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
+                if (m_rasterPending) {
+                    if (pendingRasterOutdatedLocked(w, h, displayLeft, displayRight, rollingMode)) {
+                        requestPrecomputedRasterLocked(w, h, displayLeft, displayRight, rollingMode);
+                    }
+                } else if (needsFullRebuild || m_precomputedCanvasDirty) {
+                    requestPrecomputedRasterLocked(w, h, displayLeft, displayRight, rollingMode);
                 } else if (rangeChanged) {
                     // At sub-1.0 zoom, multiple source columns map to each
                     // pixel.  Small column shifts don't produce visible
@@ -2722,43 +3057,71 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     if (effectiveZoom < 0.999 && pixelShift < 1.0) {
                         // Old canvas is still close enough — skip.
                     } else if (!advancePrecomputedCanvasLocked(displayLeft, displayRight, rollingMode)) {
-                        rebuildPrecomputedCanvasLocked(w, h, displayLeft, displayRight, rollingMode);
+                        requestPrecomputedRasterLocked(w, h, displayLeft, displayRight, rollingMode);
                     }
                 }
                 m_precomputedLastRightCol = nowCol;
                 m_precomputedLastDisplaySeq = rollingMode
                     ? displayRight
                     : static_cast<qint64>(nowCol);
-                m_precomputedCanvasColumnsPerSecond = columnsPerSecond;
-                m_precomputedCanvasEpoch = rollingMode ? m_rollingEpoch : 0;
-                m_precomputedCanvasPixelsPerSecond =
-                    m_precomputedCanvasZoomLevel * columnsPerSecond;
             }
 
+            // Where this view starts: the canvas's position when it is the
+            // view's, and where a rasterization of the view will put it.
+            const bool centeredScrolling = !rollingMode && centeredRangeScrolls(
+                displayLeft,
+                displayRight,
+                m_precomputedMaxColumnIndex >= 0
+                    ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                    : static_cast<qint64>(0),
+                static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+                centeredDecodedTailLooksFinalForFrame);
+            const bool canvasIsView = !m_rasterPending
+                && !m_canvas.isNull()
+                && m_canvas.width() == w
+                && m_canvas.height() == h
+                && rollingMode == m_precomputedCanvasRolling
+                && std::abs(effectiveZoom - m_precomputedCanvasZoomLevel) <= 0.001
+                && (m_precomputedCanvasColumnsPerSecond <= 0.0
+                    || std::abs(m_precomputedCanvasColumnsPerSecond - columnsPerSecond)
+                        <= 1e-9 * columnsPerSecond);
+            if (rollingMode) {
+                const int viewPixels = canvasIsView
+                    ? std::min(m_canvasFilledCols, m_canvas.width())
+                    : rasterDrawPixels(w, displayLeft, displayRight, effectiveZoom);
+                drawX = static_cast<double>(w - viewPixels)
+                    - columnPhase * effectiveZoom
+                    - (canvasIsView ? m_precomputedCanvasSubpixelOffset : 0.0);
+            } else {
+                drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
+            }
+
+            const bool zoomPreviewWanted = zoomPreviewWantedLocked()
+                || (m_rasterPending && m_rasterHoldsZoomPreview);
+            m_zoomPreviewWantedLastFrame = zoomPreviewWanted;
+            bool zoomPreviewShown = false;
             if (!m_canvas.isNull() && m_canvasFilledCols > 0) {
                 hasCanvas = true;
                 canvasSize = m_canvas.size();
                 drawCols = std::min(m_canvasFilledCols, canvasSize.width());
                 srcStart = (m_canvasWriteX - drawCols + canvasSize.width()) % canvasSize.width();
                 scrollOffset = columnPhase * effectiveZoom;
-                if (rollingMode) {
-                    drawX = static_cast<double>(w - drawCols)
+                // Where the canvas goes as drawn: at the view's start when
+                // it is the view's, and else where it went last.
+                canvasDrawX = drawX;
+                if (rollingMode && !canvasIsView) {
+                    canvasDrawX = static_cast<double>(w - drawCols)
                         - columnPhase * effectiveZoom
                         - m_precomputedCanvasSubpixelOffset;
-                } else {
-                    const bool centeredScrolling = centeredRangeScrolls(
-                        displayLeft,
-                        displayRight,
-                        m_precomputedMaxColumnIndex >= 0
-                            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                            : static_cast<qint64>(0),
-                        static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                        centeredDecodedTailLooksFinalForFrame);
-                    drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
                 }
-                if (zoomPreviewWantedLocked()) {
+                if (zoomPreviewWanted) {
                     preview = zoomPreviewLocked(
-                        w, clampedPositionSeconds, drawX, rollingMode, columnsPerSecond);
+                        w, clampedPositionSeconds, canvasDrawX, rollingMode, columnsPerSecond);
+                    zoomPreviewShown = preview.active;
+                } else if (!canvasIsView) {
+                    preview = staleCanvasAlignmentLocked(
+                        canvasDrawX, drawX, displayLeft, rollingMode,
+                        effectiveZoom, columnsPerSecond);
                 }
                 latestX = (m_canvasWriteX - 1 + canvasSize.width()) % canvasSize.width();
                 tileCount = static_cast<int>(m_dirtyTiles.size());
@@ -2777,16 +3140,24 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         continue;
                     }
                     tileDirtyIndexes.push_back(tileIndex);
-                    tileImages.push_back(m_canvas.copy(tileStart, 0, tileWidth, canvasSize.height()));
+                    // The rasterization's copy, if no column changed since.
+                    QImage rasterTile;
+                    if (tileIndex < m_rasterTiles.size()) {
+                        rasterTile = std::exchange(m_rasterTiles[tileIndex], QImage());
+                    }
+                    tileImages.push_back(
+                        rasterTile.size() == QSize(tileWidth, canvasSize.height())
+                            ? std::move(rasterTile)
+                            : m_canvas.copy(tileStart, 0, tileWidth, canvasSize.height()));
                     m_dirtyTiles[static_cast<size_t>(tileIndex)] = 0;
                 }
             }
 
-            if (preview.active && !rollingMode) {
+            if (zoomPreviewShown && !rollingMode) {
                 playheadPixel = static_cast<int>(std::round(preview.toX));
             }
-            m_zoomPreviewShown = preview.active;
-            if (preview.active) {
+            m_zoomPreviewShown = zoomPreviewShown;
+            if (zoomPreviewShown) {
                 m_zoomPreviewAnchorSeconds = clampedPositionSeconds;
                 m_zoomPreviewAnchorX = preview.toX;
                 m_zoomPreviewPixelsPerSecond =
@@ -2830,7 +3201,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // Only rebuilt when the shift exhausts the padding.
             // The time grid and the crosshair's readout follow the data,
             // not the scaled preview, so they wait for the data.
-            if (m_gridEnabled && m_binsPerColumn > 1 && !preview.active) {
+            if (m_gridEnabled && m_binsPerColumn > 1 && !zoomPreviewShown) {
                 constexpr int kTimeGridPadding = 400;
                 // The pixel shift accounts for both displayLeft advancement
                 // and drawX changes (critical in rolling mode where drawX
@@ -2865,7 +3236,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // panes when crosshairSharedX >= 0 (vertical line + bottom time label).
             if (m_crosshairEnabled
                 && (m_hoverActive || m_crosshairSharedX >= 0.0)
-                && !preview.active) {
+                && !zoomPreviewShown) {
                 bool crosshairTimeStale = false;
                 if (m_showTimeLabels) {
                     crosshairTimeStale =
@@ -2907,6 +3278,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     srcStart = (m_canvasWriteX - drawCols + m_canvas.width()) % m_canvas.width();
                     scrollOffset = 0.0;
                     drawX = static_cast<double>(w - drawCols) - scrollOffset;
+                    canvasDrawX = drawX;
                     latestX = (m_canvasWriteX - 1 + m_canvas.width()) % m_canvas.width();
                     tileCount = static_cast<int>(m_dirtyTiles.size());
                     const bool refreshAllTiles = node->tileTextures.size() != tileCount;
@@ -3053,6 +3425,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const int withinTile = segmentOffset - tileStart;
                 const int span = std::min(remainingLength, tileWidth - withinTile);
                 QSGTexture *tileTexture = node->tileTextures[tileIndex];
+                // A canvas awaiting its rasterization for another height
+                // is stretched to this one.
                 configurePreviewTextureNode(
                     node->tileFragments[fragmentCursor++],
                     tileTexture,
@@ -3060,7 +3434,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         segmentTargetX,
                         0.0,
                         static_cast<double>(span),
-                        static_cast<double>(canvasSize.height())),
+                        static_cast<double>(h)),
                     QRectF(withinTile, 0, span, canvasSize.height()),
                     preview,
                     static_cast<double>(w),
@@ -3073,9 +3447,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
         const int firstLength = std::min(canvasSize.width() - srcStart, drawCols);
         const int secondLength = drawCols - firstLength;
-        configureSegment(srcStart, firstLength, drawX);
+        configureSegment(srcStart, firstLength, canvasDrawX);
         if (secondLength > 0) {
-            configureSegment(0, secondLength, drawX + static_cast<double>(firstLength));
+            configureSegment(0, secondLength, canvasDrawX + static_cast<double>(firstLength));
         }
 
         int latestTileIndex = latestX / kCanvasTileWidth;
@@ -3088,10 +3462,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 node->latest,
                 latestTexture,
                 QRectF(
-                    drawX + static_cast<double>(drawCols),
+                    canvasDrawX + static_cast<double>(drawCols),
                     0.0,
                     scrollOffset,
-                    static_cast<double>(canvasSize.height())),
+                    static_cast<double>(h)),
                 QRectF(latestWithinTile, 0, 1, canvasSize.height()),
                 preview,
                 static_cast<double>(w),
@@ -3257,7 +3631,7 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
     if (newGeometry.size() != oldGeometry.size()) {
         QMutexLocker lock(&m_stateMutex);
         invalidateMapping();
-        invalidateCanvas();
+        markCanvasStaleLocked();
         m_freqGridDirty = true;
         m_timeGridDirty = true;
         m_crosshairDirty = true;
@@ -3940,7 +4314,9 @@ void SpectrogramItem::invalidateMapping() {
 }
 
 void SpectrogramItem::invalidateCanvas() {
+    cancelPendingRasterLocked();
     m_canvas = QImage();
+    m_rasterTiles.clear();
     m_canvasDirty = true;
     m_canvasWriteX = 0;
     m_canvasFilledCols = 0;
@@ -3950,6 +4326,62 @@ void SpectrogramItem::invalidateCanvas() {
     m_precomputedCanvasDirty = true;
     m_precomputedCanvasSubpixelOffset = 0.0;
     m_dirtyTiles.clear();
+}
+
+void SpectrogramItem::markCanvasStaleLocked() {
+    // The canvas stays on screen until its replacement is rasterized.
+    m_canvasDirty = true;
+    m_precomputedCanvasDirty = true;
+}
+
+SpectrogramZoomPreview SpectrogramItem::staleCanvasAlignmentLocked(
+    double canvasDrawX,
+    double viewDrawX,
+    qint64 displayLeft,
+    bool rollingMode,
+    double effectiveZoom,
+    double columnsPerSecond) const {
+    SpectrogramZoomPreview alignment;
+    const double canvasZoom = m_precomputedCanvasZoomLevel;
+    // Centered columns are another track's after a track change: that
+    // canvas stays as it is.
+    if (canvasZoom <= 0.0
+        || effectiveZoom <= 0.0
+        || m_precomputedCanvasDisplayRight < m_precomputedCanvasDisplayLeft
+        || (!m_precomputedCanvasRolling
+            && m_precomputedCanvasTrackToken != m_precomputedTrackToken)) {
+        return alignment;
+    }
+    const double canvasColumnsPerSecond = m_precomputedCanvasColumnsPerSecond > 0.0
+        ? m_precomputedCanvasColumnsPerSecond
+        : columnsPerSecond;
+    const double canvasLeft = static_cast<double>(m_precomputedCanvasDisplayLeft);
+    // The canvas's first column, in this view's columns: the same ones in
+    // the same mode and time scale (for rolling history, while the ring
+    // keeps its write sequences), and else the column at its time.
+    double viewColumn = canvasLeft;
+    double scale = effectiveZoom / canvasZoom;
+    const bool sameColumns = rollingMode == m_precomputedCanvasRolling
+        && std::abs(canvasColumnsPerSecond - columnsPerSecond) <= 1e-9 * columnsPerSecond
+        && (!rollingMode || m_precomputedCanvasRingGeneration == m_ringGeneration);
+    if (!sameColumns) {
+        if (canvasColumnsPerSecond <= 0.0 || columnsPerSecond <= 0.0) {
+            return alignment;
+        }
+        const double seconds =
+            (canvasLeft - static_cast<double>(m_precomputedCanvasEpoch)) / canvasColumnsPerSecond;
+        viewColumn = seconds * columnsPerSecond
+            + (rollingMode ? static_cast<double>(m_rollingEpoch) : 0.0);
+        scale = (effectiveZoom * columnsPerSecond) / (canvasZoom * canvasColumnsPerSecond);
+    }
+    alignment.fromX = canvasDrawX;
+    alignment.toX = viewDrawX + (viewColumn - static_cast<double>(displayLeft)) * effectiveZoom;
+    alignment.scale = scale;
+    alignment.active = std::isfinite(scale)
+        && scale > 0.0
+        && std::isfinite(alignment.toX)
+        && (std::abs(scale - 1.0) > 1e-9 || std::abs(alignment.toX - alignment.fromX) > 1e-6);
+    return alignment;
 }
 
 void SpectrogramItem::resizeDirtyTilesLocked() {
@@ -3970,6 +4402,10 @@ void SpectrogramItem::markTileDirtyLocked(int x) {
     resizeDirtyTilesLocked();
     const int tileIndex = std::clamp(x / kCanvasTileWidth, 0, static_cast<int>(m_dirtyTiles.size()) - 1);
     m_dirtyTiles[static_cast<size_t>(tileIndex)] = 1;
+    // The rasterization's copy of this tile misses what is drawn now.
+    if (tileIndex < m_rasterTiles.size()) {
+        m_rasterTiles[tileIndex] = QImage();
+    }
 }
 
 void SpectrogramItem::markAllTilesDirtyLocked() {
@@ -4023,6 +4459,7 @@ void SpectrogramItem::ensureCanvas(int width, int height) {
     if (m_canvas.width() != cols || m_canvas.height() != height || m_canvas.format() != QImage::Format_RGB32) {
         m_canvas = QImage(cols, height, QImage::Format_RGB32);
         m_canvas.fill(Qt::black);
+        m_rasterTiles.clear();
         m_canvasDirty = true;
         resizeDirtyTilesLocked();
         markAllTilesDirtyLocked();
@@ -4037,6 +4474,7 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
         return;
     }
     m_canvas.fill(Qt::black);
+    m_rasterTiles.clear();
     m_canvasWriteX = 0;
     m_canvasFilledCols = 0;
     const int cols = m_canvas.width();
@@ -4162,9 +4600,13 @@ std::array<quint8, 256> SpectrogramItem::buildPrecomputedDbRemapLocked() const {
     return dbRemap;
 }
 
-std::shared_ptr<const SpectrogramProjection> SpectrogramItem::precomputedProjectionLocked() const {
+std::shared_ptr<const SpectrogramProjection> SpectrogramItem::precomputedProjectionLocked(
+    int height) const {
+    if (height < 0) {
+        height = m_canvas.height();
+    }
     const SpectrogramProjection::Key key{
-        m_canvas.height(), m_mappingHeight, m_binsPerColumn,
+        height, m_mappingHeight, m_binsPerColumn,
         m_precomputedBinsPerColumn, m_sampleRateHz, m_logScale,
         m_dbRange, m_channelMuted};
     if (m_precomputedProjection && m_precomputedProjection->key == key) {
@@ -4182,11 +4624,11 @@ std::shared_ptr<const SpectrogramProjection> SpectrogramItem::precomputedProject
     std::erase_if(cache, [](const auto &entry) { return entry.second.expired(); });
     auto projection = std::make_shared<SpectrogramProjection>();
     projection->key = key;
-    projection->binRanges.reserve(static_cast<size_t>(m_canvas.height()));
+    projection->binRanges.reserve(static_cast<size_t>(std::max(0, height)));
     const int mapSize = static_cast<int>(m_iToBin.size());
     const int bins = std::max(1, m_precomputedBinsPerColumn);
-    for (int y = 0; y < m_canvas.height(); ++y) {
-        const int mi = m_canvas.height() - 1 - y;
+    for (int y = 0; y < height; ++y) {
+        const int mi = height - 1 - y;
         int lo = 0;
         int hi = 0;
         if (mi >= 0 && mi < mapSize) {
@@ -4216,76 +4658,25 @@ std::shared_ptr<const SpectrogramProjection> SpectrogramItem::precomputedProject
     return m_precomputedProjection;
 }
 
+const quint8 *SpectrogramItem::ringColumnLocked(qint64 displayIndex, bool rollingMode) const {
+    const int slot = ringSlotForDisplayIndexLocked(displayIndex, rollingMode);
+    return slot >= 0 ? m_ring.column(slot) : nullptr;
+}
+
 void SpectrogramItem::drawPrecomputedColumnAtLocked(
     int x,
     qint64 displayIndex,
     bool rollingMode,
     const SpectrogramProjection &projection) {
-    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width() || m_precomputedBinsPerColumn <= 0) {
+    if (!canvasColumnDrawable(m_canvas, x, projection) || m_precomputedBinsPerColumn <= 0) {
         return;
     }
-
     markTileDirtyLocked(x);
-
-    const int height = m_canvas.height();
-    // Detach once per column, not once for every pixel written.
-    auto *destination = reinterpret_cast<QRgb *>(m_canvas.bits()) + x;
-    const qsizetype rowStride = m_canvas.bytesPerLine() / static_cast<qsizetype>(sizeof(QRgb));
-    const int bins = m_precomputedBinsPerColumn;
-    const auto *ringData = reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
-    const QRgb bgColor = kBackgroundColor.rgba();
-
-    int slot = -1;
-    bool valid = false;
-    if (rollingMode) {
-        slot = m_ringCapacity > 0
-            ? static_cast<int>(displayIndex % m_ringCapacity)
-            : -1;
-        valid = displayIndex >= m_ringOldestSeq
-            && displayIndex < m_ringWriteSeq
-            && slot >= 0
-            && slot < m_ringCapacity
-            && !m_ringSequenceId.empty()
-            && m_ringSequenceId[static_cast<size_t>(slot)] == displayIndex
-            && !m_ringColumnId.empty()
-            && m_ringColumnId[static_cast<size_t>(slot)] >= 0;
-    } else {
-        const auto tokenColumns = m_trackColumnToSeqByToken.constFind(m_precomputedTrackToken);
-        const qint64 seq = tokenColumns != m_trackColumnToSeqByToken.cend()
-            ? tokenColumns->value(static_cast<qint32>(displayIndex), -1)
-            : -1;
-        slot = seq >= 0 && m_ringCapacity > 0
-            ? static_cast<int>(seq % m_ringCapacity)
-            : -1;
-        valid = displayIndex >= 0
-            && seq >= m_ringOldestSeq
-            && seq < m_ringWriteSeq
-            && slot >= 0
-            && slot < m_ringCapacity
-            && !m_ringSequenceId.empty()
-            && m_ringSequenceId[static_cast<size_t>(slot)] == seq
-            && !m_ringColumnId.empty()
-            && m_ringColumnId[static_cast<size_t>(slot)] == static_cast<qint32>(displayIndex);
-    }
-
-    if (!valid) {
-        for (int y = 0; y < height; ++y) {
-            destination[static_cast<qsizetype>(y) * rowStride] = bgColor;
-        }
-        return;
-    }
-
-    const int baseOff = slot * bins;
-    for (int y = 0; y < height; ++y) {
-        const auto [binLo, binHi] = projection.binRanges[static_cast<size_t>(y)];
-
-        quint8 rawMax = 0;
-        for (int b = binLo; b <= binHi; ++b) {
-            rawMax = std::max(rawMax, ringData[baseOff + b]);
-        }
-        destination[static_cast<qsizetype>(y) * rowStride] =
-            projection.colors[static_cast<size_t>(rawMax)];
-    }
+    rasterColumn(m_canvas, x, displayIndex,
+        spectrogramColumns([this, rollingMode](qint64 index) {
+            return ringColumnLocked(index, rollingMode);
+        }),
+        projection);
 }
 
 void SpectrogramItem::drawPeakHoldColumnRangeLocked(
@@ -4294,67 +4685,16 @@ void SpectrogramItem::drawPeakHoldColumnRangeLocked(
     qint64 colLast,
     bool rollingMode,
     const SpectrogramProjection &projection) {
-    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width()
+    if (!canvasColumnDrawable(m_canvas, x, projection)
         || m_precomputedBinsPerColumn <= 0 || colFirst > colLast) {
         return;
     }
-
-    // Single column: delegate to the fast path.
-    if (colFirst == colLast) {
-        drawPrecomputedColumnAtLocked(x, colFirst, rollingMode, projection);
-        return;
-    }
-
     markTileDirtyLocked(x);
-
-    const int height = m_canvas.height();
-    // Detach once per column, not once for every pixel written.
-    auto *destination = reinterpret_cast<QRgb *>(m_canvas.bits()) + x;
-    const qsizetype rowStride = m_canvas.bytesPerLine() / static_cast<qsizetype>(sizeof(QRgb));
-    const int bins = m_precomputedBinsPerColumn;
-    const auto *ringData =
-        reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
-    const QRgb bgColor = kBackgroundColor.rgba();
-
-    // Resolve ring slots for each column in the range.
-    // Cap to a reasonable max to avoid pathological cases.
-    const int rangeCols = static_cast<int>(
-        std::min(colLast - colFirst + 1, static_cast<qint64>(64)));
-
-    // Collect valid slot base offsets.
-    std::array<int, 64> slotBases{};
-    int validCount = 0;
-    for (int i = 0; i < rangeCols; ++i) {
-        const int slot = ringSlotForDisplayIndexLocked(
-            colFirst + i, rollingMode);
-        if (slot >= 0) {
-            slotBases[static_cast<size_t>(validCount)] = slot * bins;
-            ++validCount;
-        }
-    }
-
-    if (validCount == 0) {
-        for (int y = 0; y < height; ++y) {
-            destination[static_cast<qsizetype>(y) * rowStride] = bgColor;
-        }
-        return;
-    }
-
-    for (int y = 0; y < height; ++y) {
-        const auto [binLo, binHi] = projection.binRanges[static_cast<size_t>(y)];
-
-        // Peak-hold across all valid columns in the range.
-        quint8 rawMax = 0;
-        for (int c = 0; c < validCount; ++c) {
-            const int base = slotBases[static_cast<size_t>(c)];
-            for (int b = binLo; b <= binHi; ++b) {
-                rawMax = std::max(rawMax, ringData[base + b]);
-            }
-        }
-
-        destination[static_cast<qsizetype>(y) * rowStride] =
-            projection.colors[static_cast<size_t>(rawMax)];
-    }
+    rasterPeakHold(m_canvas, x, colFirst, colLast,
+        spectrogramColumns([this, rollingMode](qint64 index) {
+            return ringColumnLocked(index, rollingMode);
+        }),
+        projection);
 }
 
 int SpectrogramItem::ringSlotForDisplayIndexLocked(
@@ -4400,62 +4740,15 @@ void SpectrogramItem::drawInterpolatedColumnAtLocked(
     double t,
     bool rollingMode,
     const SpectrogramProjection &projection) {
-    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width()
-        || m_precomputedBinsPerColumn <= 0) {
+    if (!canvasColumnDrawable(m_canvas, x, projection) || m_precomputedBinsPerColumn <= 0) {
         return;
     }
-
     markTileDirtyLocked(x);
-
-    const int height = m_canvas.height();
-    // Detach once per column, not once for every pixel written.
-    auto *destination = reinterpret_cast<QRgb *>(m_canvas.bits()) + x;
-    const qsizetype rowStride = m_canvas.bytesPerLine() / static_cast<qsizetype>(sizeof(QRgb));
-    const int bins = m_precomputedBinsPerColumn;
-    const auto *ringData =
-        reinterpret_cast<const quint8 *>(m_ringBuffer.constData());
-    const QRgb bgColor = kBackgroundColor.rgba();
-
-    const int slotL = ringSlotForDisplayIndexLocked(displayIndexL, rollingMode);
-    const int slotR = ringSlotForDisplayIndexLocked(displayIndexR, rollingMode);
-
-    if (slotL < 0 && slotR < 0) {
-        for (int y = 0; y < height; ++y) {
-            destination[static_cast<qsizetype>(y) * rowStride] = bgColor;
-        }
-        return;
-    }
-    if (slotL < 0) {
-        drawPrecomputedColumnAtLocked(
-            x, displayIndexR, rollingMode, projection);
-        return;
-    }
-    if (slotR < 0) {
-        drawPrecomputedColumnAtLocked(
-            x, displayIndexL, rollingMode, projection);
-        return;
-    }
-
-    const int baseL = slotL * bins;
-    const int baseR = slotR * bins;
-    const double oneMinusT = 1.0 - t;
-
-    for (int y = 0; y < height; ++y) {
-        const auto [binLo, binHi] = projection.binRanges[static_cast<size_t>(y)];
-
-        quint8 rawMaxL = 0;
-        quint8 rawMaxR = 0;
-        for (int b = binLo; b <= binHi; ++b) {
-            rawMaxL = std::max(rawMaxL, ringData[baseL + b]);
-            rawMaxR = std::max(rawMaxR, ringData[baseR + b]);
-        }
-
-        const auto rawBlended = static_cast<quint8>(std::lround(
-            static_cast<double>(rawMaxL) * oneMinusT
-            + static_cast<double>(rawMaxR) * t));
-        destination[static_cast<qsizetype>(y) * rowStride] =
-            projection.colors[static_cast<size_t>(rawBlended)];
-    }
+    rasterInterpolated(m_canvas, x, displayIndexL, displayIndexR, t,
+        spectrogramColumns([this, rollingMode](qint64 index) {
+            return ringColumnLocked(index, rollingMode);
+        }),
+        projection);
 }
 
 void SpectrogramItem::drawPrecomputedPixelAtLocked(
@@ -4466,96 +4759,300 @@ void SpectrogramItem::drawPrecomputedPixelAtLocked(
     bool rollingMode,
     double effectiveZoom,
     const SpectrogramProjection &projection) {
-    if (m_canvas.isNull() || effectiveZoom <= 0.0 || displayRight < displayLeft) {
+    if (!canvasColumnDrawable(m_canvas, canvasX, projection)
+        || m_precomputedBinsPerColumn <= 0
+        || effectiveZoom <= 0.0
+        || displayRight < displayLeft) {
         return;
     }
-    const double columnsPerPixel = 1.0 / effectiveZoom;
-    const double rangeStart = static_cast<double>(pixelX) * columnsPerPixel;
-    const double rangeEnd = static_cast<double>(pixelX + 1) * columnsPerPixel;
-    const qint64 colFirst = std::min(
-        displayLeft + static_cast<qint64>(std::floor(rangeStart)),
-        displayRight);
-    const qint64 colLast = std::min(
-        displayLeft + static_cast<qint64>(std::ceil(rangeEnd - 1.0)),
-        displayRight);
-
-    const bool interpolate = effectiveZoom > 1.001;
-    if (colFirst < colLast && !interpolate) {
-        drawPeakHoldColumnRangeLocked(
-            canvasX, colFirst, colLast, rollingMode, projection);
-    } else if (interpolate) {
-        const double t = rangeStart - std::floor(rangeStart);
-        if (t > 0.001) {
-            const qint64 colR = std::min(colFirst + 1, displayRight);
-            if (colR != colFirst) {
-                drawInterpolatedColumnAtLocked(
-                    canvasX, colFirst, colR, t, rollingMode, projection);
-                return;
-            }
-        }
-        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, projection);
-    } else {
-        drawPrecomputedColumnAtLocked(canvasX, colFirst, rollingMode, projection);
-    }
+    markTileDirtyLocked(canvasX);
+    rasterPixel(m_canvas, canvasX, pixelX, displayLeft, displayRight, effectiveZoom,
+        spectrogramColumns([this, rollingMode](qint64 index) {
+            return ringColumnLocked(index, rollingMode);
+        }),
+        projection);
 }
 
-void SpectrogramItem::rebuildPrecomputedCanvasLocked(
+std::shared_ptr<SpectrogramRasterJob> SpectrogramItem::makeRasterJobLocked(
     int width,
     int height,
     qint64 displayLeft,
     qint64 displayRight,
     bool rollingMode) {
-    if (width <= 0 || height <= 0 || displayRight < displayLeft) {
-        invalidateCanvas();
+    if (width <= 0 || height <= 0 || displayRight < displayLeft
+        || m_precomputedBinsPerColumn <= 0) {
+        return {};
+    }
+    ensureMapping(height);
+    auto job = std::make_shared<SpectrogramRasterJob>();
+    SpectrogramRasterTarget &target = job->target;
+    target.width = width;
+    target.height = height;
+    target.displayLeft = displayLeft;
+    target.displayRight = displayRight;
+    target.rollingMode = rollingMode;
+    target.effectiveZoom = effectiveZoomLocked();
+    target.columnsPerSecond = m_precomputedHopSize > 0
+        ? static_cast<double>(m_precomputedSampleRateHz)
+            / static_cast<double>(m_precomputedHopSize)
+        : 0.0;
+    target.epoch = rollingMode ? m_rollingEpoch : 0;
+    target.trackToken = m_precomputedTrackToken;
+    target.ringGeneration = m_ringGeneration;
+    target.projection = precomputedProjectionLocked(height);
+    // Copying the ring shares its blocks; only the slot lookup, one per
+    // display column, costs anything here.
+    job->ring = m_ring;
+    const qint64 columnCount = displayRight - displayLeft + 1;
+    job->columnSlots.resize(static_cast<size_t>(columnCount));
+    for (qint64 i = 0; i < columnCount; ++i) {
+        job->columnSlots[static_cast<size_t>(i)] =
+            ringSlotForDisplayIndexLocked(displayLeft + i, rollingMode);
+    }
+    return job;
+}
+
+std::shared_ptr<SpectrogramRasterResult> SpectrogramItem::rasterize(
+    const SpectrogramRasterJob &job,
+    const std::atomic<quint64> *latestSerial) {
+    const SpectrogramRasterTarget &target = job.target;
+    const auto wanted = [&job, latestSerial]() {
+        return latestSerial == nullptr
+            || latestSerial->load(std::memory_order_relaxed) == job.serial;
+    };
+    if (!wanted() || target.projection == nullptr) {
+        return {};
+    }
+    QImage canvas(target.width, target.height, QImage::Format_RGB32);
+    if (canvas.isNull()
+        || static_cast<int>(target.projection->binRanges.size()) != target.height) {
+        return {};
+    }
+    canvas.fill(Qt::black);
+    const auto source = spectrogramColumns([&job](qint64 index) -> const quint8 * {
+        const qint64 offset = index - job.target.displayLeft;
+        if (offset < 0 || offset >= static_cast<qint64>(job.columnSlots.size())) {
+            return nullptr;
+        }
+        const int slot = job.columnSlots[static_cast<size_t>(offset)];
+        return slot >= 0 ? job.ring.column(slot) : nullptr;
+    });
+    const int drawPixels = rasterDrawPixels(
+        target.width, target.displayLeft, target.displayRight, target.effectiveZoom);
+    for (int px = 0; px < drawPixels; ++px) {
+        // A newer rasterization replaced this one: stop.
+        if (px % kCanvasTileWidth == 0 && !wanted()) {
+            return {};
+        }
+        rasterPixel(canvas, px, px, target.displayLeft, target.displayRight,
+            target.effectiveZoom, source, *target.projection);
+    }
+    auto result = std::make_shared<SpectrogramRasterResult>();
+    result->serial = job.serial;
+    result->target = target;
+    result->drawPixels = drawPixels;
+    result->columnSlots = job.columnSlots;
+    const int tileCount = std::max(1, (target.width + kCanvasTileWidth - 1) / kCanvasTileWidth);
+    result->tiles.reserve(tileCount);
+    for (int tile = 0; tile < tileCount; ++tile) {
+        const int tileStart = tile * kCanvasTileWidth;
+        result->tiles.push_back(canvas.copy(
+            tileStart, 0, std::min(kCanvasTileWidth, target.width - tileStart), target.height));
+    }
+    result->canvas = std::move(canvas);
+    return result;
+}
+
+void SpectrogramItem::requestPrecomputedRasterLocked(
+    int width,
+    int height,
+    qint64 displayLeft,
+    qint64 displayRight,
+    bool rollingMode) {
+    std::shared_ptr<SpectrogramRasterJob> job =
+        makeRasterJobLocked(width, height, displayLeft, displayRight, rollingMode);
+    if (!job) {
         return;
     }
+    // A canvas shown through the zoom preview stays so until this result
+    // replaces it, which beats showing it as it is for a few frames.
+    m_rasterHoldsZoomPreview = m_zoomPreviewWantedLastFrame
+        || (m_rasterPending && m_rasterHoldsZoomPreview);
+    job->serial = ++m_rasterSerial;
+    // Any older rasterization stops at its next check.
+    m_rasterMailbox->latestSerial.store(job->serial, std::memory_order_relaxed);
+    m_rasterPending = true;
+    m_rasterTarget = job->target;
+    m_precomputedCanvasDirty = false;
+    spectrogramRasterPool().start([job, mailbox = m_rasterMailbox]() {
+        std::shared_ptr<SpectrogramRasterResult> result =
+            rasterize(*job, &mailbox->latestSerial);
+        if (!result) {
+            return;
+        }
+        QMutexLocker lock(&mailbox->mutex);
+        SpectrogramItem *owner = mailbox->owner;
+        if (owner == nullptr
+            || mailbox->latestSerial.load(std::memory_order_relaxed) != result->serial) {
+            return;
+        }
+        // Holding the mutex keeps the owner alive while this posts; its
+        // destruction discards the event if it comes first.
+        QMetaObject::invokeMethod(
+            owner, [owner, result]() { owner->installRasterResult(result); },
+            Qt::QueuedConnection);
+    });
+}
 
-    if (m_canvas.isNull()
-        || m_canvas.width() != width
-        || m_canvas.height() != height
-        || m_canvas.format() != QImage::Format_RGB32) {
-        m_canvas = QImage(width, height, QImage::Format_RGB32);
+bool SpectrogramItem::pendingRasterOutdatedLocked(
+    int width,
+    int height,
+    qint64 displayLeft,
+    qint64 displayRight,
+    bool rollingMode) const {
+    const SpectrogramRasterTarget &target = m_rasterTarget;
+    const double effectiveZoom = effectiveZoomLocked();
+    const double columnsPerSecond = m_precomputedHopSize > 0
+        ? static_cast<double>(m_precomputedSampleRateHz)
+            / static_cast<double>(m_precomputedHopSize)
+        : 0.0;
+    if (target.width != width
+        || target.height != height
+        || target.rollingMode != rollingMode
+        || std::abs(target.effectiveZoom - effectiveZoom) > 0.001
+        || std::abs(target.columnsPerSecond - columnsPerSecond)
+            > 1e-9 * std::max(1.0, columnsPerSecond)
+        || (rollingMode && target.epoch != m_rollingEpoch)
+        || (!rollingMode && target.trackToken != m_precomputedTrackToken)
+        || target.ringGeneration != m_ringGeneration
+        || target.projection != precomputedProjectionLocked(height)) {
+        return true;
     }
-    m_canvas.fill(Qt::black);
+    // Columns arriving while it rasterizes are drawn in once it arrives, as
+    // the view moves on. A view behind it, or a canvas width ahead, needs
+    // another one.
+    const qint64 targetRight = rasterDisplayRight(
+        target.displayLeft,
+        rasterDrawPixels(width, target.displayLeft, target.displayRight, target.effectiveZoom),
+        target.effectiveZoom);
+    return displayLeft < target.displayLeft
+        || displayRight < targetRight
+        || static_cast<double>(displayLeft - target.displayLeft) * effectiveZoom
+            >= static_cast<double>(width);
+}
+
+void SpectrogramItem::cancelPendingRasterLocked() {
+    if (!m_rasterPending) {
+        return;
+    }
+    m_rasterPending = false;
+    m_rasterHoldsZoomPreview = false;
+    ++m_rasterSerial;
+    m_rasterMailbox->latestSerial.store(m_rasterSerial, std::memory_order_relaxed);
+    m_precomputedCanvasDirty = true;
+}
+
+void SpectrogramItem::installRasterResult(
+    const std::shared_ptr<SpectrogramRasterResult> &result) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        // Only the newest rasterization may replace the canvas.
+        if (!m_rasterPending || result->serial != m_rasterSerial) {
+            return;
+        }
+        m_rasterPending = false;
+        m_rasterHoldsZoomPreview = false;
+        if (result->target.ringGeneration != m_ringGeneration) {
+            m_precomputedCanvasDirty = true;
+        } else {
+            installRasterResultLocked(*result);
+        }
+    }
+    update();
+}
+
+bool SpectrogramItem::installRasterResultLocked(const SpectrogramRasterResult &result) {
+    const SpectrogramRasterTarget &target = result.target;
+    if (result.canvas.isNull() || target.width <= 0) {
+        return false;
+    }
+    // Freeing the canvas it replaces takes a millisecond: a worker does it.
+    QImage replacedCanvas = std::exchange(m_canvas, result.canvas);
+    QVector<QImage> replacedTiles = std::exchange(m_rasterTiles, result.tiles);
+    if (!replacedCanvas.isNull() || !replacedTiles.isEmpty()) {
+        spectrogramRasterPool().start(
+            [replacedCanvas = std::move(replacedCanvas),
+             replacedTiles = std::move(replacedTiles)]() {});
+    }
     resizeDirtyTilesLocked();
     markAllTilesDirtyLocked();
+    m_canvasWriteX = result.drawPixels % target.width;
+    m_canvasFilledCols = result.drawPixels;
+    m_precomputedCanvasDisplayLeft = target.displayLeft;
+    m_precomputedCanvasDisplayRight =
+        rasterDisplayRight(target.displayLeft, result.drawPixels, target.effectiveZoom);
+    m_precomputedCanvasRolling = target.rollingMode;
+    m_precomputedCanvasZoomLevel = target.effectiveZoom;
+    m_precomputedCanvasSubpixelOffset = 0.0;
+    m_precomputedCanvasColumnsPerSecond = target.columnsPerSecond;
+    m_precomputedCanvasEpoch = target.epoch;
+    m_precomputedCanvasTrackToken = target.trackToken;
+    m_precomputedCanvasRingGeneration = target.ringGeneration;
+    m_precomputedCanvasPixelsPerSecond = target.effectiveZoom * target.columnsPerSecond;
+    if (!target.rollingMode) {
+        // Draw in the centered columns that arrived during the rasterization.
+        qint64 runStart = -1;
+        for (size_t i = 0; i <= result.columnSlots.size(); ++i) {
+            const qint64 column = target.displayLeft + static_cast<qint64>(i);
+            const bool arrived = i < result.columnSlots.size()
+                && result.columnSlots[i] < 0
+                && ringSlotForDisplayIndexLocked(column, false) >= 0;
+            if (arrived && runStart < 0) {
+                runStart = column;
+            } else if (!arrived && runStart >= 0) {
+                drawCenteredColumnsInPlaceLocked(runStart, column - 1, target.effectiveZoom);
+                runStart = -1;
+            }
+        }
+    }
+    return true;
+}
 
-    const qint64 sourceColumns = displayRight - displayLeft + 1;
-    const double rebuildEffectiveZoom = effectiveZoomLocked();
-    int drawPixels = std::min(width,
-        static_cast<int>(std::ceil(
-            static_cast<double>(sourceColumns) * rebuildEffectiveZoom)));
-    // At max zoom-out, hop rounding can produce a few fewer columns
-    // than the canvas width.  Pad to width when the display covers
-    // nearly all the content — the colFirst clamping in the loop
-    // repeats the last column for the extra pixels.
-    if (drawPixels < width
-        && displayLeft == 0
-        && sourceColumns + 5 >= static_cast<qint64>(width)) {
-        drawPixels = width;
+void SpectrogramItem::drawCenteredColumnsInPlaceLocked(
+    qint64 firstColumn, qint64 lastColumn, double effectiveZoom) {
+    const qint64 dispL = m_precomputedCanvasDisplayLeft;
+    const qint64 dispR = m_precomputedCanvasDisplayRight;
+    // A canvas from rolling mode, or one awaiting its rasterization for
+    // another height, has no place for them.
+    if (m_canvas.isNull()
+        || m_canvasFilledCols <= 0
+        || m_precomputedCanvasRolling
+        || dispR < dispL
+        || m_canvas.height() != m_mappingHeight
+        || firstColumn > dispR
+        || lastColumn < dispL) {
+        return;
     }
     const auto projectionOwner = precomputedProjectionLocked();
     const auto &projection = *projectionOwner;
-
-    for (int px = 0; px < drawPixels; ++px) {
-        drawPrecomputedPixelAtLocked(
-            px, px, displayLeft, displayRight,
-            rollingMode, rebuildEffectiveZoom, projection);
+    const int canvasWidth = m_canvas.width();
+    const int drawCols = std::min(m_canvasFilledCols, canvasWidth);
+    const int canvasStart =
+        (m_canvasWriteX - drawCols + canvasWidth) % canvasWidth;
+    for (qint64 col = std::max(firstColumn, dispL);
+         col <= std::min(lastColumn, dispR); ++col) {
+        // Use the rasterization's logical mapping, then translate through
+        // the circular canvas offset. Once centered playback starts
+        // scrolling, logical x=0 no longer lives at physical x=0.
+        // Writing late right-edge data directly to logical x leaves
+        // the visible circular slot permanently black.
+        const int logicalX = static_cast<int>(
+            static_cast<double>(col - dispL) * effectiveZoom);
+        if (logicalX >= 0 && logicalX < canvasWidth) {
+            const int canvasX = (canvasStart + logicalX) % canvasWidth;
+            drawPrecomputedColumnAtLocked(canvasX, col, false, projection);
+        }
     }
-
-    const double columnsPerPixel = 1.0 / rebuildEffectiveZoom;
-    m_canvasWriteX = width > 0 ? (drawPixels % width) : 0;
-    m_canvasFilledCols = drawPixels;
-    m_precomputedCanvasDisplayLeft = displayLeft;
-    m_precomputedCanvasDisplayRight =
-        drawPixels > 0
-            ? (displayLeft + static_cast<qint64>(
-                   static_cast<double>(drawPixels) * columnsPerPixel) - 1)
-            : (displayLeft - 1);
-    m_precomputedCanvasRolling = rollingMode;
-    m_precomputedCanvasZoomLevel = rebuildEffectiveZoom;
-    m_precomputedCanvasDirty = false;
-    m_precomputedCanvasSubpixelOffset = 0.0;
 }
 
 bool SpectrogramItem::advancePrecomputedCanvasLocked(

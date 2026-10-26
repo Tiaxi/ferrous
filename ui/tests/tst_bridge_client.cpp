@@ -2549,8 +2549,8 @@ void BridgeClientTest::precomputedSpectrogramChunksRouteDirectlyToRegisteredItem
     QVERIFY(right.m_precomputedReady);
     QCOMPARE(left.m_ringCapacity > 0, true);
     QCOMPARE(right.m_ringCapacity > 0, true);
-    QCOMPARE(static_cast<quint8>(left.m_ringBuffer.at(0)), static_cast<quint8>(0x11));
-    QCOMPARE(static_cast<quint8>(right.m_ringBuffer.at(0)), static_cast<quint8>(0x77));
+    QCOMPARE(left.m_ring.column(0)[0], static_cast<quint8>(0x11));
+    QCOMPARE(right.m_ring.column(0)[0], static_cast<quint8>(0x77));
 }
 
 void BridgeClientTest::delayedSpectrogramBatchesPreserveColumnsAndRejectOldGeneration() {
@@ -2577,7 +2577,7 @@ void BridgeClientTest::delayedSpectrogramBatchesPreserveColumnsAndRejectOldGener
         for (int column = 0; column < 200; ++column) {
             QCOMPARE(item.m_ringColumnId[column], column);
             QCOMPARE(item.m_ringTrackToken[column], quint64(42));
-            QCOMPARE(static_cast<quint8>(item.m_ringBuffer[column * 4]), quint8(0x11));
+            QCOMPARE(item.m_ring.column(column)[0], quint8(0x11));
         }
     }
 }

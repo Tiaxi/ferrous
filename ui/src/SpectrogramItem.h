@@ -10,9 +10,11 @@
 #include <QPointer>
 #include <QQuickItem>
 #include <QTimer>
+#include <QVector>
 #include <QVariantList>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <memory>
@@ -24,7 +26,65 @@ class QQuickWindow;
 class QSGNode;
 class QWheelEvent;
 struct SpectrogramProjection;
+struct SpectrogramRasterMailbox;
 struct SpectrogramZoomPreview;
+
+// Ring columns in fixed-size, implicitly shared blocks. A rasterization
+// keeps copies of the blocks it reads, so writing a column copies only its
+// block, and only while a rasterization still holds that block.
+class SpectrogramRingStorage {
+public:
+    static constexpr int kColumnsPerBlock = 64;
+
+    void clear();
+    // Zero-filled room for `capacity` columns of `bins` bytes.
+    void allocate(int capacity, int bins);
+    int bins() const { return m_bins; }
+    qint64 byteSize() const;
+    const quint8 *column(int slot) const;
+    quint8 *writableColumn(int slot);
+
+private:
+    std::vector<QByteArray> m_blocks;
+    int m_bins{0};
+};
+
+// What a rasterization draws: the canvas's size and the display columns it
+// shows, and what they are drawn from.
+struct SpectrogramRasterTarget {
+    int width{0};
+    int height{0};
+    qint64 displayLeft{0};
+    qint64 displayRight{-1};
+    bool rollingMode{false};
+    double effectiveZoom{1.0};
+    double columnsPerSecond{0.0};
+    qint64 epoch{0};
+    quint64 trackToken{0};
+    quint64 ringGeneration{0};
+    std::shared_ptr<const SpectrogramProjection> projection;
+};
+
+// A canvas to draw on a worker, with what it reads: copies of the ring's
+// blocks, and where in them each display column is.
+struct SpectrogramRasterJob {
+    quint64 serial{0};
+    SpectrogramRasterTarget target;
+    SpectrogramRingStorage ring;
+    // The slot of display column target.displayLeft + i, or -1 without it.
+    std::vector<int> columnSlots;
+};
+
+struct SpectrogramRasterResult {
+    quint64 serial{0};
+    SpectrogramRasterTarget target;
+    QImage canvas;
+    // Copies of the canvas's tiles, ready to upload.
+    QVector<QImage> tiles;
+    int drawPixels{0};
+    // The job's slots, which tell the columns it had to draw without.
+    std::vector<int> columnSlots;
+};
 
 class SpectrogramItem : public QQuickItem {
     Q_OBJECT
@@ -50,6 +110,7 @@ class SpectrogramItem : public QQuickItem {
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
+    ~SpectrogramItem() override;
 
     double dbRange() const;
     void setDbRange(double value);
@@ -181,12 +242,41 @@ private:
         std::chrono::steady_clock::time_point now);
     void releasePositionHoldLocked(std::chrono::steady_clock::time_point now);
     void continueGaplessLocked(std::chrono::steady_clock::time_point now);
-    void rebuildPrecomputedCanvasLocked(
+    std::shared_ptr<SpectrogramRasterJob> makeRasterJobLocked(
         int width,
         int height,
         qint64 displayLeft,
         qint64 displayRight,
         bool rollingMode);
+    static std::shared_ptr<SpectrogramRasterResult> rasterize(
+        const SpectrogramRasterJob &job,
+        const std::atomic<quint64> *latestSerial = nullptr);
+    void requestPrecomputedRasterLocked(
+        int width,
+        int height,
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode);
+    bool pendingRasterOutdatedLocked(
+        int width,
+        int height,
+        qint64 displayLeft,
+        qint64 displayRight,
+        bool rollingMode) const;
+    void cancelPendingRasterLocked();
+    void installRasterResult(const std::shared_ptr<SpectrogramRasterResult> &result);
+    bool installRasterResultLocked(const SpectrogramRasterResult &result);
+    void drawCenteredColumnsInPlaceLocked(
+        qint64 firstColumn, qint64 lastColumn, double effectiveZoom);
+    const quint8 *ringColumnLocked(qint64 displayIndex, bool rollingMode) const;
+    void markCanvasStaleLocked();
+    SpectrogramZoomPreview staleCanvasAlignmentLocked(
+        double canvasDrawX,
+        double viewDrawX,
+        qint64 displayLeft,
+        bool rollingMode,
+        double effectiveZoom,
+        double columnsPerSecond) const;
     bool advancePrecomputedCanvasLocked(
         qint64 displayLeft,
         qint64 displayRight,
@@ -221,7 +311,8 @@ private:
         qint64 displayIndex,
         bool rollingMode) const;
     std::array<quint8, 256> buildPrecomputedDbRemapLocked() const;
-    std::shared_ptr<const SpectrogramProjection> precomputedProjectionLocked() const;
+    // For `height` rows, or the canvas's height by default.
+    std::shared_ptr<const SpectrogramProjection> precomputedProjectionLocked(int height = -1) const;
     mutable std::shared_ptr<const SpectrogramProjection> m_precomputedProjection;
     void rebuildCanvasFromColumns();
     void drawColumnAt(int x, const std::vector<quint8> &col);
@@ -293,6 +384,24 @@ private:
     int m_canvasFilledCols{0};
     std::deque<std::vector<quint8>> m_columns;
     std::vector<unsigned char> m_dirtyTiles;
+    // Tile copies a rasterization made of the canvas it delivered, for the
+    // render thread to upload instead of copying them itself. A tile drawn
+    // into since then is copied again.
+    QVector<QImage> m_rasterTiles;
+    // The rasterization that will replace the canvas: its target, and its
+    // serial, which only its result carries. The canvas stays on screen,
+    // aligned to the view, until the result arrives.
+    std::shared_ptr<SpectrogramRasterMailbox> m_rasterMailbox;
+    quint64 m_rasterSerial{0};
+    bool m_rasterPending{false};
+    SpectrogramRasterTarget m_rasterTarget;
+    // The canvas being replaced was on screen through the zoom preview,
+    // which goes on until its replacement arrives.
+    bool m_rasterHoldsZoomPreview{false};
+    bool m_zoomPreviewWantedLastFrame{false};
+    // Changes whenever the ring's columns are cleared or renumbered, which
+    // makes a rasterization of them obsolete.
+    quint64 m_ringGeneration{0};
     bool m_seedHistoryOnNextAppend{true};
     bool m_animationTickInitialized{false};
     std::chrono::steady_clock::time_point m_lastAnimationTick{};
@@ -317,7 +426,7 @@ private:
     QMetaObject::Connection m_windowVisibilityConnection;
 
     // Ring-buffer spectrogram storage.
-    QByteArray m_ringBuffer;          // capacity * bins_per_column bytes
+    SpectrogramRingStorage m_ring;    // capacity columns of bins_per_column bytes
     std::vector<qint32> m_ringColumnId; // per write-order slot: track column index, or -1
     std::vector<qint64> m_ringSequenceId; // per slot: write sequence stored there, or -1
     std::vector<quint64> m_ringTrackToken; // per slot: track token stored there, or 0
@@ -409,6 +518,10 @@ private:
     double m_precomputedCanvasColumnsPerSecond{0.0};
     qint64 m_precomputedCanvasEpoch{0};
     double m_precomputedCanvasPixelsPerSecond{0.0};
+    // The track of a centered canvas's columns, and the ring numbering of
+    // a rolling one's.
+    quint64 m_precomputedCanvasTrackToken{0};
+    quint64 m_precomputedCanvasRingGeneration{0};
     // The scaled canvas drawn last, so that clicks seek where it shows:
     // the track time at anchor X, and pixels per second.
     bool m_zoomPreviewShown{false};
