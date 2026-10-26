@@ -2308,8 +2308,9 @@ where
             Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
                 break true;
             }
-            // Symphonia 0.5 reads only the last link of a chained Ogg file,
-            // after a reset at each link before it.
+            // Any other error stops the decode short of the end. That
+            // includes a reset at the next link of a chained Ogg file:
+            // Symphonia 0.5 would go on with the last link, not the next.
             Err(_) => break false,
         };
 

@@ -5204,8 +5204,9 @@ mod tests {
                 ] {
                     let columns = columns_until_eof(commands);
                     for click in clicks {
+                        // A quarter of the clicks' spacing.
                         let expected = click / column_hop;
-                        let reach = 8_000 / column_hop;
+                        let reach = 2_048 / column_hop;
                         assert_eq!(
                             loudest_column(&columns, expected, reach),
                             expected,
@@ -5244,7 +5245,7 @@ mod tests {
             }
         }
         for click in clicks {
-            assert_eq!(loudest_column(&columns, click / 64, 125), click / 64);
+            assert_eq!(loudest_column(&columns, click / 64, 32), click / 64);
         }
         std::fs::remove_file(path).expect("remove fixture");
     }

@@ -487,6 +487,38 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn an_mp3_detail_window_shows_its_click_at_its_playback_time() {
+        // A click at 0.2 s (frame 8,820) once the encoder delay is cut, as
+        // playback cuts it; see `fixtures/README.md`.
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-waveform-window-gapless-click-{}.mp3",
+            std::process::id()
+        ));
+        std::fs::write(&path, include_bytes!("fixtures/gapless-click.mp3")).expect("fixture");
+        let window = decode_waveform_window(&path, 0.15, 0.25, 4_410).expect("window");
+        std::fs::remove_file(path).expect("remove fixture");
+
+        assert_eq!(window.frames_per_point, 1);
+        let loudest = window
+            .extrema
+            .chunks_exact(2)
+            .enumerate()
+            .max_by(|(_, a), (_, b)| {
+                a[1].abs()
+                    .max(a[0].abs())
+                    .total_cmp(&b[1].abs().max(b[0].abs()))
+            })
+            .map(|(point, _)| point)
+            .expect("points");
+        let frame =
+            (window.start_seconds * 44_100.0).round() + f64::from(u32::try_from(loudest).unwrap());
+        assert!(
+            (frame - 8_820.0).abs() <= 4.0,
+            "the click is at frame {frame}"
+        );
+    }
+
+    #[test]
     fn cancelled_window_does_not_open_the_source() {
         let error = decode_waveform_window_cancellable(
             Path::new("/missing/cancelled.wav"),
