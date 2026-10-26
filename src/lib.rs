@@ -2,6 +2,7 @@
 
 pub mod analysis;
 pub mod artwork;
+mod collation;
 mod file_edit_lock;
 mod file_identity;
 mod folder_cover;

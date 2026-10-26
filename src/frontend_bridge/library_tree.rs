@@ -6,6 +6,7 @@ use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::collation::CollationKey;
 use crate::folder_cover::FolderImages;
 use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
 
@@ -41,6 +42,7 @@ struct AlbumNodeBuilder {
 #[derive(Debug, Clone)]
 struct ArtistNodeBuilder {
     artist_name: String,
+    sort_key: CollationKey,
     artist_path: PathBuf,
     loose_tracks: Vec<TrackLeaf>,
     albums: BTreeMap<String, AlbumNodeBuilder>,
@@ -50,6 +52,7 @@ struct ArtistNodeBuilder {
 struct RootNodeBuilder {
     root_path: PathBuf,
     root_name: String,
+    sort_key: CollationKey,
     artists: BTreeMap<String, ArtistNodeBuilder>,
 }
 
@@ -63,6 +66,7 @@ struct OrderedTrack {
 #[derive(Debug, Clone)]
 struct ResolvedAlbum {
     title: String,
+    title_key: CollationKey,
     year: Option<i32>,
     folder_name: String,
     folder_path: PathBuf,
@@ -76,6 +80,7 @@ struct ResolvedAlbum {
 #[derive(Debug, Clone)]
 struct ResolvedSection {
     name: String,
+    name_key: CollationKey,
     path: PathBuf,
     cover_path: Option<String>,
     cover_stamp: u64,
@@ -204,7 +209,7 @@ impl FlatTreeRow {
             track_number,
             child_count: 0,
             title: title.to_string(),
-            key: format!("track|{path}"),
+            key: track_row_key(path),
             artist: artist_name.to_string(),
             path: path.to_string(),
             cover_path: String::new(),
@@ -233,24 +238,143 @@ struct AlbumRowConfig<'a, S> {
 }
 
 fn root_row_key(root_path: &str) -> String {
-    format!("root|{root_path}")
+    tree_key("root", &[root_path])
 }
 
-fn artist_row_key(root_path: &str, artist_name: &str) -> String {
-    format!("artist|{root_path}|{artist_name}")
+pub(super) fn artist_row_key(root_path: &str, artist_name: &str) -> String {
+    tree_key("artist", &[root_path, artist_name])
 }
 
-fn album_row_key(root_path: &str, artist_name: &str, folder_name: &str) -> String {
-    format!("album|{root_path}|{artist_name}|{folder_name}")
+pub(super) fn album_row_key(root_path: &str, artist_name: &str, folder_name: &str) -> String {
+    tree_key("album", &[root_path, artist_name, folder_name])
 }
 
-fn section_row_key(
+pub(super) fn section_row_key(
     root_path: &str,
     artist_name: &str,
     folder_name: &str,
     section_name: &str,
 ) -> String {
-    format!("section|{root_path}|{artist_name}|{folder_name}|{section_name}")
+    tree_key(
+        "section",
+        &[root_path, artist_name, folder_name, section_name],
+    )
+}
+
+pub(super) fn track_row_key(path: &str) -> String {
+    tree_key("track", &[path])
+}
+
+/// The key of a tree row: `kind|part|…|part`. Every part but the last has
+/// its `\` and `|` escaped with a `\`. Each kind has a fixed number of
+/// parts, so a name with a `|` in it cannot pass for two parts, and names
+/// without either character keep the keys they had before parts were
+/// escaped.
+fn tree_key(kind: &str, parts: &[&str]) -> String {
+    let mut key =
+        String::with_capacity(kind.len() + parts.iter().map(|part| part.len() + 1).sum::<usize>());
+    key.push_str(kind);
+    for (index, part) in parts.iter().enumerate() {
+        key.push('|');
+        if index + 1 == parts.len() {
+            key.push_str(part);
+        } else {
+            for ch in part.chars() {
+                if matches!(ch, '\\' | '|') {
+                    key.push('\\');
+                }
+                key.push(ch);
+            }
+        }
+    }
+    key
+}
+
+/// Whether `key` is the [`tree_key`] of `kind` and `parts`.
+pub(super) fn tree_key_is(key: &str, kind: &str, parts: &[&str]) -> bool {
+    let Some(mut rest) = key.strip_prefix(kind) else {
+        return false;
+    };
+    for (index, part) in parts.iter().enumerate() {
+        let Some(next) = rest.strip_prefix('|') else {
+            return false;
+        };
+        rest = next;
+        if index + 1 == parts.len() {
+            return rest == *part;
+        }
+        for ch in part.chars() {
+            if matches!(ch, '\\' | '|') {
+                let Some(next) = rest.strip_prefix('\\') else {
+                    return false;
+                };
+                rest = next;
+            }
+            let Some(next) = rest.strip_prefix(ch) else {
+                return false;
+            };
+            rest = next;
+        }
+    }
+    rest.is_empty()
+}
+
+/// The key the tree gave a row before [`tree_key`] escaped its parts, if
+/// it differs from the escaped key.
+fn legacy_tree_key(kind: &str, parts: &[&str]) -> Option<String> {
+    let (_, escaped) = parts.split_last()?;
+    if !escaped.iter().any(|part| part.contains(['\\', '|'])) {
+        return None;
+    }
+    Some(
+        std::iter::once(kind)
+            .chain(parts.iter().copied())
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+}
+
+/// The keys of the rows of a library, and the keys from before parts were
+/// escaped (see [`tree_key`]) that name one of them alone.
+#[derive(Default)]
+struct TreeKeys {
+    valid: HashSet<String>,
+    /// Each legacy key, and the key it is now; `None` if it was the key of
+    /// more than one row.
+    legacy: HashMap<String, Option<String>>,
+}
+
+impl TreeKeys {
+    fn insert(&mut self, kind: &str, parts: &[&str]) {
+        let key = tree_key(kind, parts);
+        if let Some(legacy) = legacy_tree_key(kind, parts) {
+            self.legacy
+                .entry(legacy)
+                .and_modify(|current| {
+                    if current.as_ref() != Some(&key) {
+                        *current = None;
+                    }
+                })
+                .or_insert_with(|| Some(key.clone()));
+        }
+        self.valid.insert(key);
+    }
+
+    /// Keeps the keys of `keys` that name a row, and replaces each legacy
+    /// key with the key its row has now.
+    fn retain<S: BuildHasher>(&self, keys: &mut HashSet<String, S>) {
+        let mut migrated = Vec::new();
+        keys.retain(|key| {
+            if self.valid.contains(key) {
+                return true;
+            }
+            if let Some(Some(current)) = self.legacy.get(key) {
+                migrated.push(current.clone());
+            }
+            false
+        });
+        keys.extend(migrated);
+    }
 }
 
 #[must_use]
@@ -267,64 +391,30 @@ pub fn retain_valid_expanded_keys<S: BuildHasher + Default>(
     library: &LibrarySnapshot,
     expanded_keys: &mut HashSet<String, S>,
 ) {
-    if expanded_keys.is_empty() {
+    if expanded_keys.is_empty() || library.roots.is_empty() {
         return;
     }
+    tree_keys(&build_root_builders(&library.roots, &library.tracks)).retain(expanded_keys);
+}
 
-    let roots = library.roots.clone();
-    if roots.is_empty() {
-        return;
-    }
-
-    let mut valid: HashSet<String> = HashSet::new();
-    for root in &roots {
-        valid.insert(root_row_key(&root.path.to_string_lossy()));
-    }
-    for track in &library.tracks {
-        let Some(root) = pick_root_for_track(&roots, track) else {
-            continue;
-        };
-        let Ok(rel) = track.path.strip_prefix(&root.path) else {
-            continue;
-        };
-        let components = rel
-            .components()
-            .filter_map(|component| {
-                let std::path::Component::Normal(name) = component else {
-                    return None;
-                };
-                Some(name.to_string_lossy().to_string())
-            })
-            .collect::<Vec<_>>();
-
-        if components.is_empty() {
-            continue;
-        }
-
-        let root_key = root.path.to_string_lossy().to_string();
-        let artist_name = if components.len() >= 2 {
-            components[0].clone()
-        } else if track.artist.trim().is_empty() {
-            String::from("Unknown Artist")
-        } else {
-            track.artist.trim().to_string()
-        };
-        valid.insert(artist_row_key(&root_key, &artist_name));
-
-        if components.len() > 2 {
-            valid.insert(album_row_key(&root_key, &artist_name, &components[1]));
-        }
-        if components.len() > 3 {
-            valid.insert(section_row_key(
-                &root_key,
-                &artist_name,
-                &components[1],
-                &components[2],
-            ));
+fn tree_keys(builders: &BTreeMap<String, RootNodeBuilder>) -> TreeKeys {
+    let mut keys = TreeKeys::default();
+    for root in builders.values() {
+        let root_path = root.root_path.to_string_lossy();
+        keys.insert("root", &[&root_path]);
+        for artist in root.artists.values() {
+            let artist_name = artist.artist_name.as_str();
+            keys.insert("artist", &[&root_path, artist_name]);
+            for album in artist.albums.values() {
+                let folder = album.folder_name.as_str();
+                keys.insert("album", &[&root_path, artist_name, folder]);
+                for section in album.sections.keys() {
+                    keys.insert("section", &[&root_path, artist_name, folder, section]);
+                }
+            }
         }
     }
-
-    expanded_keys.retain(|key| valid.contains(key));
+    keys
 }
 
 /// Reusable hierarchy and album presentation data for one immutable library revision.
@@ -332,7 +422,7 @@ pub fn retain_valid_expanded_keys<S: BuildHasher + Default>(
 pub struct LibraryTreeCache {
     builders: BTreeMap<String, RootNodeBuilder>,
     resolved_albums: HashMap<String, Vec<ResolvedAlbum>>,
-    valid_keys: HashSet<String>,
+    keys: TreeKeys,
     pub(crate) counts: (usize, usize),
 }
 
@@ -340,29 +430,7 @@ impl LibraryTreeCache {
     #[must_use]
     pub fn new(library: &LibrarySnapshot) -> Self {
         let builders = build_root_builders(&library.roots, &library.tracks);
-        let mut valid_keys = HashSet::new();
-        for root in builders.values() {
-            let root_path = root.root_path.to_string_lossy();
-            valid_keys.insert(root_row_key(&root_path));
-            for artist in root.artists.values() {
-                valid_keys.insert(artist_row_key(&root_path, &artist.artist_name));
-                for album in artist.albums.values() {
-                    valid_keys.insert(album_row_key(
-                        &root_path,
-                        &artist.artist_name,
-                        &album.folder_name,
-                    ));
-                    for section in album.sections.keys() {
-                        valid_keys.insert(section_row_key(
-                            &root_path,
-                            &artist.artist_name,
-                            &album.folder_name,
-                            section,
-                        ));
-                    }
-                }
-            }
-        }
+        let keys = tree_keys(&builders);
         // The artists and albums are the tree's, so they are counted here,
         // once per library.
         let counts = builders.values().fold((0, 0), |(artists, albums), root| {
@@ -379,7 +447,7 @@ impl LibraryTreeCache {
         Self {
             builders,
             resolved_albums: HashMap::new(),
-            valid_keys,
+            keys,
             counts,
         }
     }
@@ -387,7 +455,7 @@ impl LibraryTreeCache {
     pub(crate) fn retain_expanded_keys(&self, keys: &mut HashSet<String>) {
         // Initial library loading must not erase the restored view state.
         if !self.builders.is_empty() {
-            keys.retain(|key| self.valid_keys.contains(key));
+            self.keys.retain(keys);
         }
     }
 
@@ -407,7 +475,7 @@ impl LibraryTreeCache {
     ) -> Vec<FlatTreeRow> {
         let multi_root = self.builders.len() >= 2;
         let mut rows = Vec::new();
-        for root_builder in self.builders.values() {
+        for root_builder in sorted_roots(&self.builders) {
             let root_depth = if multi_root { 0 } else { u16::MAX };
             let artist_depth = u16::from(multi_root);
             let root_path = root_builder.root_path.to_string_lossy().to_string();
@@ -453,6 +521,7 @@ fn build_root_builders(
                 RootNodeBuilder {
                     root_path: root.path.clone(),
                     root_name: root.display_name(),
+                    sort_key: CollationKey::new(&root.display_name()),
                     artists: BTreeMap::new(),
                 },
             )
@@ -508,6 +577,7 @@ fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, tra
         .artists
         .entry(artist_name.clone())
         .or_insert_with(|| ArtistNodeBuilder {
+            sort_key: CollationKey::new(&artist_name),
             artist_name: artist_name.clone(),
             artist_path,
             loose_tracks: Vec::new(),
@@ -568,7 +638,7 @@ fn build_artist_rows_flat<S: BuildHasher>(
 ) -> Vec<FlatTreeRow> {
     let lazy_hydration = expanded_keys.is_some();
     let mut artists = root.artists.values().collect::<Vec<_>>();
-    artists.sort_by(|a, b| natural_cmp(&a.artist_name, &b.artist_name));
+    sort_artists(&mut artists);
 
     let mut out = Vec::new();
     for artist in artists {
@@ -831,6 +901,7 @@ fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
 
         sections.push(ResolvedSection {
             name: name.clone(),
+            name_key: CollationKey::new(name),
             path: album.folder_path.join(name),
             cover_path: section_cover,
             cover_stamp: section_cover_stamp,
@@ -838,7 +909,7 @@ fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
             tracks: order_tracks(tracks),
         });
     }
-    sections.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+    sections.sort_by(|a, b| by_name((&a.name_key, &a.name), (&b.name_key, &b.name)));
 
     let title = resolve_album_title(&album_tracks, &album.folder_name);
     let year = resolve_album_year(&album_tracks);
@@ -857,6 +928,7 @@ fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
     );
 
     ResolvedAlbum {
+        title_key: CollationKey::new(&title),
         title,
         year,
         folder_name: album.folder_name.clone(),
@@ -876,15 +948,19 @@ fn sort_resolved_albums(albums: &mut [ResolvedAlbum], sort_mode: LibrarySortMode
             a_unknown
                 .cmp(&b_unknown)
                 .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
-                .then_with(|| natural_cmp(&a.title, &b.title))
+                .then_with(|| by_name((&a.title_key, &a.title), (&b.title_key, &b.title)))
         }
-        LibrarySortMode::Title => natural_cmp(&a.title, &b.title).then_with(|| {
-            let a_unknown = a.year.is_none();
-            let b_unknown = b.year.is_none();
-            a_unknown
-                .cmp(&b_unknown)
-                .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
-        }),
+        LibrarySortMode::Title => a
+            .title_key
+            .cmp(&b.title_key)
+            .then_with(|| {
+                let a_unknown = a.year.is_none();
+                let b_unknown = b.year.is_none();
+                a_unknown
+                    .cmp(&b_unknown)
+                    .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
+            })
+            .then_with(|| a.title.cmp(&b.title)),
     });
 }
 
@@ -941,30 +1017,24 @@ fn order_tracks(tracks: &[TrackLeaf]) -> Vec<OrderedTrack> {
         return Vec::new();
     }
 
-    let mut positional = tracks
-        .iter()
-        .map(|track| track.path.to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    positional.sort_by(|a, b| natural_cmp(a, b));
-    let positional_map = positional
-        .into_iter()
-        .enumerate()
-        .map(|(idx, path)| (path, idx + 1))
-        .collect::<HashMap<_, _>>();
-
-    let mut candidates = tracks
+    let mut keyed = tracks
         .iter()
         .map(|track| {
             let path = track.path.to_string_lossy().to_string();
+            (CollationKey::new(&path), path, track)
+        })
+        .collect::<Vec<_>>();
+    keyed.sort_by(|a, b| by_name((&a.0, &a.1), (&b.0, &b.1)));
+
+    let mut candidates = keyed
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, path, track))| {
             let filename_number = leading_track_number(&track.file_stem);
-            let number = track.track_no.or(filename_number).unwrap_or_else(|| {
-                positional_map
-                    .get(&path)
-                    .copied()
-                    .unwrap_or(1)
-                    .try_into()
-                    .unwrap_or(1)
-            });
+            let number = track
+                .track_no
+                .or(filename_number)
+                .unwrap_or_else(|| u32::try_from(index + 1).unwrap_or(u32::MAX));
             let rank = if track.track_no.is_some() {
                 0
             } else if filename_number.is_some() {
@@ -981,12 +1051,9 @@ fn order_tracks(tracks: &[TrackLeaf]) -> Vec<OrderedTrack> {
         })
         .collect::<Vec<_>>();
 
-    candidates.sort_by(|a, b| {
-        a.rank
-            .cmp(&b.rank)
-            .then_with(|| a.number.cmp(&b.number))
-            .then_with(|| natural_cmp(&a.path, &b.path))
-    });
+    // A stable sort of paths already in order: equal ranks and numbers keep
+    // the order of their paths.
+    candidates.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.number.cmp(&b.number)));
 
     let max_number = candidates.iter().map(|c| c.number).max().unwrap_or(0);
     let width = std::cmp::max(2, max_number.to_string().len());
@@ -1050,57 +1117,22 @@ fn leading_track_number(input: &str) -> Option<u32> {
     }
 }
 
-fn natural_cmp(a: &str, b: &str) -> Ordering {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    let mut ia = 0usize;
-    let mut ib = 0usize;
+/// Orders names by their collation keys, then by their own text.
+fn by_name(a: (&CollationKey, &str), b: (&CollationKey, &str)) -> Ordering {
+    a.0.cmp(b.0).then_with(|| a.1.cmp(b.1))
+}
 
-    while ia < a.len() && ib < b.len() {
-        let ca = a[ia];
-        let cb = b[ib];
+fn sort_artists(artists: &mut [&ArtistNodeBuilder]) {
+    artists.sort_by(|a, b| by_name((&a.sort_key, &a.artist_name), (&b.sort_key, &b.artist_name)));
+}
 
-        if ca.is_ascii_digit() && cb.is_ascii_digit() {
-            let start_a = ia;
-            let start_b = ib;
-            while ia < a.len() && a[ia].is_ascii_digit() {
-                ia += 1;
-            }
-            while ib < b.len() && b[ib].is_ascii_digit() {
-                ib += 1;
-            }
-
-            let mut na = &a[start_a..ia];
-            let mut nb = &b[start_b..ib];
-            while na.len() > 1 && na[0] == b'0' {
-                na = &na[1..];
-            }
-            while nb.len() > 1 && nb[0] == b'0' {
-                nb = &nb[1..];
-            }
-
-            let cmp = na
-                .len()
-                .cmp(&nb.len())
-                .then_with(|| na.cmp(nb))
-                .then_with(|| (ia - start_a).cmp(&(ib - start_b)));
-            if cmp != Ordering::Equal {
-                return cmp;
-            }
-            continue;
-        }
-
-        let la = ca.to_ascii_lowercase();
-        let lb = cb.to_ascii_lowercase();
-        let cmp = la.cmp(&lb);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        ia += 1;
-        ib += 1;
-    }
-
-    a.len().cmp(&b.len())
+/// The roots in the order the tree shows them: by name, then by path.
+fn sorted_roots(builders: &BTreeMap<String, RootNodeBuilder>) -> Vec<&RootNodeBuilder> {
+    let mut roots = builders.values().collect::<Vec<_>>();
+    // The builders are in the order of their paths, which the stable sort
+    // keeps for equal names.
+    roots.sort_by(|a, b| by_name((&a.sort_key, &a.root_name), (&b.sort_key, &b.root_name)));
+    roots
 }
 
 /// Collect all track paths for the given artist in the same order the
@@ -1153,7 +1185,7 @@ fn emit_artist_paths(
             a_unknown
                 .cmp(&b_unknown)
                 .then_with(|| a.year.unwrap_or(i32::MAX).cmp(&b.year.unwrap_or(i32::MAX)))
-                .then_with(|| natural_cmp(&a.name, &b.name))
+                .then_with(|| by_name((&a.name_key, &a.name), (&b.name_key, &b.name)))
         });
         for section in non_disc {
             for track in &section.tracks {
@@ -1170,7 +1202,7 @@ fn emit_root_artists_paths(
     out: &mut Vec<PathBuf>,
 ) {
     let mut artists: Vec<&ArtistNodeBuilder> = root_builder.artists.values().collect();
-    artists.sort_by(|a, b| natural_cmp(&a.artist_name, &b.artist_name));
+    sort_artists(&mut artists);
     for artist in artists {
         emit_artist_paths(artist, sort_mode, out);
     }
@@ -1228,7 +1260,7 @@ pub(crate) fn collect_all_paths_tree_order(
 ) -> Vec<PathBuf> {
     let builders = build_root_builders(&library.roots, &library.tracks);
     let mut out = Vec::new();
-    for root_builder in builders.values() {
+    for root_builder in sorted_roots(&builders) {
         emit_root_artists_paths(root_builder, sort_mode, &mut out);
     }
     out
@@ -1705,6 +1737,256 @@ mod tests {
         let rows = decode_rows(&bytes);
         assert!(rows.iter().any(|row| row.row_type == ROW_TYPE_ALBUM));
         assert!(rows.iter().any(|row| row.row_type == ROW_TYPE_TRACK));
+    }
+
+    fn titles_of(rows: &[DecodedRow], row_type: u8) -> Vec<String> {
+        rows.iter()
+            .filter(|row| row.row_type == row_type)
+            .map(|row| row.title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn accented_names_sort_with_their_base_letters_and_numbers_naturally() {
+        let paths = [
+            "/music/Zappa/Album/01.flac",
+            "/music/Émilie Simon/Album/01.flac",
+            "/music/Ørjan/Album/01.flac",
+            "/music/Abba/Album/01.flac",
+            "/music/Eels/Album/01.flac",
+            "/music/Oasis/Album/01.flac",
+            "/music/Oasis/Ålbum/01.flac",
+            "/music/Oasis/Zed/01.flac",
+            "/music/Oasis/Boxed/Disc 10/01.flac",
+            "/music/Oasis/Boxed/Disc 2/01.flac",
+            "/music/Oasis/Boxed/Disc 1/01.flac",
+            "/music/Oasis/Loose/Track 10.flac",
+            "/music/Oasis/Loose/Track 9.flac",
+        ];
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: crate::library::shared_tracks(
+                paths
+                    .iter()
+                    .map(|path| track(path, "", None, None, ""))
+                    .collect(),
+            ),
+            ..LibrarySnapshot::default()
+        };
+        let rows = build_library_tree_flat_rows::<std::collections::hash_map::RandomState>(
+            &library,
+            LibrarySortMode::Title,
+            None,
+        );
+        let rows = decode_rows(&encode_flat_rows(&rows));
+        assert_eq!(
+            titles_of(&rows, ROW_TYPE_ARTIST),
+            [
+                "Abba (1)",
+                "Eels (1)",
+                "Émilie Simon (1)",
+                "Oasis (5)",
+                "Ørjan (1)",
+                "Zappa (1)"
+            ]
+        );
+        assert_eq!(
+            titles_of(&rows, ROW_TYPE_ALBUM),
+            [
+                "Album", "Album", "Album", "Album", "Ålbum", "Boxed", "Loose", "Zed", "Album",
+                "Album"
+            ]
+        );
+        assert_eq!(
+            titles_of(&rows, ROW_TYPE_SECTION),
+            ["Disc 1", "Disc 2", "Disc 10"]
+        );
+        let loose: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type == ROW_TYPE_TRACK && row.path.contains("/Loose/"))
+            .map(|row| row.path.as_str())
+            .collect();
+        assert_eq!(
+            loose,
+            [
+                "/music/Oasis/Loose/Track 9.flac",
+                "/music/Oasis/Loose/Track 10.flac"
+            ]
+        );
+        // Queueing follows the tree.
+        let queued = collect_artist_paths_tree_order(&library, "Oasis", LibrarySortMode::Title);
+        assert_eq!(
+            queued
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()[..5],
+            [
+                "/music/Oasis/Album/01.flac",
+                "/music/Oasis/Ålbum/01.flac",
+                "/music/Oasis/Boxed/Disc 1/01.flac",
+                "/music/Oasis/Boxed/Disc 2/01.flac",
+                "/music/Oasis/Boxed/Disc 10/01.flac",
+            ]
+        );
+    }
+
+    #[test]
+    fn roots_sort_by_their_names() {
+        let mut library = LibrarySnapshot {
+            roots: vec![root("/a"), root("/b"), root("/c")],
+            tracks: crate::library::shared_tracks(
+                ["/a/X/Y/1.flac", "/b/X/Y/1.flac", "/c/X/Y/1.flac"]
+                    .iter()
+                    .map(|path| LibraryTrack {
+                        root_path: Path::new(path).ancestors().nth(3).expect("root").into(),
+                        ..track(path, "", None, None, "")
+                    })
+                    .collect(),
+            ),
+            ..LibrarySnapshot::default()
+        };
+        library.roots[0].name = "Zebra".to_string();
+        library.roots[1].name = "Éclair".to_string();
+        library.roots[2].name = "apple".to_string();
+        let rows = build_library_tree_flat_rows::<std::collections::hash_map::RandomState>(
+            &library,
+            LibrarySortMode::Year,
+            None,
+        );
+        let roots: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type == ROW_TYPE_ROOT)
+            .map(|row| row.title.as_str())
+            .collect();
+        assert_eq!(roots, ["apple", "Éclair", "Zebra"]);
+        let all = collect_all_paths_tree_order(&library, LibrarySortMode::Year);
+        assert_eq!(
+            all,
+            [
+                PathBuf::from("/c/X/Y/1.flac"),
+                PathBuf::from("/b/X/Y/1.flac"),
+                PathBuf::from("/a/X/Y/1.flac")
+            ]
+        );
+    }
+
+    #[test]
+    fn names_with_a_separator_have_keys_of_their_own() {
+        // Joined without escapes, both albums had the key
+        // `album|/music|A|B|C`, and both sections `section|/music|A|B|C|D`.
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: crate::library::shared_tracks(vec![
+                track("/music/A|B/C/D/01.flac", "", None, Some(1), "One"),
+                track("/music/A/B|C/D/01.flac", "", None, Some(1), "Two"),
+                track("/music/A\\/B|C/D/01.flac", "", None, Some(1), "Three"),
+            ]),
+            ..LibrarySnapshot::default()
+        };
+        let rows = build_library_tree_flat_rows::<std::collections::hash_map::RandomState>(
+            &library,
+            LibrarySortMode::Year,
+            None,
+        );
+        let keys: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type != ROW_TYPE_TRACK)
+            .map(|row| row.key.as_str())
+            .collect();
+        let unique: HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len(), "{keys:?}");
+        assert!(keys.contains(&"album|/music|A\\|B|C"), "{keys:?}");
+        assert!(keys.contains(&"album|/music|A|B|C"), "{keys:?}");
+        assert!(keys.contains(&"section|/music|A|B\\|C|D"), "{keys:?}");
+
+        // Expanding one album expands only that album.
+        let expanded = HashSet::from([
+            "artist|/music|A|B".to_string(),
+            "artist|/music|A".to_string(),
+            "album|/music|A\\|B|C".to_string(),
+        ]);
+        let bytes =
+            build_library_tree_flat_binary(&library, LibrarySortMode::Year, Some(&expanded));
+        let tracks: Vec<_> = decode_rows(&bytes)
+            .into_iter()
+            .filter(|row| row.row_type == ROW_TYPE_SECTION)
+            .map(|row| row.path)
+            .collect();
+        assert_eq!(tracks, ["/music/A|B/C/D"]);
+
+        // Each key names its row alone.
+        assert!(tree_key_is(
+            "album|/music|A\\|B|C",
+            "album",
+            &["/music", "A|B", "C"]
+        ));
+        assert!(!tree_key_is(
+            "album|/music|A\\|B|C",
+            "album",
+            &["/music", "A", "B|C"]
+        ));
+        assert!(tree_key_is(
+            "album|/music|A|B|C",
+            "album",
+            &["/music", "A", "B|C"]
+        ));
+        assert!(!tree_key_is(
+            "album|/music|A|B|C",
+            "album",
+            &["/music", "A|B", "C"]
+        ));
+        assert!(tree_key_is(
+            "album|/music|A\\\\/B\\|C|D",
+            "album",
+            &["/music", "A\\/B|C", "D"]
+        ));
+    }
+
+    #[test]
+    fn expanded_keys_from_before_escaping_move_to_their_rows() {
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: crate::library::shared_tracks(vec![
+                track(
+                    "/music/AC|DC/Back in Black/01.flac",
+                    "",
+                    None,
+                    Some(1),
+                    "One",
+                ),
+                track("/music/X|Y/Z/S/01.flac", "", None, Some(1), "Two"),
+                track("/music/X/Y|Z/S/01.flac", "", None, Some(1), "Three"),
+                track("/music/Plain/Album/01.flac", "", None, Some(1), "Four"),
+            ]),
+            ..LibrarySnapshot::default()
+        };
+        let mut expanded = HashSet::from([
+            "artist|/music|AC|DC".to_string(),
+            "album|/music|AC|DC|Back in Black".to_string(),
+            // The legacy key of two sections: which one is not known.
+            "section|/music|X|Y|Z|S".to_string(),
+            "album|/music|Plain|Album".to_string(),
+            "album|/music|Gone|Album".to_string(),
+        ]);
+        let cache = LibraryTreeCache::new(&library);
+        cache.retain_expanded_keys(&mut expanded);
+        let mut kept: Vec<_> = expanded.iter().map(String::as_str).collect();
+        kept.sort_unstable();
+        assert_eq!(
+            kept,
+            [
+                "album|/music|AC\\|DC|Back in Black",
+                "album|/music|Plain|Album",
+                "artist|/music|AC|DC",
+            ]
+        );
+
+        let mut expanded = HashSet::from(["album|/music|AC|DC|Back in Black".to_string()]);
+        retain_valid_expanded_keys(&library, &mut expanded);
+        assert_eq!(
+            expanded,
+            HashSet::from(["album|/music|AC\\|DC|Back in Black".to_string()])
+        );
     }
 
     #[test]
@@ -2216,6 +2498,7 @@ mod tests {
     fn section_year_appears_in_title_in_flat_rows() {
         let album = ResolvedAlbum {
             title: "Muut".to_string(),
+            title_key: CollationKey::new("Muut"),
             year: None,
             folder_name: "Muut".to_string(),
             folder_path: PathBuf::from("/music/PT/Muut"),
@@ -2224,6 +2507,7 @@ mod tests {
             root_tracks: vec![],
             sections: vec![ResolvedSection {
                 name: "Lightbulb Sun".to_string(),
+                name_key: CollationKey::new("Lightbulb Sun"),
                 path: PathBuf::from("/music/PT/Muut/Lightbulb Sun"),
                 cover_path: Some("/cover.jpg".to_string()),
                 cover_stamp: 7,

@@ -122,10 +122,21 @@ pub(super) fn load_session_snapshot() -> Option<SessionSnapshot> {
 pub(super) fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
     let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
     let queue_values = value.get("queue")?.as_array()?;
-    let queue = queue_values
+    let mut queue = queue_values
         .iter()
         .filter_map(|v| v.as_str().map(PathBuf::from))
         .collect::<Vec<_>>();
+    if let Some(raw_paths) = value
+        .get("queue_path_bytes")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (index, raw) in raw_paths {
+            let entry = index.parse::<usize>().ok().and_then(|i| queue.get_mut(i));
+            if let (Some(entry), Some(path)) = (entry, raw.as_str().and_then(path_from_hex)) {
+                *entry = path;
+            }
+        }
+    }
     let selected_queue_index = value
         .get("selected_queue_index")
         .and_then(serde_json::Value::as_u64)
@@ -135,9 +146,15 @@ pub(super) fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok());
     let current_path = value
-        .get("current_path")
+        .get("current_path_bytes")
         .and_then(serde_json::Value::as_str)
-        .map(PathBuf::from);
+        .and_then(path_from_hex)
+        .or_else(|| {
+            value
+                .get("current_path")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        });
     let library_expanded_keys = value
         .get("library_expanded_keys")
         .and_then(serde_json::Value::as_array)
@@ -177,7 +194,7 @@ pub(super) fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
 }
 
 pub(super) fn format_session_text(session: &SessionSnapshot) -> String {
-    let payload = json!({
+    let mut payload = json!({
         "queue": session
             .queue
             .iter()
@@ -194,7 +211,52 @@ pub(super) fn format_session_text(session: &SessionSnapshot) -> String {
         "library_view_anchor_key": &session.library_view_anchor_key,
         "library_view_anchor_offset": session.library_view_anchor_offset,
     });
+    // JSON strings hold only Unicode, so a path that is not UTF-8 is also
+    // saved as its bytes. Builds that don't read them still find each entry
+    // at its index.
+    let raw_queue_paths: serde_json::Map<String, serde_json::Value> = session
+        .queue
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| Some((index.to_string(), path_to_hex(path)?.into())))
+        .collect();
+    if !raw_queue_paths.is_empty() {
+        payload["queue_path_bytes"] = raw_queue_paths.into();
+    }
+    if let Some(raw) = session.current_path.as_deref().and_then(path_to_hex) {
+        payload["current_path_bytes"] = raw.into();
+    }
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// The bytes of `path` in hex, if it is not UTF-8 and so cannot be saved as
+/// a JSON string.
+#[cfg(unix)]
+fn path_to_hex(path: &Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    path.to_str()
+        .is_none()
+        .then(|| data_encoding::HEXLOWER.encode(path.as_os_str().as_bytes()))
+}
+
+#[cfg(not(unix))]
+fn path_to_hex(_path: &Path) -> Option<String> {
+    None
+}
+
+/// The path saved by [`path_to_hex`].
+#[cfg(unix)]
+fn path_from_hex(hex: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(hex.as_bytes())
+        .ok()?;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+#[cfg(not(unix))]
+fn path_from_hex(_hex: &str) -> Option<PathBuf> {
+    None
 }
 
 /// Save the queue and library view for the next start.
@@ -693,6 +755,47 @@ mod tests {
         let text = format_session_text(&session);
         let parsed = parse_session_text(&text).expect("parse session text");
         assert_eq!(parsed, session);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paths_that_are_not_utf8_survive_a_saved_session() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/music/Bj\xf6rk/01 \xe9t\xe9.flac".to_vec(),
+        ));
+        let session = SessionSnapshot {
+            queue: vec![p("/a.flac"), raw.clone(), p("/b.flac")],
+            selected_queue_index: Some(1),
+            current_queue_index: Some(1),
+            current_path: Some(raw.clone()),
+            ..SessionSnapshot::default()
+        };
+        let text = format_session_text(&session);
+        assert_eq!(
+            parse_session_text(&text).expect("parse session text"),
+            session
+        );
+
+        // The format stays readable by builds that only know the strings:
+        // every entry is at its index, and the others are as before.
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        let queue = value["queue"].as_array().expect("queue");
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0], "/a.flac");
+        assert_eq!(queue[2], "/b.flac");
+        assert!(queue[1].as_str().is_some());
+        assert!(value.get("queue_path_bytes").is_some());
+
+        // A session without the bytes reads as before.
+        let utf8 = SessionSnapshot {
+            queue: vec![p("/a.flac")],
+            current_path: Some(p("/a.flac")),
+            ..SessionSnapshot::default()
+        };
+        let text = format_session_text(&utf8);
+        assert!(!text.contains("_bytes"), "{text}");
+        assert_eq!(parse_session_text(&text).expect("parse session text"), utf8);
     }
 
     #[test]

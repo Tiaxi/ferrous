@@ -4284,6 +4284,13 @@ void BridgeClientTest::searchResultsRankFilterAndHighlight() {
     QCOMPARE(model.highlightText("Album: Signify", "type:album signify"), QStringLiteral("Album: <b>Signify</b>"));
     QCOMPARE(model.highlightText(QString::fromUtf8("Björk & <Blue>"), "bjork blue"), QString::fromUtf8("<b>Björk</b> &amp; &lt;<b>Blue</b>&gt;"));
     QCOMPARE(model.highlightText(QString::fromUtf8("Cafe\xcc\x81"), "cafe"), QString::fromUtf8("<b>Cafe\xcc\x81</b>"));
+    // Letters without a decomposition match their base letters, as the
+    // Rust search folds them.
+    QCOMPARE(model.highlightText(QString::fromUtf8("Øystein Sørensen"), "oystein sorensen"),
+             QString::fromUtf8("<b>Øystein</b> <b>Sørensen</b>"));
+    QCOMPARE(model.highlightText(QString::fromUtf8("Straße"), "strasse"), QString::fromUtf8("<b>Straße</b>"));
+    QCOMPARE(model.highlightText(QString::fromUtf8("Ægir Łódź"), "aegir lodz"),
+             QString::fromUtf8("<b>Ægir</b> <b>Łódź</b>"));
 }
 
 void BridgeClientTest::searchProtocolTotalsAndExpansion() {

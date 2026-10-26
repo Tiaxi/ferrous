@@ -477,11 +477,28 @@ void GlobalSearchResultsModel::rebuildSearchRows() {
 }
 
 QString GlobalSearchResultsModel::highlightText(const QString &text, const QString &query) const {
+    // Folds as the Rust search does (crate::collation::fold): base letters,
+    // with the letters that have no decomposition spelled out.
     const auto fold = [](const QString &value) {
         QString result;
         for (auto ch : value.normalized(QString::NormalizationForm_KD).toCaseFolded()) {
-            if (ch.category() != QChar::Mark_NonSpacing && ch.category() != QChar::Mark_SpacingCombining
-                && ch.category() != QChar::Mark_Enclosing) result += ch;
+            if (ch.category() == QChar::Mark_NonSpacing || ch.category() == QChar::Mark_SpacingCombining
+                || ch.category() == QChar::Mark_Enclosing) continue;
+            switch (ch.unicode()) {
+            case 0x00DF: result += QStringLiteral("ss"); break; // ß
+            case 0x00E6: result += QStringLiteral("ae"); break; // æ
+            case 0x0153: result += QStringLiteral("oe"); break; // œ
+            case 0x00F8: result += QLatin1Char('o'); break;     // ø
+            case 0x0142: result += QLatin1Char('l'); break;     // ł
+            case 0x0111:                                        // đ
+            case 0x00F0: result += QLatin1Char('d'); break;     // ð
+            case 0x00FE: result += QStringLiteral("th"); break; // þ
+            case 0x0127: result += QLatin1Char('h'); break;     // ħ
+            case 0x0167: result += QLatin1Char('t'); break;     // ŧ
+            case 0x0131: result += QLatin1Char('i'); break;     // ı
+            case 0x03C2: result += QChar(0x03C3); break;        // ς
+            default: result += ch;
+            }
         }
         return result;
     };

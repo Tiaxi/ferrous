@@ -12,6 +12,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::library::{LibraryRoot, LibrarySearchTrack, LibrarySnapshot, LibraryTrack};
 
+use super::library_tree::{album_row_key, artist_row_key, section_row_key, track_row_key};
 use super::search_query::SearchQuery;
 
 use super::{
@@ -487,14 +488,10 @@ fn search_cancel_poll_rows() -> usize {
 // Normalize / split / match
 // ---------------------------------------------------------------------------
 
-/// Lowercase and strip diacritical marks so that e.g. "jonsi" matches "Jónsi".
-/// Uses NFKD decomposition and then removes combining characters (Unicode
-/// category Mark, Nonspacing — `Mn`).
+/// Lowercase and fold to base letters (see [`crate::collation::fold`]), so
+/// that "jonsi" matches "Jónsi" and "oyvind" matches "Øyvind".
 pub(super) fn normalize_for_search(text: &str) -> String {
-    text.nfkd()
-        .filter(|ch| !unicode_normalization::char::is_combining_mark(*ch))
-        .collect::<String>()
-        .to_lowercase()
+    crate::collation::fold(text)
 }
 
 pub(super) fn split_search_terms(query: &str) -> Vec<String> {
@@ -590,9 +587,8 @@ pub(super) fn derive_tree_path_context_for_root(
     } else {
         fallback_artist.trim().to_string()
     };
-    let artist_key = format!("artist|{}|{artist_name}", root.root_key);
-    let track_path = path.to_string_lossy().to_string();
-    let track_key = format!("track|{track_path}");
+    let artist_key = artist_row_key(&root.root_key, &artist_name);
+    let track_key = track_row_key(&path.to_string_lossy());
 
     if components.len() <= 2 {
         return Some(TreePathContext {
@@ -609,11 +605,13 @@ pub(super) fn derive_tree_path_context_for_root(
     }
 
     let album_folder = components[1].clone();
-    let album_key = format!("album|{}|{artist_name}|{album_folder}", root.root_key);
+    let album_key = album_row_key(&root.root_key, &artist_name, &album_folder);
     let section_key = if components.len() >= 4 {
-        Some(format!(
-            "section|{}|{artist_name}|{album_folder}|{}",
-            root.root_key, components[2]
+        Some(section_row_key(
+            &root.root_key,
+            &artist_name,
+            &album_folder,
+            &components[2],
         ))
     } else {
         None
@@ -739,23 +737,6 @@ pub(super) fn tree_path_parts<'a>(
         section: section.filter(|_| count == 4),
         is_main_level_album_track: count == 3,
     })
-}
-
-/// Whether `key` is `kind|part|part…`, the form of the library tree's keys.
-pub(super) fn tree_key_is(key: &str, kind: &str, parts: &[&str]) -> bool {
-    let Some(mut rest) = key.strip_prefix(kind) else {
-        return false;
-    };
-    for part in parts {
-        let Some(next) = rest
-            .strip_prefix('|')
-            .and_then(|next| next.strip_prefix(part))
-        else {
-            return false;
-        };
-        rest = next;
-    }
-    rest.is_empty()
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,7 +1111,17 @@ fn prepare_search_track(
     track: &LibraryTrack,
     roots_by_path: &HashMap<PathBuf, PreparedSearchRoot>,
 ) -> PreparedTrackEntry {
-    let path_string = track.path.to_string_lossy().to_string();
+    // Within its root, so the folders above the root, such as `home` and
+    // the user's name, don't match every track.
+    let relative_path = track
+        .path
+        .strip_prefix(&track.root_path)
+        .ok()
+        .filter(|relative| {
+            !track.root_path.as_os_str().is_empty() && !relative.as_os_str().is_empty()
+        })
+        .unwrap_or(&track.path);
+    let path_string = relative_path.to_string_lossy();
     let title = track.title.trim().to_string();
     let artist = track.artist.trim().to_string();
     let album = track.album.trim().to_string();
@@ -2026,6 +2017,90 @@ mod tests {
         assert_eq!(normalize_for_search("naïve"), "naive");
         // Plain ASCII unchanged
         assert_eq!(normalize_for_search("Pink Floyd"), "pink floyd");
+    }
+
+    #[test]
+    fn letters_without_a_decomposition_match_their_base_letters() {
+        assert_eq!(normalize_for_search("Øyvind"), "oyvind");
+        assert_eq!(normalize_for_search("Ærø"), "aero");
+        assert_eq!(normalize_for_search("Weiß"), "weiss");
+        assert_eq!(normalize_for_search("Łódź"), "lodz");
+        let tracks = vec![
+            fixture_track("Kjærlighet", "Øyvind Staveland", "Weiß", "01"),
+            fixture_track("Other", "Kult", "Łódź Nocą", "02"),
+        ];
+        for (query, title) in [
+            ("oyvind", "Kjærlighet"),
+            ("kjaerlighet", "Kjærlighet"),
+            ("weiss", "Kjærlighet"),
+            ("lodz", "Other"),
+        ] {
+            let rows = fixture_search(query, tracks.clone(), 20);
+            let titles: Vec<_> = rows
+                .iter()
+                .filter(|row| row.row_type == BridgeSearchResultRowType::Track)
+                .map(|row| row.label.as_str())
+                .collect();
+            assert_eq!(titles, [title], "query {query}");
+        }
+    }
+
+    #[test]
+    fn paths_match_within_their_root() {
+        let root = p("/home/listener/Music/flac");
+        let track = |artist: &str, file: &str| crate::library::LibraryTrack {
+            path: root.join(artist).join("Album").join(format!("{file}.mp3")),
+            root_path: root.clone(),
+            title: file.into(),
+            artist: artist.into(),
+            album: "Album".into(),
+            ..crate::library::LibraryTrack::default()
+        };
+        let library = LibrarySnapshot {
+            roots: vec![LibraryRoot {
+                path: root.clone(),
+                name: "Main".into(),
+            }],
+            tracks: crate::library::shared_tracks(vec![
+                track("Artist", "one"),
+                track("Artist", "two"),
+                track("Flac Fans", "three"),
+                track("Other", "home movies"),
+            ]),
+            ..LibrarySnapshot::default()
+        };
+        let prepared = prepare_search_library(&library);
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let tracks_for = |query: &str| -> Vec<String> {
+            let PreparedSearchOutcome::Hits(buckets) =
+                search_tracks_prepared(query, &prepared, &library.roots, 20, &rx)
+            else {
+                panic!("unexpected cancellation")
+            };
+            let mut paths: Vec<_> = buckets
+                .track_rows
+                .iter()
+                .map(|row| row.track_path.clone())
+                .collect();
+            paths.sort();
+            paths
+        };
+        // The folders that hold the root, and the root's own folder, are
+        // not part of any track's path.
+        for query in ["listener", "music", "path:listener"] {
+            assert!(tracks_for(query).is_empty(), "query {query}");
+        }
+        assert_eq!(
+            tracks_for("flac"),
+            [root.join("Flac Fans/Album/three.mp3").to_string_lossy()]
+        );
+        assert_eq!(
+            tracks_for("home"),
+            [root.join("Other/Album/home movies.mp3").to_string_lossy()]
+        );
+        assert_eq!(tracks_for("path:album/two").len(), 1);
+        // The root's name still matches its tracks.
+        assert_eq!(tracks_for("main").len(), 4);
     }
 
     #[test]
