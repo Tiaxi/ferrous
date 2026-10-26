@@ -12,7 +12,13 @@ permissions:
 
 jobs:
   rust-backend:
-    name: Rust Backend Checks
+    name: "Rust Backend Checks${{ matrix.toolchain == 'fedora' && ' (Fedora Rust)' || '' }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        # pinned: the reviewed toolchain, which also runs formatting and Clippy.
+        # fedora: Fedora's rust and cargo packages, which build the release RPMs.
+        toolchain: [pinned, fedora]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -56,19 +62,40 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
+        if: matrix.toolchain == 'pinned'
         uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: rustfmt, clippy
 
+      - name: Install Fedora's Rust toolchain
+        if: matrix.toolchain == 'fedora'
+        timeout-minutes: 10
+        run: dnf -y $DNF_OPTS install rust cargo
+
+      - name: Show Rust toolchain
+        run: |
+          command -v rustc cargo
+          rustc --version
+          cargo --version
+          if [ "${{ matrix.toolchain }}" = fedora ]; then
+            # No rustup toolchain may shadow the packaged one.
+            test "$(command -v rustc)" = /usr/bin/rustc
+            test "$(command -v cargo)" = /usr/bin/cargo
+          fi
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v0-rust-fedora-44
+          prefix-key: "v0-rust-fedora-44${{ matrix.toolchain == 'fedora' && '-fedora-rust' || '' }}"
 
+      # Lints stay on the pinned toolchain, so that new lints in a Fedora Rust
+      # update do not fail CI.
       - name: Check formatting
+        if: matrix.toolchain == 'pinned'
         run: cargo fmt --check
 
       - name: Clippy
+        if: matrix.toolchain == 'pinned'
         run: cargo clippy --all-features -- -D clippy::pedantic
 
       - name: Isolate test user directories
@@ -94,10 +121,12 @@ jobs:
         run: cargo test --features gst
 
       - name: Test (profiling instrumentation)
+        if: matrix.toolchain == 'pinned'
         shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
         run: cargo test --features "gst profiling-logs"
 
       - name: Test (mock backend)
+        if: matrix.toolchain == 'pinned'
         shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
         run: cargo test
 
