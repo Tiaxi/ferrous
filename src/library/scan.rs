@@ -5916,8 +5916,10 @@ mod tests {
 
         let outcome = scan(&conn, &a);
 
+        let mut removed = outcome.removed;
+        removed.sort();
         assert_eq!(
-            outcome.removed,
+            removed,
             [
                 a.join("Linked/01.mp3").to_string_lossy().to_string(),
                 a.join("Linked/02.mp3").to_string_lossy().to_string(),
