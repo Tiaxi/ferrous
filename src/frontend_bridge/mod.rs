@@ -3526,6 +3526,71 @@ mod tests {
         assert!(matches!(event_rx.try_recv(), Ok(BridgeEvent::Stopped)));
     }
 
+    /// Tells the child process that
+    /// `test_bridges_stop_in_time_while_gstreamer_rebuilds_its_registry`
+    /// starts to run its part.
+    #[cfg(feature = "gst")]
+    const COLD_REGISTRY_CHILD_ENV: &str = "FERROUS_TEST_COLD_GSTREAMER_REGISTRY";
+
+    /// With an empty cache directory, `GStreamer` rebuilds its plugin
+    /// registry when it is first initialized (#241). A process initializes
+    /// it only once, and another test may have done so already, so the
+    /// bridge starts and stops in a child process with a cache directory of
+    /// its own.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn test_bridges_stop_in_time_while_gstreamer_rebuilds_its_registry() {
+        let cache = crate::paths::test_root().join("cold-gstreamer-cache");
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&cache).expect("create the cache directory");
+
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, module)| module);
+        let name = format!("{module}::cold_gstreamer_registry_bridge");
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        child
+            .args(["--exact", &name, "--ignored"])
+            .env(COLD_REGISTRY_CHILD_ENV, "1")
+            .env_remove("GST_REGISTRY")
+            .env_remove("GST_REGISTRY_1_0")
+            .env_remove("GST_REGISTRY_UPDATE");
+        crate::paths::set_child_cache_home(&mut child, &cache);
+        let output = child.output().expect("run the child process");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(&format!("test {name} ... ok")),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The child rebuilt the registry in its own cache directory.
+        assert!(cache.join("gstreamer-1.0").is_dir());
+        std::fs::remove_dir_all(cache).expect("remove the cache directory");
+    }
+
+    /// The child process's part of
+    /// `test_bridges_stop_in_time_while_gstreamer_rebuilds_its_registry`.
+    #[cfg(feature = "gst")]
+    #[test]
+    #[ignore = "run in a child process by test_bridges_stop_in_time_while_gstreamer_rebuilds_its_registry"]
+    fn cold_gstreamer_registry_bridge() {
+        if std::env::var_os(COLD_REGISTRY_CHILD_ENV).is_none() {
+            return;
+        }
+        assert!(
+            !gstreamer::INITIALIZED.load(Ordering::SeqCst),
+            "the bridge starts before GStreamer is initialized"
+        );
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = unbounded();
+
+        assert!(
+            runtime.shutdown(&event_tx),
+            "{:?}",
+            error_messages(&event_rx)
+        );
+    }
+
     #[test]
     fn renaming_the_playing_file_continues_its_lastfm_play() {
         let _guard = test_guard();

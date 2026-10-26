@@ -124,6 +124,13 @@ pub(crate) fn set_config_dir_override(dir: Option<PathBuf>) -> Option<PathBuf> {
     CONFIG_DIR_OVERRIDE.with(|current| current.replace(dir))
 }
 
+/// Make the child process that `command` starts use `dir` as its cache
+/// base directory, where `GStreamer` keeps its plugin registry.
+#[cfg(all(test, feature = "gst"))]
+pub(crate) fn set_child_cache_home(command: &mut std::process::Command, dir: &std::path::Path) {
+    command.env(BaseDir::Cache.xdg_var(), dir);
+}
+
 /// A config directory of the current thread's own, under [`test_root`],
 /// until this is dropped. Dropping it removes the directory.
 #[cfg(test)]
