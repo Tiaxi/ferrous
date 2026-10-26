@@ -45,6 +45,7 @@ mod queue_validation;
 mod search;
 mod search_query;
 mod tree_worker;
+mod window_layout;
 mod workers;
 
 use commands::{handle_bridge_command, sync_queue_details, BridgeCommandContext};
@@ -63,6 +64,7 @@ pub use queue_sync::{QueueEdit, QueueUpdate};
 pub use queue_undo::{QueueUndoKind, QueueUndoRestored, QueueUndoState};
 pub(crate) use search::is_main_album_disc_section;
 use search::{drain_search_results, process_search_results, SearchWorkerQuery};
+pub use window_layout::{WindowGeometry, WindowLayout};
 use workers::{spawn_apply_album_art_worker, spawn_lastfm_service, spawn_search_worker};
 
 #[cfg(feature = "profiling-logs")]
@@ -314,6 +316,7 @@ pub enum BridgeSettingsCommand {
     SetChannelButtonsVisibility(u8),
     SetSpectrogramZoomEnabled(bool),
     SetLibraryWatchEnabled(bool),
+    SetWindowLayout(WindowLayout),
     BeginLastFmAuth,
     CompleteLastFmAuth,
     DisconnectLastFm,
@@ -530,6 +533,8 @@ pub struct BridgeSettings {
     /// at startup.
     pub library_watch_enabled: bool,
     pub integrations: BridgeIntegrationSettings,
+    /// The main window's layout, which only the UI uses.
+    pub window: WindowLayout,
     /// Lines of the settings file with keys this build does not know, such
     /// as a newer build's, kept as they were.
     pub unknown_lines: Vec<String>,
@@ -564,6 +569,7 @@ impl Default for BridgeSettings {
                 lastfm_scrobbling_enabled: false,
                 lastfm_username: String::new(),
             },
+            window: WindowLayout::default(),
             unknown_lines: Vec::new(),
         }
     }
@@ -3180,6 +3186,27 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn a_new_window_layout_is_kept_and_saved_and_an_unchanged_one_is_not() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(32);
+        let layout = WindowLayout {
+            maximized: true,
+            sidebar_width_ratio: Some(0.3),
+            ..WindowLayout::default()
+        };
+        for (sent, dirty) in [(layout, true), (layout, false)] {
+            runtime.flags.settings_dirty = false;
+            runtime.handle_command(
+                BridgeCommand::Settings(BridgeSettingsCommand::SetWindowLayout(sent)),
+                &event_tx,
+            );
+            assert_eq!(runtime.state.settings.window, layout);
+            assert_eq!(runtime.flags.settings_dirty, dirty);
+        }
     }
 
     #[test]

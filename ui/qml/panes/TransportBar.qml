@@ -32,6 +32,7 @@ ToolBar {
     readonly property bool volumeSilent: root.volumeMuted
         || root.normalizedVolumeValue(root.uiBridge.volume) <= 0.0001
 
+    implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
     implicitHeight: contentItem.implicitHeight + topPadding + bottomPadding
     leftPadding: 8
     rightPadding: 12

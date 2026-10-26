@@ -122,6 +122,7 @@ qt_add_qml_module(ferrous
         qml/controllers/PlaybackController.qml
         qml/controllers/QueueController.qml
         qml/controllers/ViewerController.qml
+        qml/controllers/WindowLayoutController.qml
         qml/dialogs/AboutDialog.qml
         qml/dialogs/ConfirmDialog.qml
         qml/dialogs/DiagnosticsDialog.qml

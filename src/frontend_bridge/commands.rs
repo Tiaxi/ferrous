@@ -235,6 +235,18 @@ fn save_settings_now(state: &BridgeState, context: &mut BridgeCommandContext<'_>
     }
 }
 
+/// Keep the window layout the UI sent, to save it with the settings.
+fn set_window_layout(
+    state: &mut BridgeState,
+    context: &mut BridgeCommandContext<'_>,
+    layout: super::WindowLayout,
+) {
+    if state.settings.window != layout {
+        state.settings.window = layout;
+        *context.settings_dirty = true;
+    }
+}
+
 fn handle_settings_bridge_command(
     cmd: &BridgeSettingsCommand,
     state: &mut BridgeState,
@@ -316,6 +328,25 @@ fn handle_settings_bridge_command(
         BridgeSettingsCommand::SetLibraryWatchEnabled(enabled) => {
             set_library_watching(state, context, *enabled);
         }
+        BridgeSettingsCommand::SetWindowLayout(layout) => {
+            set_window_layout(state, context, *layout);
+        }
+        BridgeSettingsCommand::SetLastFmScrobblingEnabled(_)
+        | BridgeSettingsCommand::BeginLastFmAuth
+        | BridgeSettingsCommand::CompleteLastFmAuth
+        | BridgeSettingsCommand::DisconnectLastFm => {
+            handle_lastfm_settings_command(cmd, state, context);
+        }
+    }
+}
+
+/// The Last.fm settings and its sign-in.
+fn handle_lastfm_settings_command(
+    cmd: &BridgeSettingsCommand,
+    state: &mut BridgeState,
+    context: &mut BridgeCommandContext<'_>,
+) {
+    match cmd {
         BridgeSettingsCommand::SetLastFmScrobblingEnabled(enabled) => {
             state.settings.integrations.lastfm_scrobbling_enabled = *enabled;
             state.lastfm.enabled = *enabled;
@@ -338,6 +369,7 @@ fn handle_settings_bridge_command(
                 .command(LastFmCommand::Disconnect { clear_queue: true });
             *context.settings_dirty = true;
         }
+        _ => {}
     }
 }
 

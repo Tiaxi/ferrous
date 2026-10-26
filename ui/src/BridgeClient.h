@@ -5,6 +5,9 @@
 #include <QAbstractListModel>
 #include <QObject>
 #include <QByteArray>
+#include <QList>
+#include <QRect>
+#include <QSize>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QNetworkAccessManager>
@@ -348,6 +351,25 @@ public:
     Q_INVOKABLE void unregisterSpectrogramItem(QObject *item);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
     Q_INVOKABLE void setLibraryWatchEnabled(bool value);
+    // The main window's layout saved in the settings, read from the file,
+    // for the window to open with before it is shown. The keys are "x",
+    // "y", "width", and "height" (if a geometry was saved, fitted to the
+    // screens there are now; see fitWindowToScreens), "maximized",
+    // "sidebarWidthRatio" and "queueHeightRatio" (if saved),
+    // "visualizationMode", and "followCurrentTrack".
+    Q_INVOKABLE QVariantMap savedWindowLayout() const;
+    // Keep `layout`, with the keys of savedWindowLayout, to save it with the
+    // settings. The geometry is the window's when it is neither maximized
+    // nor fullscreen.
+    Q_INVOKABLE void setWindowLayout(const QVariantMap &layout);
+    // Where a window saved at `saved` opens on screens whose available areas
+    // are `screens`: on the screen it overlaps most, or centred on the first
+    // one when it overlaps none, such as one saved on a monitor that is gone.
+    // It keeps its size where the screen has room for it, and at least
+    // `minimum` where the screen has room for that; it is moved fully onto
+    // the screen.
+    static QRect fitWindowToScreens(
+        const QRect &saved, const QList<QRect> &screens, const QSize &minimum);
     Q_INVOKABLE void setLastFmScrobblingEnabled(bool value);
     Q_INVOKABLE void beginLastFmAuth();
     Q_INVOKABLE void completeLastFmAuth();

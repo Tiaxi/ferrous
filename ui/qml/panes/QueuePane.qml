@@ -33,6 +33,19 @@ Rectangle {
     readonly property real lengthColumnWidth: Math.ceil(Math.max(
         lengthHeaderMetrics.advanceWidth,
         lengthValueMetrics.advanceWidth) + columnFontMetrics.averageCharacterWidth)
+    // The narrowest the queue gets: every column, and a title column wide
+    // enough to tell the tracks apart. The number column is counted for
+    // queues of up to 99,999 tracks rather than at its width now, so that
+    // the window's minimum does not change as tracks are queued.
+    readonly property real minimumTitleColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 12)
+    readonly property real minimumOrderColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 6.5)
+    readonly property real minimumContentWidth: Math.ceil(2 * root.columnMargin
+        + root.playlistIndicatorColumnWidth + root.minimumOrderColumnWidth
+        + root.minimumTitleColumnWidth + root.artistColumnWidth + root.albumColumnWidth
+        + root.lengthColumnWidth + 5 * root.columnSpacing + root.scrollBarAllowance)
+    // Room for the scroll bar beside the rows, which some styles widen
+    // while it is used; see reservedRightPadding.
+    readonly property real scrollBarAllowance: 20
 
     FontMetrics {
         id: columnFontMetrics

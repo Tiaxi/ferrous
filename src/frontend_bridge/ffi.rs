@@ -13,12 +13,13 @@ use std::os::fd::RawFd;
 
 use super::imports::{ImportGate, RenamedDetails};
 use super::queue_relay::{QueueBatch, QueueRelay};
+use super::window_layout::{self, FerrousWindowLayout, WindowGeometry, WindowLayout};
 use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand,
     BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame,
-    BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory, FrontendBridgeHandle,
-    LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueUndoState, RowsMove,
-    ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
+    BridgeSettings, BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory,
+    FrontendBridgeHandle, LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueUndoState,
+    RowsMove, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
@@ -1154,6 +1155,32 @@ pub extern "C" fn ferrous_ffi_spectrogram_zoom_after_request(current: f32, reque
     )
 }
 
+/// Fill `out` with the window layout saved in the settings file, or the
+/// default layout if there is none. The UI calls this once before it shows
+/// the window, which reads the file. Returns false if `out` is null.
+///
+/// # Safety
+///
+/// `out` must be null or point to a writable `FerrousWindowLayout`.
+#[no_mangle]
+pub unsafe extern "C" fn ferrous_ffi_saved_window_layout(out: *mut FerrousWindowLayout) -> bool {
+    ffi_call(
+        "ferrous_ffi_saved_window_layout",
+        |_| false,
+        || {
+            if out.is_null() {
+                return false;
+            }
+            let mut settings = BridgeSettings::default();
+            super::config::load_settings_into(&mut settings);
+            // SAFETY: The caller guarantees that a non-null `out` points to
+            // a writable `FerrousWindowLayout`.
+            unsafe { out.write(FerrousWindowLayout::from(&settings.window)) };
+            true
+        },
+    )
+}
+
 /// Start the bridge. Returns null if it cannot start.
 #[no_mangle]
 pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
@@ -2092,6 +2119,37 @@ fn parse_library_ui_command(
     Ok(Some(BridgeCommand::Library(command)))
 }
 
+/// The payload of the command that sets the window layout: `has_geometry`
+/// (u8), `x`, `y` (i32), `width`, `height` (u32), `maximized` (u8), the
+/// sidebar and queue shares (f32, negative for the default),
+/// `visualization_mode` (u8), and `follow_current_track` (u8). Values out
+/// of range are dropped or brought in range, as when the settings are read.
+fn read_window_layout(reader: &mut BinaryReader<'_>) -> Result<WindowLayout, String> {
+    let has_geometry = reader.read_u8()? != 0;
+    let (x, y) = (reader.read_i32()?, reader.read_i32()?);
+    let (width, height) = (reader.read_u32()?, reader.read_u32()?);
+    let maximized = reader.read_u8()? != 0;
+    let ratio = |value: f32| {
+        (value >= 0.0)
+            .then_some(value)
+            .and_then(window_layout::checked_ratio)
+    };
+    let sidebar_width_ratio = ratio(reader.read_f32()?);
+    let queue_height_ratio = ratio(reader.read_f32()?);
+    let visualization_mode = reader.read_u8()?.min(1);
+    let follow_current_track = reader.read_u8()? != 0;
+    Ok(WindowLayout {
+        geometry: has_geometry
+            .then(|| WindowGeometry::checked(x, y, width, height))
+            .flatten(),
+        maximized,
+        sidebar_width_ratio,
+        queue_height_ratio,
+        visualization_mode,
+        follow_current_track,
+    })
+}
+
 fn parse_settings_command(
     cmd_id: u16,
     reader: &mut BinaryReader<'_>,
@@ -2132,6 +2190,7 @@ fn parse_settings_command(
         )),
         59 => BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(reader.read_u8()? != 0),
         67 => BridgeSettingsCommand::SetLibraryWatchEnabled(reader.read_u8()? != 0),
+        71 => BridgeSettingsCommand::SetWindowLayout(read_window_layout(reader)?),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -3244,6 +3303,7 @@ mod tests {
                     lastfm_scrobbling_enabled: true,
                     lastfm_username: "tester".to_string(),
                 },
+                window: WindowLayout::default(),
                 unknown_lines: Vec::new(),
             },
             lastfm: crate::lastfm::RuntimeState {
@@ -3690,6 +3750,130 @@ mod tests {
             parse_binary_command(&encode_command(62, &payload)).err(),
             Some("unknown binary command id 62".to_string())
         );
+    }
+
+    fn window_layout_payload(
+        geometry: Option<(i32, i32, u32, u32)>,
+        maximized: bool,
+        ratios: (f32, f32),
+        mode: u8,
+        follow: bool,
+    ) -> Vec<u8> {
+        let (x, y, width, height) = geometry.unwrap_or_default();
+        let mut payload = vec![u8::from(geometry.is_some())];
+        payload.extend_from_slice(&x.to_le_bytes());
+        payload.extend_from_slice(&y.to_le_bytes());
+        payload.extend_from_slice(&width.to_le_bytes());
+        payload.extend_from_slice(&height.to_le_bytes());
+        payload.push(u8::from(maximized));
+        payload.extend_from_slice(&ratios.0.to_le_bytes());
+        payload.extend_from_slice(&ratios.1.to_le_bytes());
+        payload.push(mode);
+        payload.push(u8::from(follow));
+        payload
+    }
+
+    fn parsed_window_layout(payload: &[u8]) -> Result<WindowLayout, String> {
+        match parse_binary_command(&encode_command(71, payload))? {
+            Some(BridgeCommand::Settings(BridgeSettingsCommand::SetWindowLayout(layout))) => {
+                Ok(layout)
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_binary_command_reads_the_window_layout() {
+        let layout = parsed_window_layout(&window_layout_payload(
+            Some((-1920, 24, 1280, 720)),
+            true,
+            (0.3, 0.6),
+            1,
+            false,
+        ))
+        .expect("parse");
+        assert_eq!(
+            layout,
+            WindowLayout {
+                geometry: Some(WindowGeometry {
+                    x: -1920,
+                    y: 24,
+                    width: 1280,
+                    height: 720
+                }),
+                maximized: true,
+                sidebar_width_ratio: Some(0.3),
+                queue_height_ratio: Some(0.6),
+                visualization_mode: 1,
+                follow_current_track: false,
+            }
+        );
+
+        // Defaults and values out of range.
+        let layout = parsed_window_layout(&window_layout_payload(
+            Some((0, 0, 0, 720)),
+            false,
+            (-1.0, f32::NAN),
+            9,
+            true,
+        ))
+        .expect("parse");
+        assert_eq!(
+            layout,
+            WindowLayout {
+                visualization_mode: 1,
+                ..WindowLayout::default()
+            }
+        );
+        let layout = parsed_window_layout(&window_layout_payload(None, false, (3.0, 0.0), 0, true))
+            .expect("parse");
+        assert_eq!(layout.geometry, None);
+        assert_eq!(layout.sidebar_width_ratio, Some(0.95));
+        assert_eq!(layout.queue_height_ratio, Some(0.05));
+
+        // A payload of another length is refused.
+        let mut long = window_layout_payload(None, false, (0.5, 0.5), 0, true);
+        long.push(0);
+        assert!(parsed_window_layout(&long).is_err());
+        assert!(parsed_window_layout(&long[..long.len() - 2]).is_err());
+    }
+
+    #[test]
+    fn the_saved_window_layout_is_read_from_the_settings_file() {
+        let _config = crate::paths::TestConfigDir::new();
+        let read = || {
+            let mut out = FerrousWindowLayout::from(&WindowLayout {
+                maximized: true,
+                ..WindowLayout::default()
+            });
+            // SAFETY: `out` is a writable layout.
+            assert!(unsafe { ferrous_ffi_saved_window_layout(&raw mut out) });
+            out
+        };
+        // Without a settings file: the default layout.
+        assert_eq!(read(), FerrousWindowLayout::from(&WindowLayout::default()));
+
+        let saved = WindowLayout {
+            geometry: Some(WindowGeometry {
+                x: 2560,
+                y: 0,
+                width: 1100,
+                height: 700,
+            }),
+            maximized: true,
+            sidebar_width_ratio: Some(0.25),
+            queue_height_ratio: None,
+            visualization_mode: 1,
+            follow_current_track: false,
+        };
+        super::super::config::save_settings(&BridgeSettings {
+            window: saved,
+            ..BridgeSettings::default()
+        })
+        .expect("save the settings");
+        assert_eq!(read(), FerrousWindowLayout::from(&saved));
+        // SAFETY: A null pointer is refused.
+        assert!(!unsafe { ferrous_ffi_saved_window_layout(std::ptr::null_mut()) });
     }
 
     #[test]

@@ -144,6 +144,8 @@ enum CommandId : quint16 {
     CmdQueueLibraryItems = 69,
     // Rows to move together; see encodeCommandMoveQueueRows.
     CmdMoveQueueRows = 70,
+    // The main window's layout; see encodeCommandWindowLayout.
+    CmdSetWindowLayout = 71,
 };
 
 // Where CmdQueueLibraryItems puts its tracks.
@@ -457,6 +459,26 @@ QByteArray encodeCommandLibraryViewState(
     const QString &anchorKey,
     float anchorOffset);
 QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query, quint32 limit = 0);
+
+// The main window's layout, as src/frontend_bridge/window_layout.rs saves it.
+struct WindowLayout {
+    bool hasGeometry{false};
+    qint32 x{0};
+    qint32 y{0};
+    quint32 width{0};
+    quint32 height{0};
+    bool maximized{false};
+    // Negative for the default.
+    float sidebarWidthRatio{-1.0F};
+    // Negative for the default.
+    float queueHeightRatio{-1.0F};
+    quint8 visualizationMode{0};
+    bool followCurrentTrack{true};
+};
+// CmdSetWindowLayout: hasGeometry (u8), x, y (i32), width, height (u32),
+// maximized (u8), the sidebar and queue ratios (f32), visualizationMode (u8),
+// and followCurrentTrack (u8).
+QByteArray encodeCommandWindowLayout(const WindowLayout &layout);
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
 // Queue commands for rows of the queue at `revision`.
 QByteArray encodeCommandQueueRow(quint16 cmdId, quint64 revision, quint32 index);

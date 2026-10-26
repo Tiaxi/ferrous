@@ -576,6 +576,7 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                 settings.integrations.lastfm_username = value.to_string();
             }
             "library_watch_enabled" => parse_flag(value, &mut settings.library_watch_enabled),
+            _ if super::window_layout::parse_setting(&mut settings.window, key, value) => {}
             // Kept for the build that wrote it.
             _ => settings.unknown_lines.push(line.to_string()),
         }
@@ -665,6 +666,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.integrations.lastfm_username,
         i32::from(settings.library_watch_enabled),
     );
+    super::window_layout::format_settings(&settings.window, &mut text);
     for line in &settings.unknown_lines {
         text.push_str(line);
         text.push('\n');
@@ -674,7 +676,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BridgeDisplaySettings, BridgeIntegrationSettings};
+    use super::super::{BridgeDisplaySettings, BridgeIntegrationSettings, WindowLayout};
     use super::*;
     use std::path::PathBuf;
 
@@ -721,6 +723,7 @@ mod tests {
                 lastfm_scrobbling_enabled: true,
                 lastfm_username: "tester".to_string(),
             },
+            window: WindowLayout::default(),
             unknown_lines: Vec::new(),
         };
         let text = format_settings_text(&settings);
@@ -782,6 +785,37 @@ mod tests {
         parse_settings_text(&mut reloaded, &saved);
         parse_settings_text(&mut reloaded, &saved);
         assert_eq!(format_settings_text(&reloaded), saved);
+    }
+
+    #[test]
+    fn the_window_layout_is_saved_with_the_settings_and_keeps_unknown_lines() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume_cubic=0.5\nfuture_key=1\n");
+        assert_eq!(settings.window, WindowLayout::default(), "older files");
+        settings.window = WindowLayout {
+            geometry: Some(super::super::WindowGeometry {
+                x: 10,
+                y: 20,
+                width: 1100,
+                height: 700,
+            }),
+            maximized: true,
+            sidebar_width_ratio: Some(0.2),
+            queue_height_ratio: Some(0.7),
+            visualization_mode: 1,
+            follow_current_track: false,
+        };
+        let text = format_settings_text(&settings);
+        assert!(
+            text.contains("\nwindow_geometry=10,20,1100,700\n"),
+            "{text}"
+        );
+        assert!(text.contains("\nfuture_key=1\n"), "{text}");
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(&mut parsed, &text);
+        assert_eq!(parsed.window, settings.window);
+        assert_eq!(parsed.unknown_lines, vec!["future_key=1".to_string()]);
+        assert_eq!(format_settings_text(&parsed), text);
     }
 
     #[test]

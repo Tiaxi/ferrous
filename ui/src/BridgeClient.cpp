@@ -28,6 +28,7 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QImage>
 #include <QImageIOHandler>
 #include <QImageReader>
@@ -42,6 +43,7 @@
 #include <QNetworkRequest>
 #include <QProcess>
 #include <QQuickWindow>
+#include <QScreen>
 #include <QSet>
 #include <QSocketNotifier>
 #include <QStandardPaths>
@@ -2641,6 +2643,105 @@ void BridgeClient::setLibraryWatchEnabled(bool value) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetLibraryWatchEnabled,
         static_cast<quint8>(value ? 1 : 0)));
+}
+
+QRect BridgeClient::fitWindowToScreens(
+    const QRect &saved, const QList<QRect> &screens, const QSize &minimum) {
+    if (screens.isEmpty() || saved.isEmpty()) {
+        return saved;
+    }
+    QRect screen = screens.constFirst();
+    qint64 largestOverlap = 0;
+    for (const QRect &candidate : screens) {
+        const QRect overlap = candidate.intersected(saved);
+        const qint64 area = static_cast<qint64>(overlap.width()) * overlap.height();
+        if (area > largestOverlap) {
+            largestOverlap = area;
+            screen = candidate;
+        }
+    }
+    const int width = std::min(std::max(saved.width(), minimum.width()), screen.width());
+    const int height = std::min(std::max(saved.height(), minimum.height()), screen.height());
+    QRect fitted(saved.topLeft(), QSize(width, height));
+    if (largestOverlap == 0) {
+        fitted.moveCenter(screen.center());
+        return fitted;
+    }
+    fitted.moveLeft(std::clamp(fitted.left(), screen.left(), screen.right() - width + 1));
+    fitted.moveTop(std::clamp(fitted.top(), screen.top(), screen.bottom() - height + 1));
+    return fitted;
+}
+
+QVariantMap BridgeClient::savedWindowLayout() const {
+    // The window opens with it, so it is read here, once, before the window
+    // is shown; the backend sends no snapshot that early.
+    FerrousWindowLayout saved{};
+    if (!ferrous_ffi_saved_window_layout(&saved)) {
+        return {};
+    }
+    QVariantMap layout;
+    if (saved.hasGeometry) {
+        QList<QRect> screens;
+        for (const QScreen *screen : QGuiApplication::screens()) {
+            screens.push_back(screen->availableGeometry());
+        }
+        // The backend keeps extents below 65536, so they fit an int.
+        const QRect fitted = fitWindowToScreens(
+            QRect(saved.x, saved.y, static_cast<int>(saved.width), static_cast<int>(saved.height)),
+            screens,
+            // The window keeps to its own minimum size.
+            QSize());
+        layout.insert(QStringLiteral("x"), fitted.x());
+        layout.insert(QStringLiteral("y"), fitted.y());
+        layout.insert(QStringLiteral("width"), fitted.width());
+        layout.insert(QStringLiteral("height"), fitted.height());
+    }
+    layout.insert(QStringLiteral("maximized"), saved.maximized);
+    if (saved.sidebarWidthRatio >= 0.0F) {
+        layout.insert(QStringLiteral("sidebarWidthRatio"), static_cast<double>(saved.sidebarWidthRatio));
+    }
+    if (saved.queueHeightRatio >= 0.0F) {
+        layout.insert(QStringLiteral("queueHeightRatio"), static_cast<double>(saved.queueHeightRatio));
+    }
+    layout.insert(QStringLiteral("visualizationMode"), static_cast<int>(saved.visualizationMode));
+    layout.insert(QStringLiteral("followCurrentTrack"), saved.followCurrentTrack);
+    return layout;
+}
+
+void BridgeClient::setWindowLayout(const QVariantMap &layout) {
+    BinaryBridgeCodec::WindowLayout command;
+    const auto number = [&layout](const QString &key, double *value) {
+        bool ok = false;
+        *value = layout.value(key).toDouble(&ok);
+        return ok && std::isfinite(*value);
+    };
+    double x = 0.0;
+    double y = 0.0;
+    double width = 0.0;
+    double height = 0.0;
+    if (number(QStringLiteral("x"), &x) && number(QStringLiteral("y"), &y)
+        && number(QStringLiteral("width"), &width) && number(QStringLiteral("height"), &height)
+        && width >= 1.0 && height >= 1.0 && width < 65536.0 && height < 65536.0
+        && std::abs(x) < 1e6 && std::abs(y) < 1e6) {
+        command.hasGeometry = true;
+        command.x = static_cast<qint32>(std::lround(x));
+        command.y = static_cast<qint32>(std::lround(y));
+        command.width = static_cast<quint32>(std::lround(width));
+        command.height = static_cast<quint32>(std::lround(height));
+    }
+    command.maximized = layout.value(QStringLiteral("maximized")).toBool();
+    double ratio = 0.0;
+    if (number(QStringLiteral("sidebarWidthRatio"), &ratio) && ratio >= 0.0) {
+        command.sidebarWidthRatio = static_cast<float>(ratio);
+    }
+    if (number(QStringLiteral("queueHeightRatio"), &ratio) && ratio >= 0.0) {
+        command.queueHeightRatio = static_cast<float>(ratio);
+    }
+    command.visualizationMode = static_cast<quint8>(
+        std::clamp(layout.value(QStringLiteral("visualizationMode")).toInt(), 0, 1));
+    command.followCurrentTrack =
+        layout.value(QStringLiteral("followCurrentTrack"), true).toBool();
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandWindowLayout(command));
 }
 
 void BridgeClient::setLastFmScrobblingEnabled(bool value) {
