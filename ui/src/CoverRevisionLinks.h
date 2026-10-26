@@ -17,7 +17,8 @@
 // and readers follow it to the current file. Links are made on a worker
 // thread, created under a temporary name and renamed into place. Only links
 // named the way this class names them are removed: the few made last stay,
-// so that a consumer still reading the previous revision finds it.
+// so that a consumer still reading the previous revision finds it, and the
+// link last made known stays until a newer one is.
 class CoverRevisionLinks : public QObject {
     Q_OBJECT
 

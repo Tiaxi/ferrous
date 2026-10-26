@@ -50,10 +50,49 @@ pub struct LibraryTrack {
     /// [`crate::folder_cover::FolderImages::stamp`]. It changes when the
     /// image at `cover_path` is replaced, so views key cached images on it.
     pub cover_stamp: u64,
+    /// When the cover was chosen; see [`CoverReadAt`].
+    pub cover_read_at: CoverReadAt,
     pub genre: String,
     pub year: Option<i32>,
     pub track_no: Option<u32>,
     pub duration_secs: Option<f32>,
+}
+
+/// When a cover choice was read from disk. Choices reach the bridge from
+/// the library worker, artwork apply and the metadata worker, each after
+/// its own delay, so the bridge orders them by this, never by arrival.
+///
+/// It says when, not what: rows that differ only here are equal, so a scan
+/// that reads a file again and gets the same row publishes nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CoverReadAt(pub Option<std::time::Instant>);
+
+impl PartialEq for CoverReadAt {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for CoverReadAt {}
+
+impl CoverReadAt {
+    /// Taken before the folder or file is read.
+    #[must_use]
+    pub fn now() -> Self {
+        Self(Some(std::time::Instant::now()))
+    }
+
+    /// Whether a cover read at `self` may replace one read at `shown`: it
+    /// was read no earlier. A time not known, such as of a row loaded from
+    /// the database, is older than any known one.
+    #[must_use]
+    pub fn is_not_older_than(self, shown: Self) -> bool {
+        match (self.0, shown.0) {
+            (Some(read), Some(shown)) => read >= shown,
+            (None, Some(_)) => false,
+            (_, None) => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -257,6 +296,8 @@ pub(crate) struct IndexedTrack {
     pub(crate) cover_path: String,
     /// See [`LibraryTrack::cover_stamp`].
     pub(crate) cover_stamp: u64,
+    /// See [`CoverReadAt`].
+    pub(crate) cover_read_at: CoverReadAt,
     pub(crate) genre: String,
     pub(crate) year: Option<i32>,
     pub(crate) track_no: Option<u32>,
@@ -272,6 +313,7 @@ impl From<&LibraryTrack> for IndexedTrack {
             album: track.album.clone(),
             cover_path: track.cover_path.clone(),
             cover_stamp: track.cover_stamp,
+            cover_read_at: track.cover_read_at,
             genre: track.genre.clone(),
             year: track.year,
             track_no: track.track_no,

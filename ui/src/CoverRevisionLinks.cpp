@@ -44,10 +44,11 @@ QString linkName(const QString &coverPath, quint64 stamp) {
     return QStringLiteral("%1-%2.%3").arg(digest).arg(stamp).arg(suffix);
 }
 
-// Removes the links this class made but those in `kept`, and temporary
-// links a stopped run left. Files that are not links, or that are named
-// otherwise, are never removed.
-void pruneLinks(const QString &directory, const std::deque<QString> &kept) {
+// Removes the links this class made but those in `kept` and `published`,
+// and temporary links a stopped run left. Files that are not links, or that
+// are named otherwise, are never removed.
+void pruneLinks(
+    const QString &directory, const std::deque<QString> &kept, const QString &published) {
     const QFileInfoList entries = QDir(directory).entryInfoList(
         QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
     for (const QFileInfo &entry : entries) {
@@ -58,7 +59,7 @@ void pruneLinks(const QString &directory, const std::deque<QString> &kept) {
         const QString path = entry.filePath();
         // Links are made one at a time, so a temporary one is a leftover.
         const bool leftover = tempNamePattern().match(name).hasMatch();
-        const bool old = linkNamePattern().match(name).hasMatch()
+        const bool old = linkNamePattern().match(name).hasMatch() && path != published
             && std::find(kept.cbegin(), kept.cend(), path) == kept.cend();
         if (leftover || old) {
             QFile::remove(path);
@@ -72,8 +73,13 @@ struct LinkResult {
 };
 
 // `recent` holds the links made, newest last; only the worker touches it.
+// `published` is the link in use until this one replaces it.
 LinkResult makeLink(
-    const QString &directory, const QString &coverPath, quint64 stamp, std::deque<QString> &recent) {
+    const QString &directory,
+    const QString &coverPath,
+    quint64 stamp,
+    const QString &published,
+    std::deque<QString> &recent) {
     if (!QDir().mkpath(directory)) {
         return {{}, QStringLiteral("could not create '%1'").arg(directory)};
     }
@@ -101,7 +107,7 @@ LinkResult makeLink(
     while (recent.size() > static_cast<std::size_t>(CoverRevisionLinks::kKeptLinks)) {
         recent.pop_front();
     }
-    pruneLinks(directory, recent);
+    pruneLinks(directory, recent, published);
     return {target, {}};
 }
 
@@ -139,8 +145,18 @@ QString CoverRevisionLinks::linkFor(const QString &coverPath, quint64 stamp) {
     m_requestedKey = key;
     m_pending = true;
     const quint64 generation = ++m_generation;
-    m_pool.start([this, directory = m_directory, coverPath, stamp, key, generation]() {
-        const LinkResult result = makeLink(directory, coverPath, stamp, m_recentLinks);
+    // The last link made known stays until a newer one is: in a burst of
+    // revisions, the links made in between may outnumber the kept ones
+    // before the newest reaches the UI.
+    m_pool.start([this,
+                  directory = m_directory,
+                  coverPath,
+                  stamp,
+                  published = m_readyLink,
+                  key,
+                  generation]() {
+        const LinkResult result =
+            makeLink(directory, coverPath, stamp, published, m_recentLinks);
         // The destructor waits for this job, so `this` is alive here, and
         // Qt drops the call if the object is gone by the time it runs.
         QMetaObject::invokeMethod(

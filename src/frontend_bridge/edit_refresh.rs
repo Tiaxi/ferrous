@@ -63,9 +63,10 @@ struct AppliedRow {
 }
 
 enum Row {
-    /// A refresh read the file, in this state.
+    /// A refresh read the file, in this state. Boxed, so that the other
+    /// rows, which are most of them, stay small.
     Refreshed {
-        indexed: IndexedTrack,
+        indexed: Box<IndexedTrack>,
         fingerprint: Option<TrackFileFingerprint>,
     },
     /// A library event had this row.
@@ -197,7 +198,7 @@ impl EditRefreshWorker {
                 Row::Refreshed {
                     indexed,
                     fingerprint,
-                } => (indexed.clone(), *fingerprint),
+                } => ((**indexed).clone(), *fingerprint),
                 Row::Library(track) => (IndexedTrack::from(&**track), None),
                 Row::Removed => {
                     details.indexed.remove(new_path);
@@ -285,7 +286,7 @@ impl EditRefreshWorker {
                 path.clone(),
                 sequence,
                 Row::Refreshed {
-                    indexed: row.clone(),
+                    indexed: Box::new(row.clone()),
                     fingerprint: fingerprints.get(path).copied(),
                 },
             );
@@ -312,6 +313,7 @@ mod tests {
             album: String::new(),
             cover_path: String::new(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year: None,
             track_no: None,

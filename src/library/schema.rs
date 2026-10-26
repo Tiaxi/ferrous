@@ -249,6 +249,8 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack> {
         album: row.get::<_, String>(4)?,
         cover_path: row.get::<_, String>(5)?,
         cover_stamp: stamp_from_column(row.get(11)?),
+        // A stored row says nothing of when its cover was read.
+        cover_read_at: super::CoverReadAt::default(),
         genre: row.get::<_, String>(6)?,
         year: row
             .get::<_, Option<i64>>(7)?

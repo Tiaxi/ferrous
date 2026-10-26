@@ -1015,6 +1015,7 @@ fn copy_track_details(track: &mut LibraryTrack, indexed: &IndexedTrack) {
     track.album.clone_from(&indexed.album);
     track.cover_path.clone_from(&indexed.cover_path);
     track.cover_stamp = indexed.cover_stamp;
+    track.cover_read_at = indexed.cover_read_at;
     track.search_tags.clone_from(&indexed.search_tags);
     track.genre.clone_from(&indexed.genre);
     track.year = indexed.year;
@@ -1421,6 +1422,7 @@ mod tests {
             album: album.to_string(),
             cover_path: String::new(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year,
             track_no,
@@ -1583,6 +1585,7 @@ mod tests {
                 album: String::new(),
                 cover_path: String::new(),
                 cover_stamp: 0,
+                cover_read_at: crate::library::CoverReadAt::default(),
                 genre: String::new(),
                 year: None,
                 track_no: None,
@@ -1696,6 +1699,7 @@ mod tests {
                 album: String::new(),
                 cover_path: String::new(),
                 cover_stamp: 0,
+                cover_read_at: crate::library::CoverReadAt::default(),
                 genre: String::new(),
                 year: None,
                 track_no: None,
@@ -2625,6 +2629,7 @@ mod tests {
             album: "Album".to_string(),
             cover_path: String::new(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year: None,
             track_no: None,
@@ -2698,6 +2703,7 @@ mod tests {
             album: String::new(),
             cover_path: String::new(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year: None,
             track_no: None,

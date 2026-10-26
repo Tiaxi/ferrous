@@ -280,6 +280,7 @@ private slots:
     void mprisArtUrlConvertsImageProviderToFileUrl();
     void mprisPublishesNewArtWhenTheCoverIsReplacedAtTheSamePath();
     void coverRevisionLinksAreMadeOncePerStampAndOldOnesRemoved();
+    void coverRevisionLinksKeepThePublishedLinkThroughABurst();
     void mprisMetadataIsRebuiltOnlyForTrackChanges();
     void mprisAlbumArtistComesFromAlbumArtistTag();
     void albumArtistFollowsMatchingMetadataAcrossTracks();
@@ -4728,6 +4729,45 @@ void BridgeClientTest::replacedCoverReloadsForANewStampButNotFromTheCache() {
         // The scan gives the replaced file a new stamp, so a new URL.
         QCOMPARE(shownImageSize(image.get(), url(2)), QSize(8, 6));
     }
+}
+
+void BridgeClientTest::coverRevisionLinksKeepThePublishedLinkThroughABurst() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString linkDir = dir.filePath(QStringLiteral("cache/ferrous/mpris_art"));
+    const QString cover = dir.filePath(QStringLiteral("cover.jpg"));
+    QFile coverFile(cover);
+    QVERIFY(coverFile.open(QIODevice::WriteOnly));
+    coverFile.write("cover");
+    coverFile.close();
+
+    CoverRevisionLinks links(linkDir);
+    QSignalSpy ready(&links, &CoverRevisionLinks::linkReady);
+    QCOMPARE(links.linkFor(cover, 1), QString());
+    QVERIFY(ready.wait(5000));
+    const QString published = links.linkFor(cover, 1);
+    QVERIFY(!published.isEmpty());
+
+    // Six revisions arrive before any of their links reaches the UI: the
+    // worker makes them all, more than the links it keeps.
+    for (quint64 stamp = 2; stamp <= 7; ++stamp) {
+        QCOMPARE(links.linkFor(cover, stamp), QString());
+    }
+    links.waitForDone();
+    QVERIFY2(QFileInfo(published).isSymLink(), "the published link is still there");
+    QFile readable(published);
+    QVERIFY(readable.open(QIODevice::ReadOnly));
+    QCOMPARE(readable.readAll(), QByteArray("cover"));
+
+    // The newest link reaches the UI and replaces it; the next revision's
+    // cleanup may then remove the old one.
+    QTRY_VERIFY_WITH_TIMEOUT(!links.pending(), 5000);
+    const QString newest = links.linkFor(cover, 7);
+    QVERIFY(!newest.isEmpty() && newest != published);
+    QCOMPARE(links.linkFor(cover, 8), QString());
+    QVERIFY(ready.wait(5000));
+    QVERIFY(!QFileInfo(published).exists() && !QFileInfo(published).isSymLink());
+    QVERIFY(QFileInfo(newest).isSymLink());
 }
 
 int main(int argc, char **argv) {

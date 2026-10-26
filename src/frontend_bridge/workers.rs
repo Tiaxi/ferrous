@@ -12,7 +12,7 @@ use crate::lastfm::{
 };
 use crate::library::{
     read_track_info, refresh_cover_paths_for_tracks, refresh_cover_paths_for_tracks_with_override,
-    track_file_fingerprint, IndexedTrack,
+    track_file_fingerprint, CoverReadAt, IndexedTrack,
 };
 
 use crate::worker_thread::spawn_worker;
@@ -76,6 +76,7 @@ fn run_apply_album_art_worker(
                 let (refresh_error, indexed_by_path) =
                     if let Some(cover_path) = outcome.cover_path_override {
                         // The folder holds the new image now, so its stamp is new.
+                        let cover_read_at = CoverReadAt::now();
                         let cover_stamp = cover_path
                             .parent()
                             .and_then(|dir| FolderImages::read(dir).ok())
@@ -98,6 +99,7 @@ fn run_apply_album_art_worker(
                                     album: String::new(),
                                     cover_path: cover_path_string.clone(),
                                     cover_stamp,
+                                    cover_read_at,
                                     genre: String::new(),
                                     year: None,
                                     track_no: None,

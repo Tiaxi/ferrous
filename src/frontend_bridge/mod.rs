@@ -496,20 +496,8 @@ impl Default for BridgeSettings {
     }
 }
 
-/// A cover that the bridge gave the current track's metadata itself, after
-/// a scan checked it again or artwork was applied. The metadata worker may
-/// still deliver results that it read before; those keep this cover.
-#[derive(Debug, Clone)]
-pub(super) struct CoverOverride {
-    source_path: String,
-    cover_path: Option<String>,
-    stamp: u64,
-    at: Instant,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(super) struct BridgeState {
-    cover_override: Option<CoverOverride>,
     queue_detail_generation: u64,
     queue_detail_validation_requested: bool,
     playback: PlaybackSnapshot,
@@ -2397,6 +2385,7 @@ mod tests {
             album: album.to_string(),
             cover_path: String::new(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year,
             track_no,
@@ -2617,6 +2606,7 @@ mod tests {
                 album: String::new(),
                 cover_path: String::new(),
                 cover_stamp: 0,
+                cover_read_at: crate::library::CoverReadAt::default(),
                 genre: String::new(),
                 year: None,
                 track_no: None,
@@ -3949,6 +3939,7 @@ mod tests {
             album: String::new(),
             cover_path: String::new(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year: None,
             track_no: None,

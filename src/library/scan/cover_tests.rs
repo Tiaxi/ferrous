@@ -130,11 +130,22 @@ fn a_rescan_picks_up_a_cover_image_added_after_the_first_scan() {
     write(&image, b"not-real-jpg");
     // The audio file is the same, so checking its cover must not read it.
     scan_test_hooks::panic_on_read(&track);
+    let before = std::time::Instant::now();
     worker.rescan();
 
     let (cover, stamp) = worker.cover(&track);
     assert_eq!(cover, path_string(&image));
     assert_ne!(stamp, first_stamp);
+    let read_at = worker
+        .library
+        .tracks()
+        .iter()
+        .find(|row| row.path == track)
+        .and_then(|row| row.cover_read_at.0);
+    assert!(
+        read_at.is_some_and(|read_at| read_at >= before),
+        "the published row says when the scan read the folder"
+    );
     assert_eq!(worker.published_rows(), std::slice::from_ref(&track));
 
     worker.rescan();
@@ -328,6 +339,7 @@ fn a_cover_check_does_not_overwrite_a_cover_written_since_the_scan_saw_the_row()
             },
             cover_path: Some(path_string(&root.join("Album/cover.jpg"))),
             stamp: 9,
+            read_at: CoverReadAt::default(),
         })],
     )
     .expect("batch");

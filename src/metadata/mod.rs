@@ -66,7 +66,7 @@ pub struct TrackMetadata {
     pub cover_art_stamp: u64,
     /// When the cover was chosen. A cover that the bridge learns of later,
     /// from a scan or artwork apply, is newer than this one.
-    pub cover_read_at: Option<std::time::Instant>,
+    pub cover_read_at: crate::library::CoverReadAt,
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +157,7 @@ fn load_metadata_for_path(path: &Path) -> TrackMetadata {
     };
     // The folder image comes first, as in the library, so that artwork
     // applied to the folder shows in both.
-    metadata.cover_read_at = Some(std::time::Instant::now());
+    metadata.cover_read_at = crate::library::CoverReadAt::now();
     if let Some(Ok(images)) = path.parent().map(FolderImages::read) {
         metadata.cover_art_stamp = images.stamp();
         metadata.cover_art_path = images

@@ -31,7 +31,7 @@ use super::schema::{
     stamp_from_column, stamp_to_column, u128_to_i64, u64_to_i64, usize_to_f32,
 };
 use super::{
-    IndexedTrack, LibraryEvent, LibraryScanProgress, LibrarySnapshot, LibraryTrack,
+    CoverReadAt, IndexedTrack, LibraryEvent, LibraryScanProgress, LibrarySnapshot, LibraryTrack,
     TrackFileFingerprint,
 };
 
@@ -905,6 +905,7 @@ impl ScanSink for SnapshotSink<'_> {
                 album: indexed.album,
                 cover_path: indexed.cover_path,
                 cover_stamp: indexed.cover_stamp,
+                cover_read_at: indexed.cover_read_at,
                 genre: indexed.genre,
                 year: indexed.year,
                 track_no: indexed.track_no,
@@ -2650,6 +2651,8 @@ struct CoverUpdate {
     /// none, stays right while the folder has no image.
     cover_path: Option<String>,
     stamp: CoverStamp,
+    /// When the folder was read.
+    read_at: CoverReadAt,
 }
 
 /// Writes the cover of `update` unless the row or file changed since the
@@ -2664,6 +2667,7 @@ fn apply_cover_update(
         task,
         cover_path,
         stamp,
+        read_at,
     } = update;
     if !writer.still_current(&task, existing.get(&task.path_string))? {
         return Ok(None);
@@ -2681,7 +2685,15 @@ fn apply_cover_update(
                 task.path.display()
             )
         })?;
-    Ok(writer.stored(&task)?.map(|indexed| (task, indexed)))
+    Ok(writer.stored(&task)?.map(|indexed| {
+        (
+            task,
+            IndexedTrack {
+                cover_read_at: read_at,
+                ..indexed
+            },
+        )
+    }))
 }
 
 /// Identity of a file independent of the path that reached it.
@@ -3120,6 +3132,7 @@ impl RootScan<'_> {
             Some(cover) => CoverCheck::Update {
                 cover_path: Some(cover.clone()),
                 stamp: folder.stamp,
+                read_at: folder.read_at,
             },
             // The folder lost the image the row shows, so only the file can
             // tell whether it has a picture of its own.
@@ -3127,6 +3140,7 @@ impl RootScan<'_> {
             None => CoverCheck::Update {
                 cover_path: None,
                 stamp: folder.stamp,
+                read_at: folder.read_at,
             },
         }
     }
@@ -3181,13 +3195,16 @@ enum ScanRow {
 struct FolderCover {
     cover: Option<String>,
     stamp: CoverStamp,
+    read_at: CoverReadAt,
 }
 
 impl FolderCover {
     /// `None` if `dir` cannot be read.
     fn read(dir: &Path) -> Option<Self> {
+        let read_at = CoverReadAt::now();
         let images = FolderImages::read(dir).ok()?;
         Some(Self {
+            read_at,
             cover: images
                 .cover()
                 .map(|cover| cover.to_string_lossy().into_owned()),
@@ -3205,6 +3222,7 @@ enum CoverCheck {
     Update {
         cover_path: Option<String>,
         stamp: CoverStamp,
+        read_at: CoverReadAt,
     },
     /// Read the file again.
     Read,
@@ -3368,7 +3386,12 @@ fn scan_root_in(
                 _ => CoverCheck::Current,
             };
 
-            if let CoverCheck::Update { cover_path, stamp } = cover_check {
+            if let CoverCheck::Update {
+                cover_path,
+                stamp,
+                read_at,
+            } = cover_check
+            {
                 let task = MetadataTask {
                     path,
                     path_string,
@@ -3380,6 +3403,7 @@ fn scan_root_in(
                         task,
                         cover_path,
                         stamp,
+                        read_at,
                     },
                     sink,
                 )?;
@@ -3660,8 +3684,12 @@ fn row_update<E>(
     let mut indexed = read.indexed;
     let cover_checked = read.cover_failure.is_none();
     if !cover_checked {
-        (indexed.cover_path, indexed.cover_stamp) = stored
-            .map(|stored| (stored.cover_path, stored.cover_stamp))
+        (
+            indexed.cover_path,
+            indexed.cover_stamp,
+            indexed.cover_read_at,
+        ) = stored
+            .map(|stored| (stored.cover_path, stored.cover_stamp, stored.cover_read_at))
             .unwrap_or_default();
     }
     Ok(RowUpdate::Write {
@@ -3746,6 +3774,7 @@ fn indexed_track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedTr
         album: row.get::<_, String>(2)?,
         cover_path: row.get::<_, String>(3)?,
         cover_stamp: stamp_from_column(row.get(9)?),
+        cover_read_at: CoverReadAt::default(),
         genre: row.get::<_, String>(4)?,
         year: row
             .get::<_, Option<i64>>(5)?
@@ -3835,6 +3864,7 @@ fn read_track_info_with_cover_cache(path: &Path, covers: Option<&EmbeddedCoverCa
         }
     }
 
+    out.cover_read_at = CoverReadAt::now();
     (out.cover_path, out.cover_stamp) = folder_cover_for_track(path);
     let mut cover_failure = None;
     // A reader that panicked read no picture.
@@ -3868,6 +3898,7 @@ fn untagged_track(path: &Path) -> IndexedTrack {
         album: String::new(),
         cover_path: String::new(),
         cover_stamp: 0,
+        cover_read_at: CoverReadAt::default(),
         genre: String::new(),
         year: None,
         track_no: None,
@@ -4130,6 +4161,7 @@ mod tests {
             album: "Album".to_string(),
             cover_path: String::new(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: "Ambient".to_string(),
             year: Some(2024),
             track_no: Some(3),
@@ -4212,6 +4244,7 @@ mod tests {
             album: "Outside Album".to_string(),
             cover_path: "/outside/cover.jpg".to_string(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: "Ambient".to_string(),
             year: Some(2024),
             track_no: Some(7),
@@ -4238,6 +4271,7 @@ mod tests {
             album: "Outside Album".to_string(),
             cover_path: String::new(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year: None,
             track_no: None,
@@ -4287,6 +4321,7 @@ mod tests {
             album: "Album A".to_string(),
             cover_path: String::new(),
             cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year: None,
             track_no: Some(1),
