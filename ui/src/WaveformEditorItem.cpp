@@ -153,6 +153,9 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     m_requestTimer.setSingleShot(true);
+    m_playbackFrameTimer.setSingleShot(true);
+    m_playbackFrameTimer.setTimerType(Qt::PreciseTimer);
+    connect(&m_playbackFrameTimer, &QTimer::timeout, this, &WaveformEditorItem::requestPlaybackFrame);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profile.enabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_WAVEFORM")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
@@ -268,8 +271,18 @@ void WaveformEditorItem::clockStateChanged() {
     const PlaybackClockState state = m_clock ? m_clock->state() : PlaybackClockState{};
     bool request = false;
     bool cacheNeedsUpdate = false;
+    bool courseCorrection = false;
+    qint64 frameDelayNs = 0;
     {
         QMutexLocker lock(&m_stateMutex);
+        // A sample that only corrects the course of playback moves nothing
+        // at once: the playback frames follow it.
+        courseCorrection = m_playing
+            && state.advancing()
+            && m_clockState.advancing()
+            && state.trackToken == m_clockState.trackToken
+            && state.epoch == m_clockState.epoch
+            && state.durationSeconds == m_clockState.durationSeconds;
         // A jump moves the view at once, and the detail of the old range is
         // no longer needed.
         const bool explicitSeek = state.epoch != m_clockState.epoch
@@ -291,10 +304,15 @@ void WaveformEditorItem::clockStateChanged() {
             && rangeMoved
             && !cacheCoversRangeLocked(start, end);
         if (cacheNeedsUpdate) invalidateCacheLocked();
+        if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(monotonicNowNs());
     }
     emit positionSecondsChanged();
     if (request) scheduleDetailRequest();
-    update();
+    if (courseCorrection) {
+        schedulePlaybackFrame(frameDelayNs);
+    } else {
+        requestPlaybackFrame();
+    }
 }
 
 void WaveformEditorItem::setPlaying(bool value) {
@@ -302,6 +320,7 @@ void WaveformEditorItem::setPlaying(bool value) {
         QMutexLocker lock(&m_stateMutex);
         if (m_playing == value) return;
         m_playing = value;
+        if (!value) m_playbackFrameTimer.stop();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (value) m_profile.frameInitialized = false;
 #endif
@@ -1131,6 +1150,7 @@ void WaveformEditorItem::bindWindowFrameLoop(QQuickWindow *window) {
 void WaveformEditorItem::handleWindowFrameSwapped() {
     if (!isVisible()) return;
     bool request = false;
+    qint64 frameDelayNs = 0;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto profileNow = std::chrono::steady_clock::now();
     bool profileLogGap = false;
@@ -1156,6 +1176,8 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
             && !cacheCoversRangeLocked(start, end)) {
             invalidateCacheLocked();
         }
+        // Detail arriving asks for its own frame.
+        frameDelayNs = playbackFrameDelayNsLocked(monotonicNowNs());
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (m_profile.enabled) {
             if (m_profile.frameInitialized) {
@@ -1197,6 +1219,55 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
     // At the first raw-sample zoom, the point cap can leave less than 40 ms
     // of headroom when prefetch becomes due. Do not spend it on zoom debounce.
     if (request) scheduleDetailRequest(true);
+    schedulePlaybackFrame(frameDelayNs);
+}
+
+qint64 WaveformEditorItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
+    if (m_zoomOutHandoffPending || !m_stagedCache.isNull()) return 0;
+    const auto [start, end] = visibleRangeLocked();
+    const double span = end - start;
+    const int width = std::max(1, static_cast<int>(std::floor(this->width())));
+    if (span <= 0.0 || width < 2) return -1;
+    if (playbackTilesEligibleLocked(start, end)) return 0;
+    const double position = displayedPositionSecondsLocked();
+    // The view follows the playhead, unless it shows the whole track or
+    // an end of it.
+    const bool wholeTrack = span >= m_durationSeconds * 0.9999;
+    const double followFrom = span * 0.5;
+    const double followTo = m_durationSeconds - span * 0.5;
+    if (!wholeTrack && position > followFrom && position < followTo) return 0;
+    // Until then, the playhead moves a pixel at a time: see paint.
+    const double secondsPerPixel = span / static_cast<double>(width - 1);
+    double change = std::numeric_limits<double>::infinity();
+    if (position < start) {
+        change = start;
+    } else if (position <= end) {
+        const double pixel = std::round((position - start) / secondsPerPixel);
+        change = start + (pixel + 0.5) * secondsPerPixel;
+    }
+    if (!wholeTrack && position <= followFrom) change = std::min(change, followFrom);
+    if (!std::isfinite(change)) return -1;
+    const std::optional<qint64> changesAt = m_clockState.reachesAt(change);
+    if (!changesAt) return -1;
+    return *changesAt > nowNs ? *changesAt - nowNs : 0;
+}
+
+void WaveformEditorItem::schedulePlaybackFrame(qint64 delayNs) {
+    if (delayNs == 0) {
+        m_playbackFrameTimer.stop();
+        requestPlaybackFrame();
+    } else if (delayNs < 0) {
+        // Nothing moves until the clock changes course, which reschedules.
+        m_playbackFrameTimer.stop();
+    } else {
+        // Whole milliseconds, rounded up: the frame is not due before.
+        const qint64 delayMs = (delayNs + 999'999) / 1'000'000;
+        m_playbackFrameTimer.start(static_cast<int>(std::min<qint64>(delayMs, 3'600'000)));
+    }
+}
+
+void WaveformEditorItem::requestPlaybackFrame() {
+    ++m_playbackFrameRequests;
     update();
 }
 

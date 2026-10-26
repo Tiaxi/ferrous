@@ -5,6 +5,8 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <optional>
 
 #include "PlaybackClock.h"
 
@@ -58,6 +60,8 @@ private slots:
     void stallOfThePipelineStartsOverFromItsSample();
     void positionStopsAtTheEndOfTheTrack();
     void framesTickOnlyWhileAdvancing();
+    void framesStopWhileNoWindowShowsThem();
+    void reachesAtFindsWhenThePositionArrives();
 };
 
 void PlaybackClockTest::monotonicClockIsTheSteadyClock() {
@@ -359,6 +363,75 @@ void PlaybackClockTest::framesTickOnlyWhileAdvancing() {
     QVERIFY(clock.m_frameTimer.isActive());
     QTRY_VERIFY(position.count() >= 2);
     QVERIFY(clock.positionSeconds() > 61.0);
+}
+
+void PlaybackClockTest::framesStopWhileNoWindowShowsThem() {
+    PlaybackClock clock;
+    QSignalSpy position(&clock, &PlaybackClock::positionChanged);
+    QSignalSpy enabled(&clock, &PlaybackClock::frameUpdatesEnabledChanged);
+    clock.applySample(sample(10.0, monotonicNowNs(), true), true);
+    QVERIFY(clock.frameUpdatesEnabled());
+    QVERIFY(clock.m_frameTimer.isActive());
+
+    // A hidden or minimized window: playback goes on without frames.
+    clock.setFrameUpdatesEnabled(false);
+    QCOMPARE(enabled.count(), 1);
+    QVERIFY(!clock.m_frameTimer.isActive());
+    position.clear();
+    QTest::qWait(100);
+    QCOMPARE(position.count(), 0);
+    // The engine's samples still move it, such as a seek's.
+    clock.applySample(sample(20.0, monotonicNowNs(), true), true);
+    QVERIFY(!clock.m_frameTimer.isActive());
+    QVERIFY(clock.positionSeconds() >= 20.0);
+    QVERIFY(clock.positionSeconds() < 20.05);
+
+    // Shown again: it catches up at once, then goes on frame by frame.
+    QTest::qWait(100);
+    position.clear();
+    clock.setFrameUpdatesEnabled(true);
+    QCOMPARE(enabled.count(), 2);
+    QVERIFY(clock.m_frameTimer.isActive());
+    QCOMPARE(position.count(), 1);
+    QVERIFY(clock.positionSeconds() >= 20.1);
+    QTRY_VERIFY(position.count() >= 3);
+
+    // Without frames, paused playback stays paused when shown.
+    clock.setFrameUpdatesEnabled(false);
+    clock.applySample(sample(30.0, monotonicNowNs(), false), true);
+    clock.setFrameUpdatesEnabled(true);
+    QVERIFY(!clock.m_frameTimer.isActive());
+    QCOMPARE(clock.positionSeconds(), 30.0);
+}
+
+void PlaybackClockTest::reachesAtFindsWhenThePositionArrives() {
+    PlaybackClockState state;
+    state.anchorSeconds = 10.0;
+    state.anchorNs = kStart;
+    state.rate = 1.0;
+    state.durationSeconds = 60.0;
+    constexpr qint64 kAlways = std::numeric_limits<qint64>::min();
+    QCOMPARE(state.reachesAt(12.5), std::optional<qint64>(kStart + 2500 * kMs));
+    QCOMPARE(state.reachesAt(10.0), std::optional<qint64>(kAlways));
+    QCOMPARE(state.reachesAt(4.0), std::optional<qint64>(kAlways));
+    // Playback stops at the end of the track.
+    QCOMPARE(state.reachesAt(60.0), std::optional<qint64>(kStart + 50'000 * kMs));
+    QVERIFY(!state.reachesAt(60.5));
+    // A clock making up a difference runs faster than real time.
+    state.rate = 1.05;
+    const qint64 corrected = *state.reachesAt(12.1);
+    QVERIFY(std::abs(corrected - (kStart + 2000 * kMs)) <= 1);
+    QVERIFY(std::abs(state.positionAt(corrected) - 12.1) < 1e-9);
+    // Paused, it never gets further.
+    state.rate = 0.0;
+    QVERIFY(!state.reachesAt(10.5));
+    QCOMPARE(state.reachesAt(10.0), std::optional<qint64>(kAlways));
+    // A gapless successor's position stays at its start until it plays.
+    state.anchorSeconds = 0.0;
+    state.anchorNs = kStart + 1000 * kMs;
+    state.rate = 1.0;
+    QCOMPARE(state.reachesAt(0.5), std::optional<qint64>(kStart + 1500 * kMs));
+    QCOMPARE(state.reachesAt(0.0), std::optional<qint64>(kAlways));
 }
 
 QTEST_MAIN(PlaybackClockTest)

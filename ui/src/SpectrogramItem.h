@@ -117,6 +117,18 @@ struct SpectrogramRasterResult {
     std::vector<int> columnSlots;
 };
 
+// What a spectrogram's scene node did in its last frame: the canvas
+// textures it made and their pixels' bytes, and how many of its texture
+// nodes it changed. For tests and benchmarks.
+struct SpectrogramSceneStatistics {
+    int canvasTextures{0};
+    qint64 canvasTextureBytes{0};
+    int textureNodeChanges{0};
+    // The grids' and the crosshair's label and line textures made.
+    int overlayTextures{0};
+    qint64 overlayTextureBytes{0};
+};
+
 class SpectrogramItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY dbRangeChanged)
@@ -208,6 +220,8 @@ public:
     Q_INVOKABLE void appendRows(const QVariantList &rows);
 
     Q_INVOKABLE double minimumZoomLevel() const;
+
+    static SpectrogramSceneStatistics sceneStatistics(const QSGNode *node);
 
 signals:
     void dbRangeChanged();
@@ -384,7 +398,15 @@ private:
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
+    // Asks for the next frame of playback, now or once it would differ
+    // from the last one.
+    void schedulePlaybackFrame();
+    void requestPlaybackFrame();
+    // How long until the last frame would change, in nanoseconds from
+    // nowNs: zero for now, or -1 for not while the clock keeps its course.
+    qint64 playbackFrameDelayNsLocked(qint64 nowNs) const;
     void updateFpsEstimateLocked();
+    void resetFpsEstimateLocked();
     double targetRowsPerSecondLocked() const;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     void resetSeekProfileLocked();
@@ -577,6 +599,17 @@ private:
     // The scaled canvas drawn last, so that clicks seek where it shows:
     // the track time at anchor X, and pixels per second.
     bool m_zoomPreviewShown{false};
+    // The last frame stays as it is until the playhead reaches
+    // changeSeconds, if valid: a centered view that does not scroll.
+    struct IdleView {
+        bool valid{false};
+        double changeSeconds{0.0};
+    };
+    IdleView m_idleView;
+    // Wakes playback frames for an idle view; see schedulePlaybackFrame.
+    QTimer *m_playbackFrameTimer{nullptr};
+    // How many playback frames the item has asked for, for tests.
+    quint64 m_playbackFrameRequests{0};
     double m_zoomPreviewAnchorSeconds{0.0};
     double m_zoomPreviewAnchorX{0.0};
     double m_zoomPreviewPixelsPerSecond{0.0};

@@ -7,6 +7,7 @@ QtObject {
     id: root
 
     required property var uiBridge
+    // Whether the window shows playback: it is visible and not minimized.
     property bool visualFeedsEnabled: false
 
     property string stoppedSpectrogramTrackPath: ""
@@ -21,6 +22,14 @@ QtObject {
         : null
     readonly property real positionSeconds: root.playbackClock ? root.playbackClock.positionSeconds : 0
     readonly property string positionText: root.playbackClock ? root.playbackClock.positionText : "00:00"
+
+    // Nothing shows the position frame by frame in a hidden window.
+    readonly property Binding clockFrameUpdates: Binding {
+        target: root.playbackClock
+        property: "frameUpdatesEnabled"
+        value: root.visualFeedsEnabled
+        when: root.playbackClock !== null
+    }
 
     function windowTitleContext() {
         const playbackState = (root.uiBridge.playbackState || "").trim()

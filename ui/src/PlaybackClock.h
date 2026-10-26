@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 
 // Nanoseconds on CLOCK_MONOTONIC: the clock the playback engine stamps its
 // position samples with (src/playback/clock.rs). std::chrono::steady_clock
@@ -41,6 +42,9 @@ struct PlaybackClockState {
     bool advancing() const { return rate > 0.0; }
     // Clamped to [0, duration]; constant before anchorNs.
     double positionAt(qint64 nowNs) const;
+    // The first time positionAt reaches `position`: the lowest time if it
+    // always has, or none if it never does.
+    std::optional<qint64> reachesAt(double position) const;
 };
 
 // The one playback clock of the UI. The bridge feeds it the engine's raw
@@ -57,6 +61,10 @@ class PlaybackClock : public QObject {
     Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY positionChanged)
     Q_PROPERTY(QString positionText READ positionText NOTIFY positionTextChanged)
     Q_PROPERTY(bool advancing READ advancing NOTIFY stateChanged)
+    // Whether positionSeconds follows playback frame by frame, for a window
+    // that shows it. Without frames it changes with the engine's samples.
+    Q_PROPERTY(bool frameUpdatesEnabled READ frameUpdatesEnabled WRITE setFrameUpdatesEnabled
+                   NOTIFY frameUpdatesEnabledChanged)
 
 public:
     using TimeSource = std::function<qint64()>;
@@ -70,7 +78,8 @@ public:
     // A jump to a sample or seek target smaller than this is no
     // discontinuity, such as a seek that lands on its target.
     static constexpr double kJumpThresholdSeconds = 0.03;
-    // How often positionSeconds updates while playback advances.
+    // How often positionSeconds updates while playback advances, with frame
+    // updates enabled.
     static constexpr int kFrameIntervalMs = 16;
 
     explicit PlaybackClock(QObject *parent = nullptr);
@@ -97,21 +106,27 @@ public:
     // Update positionSeconds to now.
     void refresh();
 
+    bool frameUpdatesEnabled() const { return m_frameUpdatesEnabled; }
+    void setFrameUpdatesEnabled(bool enabled);
+
     static QString formatSeconds(double seconds);
 
 signals:
     void stateChanged();
     void positionChanged();
     void positionTextChanged();
+    void frameUpdatesEnabledChanged();
 
 private:
     friend class PlaybackClockTest;
 
     void setState(const PlaybackClockState &state);
+    void updateFrameTimer();
 
     TimeSource m_timeSource;
     PlaybackClockState m_state;
     double m_positionSeconds{0.0};
     QString m_positionText{QStringLiteral("00:00")};
     QTimer m_frameTimer;
+    bool m_frameUpdatesEnabled{true};
 };

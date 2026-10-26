@@ -3,7 +3,9 @@
 
 #include <QCache>
 #include <QDataStream>
+#include <QFont>
 #include <QFontMetricsF>
+#include <QHashFunctions>
 #include <QImage>
 #include <QPaintDevice>
 #include <QPaintEngine>
@@ -41,8 +43,28 @@ struct Texture {
     quint64 bytes{0};
     bool used{false};
 };
+// A label as drawn: its text, font and color at a scale. Labels repeat
+// from frame to frame, so finding one must cost less than drawing it.
+struct LabelKey {
+    QString text;
+    QFont font;
+    QRgb color{0};
+    double scale{1.0};
+    bool operator==(const LabelKey &other) const {
+        return color == other.color && scale == other.scale && text == other.text
+            && font == other.font;
+    }
+};
+size_t qHash(const LabelKey &key, size_t seed = 0) {
+    return qHashMulti(seed, key.text, key.font, key.color, key.scale);
+}
+struct Label {
+    QImage image;
+    // Where the image goes relative to the text's origin.
+    QRect bounds;
+};
 struct Scene final : QSGClipNode {
-    Scene() : rasterCache(16 * 1024) {
+    Scene() : rasterCache(16 * 1024), labelCache(4 * 1024) {
         setIsRectangular(true);
         setGeometry(new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 4));
         setFlag(QSGNode::OwnsGeometry);
@@ -52,6 +74,7 @@ struct Scene final : QSGClipNode {
         while (firstChild()) delete firstChild();
     }
     QCache<QByteArray, QImage> rasterCache; // KiB, bounded independently of zoom
+    QCache<LabelKey, Label> labelCache; // KiB
     std::map<std::tuple<qint64, int, int>, Texture> textures;
     std::vector<Command::Kind> kinds;
     WaveformSceneGraph::Statistics stats;
@@ -174,32 +197,35 @@ public:
         }
     }
     void drawTextItem(const QPointF &position, const QTextItem &text) override {
-        const QFont font = text.font();
-        const QColor color = painter()->pen().color();
-        const QFontMetricsF metrics(font);
-        const QRect bounds = metrics.boundingRect(text.text()).adjusted(-2, -2, 2, 2).toAlignedRect();
-        if (bounds.isEmpty()) return;
-        QByteArray key;
-        QDataStream stream(&key, QIODevice::WriteOnly);
-        stream << quint8(1) << scene.scale << font << color << text.text();
-        QImage *image = scene.rasterCache.object(key);
-        QImage uncached;
-        if (!image) {
-            auto next = std::make_unique<QImage>((QSizeF(bounds.size()) * scene.scale).toSize(), QImage::Format_ARGB32_Premultiplied);
-            next->setDevicePixelRatio(scene.scale);
-            next->fill(Qt::transparent);
-            QPainter raster(next.get()); raster.setFont(font); raster.setPen(color);
-            raster.drawText(-bounds.topLeft(), text.text()); raster.end();
-            const int cost = std::max(1, static_cast<int>(next->sizeInBytes() / 1024));
-            if (cost <= scene.rasterCache.maxCost()) {
-                image = next.get();
-                scene.rasterCache.insert(key, next.release(), cost);
+        LabelKey key{text.text(), text.font(), painter()->pen().color().rgba(), scene.scale};
+        const Label *label = scene.labelCache.object(key);
+        Label uncached;
+        if (!label) {
+            // Laid out only when it is first drawn.
+            ++labelRasters;
+            const QFontMetricsF metrics(key.font);
+            uncached.bounds = metrics.boundingRect(key.text).adjusted(-2, -2, 2, 2).toAlignedRect();
+            if (!uncached.bounds.isEmpty()) {
+                uncached.image = QImage((QSizeF(uncached.bounds.size()) * scene.scale).toSize(),
+                    QImage::Format_ARGB32_Premultiplied);
+                uncached.image.setDevicePixelRatio(scene.scale);
+                uncached.image.fill(Qt::transparent);
+                QPainter raster(&uncached.image); raster.setFont(key.font);
+                raster.setPen(QColor::fromRgba(key.color));
+                raster.drawText(-uncached.bounds.topLeft(), key.text); raster.end();
+            }
+            const int cost = std::max(1, static_cast<int>(uncached.image.sizeInBytes() / 1024));
+            if (cost <= scene.labelCache.maxCost()) {
+                auto cached = std::make_unique<Label>(std::move(uncached));
+                label = cached.get();
+                scene.labelCache.insert(std::move(key), cached.release(), cost);
             } else {
-                uncached = std::move(*next);
-                image = &uncached;
+                label = &uncached;
             }
         }
-        drawImage(QRectF(position + bounds.topLeft(), bounds.size()), *image, image->rect(), Qt::AutoColor);
+        if (label->bounds.isEmpty()) return;
+        drawImage(QRectF(position + label->bounds.topLeft(), label->bounds.size()), label->image,
+            label->image.rect(), Qt::AutoColor);
     }
     void drawPath(const QPainterPath &path) override {
         if (path.isEmpty()) return;
@@ -252,6 +278,7 @@ public:
     }
 
     std::vector<Command> commands;
+    int labelRasters{0};
 private:
     std::vector<Vertex> &geometry() {
         if (commands.empty() || commands.back().kind != Command::Geometry) {
@@ -360,6 +387,7 @@ QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSi
     }
     painter.end();
     scene->stats = {};
+    scene->stats.labelRasters = device.engine.labelRasters;
     for (auto &[key, texture] : scene->textures) { Q_UNUSED(key); texture.used = false; }
     QSGNode *node = scene->firstChild();
     std::vector<Command::Kind> kinds;
