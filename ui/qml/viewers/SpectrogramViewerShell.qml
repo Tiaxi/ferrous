@@ -184,6 +184,7 @@ Item {
             errorController: root.errorController
             uiPalette: root.uiPalette
             historyAvailable: false
+            active: root.viewerOpen && !root.useWholeScreenViewerMode
         }
     }
 
@@ -293,6 +294,7 @@ Item {
             errorController: root.errorController
             uiPalette: root.uiPalette
             historyAvailable: false
+            active: root.viewerOpen && root.useWholeScreenViewerMode
         }
     }
 }

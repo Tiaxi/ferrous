@@ -2044,12 +2044,16 @@ void QmlSmokeTest::consecutiveErrorsAreBothVisible() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
-    auto *banner = window->findChild<QQuickItem *>(QStringLiteral("errorBanner"));
     auto *mainBanner = window->findChild<QQuickItem *>(QStringLiteral("mainErrorBanner"));
+    const auto bannerText = [mainBanner]() {
+        auto *message = qvariant_cast<QQuickItem *>(mainBanner->property("message"));
+        return message != nullptr && message->isVisible() ? message->property("text").toString()
+                                                          : QString();
+    };
     auto *history = window->findChild<QQuickItem *>(QStringLiteral("errorHistory"));
     auto *historyList = window->findChild<QQuickItem *>(QStringLiteral("errorHistoryList"));
     QObject *statusButton = window->findChild<QObject *>(QStringLiteral("statusBarErrorsButton"));
-    QVERIFY(bridge != nullptr && errors != nullptr && banner != nullptr && mainBanner != nullptr
+    QVERIFY(bridge != nullptr && errors != nullptr && mainBanner != nullptr
             && history != nullptr && historyList != nullptr && statusButton != nullptr);
     QVERIFY(!mainBanner->isVisible());
     QVERIFY(!statusButton->property("visible").toBool());
@@ -2060,12 +2064,11 @@ void QmlSmokeTest::consecutiveErrorsAreBothVisible() {
     const QString scan = QStringLiteral("could not read 1 folder or file in '/music'");
     clearCapturedMessages();
     QVERIFY(sendBridgeError(bridge, skipped, 1, 0, QStringLiteral("/music/bad.flac")));
-    QTRY_VERIFY(banner->isVisible());
-    QCOMPARE(banner->property("text").toString(), QStringLiteral("Playback: ") + skipped);
+    QTRY_COMPARE(bannerText(), QStringLiteral("Playback: ") + skipped);
     QVERIFY(sendBridgeError(bridge, scan, 2, 1));
 
     // The newest is shown in full; the first is not lost.
-    QTRY_COMPARE(banner->property("text").toString(), QStringLiteral("Library: ") + scan);
+    QTRY_COMPARE(bannerText(), QStringLiteral("Library: ") + scan);
     QCOMPARE(errorHistoryMessages(errors), (QStringList{scan, skipped}));
     QTRY_VERIFY(statusButton->property("visible").toBool());
     QCOMPARE(statusButton->property("text").toString(), QStringLiteral("2 errors"));
@@ -2083,11 +2086,11 @@ void QmlSmokeTest::consecutiveErrorsAreBothVisible() {
 
     // Dismissing the banner keeps the history; a new error shows again.
     QVERIFY(QMetaObject::invokeMethod(errors, "dismissLatest"));
-    QTRY_VERIFY(!banner->isVisible());
+    QTRY_VERIFY(bannerText().isEmpty());
     QVERIFY(history->isVisible());
     QCOMPARE(errorHistoryMessages(errors).size(), 2);
     QVERIFY(sendBridgeError(bridge, QStringLiteral("Last.fm session expired."), 5, 1));
-    QTRY_VERIFY(banner->isVisible());
+    QTRY_COMPARE(bannerText(), QStringLiteral("Last.fm: Last.fm session expired."));
 
     // Removing entries and clearing the history.
     QVERIFY(QMetaObject::invokeMethod(errors, "remove", Q_ARG(QVariant, 1)));
@@ -2108,8 +2111,8 @@ void QmlSmokeTest::repeatedErrorsAreCounted() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
-    auto *banner = window->findChild<QQuickItem *>(QStringLiteral("errorBanner"));
-    QVERIFY(bridge != nullptr && errors != nullptr && banner != nullptr);
+    auto *mainBanner = window->findChild<QQuickItem *>(QStringLiteral("mainErrorBanner"));
+    QVERIFY(bridge != nullptr && errors != nullptr && mainBanner != nullptr);
     const QString message = QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it.");
     const QString subject = QStringLiteral("/music/bad.flac");
 
@@ -2123,6 +2126,8 @@ void QmlSmokeTest::repeatedErrorsAreCounted() {
     auto *entries = qvariant_cast<QAbstractItemModel *>(errors->property("entries"));
     QVERIFY(entries != nullptr);
     QCOMPARE(entries->index(0, 0).data(entries->roleNames().key("count")).toInt(), 3);
+    QQuickItem *banner = nullptr;
+    QTRY_VERIFY((banner = qvariant_cast<QQuickItem *>(mainBanner->property("message"))) != nullptr);
     QTRY_COMPARE(banner->property("text").toString(),
                  QStringLiteral("Playback: ") + message + QStringLiteral(" (\u00d73)"));
 
@@ -2166,8 +2171,8 @@ void QmlSmokeTest::aLongErrorIsShownWhole() {
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
-    auto *banner = window->findChild<QQuickItem *>(QStringLiteral("errorBanner"));
-    QVERIFY(bridge != nullptr && banner != nullptr);
+    auto *mainBanner = window->findChild<QQuickItem *>(QStringLiteral("mainErrorBanner"));
+    QVERIFY(bridge != nullptr && mainBanner != nullptr);
     QString message = QStringLiteral(
         "could not cache the embedded covers of 3 files in '/music'; kept their previous covers "
         "and will retry at the next scan (first: '/music/");
@@ -2180,6 +2185,8 @@ void QmlSmokeTest::aLongErrorIsShownWhole() {
     QVERIFY(sendBridgeError(bridge, message, 2, 0));
 
     const QString shown = QStringLiteral("Library: ") + message;
+    QQuickItem *banner = nullptr;
+    QTRY_VERIFY((banner = qvariant_cast<QQuickItem *>(mainBanner->property("message"))) != nullptr);
     QTRY_COMPARE(banner->property("text").toString(), shown);
     // The message wraps over lines rather than being cut off.
     QList<QQuickItem *> labels;
@@ -2239,7 +2246,7 @@ void QmlSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     QVERIFY2(messages.first().contains(QStringLiteral("Couldn't keep the screen awake")),
              qPrintable(messages.first()));
     QVERIFY(messages.first().contains(QStringLiteral("no idle service")));
-    auto *message = viewerBanner->findChild<QQuickItem *>(QStringLiteral("errorBanner"));
+    auto *message = qvariant_cast<QQuickItem *>(viewerBanner->property("message"));
     QVERIFY(message != nullptr);
     QCOMPARE(message->property("text").toString(), QStringLiteral("System: ") + messages.first());
 
@@ -2975,6 +2982,14 @@ void QmlSmokeTest::tagEditorStaysOpenWhileSavingAndShowsTheResult() {
     QVERIFY(fixture.dialog->property("statusHasFailure").toBool());
     QVERIFY(fixture.editor.dirty());
     QVERIFY(cancel->property("enabled").toBool());
+    // The app's error list has it too, with the file that failed.
+    QObject *errors = fixture.window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(errors != nullptr);
+    QCOMPARE(errorHistoryMessages(errors),
+             QStringList{QStringLiteral("Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied")});
+    QVERIFY(finishIncubation(fixture.engine));
+    QCOMPARE(takeCapturedMessagesText(),
+             QStringLiteral("error [Tags]: Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied"));
 }
 
 void QmlSmokeTest::closingTheWindowWithTagEditsAsksAndCancelKeepsThem() {
@@ -3070,6 +3085,9 @@ void QmlSmokeTest::tagSaveFailureWhileQuittingKeepsTheWindowOpen() {
     QVERIFY(fixture.editor.statusIsError());
     QVERIFY(fixture.editor.dirty());
     QCOMPARE(fixture.stateSaves(), 0);
+    QVERIFY(finishIncubation(fixture.engine));
+    QCOMPARE(takeCapturedMessagesText(),
+             QStringLiteral("error [Tags]: Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied"));
 
     // Quitting again asks again.
     fixture.window->close();

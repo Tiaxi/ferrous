@@ -15,11 +15,32 @@ Item {
     required property var uiPalette
     // Viewers show the newest error only.
     property bool historyAvailable: true
+    // Whether the banner may show at all, such as while its viewer is open.
+    property bool active: true
+    // The message showing the newest error, while one is shown.
+    readonly property alias message: bannerLoader.item
+    // The palette's colors; viewers made without one show no history.
+    readonly property color paletteTextColor: root.uiPalette ? root.uiPalette.uiTextColor : "black"
+    readonly property color paletteMutedTextColor: root.uiPalette
+        ? root.uiPalette.uiMutedTextColor
+        : "gray"
+    readonly property color paletteSurfaceColor: root.uiPalette
+        ? root.uiPalette.uiSurfaceColor
+        : "transparent"
+    readonly property color paletteSurfaceAltColor: root.uiPalette
+        ? root.uiPalette.uiSurfaceAltColor
+        : "transparent"
+    readonly property color paletteBorderColor: root.uiPalette
+        ? root.uiPalette.uiBorderColor
+        : "transparent"
+    readonly property int errorCount: root.errorController ? root.errorController.count : 0
     readonly property var entry: root.errorController ? root.errorController.latest : null
-    readonly property bool bannerShown: root.errorController !== null
+    readonly property bool bannerShown: root.active
+        && root.errorController !== null
         && root.errorController.latestShown
         && root.entry !== null
-    readonly property bool historyShown: root.historyAvailable
+    readonly property bool historyShown: root.active
+        && root.historyAvailable
         && root.errorController !== null
         && root.errorController.historyExpanded
         && root.errorController.count > 0
@@ -42,34 +63,40 @@ Item {
         anchors.top: parent.top
         spacing: 0
 
-        Kirigami.InlineMessage {
-            id: banner
-            objectName: "errorBanner"
+        // Built only while an error is shown: the message's actions build
+        // their overflow menu in the background.
+        Loader {
+            id: bannerLoader
             Layout.fillWidth: true
-            visible: root.bannerShown
-            type: root.entry && root.entry.severity === ErrorUtils.SeverityWarning
-                ? Kirigami.MessageType.Warning
-                : Kirigami.MessageType.Error
-            // Wraps; the whole message is shown however long it is.
-            text: ErrorUtils.describe(root.entry)
-            // The close button would hide the message for good, so dismissing is
-            // an action that only hides the newest error.
-            showCloseButton: false
-            actions: [
-                Kirigami.Action {
-                    text: root.historyShown
-                        ? "Hide Recent Errors"
-                        : "Recent Errors (" + root.errorController.count + ")"
-                    icon.name: "view-list-details"
-                    visible: root.historyAvailable
-                    onTriggered: root.errorController.toggleHistory()
-                },
-                Kirigami.Action {
-                    text: "Dismiss"
-                    icon.name: "dialog-close"
-                    onTriggered: root.errorController.dismissLatest()
-                }
-            ]
+            active: root.bannerShown
+            visible: active
+            sourceComponent: Kirigami.InlineMessage {
+                objectName: "errorBanner"
+                visible: true
+                type: root.entry && root.entry.severity === ErrorUtils.SeverityWarning
+                    ? Kirigami.MessageType.Warning
+                    : Kirigami.MessageType.Error
+                // Wraps; the whole message is shown however long it is.
+                text: ErrorUtils.describe(root.entry)
+                // The close button would hide the message for good, so
+                // dismissing is an action that only hides the newest error.
+                showCloseButton: false
+                actions: [
+                    Kirigami.Action {
+                        text: root.historyShown
+                            ? "Hide Recent Errors"
+                            : "Recent Errors (" + root.errorCount + ")"
+                        icon.name: "view-list-details"
+                        visible: root.historyAvailable
+                        onTriggered: root.errorController.toggleHistory()
+                    },
+                    Kirigami.Action {
+                        text: "Dismiss"
+                        icon.name: "dialog-close"
+                        onTriggered: root.errorController.dismissLatest()
+                    }
+                ]
+            }
         }
 
         Rectangle {
@@ -80,8 +107,8 @@ Item {
                 historyHeader.implicitHeight + historyList.contentHeight + 16,
                 Kirigami.Units.gridUnit * 14)
             visible: root.historyShown
-            color: root.uiPalette.uiSurfaceColor
-            border.color: root.uiPalette.uiBorderColor
+            color: root.paletteSurfaceColor
+            border.color: root.paletteBorderColor
 
             ColumnLayout {
                 anchors.fill: parent
@@ -97,7 +124,7 @@ Item {
                         Layout.fillWidth: true
                         level: 4
                         text: "Recent Errors"
-                        color: root.uiPalette.uiTextColor
+                        color: root.paletteTextColor
                     }
                     Button {
                         objectName: "errorHistoryClearButton"
@@ -145,7 +172,7 @@ Item {
                         height: historyRowLayout.implicitHeight + 8
                         color: historyRow.index % 2 === 0
                             ? "transparent"
-                            : root.uiPalette.uiSurfaceAltColor
+                            : root.paletteSurfaceAltColor
                         Accessible.role: Accessible.ListItem
                         Accessible.name: historyRow.heading + ", "
                             + ErrorUtils.timeText(historyRow.lastSeenMs) + ": " + historyRow.message
@@ -172,7 +199,7 @@ Item {
                             Label {
                                 Layout.alignment: Qt.AlignTop
                                 text: ErrorUtils.timeText(historyRow.lastSeenMs)
-                                color: root.uiPalette.uiMutedTextColor
+                                color: root.paletteMutedTextColor
                             }
 
                             ColumnLayout {
@@ -183,21 +210,21 @@ Item {
                                     Layout.fillWidth: true
                                     text: historyRow.heading
                                     font.weight: Font.DemiBold
-                                    color: root.uiPalette.uiTextColor
+                                    color: root.paletteTextColor
                                 }
                                 Label {
                                     objectName: "errorHistoryMessage"
                                     Layout.fillWidth: true
                                     text: historyRow.message
                                     wrapMode: Text.Wrap
-                                    color: root.uiPalette.uiTextColor
+                                    color: root.paletteTextColor
                                 }
                                 Label {
                                     Layout.fillWidth: true
                                     visible: historyRow.subject.length > 0
                                     text: historyRow.subject
                                     elide: Text.ElideMiddle
-                                    color: root.uiPalette.uiMutedTextColor
+                                    color: root.paletteMutedTextColor
                                 }
                             }
 
