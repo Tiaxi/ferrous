@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -268,7 +269,6 @@ pub(super) enum SpectrogramWorkerCommand {
     UpdateWidgetWidth {
         widget_width: u32,
     },
-    #[allow(dead_code)]
     SetDisplayMode(SpectrogramDisplayMode),
     /// Release the current decoder and wait for another session. The worker
     /// itself lives until its command channel disconnects.
@@ -798,15 +798,14 @@ fn spectrogram_worker_loop(
                 Err(_) => break,
             },
         };
-        let Some(cmd) = coalesce_queued_new_track_command(cmd, cmd_rx, generation) else {
+        let Some(next) = coalesce_queued_new_track_command(cmd, cmd_rx, generation) else {
             continue;
         };
 
-        match cmd {
+        match next.cmd {
             SpectrogramWorkerCommand::NewTrack { .. } => {
-                let mut cmd = cmd;
                 next_cmd = run_spectrogram_session(
-                    &mut cmd,
+                    next,
                     cmd_rx,
                     event_tx,
                     generation,
@@ -832,13 +831,20 @@ fn spectrogram_worker_loop(
     }
 }
 
+/// Take the commands queued behind `initial_cmd`, when it starts a session,
+/// before the session starts.  A later `NewTrack` supersedes it and the
+/// commands queued before that one: the analysis thread built it from its
+/// state after them.  A `StopSession` supersedes all of them.  The session
+/// that starts applies the others, in order, before it reads the channel;
+/// only positions and seeks that later ones supersede are dropped.
 fn coalesce_queued_new_track_command(
     initial_cmd: SpectrogramWorkerCommand,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     generation: &AtomicU64,
-) -> Option<SpectrogramWorkerCommand> {
+) -> Option<QueuedCommand> {
+    let mut queued = VecDeque::new();
     if !matches!(initial_cmd, SpectrogramWorkerCommand::NewTrack { .. }) {
-        return Some(initial_cmd);
+        return Some(QueuedCommand::alone(initial_cmd));
     }
 
     let mut latest_new_track = initial_cmd;
@@ -846,14 +852,18 @@ fn coalesce_queued_new_track_command(
         match cmd {
             SpectrogramWorkerCommand::NewTrack { .. } => {
                 latest_new_track = cmd;
+                queued.clear();
             }
             SpectrogramWorkerCommand::StopSession => {
-                return Some(SpectrogramWorkerCommand::StopSession)
+                return Some(QueuedCommand::alone(SpectrogramWorkerCommand::StopSession));
             }
             SpectrogramWorkerCommand::RemapPaths(renames) => {
+                // The session opens its file after these renames.  The
+                // continuations queued before them follow them too.
                 remap_new_track_path(&mut latest_new_track, &renames);
+                queue_session_command(&mut queued, SpectrogramWorkerCommand::RemapPaths(renames));
             }
-            _ => {}
+            cmd => queue_session_command(&mut queued, cmd),
         }
     }
 
@@ -862,13 +872,59 @@ fn coalesce_queued_new_track_command(
         ..
     } = &latest_new_track
     else {
-        return Some(latest_new_track);
+        return Some(QueuedCommand::alone(latest_new_track));
     };
-    if cmd_generation == generation.load(Ordering::Relaxed) {
-        Some(latest_new_track)
-    } else {
-        None
+    // The commands queued behind a stale session are stale with it: the
+    // session of the current generation starts from the state after them.
+    (cmd_generation == generation.load(Ordering::Relaxed)).then_some(QueuedCommand {
+        cmd: latest_new_track,
+        behind: queued,
+    })
+}
+
+/// A command for the worker, with the commands queued behind it for the
+/// session it starts.
+#[derive(Debug)]
+struct QueuedCommand {
+    cmd: SpectrogramWorkerCommand,
+    behind: VecDeque<SpectrogramWorkerCommand>,
+}
+
+impl QueuedCommand {
+    fn alone(cmd: SpectrogramWorkerCommand) -> Self {
+        Self {
+            cmd,
+            behind: VecDeque::new(),
+        }
     }
+}
+
+/// Queue `cmd` for a session that has not started, dropping the commands it
+/// supersedes, as the session acts only on the latest of them: a position
+/// supersedes earlier positions, and a seek earlier positions and seeks.
+/// A seek storm so stays one command.
+fn queue_session_command(
+    queued: &mut VecDeque<SpectrogramWorkerCommand>,
+    cmd: SpectrogramWorkerCommand,
+) {
+    match cmd {
+        SpectrogramWorkerCommand::PositionUpdate { .. } => {
+            queued.retain(|queued| {
+                !matches!(queued, SpectrogramWorkerCommand::PositionUpdate { .. })
+            });
+        }
+        SpectrogramWorkerCommand::Seek { .. } => {
+            queued.retain(|queued| {
+                !matches!(
+                    queued,
+                    SpectrogramWorkerCommand::PositionUpdate { .. }
+                        | SpectrogramWorkerCommand::Seek { .. }
+                )
+            });
+        }
+        _ => {}
+    }
+    queued.push_back(cmd);
 }
 
 // ---------------------------------------------------------------------------
@@ -951,6 +1007,9 @@ struct SpectrogramSessionState {
     rejected_continuation: Option<PathBuf>,
     /// Why the decode failed, when it did.
     failure: Option<String>,
+    /// Commands queued behind the session's `NewTrack`.  The session takes
+    /// them before the channel's, so they apply in the order sent.
+    queued_commands: VecDeque<SpectrogramWorkerCommand>,
 }
 
 /// Action returned by command processing in the session loop.
@@ -980,7 +1039,7 @@ enum SessionAction {
 /// Returns `Some(cmd)` if interrupted by a NewTrack/Stop, `None` if session ended naturally.
 #[allow(clippy::too_many_lines)]
 fn run_spectrogram_session(
-    initial_cmd: &mut SpectrogramWorkerCommand,
+    start: QueuedCommand,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
     event_tx: &dyn AnalysisEventOutput,
     generation: &AtomicU64,
@@ -988,6 +1047,11 @@ fn run_spectrogram_session(
     track_duration_ms_out: &AtomicU64,
     reports: &Sender<SessionReport>,
 ) -> Option<SpectrogramWorkerCommand> {
+    let QueuedCommand {
+        cmd: mut initial_cmd,
+        behind: queued_commands,
+    } = start;
+    let initial_cmd = &mut initial_cmd;
     let SpectrogramWorkerCommand::NewTrack { handoff, .. } = initial_cmd else {
         return None;
     };
@@ -1166,6 +1230,7 @@ fn run_spectrogram_session(
         pending_continue: None,
         rejected_continuation: None,
         failure: None,
+        queued_commands,
     };
 
     // Send initial metadata chunk (0 columns, carries estimates + transition semantics).
@@ -1480,6 +1545,8 @@ fn session_decode_loop(
                 SessionAction::Continue => {}
                 SessionAction::FlushToken => {
                     session_flush_token(session, event_tx, columns_produced_out);
+                    // Then the position that waited for the token chunk.
+                    continue;
                 }
                 SessionAction::Stop => return Some(SpectrogramWorkerCommand::StopSession),
                 SessionAction::End => return None,
@@ -1502,7 +1569,7 @@ fn session_decode_loop(
             // avoid re-fragmenting into heartbeat-sized UI updates.
             flush_chunk_before_lookahead_park(session, event_tx, columns_produced_out);
             // Park: block until a command arrives.
-            match cmd_rx.recv() {
+            match next_session_command(session, || cmd_rx.recv()) {
                 Ok(cmd) => match handle_single_command(session, cmd) {
                     SessionAction::Continue => continue,
                     SessionAction::FlushToken => {
@@ -1524,7 +1591,9 @@ fn session_decode_loop(
 
         // 3. Rate throttle (rolling mode only, after the post-reset window).
         if let Some(wait) = throttle_wait(session, std::time::Instant::now()) {
-            match cmd_rx.recv_timeout(wait.min(Duration::from_millis(500))) {
+            match next_session_command(session, || {
+                cmd_rx.recv_timeout(wait.min(Duration::from_millis(500)))
+            }) {
                 Ok(cmd) => match handle_single_command(session, cmd) {
                     SessionAction::Continue => continue,
                     SessionAction::FlushToken => {
@@ -1622,7 +1691,7 @@ fn session_decode_loop(
         if generation.load(Ordering::Relaxed) != session_gen {
             return None;
         }
-        match cmd_rx.recv() {
+        match next_session_command(session, || cmd_rx.recv()) {
             Ok(cmd) => match handle_single_command(session, cmd) {
                 SessionAction::Continue => {
                     if let Some((path, token)) = session.pending_continue.take() {
@@ -1651,17 +1720,25 @@ fn session_decode_loop(
 // Command processing
 // ---------------------------------------------------------------------------
 
+/// The session's next command: those queued behind its `NewTrack` come
+/// before the channel's.
+fn next_session_command<E>(
+    session: &mut SpectrogramSessionState,
+    recv: impl FnOnce() -> Result<SpectrogramWorkerCommand, E>,
+) -> Result<SpectrogramWorkerCommand, E> {
+    session.queued_commands.pop_front().map_or_else(recv, Ok)
+}
+
 fn process_session_commands(
     session: &mut SpectrogramSessionState,
     cmd_rx: &Receiver<SpectrogramWorkerCommand>,
 ) -> Option<SessionAction> {
-    let mut latest_new_track: Option<SpectrogramWorkerCommand> = None;
     let mut latest_position: Option<f64> = None;
     let mut latest_seek: Option<f64> = None;
     let mut needs_flush_token = false;
 
     // Drain all pending commands, take the latest seek/position update.
-    while let Ok(cmd) = cmd_rx.try_recv() {
+    while let Ok(cmd) = next_session_command(session, || cmd_rx.try_recv()) {
         match cmd {
             SpectrogramWorkerCommand::PositionUpdate { position_seconds } => {
                 latest_position = Some(position_seconds);
@@ -1670,7 +1747,9 @@ fn process_session_commands(
                 latest_seek = Some(position_seconds);
             }
             SpectrogramWorkerCommand::NewTrack { .. } => {
-                latest_new_track = Some(cmd);
+                // The commands queued behind it are for the session it
+                // starts, which takes them with it.
+                return Some(SessionAction::NewSession(cmd));
             }
             SpectrogramWorkerCommand::SetDisplayMode(mode) => {
                 apply_display_mode(session, mode);
@@ -1699,20 +1778,25 @@ fn process_session_commands(
             }
             SpectrogramWorkerCommand::RemapPaths(renames) => {
                 remap_pending_continue(session, &renames);
-                if let Some(cmd) = latest_new_track.as_mut() {
-                    remap_new_track_path(cmd, &renames);
-                }
             }
         }
     }
 
-    if let Some(cmd) = latest_new_track {
-        return Some(SessionAction::NewSession(cmd));
-    }
-
     // FlushToken takes priority over position-only results — the UI
     // needs the metadata chunk before the next position update lands.
+    // The seek or position then follows it.
     if needs_flush_token {
+        if let Some(position_seconds) = latest_seek {
+            queue_session_command(
+                &mut session.queued_commands,
+                SpectrogramWorkerCommand::Seek { position_seconds },
+            );
+        } else if let Some(position_seconds) = latest_position {
+            queue_session_command(
+                &mut session.queued_commands,
+                SpectrogramWorkerCommand::PositionUpdate { position_seconds },
+            );
+        }
         return Some(SessionAction::FlushToken);
     }
 
@@ -2539,7 +2623,7 @@ mod tests {
             let (events, event_rx) = unbounded();
             let file = path.clone();
             let worker = std::thread::spawn(move || {
-                let mut command = SpectrogramWorkerCommand::NewTrack {
+                let command = SpectrogramWorkerCommand::NewTrack {
                     track_token: 1,
                     generation: 1,
                     path: file,
@@ -2557,7 +2641,7 @@ mod tests {
                     handoff: SessionHandoff::default(),
                 };
                 run_spectrogram_session(
-                    &mut command,
+                    QueuedCommand::alone(command),
                     &command_rx,
                     &events,
                     &AtomicU64::new(1),
@@ -2686,7 +2770,7 @@ mod tests {
                 let hop = super::super::zoom_hop_size(fft, zoom);
                 let (commands, command_rx) = unbounded();
                 let (events, event_rx) = unbounded();
-                let mut command = SpectrogramWorkerCommand::NewTrack {
+                let command = SpectrogramWorkerCommand::NewTrack {
                     track_token: 1,
                     generation: 1,
                     path: path.clone(),
@@ -2706,7 +2790,7 @@ mod tests {
                 let initial = command.clone();
                 let worker = std::thread::spawn(move || {
                     run_spectrogram_session(
-                        &mut command,
+                        QueuedCommand::alone(command),
                         &command_rx,
                         &events,
                         &AtomicU64::new(1),
@@ -2754,7 +2838,7 @@ mod tests {
                 let (events, event_rx) = unbounded();
                 let worker = std::thread::spawn(move || {
                     run_spectrogram_session(
-                        &mut initial,
+                        QueuedCommand::alone(initial),
                         &command_rx,
                         &events,
                         &AtomicU64::new(1),
@@ -2865,6 +2949,7 @@ mod tests {
             pending_continue: None,
             rejected_continuation: None,
             failure: None,
+            queued_commands: VecDeque::new(),
         };
 
         match handle_single_command(
@@ -2978,6 +3063,7 @@ mod tests {
             pending_continue: None,
             rejected_continuation: None,
             failure: None,
+            queued_commands: VecDeque::new(),
         };
 
         assert!(post_reset_window_active(&session));
@@ -3030,6 +3116,7 @@ mod tests {
             pending_continue: None,
             rejected_continuation: None,
             failure: None,
+            queued_commands: VecDeque::new(),
         };
 
         let cols_out = AtomicU64::new(0);
@@ -3092,6 +3179,7 @@ mod tests {
             pending_continue: None,
             rejected_continuation: None,
             failure: None,
+            queued_commands: VecDeque::new(),
         };
 
         let cols_out = AtomicU64::new(0);
@@ -3146,6 +3234,7 @@ mod tests {
             pending_continue: None,
             rejected_continuation: None,
             failure: None,
+            queued_commands: VecDeque::new(),
         };
 
         let cols_out = AtomicU64::new(0);
@@ -3231,6 +3320,7 @@ mod tests {
             pending_continue: None,
             rejected_continuation: None,
             failure: None,
+            queued_commands: VecDeque::new(),
         }
     }
 
@@ -3346,17 +3436,26 @@ mod tests {
         })
         .unwrap();
 
-        let action = process_session_commands(&mut session, &rx);
-        let Some(SessionAction::NewSession(SpectrogramWorkerCommand::NewTrack {
-            generation,
-            zoom_level,
-            ..
-        })) = action
+        // The session ends at the first; the worker then takes the latest.
+        let Some(SessionAction::NewSession(first)) = process_session_commands(&mut session, &rx)
+        else {
+            panic!("expected the first queued NewTrack");
+        };
+        let Some(QueuedCommand {
+            cmd:
+                SpectrogramWorkerCommand::NewTrack {
+                    generation,
+                    zoom_level,
+                    ..
+                },
+            behind: queued,
+        }) = coalesce_queued_new_track_command(first, &rx, &AtomicU64::new(3))
         else {
             panic!("expected latest queued NewTrack");
         };
         assert_eq!(generation, 3);
         assert!((zoom_level - 0.1).abs() < f32::EPSILON);
+        assert!(queued.is_empty(), "{queued:?}");
     }
 
     #[test]
@@ -3399,8 +3498,9 @@ mod tests {
         })
         .unwrap();
 
-        let cmd = coalesce_queued_new_track_command(initial, &rx, &generation_state)
-            .expect("latest queued generation should still be live");
+        let QueuedCommand { cmd, .. } =
+            coalesce_queued_new_track_command(initial, &rx, &generation_state)
+                .expect("latest queued generation should still be live");
         let SpectrogramWorkerCommand::NewTrack {
             generation,
             zoom_level,
@@ -3773,6 +3873,9 @@ mod tests {
         else {
             panic!("expected the queued session");
         };
+        let QueuedCommand { cmd, .. } =
+            coalesce_queued_new_track_command(cmd, &rx, &AtomicU64::new(1))
+                .expect("current session");
         assert_eq!(new_track_path(&cmd), Path::new("/music/b.flac"));
         tx.send(renames(&swap)).unwrap();
         tx.send(test_new_track("/music/a.flac", 2)).unwrap();
@@ -3785,7 +3888,7 @@ mod tests {
         // So does a session waiting for an idle worker.
         let generation = AtomicU64::new(3);
         tx.send(renames(&swap)).unwrap();
-        let cmd =
+        let QueuedCommand { cmd, .. } =
             coalesce_queued_new_track_command(test_new_track("/music/a.flac", 3), &rx, &generation)
                 .expect("current session");
         assert_eq!(new_track_path(&cmd), Path::new("/music/b.flac"));
@@ -4326,9 +4429,9 @@ mod tests {
                     track_token: 2,
                 })
                 .unwrap();
-            let mut session = session_on(&path, 1, 4);
+            let session = session_on(&path, 1, 4);
             let ended = run_spectrogram_session(
-                &mut session,
+                QueuedCommand::alone(session),
                 &command_rx,
                 &events,
                 &generation,
@@ -4360,10 +4463,10 @@ mod tests {
                     track_token: 1,
                 })
                 .unwrap();
-            let mut session = session_on(&path, 1, 4);
+            let session = session_on(&path, 1, 4);
             let session = std::thread::spawn(move || {
                 run_spectrogram_session(
-                    &mut session,
+                    QueuedCommand::alone(session),
                     &command_rx,
                     &events,
                     &AtomicU64::new(4),
@@ -4483,5 +4586,451 @@ mod tests {
         drop(event_rx);
         worker.join().expect("worker");
         std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    // ---------------------------------------------------------------
+    // Commands queued behind a NewTrack
+    // ---------------------------------------------------------------
+
+    /// A worker that finds `commands` queued when it reads its first, as
+    /// when they queue behind a `NewTrack` while it is busy.
+    struct QueuedWorker {
+        commands: Sender<SpectrogramWorkerCommand>,
+        events: Receiver<AnalysisEvent>,
+        reports: Receiver<SessionReport>,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl QueuedWorker {
+        fn start(commands: Vec<SpectrogramWorkerCommand>) -> Self {
+            let (command_tx, command_rx) = unbounded();
+            for command in commands {
+                command_tx.send(command).unwrap();
+            }
+            let (events, event_rx) = unbounded();
+            let (reports, report_rx) = unbounded();
+            let thread = std::thread::spawn(move || {
+                spectrogram_worker_loop(
+                    &command_rx,
+                    &events,
+                    &AtomicU64::new(1),
+                    &AtomicU64::new(0),
+                    &AtomicU64::new(0),
+                    &reports,
+                );
+            });
+            Self {
+                commands: command_tx,
+                events: event_rx,
+                reports: report_rx,
+                thread,
+            }
+        }
+
+        /// The chunks up to and including the first that `stop` accepts.
+        fn chunks_until(
+            &self,
+            mut stop: impl FnMut(&PrecomputedSpectrogramChunk) -> bool,
+        ) -> Vec<PrecomputedSpectrogramChunk> {
+            let mut chunks = Vec::new();
+            loop {
+                let chunk = next_chunk(&self.events);
+                let done = stop(&chunk);
+                chunks.push(chunk);
+                if done {
+                    return chunks;
+                }
+            }
+        }
+
+        /// End the worker once it parks, and return what it reported.
+        fn finish(self) -> Vec<SessionReport> {
+            drop(self.commands);
+            self.thread.join().expect("worker");
+            self.reports.try_iter().collect()
+        }
+    }
+
+    /// A session of `path` at 250 columns per second, for a 16 kHz file.
+    fn fast_session(path: &Path, display_mode: SpectrogramDisplayMode) -> SpectrogramWorkerCommand {
+        let mut command = session_on(path, 1, 1);
+        if let SpectrogramWorkerCommand::NewTrack {
+            hop_size,
+            zoom_level,
+            display_mode: mode,
+            ..
+        } = &mut command
+        {
+            // Above zoom 1 the columns are the STFT rows.
+            *hop_size = 64;
+            *zoom_level = 2.0;
+            *mode = display_mode;
+        }
+        command
+    }
+
+    fn with_new_track(
+        mut command: SpectrogramWorkerCommand,
+        edit: impl FnOnce(&mut f32, &mut u32, &mut SpectrogramDisplayMode),
+    ) -> SpectrogramWorkerCommand {
+        if let SpectrogramWorkerCommand::NewTrack {
+            zoom_level,
+            widget_width,
+            display_mode,
+            ..
+        } = &mut command
+        {
+            edit(zoom_level, widget_width, display_mode);
+        }
+        command
+    }
+
+    #[test]
+    fn a_display_mode_change_queued_behind_a_new_track_takes_effect() {
+        // Rolling chunks stop growing at 64 columns; centered ones grow on.
+        let path = write_tone_fixture("queued-display-mode", 4, 16_000);
+        for (started, queued) in [
+            (
+                SpectrogramDisplayMode::Centered,
+                SpectrogramDisplayMode::Rolling,
+            ),
+            (
+                SpectrogramDisplayMode::Rolling,
+                SpectrogramDisplayMode::Centered,
+            ),
+        ] {
+            let worker = QueuedWorker::start(vec![
+                fast_session(&path, started),
+                SpectrogramWorkerCommand::SetDisplayMode(queued),
+            ]);
+            let mut columns = 0;
+            let chunks = worker.chunks_until(|chunk| {
+                columns += u32::from(chunk.column_count);
+                columns >= 600 || chunk.complete
+            });
+            let largest = chunks.iter().map(|chunk| chunk.column_count).max();
+            match queued {
+                SpectrogramDisplayMode::Rolling => {
+                    assert!(largest <= Some(64), "{started:?} → rolling: {largest:?}");
+                }
+                SpectrogramDisplayMode::Centered => {
+                    assert!(largest > Some(64), "{started:?} → centered: {largest:?}");
+                }
+            }
+            worker.finish();
+        }
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_seek_queued_behind_a_new_track_takes_effect() {
+        let path = write_tone_fixture("queued-seek", 4, 16_000);
+        let worker = QueuedWorker::start(vec![
+            fast_session(&path, SpectrogramDisplayMode::Rolling),
+            SpectrogramWorkerCommand::Seek {
+                position_seconds: 2.0,
+            },
+        ]);
+        let chunks = worker.chunks_until(|chunk| {
+            (chunk.buffer_reset && chunk.start_column_index > 0) || chunk.complete
+        });
+        let reset = chunks.last().expect("chunks");
+        assert!(
+            reset.buffer_reset && reset.start_column_index == 500,
+            "{reset:?}"
+        );
+        worker.finish();
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_position_storm_behind_a_new_track_coalesces_to_the_last_position() {
+        let positions = |range: std::ops::RangeInclusive<u32>| {
+            range.map(|step| SpectrogramWorkerCommand::PositionUpdate {
+                position_seconds: f64::from(step) * 0.04,
+            })
+        };
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        for command in positions(1..=1_000) {
+            tx.send(command).unwrap();
+        }
+        let QueuedCommand {
+            behind: mut queued, ..
+        } = coalesce_queued_new_track_command(
+            test_new_track("/music/a.flac", 1),
+            &rx,
+            &AtomicU64::new(1),
+        )
+        .expect("current session");
+        assert!(
+            matches!(queued.make_contiguous(), [SpectrogramWorkerCommand::PositionUpdate { position_seconds }]
+                if (*position_seconds - 40.0).abs() < 1e-9),
+            "{queued:?}"
+        );
+
+        // A seek supersedes the positions and seeks before it, not the
+        // positions after it.
+        for command in positions(1..=10) {
+            tx.send(command).unwrap();
+        }
+        for step in 1..=10 {
+            tx.send(SpectrogramWorkerCommand::Seek {
+                position_seconds: f64::from(step),
+            })
+            .unwrap();
+        }
+        tx.send(SpectrogramWorkerCommand::UpdateWidgetWidth {
+            widget_width: 2_560,
+        })
+        .unwrap();
+        for command in positions(251..=260) {
+            tx.send(command).unwrap();
+        }
+        let QueuedCommand {
+            behind: mut queued, ..
+        } = coalesce_queued_new_track_command(
+            test_new_track("/music/a.flac", 1),
+            &rx,
+            &AtomicU64::new(1),
+        )
+        .expect("current session");
+        assert!(
+            matches!(
+                queued.make_contiguous(),
+                [
+                    SpectrogramWorkerCommand::Seek { position_seconds: seek },
+                    SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: 2_560 },
+                    SpectrogramWorkerCommand::PositionUpdate { position_seconds: position },
+                ] if (*seek - 10.0).abs() < 1e-9 && (*position - 10.4).abs() < 1e-9
+            ),
+            "{queued:?}"
+        );
+
+        // The worker seeks once, to the last position, past its lookahead.
+        let path = write_tone_fixture("queued-positions", 45, 8_000);
+        let mut commands = vec![with_new_track(session_on(&path, 1, 1), |_, _, mode| {
+            *mode = SpectrogramDisplayMode::Rolling;
+        })];
+        commands.extend(positions(1..=1_000));
+        let worker = QueuedWorker::start(commands);
+        let chunks =
+            worker.chunks_until(|chunk| chunk.buffer_reset && chunk.start_column_index > 0);
+        assert_eq!(chunks.last().expect("chunks").start_column_index, 312);
+        worker.finish();
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_continuation_queued_behind_a_new_track_takes_effect() {
+        let first = write_tone_fixture("queued-continue-first", 1, 8_000);
+        let next = write_tone_fixture("queued-continue-next", 1, 8_000);
+        let rolling = |path: &Path| {
+            with_new_track(session_on(path, 1, 1), |_, _, mode| {
+                *mode = SpectrogramDisplayMode::Rolling;
+            })
+        };
+
+        // The track switches before the first file ends.
+        let worker = QueuedWorker::start(vec![
+            rolling(&first),
+            SpectrogramWorkerCommand::ContinueWithFile {
+                path: next.clone(),
+                track_token: 1,
+            },
+            SpectrogramWorkerCommand::UpdateTrackToken { track_token: 2 },
+        ]);
+        let chunks = worker.chunks_until(|chunk| chunk.track_token == 2 && chunk.complete);
+        assert!(chunks
+            .iter()
+            .any(|chunk| chunk.track_token == 1 && chunk.complete));
+        let reports = worker.finish();
+        assert!(
+            reports.iter().any(|report| matches!(report,
+                SessionReport::Opened { path, track_token: 2, generation: 1, .. } if *path == next)),
+            "{reports:?}"
+        );
+
+        // A cancelled continuation is not opened.
+        let worker = QueuedWorker::start(vec![
+            rolling(&first),
+            SpectrogramWorkerCommand::ContinueWithFile {
+                path: next.clone(),
+                track_token: 2,
+            },
+            SpectrogramWorkerCommand::CancelPendingContinue,
+        ]);
+        worker.chunks_until(|chunk| chunk.complete);
+        let reports = worker.finish();
+        assert!(
+            reports.iter().all(|report| !matches!(report,
+                SessionReport::Opened { path, .. } if *path == next)),
+            "{reports:?}"
+        );
+        std::fs::remove_file(first).expect("remove fixture");
+        std::fs::remove_file(next).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_track_token_queued_behind_a_new_track_takes_effect() {
+        let path = write_tone_fixture("queued-token", 1, 8_000);
+        let worker = QueuedWorker::start(vec![
+            session_on(&path, 1, 1),
+            SpectrogramWorkerCommand::UpdateTrackToken { track_token: 5 },
+        ]);
+        let chunks = worker.chunks_until(|chunk| chunk.complete);
+        assert_eq!(chunks.last().expect("chunks").track_token, 5);
+        worker.finish();
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_widget_width_queued_behind_a_new_track_takes_effect() {
+        // At zoom 64 a 1920-pixel centered view parks 138 columns ahead,
+        // and a 3840-pixel one 198.
+        let path = write_tone_fixture("queued-width", 30, 8_000);
+        let worker = QueuedWorker::start(vec![
+            with_new_track(session_on(&path, 1, 1), |zoom, width, _| {
+                *zoom = 64.0;
+                *width = 1_920;
+            }),
+            SpectrogramWorkerCommand::UpdateWidgetWidth {
+                widget_width: 3_840,
+            },
+        ]);
+        worker
+            .chunks_until(|chunk| chunk.start_column_index + u32::from(chunk.column_count) >= 190);
+        worker.finish();
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_continuation_queued_behind_a_new_track_follows_later_renames() {
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        tx.send(SpectrogramWorkerCommand::ContinueWithFile {
+            path: PathBuf::from("/music/next.flac"),
+            track_token: 2,
+        })
+        .unwrap();
+        tx.send(SpectrogramWorkerCommand::RemapPaths(Arc::new(
+            [(
+                PathBuf::from("/music/next.flac"),
+                PathBuf::from("/music/02.flac"),
+            )]
+            .into_iter()
+            .collect(),
+        )))
+        .unwrap();
+        let QueuedCommand { behind: queued, .. } = coalesce_queued_new_track_command(
+            test_new_track("/music/a.flac", 1),
+            &rx,
+            &AtomicU64::new(1),
+        )
+        .expect("current session");
+        let mut session = make_test_session();
+        session.queued_commands = queued;
+        assert!(process_session_commands(&mut session, &rx).is_none());
+        assert_eq!(
+            session.pending_continue,
+            Some((PathBuf::from("/music/02.flac"), 2))
+        );
+    }
+
+    #[test]
+    fn only_later_sessions_and_stops_supersede_queued_commands() {
+        // A later session starts from the analysis thread's state after
+        // the commands queued before it.
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        tx.send(SpectrogramWorkerCommand::SetDisplayMode(
+            SpectrogramDisplayMode::Centered,
+        ))
+        .unwrap();
+        tx.send(test_new_track("/music/b.flac", 1)).unwrap();
+        tx.send(SpectrogramWorkerCommand::CancelPendingContinue)
+            .unwrap();
+        let QueuedCommand {
+            cmd,
+            behind: mut queued,
+        } = coalesce_queued_new_track_command(
+            test_new_track("/music/a.flac", 1),
+            &rx,
+            &AtomicU64::new(1),
+        )
+        .expect("current session");
+        assert_eq!(new_track_path(&cmd), Path::new("/music/b.flac"));
+        assert!(
+            matches!(
+                queued.make_contiguous(),
+                [SpectrogramWorkerCommand::CancelPendingContinue]
+            ),
+            "{queued:?}"
+        );
+
+        // A stop ends both, and the commands after it stay queued.
+        tx.send(SpectrogramWorkerCommand::SetDisplayMode(
+            SpectrogramDisplayMode::Centered,
+        ))
+        .unwrap();
+        tx.send(SpectrogramWorkerCommand::StopSession).unwrap();
+        tx.send(test_new_track("/music/c.flac", 1)).unwrap();
+        let stopped = coalesce_queued_new_track_command(
+            test_new_track("/music/a.flac", 1),
+            &rx,
+            &AtomicU64::new(1),
+        );
+        assert!(
+            matches!(&stopped, Some(QueuedCommand { cmd: SpectrogramWorkerCommand::StopSession, behind })
+                if behind.is_empty()),
+            "{stopped:?}"
+        );
+        assert_eq!(
+            new_track_path(&rx.try_recv().expect("the next session")),
+            Path::new("/music/c.flac")
+        );
+    }
+
+    #[test]
+    fn a_running_session_leaves_the_commands_behind_a_new_track_queued() {
+        let mut session = make_test_session();
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        tx.send(test_new_track("/music/b.flac", 2)).unwrap();
+        tx.send(SpectrogramWorkerCommand::SetDisplayMode(
+            SpectrogramDisplayMode::Centered,
+        ))
+        .unwrap();
+        assert!(matches!(
+            process_session_commands(&mut session, &rx),
+            Some(SessionAction::NewSession(_))
+        ));
+        assert_eq!(session.display_mode, SpectrogramDisplayMode::Rolling);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SpectrogramWorkerCommand::SetDisplayMode(
+                SpectrogramDisplayMode::Centered
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_seek_drained_with_a_track_token_follows_the_token_chunk() {
+        let mut session = make_test_session();
+        let (tx, rx) = unbounded::<SpectrogramWorkerCommand>();
+        tx.send(SpectrogramWorkerCommand::Seek {
+            position_seconds: 5.0,
+        })
+        .unwrap();
+        tx.send(SpectrogramWorkerCommand::UpdateTrackToken { track_token: 9 })
+            .unwrap();
+        assert!(matches!(
+            process_session_commands(&mut session, &rx),
+            Some(SessionAction::FlushToken)
+        ));
+        assert_eq!(session.track_token, 9);
+        assert!(
+            matches!(
+                process_session_commands(&mut session, &rx),
+                Some(SessionAction::SeekRequired { position_seconds }) if (position_seconds - 5.0).abs() < 1e-9
+            ),
+            "the seek was dropped"
+        );
     }
 }
