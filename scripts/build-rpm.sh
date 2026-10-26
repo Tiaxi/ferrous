@@ -171,7 +171,7 @@ vendor_stage="${RPM_TOPDIR}/SOURCES/ferrous-${version}-vendor"
 vendor_tar="${RPM_TOPDIR}/SOURCES/ferrous-${version}-vendor.tar.gz"
 rm -rf "${vendor_stage}" "${vendor_tar}"
 mkdir -p "${vendor_stage}"
-cargo vendor --locked --manifest-path "${REPO_ROOT}/Cargo.toml" "${vendor_stage}/vendor" >/dev/null
+cargo vendor --quiet --locked --manifest-path "${REPO_ROOT}/Cargo.toml" "${vendor_stage}/vendor" >/dev/null
 tar -C "${vendor_stage}" -czf "${vendor_tar}" vendor
 rm -rf "${vendor_stage}"
 

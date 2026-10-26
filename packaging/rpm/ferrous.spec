@@ -38,6 +38,9 @@ Requires:       qt6-qtbase
 Requires:       qt6-qtdeclarative
 Requires:       qt6-qtquickcontrols2
 Requires:       kf6-kirigami
+# The org.kde.desktop controls style, which Ferrous selects at startup; without
+# it, for example outside Plasma, the main window fails to load.
+Requires:       kf6-qqc2-desktop-style
 Requires:       gstreamer1
 Requires:       gstreamer1-plugins-base
 Requires:       gstreamer1-plugins-good
