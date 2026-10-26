@@ -2348,6 +2348,20 @@ pub(crate) mod scan_test_hooks {
         pass_gate(&WALK_GATES, root);
     }
 
+    thread_local! {
+        static LINK_CHECKS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Counts a row path resolved to look for a duplicate through a link.
+    pub(super) fn note_link_check() {
+        LINK_CHECKS.with(|checks| checks.set(checks.get() + 1));
+    }
+
+    /// The row paths resolved on this thread to look for duplicates.
+    pub(crate) fn link_checks() -> usize {
+        LINK_CHECKS.with(Cell::get)
+    }
+
     /// Scans on this thread use `tuning`.
     pub(crate) fn set_tuning(tuning: ScanTuning) {
         TUNING.with(|cell| cell.set(Some(tuning)));
@@ -2934,12 +2948,7 @@ impl LibraryWalk {
             // A link back to the root: the walk reports it as a loop.
             return true;
         }
-        // The root that indexes the target is the innermost one that holds it.
-        let owner = std::iter::once(&self.root)
-            .chain(&self.other_roots)
-            .filter(|root| target.starts_with(root))
-            .max_by_key(|root| root.components().count());
-        if owner.is_some_and(|owner| owner != &self.root) {
+        if self.other_owner(&target).is_some() {
             return false;
         }
         let encloses = |root: &PathBuf| root.starts_with(&target);
@@ -2952,6 +2961,17 @@ impl LibraryWalk {
             return false;
         }
         true
+    }
+
+    /// The other root that indexes the canonical path `target`, if any: the
+    /// innermost root that holds it.
+    fn other_owner(&self, target: &Path) -> Option<&Path> {
+        std::iter::once(&self.root)
+            .chain(&self.other_roots)
+            .filter(|root| target.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .filter(|owner| *owner != &self.root)
+            .map(PathBuf::as_path)
     }
 
     /// Starts the walk of the next path of a scoped walk. Returns false when
@@ -3201,6 +3221,18 @@ struct RootScanOutcome {
     /// After a complete scan of the whole root, the files found that have
     /// other names.
     hard_linked: Option<HashSet<PathBuf>>,
+}
+
+impl RootScanOutcome {
+    /// The outcome of a scan that `sink` stopped: nothing removed, no problem.
+    fn stopped() -> Self {
+        Self {
+            removed: Vec::new(),
+            problem: None,
+            needs_full_scan: false,
+            hard_linked: None,
+        }
+    }
 }
 
 pub(super) fn count_label(count: usize, singular: &str, plural: &str) -> String {
@@ -3664,12 +3696,7 @@ fn scan_root_in(
     if !complete {
         // The rows read since the last batch are dropped with the workers'
         // remaining reads; the next scan reads those files again.
-        return Ok(RootScanOutcome {
-            removed: Vec::new(),
-            problem: None,
-            needs_full_scan: false,
-            hard_linked: None,
-        });
+        return Ok(RootScanOutcome::stopped());
     }
 
     // Rows of sidecars, indexed before sidecars were skipped (#201), are
@@ -3679,7 +3706,19 @@ fn scan_root_in(
         .filter(|p| walk.sidecars.contains(Path::new(p)))
         .cloned()
         .collect();
-    let previous_track_count = previous_index_count - sidecar_rows.len();
+    // Rows reached through links into another root, indexed before that
+    // root was added, duplicate its rows; the walk skips those links, so a
+    // root holding only such links finds no audio files. A walk that found
+    // audio files removes them as stale.
+    let linked_rows = if walk.found == 0 {
+        match linked_duplicate_rows(conn, &walk, &existing, sink)? {
+            Some(rows) => rows,
+            None => return Ok(RootScanOutcome::stopped()),
+        }
+    } else {
+        Vec::new()
+    };
+    let previous_track_count = previous_index_count - sidecar_rows.len() - linked_rows.len();
     // A root that previously had tracks but now has no audio files at all is
     // most likely an unmounted or offline folder, not an emptied library,
     // even if a folder under its mount point holds sidecars. A scoped walk
@@ -3688,7 +3727,7 @@ fn scan_root_in(
         && previous_track_count > 0
         && (scope.is_none() || root_looks_offline(&root));
     let stale: Vec<String> = if keep_all {
-        sidecar_rows
+        sidecar_rows.into_iter().chain(linked_rows).collect()
     } else {
         existing
             .keys()
@@ -3733,6 +3772,87 @@ fn scan_root_in(
         needs_full_scan: walk.needs_full_scan,
         hard_linked: scope.is_none().then_some(walk.hard_linked),
     })
+}
+
+/// The rows of `existing` that duplicate another root's rows through links,
+/// after a walk that found no audio files.
+///
+/// The walk does not follow a link into another root (see
+/// [`LibraryWalk::follows_link`]), so a row indexed through one before that
+/// root was added is a duplicate once that root holds a row for the file the
+/// link leads to. Such a row goes even when the root looks offline: it
+/// rests on a link that resolves and a row of the other root, not on what
+/// the walk found. A row is kept when its path does not resolve, as on an
+/// unmounted share, or when the other root has not indexed the file: a link
+/// that resolves does not show that the other root can read its folder.
+///
+/// Rows are looked up only when another root holds rows, and the scan's
+/// commands are checked before each path is resolved, as resolving a path
+/// on a network share can stall. Returns `None` when `sink` stops the scan.
+fn linked_duplicate_rows(
+    conn: &Connection,
+    walk: &LibraryWalk,
+    existing: &HashMap<String, ExistingTrackScanState>,
+    sink: &mut dyn ScanSink,
+) -> Result<Option<Vec<String>>, String> {
+    let mut indexed_roots: Vec<&Path> = Vec::new();
+    for other in &walk.other_roots {
+        let has_rows: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tracks WHERE root_path = ?1)",
+                params![other.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if has_rows {
+            indexed_roots.push(other);
+        }
+    }
+    let mut duplicates = Vec::new();
+    if indexed_roots.is_empty() {
+        return Ok(Some(duplicates));
+    }
+    for path in existing.keys() {
+        let row_path = Path::new(path);
+        // A row inside another root is not reached through a link into it.
+        if walk.sidecars.contains(row_path)
+            || walk
+                .other_roots
+                .iter()
+                .any(|other| row_path.starts_with(other))
+        {
+            continue;
+        }
+        if sink.should_stop(conn) {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        scan_test_hooks::note_link_check();
+        let Ok(target) = row_path.canonicalize() else {
+            continue;
+        };
+        let Some(owner) = walk
+            .other_owner(&target)
+            .filter(|owner| indexed_roots.contains(owner))
+        else {
+            continue;
+        };
+        // A path that is not UTF-8 is stored lossily, so a row with the same
+        // text may be another file's.
+        let (Some(target), Some(owner)) = (target.to_str(), owner.to_str()) else {
+            continue;
+        };
+        let indexed: bool = conn
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM tracks WHERE path = ?1 AND root_path = ?2)",
+            )
+            .and_then(|mut stmt| stmt.query_row(params![target, owner], |row| row.get(0)))
+            .map_err(|e| e.to_string())?;
+        if indexed {
+            duplicates.push(path.clone());
+        }
+    }
+    Ok(Some(duplicates))
 }
 
 /// Whether `path` is a track: a file with a supported audio extension that
@@ -5848,6 +5968,360 @@ mod tests {
             [a.join("Own/01.mp3"), b.join("Album/02.mp3")]
         );
         assert_eq!(root_of(&conn, &b.join("Album/02.mp3")), b.to_string_lossy());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Roots `a` and `b` under a new folder, where `a/Linked` is a link to
+    /// `b/Album`, which holds two tracks, and `a` indexed them through the
+    /// link before `b` was added. Returns the folder, `a` and `b`.
+    #[cfg(unix)]
+    fn index_through_a_link_then_add_its_target(conn: &Connection, name: &str) -> [PathBuf; 3] {
+        let base = test_dir(name);
+        fs::create_dir_all(base.join("a")).expect("mkdir a");
+        fs::create_dir_all(base.join("b/Album")).expect("mkdir b");
+        let base = base.canonicalize().expect("canonical base");
+        let (a, b) = (base.join("a"), base.join("b"));
+        write_stub(&b.join("Album/01.mp3"), b"one");
+        write_stub(&b.join("Album/02.mp3"), b"two");
+        std::os::unix::fs::symlink(b.join("Album"), a.join("Linked")).expect("link");
+        scan(conn, &a);
+        assert_eq!(
+            indexed_paths(conn),
+            [a.join("Linked/01.mp3"), a.join("Linked/02.mp3")]
+        );
+        insert_root(conn, &b, "").expect("root b");
+        scan(conn, &b);
+        [base, a, b]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_holding_only_links_into_another_root_drops_its_duplicates() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let [base, a, b] = index_through_a_link_then_add_its_target(&conn, "only-links");
+
+        let outcome = scan(&conn, &a);
+
+        let mut removed = outcome.removed;
+        removed.sort();
+        assert_eq!(
+            removed,
+            [
+                a.join("Linked/01.mp3").to_string_lossy().to_string(),
+                a.join("Linked/02.mp3").to_string_lossy().to_string(),
+            ]
+        );
+        assert_eq!(outcome.problem, None);
+        assert_eq!(
+            indexed_paths(&conn),
+            [b.join("Album/01.mp3"), b.join("Album/02.mp3")]
+        );
+        assert_eq!(root_of(&conn, &b.join("Album/01.mp3")), b.to_string_lossy());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_offline_root_keeps_the_rows_it_indexed_through_links() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let [base, a, b] = index_through_a_link_then_add_its_target(&conn, "offline-links");
+        let linked = [a.join("Linked/01.mp3"), a.join("Linked/02.mp3")];
+        let owned = [b.join("Album/01.mp3"), b.join("Album/02.mp3")];
+        let both: Vec<PathBuf> = linked.iter().chain(&owned).cloned().collect();
+
+        // An unmounted mount point is an empty folder; the links are gone
+        // with the share, so the rows cannot be resolved.
+        fs::remove_file(a.join("Linked")).expect("unmount a");
+        let outcome = scan(&conn, &a);
+
+        assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+        let problem = outcome.problem.expect("the offline root is reported");
+        assert!(
+            problem.contains("found no audio files")
+                && problem.contains("kept its 2 indexed tracks"),
+            "{problem}"
+        );
+        assert_eq!(indexed_paths(&conn), both);
+
+        // A mount point that is gone fails the scan before it removes rows.
+        fs::remove_dir(&a).expect("remove the mount point");
+        scan_root(&conn, &a, &mut |_| {}, &mut |_, _| {})
+            .err()
+            .expect("a missing root fails its scan");
+        assert_eq!(indexed_paths(&conn), both);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Restores the permissions of a folder [`lock_listing`] locked, even
+    /// when the test panics.
+    #[cfg(unix)]
+    struct ListingLock<'a>(&'a Path);
+
+    #[cfg(unix)]
+    impl Drop for ListingLock<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+
+            if let Err(err) = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755)) {
+                eprintln!("could not unlock '{}': {err}", self.0.display());
+            }
+        }
+    }
+
+    /// Locks `folder` to searchable but not readable, until the returned
+    /// lock is dropped. `None`, with the folder unlocked and the test logged
+    /// as skipped, when it can still be listed: root and `CAP_DAC_OVERRIDE`
+    /// ignore the permissions.
+    #[cfg(unix)]
+    fn lock_listing(folder: &Path) -> Option<ListingLock<'_>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o111)).expect("lock folder");
+        let lock = ListingLock(folder);
+        if fs::read_dir(folder).is_ok() {
+            eprintln!("skipping: permission-denied folders are readable for this user");
+            return None;
+        }
+        Some(lock)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_a_root_that_has_not_indexed_its_target_keeps_the_row() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("unindexed-target");
+        fs::create_dir_all(base.join("a")).expect("mkdir a");
+        fs::create_dir_all(base.join("b/Album")).expect("mkdir b");
+        let base = base.canonicalize().expect("canonical base");
+        let (a, b) = (base.join("a"), base.join("b"));
+        let song = a.join("Linked/song.mp3");
+        write_stub(&b.join("Album/song.mp3"), b"song");
+        std::os::unix::fs::symlink(b.join("Album"), a.join("Linked")).expect("link");
+        scan(&conn, &a);
+        assert_eq!(indexed_paths(&conn), [song.clone()]);
+
+        // The link still resolves, but `b`'s scan cannot list the folder, as
+        // on a network share whose lookups are cached, and indexes nothing.
+        let Some(lock) = lock_listing(&b) else {
+            let _ = fs::remove_dir_all(base);
+            return;
+        };
+        insert_root(&conn, &b, "").expect("root b");
+        let b_outcome = scan(&conn, &b);
+        let outcome = scan(&conn, &a);
+        drop(lock);
+
+        assert!(b_outcome
+            .problem
+            .is_some_and(|problem| problem.contains("could not read")));
+        assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+        let problem = outcome.problem.expect("the offline root is reported");
+        assert!(
+            problem.contains("found no audio files")
+                && problem.contains("kept its 1 indexed track"),
+            "{problem}"
+        );
+        assert_eq!(indexed_paths(&conn), [song]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_to_a_file_whose_name_is_not_utf8_keeps_the_row() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("non-utf8-target");
+        fs::create_dir_all(base.join("a")).expect("mkdir a");
+        fs::create_dir_all(base.join("b/Album")).expect("mkdir b");
+        fs::create_dir_all(base.join("aside")).expect("mkdir aside");
+        let base = base.canonicalize().expect("canonical base");
+        let (a, b) = (base.join("a"), base.join("b"));
+        let target = b.join("Album").join(OsStr::from_bytes(b"\xFF.mp3"));
+        let song = a.join("song.mp3");
+        write_stub(&target, b"not utf-8");
+        std::os::unix::fs::symlink(&target, &song).expect("link");
+        scan(&conn, &a);
+        assert_eq!(indexed_paths(&conn), [song.clone()]);
+
+        // While the target is away, `b` indexes another file, whose name is
+        // the target's name with its byte replaced as a lossy conversion does.
+        let aside = base.join("aside/target.mp3");
+        fs::rename(&target, &aside).expect("move aside");
+        let lookalike = b.join("Album/\u{FFFD}.mp3");
+        write_stub(&lookalike, b"utf-8");
+        insert_root(&conn, &b, "").expect("root b");
+        scan(&conn, &b);
+        fs::rename(&aside, &target).expect("move back");
+
+        let outcome = scan(&conn, &a);
+
+        assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+        let problem = outcome.problem.expect("the kept track is reported");
+        assert!(problem.contains("kept its 1 indexed track"), "{problem}");
+        assert_eq!(indexed_paths(&conn), [song, lookalike]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_links_whose_targets_another_root_indexed_are_dropped() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("partly-indexed-targets");
+        fs::create_dir_all(base.join("a")).expect("mkdir a");
+        fs::create_dir_all(base.join("b/Album")).expect("mkdir b");
+        fs::create_dir_all(base.join("aside")).expect("mkdir aside");
+        let base = base.canonicalize().expect("canonical base");
+        let (a, b) = (base.join("a"), base.join("b"));
+        write_stub(&b.join("Album/01.mp3"), b"one");
+        write_stub(&b.join("Album/02.mp3"), b"two");
+        std::os::unix::fs::symlink(b.join("Album"), a.join("Linked")).expect("link");
+        scan(&conn, &a);
+        // `b` is scanned while `02.mp3` is away, so it indexes `01.mp3` alone.
+        insert_root(&conn, &b, "").expect("root b");
+        let aside = base.join("aside/02.mp3");
+        fs::rename(b.join("Album/02.mp3"), &aside).expect("move aside");
+        scan(&conn, &b);
+        fs::rename(&aside, b.join("Album/02.mp3")).expect("move back");
+
+        let outcome = scan(&conn, &a);
+
+        assert_eq!(
+            outcome.removed,
+            [a.join("Linked/01.mp3").to_string_lossy().to_string()]
+        );
+        assert_eq!(
+            indexed_paths(&conn),
+            [a.join("Linked/02.mp3"), b.join("Album/01.mp3")]
+        );
+
+        // Once `b` indexes it, the other duplicate goes too.
+        scan(&conn, &b);
+        let outcome = scan(&conn, &a);
+        assert_eq!(
+            outcome.removed,
+            [a.join("Linked/02.mp3").to_string_lossy().to_string()]
+        );
+        assert_eq!(outcome.problem, None);
+        assert_eq!(
+            indexed_paths(&conn),
+            [b.join("Album/01.mp3"), b.join("Album/02.mp3")]
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn an_empty_root_resolves_no_paths_while_no_other_root_has_rows() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("no-other-rows");
+        fs::create_dir_all(base.join("a")).expect("mkdir a");
+        fs::create_dir_all(base.join("b")).expect("mkdir b");
+        let base = base.canonicalize().expect("canonical base");
+        let (a, b) = (base.join("a"), base.join("b"));
+        let song = a.join("song.mp3");
+        write_stub(&song, b"song");
+        scan(&conn, &a);
+        fs::remove_file(&song).expect("unmount a");
+
+        let checks = scan_test_hooks::link_checks();
+        let alone = scan(&conn, &a);
+        insert_root(&conn, &b, "").expect("root b without tracks");
+        let beside_empty = scan(&conn, &a);
+
+        assert_eq!(scan_test_hooks::link_checks(), checks);
+        for outcome in [alone, beside_empty] {
+            assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+            let problem = outcome.problem.expect("the offline root is reported");
+            assert!(problem.contains("kept its 1 indexed track"), "{problem}");
+        }
+        assert_eq!(indexed_paths(&conn), [song]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A sink that stops the scan the first time it is asked.
+    #[derive(Default)]
+    struct StoppingSink {
+        asked: usize,
+    }
+
+    impl ScanSink for StoppingSink {
+        fn progress(&mut self, _conn: &Connection, _progress: RootScanProgress) {}
+
+        fn committed(&mut self, _root: &Path, _rows: Vec<(MetadataTask, IndexedTrack)>) {}
+
+        fn should_stop(&mut self, _conn: &Connection) -> bool {
+            self.asked += 1;
+            true
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scan_stopped_while_it_looks_for_linked_duplicates_removes_nothing() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let [base, a, b] = index_through_a_link_then_add_its_target(&conn, "stop-link-check");
+        let indexed = indexed_paths(&conn);
+
+        let mut sink = StoppingSink::default();
+        let outcome = scan_root_in(&conn, &a, None, None, &mut sink).expect("scan");
+
+        // The walk finds no files, so the duplicate lookup asks first.
+        assert_eq!(sink.asked, 1);
+        assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+        assert_eq!(outcome.problem, None);
+        assert_eq!(indexed_paths(&conn), indexed);
+        assert_eq!(
+            root_of(&conn, &a.join("Linked/01.mp3")),
+            a.to_string_lossy()
+        );
+        assert_eq!(root_of(&conn, &b.join("Album/01.mp3")), b.to_string_lossy());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_whose_own_files_are_gone_keeps_them_but_drops_its_linked_duplicates() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("own-gone-links");
+        fs::create_dir_all(base.join("a/Own")).expect("mkdir a");
+        fs::create_dir_all(base.join("b/Album")).expect("mkdir b");
+        let base = base.canonicalize().expect("canonical base");
+        let (a, b) = (base.join("a"), base.join("b"));
+        write_stub(&a.join("Own/01.mp3"), b"own");
+        write_stub(&b.join("Album/02.mp3"), b"linked");
+        std::os::unix::fs::symlink(b.join("Album"), a.join("Linked")).expect("link");
+        scan(&conn, &a);
+        insert_root(&conn, &b, "").expect("root b");
+        scan(&conn, &b);
+
+        // A link that resolves does not show that the rest of the root is
+        // reachable, so its own missing track is kept as if it were offline.
+        fs::remove_file(a.join("Own/01.mp3")).expect("remove own track");
+        let outcome = scan(&conn, &a);
+
+        assert_eq!(
+            outcome.removed,
+            [a.join("Linked/02.mp3").to_string_lossy().to_string()]
+        );
+        let problem = outcome.problem.expect("the missing track is reported");
+        assert!(
+            problem.contains("found no audio files")
+                && problem.contains("kept its 1 indexed track"),
+            "{problem}"
+        );
+        assert_eq!(
+            indexed_paths(&conn),
+            [a.join("Own/01.mp3"), b.join("Album/02.mp3")]
+        );
         let _ = fs::remove_dir_all(base);
     }
 
