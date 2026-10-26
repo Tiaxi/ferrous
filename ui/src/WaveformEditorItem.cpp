@@ -438,6 +438,21 @@ void WaveformEditorItem::setHoverPosition(double x, double y, bool active) {
     if (crosshairEnabled()) update();
 }
 
+void WaveformEditorItem::itemChange(ItemChange change, const ItemChangeData &value) {
+    QQuickItem::itemChange(change, value);
+    if (change != ItemDevicePixelRatioHasChanged) {
+        return;
+    }
+    // Moving to a screen with another scale, or the scale changing: the
+    // next paint draws the caches at the new device pixels, once. A staged
+    // cache or playback tiles at the old ones would land at the wrong size.
+    {
+        QMutexLocker lock(&m_stateMutex);
+        invalidateCacheLocked();
+    }
+    update();
+}
+
 void WaveformEditorItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
     QQuickItem::geometryChange(newGeometry, oldGeometry);
     if (newGeometry.size() != oldGeometry.size()) {
@@ -897,9 +912,17 @@ int WaveformEditorItem::detailRequestPointCountLocked(
     return std::clamp(requestedPoints, 64, kMaximumDetailPoints);
 }
 
+double WaveformEditorItem::renderScaleLocked() const {
+    return window() != nullptr ? window()->effectiveDevicePixelRatio() : 1.0;
+}
+
 int WaveformEditorItem::renderPixelWidthLocked() const {
-    const double scale = window() != nullptr ? window()->effectiveDevicePixelRatio() : 1.0;
-    return std::max(1, static_cast<int>(std::ceil(width() * scale)));
+    return std::max(1, static_cast<int>(std::ceil(width() * renderScaleLocked())));
+}
+
+int WaveformEditorItem::renderPixelHeightLocked() const {
+    return std::max(1, static_cast<int>(std::ceil(
+        std::floor(height()) * renderScaleLocked() - 1e-6)));
 }
 
 WaveformEditorItem::CacheGrid WaveformEditorItem::cacheGridForRangeLocked(
@@ -1205,6 +1228,8 @@ void WaveformEditorItem::clearStagedCacheLocked() {
     m_stagedCacheFramesPerPoint = 0;
     m_stagedCacheDisplayedChannels = 0;
     m_stagedCacheNextX = 0;
+    m_stagedCacheViewportWidth = 0;
+    m_stagedCacheViewportHeight = 0;
     m_stagedCacheCommitsDeferredZoom = false;
 }
 
@@ -1224,9 +1249,10 @@ void WaveformEditorItem::beginStagedCacheForRangeLocked(
     const CacheGrid grid = cacheGridForRangeLocked(
         visibleStart, visibleEnd,
         m_detail.startSeconds, m_detail.endSeconds);
-    const int renderHeight = std::max(
-        1, static_cast<int>(std::floor(height())));
+    const int renderHeight = renderPixelHeightLocked();
     m_stagedCache = QImage(grid.width, renderHeight, QImage::Format_RGB32);
+    m_stagedCacheViewportWidth = renderPixelWidthLocked();
+    m_stagedCacheViewportHeight = renderHeight;
     m_stagedCacheStartSeconds = grid.startSeconds;
     m_stagedCacheEndSeconds = grid.endSeconds;
     m_stagedCacheSecondsPerPixel = grid.secondsPerPixel;
@@ -1272,7 +1298,8 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
             m_stagedCacheEndSeconds,
             m_stagedCacheDisplayedChannels,
             firstX,
-            lastX);
+            lastX,
+            renderScaleLocked());
         m_stagedCacheNextX = lastX;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         processedColumns = lastX - firstX;
@@ -1307,8 +1334,10 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
         m_cacheSecondsPerPixel = m_stagedCacheSecondsPerPixel;
         m_cacheFramesPerPoint = m_stagedCacheFramesPerPoint;
         m_cacheDisplayedChannels = m_stagedCacheDisplayedChannels;
-        m_cachedViewportWidth = renderPixelWidthLocked();
-        m_cachedViewportHeight = m_cache.height();
+        // For the viewport it was begun for: at another scale since, the
+        // next paint draws a cache at that one.
+        m_cachedViewportWidth = m_stagedCacheViewportWidth;
+        m_cachedViewportHeight = m_stagedCacheViewportHeight;
         m_cacheDirty = false;
         if (commitsDeferredZoom) {
             m_presentedZoomLevel = m_zoomLevel;
@@ -1442,13 +1471,13 @@ void WaveformEditorItem::paint(QPainter *painter) {
         profileRebuiltCache = !directDetail
             && (m_cacheDirty
                 || m_cachedViewportWidth != renderPixelWidthLocked()
-                || m_cachedViewportHeight != canvasHeight);
+                || m_cachedViewportHeight != renderPixelHeightLocked());
 #endif
         if (directDetail) {
             painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
             drawDetailLocked(
                 *painter, canvasWidth, canvasHeight,
-                visibleStart, visibleEnd, displayedChannelCountLocked());
+                visibleStart, visibleEnd, displayedChannelCountLocked(), 1.0);
         } else {
             const bool tiledPlayback = playbackTilesEligibleLocked(
                 visibleStart, visibleEnd);
@@ -1458,11 +1487,11 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 && m_detail.framesPerPoint > 0;
             if (tiledPlayback && currentDetailReady) {
                 preparePlaybackTilesLocked(
-                    visibleStart, visibleEnd, canvasHeight);
+                    visibleStart, visibleEnd, renderPixelHeightLocked());
                 playbackTilesRendered = renderMissingPlaybackTilesLocked(
                     visibleStart,
                     visibleEnd,
-                    canvasHeight,
+                    renderPixelHeightLocked(),
                     playbackTileRenderBudgetLocked(
                         visibleStart, visibleEnd));
             }
@@ -1470,10 +1499,10 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 playbackTilesComplete = playbackTilesCoverLocked(
                     visibleStart, visibleEnd);
                 playbackTilePaints = playbackTilePaintsLocked(
-                    visibleStart, visibleEnd, canvasWidth);
+                    visibleStart, visibleEnd, canvasWidth, canvasHeight);
             }
             if (!playbackTilesComplete) {
-                rebuildCacheLocked(renderPixelWidthLocked(), canvasHeight);
+                rebuildCacheLocked(renderPixelWidthLocked(), renderPixelHeightLocked());
                 cache = m_cache;
             }
         }
@@ -1734,8 +1763,7 @@ bool WaveformEditorItem::playbackTilesEligibleLocked(
     const bool compatible = !m_playbackTiles.empty()
         && std::abs(m_playbackTileSecondsPerPixel - secondsPerPixel)
             <= tolerance
-        && m_playbackTileHeight
-            == std::max(1, static_cast<int>(std::floor(height())))
+        && m_playbackTileHeight == renderPixelHeightLocked()
         && m_playbackTileDisplayedChannels == displayedChannelCountLocked();
     if (!compatible) return false;
     const double tileDuration = secondsPerPixel * kPlaybackTileWidth;
@@ -1863,7 +1891,8 @@ int WaveformEditorItem::renderMissingPlaybackTilesLocked(
             tileEnd,
             m_playbackTileDisplayedChannels,
             firstX,
-            lastX);
+            lastX,
+            renderScaleLocked());
         tilePainter.end();
         m_playbackTiles.emplace(
             tileIndex, PlaybackTile{std::move(tileImage)});
@@ -1920,7 +1949,7 @@ bool WaveformEditorItem::playbackTilesCoverLocked(
 
 std::vector<WaveformEditorItem::PlaybackTilePaint>
 WaveformEditorItem::playbackTilePaintsLocked(
-    double visibleStart, double visibleEnd, int canvasWidth) const {
+    double visibleStart, double visibleEnd, int canvasWidth, int canvasHeight) const {
     std::vector<PlaybackTilePaint> paints;
     if (m_playbackTileSecondsPerPixel <= 0.0
         || visibleEnd <= visibleStart || canvasWidth <= 0) {
@@ -1946,7 +1975,7 @@ WaveformEditorItem::playbackTilePaintsLocked(
                 0.0,
                 tileDuration / visibleSpan
                     * static_cast<double>(canvasWidth),
-                static_cast<double>(m_playbackTileHeight)),
+                static_cast<double>(canvasHeight)),
         });
     }
     return paints;
@@ -1989,18 +2018,19 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
     QPainter painter(&m_cache);
     painter.setRenderHint(QPainter::Antialiasing, false);
     const int channels = displayedChannelCountLocked();
+    const double scale = renderScaleLocked();
     if (detailReady) {
         drawDetailLocked(
             painter, grid.width, height,
-            grid.startSeconds, grid.endSeconds, channels);
+            grid.startSeconds, grid.endSeconds, channels, scale);
     } else if (useOverview) {
         drawOverviewLocked(
             painter, grid.width, height,
-            grid.startSeconds, grid.endSeconds, channels);
+            grid.startSeconds, grid.endSeconds, channels, scale);
     } else {
         drawDetailLocked(
             painter, grid.width, height,
-            grid.startSeconds, grid.endSeconds, channels);
+            grid.startSeconds, grid.endSeconds, channels, scale);
     }
     painter.end();
     m_cachedViewportWidth = width;
@@ -2164,7 +2194,8 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
 }
 
 void WaveformEditorItem::drawOverviewLocked(QPainter &painter, int width, int height,
-                                             double visibleStart, double visibleEnd, int channels) const {
+                                             double visibleStart, double visibleEnd, int channels,
+                                             double pixelScale) const {
     // The overview is a combined peak envelope, with no channel identity.
     if (m_overviewData.isEmpty() || m_durationSeconds <= 0.0
         || (m_viewMode == 1 && channels > 1)) return;
@@ -2180,7 +2211,7 @@ void WaveformEditorItem::drawOverviewLocked(QPainter &painter, int width, int he
         const double top = static_cast<double>(channel) * height / channels;
         const double bottom = static_cast<double>(channel + 1) * height / channels;
         const double center = (top + bottom) * 0.5;
-        const double half = (bottom - top) * 0.5 - 1.0;
+        const double half = (bottom - top) * 0.5 - pixelScale;
         painter.setPen(QPen(channelIsMutedLocked(channel) ? kMutedWaveform : kWaveform, 1.0));
         for (int x = 0; x < width; ++x) {
             const double start = std::max(0.0, visibleStart + x * secondsPerPixel);
@@ -2195,15 +2226,16 @@ void WaveformEditorItem::drawOverviewLocked(QPainter &painter, int width, int he
 }
 
 void WaveformEditorItem::drawDetailLocked(QPainter &painter, int width, int height,
-                                           double visibleStart, double visibleEnd, int channels) const {
+                                           double visibleStart, double visibleEnd, int channels,
+                                           double pixelScale) const {
     drawDetailSliceLocked(
-        painter, width, height, visibleStart, visibleEnd, channels, 0, width);
+        painter, width, height, visibleStart, visibleEnd, channels, 0, width, pixelScale);
 }
 
 void WaveformEditorItem::drawDetailSliceLocked(
     QPainter &painter, int width, int height,
     double visibleStart, double visibleEnd, int channels,
-    int firstX, int lastX) const {
+    int firstX, int lastX, double pixelScale) const {
     const double detailSpan = m_detail.endSeconds - m_detail.startSeconds;
     const double visibleSpan = visibleEnd - visibleStart;
     firstX = std::clamp(firstX, 0, width);
@@ -2217,8 +2249,8 @@ void WaveformEditorItem::drawDetailSliceLocked(
         >= kSampleMarkerPixelsPerSample;
     const double sampleMarkerSize = std::clamp(
         sampleSpacing * 0.75,
-        kMinimumSampleMarkerSize,
-        kMaximumSampleMarkerSize);
+        kMinimumSampleMarkerSize * pixelScale,
+        kMaximumSampleMarkerSize * pixelScale);
     const double secondsPerPixel = visibleSpan
         / static_cast<double>(std::max(1, width));
     const int boundaryMargin = sampleCurve
@@ -2235,9 +2267,10 @@ void WaveformEditorItem::drawDetailSliceLocked(
         const double top = static_cast<double>(displayChannel) * height / channels;
         const double bottom = static_cast<double>(displayChannel + 1) * height / channels;
         const double center = (top + bottom) * 0.5;
-        const double half = (bottom - top) * 0.5 - 1.0;
+        const double half = (bottom - top) * 0.5 - pixelScale;
         const QColor color = channelIsMutedLocked(displayChannel) ? kMutedWaveform : kWaveform;
-        painter.setPen(QPen(color, sampleMarkers ? 1.2 : 1.0));
+        // Columns are a pixel wide; curves keep their logical width.
+        painter.setPen(QPen(color, sampleCurve ? (sampleMarkers ? 1.2 : 1.0) * pixelScale : 1.0));
         QPolygonF polyline;
         std::vector<float> pixelMinima;
         std::vector<float> pixelMaxima;

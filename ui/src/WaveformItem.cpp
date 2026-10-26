@@ -203,15 +203,25 @@ void WaveformItem::setBgColor(const QColor &color) {
     update(dirtyRect);
 }
 
+void WaveformItem::itemChange(ItemChange change, const ItemChangeData &value) {
+    QQuickPaintedItem::itemChange(change, value);
+    if (change == ItemDevicePixelRatioHasChanged) {
+        // The next paint redraws the cache at the new scale.
+        update();
+    }
+}
+
 void WaveformItem::paint(QPainter *painter) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto paint_start = std::chrono::steady_clock::now();
     int peaksCountLocal = 0;
 #endif
+    // The painter draws on the item's texture, at its device pixels.
+    const double scale = std::max(1e-3, std::abs(painter->deviceTransform().m11()));
     QImage waveformCacheLocal;
     {
         QMutexLocker lock(&m_stateMutex);
-        ensureCacheLocked(currentWidthLocked(), currentHeightLocked());
+        ensureCacheLocked(scale);
         updateWaveformCacheLocked();
         waveformCacheLocal = m_waveformCache;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -219,11 +229,16 @@ void WaveformItem::paint(QPainter *painter) {
 #endif
     }
 
-    const QRect clipRect = painter->clipBoundingRect().toAlignedRect();
-    if (clipRect.isValid() && !waveformCacheLocal.isNull()) {
-        painter->drawImage(clipRect, waveformCacheLocal, clipRect);
-    } else if (!waveformCacheLocal.isNull()) {
-        painter->drawImage(QPoint(0, 0), waveformCacheLocal);
+    if (!waveformCacheLocal.isNull()) {
+        // One cache pixel to a device pixel.
+        const QRectF cacheRect(
+            0.0, 0.0, waveformCacheLocal.width() / scale, waveformCacheLocal.height() / scale);
+        const QRectF clipRect = painter->clipBoundingRect();
+        const QRectF target = clipRect.isValid() ? clipRect.intersected(cacheRect) : cacheRect;
+        if (!target.isEmpty()) {
+            painter->drawImage(target, waveformCacheLocal,
+                QRectF(target.topLeft() * scale, target.size() * scale));
+        }
     }
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -282,18 +297,25 @@ int WaveformItem::xForPeakIndexLocked(int peakIndex, int peakCount, int drawWidt
         drawWidth - 1);
 }
 
-void WaveformItem::ensureCacheLocked(int width, int height) {
+void WaveformItem::ensureCacheLocked(double scale) {
+    const int width = currentWidthLocked();
+    const int height = currentHeightLocked();
     if (width <= 0 || height <= 0) {
         m_waveformCache = QImage();
         m_dirtyRect = QRect();
         m_cacheDirty = false;
         return;
     }
-    if (m_waveformCache.size() == QSize(width, height)
+    const QSize pixels(
+        std::max(1, static_cast<int>(std::ceil(width * scale - 1e-6))),
+        std::max(1, static_cast<int>(std::ceil(height * scale - 1e-6))));
+    if (m_waveformCache.size() == pixels
+        && m_waveformCache.devicePixelRatio() == scale
         && m_waveformCache.format() == QImage::Format_RGB32) {
         return;
     }
-    m_waveformCache = QImage(width, height, QImage::Format_RGB32);
+    m_waveformCache = QImage(pixels, QImage::Format_RGB32);
+    m_waveformCache.setDevicePixelRatio(scale);
     m_waveformCache.fill(m_bgColor);
     m_dirtyRect = QRect(0, 0, width, height);
     m_cacheDirty = true;
@@ -330,7 +352,12 @@ void WaveformItem::updateWaveformCacheLocked() {
         return;
     }
 
-    QRect dirty = m_dirtyRect.intersected(m_waveformCache.rect());
+    // The bars are drawn a device pixel wide, from the logical dirty area.
+    const double scale = m_waveformCache.devicePixelRatio();
+    const QRect cacheRect(QPoint(0, 0), m_waveformCache.size());
+    QRect dirty = QRectF(QPointF(m_dirtyRect.topLeft()) * scale, QSizeF(m_dirtyRect.size()) * scale)
+        .toAlignedRect()
+        .intersected(cacheRect);
     if (!dirty.isValid() || dirty.isEmpty()) {
         m_dirtyRect = QRect();
         m_cacheDirty = false;
@@ -338,22 +365,28 @@ void WaveformItem::updateWaveformCacheLocked() {
     }
 
     QPainter cachePainter(&m_waveformCache);
+    // In device pixels.
+    cachePainter.setWorldTransform(QTransform::fromScale(1.0 / scale, 1.0 / scale));
     cachePainter.fillRect(dirty, m_bgColor);
     if (!m_peaksData.isEmpty()) {
         cachePainter.setPen(Qt::NoPen);
         cachePainter.setBrush(m_barColor);
         const int count = m_peaksData.size();
         const double half = static_cast<double>(m_waveformCache.height()) / 2.0;
+        // The thinnest bar is a logical pixel either way of the middle.
+        const int minimumBar = std::max(1, static_cast<int>(std::lround(scale)));
         const auto *src = reinterpret_cast<const uchar *>(m_peaksData.constData());
-        const int drawWidth = drawnWidthLocked(
-            m_generatedSeconds,
-            m_waveformComplete,
-            m_durationSeconds);
+        const int drawWidth = std::clamp(
+            static_cast<int>(std::floor(static_cast<double>(drawnWidthLocked(
+                m_generatedSeconds, m_waveformComplete, m_durationSeconds))
+                * scale + 1e-6)),
+            0,
+            m_waveformCache.width());
         const int right = std::min(dirty.right() + 1, drawWidth);
         for (int x = dirty.x(); x < right; ++x) {
             const int idx = (count <= 1 || drawWidth <= 1) ? 0 : (x * (count - 1) / (drawWidth - 1));
             const double peak = static_cast<double>(src[idx]) / 255.0;
-            const int bar = std::max(1, static_cast<int>(std::floor(peak * half)));
+            const int bar = std::max(minimumBar, static_cast<int>(std::floor(peak * half)));
             const int y = static_cast<int>(half) - bar;
             cachePainter.drawRect(x, y, 1, bar * 2);
         }
