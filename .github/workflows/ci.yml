@@ -14,7 +14,34 @@ jobs:
   rust-backend:
     name: Rust Backend Checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: fedora:44
+    env:
+      # Give up on a stalled mirror instead of waiting on it.
+      DNF_OPTS: --setopt=retries=3 --setopt=timeout=30 --setopt=minrate=10240
     steps:
+      - name: Install system dependencies
+        timeout-minutes: 10
+        run: |
+          # RPM Fusion's full FFmpeg, as on the release platform, so the libav
+          # plugin has the AC-3, DTS, AAC and MP3 codecs the fixture tests use.
+          dnf -y $DNF_OPTS install \
+            https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm
+          dnf -y $DNF_OPTS install --allowerasing \
+            git \
+            curl \
+            tar \
+            zstd \
+            gcc \
+            pkgconf-pkg-config \
+            glib2-devel \
+            gstreamer1-devel \
+            gstreamer1-plugins-base-devel \
+            gstreamer1-plugins-good \
+            gstreamer1-plugin-libav \
+            ffmpeg-libs
+
       - name: Checkout
         uses: actions/checkout@v5
         with:
@@ -27,17 +54,8 @@ jobs:
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
-
-      - name: Install Linux deps for gst feature
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libglib2.0-dev \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-plugins-good \
-            gstreamer1.0-libav
+        with:
+          prefix-key: v0-rust-fedora-44
 
       - name: Check formatting
         run: cargo fmt --check
@@ -54,13 +72,25 @@ jobs:
             echo "XDG_CACHE_HOME=$RUNNER_TEMP/xdg/cache"
           } >> "$GITHUB_ENV"
 
+      - name: Create an unprivileged test user
+        run: |
+          # Root reads locked folders and may give files away, so the tests
+          # of those refusals skip under it. Test as a user in a supplementary
+          # group instead, as on a desktop.
+          groupadd ferrous-test
+          useradd --create-home --groups ferrous-test tester
+          chown -R tester: "$GITHUB_WORKSPACE" "$HOME" "$RUNNER_TEMP/xdg"
+
       - name: Test (GStreamer backend)
+        shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
         run: cargo test --features gst
 
       - name: Test (profiling instrumentation)
+        shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
         run: cargo test --features "gst profiling-logs"
 
       - name: Test (mock backend)
+        shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
         run: cargo test
 
   ui:
@@ -69,12 +99,17 @@ jobs:
       matrix:
         profile_logs: ['OFF', 'ON']
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     container:
       image: fedora:44
+    env:
+      # Give up on a stalled mirror instead of waiting on it.
+      DNF_OPTS: --setopt=retries=3 --setopt=timeout=30 --setopt=minrate=10240
     steps:
       - name: Install system dependencies
+        timeout-minutes: 10
         run: |
-          dnf -y install \
+          dnf -y $DNF_OPTS install \
             git \
             cmake \
             ninja-build \
