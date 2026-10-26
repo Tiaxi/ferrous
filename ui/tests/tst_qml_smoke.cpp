@@ -993,6 +993,11 @@ private slots:
     void waveformSceneGraphMatchesRaster_data();
     void waveformSceneGraphMatchesRaster();
     void waveformSceneGraphBenchmark();
+    void waveformEditorPlaybackBenchmark();
+    void waveformSceneGraphLaysOutEachLabelOnce();
+    void waveformEditorIdleViewWaitsForThePlayheadsNextPixel();
+    void waveformEditorLateFrameCallbackDrawsAtOnce();
+    void waveformEditorIdleViewDrawsOnlyFramesThatDiffer();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
     void spectrogramStaleTokenChunksAreDropped();
     void spectrogramGaplessTokenChunksPassFilter();
@@ -1024,6 +1029,15 @@ private slots:
     void spectrogramTrackChangeCancelsPendingZoomDebounce();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
+    void spectrogramFpsOverlayToggleKeepsSceneNode();
+    void spectrogramStillFramesLeaveTextureNodesAlone();
+    void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data();
+    void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel();
+    void spectrogramLateFrameCallbackDrawsAtOnce();
+    void spectrogramMovingViewsRequestEveryFrame();
+    void spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce();
+    void spectrogramIdleViewDrawsOnlyFramesThatDiffer();
+    void mainWindowStopsPositionFramesWhileHidden();
     void trackIdentityChangedSignalTriggersQmlHandler();
     void queueAutoCenterIsDeferredOffHandlerStack();
     void queueRemovalSendsOneBatch();
@@ -1039,6 +1053,7 @@ private slots:
     void spectrogramProjectionWritesPreserveSharedCanvasImages();
     void spectrogramRebuildBenchmark();
     void spectrogramOverlayBenchmark();
+    void spectrogramPlaybackBenchmark();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
     void spectrogramCrosshairOverlayGeneratesOnHover();
@@ -7924,9 +7939,12 @@ void QmlSmokeTest::waveformSceneGraphBenchmark() {
     window.resize(64, 64); window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     for (const QSize size : {QSize(1200, 180), QSize(3440, 1440)}) {
+        for (const bool grid : {false, true}) {
         for (const double zoom : {1.0, 8.0, 4000.0}) {
             WaveformEditorItem item;
             item.setWidth(size.width()); item.setHeight(size.height());
+            // The grid adds rulers and their labels.
+            item.setGridEnabled(grid);
             item.setDurationSeconds(60.0); setTestPosition(item, 30.0);
             item.setOverviewComplete(true);
             item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
@@ -7968,11 +7986,219 @@ void QmlSmokeTest::waveformSceneGraphBenchmark() {
                 uploads += stats.textureUploads; bytes += stats.uploadedBytes;
             }
             const double sceneMs = timer.nsecsElapsed() / 1.0e6 / frames;
-            qInfo("waveform %dx%d zoom=%.0f raster_ms=%.4f scene_ms=%.4f uploads=%llu bytes=%llu",
-                size.width(), size.height(), zoom, rasterMs, sceneMs,
+            qInfo("waveform %dx%d grid=%d zoom=%.0f raster_ms=%.4f scene_ms=%.4f uploads=%llu bytes=%llu",
+                size.width(), size.height(), grid ? 1 : 0, zoom, rasterMs, sceneMs,
                 static_cast<unsigned long long>(uploads), static_cast<unsigned long long>(bytes));
             delete node;
         }
+        }
+    }
+}
+
+void QmlSmokeTest::waveformSceneGraphLaysOutEachLabelOnce() {
+    QQuickWindow window;
+    window.resize(64, 64);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    WaveformEditorItem item;
+    item.setWidth(1200);
+    item.setHeight(180);
+    item.setGridEnabled(true);
+    item.setViewMode(1);
+    item.setChannelCountHint(2);
+    item.setDurationSeconds(60.0);
+    setTestPosition(item, 30.0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    const auto render = [&](QSGNode *node) {
+        return WaveformSceneGraph::render(node, &window, QSize(1200, 180),
+            [&](QPainter *painter) { item.paint(painter); });
+    };
+    QSGNode *node = render(nullptr);
+    QVERIFY(node != nullptr);
+    // Both channels' rulers and the time ruler.
+    QVERIFY(WaveformSceneGraph::statistics(node).labelRasters >= 20);
+    // The labels of the next frames are the same ones.
+    for (int frame = 0; frame < 3; ++frame) {
+        node = render(node);
+        QCOMPARE(WaveformSceneGraph::statistics(node).labelRasters, 0);
+    }
+    delete node;
+}
+
+void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
+    // 100 s over 1001 pixels: the playhead moves a pixel every 0.1 s.
+    WaveformEditorItem item;
+    item.setWidth(1001);
+    item.setHeight(100);
+    item.setDurationSeconds(100.0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    // The window paints, then hears that the frame is on screen.
+    QImage canvas(1001, 100, QImage::Format_RGB32);
+    const auto paint = [&item, &canvas]() {
+        QPainter painter(&canvas);
+        item.paint(&painter);
+    };
+    setTestPosition(item, 10.02);
+    item.setPlaying(true);
+    setTestPosition(item, 10.02);
+    const quint64 requested = item.m_playbackFrameRequests;
+    paint();
+    item.handleWindowFrameSwapped();
+    // The whole track is in view: no frame until pixel 101 at 10.05 s.
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+    QVERIFY(item.m_playbackFrameTimer.isActive());
+    const double untilChangeMs = (10.05 - testClock(item).positionAt(monotonicNowNs())) * 1000.0;
+    QVERIFY2(std::abs(item.m_playbackFrameTimer.remainingTime() - untilChangeMs) <= 3.0,
+        qPrintable(QStringLiteral("%1 ms for %2 ms")
+            .arg(item.m_playbackFrameTimer.remainingTime()).arg(untilChangeMs)));
+    QTRY_COMPARE_WITH_TIMEOUT(item.m_playbackFrameRequests, requested + 1, 1000);
+
+    // Zoomed in, the view follows the playhead every frame.
+    item.setZoomLevel(8.0);
+    setTestPosition(item, 50.0);
+    const quint64 zoomed = item.m_playbackFrameRequests;
+    for (int frame = 1; frame <= 3; ++frame) {
+        paint();
+        item.handleWindowFrameSwapped();
+        QCOMPARE(item.m_playbackFrameRequests, zoomed + frame);
+    }
+    // Until the playhead reaches the middle of a view that starts at the
+    // track's start, the view stays where it is.
+    setTestPosition(item, 6.2);
+    const quint64 atStart = item.m_playbackFrameRequests;
+    paint();
+    item.handleWindowFrameSwapped();
+    QCOMPARE(item.m_playbackFrameRequests, atStart);
+    QVERIFY(item.m_playbackFrameTimer.isActive());
+    QVERIFY(item.m_playbackFrameTimer.remainingTime() <= 13);
+    // A course correction reschedules without a frame; a seek shows at once.
+    PlaybackClock &clock = testClock(item);
+    PlaybackSample sample;
+    sample.positionSeconds = clock.positionAt(monotonicNowNs()) + 0.001;
+    sample.sampledAtNs = monotonicNowNs();
+    sample.advancing = true;
+    sample.trackToken = clock.state().trackToken;
+    clock.applySample(sample, false);
+    QCOMPARE(item.m_playbackFrameRequests, atStart);
+    QVERIFY(item.m_playbackFrameTimer.isActive());
+    sample.positionSeconds = 1.0;
+    clock.applySample(sample, true);
+    QCOMPARE(item.m_playbackFrameRequests, atStart + 1);
+    item.setPlaying(false);
+    QVERIFY(!item.m_playbackFrameTimer.isActive());
+}
+
+void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
+    // 100 s over 101 pixels: a pixel a second. The frame painted at 10.4 s
+    // shows pixel 10 until 10.5 s. Its frame-swapped callback arrives late,
+    // after playback has passed that: the next frame is due at once, not
+    // at the boundary after.
+    WaveformEditorItem item;
+    item.setWidth(101);
+    item.setHeight(50);
+    item.setDurationSeconds(100.0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    setTestPosition(item, 10.4);
+    item.setPlaying(true);
+    setTestPosition(item, 10.4);
+    QImage canvas(101, 50, QImage::Format_RGB32);
+    {
+        QPainter painter(&canvas);
+        item.paint(&painter);
+    }
+    PlaybackClock &clock = testClock(item);
+    QVERIFY(QTest::qWaitFor(
+        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 10.52; }, 2000));
+    const quint64 requested = item.m_playbackFrameRequests;
+    item.handleWindowFrameSwapped();
+    QCOMPARE(item.m_playbackFrameRequests, requested + 1);
+    QVERIFY(!item.m_playbackFrameTimer.isActive());
+    // A course correction then does not postpone it either.
+    {
+        QPainter painter(&canvas);
+        item.paint(&painter);
+    }
+    QVERIFY(QTest::qWaitFor(
+        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 11.52; }, 2000));
+    PlaybackSample sample;
+    sample.positionSeconds = clock.positionAt(monotonicNowNs()) + 0.001;
+    sample.sampledAtNs = monotonicNowNs();
+    sample.advancing = true;
+    sample.trackToken = clock.state().trackToken;
+    const quint64 corrected = item.m_playbackFrameRequests;
+    clock.applySample(sample, false);
+    QCOMPARE(item.m_playbackFrameRequests, corrected + 1);
+}
+
+void QmlSmokeTest::waveformEditorIdleViewDrawsOnlyFramesThatDiffer() {
+    QQuickWindow window;
+    window.resize(1001, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    int frames = 0;
+    connect(&window, &QQuickWindow::frameSwapped, &window, [&frames]() { ++frames; });
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setWidth(1001);
+    item.setHeight(100);
+    item.setDurationSeconds(250.0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    setTestPosition(item, 100.0);
+    item.setPlaying(true);
+    setTestPosition(item, 100.0);
+    // The whole track in view: a pixel every 0.25 s.
+    QTest::qWait(300);
+    frames = 0;
+    QTest::qWait(1000);
+    QVERIFY2(frames >= 2 && frames <= 7, qPrintable(QString::number(frames)));
+    const int idleFrames = frames;
+    // Zoomed in, the view scrolls every frame.
+    item.setZoomLevel(8.0);
+    QTest::qWait(300);
+    frames = 0;
+    QTest::qWait(1000);
+    QVERIFY2(frames >= 4 * std::max(idleFrames, 5), qPrintable(QString::number(frames)));
+}
+
+void QmlSmokeTest::waveformEditorPlaybackBenchmark() {
+    if (!qEnvironmentVariableIsSet("FERROUS_BENCHMARK_WAVEFORM")) QSKIP("optional render benchmark");
+    // The frames a window draws in two seconds of playback of a four-minute
+    // track, with the grid, over the whole track and zoomed in.
+    QQuickWindow window;
+    window.resize(1200, 180);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    for (const double zoom : {1.0, 8.0}) {
+        WaveformEditorItem item;
+        item.setParentItem(window.contentItem());
+        item.setWidth(1200);
+        item.setHeight(180);
+        item.setGridEnabled(true);
+        item.setDurationSeconds(240.0);
+        item.setOverviewComplete(true);
+        item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+        item.setZoomLevel(zoom);
+        setTestPosition(item, 100.0);
+        item.setPlaying(true);
+        setTestPosition(item, 100.0);
+        QTest::qWait(500);
+        int frames = 0;
+        const auto connection = connect(&window, &QQuickWindow::frameSwapped, &window,
+            [&frames]() { ++frames; });
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QTest::qWait(2000);
+        disconnect(connection);
+        qInfo("waveform playback zoom=%.0f scale=%g frames_per_s=%.1f", zoom,
+            window.effectiveDevicePixelRatio(),
+            frames / (static_cast<double>(elapsed.nsecsElapsed()) / 1e9));
+        item.setPlaying(false);
+        item.setParentItem(nullptr);
+        QTest::qWait(100);
     }
 }
 
@@ -9448,6 +9674,342 @@ void QmlSmokeTest::spectrogramRenderLoopStopsWhenNotPlaying() {
     QVERIFY(!item.m_playing);
 }
 
+namespace {
+
+// A centered pane whose whole track is in view, as when zoomed out: 380
+// columns at 48 kHz and the hop of a zoom of 0.05, drawn a column to a
+// logical pixel, 2.34 columns a second. Playing from `position`.
+void prepareWholeTrackPlayback(SpectrogramItem &item, double position) {
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    constexpr int bins = 64;
+    constexpr int hop = 20'480;
+    constexpr int columns = 380;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, columns, 48'000, hop, true, true, 1, true, 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1024.0 / hop;
+    }
+    setTestPosition(item, position);
+    item.setPlaying(true);
+    setTestPosition(item, position);
+}
+
+constexpr double kWholeTrackColumnsPerSecond = 48'000.0 / 20'480.0;
+
+} // namespace
+
+void QmlSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
+    QQuickWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareWholeTrackPlayback(item, 50.0);
+    item.setPlaying(false);
+    QSGNode *node = paintSettled(item, nullptr);
+    QVERIFY(SpectrogramItem::sceneStatistics(node).canvasTextures > 0);
+    for (const bool shown : {true, false}) {
+        item.setShowFpsOverlay(shown);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_fpsValue = 60;
+            item.m_overlayDirty = true;
+        }
+        // The overlay comes and goes; the canvas's textures stay.
+        QSGNode *next = item.updatePaintNode(node, nullptr);
+        QCOMPARE(next, node);
+        QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
+        auto *overlay = static_cast<QSGSimpleTextureNode *>(node->lastChild());
+        QCOMPARE(!overlay->rect().isEmpty(), shown);
+    }
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramStillFramesLeaveTextureNodesAlone() {
+    // The scene graph redoes each node it is told has changed: its geometry,
+    // its material, and the batches it is in. A frame that shows what the
+    // last one did, or moves only the playhead, changes no texture node.
+    for (const double scale : {1.0, 2.0}) {
+        QQuickWindow window;
+        window.resize(400, 100);
+        if (scale != 1.0) {
+            QScreen *screen = hiDpiTestScreen(scale);
+            if (screen == nullptr) {
+                qInfo("No offscreen HiDPI test screen at %g", scale);
+                continue;
+            }
+            QVERIFY(moveWindowToScreen(window, screen));
+        }
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+        prepareWholeTrackPlayback(item, 50.0);
+        item.setPlaying(false);
+        item.setGridEnabled(true);
+        item.setShowTimeLabels(true);
+        QSGNode *node = paintSettled(item, nullptr);
+        node = item.updatePaintNode(node, nullptr);
+        QVERIFY(drawnCanvasFragments(node) > 0);
+        QCOMPARE(SpectrogramItem::sceneStatistics(node).textureNodeChanges, 0);
+        QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
+        auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+        const QRectF before = playhead->rect();
+        setTestPosition(item, 50.0 + 1.5 / kWholeTrackColumnsPerSecond);
+        node = item.updatePaintNode(node, nullptr);
+        QVERIFY(playhead->rect().left() > before.left());
+        QCOMPARE(SpectrogramItem::sceneStatistics(node).textureNodeChanges, 0);
+        QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
+        delete node;
+    }
+}
+
+void QmlSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data() {
+    QTest::addColumn<double>("scale");
+    QTest::newRow("1x") << 1.0;
+    QTest::newRow("2x") << 2.0;
+}
+
+void QmlSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel() {
+    QFETCH(double, scale);
+    QQuickWindow window;
+    window.resize(400, 100);
+    if (scale != 1.0) {
+        QScreen *screen = hiDpiTestScreen(scale);
+        if (screen == nullptr) {
+            QSKIP("Needs the offscreen platform's HiDPI test screen at that scale");
+        }
+        QVERIFY(moveWindowToScreen(window, screen));
+    }
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    // The window does not draw it; the test does.
+    prepareWholeTrackPlayback(item, 50.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_canvasScale, scale);
+        QVERIFY(item.m_idleView.valid);
+        // Column 117 is under the playhead; the next one moves it.
+        QCOMPARE(item.m_idleView.changeSeconds, 118.0 / kWholeTrackColumnsPerSecond);
+    }
+    const quint64 requested = item.m_playbackFrameRequests;
+    item.handleWindowAfterAnimating();
+    // No frame until then: it would be the same.
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+    QVERIFY(item.m_playbackFrameTimer->isActive());
+    const double untilChangeMs = (118.0 / kWholeTrackColumnsPerSecond
+        - testClock(item).positionAt(monotonicNowNs())) * 1000.0;
+    QVERIFY2(std::abs(item.m_playbackFrameTimer->remainingTime() - untilChangeMs) <= 3.0,
+        qPrintable(QStringLiteral("%1 ms for %2 ms")
+            .arg(item.m_playbackFrameTimer->remainingTime()).arg(untilChangeMs)));
+    // Then the frame comes, with the playhead on its next pixel, and the
+    // next one waits for the column after.
+    QTRY_COMPARE_WITH_TIMEOUT(item.m_playbackFrameRequests, requested + 1, 1000);
+    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+    const double before = playhead->rect().left();
+    node = item.updatePaintNode(node, nullptr);
+    QCOMPARE(playhead->rect().left(), before + 1.0);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_idleView.valid);
+        QCOMPARE(item.m_idleView.changeSeconds, 119.0 / kWholeTrackColumnsPerSecond);
+    }
+    item.handleWindowAfterAnimating();
+    QCOMPARE(item.m_playbackFrameRequests, requested + 1);
+    QVERIFY(item.m_playbackFrameTimer->remainingTime() > 300);
+    // Paused, it waits for the clock.
+    item.setPlaying(false);
+    QVERIFY(!item.m_playbackFrameTimer->isActive());
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramLateFrameCallbackDrawsAtOnce() {
+    // The frame painted at 50 s shows column 117 until column 118 at
+    // 50.35 s. Its frame-swapped callback arrives after that: the next
+    // frame is due at once.
+    SpectrogramItem item;
+    prepareWholeTrackPlayback(item, 50.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    PlaybackClock &clock = testClock(item);
+    QVERIFY(QTest::qWaitFor([&clock]() {
+        return clock.positionAt(monotonicNowNs()) >= 118.2 / kWholeTrackColumnsPerSecond;
+    }, 2000));
+    const quint64 requested = item.m_playbackFrameRequests;
+    item.handleWindowAfterAnimating();
+    QCOMPARE(item.m_playbackFrameRequests, requested + 1);
+    QVERIFY(!item.m_playbackFrameTimer->isActive());
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramMovingViewsRequestEveryFrame() {
+    // Rolling views, and centered ones while they scroll, move every frame.
+    for (const bool rolling : {false, true}) {
+        SpectrogramItem item;
+        item.setWidth(400);
+        item.setHeight(100);
+        item.setDisplayMode(rolling ? 0 : 1);
+        constexpr int bins = 64;
+        constexpr int columns = 4000;
+        item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+            0, columns, 48'000, 1024, true, true, 1, true, 1);
+        setTestPosition(item, 40.0);
+        item.setPlaying(true);
+        setTestPosition(item, 40.0);
+        QSGNode *node = paintSettled(item, nullptr);
+        node = item.updatePaintNode(node, nullptr);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY(!item.m_idleView.valid);
+        }
+        const quint64 requested = item.m_playbackFrameRequests;
+        for (int frame = 1; frame <= 3; ++frame) {
+            item.handleWindowAfterAnimating();
+            QCOMPARE(item.m_playbackFrameRequests, requested + frame);
+            QVERIFY(!item.m_playbackFrameTimer->isActive());
+        }
+        delete node;
+    }
+}
+
+void QmlSmokeTest::spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce() {
+    SpectrogramItem item;
+    prepareWholeTrackPlayback(item, 50.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    item.handleWindowAfterAnimating();
+    QVERIFY(item.m_playbackFrameTimer->isActive());
+    quint64 requested = item.m_playbackFrameRequests;
+    PlaybackClock &clock = testClock(item);
+    const auto sampleAt = [&clock](double position, quint64 token, bool advancing) {
+        PlaybackSample sample;
+        sample.positionSeconds = position;
+        sample.sampledAtNs = monotonicNowNs();
+        sample.advancing = advancing;
+        sample.trackToken = token;
+        return sample;
+    };
+    // A sample a little ahead corrects the clock's course: the next frame
+    // still waits for the playhead's next pixel, a little sooner.
+    const double now = clock.positionAt(monotonicNowNs());
+    clock.applySample(sampleAt(now + 0.02, clock.state().trackToken, true), false);
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+    QVERIFY(item.m_playbackFrameTimer->isActive());
+    // A seek shows at once.
+    clock.applySample(sampleAt(80.0, clock.state().trackToken, true), true);
+    QCOMPARE(item.m_playbackFrameRequests, ++requested);
+    // So does another track, such as a gapless successor or Repeat-One's
+    // next round.
+    clock.applySample(sampleAt(0.0, clock.state().trackToken + 1, true), false);
+    QCOMPARE(item.m_playbackFrameRequests, ++requested);
+    node = item.updatePaintNode(node, nullptr);
+    // And a pause.
+    clock.applySample(sampleAt(0.5, clock.state().trackToken, false), false);
+    QCOMPARE(item.m_playbackFrameRequests, ++requested);
+    node = item.updatePaintNode(node, nullptr);
+    // Paused, nothing moves until the clock does.
+    item.handleWindowAfterAnimating();
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+    QVERIFY(!item.m_playbackFrameTimer->isActive());
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramIdleViewDrawsOnlyFramesThatDiffer() {
+    // In a window: the whole track in view moves its playhead a pixel
+    // 2.34 times a second, and the window draws about that often. A view
+    // that scrolls draws every frame.
+    QQuickWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    int frames = 0;
+    connect(&window, &QQuickWindow::frameSwapped, &window, [&frames]() { ++frames; });
+    auto *idle = new SpectrogramItem(window.contentItem());
+    prepareWholeTrackPlayback(*idle, 50.0);
+    QTest::qWait(300);
+    frames = 0;
+    QTest::qWait(1000);
+    QVERIFY2(frames >= 1 && frames <= 5, qPrintable(QString::number(frames)));
+    const int idleFrames = frames;
+    delete idle;
+
+    auto *scrolling = new SpectrogramItem(window.contentItem());
+    scrolling->setWidth(400);
+    scrolling->setHeight(100);
+    scrolling->setDisplayMode(1);
+    constexpr int bins = 64;
+    constexpr int columns = 4000;
+    scrolling->feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, columns, 48'000, 1024, true, true, 1, true, 1);
+    setTestPosition(*scrolling, 40.0);
+    scrolling->setPlaying(true);
+    setTestPosition(*scrolling, 40.0);
+    QTest::qWait(300);
+    frames = 0;
+    QTest::qWait(1000);
+    QVERIFY2(frames >= 4 * std::max(idleFrames, 5), qPrintable(QString::number(frames)));
+}
+
+void QmlSmokeTest::mainWindowStopsPositionFramesWhileHidden() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
+    engine.load(QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
+    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    // The fallback bridge has no clock; give it one that plays.
+    PlaybackClock clock;
+    auto *bridge = window->property("uiBridge").value<QObject *>();
+    QVERIFY(bridge != nullptr);
+    QVERIFY(bridge->setProperty("playbackClock", QVariant::fromValue(&clock)));
+    PlaybackSample sample;
+    sample.positionSeconds = 10.0;
+    sample.sampledAtNs = monotonicNowNs();
+    sample.advancing = true;
+    sample.durationSeconds = 600.0;
+    sample.trackToken = 1;
+    clock.applySample(sample, true);
+    QSignalSpy position(&clock, &PlaybackClock::positionChanged);
+    const auto framesTick = [&position]() {
+        position.clear();
+        return QTest::qWaitFor([&position]() { return position.count() >= 3; }, 1000);
+    };
+    const auto framesStopped = [&position]() {
+        position.clear();
+        QTest::qWait(150);
+        return position.isEmpty();
+    };
+    QTRY_VERIFY(clock.frameUpdatesEnabled());
+    QVERIFY(framesTick());
+
+    window->hide();
+    QTRY_VERIFY(!clock.frameUpdatesEnabled());
+    QVERIFY(framesStopped());
+    window->show();
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QTRY_VERIFY(clock.frameUpdatesEnabled());
+    QVERIFY(framesTick());
+
+    window->showMinimized();
+    if (window->visibility() == QWindow::Minimized) {
+        QTRY_VERIFY(!clock.frameUpdatesEnabled());
+        QVERIFY(framesStopped());
+        window->showNormal();
+        QTRY_VERIFY(clock.frameUpdatesEnabled());
+        QVERIFY(framesTick());
+    } else {
+        qInfo("The %s platform does not minimize windows",
+            qPrintable(QGuiApplication::platformName()));
+    }
+    QVERIFY(bridge->setProperty("playbackClock", QVariant()));
+}
+
 void QmlSmokeTest::trackIdentityChangedSignalTriggersQmlHandler() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -10485,6 +11047,145 @@ void QmlSmokeTest::spectrogramOverlayBenchmark() {
     report("crosshair_move", crosshair);
     report("resize_frame", resize);
     delete node;
+}
+
+void QmlSmokeTest::spectrogramPlaybackBenchmark() {
+    if (qEnvironmentVariableIntValue("FERROUS_BENCHMARK_SPECTROGRAM") != 1) {
+        QSKIP("Set FERROUS_BENCHMARK_SPECTROGRAM=1 to measure playback frames");
+    }
+    // Steady playback of a 1720 x 719 pane in a window at
+    // FERROUS_BENCHMARK_SPECTROGRAM_SCALE (default 1): rolling, centered
+    // and scrolling, and centered with the whole track in view, as when
+    // zoomed out. First the frames the window draws in two seconds of
+    // playback, then the render sync's share of 120 frames 1/60 s apart.
+    const double scale = qEnvironmentVariableIsSet("FERROUS_BENCHMARK_SPECTROGRAM_SCALE")
+        ? qEnvironmentVariable("FERROUS_BENCHMARK_SPECTROGRAM_SCALE").toDouble()
+        : 1.0;
+    QQuickWindow window;
+    window.resize(1720, 719);
+    if (scale != 1.0 && QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        QScreen *screen = hiDpiTestScreen(scale);
+        if (screen == nullptr) {
+            QSKIP("Needs the offscreen platform's HiDPI test screen at that scale");
+        }
+        QVERIFY(moveWindowToScreen(window, screen));
+    }
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    struct Scenario {
+        const char *name;
+        int mode;
+        int hop;
+        int columns;
+        double position;
+        // With both grids and time labels, and the pointer over the pane.
+        bool hovered;
+    };
+    // 48 kHz; a hop of 20480 is the backend's at a zoom of 0.05, drawn a
+    // column to a logical pixel.
+    const Scenario scenarios[] = {
+        {"rolling", 0, 1024, 6000, 60.0, false},
+        {"centered", 1, 1024, 20'000, 100.0, false},
+        {"centered_whole_track", 1, 20'480, 1700, 300.0, false},
+        {"centered_hovered", 1, 1024, 20'000, 100.0, true},
+    };
+    constexpr int bins = 1025;
+    for (const Scenario &scenario : scenarios) {
+        auto *item = new SpectrogramItem(window.contentItem());
+        item->setWidth(1720);
+        item->setHeight(719);
+        item->setDisplayMode(scenario.mode);
+        if (scenario.hovered) {
+            item->setGridEnabled(true);
+            item->setShowTimeLabels(true);
+            item->setCrosshairEnabled(true);
+            QHoverEvent hover(QEvent::HoverEnter, QPointF(500.0, 300.0), QPointF(500.0, 300.0), QPointF());
+            item->hoverEnterEvent(&hover);
+        }
+        item->feedPrecomputedChunk(QByteArray(bins * scenario.columns, '\x50'), bins, 0,
+            scenario.columns, 0, scenario.columns, 48000, scenario.hop, true, true, 1, true, 1);
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            item->m_renderZoomLevel = 1024.0 / scenario.hop;
+        }
+        // There first, so that the rolling history does not wait for data
+        // after a jump.
+        setTestPosition(*item, scenario.position);
+        item->setPlaying(true);
+        setTestPosition(*item, scenario.position);
+        QTest::qWait(500);
+        int frames = 0;
+        const auto connection = connect(&window, &QQuickWindow::frameSwapped, &window,
+            [&frames]() { ++frames; });
+        // The renderer's time for each frame, on the render thread.
+        QMutex renderMutex;
+        QElapsedTimer renderTimer;
+        std::vector<double> renderMs;
+        const auto renderStarted = connect(&window, &QQuickWindow::beforeRendering, &window,
+            [&]() { QMutexLocker lock(&renderMutex); renderTimer.start(); }, Qt::DirectConnection);
+        const auto renderEnded = connect(&window, &QQuickWindow::afterRendering, &window,
+            [&]() {
+                QMutexLocker lock(&renderMutex);
+                renderMs.push_back(static_cast<double>(renderTimer.nsecsElapsed()) / 1e6);
+            }, Qt::DirectConnection);
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QTest::qWait(2000);
+        const double framesPerSecond = frames / (static_cast<double>(elapsed.nsecsElapsed()) / 1e9);
+        disconnect(connection);
+        disconnect(renderStarted);
+        disconnect(renderEnded);
+        double renderMean = 0.0;
+        {
+            QMutexLocker lock(&renderMutex);
+            renderMean = renderMs.empty() ? 0.0
+                : std::accumulate(renderMs.begin(), renderMs.end(), 0.0) / renderMs.size();
+        }
+        item->setPlaying(false);
+        QTest::qWait(100);
+
+        QSGNode *node = paintSettled(*item, nullptr);
+        constexpr int iterations = 120;
+        std::vector<double> ms;
+        qint64 textures = 0;
+        qint64 bytes = 0;
+        qint64 nodeChanges = 0;
+        qint64 overlayTextures = 0;
+        qint64 overlayBytes = 0;
+        for (int i = 0; i < iterations; ++i) {
+            {
+                QMutexLocker lock(&item->m_stateMutex);
+                item->m_clockState.anchorSeconds = scenario.position + i / 60.0;
+                item->m_clockState.anchorNs = monotonicNowNs();
+                item->m_clockState.rate = 0.0;
+            }
+            elapsed.restart();
+            node = item->updatePaintNode(node, nullptr);
+            ms.push_back(static_cast<double>(elapsed.nsecsElapsed()) / 1e6);
+            const SpectrogramSceneStatistics frame = SpectrogramItem::sceneStatistics(node);
+            textures += frame.canvasTextures;
+            bytes += frame.canvasTextureBytes;
+            nodeChanges += frame.textureNodeChanges;
+            overlayTextures += frame.overlayTextures;
+            overlayBytes += frame.overlayTextureBytes;
+            QVERIFY(QTest::qWaitFor([item]() { return !spectrogramRasterPending(*item); }, 5000));
+        }
+        qInfo("playback %s scale=%g frames_per_s=%.1f render_mean_ms=%.3f textures_per_frame=%.2f "
+              "texture_kib_per_frame=%.1f overlay_textures_per_frame=%.2f "
+              "overlay_kib_per_frame=%.2f node_changes_per_frame=%.1f sync_mean_ms=%.3f "
+              "sync_worst_ms=%.3f",
+            scenario.name, window.effectiveDevicePixelRatio(), framesPerSecond, renderMean,
+            static_cast<double>(textures) / iterations,
+            static_cast<double>(bytes) / 1024.0 / iterations,
+            static_cast<double>(overlayTextures) / iterations,
+            static_cast<double>(overlayBytes) / 1024.0 / iterations,
+            static_cast<double>(nodeChanges) / iterations,
+            std::accumulate(ms.begin(), ms.end(), 0.0) / iterations,
+            *std::max_element(ms.begin(), ms.end()));
+        delete node;
+        delete item;
+        QTest::qWait(100);
+    }
 }
 
 void QmlSmokeTest::spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans() {

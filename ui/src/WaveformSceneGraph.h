@@ -21,6 +21,8 @@ struct Statistics {
     quint64 residentBytes{0};
     int commands{0};
     int geometryVertices{0};
+    // Labels laid out and rasterized because no earlier frame drew them.
+    int labelRasters{0};
 };
 QSGNode *render(QSGNode *previous, QQuickWindow *window, QSize size,
     const std::function<void(QPainter *)> &paint, bool rasterize = false);

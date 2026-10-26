@@ -275,7 +275,7 @@ bool smoothnessLooksIncident(
 }
 #endif
 
-void configureTextureNode(
+bool configureTextureNode(
     QSGSimpleTextureNode *node,
     QSGTexture *texture,
     const QRectF &target,
@@ -375,6 +375,8 @@ struct SpectrogramSceneNode final : public QSGNode {
                 texture = window->createTextureFromImage(placed.image);
                 if (texture != nullptr) {
                     texture->setFiltering(QSGTexture::Nearest);
+                    statistics.overlayTextures += 1;
+                    statistics.overlayTextureBytes += placed.image.sizeInBytes();
                     overlayTextures.insert(placed.key, texture);
                 }
             }
@@ -389,12 +391,31 @@ struct SpectrogramSceneNode final : public QSGNode {
                 layer.imagesRoot->appendChildNode(imageNode);
                 layer.images.push_back(imageNode);
             }
-            configureTextureNode(layer.images[shown++], texture, placed.rect,
-                QRectF(QPointF(0.0, 0.0), texture->textureSize()), placeholderTexture);
+            noteTextureNode(configureTextureNode(layer.images[shown++], texture, placed.rect,
+                QRectF(QPointF(0.0, 0.0), texture->textureSize()), placeholderTexture));
         }
         for (int i = shown; i < layer.images.size(); ++i) {
-            configureTextureNode(layer.images[i], nullptr, QRectF(), QRectF(), placeholderTexture);
+            noteTextureNode(configureTextureNode(
+                layer.images[i], nullptr, QRectF(), QRectF(), placeholderTexture));
         }
+    }
+
+    void noteTextureNode(bool changed) {
+        statistics.textureNodeChanges += changed ? 1 : 0;
+    }
+
+    // Makes a texture of a canvas tile, or part of one.
+    QSGTexture *createCanvasTexture(QQuickWindow *window, const QImage &image) {
+        if (image.isNull() || window == nullptr) {
+            return nullptr;
+        }
+        QSGTexture *texture = window->createTextureFromImage(image);
+        if (texture != nullptr) {
+            texture->setFiltering(QSGTexture::Nearest);
+            statistics.canvasTextures += 1;
+            statistics.canvasTextureBytes += image.sizeInBytes();
+        }
+        return texture;
     }
 
     // Deletes the overlay textures no overlay showed this frame.
@@ -437,6 +458,8 @@ struct SpectrogramSceneNode final : public QSGNode {
     QSGTexture *placeholderTexture{nullptr};
     quintptr ownerWindowId{0};
     quint64 generation{0};
+    // What the last frame did.
+    SpectrogramSceneStatistics statistics;
 };
 
 QImage placeholderImage() {
@@ -445,35 +468,51 @@ QImage placeholderImage() {
     return image;
 }
 
-void configureTextureNode(
+// Shows `source` of `texture` at `target`, or nothing. Only what differs
+// from what the node shows is set: each change makes the renderer redo the
+// node's geometry or material. Returns whether anything changed.
+bool configureTextureNode(
     QSGSimpleTextureNode *node,
     QSGTexture *texture,
     const QRectF &target,
     const QRectF &source,
     QSGTexture *placeholderTexture) {
     if (node == nullptr) {
-        return;
+        return false;
     }
+    QSGTexture *shown = texture;
+    QRectF rect = target;
+    QRectF sourceRect = source;
     if (texture == nullptr || target.isEmpty() || source.isEmpty()) {
-        if (placeholderTexture != nullptr) {
-            node->setTexture(placeholderTexture);
-        }
-        node->setRect(QRectF());
-        node->setSourceRect(QRectF(0.0, 0.0, 1.0, 1.0));
-        return;
+        shown = placeholderTexture;
+        rect = QRectF();
+        sourceRect = QRectF(0.0, 0.0, 1.0, 1.0);
     }
-
-    node->setTexture(texture);
-    node->setFiltering(QSGTexture::Nearest);
-    node->setRect(target);
-    node->setSourceRect(source);
+    bool changed = false;
+    if (shown != nullptr && node->texture() != shown) {
+        node->setTexture(shown);
+        changed = true;
+    }
+    if (node->filtering() != QSGTexture::Nearest) {
+        node->setFiltering(QSGTexture::Nearest);
+        changed = true;
+    }
+    if (node->rect() != rect) {
+        node->setRect(rect);
+        changed = true;
+    }
+    if (node->sourceRect() != sourceRect) {
+        node->setSourceRect(sourceRect);
+        changed = true;
+    }
+    return changed;
 }
 
 // Configures a texture node for a canvas span drawn through a zoom
 // preview, cut to the item's width so that a zoomed-in preview does not
 // draw over its neighbours. The target, the preview and the width are in
 // canvas pixels, `pixelScale` to a logical pixel.
-void configurePreviewTextureNode(
+bool configurePreviewTextureNode(
     QSGSimpleTextureNode *node,
     QSGTexture *texture,
     const QRectF &target,
@@ -486,16 +525,14 @@ void configurePreviewTextureNode(
         return QRectF(rect.topLeft() / pixelScale, rect.size() / pixelScale);
     };
     if (!preview.active || target.isEmpty() || source.isEmpty()) {
-        configureTextureNode(node, texture, logical(target), source, placeholderTexture);
-        return;
+        return configureTextureNode(node, texture, logical(target), source, placeholderTexture);
     }
     const double left = preview.map(target.left());
     const double right = preview.map(target.right());
     const double clippedLeft = std::max(0.0, left);
     const double clippedRight = std::min(itemWidth, right);
     if (clippedRight <= clippedLeft) {
-        configureTextureNode(node, nullptr, QRectF(), QRectF(), placeholderTexture);
-        return;
+        return configureTextureNode(node, nullptr, QRectF(), QRectF(), placeholderTexture);
     }
     const double sourcePerPixel = source.width() / (right - left);
     const QRectF clippedSource(
@@ -503,7 +540,7 @@ void configurePreviewTextureNode(
         source.top(),
         (clippedRight - clippedLeft) * sourcePerPixel,
         source.height());
-    configureTextureNode(
+    return configureTextureNode(
         node,
         texture,
         logical(QRectF(clippedLeft, target.top(), clippedRight - clippedLeft, target.height())),
@@ -1184,6 +1221,10 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     });
     connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
     bindWindowFpsTracking(window());
+    m_playbackFrameTimer = new QTimer(this);
+    m_playbackFrameTimer->setSingleShot(true);
+    m_playbackFrameTimer->setTimerType(Qt::PreciseTimer);
+    connect(m_playbackFrameTimer, &QTimer::timeout, this, &SpectrogramItem::requestPlaybackFrame);
     m_zoomDebounceTimer = new QTimer(this);
     m_zoomDebounceTimer->setSingleShot(true);
     m_zoomDebounceTimer->setInterval(150);
@@ -1266,10 +1307,10 @@ void SpectrogramItem::setShowFpsOverlay(bool value) {
             return;
         }
         m_showFpsOverlay = next;
-        m_overlayDirty = true;
+        // The estimate starts over; the scene node and its textures stay.
+        resetFpsEstimateLocked();
     }
     emit showFpsOverlayChanged();
-    bindWindowFpsTracking(window());
     update();
 }
 
@@ -1338,6 +1379,7 @@ void SpectrogramItem::setClock(PlaybackClock *value) {
 void SpectrogramItem::clockStateChanged() {
     using Clock = std::chrono::steady_clock;
     const PlaybackClockState next = m_clock ? m_clock->state() : PlaybackClockState{};
+    bool courseCorrection = false;
     {
         QMutexLocker lock(&m_stateMutex);
         const auto now = Clock::now();
@@ -1383,9 +1425,24 @@ void SpectrogramItem::clockStateChanged() {
             }
         }
         m_positionSeconds = currentRenderPositionSecondsLocked(now);
+        // A sample that only corrects the course of playback moves nothing
+        // at once: the playback frames follow it. Anything else, such as a
+        // seek, a track change or a pause, shows at once.
+        courseCorrection = m_playing
+            && m_precomputedReady
+            && next.advancing()
+            && previous.advancing()
+            && next.trackToken == previous.trackToken
+            && next.epoch == previous.epoch
+            && next.durationSeconds == previous.durationSeconds
+            && held == positionHeldLocked(nowNs);
     }
     emit positionSecondsChanged();
-    update();
+    if (courseCorrection) {
+        schedulePlaybackFrame();
+    } else {
+        requestPlaybackFrame();
+    }
 }
 
 bool SpectrogramItem::positionHeldLocked(qint64 nowNs) const {
@@ -1469,6 +1526,9 @@ void SpectrogramItem::setPlaying(bool value) {
         changed = true;
     }
     if (changed) {
+        if (!value) {
+            m_playbackFrameTimer->stop();
+        }
         emit playingChanged();
         update();
     }
@@ -3132,6 +3192,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         node->ownerWindowId = windowId;
         node->generation = m_sceneGraphGeneration;
     }
+    node->statistics = {};
     if (node->placeholderTexture == nullptr && currentWindow != nullptr) {
         node->placeholderTexture = currentWindow->createTextureFromImage(placeholderImage());
         if (node->placeholderTexture != nullptr) {
@@ -3195,6 +3256,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
         const double renderPositionSeconds = currentRenderPositionSecondsLocked(renderNow);
         m_zoomPreviewShown = false;
+        m_idleView = {};
         const bool usePrecomputed = m_precomputedReady
             && m_precomputedBinsPerColumn > 0
             && m_precomputedTotalColumnsEstimate > 0;
@@ -3499,7 +3561,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 canvasSize = m_canvas.size();
                 drawCols = std::min(m_canvasFilledCols, canvasSize.width());
                 srcStart = (m_canvasWriteX - drawCols + canvasSize.width()) % canvasSize.width();
-                scrollOffset = columnPhase * canvasZoom;
+                // A view that scrolls has moved part of a column past its
+                // last one; a centered one that stays still has not.
+                scrollOffset = rollingMode || centeredScrolling ? columnPhase * canvasZoom : 0.0;
                 canvasEndGap = canvasIsView || rollingMode ? m_precomputedCanvasSubpixelOffset : 0.0;
                 // Where the canvas goes as drawn: at the view's start when
                 // it is the view's, and else where it went last.
@@ -3579,6 +3643,49 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     0.0,
                     static_cast<double>(deviceLineWidth(scale)) / scale,
                     static_cast<double>(ch) / scale);
+            }
+
+            // A centered view that stays still, with its canvas in place,
+            // changes only when the playhead moves to another pixel or the
+            // view starts to scroll. Until playback reaches that column the
+            // frames would all be this one.
+            if (!rollingMode
+                && !centeredScrolling
+                && canvasIsView
+                && !canvasFreeze
+                && !zoomPreviewWanted
+                && !preview.active
+                && visibleCols > 0
+                && !positionHeldLocked(monotonicNs(renderNow))) {
+                const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
+                    ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+                    : static_cast<qint64>(0);
+                const qint64 estimateCount = std::max<qint64>(m_precomputedTotalColumnsEstimate, 1);
+                const int visibleWindowCols = static_cast<int>(
+                    std::ceil(static_cast<double>(cw) / canvasZoom));
+                const auto drawnPlayhead = [cw](int pixel) {
+                    return pixel < 0 ? -1 : std::clamp(pixel, 0, cw - 1);
+                };
+                const int shownPlayhead = drawnPlayhead(playheadPixel);
+                // The playhead moves a pixel within 1 / canvasZoom columns;
+                // a view zoomed out further than this many columns to a
+                // pixel looks again after that many.
+                constexpr qint64 kMaxIdleColumns = 4096;
+                qint64 column = nowCol + 1;
+                for (; column <= nowCol + kMaxIdleColumns; ++column) {
+                    const CenteredDisplayRange next = centeredDisplayRange(
+                        column, visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
+                    // The view keeps the canvas's range, as above.
+                    if (std::max(next.left, displayLeft) != displayLeft
+                        || std::max(next.right, displayRight) != displayRight
+                        || drawnPlayhead(static_cast<int>(std::round(
+                               static_cast<double>(column - displayLeft) * canvasZoom)))
+                            != shownPlayhead) {
+                        break;
+                    }
+                }
+                m_idleView.valid = true;
+                m_idleView.changeSeconds = static_cast<double>(column) / columnsPerSecond;
             }
 
             // The overlays draw lines and small images in place, and lay
@@ -3763,13 +3870,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         if (tileIndex < 0 || tileIndex >= node->tileTextures.size()) {
             continue;
         }
-        QSGTexture *newTexture = nullptr;
-        if (!tileImages[i].isNull() && currentWindow != nullptr) {
-            newTexture = currentWindow->createTextureFromImage(tileImages[i]);
-            if (newTexture != nullptr) {
-                newTexture->setFiltering(QSGTexture::Nearest);
-            }
-        }
+        QSGTexture *newTexture = node->createCanvasTexture(currentWindow, tileImages[i]);
         if (node->tileTextures[tileIndex] != nullptr) {
             retiredTileTextures.push_back(node->tileTextures[tileIndex]);
         }
@@ -3786,18 +3887,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         }
     }
 
+    // Each fragment is set once, to what it shows this frame, so that the
+    // ones that show the same as before stay untouched.
     node->ensureTileFragments(tileCount + 1);
-    for (QSGSimpleTextureNode *tileNode : node->tileFragments) {
-        configureTextureNode(
-            tileNode,
-            nullptr,
-            QRectF(),
-            QRect(),
-            node->placeholderTexture);
-    }
-
+    int fragmentCursor = 0;
     if (hasCanvas) {
-        int fragmentCursor = 0;
         auto configureSegment = [&](int canvasOffset, int length, double targetX) {
             int remainingLength = length;
             int segmentOffset = canvasOffset;
@@ -3816,7 +3910,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 QSGTexture *tileTexture = node->tileTextures[tileIndex];
                 // A canvas awaiting its rasterization for another height
                 // is stretched to this one.
-                configurePreviewTextureNode(
+                node->noteTextureNode(configurePreviewTextureNode(
                     node->tileFragments[fragmentCursor++],
                     tileTexture,
                     QRectF(
@@ -3828,7 +3922,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     preview,
                     static_cast<double>(cw),
                     canvasScale,
-                    node->placeholderTexture);
+                    node->placeholderTexture));
                 segmentOffset += span;
                 segmentTargetX += static_cast<double>(span);
                 remainingLength -= span;
@@ -3850,7 +3944,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             && latestTileIndex < node->tileTextures.size()) {
             QSGTexture *latestTexture = node->tileTextures[latestTileIndex];
             const int latestWithinTile = latestX - (latestTileIndex * kCanvasTileWidth);
-            configurePreviewTextureNode(
+            node->noteTextureNode(configurePreviewTextureNode(
                 node->latest,
                 latestTexture,
                 QRectF(
@@ -3862,30 +3956,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 preview,
                 static_cast<double>(cw),
                 canvasScale,
-                node->placeholderTexture);
+                node->placeholderTexture));
         } else {
-            configureTextureNode(
-                node->latest,
-                nullptr,
-                QRectF(),
-                QRect(),
-                node->placeholderTexture);
+            node->noteTextureNode(configureTextureNode(
+                node->latest, nullptr, QRectF(), QRect(), node->placeholderTexture));
         }
     } else {
-        for (QSGSimpleTextureNode *tileNode : node->tileFragments) {
-            configureTextureNode(
-                tileNode,
-                nullptr,
-                QRectF(),
-                QRect(),
-                node->placeholderTexture);
-        }
-        configureTextureNode(
-            node->latest,
-            nullptr,
-            QRectF(),
-            QRect(),
-            node->placeholderTexture);
+        node->noteTextureNode(configureTextureNode(
+            node->latest, nullptr, QRectF(), QRect(), node->placeholderTexture));
+    }
+    for (int i = fragmentCursor; i < node->tileFragments.size(); ++i) {
+        node->noteTextureNode(configureTextureNode(
+            node->tileFragments[i], nullptr, QRectF(), QRect(), node->placeholderTexture));
     }
 
     if (showPlayhead) {
@@ -3909,19 +3991,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             4.0,
             static_cast<double>(overlaySize.width()) / scale,
             static_cast<double>(overlaySize.height()) / scale);
-        configureTextureNode(
+        node->noteTextureNode(configureTextureNode(
             node->overlay,
             node->overlayTexture,
             target,
             QRect(0, 0, overlaySize.width(), overlaySize.height()),
-            node->placeholderTexture);
+            node->placeholderTexture));
     } else {
-        configureTextureNode(
-            node->overlay,
-            nullptr,
-            QRectF(),
-            QRect(),
-            node->placeholderTexture);
+        node->noteTextureNode(configureTextureNode(
+            node->overlay, nullptr, QRectF(), QRect(), node->placeholderTexture));
     }
 
     delete oldOverlayTexture;
@@ -3967,6 +4045,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
 
     return node;
+}
+
+SpectrogramSceneStatistics SpectrogramItem::sceneStatistics(const QSGNode *node) {
+    return node != nullptr
+        ? static_cast<const SpectrogramSceneNode *>(node)->statistics
+        : SpectrogramSceneStatistics{};
 }
 
 void SpectrogramItem::releaseResources() {
@@ -5583,11 +5667,7 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
         QMutexLocker lock(&m_stateMutex);
         m_sceneGraphGeneration += 1;
         markAllTilesDirtyLocked();
-        m_overlayDirty = true;
-        m_fpsInitialized = false;
-        m_fpsValue = 0;
-        m_fpsAccumFrames = 0;
-        m_fpsAccumSeconds = 0.0;
+        resetFpsEstimateLocked();
         m_animationTickInitialized = false;
     }
 
@@ -5684,13 +5764,56 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     }
 #endif
     lock.unlock();
-    // Only sustain the render loop when the spectrogram is actively
-    // scrolling (playing).  When stopped/paused the display is static
-    // and re-renders are already triggered on demand by data feeds
-    // (feedPrecomputedChunk) or property changes (setPositionSeconds).
-    if (changed || (precomputedActive && playing)) {
+    // Only sustain the render loop while playing, and only with frames
+    // that differ. When stopped or paused the display is static and
+    // re-renders are triggered on demand by data feeds
+    // (feedPrecomputedChunk) or property changes.
+    if (changed) {
         update();
+    } else if (precomputedActive && playing) {
+        schedulePlaybackFrame();
     }
+}
+
+qint64 SpectrogramItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
+    if (!m_idleView.valid || positionHeldLocked(nowNs)) {
+        return 0;
+    }
+    // Paused, or playback ends first: until the clock changes course.
+    const std::optional<qint64> changesAt =
+        m_clockState.reachesAt(m_idleView.changeSeconds - m_gaplessPositionOffset);
+    if (!changesAt) {
+        return -1;
+    }
+    return *changesAt > nowNs ? *changesAt - nowNs : 0;
+}
+
+void SpectrogramItem::schedulePlaybackFrame() {
+    qint64 delayNs = 0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_precomputedReady || !m_playing) {
+            m_playbackFrameTimer->stop();
+            return;
+        }
+        delayNs = playbackFrameDelayNsLocked(monotonicNowNs());
+    }
+    if (delayNs == 0) {
+        m_playbackFrameTimer->stop();
+        requestPlaybackFrame();
+    } else if (delayNs < 0) {
+        // Nothing moves until the clock changes course, which reschedules.
+        m_playbackFrameTimer->stop();
+    } else {
+        // Whole milliseconds, rounded up: the frame is not due before.
+        const qint64 delayMs = (delayNs + 999'999) / 1'000'000;
+        m_playbackFrameTimer->start(static_cast<int>(std::min<qint64>(delayMs, 3'600'000)));
+    }
+}
+
+void SpectrogramItem::requestPlaybackFrame() {
+    ++m_playbackFrameRequests;
+    update();
 }
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -6186,6 +6309,14 @@ QVariantMap SpectrogramItem::debugSeekProfileStateLocked() const {
     return m_seekProfile.lastSummary;
 }
 #endif
+
+void SpectrogramItem::resetFpsEstimateLocked() {
+    m_overlayDirty = true;
+    m_fpsInitialized = false;
+    m_fpsValue = 0;
+    m_fpsAccumFrames = 0;
+    m_fpsAccumSeconds = 0.0;
+}
 
 void SpectrogramItem::updateFpsEstimateLocked() {
     using Clock = std::chrono::steady_clock;

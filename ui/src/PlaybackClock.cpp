@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <limits>
 
 namespace {
 
@@ -35,6 +36,20 @@ double PlaybackClockState::positionAt(qint64 nowNs) const {
         position = std::min(position, durationSeconds);
     }
     return position;
+}
+
+std::optional<qint64> PlaybackClockState::reachesAt(double position) const {
+    if (positionAt(anchorNs) >= position) {
+        return std::numeric_limits<qint64>::min();
+    }
+    if (!advancing() || (durationSeconds > 0.0 && position > durationSeconds)) {
+        return std::nullopt;
+    }
+    const double untilNs = std::ceil((position - anchorSeconds) / rate * kNanosPerSecond);
+    if (untilNs >= static_cast<double>(std::numeric_limits<qint64>::max() - anchorNs)) {
+        return std::nullopt;
+    }
+    return anchorNs + static_cast<qint64>(untilNs);
 }
 
 PlaybackClock::PlaybackClock(QObject *parent)
@@ -122,15 +137,30 @@ void PlaybackClock::setDurationSeconds(double durationSeconds) {
 
 void PlaybackClock::setState(const PlaybackClockState &state) {
     m_state = state;
-    if (m_state.advancing()) {
+    updateFrameTimer();
+    emit stateChanged();
+    refresh();
+}
+
+void PlaybackClock::setFrameUpdatesEnabled(bool enabled) {
+    if (m_frameUpdatesEnabled == enabled) {
+        return;
+    }
+    m_frameUpdatesEnabled = enabled;
+    updateFrameTimer();
+    emit frameUpdatesEnabledChanged();
+    // The position catches up with the samples taken without frames.
+    refresh();
+}
+
+void PlaybackClock::updateFrameTimer() {
+    if (m_state.advancing() && m_frameUpdatesEnabled) {
         if (!m_frameTimer.isActive()) {
             m_frameTimer.start();
         }
     } else {
         m_frameTimer.stop();
     }
-    emit stateChanged();
-    refresh();
 }
 
 void PlaybackClock::refresh() {

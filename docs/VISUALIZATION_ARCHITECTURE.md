@@ -48,6 +48,10 @@ Each spectrogram item owns its raw ring and rendered canvas under its state mute
 
 A hidden pane skips animation ticks and canvas writes while retaining batches needed by another visible pane. Showing it invalidates the canvas. Hidden waveform surfaces clear their detail source, cancelling detail queries; the one-off overview cache job remains independent.
 
+During playback the spectrogram and the waveform editor ask for a frame only when it would differ from the last one. Rolling spectrograms, centered ones while they scroll, and zoomed waveforms that follow the playhead move every frame. A centered spectrogram that stays still, such as one showing the whole track, and a waveform showing the whole track or one of its ends, change only when the playhead reaches its next pixel or the view starts to follow it. The item works out, from the frame it last drew, when playback reaches that point on the clock's course, and wakes its frame with a single-shot timer; a frame that is already due is asked for at once. A clock sample that only corrects the course reschedules that frame; a seek, a track change, including a gapless successor or Repeat-One, and a pause show at once. Data, rasterizations, and property changes still ask for their own frames. Texture nodes are only changed when their texture or placement does, so a frame that moves only the playhead leaves the canvas nodes alone.
+
+A hidden or minimized window turns off the playback clock's per-frame position updates. Its position then follows the engine's samples, and catches up when the window is shown again. MPRIS reads the clock directly, and Last.fm's scrobble timing follows the backend's playback state, so neither depends on those updates.
+
 ## Validation and profiling
 
 Run the checks in [DEVELOPMENT.md](DEVELOPMENT.md). Regression fixtures are synthetic or embedded and require no personal media or network access. Tests cover rolling and centered seeks, codec preroll, packet boundaries, timestamp gaps, track transitions, EOF, cancellation, stale generations, memory budgets, and Rust/Qt waveform payloads.

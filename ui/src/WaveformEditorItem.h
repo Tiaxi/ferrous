@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <map>
 #include <vector>
 
@@ -249,6 +250,19 @@ private:
     void updateFpsEstimateLocked();
     void bindWindowFrameLoop(QQuickWindow *window);
     void handleWindowFrameSwapped();
+    // How long until a frame of playback would differ from the last, in
+    // nanoseconds from nowNs: zero for now, or -1 for not while the clock
+    // keeps its course.
+    qint64 playbackFrameDelayNsLocked(qint64 nowNs) const;
+    // Where playback makes a frame of this view, with the playhead at
+    // `position`, out of date: the playhead's next pixel, or the view
+    // starting to follow it. NaN while the view moves with playback, and
+    // infinity if it never does.
+    double frameChangeSecondsLocked(
+        double visibleStart, double visibleEnd, double position, int width) const;
+    // Asks for the next frame of playback, now or once it would differ.
+    void schedulePlaybackFrame(qint64 delayNs);
+    void requestPlaybackFrame();
     bool cacheCoversRangeLocked(double start, double end) const;
     void invalidateCacheLocked();
     void clearStagedCacheLocked();
@@ -374,6 +388,13 @@ private:
     QMetaObject::Connection m_frameSwappedConnection;
     QMetaObject::Connection m_windowVisibilityConnection;
     QTimer m_requestTimer;
+    // Wakes the next playback frame of a view that stays still.
+    QTimer m_playbackFrameTimer;
+    // How many playback frames the item has asked for, for tests.
+    quint64 m_playbackFrameRequests{0};
+    // frameChangeSecondsLocked of the frame painted last; NaN, moving,
+    // until the first.
+    double m_paintedFrameChangeSeconds{std::numeric_limits<double>::quiet_NaN()};
     std::atomic_bool m_guiContinuationQueued{false};
     std::atomic_bool m_guiRepaintPending{false};
     std::atomic_bool m_samplePointsNotificationPending{false};

@@ -120,6 +120,8 @@ The canvas is drawn at device pixels. Add `FERROUS_BENCHMARK_SPECTROGRAM_SCALE=2
 
 `spectrogramOverlayBenchmark` takes the same two variables. It measures the render sync's share of a 3440×719 pane's grid and crosshair overlays, with both grids and their labels shown: an ordinary frame, a time-grid refresh, a refresh of both grids, a crosshair move and a resize frame, as `mean_ms` and `worst_ms`.
 
+`spectrogramPlaybackBenchmark` takes them too. It plays a 1720×719 pane rolling, centered and scrolling, centered with the whole track in view, and centered with both grids, time labels and the pointer over it. For each, it reports the frames the window draws a second of real playback (`frames_per_s`) and the renderer's mean time for them, then, over 120 frames 1/60 s apart, the canvas and overlay textures made a frame and their size, the texture nodes changed a frame, and the render sync's time.
+
 To compare waveform CPU painting with scene graph preparation using synthetic resident data:
 
 ```bash
@@ -128,9 +130,11 @@ FERROUS_BENCHMARK_WAVEFORM=1 QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=rhi \
   ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphBenchmark
 ```
 
-This optional benchmark uses 1200×180 and 3440×1440 viewports at overview, intermediate, and sample zoom levels. It reports CPU milliseconds per frame and texture creation requests/payload bytes after warmup. It excludes decoding, GPU submission, presentation, and display refresh limits; it does not measure displayed FPS. Use the same optimized build, machine, and renderer for comparisons. The native command requires an X display (Xvfb works for automated checks); use `QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software` to measure the software fallback.
+This optional benchmark uses 1200×180 and 3440×1440 viewports at overview, intermediate, and sample zoom levels, without and with the grid and its labels. It reports CPU milliseconds per frame and texture creation requests/payload bytes after warmup. It excludes decoding, GPU submission, presentation, and display refresh limits; it does not measure displayed FPS. Use the same optimized build, machine, and renderer for comparisons. The native command requires an X display (Xvfb works for automated checks); use `QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software` to measure the software fallback.
 
-The waveform editor retains image tiles in the scene graph and moves their source coordinates during playback. Native sample curves use antialiased geometry; labels use a bounded raster cache. The software renderer keeps a single raster pass at sample zoom. Texture resources belong to the render node and are recreated with the window's scene graph. CI compares the native output with the shared raster reference at 1× and 2× scaling, including rulers, crosshairs, split channels, and texture tile boundaries.
+With the same variable, `waveformEditorPlaybackBenchmark` reports the frames a window draws a second while a four-minute track plays, over the whole track and zoomed in.
+
+The waveform editor retains image tiles in the scene graph and moves their source coordinates during playback. Native sample curves use antialiased geometry; labels use a bounded raster cache and are laid out only when first drawn. The software renderer keeps a single raster pass at sample zoom. Texture resources belong to the render node and are recreated with the window's scene graph. CI compares the native output with the shared raster reference at 1× and 2× scaling, including rulers, crosshairs, split channels, and texture tile boundaries.
 
 Other useful runtime controls:
 
