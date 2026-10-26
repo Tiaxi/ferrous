@@ -130,10 +130,7 @@ pub(super) fn persist_waveform_to_db(
     coverage_seconds: f32,
 ) -> rusqlite::Result<()> {
     if peaks.is_empty() {
-        let _ = conn.execute(
-            "DELETE FROM waveform_cache WHERE path = ?1",
-            params![path.to_string_lossy().to_string()],
-        );
+        delete_waveform_from_db(conn, path);
         return Ok(());
     }
     let blob = encode_peaks_blob(peaks);
@@ -170,6 +167,15 @@ pub(super) fn persist_waveform_to_db(
         ],
     )?;
     Ok(())
+}
+
+/// Forget the saved waveform of `path`. A failed write leaves it to the
+/// stamp check.
+pub(super) fn delete_waveform_from_db(conn: &Connection, path: &Path) {
+    let _ = conn.execute(
+        "DELETE FROM waveform_cache WHERE path = ?1",
+        params![path.to_string_lossy().to_string()],
+    );
 }
 
 /// Keep the `max_rows` waveforms used last.
