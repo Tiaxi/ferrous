@@ -75,7 +75,14 @@ sudo dnf builddep packaging/rpm/ferrous.spec
 ./scripts/build-rpm.sh --install
 ```
 
-The helper packages the current working tree, vendors the crates that `Cargo.lock` lists into a second source tarball, validates the desktop entry and AppStream metadata, runs package checks, and writes RPMs under `dist/rpm/RPMS/`. Vendoring needs network access unless Cargo has already downloaded the crates; the package build itself runs offline. rpmbuild checks the build dependencies, so the package build uses Fedora's `rust` and `cargo` packages, not a rustup toolchain. Package builds do not treat compiler warnings as errors.
+The helper packages the current working tree, vendors the crates that `Cargo.lock` lists into a second source tarball, validates the desktop entry and AppStream metadata, runs package checks, and writes RPMs under `dist/rpm/RPMS/`. Vendoring needs network access unless Cargo has already downloaded the crates; the package build itself runs offline. Package builds do not treat compiler warnings as errors.
+
+rpmbuild checks that Fedora's `rust` and `cargo` packages are installed, but it does not choose the compiler: CMake runs the first `cargo` on the path after loading `~/.cargo/env`. Release packages are built in a clean Fedora container, where Fedora's toolchain is the only one. On a machine with rustup, a local package build uses the rustup toolchain unless you link Fedora's toolchain into rustup and select it:
+
+```bash
+rustup toolchain link fedora /usr
+RUSTUP_TOOLCHAIN=fedora ./scripts/build-rpm.sh
+```
 
 ## Formats
 
