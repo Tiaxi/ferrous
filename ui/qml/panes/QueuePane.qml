@@ -155,7 +155,15 @@ Rectangle {
 
                 Component.onCompleted: root.controller.registerView(playlistView)
 
+                // The row being dragged, which Escape stops.
+                property var draggingRow: null
+
                 Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Escape && playlistView.draggingRow) {
+                        playlistView.draggingRow.cancelDrag()
+                        event.accepted = true
+                        return
+                    }
                     if (event.key === Qt.Key_Menu
                             || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
                         playlistView.openContextMenuForSelection()
@@ -327,12 +335,30 @@ Rectangle {
                         drag.target: (pressedButtons & Qt.LeftButton) ? playlistDragProxy : null
                         drag.smoothed: false
 
+                        // Escape stopped this press's drag; the rest of the
+                        // press does nothing.
+                        property bool dragCancelled: false
+
                         function endDrag() {
                             playlistDragProxy.x = 0
                             playlistDragProxy.y = 0
+                            if (playlistView.draggingRow === playlistRowMouseArea) {
+                                playlistView.draggingRow = null
+                            }
+                        }
+
+                        // Drops nothing and keeps the highlight.
+                        function cancelDrag() {
+                            dragCancelled = true
+                            if (playlistDragProxy.Drag.active) {
+                                playlistDragProxy.Drag.cancel()
+                            }
+                            root.controller.cancelRowPress()
+                            endDrag()
                         }
 
                         onPressed: function(mouse) {
+                            dragCancelled = false
                             playlistView.forceActiveFocus()
                             // The proxy starts under the pointer, so it is
                             // where the drag drops.
@@ -345,12 +371,17 @@ Rectangle {
                         }
 
                         onPositionChanged: {
-                            if (drag.active && !playlistDragProxy.Drag.active) {
+                            if (drag.active && !dragCancelled && !playlistDragProxy.Drag.active) {
                                 playlistDragProxy.Drag.active = true
+                                playlistView.draggingRow = playlistRowMouseArea
                             }
                         }
 
                         onReleased: function(mouse) {
+                            if (dragCancelled) {
+                                endDrag()
+                                return
+                            }
                             const dragged = playlistDragProxy.Drag.active
                             if (dragged) {
                                 playlistDragProxy.Drag.drop()

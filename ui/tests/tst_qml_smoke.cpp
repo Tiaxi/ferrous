@@ -902,6 +902,8 @@ private slots:
     void draggingAHighlightedQueueRowMovesEveryHighlightedRow();
     void queueDropsFollowTheRowsAfterRowsAboveAreRemoved();
     void aRevealDuringTheSavedViewRestoreKeepsSavingTheView();
+    void escapeCancelsAQueueRowDrag();
+    void aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore();
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
@@ -16350,27 +16352,11 @@ void QmlSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
                      - (topRowY + rowHeight * 3)) < 0.5);
 }
 
-void QmlSmokeTest::aRevealDuringTheSavedViewRestoreKeepsSavingTheView() {
-    // Artist A's rows are not loaded yet; artist B's are.
-    QVector<BinaryTreeRow> rows;
-    rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist A (1)"),
-        QStringLiteral("artist|/music|Artist A"), QStringLiteral("Artist A"),
-        QStringLiteral("/music/Artist A"), {}, {}, {}});
-    rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist B (1)"),
-        QStringLiteral("artist|/music|Artist B"), QStringLiteral("Artist B"),
-        QStringLiteral("/music/Artist B"), {}, {}, {}});
-    const QString trackB = QStringLiteral("/music/Artist B/01.flac");
-    rows.push_back(BinaryTreeRow{4, 1, -1, 1, 0, QStringLiteral("01"),
-        QStringLiteral("track|") + trackB, QStringLiteral("Artist B"), trackB, {}, trackB,
-        QStringList{trackB}});
-    LibraryTreeModel model;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
-    engine.rootContext()->setContextProperty(QStringLiteral("treeBytes"), encodeRows(rows));
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+namespace {
+
+// The library controller with a saved view state whose selection is in
+// artist A, over `testLibraryModel`, with the bridge's saves in `savedKeys`.
+const QByteArray kRestoreHarness = QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 
@@ -16423,7 +16409,37 @@ Item {
             row, testLibraryModel.rowDataForRow(row), Qt.LeftButton, Qt.NoModifier)
     }
 }
-)QML"), baseUrl, &errorText));
+)QML");
+
+// Artist A's rows are not loaded yet; artist B's are.
+QVector<BinaryTreeRow> restoreHarnessRows() {
+    QVector<BinaryTreeRow> rows;
+    rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist A (1)"),
+        QStringLiteral("artist|/music|Artist A"), QStringLiteral("Artist A"),
+        QStringLiteral("/music/Artist A"), {}, {}, {}});
+    rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist B (1)"),
+        QStringLiteral("artist|/music|Artist B"), QStringLiteral("Artist B"),
+        QStringLiteral("/music/Artist B"), {}, {}, {}});
+    const QString trackB = QStringLiteral("/music/Artist B/01.flac");
+    rows.push_back(BinaryTreeRow{4, 1, -1, 1, 0, QStringLiteral("01"),
+        QStringLiteral("track|") + trackB, QStringLiteral("Artist B"), trackB, {}, trackB,
+        QStringList{trackB}});
+    return rows;
+}
+
+} // namespace
+
+void QmlSmokeTest::aRevealDuringTheSavedViewRestoreKeepsSavingTheView() {
+    const QString trackB = QStringLiteral("/music/Artist B/01.flac");
+    const QVector<BinaryTreeRow> rows = restoreHarnessRows();
+    LibraryTreeModel model;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
+    engine.rootContext()->setContextProperty(QStringLiteral("treeBytes"), encodeRows(rows));
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kRestoreHarness, baseUrl, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
     QObject *controller = root->property("controllerRef").value<QObject *>();
 
@@ -16443,6 +16459,95 @@ Item {
                  QStringLiteral("artist|/music|Artist B"));
 
     // What the user selects next is saved too.
+    const int trackRow = model.indexForSelectionKey(QStringLiteral("track|") + trackB);
+    QVERIFY(trackRow > 0);
+    QVERIFY(QMetaObject::invokeMethod(root.get(), "clickRow", Q_ARG(QVariant, trackRow)));
+    QTRY_COMPARE(root->property("savedKeys").toStringList().last(), QStringLiteral("track|") + trackB);
+}
+
+
+void QmlSmokeTest::escapeCancelsAQueueRowDrag() {
+    QueueRowsModel rows;
+    loadQueueRows(rows, 10);
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kQueuePaneHarness, baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
+    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    auto *indicator = root->findChild<QQuickItem *>(QStringLiteral("queueDropIndicator"));
+    QVERIFY(indicator != nullptr);
+    QTRY_VERIFY(!queueRowPoint(view, 9, 0.5).isNull());
+    const auto takeCommands = [&root]() {
+        QVariant taken;
+        QMetaObject::invokeMethod(root.data(), "takeCommands", Q_RETURN_ARG(QVariant, taken));
+        return taken.toString();
+    };
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
+        Q_ARG(QVariant, QVariant(QVariantList{2, 3, 6}))));
+
+    // Highlighted row 3 is dragged over row 8, where the line shows.
+    const QPoint from = queueRowPoint(view, 3, 0.5);
+    const QPoint over = queueRowPoint(view, 8, 0.25);
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from);
+    for (int step = 1; step <= 20; ++step) {
+        QTest::mouseMove(window, from + (over - from) * step / 20);
+    }
+    QTRY_VERIFY(indicator->isVisible());
+
+    // Escape stops the drag: the line goes, and moving on and letting go
+    // there moves nothing and keeps the highlight.
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!indicator->isVisible());
+    QTest::mouseMove(window, over + QPoint(0, 4));
+    QVERIFY(!indicator->isVisible());
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, over + QPoint(0, 4));
+    QCOMPARE(takeCommands(), QString());
+    QCOMPARE(queueSelection(controller), (QList<int>{2, 3, 6}));
+    QTest::qWait(QGuiApplication::styleHints()->mouseDoubleClickInterval() + 50);
+
+    // The next drag works as before.
+    dragWithMouse(window, queueRowPoint(view, 3, 0.5), queueRowPoint(view, 8, 0.25));
+    QCOMPARE(takeCommands(), QStringLiteral("move 2,3,6 before 8"));
+}
+
+void QmlSmokeTest::aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore() {
+    const QString trackB = QStringLiteral("/music/Artist B/01.flac");
+    LibraryTreeModel model;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
+    engine.rootContext()->setContextProperty(QStringLiteral("treeBytes"), encodeRows(restoreHarnessRows()));
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kRestoreHarness, baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *controller = root->property("controllerRef").value<QObject *>();
+
+    // The user reveals artist B from the search before the first tree, and
+    // with it the saved selection in artist A, arrives.
+    QVERIFY(QMetaObject::invokeMethod(root.get(), "searchReveal"));
+    QVERIFY(model.revealPending());
+    QVERIFY(QMetaObject::invokeMethod(root.get(), "start"));
+    QCOMPARE(controller->property("selectedSelectionKey").toString(),
+             QStringLiteral("artist|/music|Artist B"));
+    QVERIFY(!controller->property("restoringViewState").toBool());
+    QVERIFY(!model.revealPending());
+    QTRY_COMPARE(root->property("savedKeys").toStringList().value(0),
+                 QStringLiteral("artist|/music|Artist B"));
+    // A later tree does not bring the saved selection back.
+    QVERIFY(QMetaObject::invokeMethod(controller, "requestTreeApply", Q_ARG(QVariant, 2),
+        Q_ARG(QVariant, encodeRows(restoreHarnessRows()))));
+    QCOMPARE(controller->property("selectedSelectionKey").toString(),
+             QStringLiteral("artist|/music|Artist B"));
+
+    // What the user selects next is saved.
     const int trackRow = model.indexForSelectionKey(QStringLiteral("track|") + trackB);
     QVERIFY(trackRow > 0);
     QVERIFY(QMetaObject::invokeMethod(root.get(), "clickRow", Q_ARG(QVariant, trackRow)));
