@@ -36,8 +36,41 @@ Item {
         interval: 100
         repeat: false
         onTriggered: {
+            // The restart decodes for the width it is for.
+            root.sendBackendWidth()
             const zoom = root.viewerMode ? root._viewerZoomLevel : root._widgetZoomLevel
             root.uiBridge.setSpectrogramZoomLevel(zoom)
+        }
+    }
+
+    // The backend sizes its decode lookahead from the widest width it has
+    // seen, and a wider one can restart its decoding, so a splitter drag
+    // must not send it every pixel. While the width changes, it gets the
+    // latest width every 100 ms (enough for a lookahead of seconds), and
+    // the final one at most 100 ms after the change stops.
+    property int _pendingBackendWidth: 0
+    property int _sentBackendWidth: 0
+    Timer {
+        id: backendWidthTimer
+        interval: 100
+        repeat: false
+        onTriggered: root.sendBackendWidth()
+    }
+
+    function reportBackendWidth(width) {
+        root._pendingBackendWidth = width
+        if (!backendWidthTimer.running) {
+            backendWidthTimer.start()
+        }
+    }
+
+    function sendBackendWidth() {
+        backendWidthTimer.stop()
+        if (root.uiBridge
+                && root._pendingBackendWidth > 0
+                && root._pendingBackendWidth !== root._sentBackendWidth) {
+            root._sentBackendWidth = root._pendingBackendWidth
+            root.uiBridge.setSpectrogramWidgetWidth(root._pendingBackendWidth)
         }
     }
 
@@ -190,6 +223,8 @@ Item {
     }
 
     Component.onCompleted: resetForCurrentMode()
+    // A fullscreen viewer closing right after a resize still reports it.
+    Component.onDestruction: sendBackendWidth()
 
     MouseArea {
         objectName: "spectrogramSurfacePointerArea"
@@ -260,6 +295,8 @@ Item {
                     }
                     onBackendZoomRequested: (level) => {
                         if (index === 0) {
+                            // The restart decodes for the width it is for.
+                            root.sendBackendWidth()
                             root.uiBridge.setSpectrogramZoomLevel(level)
                         }
                     }
@@ -272,7 +309,7 @@ Item {
                     // Only report width from the first pane (all share the same width).
                     onSpectrogramWidthChanged: (w) => {
                         if (index === 0) {
-                            root.uiBridge.setSpectrogramWidgetWidth(w)
+                            root.reportBackendWidth(w)
                             // On significant width changes (>20%), debounce
                             // a backend restart so the decode window matches.
                             const ref = root._widthRestartRef

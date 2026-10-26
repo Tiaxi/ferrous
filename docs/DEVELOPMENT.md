@@ -114,7 +114,7 @@ FERROUS_BENCHMARK_SPECTROGRAM=1 QT_QPA_PLATFORM=offscreen \
   ./ui/build/ferrous_qml_smoke_tests spectrogramRebuildBenchmark
 ```
 
-This optional benchmark reports full-canvas rebuild times and image checksums for two FFT sizes, two pane heights, and linear/logarithmic frequency scales at 3440 pixels wide. It excludes decoding, transport, and GPU uploads. Use the same optimized build and machine for comparisons; normal test runs skip it.
+This optional benchmark covers two FFT sizes, two pane heights, and linear/logarithmic frequency scales at 3440 pixels wide. For each, it reports the time to rasterize a full canvas on a worker (`raster_ms`), the render sync's time to hand that work to a worker (`request_ms`), the UI thread's time to put the result in place (`install_ms`), the render sync's time to pass its tiles on for upload (`handoff_ms`), and an image checksum. It excludes decoding, transport, and GPU uploads. Use the same optimized build and machine for comparisons; normal test runs skip it.
 
 To compare waveform CPU painting with scene graph preparation using synthetic resident data:
 

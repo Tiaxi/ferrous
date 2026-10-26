@@ -113,6 +113,135 @@ void setTestPositionAgo(Item &item, double seconds, double agoSeconds) {
     clock.applySample(sample, false);
 }
 
+// How much larger than in the canvas the drawn canvas spans are on screen:
+// all of them share one scale. -1 without spans, -2 for differing scales.
+double drawnCanvasScale(QSGNode *node) {
+    QSGNode *tilesRoot = node != nullptr ? node->childAtIndex(1) : nullptr;
+    if (tilesRoot == nullptr) {
+        return -1.0;
+    }
+    double scale = -1.0;
+    for (int i = 0; i < tilesRoot->childCount(); ++i) {
+        auto *fragment = static_cast<QSGSimpleTextureNode *>(tilesRoot->childAtIndex(i));
+        if (fragment->rect().isEmpty() || fragment->sourceRect().width() <= 0.0) {
+            continue;
+        }
+        const double fragmentScale = fragment->rect().width() / fragment->sourceRect().width();
+        if (scale >= 0.0 && std::abs(fragmentScale - scale) > 1e-6) {
+            return -2.0;
+        }
+        scale = fragmentScale;
+    }
+    return scale;
+}
+
+// How many canvas spans are drawn.
+int drawnCanvasFragments(QSGNode *node) {
+    QSGNode *tilesRoot = node != nullptr ? node->childAtIndex(1) : nullptr;
+    int fragments = 0;
+    for (int i = 0; tilesRoot != nullptr && i < tilesRoot->childCount(); ++i) {
+        const auto *fragment = static_cast<QSGSimpleTextureNode *>(tilesRoot->childAtIndex(i));
+        if (!fragment->rect().isEmpty()) {
+            ++fragments;
+        }
+    }
+    return fragments;
+}
+
+// A 3440 x 719 centered pane, 4097 bins at 48 kHz and a hop of 1024, with
+// 8192 columns decoded and its playhead at 30 s, near the track's start.
+void prepareFullscreenForwardSeek(SpectrogramItem &item) {
+    item.setWidth(3440);
+    item.setHeight(719);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 4097;
+    constexpr int columns = 8192;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, 20'000, 48000, 1024, false, true, 1, false, 1);
+    setTestPosition(item, 30.0);
+}
+
+// A pane playing back at 384 kHz and 16x zoom: 6000 columns a second, one
+// a pixel, with 12000 columns decoded and the playhead at 0.5 s.
+void prepareHighRatePlayback(SpectrogramItem &item, int width, int height, int bins, bool rolling) {
+    item.setWidth(width);
+    item.setHeight(height);
+    item.setDisplayMode(rolling ? 0 : 1);
+    item.setPlaying(true);
+    constexpr int columns = 12'000;
+    constexpr int hop = 64;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, 200'000, 384'000, hop, false, true, 1, true, 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1024.0 / hop;
+    }
+    setTestPosition(item, 0.5);
+}
+
+// The drawn spans' extent on screen.
+QPair<double, double> drawnCanvasExtent(QSGNode *node) {
+    QSGNode *tilesRoot = node->childAtIndex(1);
+    double left = std::numeric_limits<double>::max();
+    double right = std::numeric_limits<double>::lowest();
+    for (int i = 0; i < tilesRoot->childCount(); ++i) {
+        auto *fragment = static_cast<QSGSimpleTextureNode *>(tilesRoot->childAtIndex(i));
+        if (fragment->rect().isEmpty()) {
+            continue;
+        }
+        left = std::min(left, fragment->rect().left());
+        right = std::max(right, fragment->rect().right());
+    }
+    return {left, right};
+}
+
+// Lets the item's zoom debounce send its request to the backend.
+bool sendPendingBackendZoom(SpectrogramItem &item) {
+    return QTest::qWaitFor(
+        [&item]() { return !item.m_zoomDebounceTimer->isActive(); }, 1000);
+}
+
+// Rasterizes an item's canvas at once, as its worker would.
+void rebuildCanvasNow(
+    SpectrogramItem &item, int width, int height,
+    qint64 displayLeft, qint64 displayRight, bool rollingMode) {
+    const auto job = item.makeRasterJobLocked(
+        width, height, displayLeft, displayRight, rollingMode);
+    const auto result = job ? SpectrogramItem::rasterize(*job) : nullptr;
+    if (!result || !item.installRasterResultLocked(*result)) {
+        item.invalidateCanvas();
+        return;
+    }
+    item.m_precomputedCanvasDirty = false;
+}
+
+bool spectrogramRasterPending(SpectrogramItem &item) {
+    QMutexLocker lock(&item.m_stateMutex);
+    return item.m_rasterPending;
+}
+
+// Paints the item, then again once each rasterization the painting starts
+// has arrived.
+QSGNode *paintSettled(SpectrogramItem &item, QSGNode *node) {
+    node = item.updatePaintNode(node, nullptr);
+    for (int round = 0; round < 8 && spectrogramRasterPending(item); ++round) {
+        if (!QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000)) {
+            break;
+        }
+        {
+            // Its window may have painted it meanwhile, uploading its tiles
+            // to the window's own nodes: this node needs them too.
+            QMutexLocker lock(&item.m_stateMutex);
+            item.markAllTilesDirtyLocked();
+        }
+        node = item.updatePaintNode(node, nullptr);
+    }
+    return node;
+}
+
 class CompositionRecordingPaintEngine final : public QPaintEngine {
 public:
     CompositionRecordingPaintEngine()
@@ -835,7 +964,19 @@ private slots:
     void spectrogramEffectiveZoomDuringTransition();
     void spectrogramDeferredZoomAppliesOnBackendData();
     void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
-    void spectrogramResizeForcesFreshBodyTextureUpload();
+    void spectrogramResizeShowsTheScaledCanvasUntilItsRasterArrives();
+    void spectrogramRollingResizeKeepsTheHistoryAtTheRightEdge();
+    void spectrogramStaleRasterIsDiscarded();
+    void spectrogramCachedBackwardSeekKeepsTheCanvasOnScreen();
+    void spectrogramCachedForwardSeekRasterizesOffTheRenderSync();
+    void spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data();
+    void spectrogramHighRatePlaybackAdvancesWithoutRebuilds();
+    void spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback();
+    void spectrogramZoomDataKeepsThePreviewUntilItsRasterArrives();
+    void spectrogramColumnsArrivingDuringARasterAreDrawnIn();
+    void spectrogramItemDestroyedDuringRasterIsSafe();
+    void spectrogramDestroyedInItsWindowRunsNoHandlersOfItsOwn();
+    void spectrogramSurfaceCoalescesWidthReports();
     void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
     void spectrogramZoomOutProducesDistinctHop();
     void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
@@ -8051,7 +8192,7 @@ void QmlSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
     }
 
     setTestPosition(item, 3.554);
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
 
     QMutexLocker lock(&item.m_stateMutex);
@@ -8080,10 +8221,10 @@ void QmlSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() {
     feed(0, 1000, true, 1);
     testClock(item).holdAt(120.0);
     feed(4571, 2500, true, 2);
-    QScopedPointer<QSGNode> node(item.updatePaintNode(nullptr, nullptr));
+    QScopedPointer<QSGNode> node(paintSettled(item, nullptr));
     QVERIFY(node);
     item.setWidth(3840);
-    item.updatePaintNode(node.data(), nullptr);
+    paintSettled(item, node.data());
     const qint64 left = item.m_precomputedCanvasDisplayLeft;
     QVERIFY(left > 0);
     QVERIFY(left < 4571);
@@ -8101,7 +8242,7 @@ void QmlSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() {
     feed(4571, 2500, true, 2);
     QCOMPARE(item.m_ringWriteSeq, writeSeq);
     QCOMPARE(item.m_precomputedSessionGeneration, quint64(3));
-    item.updatePaintNode(node.data(), nullptr);
+    paintSettled(item, node.data());
 
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, left);
     QVERIFY(!item.m_zoomFillActive);
@@ -8125,7 +8266,7 @@ void QmlSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.ensureMapping(180);
-        item.rebuildPrecomputedCanvasLocked(320, 180, 0, 319, false);
+        rebuildCanvasNow(item, 320, 180, 0, 319, false);
     }
     QVERIFY(!item.m_canvas.isNull());
     testClock(item).holdAt(3990.0 * 1024.0 / 44100.0);
@@ -8150,7 +8291,7 @@ void QmlSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, actualEnd);
     QVERIFY(!item.m_zoomFillActive);
     QVERIFY(item.m_precomputedCanvasDirty);
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(item.m_precomputedCanvasDisplayLeft >= 3600);
     QVERIFY(item.m_precomputedCanvasDisplayRight < actualEnd);
@@ -8329,7 +8470,7 @@ void QmlSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
     // 600-col half-window trigger).
     setTestPosition(item, 11.25);
 
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
 
     QMutexLocker lock(&item.m_stateMutex);
@@ -8378,7 +8519,7 @@ void QmlSmokeTest::spectrogramCenteredEofDetachmentDisablesSubpixelScrolling() {
 
     setTestPosition(item, 11.25);
 
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
 
     QMutexLocker lock(&item.m_stateMutex);
@@ -8412,7 +8553,7 @@ void QmlSmokeTest::spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBefor
         sampleRate, hop, false, false, 1);
     setTestPosition(item, 103.0);
 
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
 
     QMutexLocker lock(&item.m_stateMutex);
@@ -8465,7 +8606,7 @@ void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
         item.m_renderZoomLevel = 1024.0 / static_cast<double>(hopZoomedOut);
     }
     setTestPosition(item, 0.0);
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(!item.m_canvas.isNull());
     QVERIFY(item.m_canvasFilledCols > 0);
@@ -8488,7 +8629,7 @@ void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     // viewport around column 0.  Keep the old non-black canvas frozen rather
     // than accepting a fully black rebuild.
     QCOMPARE(item.m_zoomFillActive, true);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(node != nullptr);
     bool frozenCanvasHasContent = false;
     for (int y = 0; y < item.m_canvas.height() && !frozenCanvasHasContent; ++y) {
@@ -8516,7 +8657,7 @@ void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     // The zoom-fill freeze must release once the ring covers the display
     // again, and the next paint must rebuild the canvas with content.
     QCOMPARE(item.m_zoomFillActive, false);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(node != nullptr);
     QVERIFY(!item.m_canvas.isNull());
     QVERIFY2(item.m_canvasFilledCols > 0,
@@ -8572,7 +8713,7 @@ void QmlSmokeTest::spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail() {
     }
     setTestPosition(item, 280.0); // playhead near EOF, decode head lags
 
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
 
     QMutexLocker lock(&item.m_stateMutex);
@@ -8880,7 +9021,7 @@ void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.ensureMapping(180);
-        item.rebuildPrecomputedCanvasLocked(320, 180, 0, 319, false);
+        rebuildCanvasNow(item, 320, 180, 0, 319, false);
     }
     QVERIFY(item.m_precomputedReady);
     QVERIFY(!item.m_canvas.isNull());
@@ -9951,6 +10092,7 @@ void QmlSmokeTest::spectrogramRebuildBenchmark() {
     // Resident synthetic history isolates projection from decoding, transport,
     // and GPU uploads. Checksums make before/after output comparisons possible.
     constexpr int width = 3440;
+    constexpr int iterations = 12;
     for (int bins : {1025, 4097}) {
         for (int height : {90, 719}) {
             for (bool logarithmic : {false, true}) {
@@ -9958,17 +10100,21 @@ void QmlSmokeTest::spectrogramRebuildBenchmark() {
                 item.setWidth(width);
                 item.setHeight(height);
                 item.setLogScale(logarithmic);
+                item.setDisplayMode(1);
                 item.m_binsPerColumn = bins;
                 item.m_precomputedBinsPerColumn = bins;
                 item.m_precomputedSampleRateHz = 48'000;
                 item.m_sampleRateHz = 48'000;
                 item.m_precomputedHopSize = 1024;
                 item.m_precomputedTrackToken = 1;
+                item.m_precomputedTotalColumnsEstimate = width;
+                item.m_precomputedMaxColumnIndex = width - 1;
+                item.m_precomputedReady = true;
                 item.m_renderZoomLevel = 1.0;
                 item.m_ringCapacity = width;
                 item.m_ringWriteSeq = width;
                 item.m_ringOldestSeq = 0;
-                item.m_ringBuffer.resize(width * bins);
+                item.m_ring.allocate(width, bins);
                 item.m_ringColumnId.resize(width);
                 item.m_ringSequenceId.resize(width);
                 item.m_ringTrackToken.resize(width, 1);
@@ -9976,24 +10122,136 @@ void QmlSmokeTest::spectrogramRebuildBenchmark() {
                     item.m_ringColumnId[static_cast<size_t>(x)] = x;
                     item.m_ringSequenceId[static_cast<size_t>(x)] = x;
                     item.m_trackColumnToSeqByToken[1].insert(x, x);
+                    quint8 *column = item.m_ring.writableColumn(x);
                     for (int bin = 0; bin < bins; ++bin) {
-                        item.m_ringBuffer[x * bins + bin] = static_cast<char>((x * 37 + bin * 13) % 256);
+                        column[bin] = static_cast<quint8>((x * 37 + bin * 13) % 256);
                     }
                 }
                 item.ensureMapping(height);
-                item.rebuildPrecomputedCanvasLocked(width, height, 0, width - 1, false);
+
+                // The rasterization itself, which runs on a worker.
+                const auto job = item.makeRasterJobLocked(width, height, 0, width - 1, false);
+                QVERIFY(job);
+                auto result = SpectrogramItem::rasterize(*job);
+                QVERIFY(result);
                 QElapsedTimer elapsed;
                 elapsed.start();
-                for (int iteration = 0; iteration < 12; ++iteration) {
-                    item.rebuildPrecomputedCanvasLocked(width, height, 0, width - 1, false);
+                for (int iteration = 0; iteration < iterations; ++iteration) {
+                    result = SpectrogramItem::rasterize(*job);
                 }
-                const double milliseconds = static_cast<double>(elapsed.nsecsElapsed()) / 12'000'000.0;
+                const double rasterMs =
+                    static_cast<double>(elapsed.nsecsElapsed()) / (iterations * 1e6);
+
                 quint64 checksum = 0;
                 for (int y = 0; y < height; ++y) {
-                    for (int x = 0; x < width; ++x) checksum += item.m_canvas.pixel(x, y);
+                    for (int x = 0; x < width; ++x) checksum += result->canvas.pixel(x, y);
                 }
-                qInfo("bins=%d height=%d log=%d rebuild_ms=%.3f checksum=%llu", bins, height,
-                    logarithmic ? 1 : 0, milliseconds, static_cast<unsigned long long>(checksum));
+
+                // The render sync's part of a frame that needs a new canvas:
+                // copying the job's inputs and handing it to a worker.
+                double requestNs = 0.0;
+                for (int iteration = 0; iteration < iterations; ++iteration) {
+                    item.setDbRange(iteration % 2 == 0 ? 120.0 : 132.0);
+                    elapsed.restart();
+                    {
+                        QMutexLocker lock(&item.m_stateMutex);
+                        item.requestPrecomputedRasterLocked(width, height, 0, width - 1, false);
+                    }
+                    requestNs += static_cast<double>(elapsed.nsecsElapsed());
+                    QVERIFY(QTest::qWaitFor(
+                        [&item]() { return !spectrogramRasterPending(item); }, 5000));
+                }
+
+                // The UI thread's part: putting the result in place of the
+                // canvas, which frees that.
+                double installNs = 0.0;
+                for (int iteration = 0; iteration < iterations; ++iteration) {
+                    auto fresh = SpectrogramItem::rasterize(*job);
+                    QVERIFY(fresh);
+                    result.reset();
+                    elapsed.restart();
+                    QVERIFY(item.installRasterResultLocked(*fresh));
+                    installNs += static_cast<double>(elapsed.nsecsElapsed());
+                    result = std::move(fresh);
+                }
+
+                // The frame after that hands the rasterization's tiles over
+                // for upload (without a window, nothing uploads them).
+                QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+                double handoffNs = 0.0;
+                for (int iteration = 0; iteration < iterations; ++iteration) {
+                    QVERIFY(item.installRasterResultLocked(*result));
+                    elapsed.restart();
+                    node = item.updatePaintNode(node, nullptr);
+                    handoffNs += static_cast<double>(elapsed.nsecsElapsed());
+                }
+                delete node;
+                if (bins == 4097 && height == 719 && !logarithmic) {
+                    // A cached forward seek past the whole canvas: the frame
+                    // must hand the canvas to a worker, not draw it. In a
+                    // window, so that the canvas's tiles have textures and
+                    // a frame does not copy them all again.
+                    QQuickWindow window;
+                    window.resize(240, 160);
+                    window.show();
+                    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+                    double seekNs = 0.0;
+                    for (int iteration = 0; iteration < iterations; ++iteration) {
+                        SpectrogramItem seeking(window.contentItem());
+                        prepareFullscreenForwardSeek(seeking);
+                        QSGNode *seekNode = paintSettled(seeking, nullptr);
+                        setTestPosition(seeking, 115.0);
+                        elapsed.restart();
+                        seekNode = seeking.updatePaintNode(seekNode, nullptr);
+                        seekNs += static_cast<double>(elapsed.nsecsElapsed());
+                        QVERIFY(spectrogramRasterPending(seeking));
+                        QVERIFY(QTest::qWaitFor(
+                            [&seeking]() { return !spectrogramRasterPending(seeking); }, 5000));
+                        delete seekNode;
+                    }
+                    qInfo("forward_seek_frame_ms=%.3f", seekNs / (iterations * 1e6));
+
+                    // Playback at 384 kHz and 16x zoom, painted at 30 fps:
+                    // each frame draws the 200 columns playback moved on.
+                    // The item's own repaint loop is cut off, so that only
+                    // these frames move its canvas.
+                    for (const bool rolling : {true, false}) {
+                        SpectrogramItem playing(window.contentItem());
+                        prepareHighRatePlayback(playing, width, height, bins, rolling);
+                        QSGNode *playNode = paintSettled(playing, nullptr);
+                        QObject::disconnect(playing.m_animationTickConnection);
+                        quint64 serial = 0;
+                        {
+                            QMutexLocker lock(&playing.m_stateMutex);
+                            serial = playing.m_rasterSerial;
+                        }
+                        double totalNs = 0.0;
+                        double worstNs = 0.0;
+                        constexpr int frames = 15;
+                        for (int frame = 0; frame < frames; ++frame) {
+                            QTest::qWait(33);
+                            elapsed.restart();
+                            playNode = playing.updatePaintNode(playNode, nullptr);
+                            const double ns = static_cast<double>(elapsed.nsecsElapsed());
+                            totalNs += ns;
+                            worstNs = std::max(worstNs, ns);
+                        }
+                        QVERIFY(!spectrogramRasterPending(playing));
+                        {
+                            QMutexLocker lock(&playing.m_stateMutex);
+                            QCOMPARE(playing.m_rasterSerial, serial);
+                        }
+                        delete playNode;
+                        qInfo("high_rate_playback_frame mode=%s mean_ms=%.3f worst_ms=%.3f",
+                            rolling ? "rolling" : "centered",
+                            totalNs / (frames * 1e6), worstNs / 1e6);
+                    }
+                }
+                qInfo("bins=%d height=%d log=%d raster_ms=%.3f request_ms=%.3f "
+                      "install_ms=%.3f handoff_ms=%.3f checksum=%llu",
+                    bins, height, logarithmic ? 1 : 0, rasterMs,
+                    requestNs / (iterations * 1e6), installNs / (iterations * 1e6),
+                    handoffNs / (iterations * 1e6), static_cast<unsigned long long>(checksum));
             }
         }
     }
@@ -10050,10 +10308,10 @@ void QmlSmokeTest::spectrogramProjectionWritesPreserveSharedCanvasImages() {
             0, 100, 48'000, 1024, false, true, 1);
         item.m_binsPerColumn = bins;
         item.ensureMapping(32);
-        item.rebuildPrecomputedCanvasLocked(2, 32, 0, 1, rolling);
+        rebuildCanvasNow(item, 2, 32, 0, 1, rolling);
         const QImage shared = item.m_canvas;
         const QImage reference = shared.copy();
-        std::fill_n(item.m_ringBuffer.data(), bins, static_cast<char>(255));
+        std::fill_n(item.m_ring.writableColumn(0), bins, static_cast<quint8>(255));
         const auto projection = item.precomputedProjectionLocked();
         item.drawPrecomputedColumnAtLocked(0, 0, rolling, *projection);
         QCOMPARE(shared, reference);
@@ -10380,7 +10638,7 @@ void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
         item.m_hoverPosition = QPointF(100.0, 50.0);
     }
 
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
 
     qint64 firstGridDisplayLeft;
@@ -10398,7 +10656,7 @@ void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
 
     setTestPosition(item, 5.0);
 
-    QSGNode *node2 = item.updatePaintNode(node, nullptr);
+    QSGNode *node2 = paintSettled(item, node);
     QVERIFY(node2 != nullptr);
 
     {
@@ -10973,7 +11231,7 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
         true, 1, false);
     setTestPosition(item, 10.0);
 
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(item.m_precomputedCanvasDisplayLeft > 0);
     const qint64 initialDisplayLeft = item.m_precomputedCanvasDisplayLeft;
@@ -10989,7 +11247,7 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
         0, zoomedOutTotalColumns, 48000, 10240, false,
         true, 1, false);
 
-    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QSGNode *updatedNode = paintSettled(item, node);
     QVERIFY(updatedNode == node);
 
     QVERIFY2(!item.m_zoomFillActive,
@@ -11010,9 +11268,9 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
     delete updatedNode;
 }
 
-void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
+void QmlSmokeTest::spectrogramResizeShowsTheScaledCanvasUntilItsRasterArrives() {
     QQuickWindow window;
-    window.resize(240, 160);
+    window.resize(340, 160);
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
 
@@ -11038,7 +11296,7 @@ void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
         48000, 1024, false, true, 1, false);
     setTestPosition(*item, 1.0);
 
-    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(*item, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(node->childCount() >= 2);
     auto *tilesRoot = node->childAtIndex(1);
@@ -11049,15 +11307,508 @@ void QmlSmokeTest::spectrogramResizeForcesFreshBodyTextureUpload() {
     QVERIFY(tileNode != nullptr);
     QVERIFY(tileNode->texture() != nullptr);
     QCOMPARE(tileNode->texture()->textureSize().height(), 80);
+    QSGTexture *shortTexture = tileNode->texture();
 
+    // The frame after the resize does not rasterize: it shows the canvas it
+    // has, stretched to the new height.
     item->setHeight(140);
-    QSGNode *updatedNode = item->updatePaintNode(node, nullptr);
-    QVERIFY(updatedNode == node);
-    QVERIFY(item->m_canvas.height() == 140);
+    node = item->updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(*item));
+    QCOMPARE(item->m_canvas.height(), 80);
+    QCOMPARE(tileNode->texture(), shortTexture);
+    QCOMPARE(tileNode->rect().height(), 140.0);
+    QCOMPARE(tileNode->sourceRect().height(), 80.0);
+
+    // Its rasterization for the new height replaces it.
+    node = paintSettled(*item, node);
+    QCOMPARE(item->m_canvas.height(), 140);
     QVERIFY(tileNode->texture() != nullptr);
     QCOMPARE(tileNode->texture()->textureSize().height(), 140);
+    QCOMPARE(tileNode->rect().height(), 140.0);
 
-    delete updatedNode;
+    // Wider, the whole track fits: the canvas stays where its columns are
+    // in the wider view until the wider one arrives.
+    item->setWidth(320);
+    node = item->updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(*item));
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+    QPair<double, double> extent = drawnCanvasExtent(node);
+    QCOMPARE(extent.first, 0.0);
+    QCOMPARE(extent.second, 240.0);
+    node = paintSettled(*item, node);
+    extent = drawnCanvasExtent(node);
+    QCOMPARE(extent.first, 0.0);
+    QCOMPARE(extent.second, 320.0);
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramRollingResizeKeepsTheHistoryAtTheRightEdge() {
+    QQuickWindow window;
+    window.resize(300, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(60);
+    item.setDisplayMode(0);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 300;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, 10'000, 48000, 1024, false, true, 1, true, 1);
+    // The playhead at the newest column.
+    setTestPosition(item, (columns - 0.5) * 1024.0 / 48000.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    QPair<double, double> extent = drawnCanvasExtent(node);
+    QVERIFY(std::abs(extent.second - 200.0) <= 1.0);
+    QVERIFY(std::abs(extent.first) <= 1.0);
+
+    // Wider: the history shown stays at the right edge, where its columns
+    // are, until the wider canvas arrives with more of it.
+    item.setWidth(260);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(item));
+    QCOMPARE(drawnCanvasScale(node), 1.0);
+    extent = drawnCanvasExtent(node);
+    QVERIFY2(std::abs(extent.second - 260.0) <= 1.0 && std::abs(extent.first - 60.0) <= 1.0,
+             qPrintable(QStringLiteral("%1..%2").arg(extent.first).arg(extent.second)));
+    node = paintSettled(item, node);
+    extent = drawnCanvasExtent(node);
+    QVERIFY2(std::abs(extent.second - 260.0) <= 1.0 && std::abs(extent.first) <= 1.0,
+             qPrintable(QStringLiteral("%1..%2").arg(extent.first).arg(extent.second)));
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramStaleRasterIsDiscarded() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 400;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    QSGNode *node = paintSettled(item, nullptr);
+    QVERIFY(!item.m_canvas.isNull());
+    const QRgb shownFirst = item.m_canvas.pixel(10, 50);
+
+    // A setting change asks for a canvas, and another change for another
+    // before the first arrives.
+    item.setDbRange(60.0);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(item));
+    std::shared_ptr<SpectrogramRasterResult> older;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto job = item.makeRasterJobLocked(
+            200, 100, item.m_rasterTarget.displayLeft, item.m_rasterTarget.displayRight, false);
+        QVERIFY(job);
+        job->serial = item.m_rasterSerial;
+        older = SpectrogramItem::rasterize(*job);
+    }
+    QVERIFY(older);
+    item.setDbRange(150.0);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(item));
+
+    // The first one's result arrives late: it is dropped, and the newer
+    // one goes on.
+    item.installRasterResult(older);
+    QVERIFY(spectrogramRasterPending(item));
+    QCOMPARE(item.m_canvas.pixel(10, 50), shownFirst);
+    QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
+    const QRgb shownNewest = item.m_canvas.pixel(10, 50);
+    QVERIFY(shownNewest != shownFirst);
+
+    // Arriving after the newer one, it does not replace that either.
+    item.installRasterResult(older);
+    QCOMPARE(item.m_canvas.pixel(10, 50), shownNewest);
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramCachedBackwardSeekKeepsTheCanvasOnScreen() {
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 1500;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 15.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    const int fragments = drawnCanvasFragments(node);
+    QVERIFY(fragments > 0);
+
+    // Back to 5 s, all of it decoded: the view jumps past the canvas's
+    // left edge. Until the canvas for it arrives, the old one stays on
+    // screen rather than moving out of view.
+    setTestPosition(item, 5.0);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(item));
+    QVERIFY2(drawnCanvasFragments(node) >= fragments,
+             qPrintable(QStringLiteral("%1 of %2").arg(drawnCanvasFragments(node)).arg(fragments)));
+    const QPair<double, double> extent = drawnCanvasExtent(node);
+    // Where it was, give or take its sub-pixel scroll.
+    QVERIFY2(extent.first > -1.0 && extent.second < 201.0 && extent.second - extent.first > 190.0,
+             qPrintable(QStringLiteral("%1..%2").arg(extent.first).arg(extent.second)));
+
+    node = paintSettled(item, node);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, qint64(234 - 100));
+    QVERIFY(drawnCanvasFragments(node) >= fragments);
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramCachedForwardSeekRasterizesOffTheRenderSync() {
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareFullscreenForwardSeek(item);
+    QSGNode *node = paintSettled(item, nullptr);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, qint64(0));
+    const int fragments = drawnCanvasFragments(node);
+    QVERIFY(fragments > 0);
+
+    // On to 115 s, already decoded: none of the canvas is in the new view.
+    // The frame hands its rasterization to a worker rather than drawing
+    // all 3440 columns itself, and keeps the old canvas on screen.
+    setTestPosition(item, 115.0);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    node = item.updatePaintNode(node, nullptr);
+    qInfo("forward seek frame: %.3f ms", static_cast<double>(elapsed.nsecsElapsed()) / 1e6);
+    QVERIFY(spectrogramRasterPending(item));
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, qint64(0));
+    QVERIFY(drawnCanvasFragments(node) >= fragments);
+
+    node = paintSettled(item, node);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, qint64(5390 - 1720));
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data() {
+    QTest::addColumn<bool>("rolling");
+    QTest::newRow("rolling") << true;
+    QTest::newRow("centered") << false;
+}
+
+void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds() {
+    QFETCH(bool, rolling);
+    constexpr int width = 1000;
+    SpectrogramItem item;
+    prepareHighRatePlayback(item, width, 50, 8, rolling);
+    QSGNode *node = paintSettled(item, nullptr);
+    quint64 serial = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        serial = item.m_rasterSerial;
+    }
+
+    // Painting at about 30 fps, playback moves the view about 200 pixels a
+    // frame: the paint draws them in, and asks a worker for nothing.
+    for (int frame = 0; frame < 10; ++frame) {
+        QTest::qWait(33);
+        node = item.updatePaintNode(node, nullptr);
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(!item.m_rasterPending && item.m_rasterSerial == serial,
+                 qPrintable(QStringLiteral("frame %1 asked for a rasterization").arg(frame)));
+        // The canvas is the view's, to its right edge.
+        QCOMPARE(item.m_canvasFilledCols, width);
+        if (rolling) {
+            QCOMPARE(item.m_precomputedCanvasDisplayRight, item.m_precomputedLastDisplaySeq);
+        } else {
+            QVERIFY(item.m_precomputedCanvasDisplayLeft <= item.m_precomputedLastDisplaySeq);
+            QVERIFY(item.m_precomputedCanvasDisplayRight >= item.m_precomputedLastDisplaySeq);
+        }
+    }
+    QVERIFY(item.m_precomputedLastDisplaySeq > 3000 + 10 * 33 * 6);
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback() {
+    constexpr int width = 2000;
+    SpectrogramItem item;
+    prepareHighRatePlayback(item, width, 50, 8, true);
+    QSGNode *node = paintSettled(item, nullptr);
+
+    // A rasterization is delivered 120 ms after the frame that asked for
+    // it, by when playback has moved on by 700 columns.
+    item.setDbRange(120.0);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(item));
+    QTest::qSleep(120);
+    QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
+    quint64 serial = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        serial = item.m_rasterSerial;
+    }
+
+    // The next frame draws those columns in, and so on: no rasterization
+    // follows the late one.
+    for (int frame = 0; frame < 6; ++frame) {
+        node = item.updatePaintNode(node, nullptr);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY2(!item.m_rasterPending && item.m_rasterSerial == serial,
+                     qPrintable(QStringLiteral("frame %1 asked for a rasterization").arg(frame)));
+            QCOMPARE(item.m_canvasFilledCols, width);
+            QCOMPARE(item.m_precomputedCanvasDisplayRight, item.m_precomputedLastDisplaySeq);
+        }
+        QTest::qWait(33);
+    }
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramZoomDataKeepsThePreviewUntilItsRasterArrives() {
+    // Rolling zooms, and centered zoom-outs, wait for their data without a
+    // zoom fill: the data's reset must not leave a frame without a canvas.
+    for (const bool rolling : {true, false}) {
+        QQuickWindow window;
+        window.resize(240, 160);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+        SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+        item.setWidth(200);
+        item.setHeight(100);
+        item.setDisplayMode(rolling ? 0 : 1);
+        item.setPlaying(false);
+        constexpr int bins = 8;
+        constexpr int columns = 2000;
+        item.feedPrecomputedChunk(
+            QByteArray(bins * columns, '\x40'), bins, 0, columns,
+            0, columns, 48000, 1024, true, true, 1, rolling, 1);
+        setTestPosition(item, 10.0);
+        QSGNode *node = paintSettled(item, nullptr);
+        QCOMPARE(drawnCanvasScale(node), 1.0);
+
+        const double zoom = rolling ? 2.0 : 0.5;
+        const int hop = rolling ? 512 : 2048;
+        item.setZoomLevel(zoom);
+        QVERIFY(sendPendingBackendZoom(item));
+        node = item.updatePaintNode(node, nullptr);
+        QVERIFY(std::abs(drawnCanvasScale(node) - zoom) < 1e-6);
+
+        const int nowColumn = static_cast<int>(10.0 * 48000 / hop);
+        item.feedPrecomputedChunk(
+            QByteArray(bins * 300, '\x70'), bins, 0, 300,
+            rolling ? nowColumn : nowColumn - 150, columns * 1024 / hop, 48000, hop,
+            false, true, 1, true, 2);
+        QVERIFY(!item.m_awaitingZoomData);
+        node = item.updatePaintNode(node, nullptr);
+        QVERIFY(spectrogramRasterPending(item));
+        QVERIFY2(std::abs(drawnCanvasScale(node) - zoom) < 1e-6,
+                 qPrintable(QString::number(drawnCanvasScale(node))));
+
+        node = paintSettled(item, node);
+        QCOMPARE(drawnCanvasScale(node), 1.0);
+        delete node;
+    }
+}
+
+void QmlSmokeTest::spectrogramColumnsArrivingDuringARasterAreDrawnIn() {
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 150, '\x60'), bins, 0, 150,
+        0, 400, 48000, 1024, false, true, 1, false, 1);
+    QSGNode *node = paintSettled(item, nullptr);
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, qint64(199));
+    QCOMPARE(item.m_canvas.pixel(170, 50), qRgb(0, 0, 0));
+
+    // Columns the view shows arrive while its canvas rasterizes without them.
+    item.setDbRange(120.0);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(item));
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 50, '\x60'), bins, 0, 50,
+        150, 400, 48000, 1024, false, false, 1, false, 1);
+    QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
+    QVERIFY(item.m_canvas.pixel(170, 50) != qRgb(0, 0, 0));
+    QCOMPARE(item.m_canvas.pixel(170, 50), item.m_canvas.pixel(100, 50));
+
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramItemDestroyedDuringRasterIsSafe() {
+    std::shared_ptr<SpectrogramRasterMailbox> mailbox;
+    {
+        auto *item = new SpectrogramItem();
+        item->setWidth(3440);
+        item->setHeight(719);
+        item->setDisplayMode(1);
+        item->setPlaying(false);
+        constexpr int bins = 4097;
+        constexpr int columns = 3440;
+        item->feedPrecomputedChunk(
+            QByteArray(bins * columns, '\x50'), bins, 0, columns,
+            0, columns, 48000, 1024, true, true, 1, false, 1);
+        QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+        QVERIFY(spectrogramRasterPending(*item));
+        mailbox = item->m_rasterMailbox;
+        // The viewer closes while its canvas rasterizes.
+        delete item;
+        delete node;
+    }
+    // The rasterization ends and lets go of everything without reaching
+    // the item; nothing it posted is delivered.
+    QTRY_COMPARE_WITH_TIMEOUT(mailbox.use_count(), 1L, 5000);
+    QTest::qWait(20);
+}
+
+void QmlSmokeTest::spectrogramDestroyedInItsWindowRunsNoHandlersOfItsOwn() {
+    // ~QQuickItem takes an item out of its window once the item's own
+    // members are destroyed, and emits windowChanged. The item's handler
+    // for it once ran then and wrote to its freed canvas tiles.
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setWidth(200);
+    item->setHeight(100);
+    item->setDisplayMode(1);
+    item->setPlaying(false);
+    constexpr int bins = 8;
+    item->feedPrecomputedChunk(
+        QByteArray(bins * 400, '\x50'), bins, 0, 400,
+        0, 400, 48000, 1024, true, true, 1, false, 1);
+    QSGNode *node = paintSettled(*item, nullptr);
+    QVERIFY(!item->m_canvas.isNull());
+    delete node;
+
+    QObject probe;
+    bool windowChangedDuringDestruction = false;
+    bool ownHandlersStillConnected = false;
+    QObject::connect(item, &QQuickItem::windowChanged, &probe, [&](QQuickWindow *window) {
+        if (window != nullptr) {
+            return;
+        }
+        windowChangedDuringDestruction = true;
+        ownHandlersStillConnected = QObject::disconnect(item, nullptr, item, nullptr);
+    });
+    delete item;
+    QVERIFY(windowChangedDuringDestruction);
+    QVERIFY(!ownHandlersStillConnected);
+}
+
+void QmlSmokeTest::spectrogramSurfaceCoalescesWidthReports() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "viewers" as Viewers
+
+Window {
+    id: root
+    width: 1200
+    height: 320
+    visible: true
+    property int paneWidth: 640
+
+    QtObject {
+        id: bridge
+        objectName: "widthBridge"
+        property var calls: []
+        property string playbackState: "Stopped"
+        property int spectrogramViewMode: 0
+        property int spectrogramDisplayMode: 1
+        property real dbRange: 90
+        property bool logScale: false
+        property bool showFps: false
+        property int sampleRateHz: 48000
+        property bool showSpectrogramCrosshair: false
+        property bool showSpectrogramScale: false
+        property bool spectrogramZoomEnabled: true
+        property int channelButtonsVisibility: 0
+        property int soloedChannel: -1
+        signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
+        signal playbackChanged()
+        function isChannelMuted(channelIndex) { return false }
+        function setSpectrogramZoomLevel(level) { calls = calls.concat(["zoom"]) }
+        function registerSpectrogramItem(item, channelIndex) {}
+        function unregisterSpectrogramItem(item) {}
+        function setSpectrogramWidgetWidth(width) { calls = calls.concat([width]) }
+        function toggleChannelMute(channelIndex) {}
+        function soloChannel(channelIndex) {}
+    }
+
+    Viewers.SpectrogramSurface {
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: root.paneWidth
+        uiBridge: bridge
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QVERIFY(QTest::qWaitForWindowExposed(qobject_cast<QQuickWindow *>(root.data()), 5000));
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("widthBridge"));
+    QVERIFY(bridge != nullptr);
+    const auto calls = [bridge]() {
+        const QVariant value = bridge->property("calls");
+        return value.canConvert<QJSValue>()
+            ? value.value<QJSValue>().toVariant().toList()
+            : value.toList();
+    };
+    const auto clearCalls = [bridge]() { bridge->setProperty("calls", QVariantList{}); };
+    QTRY_COMPARE(calls(), QVariantList{640});
+    clearCalls();
+
+    // A resize within one frame reports its final width, once.
+    for (int width = 641; width <= 700; ++width) {
+        root->setProperty("paneWidth", width);
+    }
+    QCOMPARE(calls().size(), 0);
+    QTRY_COMPARE(calls(), QVariantList{700});
+    QTest::qWait(250);
+    QCOMPARE(calls(), QVariantList{700});
+    clearCalls();
+
+    // A splitter drag reports the width as it goes, but far from every
+    // pixel, and its final width.
+    constexpr int dragSteps = 20;
+    for (int step = 1; step <= dragSteps; ++step) {
+        root->setProperty("paneWidth", 700 - step * 2);
+        QTest::qWait(40);
+    }
+    const int reportsDuringDrag = static_cast<int>(calls().size());
+    QVERIFY2(reportsDuringDrag >= 2 && reportsDuringDrag < dragSteps / 2,
+             qPrintable(QString::number(reportsDuringDrag)));
+    QTRY_COMPARE(calls().constLast(), QVariant(700 - dragSteps * 2));
+    clearCalls();
+
+    // A large change restarts the backend after it settles, for the width
+    // it settled at.
+    root->setProperty("paneWidth", 1000);
+    QTRY_VERIFY(calls().contains(QVariant(QStringLiteral("zoom"))));
+    const QVariantList restart = calls();
+    QVERIFY(restart.indexOf(QVariant(1000)) >= 0);
+    QVERIFY(restart.indexOf(QVariant(1000)) < restart.indexOf(QVariant(QStringLiteral("zoom"))));
 }
 
 void QmlSmokeTest::spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights() {
@@ -11083,7 +11834,7 @@ void QmlSmokeTest::spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights() {
         0, columns, 48000, 1024, true,
         true, 1, false);
 
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
     QVERIFY(!item.m_canvas.isNull());
 
@@ -11102,7 +11853,7 @@ void QmlSmokeTest::spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights() {
              "default-height linear spectrogram should show highest-bin energy on the top row");
 
     item.setHeight(318);
-    QSGNode *updatedNode = item.updatePaintNode(node, nullptr);
+    QSGNode *updatedNode = paintSettled(item, node);
     QVERIFY(updatedNode == node);
     QVERIFY(!item.m_canvas.isNull());
     QVERIFY2(topRowLuma() > 20,
@@ -11257,7 +12008,7 @@ void QmlSmokeTest::spectrogramHighRateRetentionPreservesViewportWithinBudget() {
         const int width = std::max(1920, SpectrogramItem::s_maxWidgetWidthSeen);
         const int visibleColumns = static_cast<int>(std::ceil(width / item.effectiveZoomLocked()));
         QVERIFY(item.m_ringCapacity >= visibleColumns * 2);
-        const qint64 bytesAcrossChannels = item.m_ringBuffer.size() * 8;
+        const qint64 bytesAcrossChannels = item.m_ring.byteSize() * 8;
         const qint64 visibleReserve = static_cast<qint64>(visibleColumns) * bins * 8;
         QVERIFY(bytesAcrossChannels <= visibleReserve * 3 + 64 * 1024 * 1024);
         QVERIFY(bytesAcrossChannels < 512 * 1024 * 1024);
@@ -11338,7 +12089,7 @@ void QmlSmokeTest::spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill()
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 2.0;
         item.ensureMapping(6);
-        item.rebuildPrecomputedCanvasLocked(12, 6, 0, 3, true);
+        rebuildCanvasNow(item, 12, 6, 0, 3, true);
         QCOMPARE(item.m_canvasFilledCols, 8);
         QCOMPARE(item.m_canvasWriteX, 8);
         initialCanvas = item.m_canvas.copy();
@@ -11394,7 +12145,7 @@ void QmlSmokeTest::spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally()
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 2.0;
         item.ensureMapping(6);
-        item.rebuildPrecomputedCanvasLocked(12, 6, 0, 5, true);
+        rebuildCanvasNow(item, 12, 6, 0, 5, true);
         QCOMPARE(item.m_canvasFilledCols, 12);
         QCOMPARE(item.m_canvasWriteX, 0);
         initialCanvas = item.m_canvas.copy();
@@ -11456,7 +12207,7 @@ void QmlSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 1.75;
         item.ensureMapping(6);
-        item.rebuildPrecomputedCanvasLocked(7, 6, 0, 3, true);
+        rebuildCanvasNow(item, 7, 6, 0, 3, true);
         QCOMPARE(item.m_canvasFilledCols, 7);
         QCOMPARE(item.m_canvasWriteX, 0);
         initialCanvas = item.m_canvas.copy();
@@ -11504,7 +12255,7 @@ void QmlSmokeTest::hiddenSpectrogramDefersPaintingAndRetainsIncomingData() {
         {
             QMutexLocker lock(&item.m_stateMutex);
             item.ensureMapping(10);
-            item.rebuildPrecomputedCanvasLocked(100, 10, 0, 99, false);
+            rebuildCanvasNow(item, 100, 10, 0, 99, false);
         }
         const QImage before = item.m_canvas.copy();
         const qint64 sequence = item.m_ringWriteSeq;
@@ -11521,7 +12272,7 @@ void QmlSmokeTest::hiddenSpectrogramDefersPaintingAndRetainsIncomingData() {
         QVERIFY(!item.m_animationTickInitialized);
         {
             QMutexLocker lock(&item.m_stateMutex);
-            item.rebuildPrecomputedCanvasLocked(100, 10, 1, 100, false);
+            rebuildCanvasNow(item, 100, 10, 1, 100, false);
         }
         QVERIFY(item.m_canvas != before);
         QVERIFY(!item.m_precomputedCanvasDirty);
@@ -11547,8 +12298,10 @@ void QmlSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset() {
 
     {
         QMutexLocker lock(&item.m_stateMutex);
+        // As the paint does before it draws.
+        item.m_binsPerColumn = bins;
         item.ensureMapping(10);
-        item.rebuildPrecomputedCanvasLocked(100, 10, 50, 149, false);
+        rebuildCanvasNow(item, 100, 10, 50, 149, false);
         QVERIFY(item.advancePrecomputedCanvasLocked(60, 159, false));
     }
 
@@ -11602,7 +12355,7 @@ void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 0.8;
         item.ensureMapping(10);
-        item.rebuildPrecomputedCanvasLocked(100, 10, 0, cols - 1, false);
+        rebuildCanvasNow(item, 100, 10, 0, cols - 1, false);
     }
 
     // Column 50 at columnsPerPixel=1.25:
@@ -11648,7 +12401,7 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 1.0;
         item.ensureMapping(720);
-        item.rebuildPrecomputedCanvasLocked(3440, 720, 0, 3439, false);
+        rebuildCanvasNow(item, 3440, 720, 0, 3439, false);
     }
     QVERIFY(!item.m_canvas.isNull());
     QCOMPARE(item.m_zoomFillActive, false);
@@ -11701,7 +12454,7 @@ void QmlSmokeTest::spectrogramSyntheticClearPreservesCanvasDuringSeek() {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_renderZoomLevel = 1.0;
         item.ensureMapping(400);
-        item.rebuildPrecomputedCanvasLocked(1920, 400, 0, 1919, false);
+        rebuildCanvasNow(item, 1920, 400, 0, 1919, false);
     }
     QVERIFY(!item.m_canvas.isNull());
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
@@ -12163,50 +12916,6 @@ int callIntFunction(QObject *object, const char *function) {
     return result.toInt();
 }
 
-// How much larger than in the canvas the drawn canvas spans are on screen:
-// all of them share one scale. -1 without spans, -2 for differing scales.
-double drawnCanvasScale(QSGNode *node) {
-    QSGNode *tilesRoot = node != nullptr ? node->childAtIndex(1) : nullptr;
-    if (tilesRoot == nullptr) {
-        return -1.0;
-    }
-    double scale = -1.0;
-    for (int i = 0; i < tilesRoot->childCount(); ++i) {
-        auto *fragment = static_cast<QSGSimpleTextureNode *>(tilesRoot->childAtIndex(i));
-        if (fragment->rect().isEmpty() || fragment->sourceRect().width() <= 0.0) {
-            continue;
-        }
-        const double fragmentScale = fragment->rect().width() / fragment->sourceRect().width();
-        if (scale >= 0.0 && std::abs(fragmentScale - scale) > 1e-6) {
-            return -2.0;
-        }
-        scale = fragmentScale;
-    }
-    return scale;
-}
-
-// The drawn spans' extent on screen.
-QPair<double, double> drawnCanvasExtent(QSGNode *node) {
-    QSGNode *tilesRoot = node->childAtIndex(1);
-    double left = std::numeric_limits<double>::max();
-    double right = std::numeric_limits<double>::lowest();
-    for (int i = 0; i < tilesRoot->childCount(); ++i) {
-        auto *fragment = static_cast<QSGSimpleTextureNode *>(tilesRoot->childAtIndex(i));
-        if (fragment->rect().isEmpty()) {
-            continue;
-        }
-        left = std::min(left, fragment->rect().left());
-        right = std::max(right, fragment->rect().right());
-    }
-    return {left, right};
-}
-
-// Lets the item's zoom debounce send its request to the backend.
-bool sendPendingBackendZoom(SpectrogramItem &item) {
-    return QTest::qWaitFor(
-        [&item]() { return !item.m_zoomDebounceTimer->isActive(); }, 1000);
-}
-
 } // namespace
 
 void QmlSmokeTest::wheelScrollsListsByTheWheelDelta() {
@@ -12417,7 +13126,7 @@ void QmlSmokeTest::spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData
         QByteArray(bins * columns, '\x40'), bins, 0, columns,
         0, columns, 48000, 1024, true, true, 1, false, 1);
     setTestPosition(item, 10.0);
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
     QCOMPARE(drawnCanvasScale(node), 1.0);
     auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
@@ -12431,7 +13140,7 @@ void QmlSmokeTest::spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData
 
     // The next frame shows the canvas at 2x at once, around the playhead,
     // which stays where the 2x data will put it.
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
     QVERIFY(std::abs(playhead->rect().x() - 100.0) <= 1.0);
     const QPair<double, double> extent = drawnCanvasExtent(node);
@@ -12444,7 +13153,7 @@ void QmlSmokeTest::spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData
     item.feedPrecomputedChunk(
         QByteArray(bins * 400, '\x60'), bins, 0, 400,
         staleStart, columns / 2, 48000, staleHop, false, true, 1, false, 2);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
     QVERIFY(std::abs(playhead->rect().x() - 100.0) <= 1.0);
     QVERIFY(item.m_zoomFillActive);
@@ -12455,7 +13164,7 @@ void QmlSmokeTest::spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData
     item.feedPrecomputedChunk(
         QByteArray(bins * 400, '\x70'), bins, 0, 400,
         nowColumn - 150, columns * 2, 48000, hop, false, true, 1, false, 3);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(!item.m_zoomFillActive);
     QCOMPARE(drawnCanvasScale(node), 1.0);
     QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
@@ -12483,7 +13192,7 @@ void QmlSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData(
         QByteArray(bins * columns, '\x40'), bins, 0, columns,
         0, columns, 48000, 1024, true, true, 1, false, 1);
     setTestPosition(item, 10.0);
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
     QCOMPARE(drawnCanvasScale(node), 1.0);
 
@@ -12493,7 +13202,7 @@ void QmlSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData(
 
     // Shown at 2x at once, with the playhead's time at the right edge,
     // where rolling data for any zoom puts it.
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
     const QPair<double, double> extent = drawnCanvasExtent(node);
     QVERIFY2(extent.first >= 0.0 && std::abs(extent.second - 200.0) <= 2.0,
@@ -12505,7 +13214,7 @@ void QmlSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData(
         QByteArray(bins * 200, '\x60'), bins, 0, 200,
         static_cast<int>(10.0 * 48000 / staleHop), columns * 4, 48000, staleHop,
         false, true, 1, true, 2);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
 
     // The 2x data replaces the preview as it arrives.
@@ -12514,7 +13223,7 @@ void QmlSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData(
         QByteArray(bins * 300, '\x70'), bins, 0, 300,
         static_cast<int>(10.0 * 48000 / hop), columns * 2, 48000, hop,
         false, true, 1, true, 3);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(!item.m_zoomFillActive);
     QCOMPARE(drawnCanvasScale(node), 1.0);
     QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
@@ -12881,7 +13590,7 @@ void QmlSmokeTest::spectrogramZoomWithinTheBackendToleranceNeedsNoNewData() {
         QByteArray(bins * 800, '\x60'), bins, 0, 800,
         static_cast<int>(10.0 * 48000 / 256) - 400, columns * 4, 48000, 256,
         false, true, 1, false, 2);
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(!item.m_awaitingZoomData);
     QCOMPARE(drawnCanvasScale(node), 1.0);
 
@@ -12890,7 +13599,7 @@ void QmlSmokeTest::spectrogramZoomWithinTheBackendToleranceNeedsNoNewData() {
     item.setZoomLevel(4.0083);
     QVERIFY(sendPendingBackendZoom(item));
     QVERIFY(!item.m_awaitingZoomData);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QCOMPARE(drawnCanvasScale(node), 1.0);
 
     delete node;
@@ -12923,7 +13632,7 @@ void QmlSmokeTest::spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview() 
     item.feedPrecomputedChunk(
         QByteArray(bins * 200, '\x60'), bins, 0, 200,
         0, 200, 48000, 10240, true, true, 1, false, 2);
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(!item.m_awaitingZoomData);
     QCOMPARE(drawnCanvasScale(node), 1.0);
 
@@ -12944,7 +13653,7 @@ void QmlSmokeTest::spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview() 
 
     // The data on screen is the backend's, so no preview waits for more.
     QVERIFY(!item.m_awaitingZoomData);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QCOMPARE(drawnCanvasScale(node), 1.0);
     QVERIFY(!item.m_zoomPreviewShown);
 
@@ -12953,7 +13662,7 @@ void QmlSmokeTest::spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview() 
     wheel(3);
     QVERIFY(sendPendingBackendZoom(item));
     QVERIFY(item.m_awaitingZoomData);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(item.m_zoomPreviewShown);
 
     delete node;
@@ -12975,13 +13684,13 @@ void QmlSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview() {
         QByteArray(bins * columns, '\x40'), bins, 0, columns,
         0, columns, 48000, 1024, true, true, 1, false, 1);
     setTestPosition(item, 10.0);
-    QSGNode *node = item.updatePaintNode(nullptr, nullptr);
+    QSGNode *node = paintSettled(item, nullptr);
 
     // Zoomed out to half, sent; then in to 2x before the half data arrives.
     item.setZoomLevel(0.5);
     QVERIFY(sendPendingBackendZoom(item));
     item.setZoomLevel(2.0);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
     const QImage previewed = item.m_canvas.copy();
     QVERIFY(!previewed.isNull());
@@ -12999,7 +13708,7 @@ void QmlSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview() {
         QByteArray(bins * 400, '\x20'), bins, 0, 400,
         staleStart + 400, columns / 2, 48000, staleHop, false, false, 1, false, 2);
     QCOMPARE(item.m_canvas, previewed);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QCOMPARE(item.m_canvas, previewed);
     QVERIFY(std::abs(drawnCanvasScale(node) - 2.0) < 1e-6);
 
@@ -13009,7 +13718,7 @@ void QmlSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview() {
     item.feedPrecomputedChunk(
         QByteArray(bins * 400, '\x70'), bins, 0, 400,
         nowColumn - 150, columns * 2, 48000, hop, false, true, 1, false, 3);
-    node = item.updatePaintNode(node, nullptr);
+    node = paintSettled(item, node);
     QVERIFY(!item.m_zoomFillActive);
     QVERIFY(item.m_canvas != previewed);
     QCOMPARE(drawnCanvasScale(node), 1.0);
