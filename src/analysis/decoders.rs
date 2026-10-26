@@ -4,13 +4,15 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use symphonia::core::audio::SampleBuffer;
+use symphonia::core::audio::{AudioBuffer, AudioBufferRef, Signal};
 use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::conv::IntoSample;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::sample::Sample;
 
 #[cfg(feature = "gst")]
 use gst::prelude::*;
@@ -24,7 +26,6 @@ use crate::raw_audio::{configure_raw_surround_decoding, filter_raw_surround_sour
 #[cfg(feature = "gst")]
 use gstreamer_app as gst_app;
 
-use super::fft::ensure_sample_buffer;
 use super::{
     f64_to_u64_saturating, usize_to_f32_approx, usize_to_u64, SpectrogramViewMode, REFERENCE_HOP,
 };
@@ -92,6 +93,51 @@ impl AudioFrames {
         self.samples.drain(..skip * self.channels);
         self.frames -= skip;
         self.first_frame = self.first_frame.saturating_add(usize_to_u64(skip));
+    }
+
+    /// The whole frames in the batch.
+    pub(super) fn analysis_frames(&self) -> usize {
+        self.frames.min(self.samples.len() / self.channels.max(1))
+    }
+
+    /// Append analysis channel `channel`'s samples from frame `first` of the
+    /// batch's [`Self::analysis_frames`] on, whatever the decoder's channel
+    /// count: a decoder may produce fewer or more channels than the file's
+    /// header said, or change its count mid-stream. Every channel gets every
+    /// frame, so their STFTs stay in step: a mono stream fills every channel,
+    /// as playback plays it on every speaker, other missing channels are
+    /// silent, and extra ones are left out. A downmix averages every decoded
+    /// channel.
+    pub(super) fn extend_analysis_channel(
+        &self,
+        out: &mut Vec<f32>,
+        channel: usize,
+        view_mode: SpectrogramViewMode,
+        first: usize,
+    ) {
+        let decoded_channels = self.channels.max(1);
+        let end = self.analysis_frames() * decoded_channels;
+        let start = (first * decoded_channels).min(end);
+        // Preserve the native sample grid. Skipping samples here aliases ultrasonic
+        // energy into the audible spectrum and loses phase at packet boundaries.
+        let frames = self.samples[start..end].chunks_exact(decoded_channels);
+        match view_mode {
+            SpectrogramViewMode::Downmix => {
+                let inv_channels = 1.0 / usize_to_f32_approx(decoded_channels);
+                out.extend(frames.map(|frame| frame.iter().sum::<f32>() * inv_channels));
+            }
+            SpectrogramViewMode::PerChannel => {
+                let source = if decoded_channels == 1 {
+                    Some(0)
+                } else {
+                    (channel < decoded_channels).then_some(channel)
+                };
+                match source {
+                    Some(source) => out.extend(frames.map(|frame| frame[source])),
+                    None => out.resize(out.len() + frames.len(), 0.0),
+                }
+            }
+        }
     }
 }
 
@@ -165,7 +211,6 @@ pub(super) enum AudioFrameSource {
         format: Box<dyn symphonia::core::formats::FormatReader>,
         decoder: Box<dyn symphonia::core::codecs::Decoder>,
         track_id: u32,
-        sample_buf: Option<SampleBuffer<f32>>,
         seek_frame: u64,
         /// The file and format to read with `GStreamer` if Symphonia fails
         /// or ends before decoding any audio; cleared once it decodes some.
@@ -201,12 +246,11 @@ impl AudioFrameSource {
                 format,
                 decoder,
                 track_id,
-                sample_buf,
                 seek_frame,
                 #[cfg(feature = "gst")]
                 fallback,
             } => {
-                let read = read_symphonia_frames(format, decoder, *track_id, sample_buf);
+                let read = read_symphonia_frames(format, decoder, *track_id);
                 #[cfg(feature = "gst")]
                 if matches!(read, Ok(AudioRead::Frames(_))) {
                     *fallback = None;
@@ -304,7 +348,6 @@ fn read_symphonia_frames(
     format: &mut Box<dyn symphonia::core::formats::FormatReader>,
     decoder: &mut Box<dyn symphonia::core::codecs::Decoder>,
     track_id: u32,
-    sample_buf: &mut Option<SampleBuffer<f32>>,
 ) -> anyhow::Result<AudioRead> {
     let packet = match format.next_packet() {
         Ok(packet) => packet,
@@ -331,15 +374,40 @@ fn read_symphonia_frames(
     let first_frame = time_base.map_or(packet.ts(), |base| {
         timestamp_frame(packet.ts(), base.numer, base.denom, spec.rate)
     });
-    let buffer = ensure_sample_buffer(sample_buf, audio.capacity(), spec);
-    buffer.copy_interleaved_ref(audio);
-    let samples = buffer.samples().to_vec();
+    let samples = interleave_f32(&audio);
     Ok(AudioRead::Frames(AudioFrames {
         frames: samples.len() / channels,
         samples,
         channels,
         first_frame,
     }))
+}
+
+/// Convert decoded audio to interleaved F32 samples in one pass, as
+/// `SampleBuffer::copy_interleaved_ref` would but straight into the batch.
+pub(super) fn interleave_f32(audio: &AudioBufferRef) -> Vec<f32> {
+    fn interleave<S: Sample + IntoSample<f32>>(buffer: &AudioBuffer<S>) -> Vec<f32> {
+        let channels = buffer.spec().channels.count();
+        let mut samples = vec![0.0; buffer.frames() * channels];
+        for channel in 0..channels {
+            for (frame, &sample) in samples.chunks_exact_mut(channels).zip(buffer.chan(channel)) {
+                frame[channel] = sample.into_sample();
+            }
+        }
+        samples
+    }
+    match audio {
+        AudioBufferRef::U8(buffer) => interleave(buffer),
+        AudioBufferRef::U16(buffer) => interleave(buffer),
+        AudioBufferRef::U24(buffer) => interleave(buffer),
+        AudioBufferRef::U32(buffer) => interleave(buffer),
+        AudioBufferRef::S8(buffer) => interleave(buffer),
+        AudioBufferRef::S16(buffer) => interleave(buffer),
+        AudioBufferRef::S24(buffer) => interleave(buffer),
+        AudioBufferRef::S32(buffer) => interleave(buffer),
+        AudioBufferRef::F32(buffer) => interleave(buffer),
+        AudioBufferRef::F64(buffer) => interleave(buffer),
+    }
 }
 
 #[cfg(feature = "gst")]
@@ -441,7 +509,6 @@ pub(super) fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usi
                 format: sf.format,
                 decoder: sf.decoder,
                 track_id: sf.track_id,
-                sample_buf: None,
                 seek_frame: 0,
                 #[cfg(feature = "gst")]
                 fallback: Some(GstFallback {
@@ -694,6 +761,34 @@ pub(super) fn u64_to_u32_saturating(v: u64) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
 }
 
+/// Split interleaved frames into `channel_count` analysis channels; see
+/// [`AudioFrames::extend_analysis_channel`].
+#[cfg(test)]
+pub(super) fn deinterleave_samples(
+    samples: &[f32],
+    frames: usize,
+    decoded_channels: usize,
+    channel_count: usize,
+    view_mode: SpectrogramViewMode,
+) -> Vec<Vec<f32>> {
+    let audio = AudioFrames {
+        samples: samples.to_vec(),
+        first_frame: 0,
+        frames,
+        channels: decoded_channels,
+    };
+    (0..channel_count)
+        .map(|channel| {
+            let mut samples = Vec::new();
+            audio.extend_analysis_channel(&mut samples, channel, view_mode, 0);
+            samples
+        })
+        .collect()
+}
+
+/// The split before [`AudioFrames::extend_analysis_channel`], kept verbatim
+/// as the reference the STFT input must match:
+///
 /// Split interleaved frames of `decoded_channels` into `channel_count`
 /// channels of `frames` samples each, whatever the decoder's channel count:
 /// a decoder may produce fewer or more channels than the file's header
@@ -701,7 +796,8 @@ pub(super) fn u64_to_u32_saturating(v: u64) -> u32 {
 /// their STFTs stay in step: a mono stream fills every channel, as playback
 /// plays it on every speaker, other missing channels are silent, and extra
 /// ones are left out.
-pub(super) fn deinterleave_samples(
+#[cfg(test)]
+pub(super) fn reference_deinterleave_samples(
     samples: &[f32],
     frames: usize,
     decoded_channels: usize,
@@ -1159,6 +1255,65 @@ mod tests {
         // This confirms the Symphonia path is still active for non-surround.
         let result = open_audio_file(Path::new("/nonexistent/path/to/file.flac"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn decoded_audio_interleaves_as_a_sample_buffer_would_for_every_format() {
+        use symphonia::core::audio::{AsAudioBufferRef, AudioBuffer, Channels, SampleBuffer};
+        use symphonia::core::conv::FromSample;
+        use symphonia::core::sample::{i24, u24};
+
+        fn check<S>(capacity: usize, frames: usize, channels: Channels)
+        where
+            S: Sample + FromSample<f64> + IntoSample<f32>,
+            AudioBuffer<S>: AsAudioBufferRef,
+        {
+            let spec = symphonia::core::audio::SignalSpec::new(44_100, channels);
+            let mut decoded = AudioBuffer::<S>::new(usize_to_u64(capacity), spec);
+            decoded.render_reserved(Some(frames));
+            for channel in 0..channels.count() {
+                for (frame, sample) in decoded.chan_mut(channel).iter_mut().enumerate() {
+                    let phase = f64::from(u32::try_from(frame * 7 + channel * 3).unwrap());
+                    *sample = S::from_sample((phase * 0.37).sin() * 0.999);
+                }
+            }
+            let mut expected = SampleBuffer::<f32>::new(usize_to_u64(capacity), spec);
+            expected.copy_interleaved_ref(decoded.as_audio_buffer_ref());
+            let actual = interleave_f32(&decoded.as_audio_buffer_ref());
+            assert!(
+                actual
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .eq(expected.samples().iter().map(|sample| sample.to_bits())),
+                "{} frames of {} channels",
+                frames,
+                channels.count()
+            );
+        }
+
+        let stereo = Channels::FRONT_LEFT | Channels::FRONT_RIGHT;
+        let surround = stereo
+            | Channels::FRONT_CENTRE
+            | Channels::LFE1
+            | Channels::REAR_LEFT
+            | Channels::REAR_RIGHT;
+        for (capacity, frames, channels) in [
+            (1_152, 1_152, stereo),
+            (4_096, 1_000, surround),
+            (64, 64, Channels::FRONT_LEFT),
+            (16, 0, surround),
+        ] {
+            check::<u8>(capacity, frames, channels);
+            check::<u16>(capacity, frames, channels);
+            check::<u24>(capacity, frames, channels);
+            check::<u32>(capacity, frames, channels);
+            check::<i8>(capacity, frames, channels);
+            check::<i16>(capacity, frames, channels);
+            check::<i24>(capacity, frames, channels);
+            check::<i32>(capacity, frames, channels);
+            check::<f32>(capacity, frames, channels);
+            check::<f64>(capacity, frames, channels);
+        }
     }
 
     #[test]

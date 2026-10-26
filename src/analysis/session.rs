@@ -12,11 +12,11 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use super::cache::WaveformSourceStamp;
 use super::decoders::{
-    deinterleave_samples, open_audio_file, u64_to_u32_saturating, AudioFrameSource, AudioFrames,
-    AudioRead, AudioTimeline,
+    open_audio_file, u64_to_u32_saturating, AudioFrameSource, AudioFrames, AudioRead, AudioTimeline,
 };
 use super::fft::{PeakHoldResampler, StftComputer};
 use super::output::{AnalysisEventOutput, AnalysisOutputs};
+use super::quantize::append_quantized_row;
 use super::retention::{lookahead_seconds, SpectrogramBufferConfig};
 use super::track_io::{source_stamp, TrackFormat};
 use super::{
@@ -155,9 +155,10 @@ fn enqueue_leading_silence(stfts: &mut [StftComputer], frames: usize) {
     if frames == 0 {
         return;
     }
-    let silence = vec![0.0; frames];
     for stft in stfts {
-        stft.enqueue_samples(&silence);
+        stft.enqueue_with(frames, |pending, first| {
+            pending.resize(pending.len() + frames - first, 0.0);
+        });
     }
 }
 
@@ -165,24 +166,21 @@ fn enqueue_leading_silence(stfts: &mut [StftComputer], frames: usize) {
 /// which the decode loops drain every row before reading the next.
 const MAX_PENDING_FRAMES: usize = 1 << 20;
 
-/// Feed a decoded batch to the per-channel STFTs. Every STFT gets one sample
-/// per frame, whatever the batch's channel count, so their windows stay in
-/// step; see [`deinterleave_samples`]. Fails if an STFT holds more audio than
-/// a batch, which would grow without producing columns.
+/// Feed a decoded batch to the per-channel STFTs, copying it straight into
+/// their queues. Every STFT gets one sample per frame, whatever the batch's
+/// channel count, so their windows stay in step; see
+/// [`AudioFrames::extend_analysis_channel`]. Fails if an STFT holds more
+/// audio than a batch, which would grow without producing columns.
 fn enqueue_audio(
     stfts: &mut [StftComputer],
     audio: &AudioFrames,
     view_mode: SpectrogramViewMode,
 ) -> Result<(), String> {
-    let per_channel = deinterleave_samples(
-        &audio.samples,
-        audio.frames,
-        audio.channels,
-        stfts.len(),
-        view_mode,
-    );
-    for (stft, samples) in stfts.iter_mut().zip(&per_channel) {
-        stft.enqueue_samples(samples);
+    let frames = audio.analysis_frames();
+    for (channel, stft) in stfts.iter_mut().enumerate() {
+        stft.enqueue_with(frames, |pending, first| {
+            audio.extend_analysis_channel(pending, channel, view_mode, first);
+        });
         if stft.pending_len() > stft.fft_size() + MAX_PENDING_FRAMES {
             return Err(format!(
                 "its analysis fell behind the decoded audio ({} frames queued)",
@@ -241,42 +239,6 @@ fn seconds_from_frames(frames: u64, sample_rate_hz: u64) -> f32 {
     let nanos = (u128::from(remainder) * 1_000_000_000) / u128::from(sample_rate_hz);
     let nanos = u32::try_from(nanos).unwrap_or(u32::MAX);
     Duration::new(secs, nanos).as_secs_f32()
-}
-
-// Shared with SpectrogramItem::buildPrecomputedDbRemapLocked: zero means
-// silence/below-floor; 1..=255 encodes -150..=0 dB relative to full scale.
-const PRECOMPUTED_DB_RANGE: f32 = 150.0;
-
-/// Compute the expected peak power dB for a full-scale sine in a
-/// Blackman-Harris-windowed FFT of the given size.  This is used to
-/// normalise the STFT output so that a full-scale signal maps to u8≈255
-/// regardless of FFT size.
-///
-/// For BH4 window: sum(w) = N × a0 (a0 = 0.35875).
-/// Peak bin magnitude = sum(w) / 2, power = (N × a0 / 2)².
-#[allow(clippy::cast_precision_loss)]
-fn stft_peak_power_db(fft_size: usize) -> f64 {
-    20.0 * (fft_size as f64 * 0.35875 / 2.0).log10()
-}
-
-fn precomputed_to_u8_spectrum(v: f32, fft_size: usize) -> u8 {
-    let range = f64::from(PRECOMPUTED_DB_RANGE);
-    if v.is_nan() || v <= 0.0 {
-        return 0;
-    }
-    let db = (10.0 / std::f64::consts::LN_10) * f64::from(v).ln();
-    // Normalise for FFT size: anchor at the BH4 peak power so that a
-    // full-scale signal maps to u8≈255 for any FFT size.
-    let peak_db = stft_peak_power_db(fft_size);
-    if db < peak_db - range {
-        return 0;
-    }
-    let xdb = (db + range - peak_db).clamp(0.0, range);
-    let scaled = 1.0 + (xdb / range) * 254.0;
-    // Value is clamped to 0.0..=255.0, so truncation and sign loss are impossible.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let result = scaled.round().clamp(0.0, 255.0) as u8;
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -508,7 +470,7 @@ fn append_stft_column(
             .get_mut(channel)
             .map_or(Some(row), |resampler| resampler.push(row));
         if let Some(output) = output {
-            append_quantized_spectrum(chunk, output, bins, fft_size);
+            append_quantized_row(chunk, output, bins, fft_size);
         } else {
             emitted = false;
         }
@@ -517,15 +479,6 @@ fn append_stft_column(
         chunk.truncate(start);
     }
     Some(emitted)
-}
-
-fn append_quantized_spectrum(chunk: &mut Vec<u8>, row: &[f32], bins: usize, fft_size: usize) {
-    chunk.extend(
-        row.iter()
-            .take(bins)
-            .map(|&power| precomputed_to_u8_spectrum(power, fft_size)),
-    );
-    chunk.extend(std::iter::repeat_n(0, bins.saturating_sub(row.len())));
 }
 
 /// Drain STFT rows from the staging pipeline, quantize, and emit
@@ -2330,17 +2283,12 @@ fn session_flush_chunk(
     if !flushed.is_empty() && flushed.iter().all(Option::is_some) {
         for maybe_row in &flushed {
             let row = maybe_row.as_ref().unwrap();
-            for &v in row.iter().take(session.bins_per_column) {
-                session
-                    .chunk_buf
-                    .push(precomputed_to_u8_spectrum(v, session.fft_size));
-            }
-            if row.len() < session.bins_per_column {
-                session.chunk_buf.extend(std::iter::repeat_n(
-                    0u8,
-                    session.bins_per_column - row.len(),
-                ));
-            }
+            append_quantized_row(
+                &mut session.chunk_buf,
+                row,
+                session.bins_per_column,
+                session.fft_size,
+            );
         }
         session.chunk_columns += 1;
         session.columns_produced += 1;
@@ -2926,31 +2874,6 @@ mod tests {
         assert_eq!(bytes.len(), 514);
         assert_eq!(bytes[..257], bytes[257..]);
         assert!(!stfts.iter().any(StftComputer::has_row));
-    }
-
-    #[test]
-    fn precomputed_encoding_preserves_full_dynamic_range_and_silence() {
-        for fft_size in [512, 1_024, 2_048, 4_096, 8_192] {
-            for silent in [0.0, -1.0, f32::NAN] {
-                assert_eq!(precomputed_to_u8_spectrum(silent, fft_size), 0);
-            }
-            let mut previous = 0;
-            for db in [-160.0, -150.0, -140.0, -132.0, -90.0, -50.0, 0.0] {
-                // FFT powers in this test remain well within f32's range.
-                #[allow(clippy::cast_possible_truncation)]
-                let power = 10.0_f64.powf((stft_peak_power_db(fft_size) + db) / 10.0) as f32;
-                let encoded = precomputed_to_u8_spectrum(power, fft_size);
-                assert!(encoded >= previous);
-                if db < -150.0 {
-                    assert_eq!(encoded, 0);
-                } else if db > -150.0 {
-                    let decoded = (f64::from(encoded) - 1.0) / 254.0 * 150.0 - 150.0;
-                    assert!((decoded - db).abs() < 0.3, "{fft_size}: {db} -> {decoded}");
-                }
-                previous = encoded;
-            }
-            assert_eq!(previous, 255);
-        }
     }
 
     #[test]
@@ -4039,7 +3962,7 @@ mod tests {
             reference.enqueue_samples(&samples);
             let mut expected = Vec::new();
             while let Some(row) = reference.take_row() {
-                append_quantized_spectrum(&mut expected, row, 257, 512);
+                append_quantized_row(&mut expected, row, 257, 512);
             }
             let mut session = make_test_session();
             session.display_mode = mode;
@@ -4239,7 +4162,6 @@ mod tests {
                     .unwrap()
             },
             track_id: 0,
-            sample_buf: None,
             seek_frame: 0,
         }
     }
@@ -5394,5 +5316,451 @@ mod tests {
         for file in files {
             std::fs::remove_file(file).expect("remove fixture");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hot path: the STFT input and byte levels match the implementation
+    // before the copies and logarithms were taken out of it.
+    // -----------------------------------------------------------------------
+
+    use super::super::decoders::reference_deinterleave_samples;
+    use super::super::quantize::reference_level;
+
+    /// A deterministic white noise source in -1..1.
+    struct Noise(u32);
+
+    impl Noise {
+        fn next(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 17;
+            self.0 ^= self.0 << 5;
+            f32::from(u16::try_from(self.0 >> 16).unwrap()) / 32_768.0 - 1.0
+        }
+    }
+
+    /// Tones, white noise, silence, impulses, full-scale clipping and noise
+    /// near the bottom of the range, `frames` long.
+    fn synthetic_signals(frames: usize) -> Vec<Vec<f32>> {
+        let time = |i: usize| super::super::usize_to_f32_approx(i) / 48_000.0;
+        let tau = std::f32::consts::TAU;
+        let mut noise = Noise(0x9e37_79b9);
+        let mut quiet = Noise(0x0bad_cafe);
+        vec![
+            (0..frames)
+                .map(|i| {
+                    0.5 * (tau * 1_000.0 * time(i)).sin() + 0.01 * (tau * 15_000.0 * time(i)).sin()
+                })
+                .collect(),
+            (0..frames).map(|_| noise.next()).collect(),
+            vec![0.0; frames],
+            (0..frames)
+                .map(|i| if i % 3_001 == 7 { 1.0 } else { 0.0 })
+                .collect(),
+            (0..frames)
+                .map(|i| (4.0 * (tau * 440.0 * time(i)).sin()).clamp(-1.0, 1.0))
+                .collect(),
+            (0..frames).map(|_| quiet.next() * 1.0e-7).collect(),
+        ]
+    }
+
+    /// Interleave `channels` of the signals, each channel starting at a
+    /// different one.
+    fn interleave_signals(signals: &[Vec<f32>], first: usize, channels: usize) -> Vec<f32> {
+        let frames = signals[0].len();
+        (0..frames)
+            .flat_map(|frame| {
+                (0..channels).map(move |channel| signals[(first + channel) % signals.len()][frame])
+            })
+            .collect()
+    }
+
+    /// Packet sizes that straddle window and hop boundaries.
+    const PACKET_FRAMES: [usize; 7] = [1, 7, 333, 1_152, 4_099, 576, 2_048];
+
+    fn packets(samples: &[f32], channels: usize) -> Vec<AudioFrames> {
+        let mut packets = Vec::new();
+        let mut frame = 0;
+        let total = samples.len() / channels;
+        for size in PACKET_FRAMES.iter().cycle() {
+            if frame >= total {
+                break;
+            }
+            let frames = (*size).min(total - frame);
+            packets.push(AudioFrames {
+                samples: samples[frame * channels..(frame + frames) * channels].to_vec(),
+                first_frame: usize_to_u64(frame),
+                frames,
+                channels,
+            });
+            frame += frames;
+        }
+        packets
+    }
+
+    /// The decode path before it de-interleaved straight into the STFTs and
+    /// quantized without logarithms.
+    struct ReferencePipeline {
+        stfts: Vec<StftComputer>,
+        resamplers: Vec<PeakHoldResampler>,
+        fft_size: usize,
+        bins: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl ReferencePipeline {
+        fn new(channels: usize, fft_size: usize, hop: usize, interval: f64) -> Self {
+            Self {
+                stfts: (0..channels)
+                    .map(|_| StftComputer::new(fft_size, hop))
+                    .collect(),
+                resamplers: (0..channels)
+                    .map(|_| PeakHoldResampler::new(interval))
+                    .collect(),
+                fft_size,
+                bins: fft_size / 2 + 1,
+                bytes: Vec::new(),
+            }
+        }
+
+        fn enqueue(&mut self, audio: &AudioFrames, view_mode: SpectrogramViewMode) {
+            let per_channel = reference_deinterleave_samples(
+                &audio.samples,
+                audio.frames,
+                audio.channels,
+                self.stfts.len(),
+                view_mode,
+            );
+            for (stft, samples) in self.stfts.iter_mut().zip(&per_channel) {
+                stft.enqueue_samples(samples);
+            }
+        }
+
+        fn append_row(&mut self, row: &[f32]) {
+            self.bytes.extend(
+                row.iter()
+                    .take(self.bins)
+                    .map(|&power| reference_level(power, self.fft_size)),
+            );
+            self.bytes
+                .extend(std::iter::repeat_n(0, self.bins.saturating_sub(row.len())));
+        }
+
+        fn drain(&mut self) {
+            while self.stfts.iter().all(StftComputer::has_row) {
+                let start = self.bytes.len();
+                let mut emitted = true;
+                for channel in 0..self.stfts.len() {
+                    let row = self.stfts[channel].take_row().unwrap().to_vec();
+                    match self.resamplers[channel].push(&row).map(<[f32]>::to_vec) {
+                        Some(output) => self.append_row(&output),
+                        None => emitted = false,
+                    }
+                }
+                if !emitted {
+                    self.bytes.truncate(start);
+                }
+            }
+        }
+
+        fn flush(&mut self) {
+            let flushed: Vec<_> = self
+                .resamplers
+                .iter_mut()
+                .map(|resampler| resampler.flush().map(<[f32]>::to_vec))
+                .collect();
+            if flushed.iter().all(Option::is_some) {
+                for row in flushed.into_iter().flatten() {
+                    self.append_row(&row);
+                }
+            }
+        }
+    }
+
+    /// Feed packets through the session's path and the reference path, and
+    /// check that every STFT's queued input and every byte level match.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_paths_match(
+        packets: &[AudioFrames],
+        channels: usize,
+        fft_size: usize,
+        hop: usize,
+        interval: f64,
+        view_mode: SpectrogramViewMode,
+        leading_silence: usize,
+        context: &str,
+    ) -> Vec<u8> {
+        let mut reference = ReferencePipeline::new(channels, fft_size, hop, interval);
+        let mut stfts: Vec<_> = (0..channels)
+            .map(|_| StftComputer::new(fft_size, hop))
+            .collect();
+        let mut resamplers: Vec<_> = (0..channels)
+            .map(|_| PeakHoldResampler::new(interval))
+            .collect();
+        let bins = fft_size / 2 + 1;
+        let mut bytes = Vec::new();
+        for stft in &mut reference.stfts {
+            stft.enqueue_samples(&vec![0.0; leading_silence]);
+        }
+        enqueue_leading_silence(&mut stfts, leading_silence);
+        for (index, packet) in packets.iter().enumerate() {
+            reference.enqueue(packet, view_mode);
+            enqueue_audio(&mut stfts, packet, view_mode).unwrap();
+            for (channel, (actual, expected)) in stfts.iter().zip(&reference.stfts).enumerate() {
+                assert!(
+                    actual
+                        .pending_samples()
+                        .iter()
+                        .map(|sample| sample.to_bits())
+                        .eq(expected
+                            .pending_samples()
+                            .iter()
+                            .map(|sample| sample.to_bits())),
+                    "{context}: STFT input of channel {channel} after packet {index}"
+                );
+            }
+            reference.drain();
+            while append_stft_column(&mut stfts, &mut resamplers, &mut bytes, bins, fft_size)
+                .is_some()
+            {}
+            assert_eq!(
+                bytes, reference.bytes,
+                "{context}: levels after packet {index}"
+            );
+        }
+        reference.flush();
+        let flushed: Vec<_> = resamplers
+            .iter_mut()
+            .map(|resampler| resampler.flush().map(<[f32]>::to_vec))
+            .collect();
+        if flushed.iter().all(Option::is_some) {
+            for row in flushed.iter().flatten() {
+                append_quantized_row(&mut bytes, row, bins, fft_size);
+            }
+        }
+        assert_eq!(bytes, reference.bytes, "{context}: levels after the flush");
+        bytes
+    }
+
+    #[test]
+    fn levels_of_synthetic_signals_match_the_logarithmic_encoding() {
+        let mut seen = [false; 256];
+        for fft_size in [512, 1_024, 2_048, 4_096, 8_192] {
+            for zoom in [0.05, 0.5, 1.0, 2.0, 16.0] {
+                let hop = super::super::zoom_hop_size(fft_size, zoom);
+                let interval = output_interval_for_zoom(hop, zoom);
+                // Enough audio for a few columns at every zoom.
+                let rows = usize::try_from(f64_to_u64_saturating(interval.ceil())).unwrap();
+                let frames = fft_size + hop * rows * 6;
+                let signals = synthetic_signals(frames);
+                for channels in [1, 2, 6] {
+                    let samples = interleave_signals(&signals, fft_size, channels);
+                    let context = format!("FFT {fft_size}, zoom {zoom}, {channels} channels");
+                    let produced = assert_paths_match(
+                        &packets(&samples, channels),
+                        channels,
+                        fft_size,
+                        hop,
+                        interval,
+                        SpectrogramViewMode::PerChannel,
+                        fft_size / 2,
+                        &context,
+                    );
+                    assert!(!produced.is_empty(), "{context}: no columns");
+                    for level in produced {
+                        seen[usize::from(level)] = true;
+                    }
+                }
+            }
+        }
+        // The signals reach from silence to full scale.
+        assert!(seen[0] && seen[255]);
+        assert!(seen.iter().filter(|&&seen| seen).count() > 200);
+    }
+
+    #[test]
+    fn levels_of_every_signal_alone_match_the_logarithmic_encoding() {
+        let signals = synthetic_signals(2_048 + 256 * 16);
+        for (index, signal) in signals.iter().enumerate() {
+            let produced = assert_paths_match(
+                &packets(signal, 1),
+                1,
+                2_048,
+                256,
+                1.0,
+                SpectrogramViewMode::PerChannel,
+                1_024,
+                &format!("signal {index}"),
+            );
+            assert!(!produced.is_empty());
+        }
+    }
+
+    #[test]
+    fn stft_input_matches_the_copying_path_for_any_decoded_layout() {
+        let signals = synthetic_signals(9_000);
+        // (decoded channels, analysis channels, view mode): matching
+        // layouts, a mono stream filling every channel, missing and extra
+        // channels, and downmixes.
+        let layouts = [
+            (1, 1, SpectrogramViewMode::PerChannel),
+            (2, 2, SpectrogramViewMode::PerChannel),
+            (6, 6, SpectrogramViewMode::PerChannel),
+            (1, 2, SpectrogramViewMode::PerChannel),
+            (2, 6, SpectrogramViewMode::PerChannel),
+            (6, 2, SpectrogramViewMode::PerChannel),
+            (1, 1, SpectrogramViewMode::Downmix),
+            (2, 1, SpectrogramViewMode::Downmix),
+            (6, 1, SpectrogramViewMode::Downmix),
+        ];
+        for (decoded, channels, view_mode) in layouts {
+            let samples = interleave_signals(&signals, decoded, decoded);
+            // Hops shorter than, equal to, and longer than the window: a
+            // longer hop carries a skip across packets.
+            for (fft_size, hop) in [(512, 128), (512, 512), (512, 1_024), (2_048, 4_095)] {
+                assert_paths_match(
+                    &packets(&samples, decoded),
+                    channels,
+                    fft_size,
+                    hop,
+                    1.0,
+                    view_mode,
+                    fft_size / 2,
+                    &format!("{decoded} into {channels} {view_mode:?}, FFT {fft_size} hop {hop}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stft_input_matches_the_copying_path_over_a_gapless_continuation() {
+        let signals = synthetic_signals(6_000);
+        // A stereo file continued by a mono file and then a six-channel
+        // one, whose timelines each start again at frame 0, on STFTs that
+        // keep their windows over the switches.
+        let mut packets = Vec::new();
+        for decoded in [2, 1, 6] {
+            let samples = interleave_signals(&signals, decoded, decoded);
+            let mut timeline = AudioTimeline::new(0);
+            let mut file = self::packets(&samples, decoded).into_iter();
+            loop {
+                match timeline
+                    .read(|| Ok(file.next().map_or(AudioRead::Eof, AudioRead::Frames)))
+                    .unwrap()
+                {
+                    AudioRead::Frames(audio) => packets.push(audio),
+                    AudioRead::Pending => {}
+                    AudioRead::Eof => break,
+                }
+            }
+        }
+        for (fft_size, hop, zoom) in [(1_024, 128, 1.0), (2_048, 64, 16.0), (512, 64, 0.5)] {
+            let interval = output_interval_for_zoom(hop, zoom);
+            for (channels, view_mode) in [
+                (2, SpectrogramViewMode::PerChannel),
+                (1, SpectrogramViewMode::Downmix),
+            ] {
+                let produced = assert_paths_match(
+                    &packets,
+                    channels,
+                    fft_size,
+                    hop,
+                    interval,
+                    view_mode,
+                    fft_size / 2,
+                    &format!("continuation, FFT {fft_size} hop {hop}, {view_mode:?}"),
+                );
+                assert!(!produced.is_empty());
+            }
+        }
+    }
+
+    /// Before/after timings of the hot path. Run with
+    /// `cargo test --release --lib -- --ignored --nocapture spectrogram_hot_path_benchmark`.
+    #[test]
+    #[ignore = "benchmark; run in a release build"]
+    fn spectrogram_hot_path_benchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        use symphonia::core::audio::{AsAudioBufferRef, AudioBuffer, SampleBuffer, Signal};
+        use symphonia::core::conv::FromSample;
+
+        fn per_item(start: Instant, items: usize) -> f64 {
+            start.elapsed().as_secs_f64() * 1.0e9 / usize_to_f64_approx(items)
+        }
+
+        // Quantization: rows of an FFT of 8192, noise across the whole range.
+        let fft_size = 8_192;
+        let bins = fft_size / 2 + 1;
+        let mut noise = Noise(0x1234_5678);
+        let row: Vec<f32> = (0..bins)
+            .map(|_| 10.0_f32.powf(noise.next() * 9.0 + 2.0))
+            .collect();
+        let rows = 2_000;
+        let mut bytes = Vec::with_capacity(bins);
+        let start = Instant::now();
+        for _ in 0..rows {
+            bytes.clear();
+            bytes.extend(row.iter().map(|&power| reference_level(power, fft_size)));
+            black_box(&bytes);
+        }
+        let before = per_item(start, rows * bins);
+        let start = Instant::now();
+        for _ in 0..rows {
+            bytes.clear();
+            append_quantized_row(&mut bytes, black_box(&row), bins, fft_size);
+            black_box(&bytes);
+        }
+        let after = per_item(start, rows * bins);
+        println!("quantization: {before:.2} ns/bin before, {after:.2} ns/bin after");
+
+        // Packets: 16-bit stereo, 4096 frames, as Symphonia decodes FLAC,
+        // into two STFTs. Everything from the decoded buffer to the queue.
+        let frames = 4_096;
+        let spec = symphonia::core::audio::SignalSpec::new(
+            48_000,
+            symphonia::core::audio::Channels::FRONT_LEFT
+                | symphonia::core::audio::Channels::FRONT_RIGHT,
+        );
+        let mut decoded = AudioBuffer::<i16>::new(usize_to_u64(frames), spec);
+        decoded.render_reserved(Some(frames));
+        for channel in 0..2 {
+            for sample in decoded.chan_mut(channel) {
+                *sample = i16::from_sample(noise.next());
+            }
+        }
+        let view_mode = SpectrogramViewMode::PerChannel;
+        let packets = 4_000;
+        let mut stfts = vec![StftComputer::new(2_048, 256), StftComputer::new(2_048, 256)];
+        let mut sample_buf = None;
+        let start = Instant::now();
+        for _ in 0..packets {
+            let audio = decoded.as_audio_buffer_ref();
+            let buffer: &mut SampleBuffer<f32> =
+                super::super::fft::ensure_sample_buffer(&mut sample_buf, audio.capacity(), spec);
+            buffer.copy_interleaved_ref(audio);
+            let samples = buffer.samples().to_vec();
+            let per_channel =
+                reference_deinterleave_samples(&samples, frames, 2, stfts.len(), view_mode);
+            for (stft, samples) in stfts.iter_mut().zip(&per_channel) {
+                stft.enqueue_samples(samples);
+                stft.reset();
+            }
+        }
+        let before = per_item(start, packets * frames);
+        let start = Instant::now();
+        for _ in 0..packets {
+            let audio = AudioFrames {
+                samples: super::super::decoders::interleave_f32(&decoded.as_audio_buffer_ref()),
+                first_frame: 0,
+                frames,
+                channels: 2,
+            };
+            enqueue_audio(&mut stfts, &audio, view_mode).unwrap();
+            for stft in &mut stfts {
+                stft.reset();
+            }
+        }
+        let after = per_item(start, packets * frames);
+        println!("packets: {before:.2} ns/frame before, {after:.2} ns/frame after");
     }
 }

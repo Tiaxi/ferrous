@@ -6,6 +6,7 @@ pub(crate) use channel_layout::probe_source_channel_labels;
 mod decoders;
 mod fft;
 mod output;
+mod quantize;
 pub(crate) mod retention;
 use output::{resets_spectral_stream, AnalysisEventOutput, AnalysisOutputs};
 #[cfg(feature = "gst")]
