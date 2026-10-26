@@ -477,11 +477,28 @@ void GlobalSearchResultsModel::rebuildSearchRows() {
 }
 
 QString GlobalSearchResultsModel::highlightText(const QString &text, const QString &query) const {
+    // Folds as the Rust search does (crate::collation::fold): base letters,
+    // with the letters that have no decomposition spelled out.
     const auto fold = [](const QString &value) {
         QString result;
         for (auto ch : value.normalized(QString::NormalizationForm_KD).toCaseFolded()) {
-            if (ch.category() != QChar::Mark_NonSpacing && ch.category() != QChar::Mark_SpacingCombining
-                && ch.category() != QChar::Mark_Enclosing) result += ch;
+            if (ch.category() == QChar::Mark_NonSpacing || ch.category() == QChar::Mark_SpacingCombining
+                || ch.category() == QChar::Mark_Enclosing) continue;
+            switch (ch.unicode()) {
+            case 0x00DF: result += QStringLiteral("ss"); break; // ß
+            case 0x00E6: result += QStringLiteral("ae"); break; // æ
+            case 0x0153: result += QStringLiteral("oe"); break; // œ
+            case 0x00F8: result += QLatin1Char('o'); break;     // ø
+            case 0x0142: result += QLatin1Char('l'); break;     // ł
+            case 0x0111:                                        // đ
+            case 0x00F0: result += QLatin1Char('d'); break;     // ð
+            case 0x00FE: result += QStringLiteral("th"); break; // þ
+            case 0x0127: result += QLatin1Char('h'); break;     // ħ
+            case 0x0167: result += QLatin1Char('t'); break;     // ŧ
+            case 0x0131: result += QLatin1Char('i'); break;     // ı
+            case 0x03C2: result += QChar(0x03C3); break;        // ς
+            default: result += ch;
+            }
         }
         return result;
     };
@@ -515,7 +532,12 @@ QString GlobalSearchResultsModel::highlightText(const QString &text, const QStri
         qsizetype offset = 0;
         while ((offset = normalized.indexOf(term, offset)) >= 0) {
             const auto end = offset + term.size();
-            const auto originalEnd = end < positions.size() ? positions[end] : text.size();
+            // Every original character the match covers part of, so "a"
+            // highlights the whole "Æ" it matches the start of, and the marks
+            // that fold away after it, as in "e" + U+0301.
+            const auto nextStart = end < positions.size() ? positions[end] : text.size();
+            auto originalEnd = std::max(positions[end - 1] + 1, nextStart);
+            while (originalEnd < text.size() && fold(text.mid(originalEnd, 1)).isEmpty()) ++originalEnd;
             for (auto i = positions[offset]; i < originalEnd; ++i) matched[i] = true;
             offset = end;
         }

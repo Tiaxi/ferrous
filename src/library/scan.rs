@@ -2046,7 +2046,7 @@ fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
                 &mut writer,
                 &root.to_string_lossy(),
                 unix_ts_i64(),
-                &HashMap::new(),
+                &SeenRows::new(&HashMap::new(), &HashMap::new()),
                 MetadataResult { task, read },
             )
             .expect("index fixture");
@@ -2633,11 +2633,12 @@ impl<'conn> TrackWriter<'conn> {
     /// row; their rows are newer than the read. The batch holds the write
     /// lock now, so none of them can happen until it commits.
     ///
-    /// `seen` is the row the scan started with.
+    /// `seen` is the row as the scan saw it before it read the file; see
+    /// [`SeenRows`].
     fn still_current(
         &mut self,
         task: &MetadataTask,
-        seen: Option<&ExistingTrackScanState>,
+        seen: Option<RowState>,
     ) -> Result<bool, String> {
         let Some(on_disk) = track_file_fingerprint(&task.path) else {
             // Moved or deleted: a rename has its row, or the next scan
@@ -2670,7 +2671,31 @@ impl<'conn> TrackWriter<'conn> {
             mtime_ns: task.mtime_ns,
             size_bytes: task.size_bytes,
         };
-        Ok(on_disk == read_state && seen.is_none_or(|seen| seen.row == row))
+        Ok(on_disk == read_state && seen.is_none_or(|seen| seen == row))
+    }
+}
+
+/// The rows a scan saw before it read their files: the rows of its root
+/// when it started, and the rows it found by path for other files it
+/// walked, such as those another root indexed that it reclaims.
+struct SeenRows<'a> {
+    existing: &'a HashMap<String, ExistingTrackScanState>,
+    found: &'a HashMap<String, RowState>,
+}
+
+impl<'a> SeenRows<'a> {
+    fn new(
+        existing: &'a HashMap<String, ExistingTrackScanState>,
+        found: &'a HashMap<String, RowState>,
+    ) -> Self {
+        Self { existing, found }
+    }
+
+    fn get(&self, path: &str) -> Option<RowState> {
+        self.existing
+            .get(path)
+            .map(|seen| seen.row)
+            .or_else(|| self.found.get(path).copied())
     }
 }
 
@@ -2681,11 +2706,11 @@ fn apply_metadata_result(
     writer: &mut TrackWriter<'_>,
     root_str: &str,
     now: i64,
-    existing: &HashMap<String, ExistingTrackScanState>,
+    seen: &SeenRows<'_>,
     result: MetadataResult,
 ) -> Result<Option<(MetadataTask, IndexedTrack)>, String> {
     let MetadataResult { task, read } = result;
-    if !writer.still_current(&task, existing.get(&task.path_string))? {
+    if !writer.still_current(&task, seen.get(&task.path_string))? {
         return Ok(None);
     }
     // The row may belong to another root that this one reclaims, so it is
@@ -2739,7 +2764,7 @@ struct CoverUpdate {
 /// written.
 fn apply_cover_update(
     writer: &mut TrackWriter<'_>,
-    existing: &HashMap<String, ExistingTrackScanState>,
+    seen: &SeenRows<'_>,
     update: CoverUpdate,
 ) -> Result<Option<(MetadataTask, IndexedTrack)>, String> {
     let CoverUpdate {
@@ -2748,7 +2773,7 @@ fn apply_cover_update(
         stamp,
         read_at,
     } = update;
-    if !writer.still_current(&task, existing.get(&task.path_string))? {
+    if !writer.still_current(&task, seen.get(&task.path_string))? {
         return Ok(None);
     }
     writer
@@ -2832,21 +2857,34 @@ struct LibraryWalk {
     scoped: bool,
     needs_full_scan: bool,
     nested_roots: HashSet<PathBuf>,
+    /// The other library roots; see [`LibraryWalk::follows_link`].
+    other_roots: Vec<PathBuf>,
     ancestors: Vec<WalkAncestor>,
     claimed: HashSet<FileIdentity>,
     linked: VecDeque<(ScanCandidate, FileIdentity)>,
     /// Supported audio files encountered, including unreadable and duplicate ones.
     found: usize,
+    /// The `AppleDouble` sidecars encountered, which are not tracks.
+    sidecars: HashSet<PathBuf>,
     kept: HashSet<PathBuf>,
     /// The files found that have other names; see
     /// [`WorkerLibrary::hard_linked`].
     hard_linked: HashSet<PathBuf>,
     read_errors: usize,
     first_read_error: Option<String>,
+    /// Links skipped because they lead to a folder that holds a root.
+    enclosing_links: usize,
+    first_enclosing_link: Option<String>,
 }
 
 impl LibraryWalk {
-    fn new(root: &Path, nested_roots: HashSet<PathBuf>) -> Self {
+    /// A walk of `root`, one of `roots`, the paths of the library's roots.
+    fn new(root: &Path, roots: &[PathBuf]) -> Self {
+        let other_roots: Vec<PathBuf> = roots
+            .iter()
+            .filter(|other| *other != root)
+            .cloned()
+            .collect();
         Self {
             walk: Some(walk_from(root)),
             root: root.to_path_buf(),
@@ -2854,26 +2892,66 @@ impl LibraryWalk {
             start: root.to_path_buf(),
             scoped: false,
             needs_full_scan: false,
-            nested_roots,
+            nested_roots: other_roots
+                .iter()
+                .filter(|other| other.starts_with(root))
+                .cloned()
+                .collect(),
+            other_roots,
             ancestors: Vec::new(),
             claimed: HashSet::new(),
             linked: VecDeque::new(),
             found: 0,
+            sidecars: HashSet::new(),
             kept: HashSet::new(),
             hard_linked: HashSet::new(),
             read_errors: 0,
             first_read_error: None,
+            enclosing_links: 0,
+            first_enclosing_link: None,
         }
     }
 
     /// A walk of the files and folders `scope` of `root`.
-    fn scoped(root: &Path, scope: &[PathBuf], nested_roots: HashSet<PathBuf>) -> Self {
+    fn scoped(root: &Path, scope: &[PathBuf], roots: &[PathBuf]) -> Self {
         Self {
             walk: None,
             starts: scope.iter().cloned().collect(),
             scoped: true,
-            ..Self::new(root, nested_roots)
+            ..Self::new(root, roots)
         }
+    }
+
+    /// Whether to follow the link at `path`. A link into another root is
+    /// not followed: that root indexes its files. Nor is a link to a folder
+    /// that holds a root, such as `/`, which would walk far more than the
+    /// library and index roots twice; the scan reports those.
+    fn follows_link(&mut self, path: &Path, is_dir: bool) -> bool {
+        let Ok(target) = path.canonicalize() else {
+            return true;
+        };
+        if target == self.root {
+            // A link back to the root: the walk reports it as a loop.
+            return true;
+        }
+        // The root that indexes the target is the innermost one that holds it.
+        let owner = std::iter::once(&self.root)
+            .chain(&self.other_roots)
+            .filter(|root| target.starts_with(root))
+            .max_by_key(|root| root.components().count());
+        if owner.is_some_and(|owner| owner != &self.root) {
+            return false;
+        }
+        let encloses = |root: &PathBuf| root.starts_with(&target);
+        if is_dir && (encloses(&self.root) || self.other_roots.iter().any(encloses)) {
+            self.enclosing_links = self.enclosing_links.saturating_add(1);
+            if self.first_enclosing_link.is_none() {
+                self.first_enclosing_link =
+                    Some(format!("'{}' to '{}'", path.display(), target.display()));
+            }
+            return false;
+        }
+        true
     }
 
     /// Starts the walk of the next path of a scoped walk. Returns false when
@@ -2935,6 +3013,13 @@ impl LibraryWalk {
                 WalkStep::Continue
             };
         }
+        if entry.path_is_symlink() && !self.follows_link(entry.path(), entry.file_type().is_dir()) {
+            return if entry.file_type().is_dir() {
+                WalkStep::SkipDir
+            } else {
+                WalkStep::Continue
+            };
+        }
         let via_link = entry.path_is_symlink()
             || depth
                 .checked_sub(1)
@@ -2955,11 +3040,20 @@ impl LibraryWalk {
             });
             return WalkStep::Continue;
         }
-        if !entry.file_type().is_file() || !is_audio_track_file(path) {
+        if !entry.file_type().is_file() || !is_supported_audio(path) {
             return WalkStep::Continue;
         }
-
-        self.found = self.found.saturating_add(1);
+        match apple_double_check(path) {
+            Some(true) => {
+                self.sidecars.insert(path.to_path_buf());
+                return WalkStep::Continue;
+            }
+            Some(false) => self.found = self.found.saturating_add(1),
+            // A `._` file that cannot be read may be a sidecar, as on the
+            // mount point of an unmounted share: it does not show that the
+            // root holds audio.
+            None => {}
+        }
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(err) => {
@@ -3151,6 +3245,9 @@ struct RootScan<'a> {
     root_str: &'a str,
     /// The rows of the root when the scan started.
     existing: &'a HashMap<String, ExistingTrackScanState>,
+    /// The rows, by path, of files the scan walked that were not rows of
+    /// its root when it started; see [`SeenRows`].
+    found: HashMap<String, RowState>,
     now: i64,
     tuning: ScanTuning,
     /// Rows read or covers checked, and not yet written.
@@ -3170,6 +3267,34 @@ impl RootScan<'_> {
         if let Some(progress) = self.progress.emit(force, self.discovered, self.processed) {
             sink.progress(self.conn, progress);
         }
+    }
+
+    /// Notes the row of a file at `path` that was not a row of the root
+    /// when the scan started, before the scan reads the file. Another root
+    /// may have indexed it (one configured before nested roots were
+    /// rejected), and its row may change while the file is read.
+    fn note_row(&mut self, path: &str) -> Result<(), String> {
+        let row = self
+            .conn
+            .prepare_cached(
+                "SELECT mtime_ns, size_bytes, cover_path, cover_stamp FROM tracks WHERE path = ?1",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_row(params![path], |row| {
+                    Ok(RowState::new(
+                        row.get(0)?,
+                        row.get(1)?,
+                        &row.get::<_, String>(2)?,
+                        stamp_from_column(row.get(3)?),
+                    ))
+                })
+                .optional()
+            })
+            .map_err(|e| format!("failed to read the indexed row of '{path}': {e}"))?;
+        if let Some(row) = row {
+            self.found.insert(path.to_string(), row);
+        }
+        Ok(())
     }
 
     /// Counts a file whose row is up to date.
@@ -3254,7 +3379,8 @@ impl RootScan<'_> {
             return Ok(());
         }
         let results = std::mem::take(&mut self.batch);
-        let written = write_batch(self.conn, self.root_str, self.now, self.existing, results)?;
+        let seen = SeenRows::new(self.existing, &self.found);
+        let written = write_batch(self.conn, self.root_str, self.now, &seen, results)?;
         sink.committed(self.root, written);
         Ok(())
     }
@@ -3313,7 +3439,7 @@ fn write_batch(
     conn: &Connection,
     root_str: &str,
     now: i64,
-    existing: &HashMap<String, ExistingTrackScanState>,
+    seen: &SeenRows<'_>,
     results: Vec<ScanRow>,
 ) -> Result<Vec<(MetadataTask, IndexedTrack)>, String> {
     // Take the write lock up front: a deferred transaction that reads before
@@ -3326,9 +3452,9 @@ fn write_batch(
         for result in results {
             written.extend(match result {
                 ScanRow::Read(result) => {
-                    apply_metadata_result(&mut writer, root_str, now, existing, result)?
+                    apply_metadata_result(&mut writer, root_str, now, seen, result)?
                 }
-                ScanRow::Cover(update) => apply_cover_update(&mut writer, existing, update)?,
+                ScanRow::Cover(update) => apply_cover_update(&mut writer, seen, update)?,
             });
         }
     }
@@ -3410,10 +3536,9 @@ fn scan_root_in(
         None => load_existing_tracks_for_root(conn, &root_str),
     };
     let previous_index_count = existing.len();
-    let nested_roots = load_roots(conn)
+    let roots: Vec<PathBuf> = load_roots(conn)
         .into_iter()
         .map(|known| known.path)
-        .filter(|path| path != &root && path.starts_with(&root))
         .collect();
     let mut seen_paths: HashSet<String> = HashSet::new();
     let tuning = ScanTuning::current();
@@ -3422,6 +3547,7 @@ fn scan_root_in(
         root: &root,
         root_str: &root_str,
         existing: &existing,
+        found: HashMap::new(),
         now: unix_ts_i64(),
         tuning,
         batch: Vec::new(),
@@ -3436,8 +3562,8 @@ fn scan_root_in(
 
     let mut workers = MetadataWorkerPool::new(tuning.workers, covers);
     let mut walk = match scope {
-        Some(scope) => LibraryWalk::scoped(&root, scope, nested_roots),
-        None => LibraryWalk::new(&root, nested_roots),
+        Some(scope) => LibraryWalk::scoped(&root, scope, &roots),
+        None => LibraryWalk::new(&root, &roots),
     };
 
     let complete = 'scan: {
@@ -3456,6 +3582,9 @@ fn scan_root_in(
             seen_paths.insert(path_string.clone());
 
             let existing_state = existing.get(&path_string);
+            if existing_state.is_none() {
+                scan.note_row(&path_string)?;
+            }
             let needs_update = existing_state.is_none_or(|existing_state| {
                 existing_state.row.mtime_ns != mtime_ns
                     || existing_state.row.size_bytes != size_bytes
@@ -3542,14 +3671,23 @@ fn scan_root_in(
         });
     }
 
+    // Rows of sidecars, indexed before sidecars were skipped (#201), are
+    // never tracks, so they go even when the root looks offline.
+    let sidecar_rows: Vec<String> = existing
+        .keys()
+        .filter(|p| walk.sidecars.contains(Path::new(p)))
+        .cloned()
+        .collect();
+    let previous_track_count = previous_index_count - sidecar_rows.len();
     // A root that previously had tracks but now has no audio files at all is
-    // most likely an unmounted or offline folder, not an emptied library. A
-    // scoped walk does not see the whole root, so it looks at the folder.
+    // most likely an unmounted or offline folder, not an emptied library,
+    // even if a folder under its mount point holds sidecars. A scoped walk
+    // does not see the whole root, so it looks at the folder.
     let keep_all = walk.found == 0
-        && previous_index_count > 0
+        && previous_track_count > 0
         && (scope.is_none() || root_looks_offline(&root));
     let stale: Vec<String> = if keep_all {
-        Vec::new()
+        sidecar_rows
     } else {
         existing
             .keys()
@@ -3571,12 +3709,21 @@ fn scan_root_in(
             "found no audio files in '{}'; kept its {} in case the folder is offline. \
              Remove the root to drop them",
             root.display(),
-            count_label(previous_index_count, "indexed track", "indexed tracks")
+            count_label(previous_track_count, "indexed track", "indexed tracks")
         )),
         None => None,
     };
+    let link_problem = walk.first_enclosing_link.map(|first| {
+        format!(
+            "did not follow {} in '{}': a link to a folder that holds a library root \
+             would index the root again (first: {first})",
+            count_label(walk.enclosing_links, "link", "links"),
+            root.display()
+        )
+    });
     let problems: Vec<String> = walk_problem
         .into_iter()
+        .chain(link_problem)
         .chain(scan.read_failures.problems(&root))
         .collect();
     Ok(RootScanOutcome {
@@ -3604,17 +3751,26 @@ pub(crate) fn is_audio_track_file(path: &Path) -> bool {
 /// Only files with such a name are read, to check for the `AppleDouble` magic
 /// number, so a track that merely starts with `._` is still a track.
 fn is_apple_double_sidecar(path: &Path) -> bool {
+    apple_double_check(path) == Some(true)
+}
+
+/// Whether `path` is an `AppleDouble` file (see [`is_apple_double_sidecar`]);
+/// `None` for a file with such a name that cannot be read, which may be one.
+fn apple_double_check(path: &Path) -> Option<bool> {
     const APPLE_DOUBLE_MAGIC: [u8; 4] = 0x0005_1607_u32.to_be_bytes();
     let has_sidecar_name = path
         .file_name()
         .is_some_and(|name| name.as_encoded_bytes().starts_with(b"._"));
     if !has_sidecar_name {
-        return false;
+        return Some(false);
     }
     let mut magic = [0; 4];
-    fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut magic))
-        .is_ok_and(|()| magic == APPLE_DOUBLE_MAGIC)
+    match fs::File::open(path).and_then(|mut file| file.read_exact(&mut magic)) {
+        Ok(()) => Some(magic == APPLE_DOUBLE_MAGIC),
+        // Too short for the header: not an `AppleDouble` file.
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => Some(false),
+        Err(_) => None,
+    }
 }
 
 /// An `AppleDouble` file as macOS writes one next to a file it copies: the
@@ -4517,6 +4673,110 @@ mod tests {
         let paths: Vec<PathBuf> = snapshot.tracks.iter().map(|t| t.path.clone()).collect();
         assert_eq!(paths, [track]);
         assert_eq!(outcome.removed, [sidecar.to_string_lossy().to_string()]);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn a_mount_point_with_only_sidecars_keeps_its_tracks_and_drops_the_sidecar_rows() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("apple-double-mount-point");
+        fs::create_dir_all(root.join("Album")).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let tracks = [root.join("Album/01.mp3"), root.join("Album/02.mp3")];
+        let sidecar = root.join("Album/._01.mp3");
+        for track in &tracks {
+            write_stub(track, crate::tag_write::TEST_MP3);
+        }
+        write_test_apple_double(&sidecar);
+        // As a scan before sidecars were skipped indexed them.
+        let mut indexed = tracks.to_vec();
+        indexed.push(sidecar.clone());
+        insert_indexed_tracks(&mut conn, &root, &indexed);
+        // The share is unmounted: its mount point shows the folder below,
+        // where sidecars were left behind.
+        for track in &tracks {
+            fs::remove_file(track).expect("unmount");
+        }
+
+        let outcome = scan(&conn, &root);
+
+        assert_eq!(indexed_paths(&conn), tracks);
+        assert_eq!(outcome.removed, [sidecar.to_string_lossy().to_string()]);
+        let problem = outcome.problem.expect("the offline root is reported");
+        assert!(
+            problem.contains("found no audio files")
+                && problem.contains("kept its 2 indexed tracks"),
+            "{problem}"
+        );
+
+        // Once the share is back, a sidecar row left over is removed too.
+        for track in &tracks {
+            write_stub(track, crate::tag_write::TEST_MP3);
+        }
+        insert_indexed_tracks(&mut conn, &root, std::slice::from_ref(&sidecar));
+        let outcome = scan(&conn, &root);
+        assert_eq!(indexed_paths(&conn), tracks);
+        assert_eq!(outcome.removed, [sidecar.to_string_lossy().to_string()]);
+        assert_eq!(outcome.problem, None);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_dot_underscore_file_does_not_show_the_root_is_mounted() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("apple-double-unreadable");
+        fs::create_dir_all(root.join("Album")).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let tracks = [root.join("Album/01.mp3"), root.join("Album/02.mp3")];
+        for track in &tracks {
+            write_stub(track, crate::tag_write::TEST_MP3);
+        }
+        insert_indexed_tracks(&mut conn, &root, &tracks);
+        // The share is unmounted; its mount point shows a leftover file
+        // named as a sidecar that cannot be read.
+        for track in &tracks {
+            fs::remove_file(track).expect("unmount");
+        }
+        let leftover = root.join("Album/._01.mp3");
+        write_stub(&leftover, crate::tag_write::TEST_MP3);
+        fs::set_permissions(&leftover, fs::Permissions::from_mode(0o000)).expect("lock");
+        // Root, or a process with CAP_DAC_OVERRIDE, reads it anyway.
+        let readable = fs::File::open(&leftover).is_ok();
+
+        let outcome = scan(&conn, &root);
+        fs::set_permissions(&leftover, fs::Permissions::from_mode(0o644)).expect("unlock");
+
+        let indexed = indexed_paths(&conn);
+        if readable {
+            // A readable `._` file without the header is a track (#201), so
+            // the root is reachable and the missing tracks are gone.
+            assert_eq!(indexed, [leftover.clone()]);
+            let mut removed = outcome.removed.clone();
+            removed.sort();
+            assert_eq!(
+                removed,
+                tracks
+                    .iter()
+                    .map(|track| track.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            assert!(
+                tracks.iter().all(|track| indexed.contains(track)),
+                "{indexed:?}"
+            );
+            assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+            let problem = outcome.problem.expect("the offline root is reported");
+            assert!(
+                problem.contains("found no audio files")
+                    && problem.contains("kept its 2 indexed tracks"),
+                "{problem}"
+            );
+        }
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -5469,6 +5729,128 @@ mod tests {
         remove_root_and_purge(&conn, &outer).expect("remove outer");
         assert_eq!(indexed_paths(&conn), [inner.join("inner.mp3")]);
         let _ = fs::remove_dir_all(outer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_another_root_is_indexed_by_that_root_alone() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("link-into-root");
+        fs::create_dir_all(base.join("a/Own")).expect("mkdir a");
+        fs::create_dir_all(base.join("b/Album")).expect("mkdir b");
+        let base = base.canonicalize().expect("canonical base");
+        let (a, b) = (base.join("a"), base.join("b"));
+        write_stub(&a.join("Own/01.mp3"), b"own");
+        write_stub(&b.join("Album/02.mp3"), b"linked");
+        std::os::unix::fs::symlink(b.join("Album"), a.join("Linked")).expect("link");
+        // Before `b` was a root, `a` indexed its files through the link.
+        scan(&conn, &a);
+        assert_eq!(
+            indexed_paths(&conn),
+            [a.join("Linked/02.mp3"), a.join("Own/01.mp3")]
+        );
+
+        insert_root(&conn, &b, "").expect("root b");
+        let outcome = scan(&conn, &a);
+        assert_eq!(
+            outcome.removed,
+            [a.join("Linked/02.mp3").to_string_lossy().to_string()]
+        );
+        assert_eq!(outcome.problem, None);
+        scan(&conn, &b);
+        assert_eq!(
+            indexed_paths(&conn),
+            [a.join("Own/01.mp3"), b.join("Album/02.mp3")]
+        );
+        assert_eq!(root_of(&conn, &b.join("Album/02.mp3")), b.to_string_lossy());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_folder_holding_the_root_is_skipped_and_reported() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("link-up");
+        fs::create_dir_all(base.join("music/Album")).expect("mkdir music");
+        fs::create_dir_all(base.join("elsewhere")).expect("mkdir elsewhere");
+        let base = base.canonicalize().expect("canonical base");
+        let root = base.join("music");
+        write_stub(&root.join("Album/01.mp3"), b"own");
+        write_stub(&base.join("elsewhere/02.mp3"), b"outside");
+        // As a link to `/` would, this one leads above the root.
+        std::os::unix::fs::symlink(&base, root.join("Up")).expect("link");
+
+        let outcome = scan(&conn, &root);
+
+        assert_eq!(indexed_paths(&conn), [root.join("Album/01.mp3")]);
+        let problem = outcome.problem.expect("the skipped link is reported");
+        assert!(
+            problem.contains("did not follow 1 link in")
+                && problem.contains(&format!("'{}'", root.join("Up").display())),
+            "{problem}"
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_reclaim_does_not_overwrite_a_cover_applied_while_it_reads_the_file() {
+        let dir = test_dir("reclaim-cover");
+        fs::create_dir_all(dir.join("outer/inner")).expect("mkdir inner");
+        let dir = dir.canonicalize().expect("canonical dir");
+        let outer = dir.join("outer");
+        let inner = outer.join("inner");
+        let track = inner.join("01.mp3");
+        write_stub(&track, crate::tag_write::TEST_MP3);
+        let db = dir.join("library.sqlite3");
+        let conn = Connection::open(&db).expect("db");
+        conn.busy_timeout(Duration::from_secs(20))
+            .expect("busy timeout");
+        init_schema(&conn).expect("schema");
+        // Before nested roots were rejected, the outer root indexed the
+        // inner root's tracks.
+        scan(&conn, &outer);
+        insert_root(&conn, &inner, "").expect("legacy nested root");
+        assert_eq!(root_of(&conn, &track), outer.to_string_lossy());
+
+        // Apply Album Art writes the row after the inner root's scan found
+        // the file and before it writes what it read.
+        let (started, release) = scan_test_hooks::hold_read(&track);
+        let applier = std::thread::spawn({
+            let db = db.clone();
+            let key = track.to_string_lossy().to_string();
+            move || {
+                started
+                    .recv_timeout(Duration::from_secs(20))
+                    .expect("the scan reads the track");
+                let other = Connection::open(&db).expect("writer");
+                other
+                    .busy_timeout(Duration::from_secs(20))
+                    .expect("busy timeout");
+                other
+                    .execute(
+                        "UPDATE tracks SET cover_path = '/elsewhere/applied.png', \
+                         cover_stamp = 5 WHERE path = ?1",
+                        params![key],
+                    )
+                    .expect("applied cover");
+                drop(release);
+            }
+        });
+        scan(&conn, &inner);
+        applier.join().expect("applier");
+
+        let cover: (String, i64) = conn
+            .query_row(
+                "SELECT cover_path, cover_stamp FROM tracks WHERE path = ?1",
+                params![track.to_string_lossy()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!(cover, ("/elsewhere/applied.png".to_string(), 5));
+        drop(conn);
+        let _ = fs::remove_dir_all(dir);
     }
 
     fn root_of(conn: &Connection, path: &Path) -> String {

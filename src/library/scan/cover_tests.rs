@@ -329,7 +329,7 @@ fn a_cover_check_does_not_overwrite_a_cover_written_since_the_scan_saw_the_row()
         &worker.conn,
         &path_string(&root),
         0,
-        &existing,
+        &SeenRows::new(&existing, &HashMap::new()),
         vec![ScanRow::Cover(CoverUpdate {
             task: MetadataTask {
                 path: track.clone(),

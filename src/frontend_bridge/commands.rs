@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, Cursor};
@@ -20,14 +21,16 @@ use crate::playback::{remap_path, PathRenames, PlaybackCommand, PlaybackEngine};
 
 use super::config::{load_settings_into, save_settings};
 use super::imports::{QueueRequest, RenamedDetails};
+use super::library_tree::tree_key_is;
 use super::queue::handle_queue_command;
 use super::queue_sync::QueueEdit;
-use super::search::{keyed_roots, tree_key_is, tree_path_parts};
+use super::search::{keyed_roots, tree_path_parts, TreePathParts};
 use super::{
     library_tree, try_send_event, ApplyAlbumArtRequest, BridgeAnalysisCommand, BridgeCommand,
     BridgeError, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
     BridgeSettingsCommand, BridgeState, ErrorCategory, LibrarySortMode, SearchWorkerQuery,
 };
+use crate::collation::CollationKey;
 
 pub(super) struct BridgeCommandContext<'a> {
     pub(super) playback: &'a PlaybackEngine,
@@ -598,9 +601,9 @@ fn normalized_library_album(track: &LibraryTrack) -> &str {
     }
 }
 
-/// The library tracks of the album selected by `artist` and `album`. Every
-/// library track is matched, so the match borrows from the tracks instead of
-/// building their tree keys.
+/// The library tracks of the album selected by `artist` and `album`, in the
+/// order the tree plays them. Every library track is matched, so the match
+/// borrows from the tracks instead of building their tree keys.
 fn collect_album_paths_for_queue(
     library: &crate::library::LibrarySnapshot,
     artist: &str,
@@ -615,59 +618,106 @@ fn collect_album_paths_for_queue(
     let album_selector_is_key = album_selector.starts_with("album|");
     let roots = keyed_roots(&library.roots);
 
-    library
-        .tracks
-        .iter()
-        .filter(|track| {
-            let parts = tree_path_parts(&track.path, &roots, &track.artist);
-
-            if album_selector_is_key {
-                let Some(parts) = parts else {
-                    return false;
-                };
-                let Some(album_folder) = parts.album_folder.as_deref() else {
-                    return false;
-                };
-                if !tree_key_is(
-                    album_selector,
-                    "album",
-                    &[parts.root_key, &parts.artist_name, album_folder],
-                ) {
-                    return false;
-                }
-                // Only include root album tracks and recognised disc
-                // sections (Disc 1, CD 2, …).  Exclude bonus/extra
-                // subfolders so the queue represents the main album.
-                return parts.is_main_level_album_track || parts.is_disc_section_album_track();
+    let mut albums: Vec<AlbumMatch<'_>> = Vec::new();
+    // Tracks outside every root, matched by their tags, in library order.
+    let mut untreed = Vec::new();
+    for track in &library.tracks {
+        let parts = tree_path_parts(&track.path, &roots, &track.artist);
+        let Some(parts) = parts else {
+            if !album_selector_is_key
+                && !artist_selector_is_key
+                && normalized_library_artist(track) == artist_selector
+                && normalized_library_album(track) == album_selector
+            {
+                untreed.push(track.path.clone());
             }
-
+            continue;
+        };
+        let in_album = parts.is_main_level_album_track || parts.is_disc_section_album_track();
+        let Some(album_folder) = parts.album_folder.as_deref() else {
+            continue;
+        };
+        let matches = if album_selector_is_key {
+            tree_key_is(
+                album_selector,
+                "album",
+                &[parts.root_key, &parts.artist_name, album_folder],
+            )
+        } else {
             let artist_matches = if artist_selector_is_key {
-                parts.as_ref().is_some_and(|parts| {
-                    tree_key_is(
-                        artist_selector,
-                        "artist",
-                        &[parts.root_key, &parts.artist_name],
-                    )
-                })
-            } else if let Some(parts) = parts.as_ref() {
-                parts.artist_name == artist_selector
+                tree_key_is(
+                    artist_selector,
+                    "artist",
+                    &[parts.root_key, &parts.artist_name],
+                )
             } else {
-                normalized_library_artist(track) == artist_selector
+                parts.artist_name == artist_selector
             };
-            if !artist_matches {
-                return false;
-            }
+            artist_matches && album_folder == album_selector
+        };
+        // Only root album tracks and recognised disc sections (Disc 1,
+        // CD 2, …); bonus/extra subfolders are not the main album.
+        if !matches || !in_album {
+            continue;
+        }
+        AlbumMatch::add(&mut albums, &parts, track);
+    }
 
-            if let Some(parts) = parts {
-                if parts.album_folder.as_deref().unwrap_or("Unknown Album") != album_selector {
-                    return false;
+    let mut out = Vec::new();
+    for mut album in albums {
+        library_tree::push_album_paths_in_tree_order(
+            &album.root_tracks,
+            &mut album.sections,
+            &mut out,
+        );
+    }
+    out.extend(untreed);
+    out
+}
+
+/// The matched tracks of one album of the tree; see
+/// [`collect_album_paths_for_queue`].
+struct AlbumMatch<'a> {
+    root_key: &'a str,
+    artist_name: Cow<'a, str>,
+    album_folder: Cow<'a, str>,
+    root_tracks: Vec<&'a LibraryTrack>,
+    sections: Vec<(Cow<'a, str>, Vec<&'a LibraryTrack>)>,
+}
+
+impl<'a> AlbumMatch<'a> {
+    fn add(albums: &mut Vec<Self>, parts: &TreePathParts<'a>, track: &'a LibraryTrack) {
+        let Some(album_folder) = parts.album_folder.as_ref() else {
+            return;
+        };
+        let index = albums
+            .iter()
+            .position(|album| {
+                album.root_key == parts.root_key
+                    && album.artist_name == parts.artist_name
+                    && album.album_folder == *album_folder
+            })
+            .unwrap_or_else(|| {
+                albums.push(Self {
+                    root_key: parts.root_key,
+                    artist_name: parts.artist_name.clone(),
+                    album_folder: album_folder.clone(),
+                    root_tracks: Vec::new(),
+                    sections: Vec::new(),
+                });
+                albums.len() - 1
+            });
+        let album = &mut albums[index];
+        match parts.section() {
+            Some(section) if !parts.is_main_level_album_track => {
+                match album.sections.iter_mut().find(|(name, _)| name == section) {
+                    Some((_, tracks)) => tracks.push(track),
+                    None => album.sections.push((section.clone(), vec![track])),
                 }
-                return parts.is_main_level_album_track || parts.is_disc_section_album_track();
             }
-            normalized_library_album(track) == album_selector
-        })
-        .map(|track| track.path.clone())
-        .collect()
+            _ => album.root_tracks.push(track),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -682,6 +732,9 @@ pub(super) struct ImportExpandOutcome {
     unreadable_count: usize,
     non_local_url_count: usize,
     invalid_playlist_count: usize,
+    /// Links to folders that hold the folder being imported, which are
+    /// skipped; see [`append_folder_tracks`].
+    enclosing_link_count: usize,
 }
 
 impl ImportExpandOutcome {
@@ -699,6 +752,7 @@ impl ImportExpandOutcome {
             + self.unreadable_count
             + self.non_local_url_count
             + self.invalid_playlist_count
+            + self.enclosing_link_count
     }
 
     fn push_missing(&mut self) {
@@ -718,12 +772,26 @@ impl ImportExpandOutcome {
     }
 }
 
-/// Decode playlist file bytes. Tries UTF-8 first; falls back to ISO-8859-1
-/// (the legacy default for `.m3u` files, where every byte maps 1:1 to a Unicode code point).
+/// Decode playlist file bytes. Tries UTF-8 first; falls back to
+/// Windows-1252, the encoding Windows players write `.m3u` files in.
 fn decode_playlist_bytes(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_owned(),
-        Err(_) => bytes.iter().map(|&b| char::from(b)).collect(),
+        Err(_) => bytes.iter().map(|&b| windows_1252_char(b)).collect(),
+    }
+}
+
+/// The character of `byte` in Windows-1252. The five bytes it leaves
+/// undefined map to the C1 controls, as in Latin-1 and the WHATWG decoder.
+fn windows_1252_char(byte: u8) -> char {
+    const HIGH: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
+        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
+        'ž', 'Ÿ',
+    ];
+    match byte {
+        0x80..=0x9f => HIGH[usize::from(byte - 0x80)],
+        _ => char::from(byte),
     }
 }
 
@@ -752,12 +820,12 @@ fn playlist_entry_path(
         return None;
     }
 
-    if let Ok(url) = url::Url::parse(trimmed) {
-        if url.scheme() != "file" {
-            outcome.push_non_local_url();
-            return None;
-        }
-        let Ok(path) = url.to_file_path() else {
+    if is_url_entry(trimmed) {
+        let Some(path) = url::Url::parse(trimmed)
+            .ok()
+            .filter(|url| url.scheme() == "file")
+            .and_then(|url| url.to_file_path().ok())
+        else {
             outcome.push_non_local_url();
             return None;
         };
@@ -768,32 +836,84 @@ fn playlist_entry_path(
         return Some(path);
     }
 
-    let candidate = PathBuf::from(trimmed);
-    let resolved = if candidate.is_absolute() {
-        candidate
-    } else {
-        base_dir.join(candidate)
-    };
-    let Some(resolved) = canonicalize_existing_path(&resolved) else {
+    let Some(resolved) = resolve_playlist_path(trimmed, base_dir) else {
         outcome.push_missing();
         return None;
     };
     Some(resolved)
 }
 
+/// Whether a playlist entry is a URL: `scheme://…`, or a `file:` URL.
+/// Other entries are paths, including Windows paths such as `C:\Music`.
+fn is_url_entry(entry: &str) -> bool {
+    let scheme = match entry.split_once("://") {
+        Some((scheme, _)) => scheme,
+        None => match entry.split_once(':') {
+            Some((scheme, _)) if scheme.eq_ignore_ascii_case("file") => scheme,
+            _ => return false,
+        },
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|ch| ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+}
+
+/// The existing file a playlist entry names, relative to `base_dir` unless
+/// it is absolute. An entry written on Windows separates folders with `\`;
+/// it is read with `/` if no file has the name as written.
+fn resolve_playlist_path(entry: &str, base_dir: &Path) -> Option<PathBuf> {
+    let resolve = |entry: &str| {
+        let candidate = PathBuf::from(entry);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else {
+            base_dir.join(candidate)
+        };
+        canonicalize_existing_path(&resolved)
+    };
+    resolve(entry).or_else(|| {
+        entry
+            .contains('\\')
+            .then(|| entry.replace('\\', "/"))
+            .and_then(|entry| resolve(&entry))
+    })
+}
+
+/// Queues the tracks in `root` and its subfolders, in their natural order.
+///
+/// Like a library scan, the walk follows links, queues each file once, and
+/// ignores links back to a folder it is in. A link to a folder that holds
+/// `root` would queue far more than the folder, so it is skipped. Folders
+/// and files that cannot be read are counted as unreadable.
 fn append_folder_tracks(
     root: &Path,
     outcome: &mut ImportExpandOutcome,
     cancelled: &impl Fn() -> bool,
 ) {
     let mut folder_tracks = Vec::new();
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-    {
+    let mut queued = HashSet::new();
+    let mut walk = WalkDir::new(root).follow_links(true).into_iter();
+    while let Some(entry) = walk.next() {
         if cancelled() {
             return;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            // A link back to a folder the walk is in: its files are queued
+            // already.
+            Err(err) if err.loop_ancestor().is_some() => continue,
+            Err(_) => {
+                outcome.push_unreadable();
+                continue;
+            }
+        };
+        if entry.path_is_symlink()
+            && entry.file_type().is_dir()
+            && links_to_enclosing_folder(entry.path(), root)
+        {
+            outcome.enclosing_link_count = outcome.enclosing_link_count.saturating_add(1);
+            walk.skip_current_dir();
+            continue;
         }
         if !entry.file_type().is_file() {
             continue;
@@ -802,10 +922,35 @@ fn append_folder_tracks(
         if is_playlist_file(path) || !is_audio_track_file(path) {
             continue;
         }
-        folder_tracks.push(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+        let track = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        folder_tracks.push((folder_sort_key(path), track));
     }
-    folder_tracks.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-    outcome.tracks.extend(folder_tracks);
+    // In the order of the paths the walk found, each file once.
+    folder_tracks.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    outcome.tracks.extend(
+        folder_tracks
+            .into_iter()
+            .map(|(_, track)| track)
+            .filter(|track| queued.insert(track.clone())),
+    );
+}
+
+/// Whether the link at `link` leads to a folder that holds `root`, such as
+/// `/`.
+fn links_to_enclosing_folder(link: &Path, root: &Path) -> bool {
+    link.canonicalize()
+        .is_ok_and(|target| target != root && root.starts_with(&target))
+}
+
+/// Sorts paths folder by folder, each name in its natural order, so
+/// "Disc 2" comes before "Disc 10".
+fn folder_sort_key(path: &Path) -> (Vec<CollationKey>, PathBuf) {
+    (
+        path.components()
+            .map(|component| CollationKey::new(&component.as_os_str().to_string_lossy()))
+            .collect(),
+        path.to_path_buf(),
+    )
 }
 
 fn append_import_path(
@@ -906,6 +1051,13 @@ pub(super) fn format_import_warning(action: &str, outcome: &ImportExpandOutcome)
             "{} cyclic or excessively nested playlists",
             outcome.invalid_playlist_count
         ));
+    }
+    match outcome.enclosing_link_count {
+        0 => {}
+        1 => parts.push("1 link to a folder that holds the imported folder".to_string()),
+        count => parts.push(format!(
+            "{count} links to folders that hold the imported folder"
+        )),
     }
     let joined = parts.join(", ");
     if outcome.tracks.is_empty() {
@@ -1546,7 +1698,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_import_paths_decodes_latin1_m3u() {
+    fn expand_import_paths_decodes_cp1252_m3u() {
         let root = test_dir("latin1-playlist");
         fs::create_dir_all(&root).expect("mkdir root");
         let track_ascii = root.join("01 - Svefnsund.flac");
@@ -1554,11 +1706,11 @@ mod tests {
         write_stub(&track_ascii, b"a");
         write_stub(&track_latin, b"b");
 
-        // Write an M3U file in ISO-8859-1 encoding where ö = 0xF6.
+        // Write an M3U file in Windows-1252 encoding where ö = 0xF6.
         let playlist = root.join("test.m3u");
         let mut m3u_bytes = b"#EXTM3U\r\n01 - Svefnsund.flac\r\n".to_vec();
         m3u_bytes.extend_from_slice(b"02 - Grasi vaxin g");
-        m3u_bytes.push(0xF6); // ö in ISO-8859-1
+        m3u_bytes.push(0xF6); // ö in Windows-1252
         m3u_bytes.extend_from_slice(b"ng.flac\r\n");
         fs::write(&playlist, &m3u_bytes).expect("write playlist");
 
@@ -1567,6 +1719,123 @@ mod tests {
         assert_eq!(outcome.missing_count, 0);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn windows_paths_in_a_playlist_are_paths_and_cp1252_text_decodes() {
+        let root = test_dir("windows-playlist");
+        fs::create_dir_all(root.join("Album")).expect("mkdir root");
+        let root = root.canonicalize().expect("canonical root");
+        // ’ and € are 0x92 and 0x80 in Windows-1252, and C1 controls in
+        // Latin-1.
+        let quoted = root.join("Album/01 - Don’t Stop €.flac");
+        let plain = root.join("Album/02 - Plain.flac");
+        write_stub(&quoted, b"a");
+        write_stub(&plain, b"b");
+
+        let playlist = root.join("windows.m3u");
+        let mut bytes = b"#EXTM3U\r\nAlbum\\01 - Don".to_vec();
+        bytes.push(0x92);
+        bytes.extend_from_slice(b"t Stop ");
+        bytes.push(0x80);
+        bytes.extend_from_slice(b".flac\r\nAlbum\\02 - Plain.flac\r\n");
+        // Absolute Windows paths name files on another system: missing, not
+        // URLs.
+        bytes.extend_from_slice(b"C:\\Music\\Album\\03 - Gone.flac\r\n");
+        bytes.extend_from_slice(b"D:/Music/04 - Gone.flac\r\n");
+        bytes.extend_from_slice(b"https://example.com/stream.mp3\r\n");
+        fs::write(&playlist, &bytes).expect("write playlist");
+
+        let outcome = expand_import_paths(vec![playlist]);
+        assert_eq!(outcome.tracks, vec![quoted, plain]);
+        assert_eq!(outcome.missing_count, 2);
+        assert_eq!(outcome.non_local_url_count, 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_scheme_and_file_entries_are_urls() {
+        assert!(is_url_entry("http://example.com/a.mp3"));
+        assert!(is_url_entry("file:///music/a.flac"));
+        assert!(is_url_entry("file:/music/a.flac"));
+        assert!(is_url_entry("svn+ssh://host/a.flac"));
+        assert!(!is_url_entry("C:\\Music\\a.flac"));
+        assert!(!is_url_entry("c:/Music/a.flac"));
+        assert!(!is_url_entry("Artist: Live/a.flac"));
+        assert!(!is_url_entry("/music/a.flac"));
+        assert!(!is_url_entry("1 ://a.flac"));
+    }
+
+    #[test]
+    fn folder_tracks_are_queued_in_natural_order() {
+        let root = test_dir("natural-folders");
+        for disc in ["Disc 10", "Disc 2", "disc 1"] {
+            fs::create_dir_all(root.join(disc)).expect("mkdir disc");
+        }
+        let root = root.canonicalize().expect("canonical root");
+        let tracks = [
+            root.join("disc 1/1.flac"),
+            root.join("Disc 2/2.flac"),
+            root.join("Disc 2/10.flac"),
+            root.join("Disc 10/1.flac"),
+            root.join("Émile.flac"),
+            root.join("Zebra.flac"),
+        ];
+        for track in &tracks {
+            write_stub(track, b"t");
+        }
+
+        let outcome = expand_import_paths(vec![root.clone()]);
+        assert_eq!(outcome.tracks, tracks);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_imports_follow_links_once_and_report_what_they_cannot_walk() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let base = test_dir("linked-import");
+        let root = base.join("music");
+        fs::create_dir_all(root.join("Album")).expect("mkdir album");
+        fs::create_dir_all(base.join("elsewhere/Other")).expect("mkdir elsewhere");
+        let base = base.canonicalize().expect("canonical base");
+        let root = base.join("music");
+        let own = root.join("Album/01.flac");
+        let outside = base.join("elsewhere/Other/02.flac");
+        write_stub(&own, b"a");
+        write_stub(&outside, b"b");
+        write_stub(&base.join("elsewhere/03.flac"), b"c");
+        // A link to a folder outside is followed; a link back to a folder
+        // the walk is in is not walked again, and a link to a folder that
+        // holds the imported one is skipped and reported.
+        symlink(base.join("elsewhere/Other"), root.join("Linked")).expect("link out");
+        symlink(&root, root.join("Album/Loop")).expect("link back");
+        symlink(&base, root.join("Up")).expect("link up");
+        // A folder that cannot be read is reported.
+        let locked = root.join("Locked");
+        fs::create_dir_all(&locked).expect("mkdir locked");
+        write_stub(&locked.join("04.flac"), b"d");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock");
+        let readable = fs::read_dir(&locked).is_ok();
+
+        let outcome = expand_import_paths(vec![root.clone()]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
+        // Root, or a process with CAP_DAC_OVERRIDE, reads the folder anyway.
+        let (tracks, unreadable) = if readable {
+            (vec![own, outside, locked.join("04.flac")], 0)
+        } else {
+            (vec![own, outside], 1)
+        };
+        assert_eq!(outcome.tracks, tracks);
+        assert_eq!(outcome.unreadable_count, unreadable);
+        assert_eq!(outcome.enclosing_link_count, 1);
+        let warning = format_import_warning("folder", &outcome).expect("warning");
+        assert!(
+            warning.contains("1 link to a folder that holds the imported folder"),
+            "{warning}"
+        );
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
@@ -1913,6 +2182,37 @@ mod tests {
     }
 
     #[test]
+    fn album_and_artist_keys_with_a_separator_queue_only_their_tracks() {
+        let root = p("/music");
+        let library = LibrarySnapshot {
+            roots: vec![library_root(&root)],
+            tracks: crate::library::shared_tracks(vec![
+                library_track("/music/A|B/C/01.flac", &root, "", "", None, Some(1)),
+                library_track("/music/A/B|C/01.flac", &root, "", "", None, Some(1)),
+            ]),
+            ..LibrarySnapshot::default()
+        };
+        let queued =
+            |artist: &str, album: &str| collect_album_paths_for_queue(&library, artist, album);
+        assert_eq!(
+            queued("artist|/music|A|B", "album|/music|A\\|B|C"),
+            [p("/music/A|B/C/01.flac")]
+        );
+        assert_eq!(
+            queued("artist|/music|A", "album|/music|A|B|C"),
+            [p("/music/A/B|C/01.flac")]
+        );
+        // The tree's contexts give the same keys.
+        let context = super::super::search::derive_tree_path_context(
+            Path::new("/music/A|B/C/01.flac"),
+            &library.roots,
+            "",
+        )
+        .expect("context");
+        assert_eq!(context.album_key.as_deref(), Some("album|/music|A\\|B|C"));
+    }
+
+    #[test]
     fn collect_album_paths_for_queue_honors_album_key_scope() {
         let root = p("/music");
         let library = LibrarySnapshot {
@@ -2073,18 +2373,21 @@ mod tests {
             ("A", "  "),
         ];
         for (artist, album) in selections {
-            assert_eq!(
-                collect_album_paths_for_queue(&library, artist, album),
-                album_paths_through_tree_contexts(&library, artist, album),
-                "{artist:?} / {album:?}"
-            );
+            // The same tracks; the order is the tree's, checked below.
+            let mut collected = collect_album_paths_for_queue(&library, artist, album);
+            let mut expected = album_paths_through_tree_contexts(&library, artist, album);
+            collected.sort();
+            expected.sort();
+            assert_eq!(collected, expected, "{artist:?} / {album:?}");
         }
+        // The album folder's tracks, then the disc sections by name, as the
+        // tree plays the album.
         assert_eq!(
             collect_album_paths_for_queue(&library, "artist|/music|A", "album|/music|A|Album"),
             vec![
                 p("/music/A/Album/01.flac"),
-                p("/music/A/Album/Disc 1/01.flac"),
                 p("/music/A/Album/CD2/01.flac"),
+                p("/music/A/Album/Disc 1/01.flac"),
             ]
         );
     }
@@ -2121,10 +2424,11 @@ mod tests {
             let paths = collect_album_paths_for_queue(&library, artist, album);
             let allocations = crate::test_alloc::allocations() - before;
             assert_eq!(paths.len(), 10);
-            // The paths of the album's tracks, the vector that holds them, and
-            // the root's key; nothing for the other 1,990 tracks.
+            // For each of the album's tracks its path and the key it is
+            // sorted by, and a few vectors; nothing for the other 1,990
+            // tracks.
             assert!(
-                allocations <= paths.len() + 8,
+                allocations <= 2 * paths.len() + 24,
                 "{allocations} allocations for {artist:?} / {album:?}"
             );
         }
