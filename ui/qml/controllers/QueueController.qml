@@ -380,15 +380,59 @@ QtObject {
         root.setSingleSelection(nextIdx)
     }
 
+    // Move every highlighted row one row up (`delta` < 0) or down; each run
+    // of rows moves as a whole and stops at the end of the queue.
     function moveSelected(delta) {
-        const from = root.primarySelectedIndex()
-        if (from < 0 || root.uiBridge.queueLength <= 0) {
+        if (root.selectedIndices.length === 0 || delta === 0) {
             return
         }
-        const to = Math.max(0, Math.min(root.uiBridge.queueLength - 1, from + delta))
-        if (to !== from) {
-            root.uiBridge.moveQueue(from, to)
+        root.uiBridge.shiftQueueRows(root.selectedIndices.slice(), delta)
+    }
+
+    // The rows an action on row `index` moves: the highlighted rows when it
+    // is one of them, otherwise the row.
+    function rowsFor(index) {
+        if (root.isIndexSelected(index) && root.selectedIndices.length > 1) {
+            return root.selectedIndices.slice()
         }
+        return [index]
+    }
+
+    function moveRowsOf(index, delta) {
+        if (index < 0 || index >= root.uiBridge.queueLength || delta === 0) {
+            return
+        }
+        root.uiBridge.shiftQueueRows(root.rowsFor(index), delta)
+    }
+
+    // Drops before row `insertIndex`, the queue length for after the last
+    // row: queue rows dragged from row `from` move there, as one change to
+    // undo; library rows and files are inserted there.
+    function dropQueueRows(from, insertIndex) {
+        if (from < 0 || from >= root.uiBridge.queueLength || insertIndex < 0) {
+            return
+        }
+        root.uiBridge.moveQueueRows(root.rowsFor(from), insertIndex)
+    }
+
+    function dropLibraryRow(libraryController, rowMap, insertIndex) {
+        libraryController.insertRowItems(rowMap, insertIndex)
+    }
+
+    function dropExternalPaths(paths, insertIndex) {
+        if (paths.length > 0) {
+            root.uiBridge.insertPaths(paths, insertIndex)
+        }
+    }
+
+    // Where rows dropped at `contentY`, in the view's content, go: before
+    // the row whose upper half it is in, after the last row past it.
+    function dropInsertIndex(contentY, rowHeight) {
+        if (rowHeight <= 0) {
+            return root.uiBridge.queueLength
+        }
+        const index = Math.floor((contentY + rowHeight * 0.5) / rowHeight)
+        return Math.max(0, Math.min(root.uiBridge.queueLength, index))
     }
 
     function openTagEditorForRow(rowIndex) {

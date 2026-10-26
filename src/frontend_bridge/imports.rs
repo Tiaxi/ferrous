@@ -18,7 +18,7 @@
 use super::commands::{
     expand_import_paths_cancellable, format_import_warning, ImportExpandOutcome,
 };
-use super::BridgeQueueCommand;
+use super::{BridgeQueueCommand, QueuePlacement};
 use crate::library::{next_file_sequence, IndexedTrack, TrackFileFingerprint};
 use crate::playback::{remap_path, PathRenames};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -35,6 +35,12 @@ use std::sync::{
 pub(super) enum QueueRequest {
     /// Files, folders, or playlists for the worker to expand.
     Import { paths: Vec<PathBuf>, replace: bool },
+    /// Files, folders, or playlists for the worker to expand, then to put
+    /// where `placement` says.
+    Placed {
+        paths: Vec<PathBuf>,
+        placement: QueuePlacement,
+    },
     /// Library tracks that replace (and start) or extend the queue. A
     /// selection that matched no tracks leaves the queue unchanged.
     Tracks { tracks: Vec<PathBuf>, replace: bool },
@@ -58,7 +64,7 @@ struct PendingChange {
 struct ImportJob {
     /// The inputs as the filesystem was after rename `base`.
     paths: Vec<PathBuf>,
-    replace: bool,
+    placement: QueuePlacement,
     id: u64,
     generation: u64,
     base: u64,
@@ -66,7 +72,7 @@ struct ImportJob {
 
 pub(super) struct ImportResult {
     outcome: ImportExpandOutcome,
-    replace: bool,
+    placement: QueuePlacement,
     id: u64,
     generation: u64,
 }
@@ -439,6 +445,7 @@ impl ImportWorker {
         let replace = match &request {
             QueueRequest::Tracks { tracks, .. } if tracks.is_empty() => return Ok(Vec::new()),
             QueueRequest::Import { replace, .. } | QueueRequest::Tracks { replace, .. } => *replace,
+            QueueRequest::Placed { placement, .. } => *placement == QueuePlacement::Replace,
             QueueRequest::Command(command) => matches!(command, BridgeQueueCommand::Replace { .. }),
         };
         if replace {
@@ -448,19 +455,15 @@ impl ImportWorker {
         let id = self.next_id;
         let change = match request {
             QueueRequest::Import { paths, replace } => {
-                self.tx
-                    .send(ImportJob {
-                        paths,
-                        replace,
-                        id,
-                        generation: self.generation.load(Ordering::Relaxed),
-                        base: self.renamed,
-                    })
-                    .map_err(|_| "import worker unavailable".to_string())?;
+                self.send_job(paths, QueuePlacement::replacing(replace), id)?;
+                None
+            }
+            QueueRequest::Placed { paths, placement } => {
+                self.send_job(paths, placement, id)?;
                 None
             }
             QueueRequest::Tracks { tracks, replace } => Some(QueueChange {
-                command: tracks_command(tracks, replace),
+                command: tracks_command(tracks, QueuePlacement::replacing(replace)),
                 warning: None,
             }),
             QueueRequest::Command(command) => Some(QueueChange {
@@ -470,6 +473,23 @@ impl ImportWorker {
         };
         self.pending.push_back(PendingChange { id, change });
         Ok(self.take_ready())
+    }
+
+    fn send_job(
+        &self,
+        paths: Vec<PathBuf>,
+        placement: QueuePlacement,
+        id: u64,
+    ) -> Result<(), String> {
+        self.tx
+            .send(ImportJob {
+                paths,
+                placement,
+                id,
+                generation: self.generation.load(Ordering::Relaxed),
+                base: self.renamed,
+            })
+            .map_err(|_| "import worker unavailable".to_string())
     }
 
     /// Record a finished import and return the changes that can apply now.
@@ -485,11 +505,15 @@ impl ImportWorker {
             return Vec::new();
         };
         let warning = format_import_warning(
-            if result.replace { "open" } else { "append" },
+            if result.placement == QueuePlacement::Replace {
+                "open"
+            } else {
+                "append"
+            },
             &result.outcome,
         );
         pending.change = Some(QueueChange {
-            command: tracks_command(result.outcome.tracks, result.replace),
+            command: tracks_command(result.outcome.tracks, result.placement),
             warning,
         });
         let ready = self.take_ready();
@@ -517,7 +541,9 @@ impl ImportWorker {
                 continue;
             };
             if let Some(
-                BridgeQueueCommand::Replace { tracks, .. } | BridgeQueueCommand::Append(tracks),
+                BridgeQueueCommand::Replace { tracks, .. }
+                | BridgeQueueCommand::Append(tracks)
+                | BridgeQueueCommand::InsertAt { tracks, .. },
             ) = change.command.as_mut()
             {
                 for path in tracks {
@@ -562,7 +588,7 @@ fn run_import(
 ) -> ControlFlow<()> {
     let ImportJob {
         mut paths,
-        replace,
+        placement,
         id,
         generation,
         base,
@@ -589,7 +615,7 @@ fn run_import(
         }
         let result = ImportResult {
             outcome,
-            replace,
+            placement,
             id,
             generation,
         };
@@ -602,17 +628,33 @@ fn run_import(
     ControlFlow::Continue(())
 }
 
-/// Replace the queue and start playback, or append; nothing without tracks.
-fn tracks_command(tracks: Vec<PathBuf>, replace: bool) -> Option<BridgeQueueCommand> {
+/// Replace the queue and start playback, append, or insert; nothing
+/// without tracks.
+fn tracks_command(tracks: Vec<PathBuf>, placement: QueuePlacement) -> Option<BridgeQueueCommand> {
     if tracks.is_empty() {
-        None
-    } else if replace {
-        Some(BridgeQueueCommand::Replace {
+        return None;
+    }
+    Some(match placement {
+        QueuePlacement::Replace => BridgeQueueCommand::Replace {
             tracks,
             autoplay: true,
-        })
-    } else {
-        Some(BridgeQueueCommand::Append(tracks))
+        },
+        QueuePlacement::Append => BridgeQueueCommand::Append(tracks),
+        QueuePlacement::Insert { revision, at } => BridgeQueueCommand::InsertAt {
+            revision,
+            at,
+            tracks,
+        },
+    })
+}
+
+impl QueuePlacement {
+    fn replacing(replace: bool) -> Self {
+        if replace {
+            Self::Replace
+        } else {
+            Self::Append
+        }
     }
 }
 
@@ -654,7 +696,7 @@ mod tests {
         outcome.tracks = tracks;
         ImportResult {
             outcome,
-            replace: job.replace,
+            placement: job.placement,
             id: job.id,
             generation: job.generation,
         }

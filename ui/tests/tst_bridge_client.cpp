@@ -247,6 +247,9 @@ private slots:
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
     void queueDeltasChangeOnlyTheirRowsWithoutAReset();
+    void queueRowRangeMovesDecodeAndMoveTheirRowsOnce();
+    void movedQueueRowsTravelAsOneCommandWithTheRustLayout();
+    void libraryItemsTravelAsOneCommandWithTheRustLayout();
     void aMissedQueueRevisionAsksForTheWholeQueueOnce();
     void rowCommandsCarryTheQueueRevision();
     void aLargeQueueEditDecodesOnlyTheChangedRows();
@@ -2188,6 +2191,167 @@ void BridgeClientTest::queueDeltasChangeOnlyTheirRowsWithoutAReset() {
     QCOMPARE(client.queueLength(), 5);
     QCOMPARE(client.selectedQueueIndex(), 4);
     QVERIFY(!client.m_queueResyncRequested);
+}
+
+void BridgeClientTest::queueRowRangeMovesDecodeAndMoveTheirRowsOnce() {
+    QByteArray full;
+    putQueueHeader(full, BinaryBridgeCodec::QueueFull, 1, 6);
+    for (const QString &path : numberedPaths(6)) {
+        putQueueRow(full, path, QStringLiteral("Track"));
+    }
+    // Rows 1 and 2 go after row 4, as the relay sends a move of rows.
+    QByteArray delta;
+    putQueueHeader(delta, BinaryBridgeCodec::QueueDelta, 2, 6);
+    putLe<quint64>(delta, 1);
+    putLe<quint32>(delta, 1);
+    putLe<quint8>(delta, BinaryBridgeCodec::QueueOpMoveRows);
+    putLe<quint32>(delta, 1);
+    putLe<quint32>(delta, 2);
+    putLe<quint32>(delta, 3);
+    BinaryBridgeCodec::DecodedSnapshot decodedFull;
+    BinaryBridgeCodec::DecodedSnapshot decodedDelta;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(queuePacket(full), &decodedFull, &error),
+        qPrintable(error));
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(queuePacket(delta), &decodedDelta, &error),
+        qPrintable(error));
+    QCOMPARE(decodedDelta.queue.ops.size(), 1);
+    QCOMPARE(decodedDelta.queue.ops.at(0).count, 2);
+    QCOMPARE(decodedDelta.queue.ops.at(0).to, 3);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(client.processBinarySnapshot(decodedFull));
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QueueRowSignals rowSignals(model);
+    QVERIFY(client.processBinarySnapshot(decodedDelta));
+    QCOMPARE(rowSignals.resets.count(), 0);
+    QCOMPARE(rowSignals.moves.count(), 1);
+    const QStringList paths = numberedPaths(6);
+    QCOMPARE(queuePaths(client),
+        (QStringList{paths[0], paths[3], paths[4], paths[1], paths[2], paths[5]}));
+    QCOMPARE(client.m_queueRevision, quint64(2));
+
+    // A move past the rows leaves them alone and asks for the whole queue.
+    QVERIFY(!model->moveRows(5, 2, 0));
+    QVERIFY(!model->moveRows(0, 2, 5));
+    QVERIFY(model->moveRows(0, 6, 0));
+    QCOMPARE(rowSignals.moves.count(), 1);
+}
+
+void BridgeClientTest::movedQueueRowsTravelAsOneCommandWithTheRustLayout() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(12, numberedPaths(6))));
+    sent.clear();
+
+    // Rows the queue lacks and repeats are left out; the rest go in order.
+    client.moveQueueRows(QVariantList{3, 0, 3, 99}, 4);
+    client.shiftQueueRows(QVariantList{5, 1, 2}, -1);
+    client.shiftQueueRows(QVariantList{2}, 1);
+    client.moveQueueRows(QVariantList{1}, 99);
+    client.moveQueueRows(QVariantList{99}, 0);
+    client.shiftQueueRows(QVariantList{}, 1);
+    QCOMPARE(sent.size(), 4);
+    // As the Rust tests of command 70 read it.
+    const auto expected = [](quint8 how, quint32 at, const QList<quint32> &rows) {
+        QByteArray payload;
+        putLe<quint64>(payload, 12);
+        putLe<quint8>(payload, how);
+        putLe<quint32>(payload, at);
+        putLe<quint32>(payload, static_cast<quint32>(rows.size()));
+        for (quint32 row : rows) {
+            putLe<quint32>(payload, row);
+        }
+        QByteArray command;
+        putLe<quint16>(command, 70);
+        putLe<quint32>(command, static_cast<quint32>(payload.size()));
+        return command + payload;
+    };
+    QCOMPARE(sent.at(0), expected(0, 4, {0, 3}));
+    QCOMPARE(sent.at(1), expected(1, 0, {1, 2, 5}));
+    QCOMPARE(sent.at(2), expected(2, 0, {2}));
+    // Past the last row is after it.
+    QCOMPARE(sent.at(3), expected(0, 6, {1}));
+}
+
+void BridgeClientTest::libraryItemsTravelAsOneCommandWithTheRustLayout() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(33, numberedPaths(4))));
+    sent.clear();
+
+    using Item = BinaryBridgeCodec::LibraryQueueItem;
+    Item paths;
+    paths.paths = {QStringLiteral("/music/a.flac"), QStringLiteral("/music/b.flac")};
+    Item artist;
+    artist.kind = Item::Artist;
+    artist.value = QStringLiteral("artist|/music|Artist");
+    Item root;
+    root.kind = Item::Root;
+    root.value = QStringLiteral("/music");
+    Item empty;
+    const BinaryBridgeCodec::LibraryQueueItems items{paths, empty, artist, root};
+    client.insertLibraryItems(QVariant::fromValue(items), 2);
+    client.playLibraryItems(QVariant::fromValue(items));
+    client.appendLibraryItems(QVariant::fromValue(items));
+    // An insertion after the last row is an append.
+    client.insertLibraryItems(QVariant::fromValue(items), 4);
+    client.insertPaths(QStringList{QStringLiteral("/music/dropped")}, 1);
+    // Nothing to queue sends nothing.
+    client.playLibraryItems(QVariant::fromValue(BinaryBridgeCodec::LibraryQueueItems{empty}));
+    client.playLibraryItems(QVariant());
+    QCOMPARE(sent.size(), 5);
+    // As the Rust tests of command 69 read it.
+    const auto expected = [](quint8 placement, quint32 at, const QList<Item> &rows) {
+        QByteArray payload;
+        putLe<quint8>(payload, placement);
+        putLe<quint64>(payload, 33);
+        putLe<quint32>(payload, at);
+        putLe<quint32>(payload, static_cast<quint32>(rows.size()));
+        for (const Item &row : rows) {
+            putLe<quint8>(payload, row.kind);
+            if (row.kind == Item::Paths) {
+                putLe<quint32>(payload, static_cast<quint32>(row.paths.size()));
+                for (const QString &path : row.paths) {
+                    putString(payload, path);
+                }
+            } else {
+                putString(payload, row.value);
+            }
+        }
+        QByteArray command;
+        putLe<quint16>(command, 69);
+        putLe<quint32>(command, static_cast<quint32>(payload.size()));
+        return command + payload;
+    };
+    QCOMPARE(sent.at(0), expected(2, 2, {paths, artist, root}));
+    QCOMPARE(sent.at(1), expected(1, 0, {paths, artist, root}));
+    QCOMPARE(sent.at(2), expected(0, 0, {paths, artist, root}));
+    QCOMPARE(sent.at(3), expected(0, 0, {paths, artist, root}));
+    Item dropped;
+    dropped.paths = {QStringLiteral("/music/dropped")};
+    QCOMPARE(sent.at(4), expected(2, 1, {dropped}));
+    QCOMPARE(errors.count(), 0);
+
+    // Rows over the command bound are refused whole, and the user is told.
+    Item huge;
+    huge.paths = QStringList(9, QLatin1Char('/') + QString(1024 * 1024, QLatin1Char('a')));
+    client.playLibraryItems(QVariant::fromValue(BinaryBridgeCodec::LibraryQueueItems{huge}));
+    QCOMPARE(sent.size(), 5);
+    QCOMPARE(errors.count(), 1);
+    QVERIFY(errors.at(0).at(0).toString().contains(QStringLiteral("The queue was not changed")));
 }
 
 void BridgeClientTest::aMissedQueueRevisionAsksForTheWholeQueueOnce() {

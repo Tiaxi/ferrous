@@ -19,8 +19,6 @@ QtObject {
     property string selectedTrackPath: ""
     property string selectedOpenPath: ""
     property var selectedPlayPaths: []
-    property var selectedSelectionKeys: []
-    property int selectionAnchorIndex: -1
     property int lastAppliedVersion: -1
     property int pendingVersion: -1
     property bool hasReceivedTreeFrame: false
@@ -29,25 +27,21 @@ QtObject {
     property real pendingAnchorFallbackY: 0
     property bool pendingAnchorValid: false
     property string typeAheadBuffer: ""
-    property string pendingRevealSelectionKey: ""
-    property var pendingRevealExpandKeys: []
-    property int pendingRevealAttempts: 0
-    property bool pendingRevealCentersSelection: false
-    property string pendingCenteredRevealKey: ""
-    property int pendingCenteredRevealAttempts: 0
+    // The row the model is revealing once the backend sends it, and what
+    // to do with it then: "select", "center", "open" or "restore".
+    property string pendingRevealKey: ""
+    property string pendingRevealPurpose: ""
     property string pendingExpandFitKey: ""
     property int pendingExpandFitAttempts: 0
-    property string pendingSearchOpenSelectionKey: ""
-    property var pendingSearchOpenExpandKeys: []
-    property int pendingSearchOpenAttempts: 0
     property bool restoredViewStateApplied: false
     property string pendingRestoredSelectionKey: ""
     property string pendingRestoredAnchorKey: ""
     property real pendingRestoredAnchorOffset: 0
     property var pendingRestoredExpandKeys: []
-    property int pendingRestoredAttempts: 0
-    property int pendingRestoredSettleAttempts: 0
     property bool restoringViewState: false
+    property bool restoreRevealStarted: false
+    // The saved state was revealed before the view was registered.
+    property bool restoreAwaitingView: false
     property var view: null
     readonly property bool viewHasActiveFocus: !!root.view && root.view.activeFocus
 
@@ -62,50 +56,32 @@ QtObject {
         onTriggered: root.typeAheadBuffer = ""
     }
 
-    property Timer revealRetryTimer: Timer {
-        interval: 80
-        repeat: false
-        onTriggered: root.applyPendingReveal()
-    }
-
-    property Timer searchOpenRetryTimer: Timer {
-        interval: 80
-        repeat: false
-        onTriggered: root.applyPendingSearchOpen()
-    }
-
     property Timer viewStatePersistTimer: Timer {
         interval: 250
         repeat: false
         onTriggered: root.persistLibraryViewState()
     }
 
-    property Timer restoredViewRetryTimer: Timer {
-        interval: 80
-        repeat: false
-        onTriggered: root.applyPendingRestoredViewState()
-    }
+    // The model reveals rows the backend had not sent when they arrive.
+    property Connections _modelConnections: Connections {
+        target: root.libraryModel
+        ignoreUnknownSignals: true
 
-    property Timer restoredViewSettleTimer: Timer {
-        interval: 60
-        repeat: false
-        onTriggered: root.settleRestoredViewState()
-    }
-
-    property Timer centeredRevealTimer: Timer {
-        interval: 60
-        repeat: false
-        onTriggered: root.applyPendingCenteredReveal()
+        function onRevealFinished(selectionKey, row) {
+            root.handleRevealFinished(selectionKey, row)
+        }
     }
 
     function registerView(view) {
         root.view = view
+        if (root.restoreAwaitingView) {
+            root.restoreAwaitingView = false
+            root.finishRestoredViewState()
+        }
     }
 
     function scheduleLibraryViewStatePersist() {
-        if (root.restoredViewStateApplied
-                && !root.restoringViewState
-                && root.pendingCenteredRevealKey.length === 0) {
+        if (root.restoredViewStateApplied && !root.restoringViewState) {
             viewStatePersistTimer.restart()
         }
     }
@@ -113,7 +89,6 @@ QtObject {
     function persistLibraryViewState() {
         if (!root.restoredViewStateApplied
                 || root.restoringViewState
-                || root.pendingCenteredRevealKey.length > 0
                 || !root.uiBridge.setLibraryViewState) {
             return
         }
@@ -125,7 +100,11 @@ QtObject {
     }
 
     function isSelectionKeySelected(key) {
-        return key.length > 0 && root.selectedSelectionKeys.indexOf(key) >= 0
+        return key.length > 0 && root.libraryModel.isKeySelected(key)
+    }
+
+    function selectionCount() {
+        return root.libraryModel.selectionCount || 0
     }
 
     function isActionableRow(rowMap) {
@@ -138,6 +117,7 @@ QtObject {
         }
         if (rowType === "album") {
             return (rowMap.artist || "").length > 0 && (rowMap.name || "").length > 0
+                && (rowMap.playPaths || []).length > 0
         }
         if (rowType === "artist") {
             return (rowMap.artist || "").length > 0
@@ -149,159 +129,50 @@ QtObject {
         return paths.length > 0
     }
 
-    function appendRow(rowMap) {
-        if (!root.isActionableRow(rowMap)) {
-            return false
-        }
-        const rowType = rowMap.rowType || ""
-        if (rowType === "track") {
-            root.uiBridge.appendTrack(rowMap.trackPath || "")
-            return true
-        }
-        if (rowType === "album") {
-            const albumPaths = rowMap.playPaths || []
-            if (albumPaths.length > 0) {
-                root.uiBridge.appendPaths(albumPaths)
-            } else {
-                root.uiBridge.appendAlbumByKey(
-                    rowMap.artist || "",
-                    rowMap.selectionKey || rowMap.name || "")
-            }
-            return true
-        }
-        if (rowType === "artist") {
-            root.uiBridge.appendArtistByName(rowMap.selectionKey || rowMap.artist || "")
-            return true
-        }
-        if (rowType === "root") {
-            root.uiBridge.appendRootByPath(rowMap.openPath || "")
-            return true
-        }
-        root.uiBridge.appendPaths(rowMap.playPaths || [])
-        return true
-    }
-
-    function replaceWithRow(rowMap) {
-        if (!root.isActionableRow(rowMap)) {
-            return false
-        }
-        const rowType = rowMap.rowType || ""
-        if (rowType === "track") {
-            root.uiBridge.playTrack(rowMap.trackPath || "")
-            return true
-        }
-        if (rowType === "album") {
-            const albumPaths = rowMap.playPaths || []
-            if (albumPaths.length > 0) {
-                root.uiBridge.replaceWithPaths(albumPaths)
-            } else {
-                root.uiBridge.replaceAlbumByKey(
-                    rowMap.artist || "",
-                    rowMap.selectionKey || rowMap.name || "")
-            }
-            return true
-        }
-        if (rowType === "artist") {
-            root.uiBridge.replaceArtistByName(rowMap.selectionKey || rowMap.artist || "")
-            return true
-        }
-        if (rowType === "root") {
-            root.uiBridge.replaceRootByPath(rowMap.openPath || "")
-            return true
-        }
-        root.uiBridge.replaceWithPaths(rowMap.playPaths || [])
-        return true
-    }
-
-    function selectedRowsSorted() {
-        const rows = []
-        for (let i = 0; i < root.selectedSelectionKeys.length; ++i) {
-            const key = root.selectedSelectionKeys[i] || ""
-            if (key.length === 0) {
-                continue
-            }
-            const rowIndex = root.libraryModel.indexForSelectionKey(key)
-            if (rowIndex < 0) {
-                continue
-            }
-            const rowMap = root.libraryModel.rowDataForRow(rowIndex)
-            if (root.isActionableRow(rowMap)) {
-                rows.push({ index: rowIndex, row: rowMap })
-            }
-        }
-        rows.sort(function(a, b) { return a.index - b.index })
-        return rows
-    }
-
-    function currentSelectionRow() {
-        return {
-            rowType: root.selectedRowType,
-            artist: root.selectedArtist,
-            name: root.selectedAlbum,
-            sourceIndex: root.selectedSourceIndex,
-            trackPath: root.selectedTrackPath,
-            openPath: root.selectedOpenPath,
-            playPaths: root.selectedPlayPaths
-        }
-    }
-
+    // The rows an action on `rowMap` acts on: the selection when the row
+    // is one of several selected rows, otherwise the row.
     function rowsForAction(rowMap) {
         if (rowMap
                 && rowMap.selectionKey
                 && root.isSelectionKeySelected(rowMap.selectionKey)
-                && root.selectedSelectionKeys.length > 1) {
-            const selectedRows = root.selectedRowsSorted()
+                && root.selectionCount() > 1) {
+            const selectedRows = root.libraryModel.selectedRowData()
             if (selectedRows.length > 0) {
-                return selectedRows.map(function(entry) { return entry.row })
+                return selectedRows
             }
         }
         return rowMap ? [rowMap] : []
     }
 
     function canPlaySelection() {
-        if (root.selectedSelectionKeys.length > 0) {
-            return root.selectedRowsSorted().length > 0
-        }
-        return root.isActionableRow(root.currentSelectionRow())
+        return root.selectionCount() > 0 && root.libraryModel.selectionActionable
     }
 
-    function playRows(rows) {
-        if (!rows || rows.length === 0) {
-            return
-        }
-        if (!root.replaceWithRow(rows[0])) {
-            return
-        }
-        for (let i = 1; i < rows.length; ++i) {
-            root.appendRow(rows[i])
-        }
+    // Each queues what an action on `rowMap` acts on, as one change to the
+    // queue.
+    function playRowItems(rowMap) {
+        root.uiBridge.playLibraryItems(root.libraryModel.queueItemsForKey(rowMap.selectionKey || ""))
     }
 
-    function appendRows(rows) {
-        if (!rows || rows.length === 0) {
-            return
-        }
-        for (let i = 0; i < rows.length; ++i) {
-            root.appendRow(rows[i])
-        }
+    function appendRowItems(rowMap) {
+        root.uiBridge.appendLibraryItems(root.libraryModel.queueItemsForKey(rowMap.selectionKey || ""))
+    }
+
+    function insertRowItems(rowMap, row) {
+        root.uiBridge.insertLibraryItems(
+            root.libraryModel.queueItemsForKey(rowMap.selectionKey || ""), row)
     }
 
     function playSelection() {
-        const rows = root.selectedRowsSorted().map(function(entry) { return entry.row })
-        if (rows.length > 0) {
-            root.playRows(rows)
-            return
+        if (root.canPlaySelection()) {
+            root.uiBridge.playLibraryItems(root.libraryModel.queueItemsForSelection())
         }
-        root.playRows([root.currentSelectionRow()])
     }
 
     function appendSelection() {
-        const rows = root.selectedRowsSorted().map(function(entry) { return entry.row })
-        if (rows.length > 0) {
-            root.appendRows(rows)
-            return
+        if (root.canPlaySelection()) {
+            root.uiBridge.appendLibraryItems(root.libraryModel.queueItemsForSelection())
         }
-        root.appendRows([root.currentSelectionRow()])
     }
 
     function canOpenTagEditorForRow(rowMap) {
@@ -391,30 +262,16 @@ QtObject {
 
     function setSingleSelection(index, rowMap) {
         if (!rowMap.selectionKey || rowMap.selectionKey.length === 0) {
-            root.selectedSelectionKeys = []
-            root.selectionAnchorIndex = -1
+            root.libraryModel.clearSelection()
             root.clearPrimarySelection()
             return
         }
-        root.selectedSelectionKeys = [rowMap.selectionKey]
-        root.selectionAnchorIndex = index
+        root.libraryModel.selectRow(index)
         root.applyPrimaryRow(rowMap)
     }
 
     function setRangeSelection(index) {
-        const anchor = root.selectionAnchorIndex >= 0 ? root.selectionAnchorIndex : index
-        const first = Math.min(anchor, index)
-        const last = Math.max(anchor, index)
-        const keys = []
-        for (let i = first; i <= last; ++i) {
-            const rowMap = root.libraryModel.rowDataForRow(i)
-            const key = rowMap.selectionKey || ""
-            if (key.length > 0 && keys.indexOf(key) < 0) {
-                keys.push(key)
-            }
-        }
-        root.selectedSelectionKeys = keys
-        root.selectionAnchorIndex = anchor
+        root.libraryModel.selectRange(index)
         root.applyPrimaryFromIndex(index)
     }
 
@@ -423,24 +280,17 @@ QtObject {
         if (key.length === 0) {
             return
         }
-        const keys = root.selectedSelectionKeys.slice()
-        const pos = keys.indexOf(key)
-        if (pos >= 0) {
-            keys.splice(pos, 1)
-        } else {
-            keys.push(key)
-        }
-        root.selectedSelectionKeys = keys
-        root.selectionAnchorIndex = index
-        if (keys.length === 0) {
+        root.libraryModel.toggleRowSelected(index)
+        if (root.selectionCount() === 0) {
             root.clearPrimarySelection()
             return
         }
-        if (keys.indexOf(root.selectedSelectionKey) >= 0) {
+        if (root.isSelectionKeySelected(root.selectedSelectionKey)) {
             return
         }
-        const fallbackKey = keys[keys.length - 1]
-        const fallbackIndex = root.libraryModel.indexForSelectionKey(fallbackKey)
+        const fallbackIndex = root.libraryModel.isRowSelected(index)
+            ? index
+            : root.libraryModel.firstSelectedRow()
         if (!root.applyPrimaryFromIndex(fallbackIndex)) {
             root.clearPrimarySelection()
         }
@@ -450,6 +300,8 @@ QtObject {
         if (!rowMap.selectionKey || rowMap.selectionKey.length === 0) {
             return
         }
+        // What the user picks wins over a row still being revealed.
+        root.cancelPendingReveal()
         const shift = (modifiers & Qt.ShiftModifier) !== 0
         const ctrl = (modifiers & Qt.ControlModifier) !== 0
         if (shift) {
@@ -461,7 +313,6 @@ QtObject {
             return
         }
         if (button === Qt.RightButton && root.isSelectionKeySelected(rowMap.selectionKey)) {
-            root.selectionAnchorIndex = index
             root.applyPrimaryRow(rowMap)
             return
         }
@@ -644,12 +495,6 @@ QtObject {
             root.applyPendingExpansionFit()
         }
         root.tryApplyPersistedViewState()
-        if (root.restoredViewStateApplied
-                && (root.pendingRestoredSelectionKey.length > 0
-                    || root.pendingRestoredAnchorKey.length > 0
-                    || root.pendingRestoredExpandKeys.length > 0)) {
-            root.applyPendingRestoredViewState()
-        }
     }
 
     function requestTreeApply(version, treeBytes) {
@@ -684,30 +529,15 @@ QtObject {
         return root.uiBridge.libraryScanInProgress && (!root.view || root.view.count === 0)
     }
 
+    // The model drops selected rows that left the tree; the primary row
+    // moves to one that is still selected.
     function syncSelectionToVisibleRows() {
-        const valid = []
-        for (let i = 0; i < root.selectedSelectionKeys.length; ++i) {
-            const key = root.selectedSelectionKeys[i]
-            if (root.libraryModel.hasSelectionKey(key) && valid.indexOf(key) < 0) {
-                valid.push(key)
-            }
+        if (root.selectedSelectionKey.length === 0
+                || root.isSelectionKeySelected(root.selectedSelectionKey)) {
+            return
         }
-        root.selectedSelectionKeys = valid
-        if (root.selectedSelectionKey.length > 0
-                && root.selectedSelectionKeys.indexOf(root.selectedSelectionKey) < 0) {
-            if (root.selectedSelectionKeys.length > 0) {
-                const fallbackIndex = root.libraryModel.indexForSelectionKey(root.selectedSelectionKeys[0])
-                if (!root.applyPrimaryFromIndex(fallbackIndex)) {
-                    root.clearPrimarySelection()
-                }
-            } else {
-                root.clearPrimarySelection()
-            }
-        }
-        if (root.selectionAnchorIndex >= root.libraryModel.count || root.selectionAnchorIndex < 0) {
-            root.selectionAnchorIndex = root.selectedSelectionKey.length > 0
-                ? root.libraryModel.indexForSelectionKey(root.selectedSelectionKey)
-                : -1
+        if (!root.applyPrimaryFromIndex(root.libraryModel.firstSelectedRow())) {
+            root.clearPrimarySelection()
         }
     }
 
@@ -785,8 +615,8 @@ QtObject {
         const base = current >= 0 ? current : 0
         const next = Math.max(0, Math.min(root.libraryModel.count - 1, base + delta))
         if (extendSelection) {
-            if (root.selectionAnchorIndex < 0) {
-                root.selectionAnchorIndex = base
+            if (root.libraryModel.anchorRow() < 0) {
+                root.libraryModel.selectRow(base)
             }
             root.setRangeSelection(next)
             const rowMap = root.libraryModel.rowDataForRow(next)
@@ -862,11 +692,7 @@ QtObject {
         if (root.selectedSelectionKey.length === 0) {
             root.selectIndex(index)
         }
-        const rowMap = root.libraryModel.rowDataForRow(index)
-        const rows = root.rowsForAction(rowMap)
-        if (rows.length > 0) {
-            root.playRows(rows)
-        }
+        root.playRowItems(root.libraryModel.rowDataForRow(index))
     }
 
     function typeAheadSearch(prefix) {
@@ -958,11 +784,7 @@ QtObject {
         if ((row.sectionKey || "").length > 0) {
             expandKeys.push(row.sectionKey)
         }
-        root.pendingRevealExpandKeys = expandKeys
-        root.pendingRevealSelectionKey = (row.trackKey || row.albumKey || row.artistKey || "")
-        root.pendingRevealAttempts = 80
-        root.pendingRevealCentersSelection = false
-        Qt.callLater(root.applyPendingReveal)
+        root.revealRow(expandKeys, row.trackKey || row.albumKey || row.artistKey || "", "select")
     }
 
     function requestBridgeReveal(expandKeys, selectionKey) {
@@ -972,26 +794,96 @@ QtObject {
         }
         root.cancelPendingRestoredViewState()
         viewStatePersistTimer.stop()
-        centeredRevealTimer.stop()
-        root.pendingCenteredRevealKey = ""
-        root.pendingCenteredRevealAttempts = 0
         root.restoredViewStateApplied = true
-        root.pendingRevealExpandKeys = expandKeys || []
-        root.pendingRevealSelectionKey = target
-        root.pendingRevealAttempts = 80
-        root.pendingRevealCentersSelection = true
-        Qt.callLater(root.applyPendingReveal)
+        root.revealRow(expandKeys || [], target, "center")
+    }
+
+    // Expand `expandKeys` and act on the row of `selectionKey` as `purpose`
+    // says, now if the model has the row, otherwise once the backend sends
+    // it. A later reveal replaces one still waiting.
+    function revealRow(expandKeys, selectionKey, purpose) {
+        root.pendingRevealKey = ""
+        root.pendingRevealPurpose = ""
+        const row = root.libraryModel.revealKey(expandKeys, selectionKey)
+        if (row < 0 && root.libraryModel.revealPending) {
+            root.pendingRevealKey = selectionKey
+            root.pendingRevealPurpose = purpose
+            return
+        }
+        root.finishReveal(purpose, row)
+    }
+
+    function handleRevealFinished(selectionKey, row) {
+        if (root.pendingRevealKey.length === 0 || selectionKey !== root.pendingRevealKey) {
+            return
+        }
+        const purpose = root.pendingRevealPurpose
+        root.pendingRevealKey = ""
+        root.pendingRevealPurpose = ""
+        root.finishReveal(purpose, row)
+    }
+
+    function cancelPendingReveal() {
+        if (root.pendingRevealKey.length === 0) {
+            return
+        }
+        if (root.pendingRevealPurpose === "restore") {
+            root.cancelPendingRestoredViewState()
+            root.scheduleLibraryViewStatePersist()
+        }
+        root.pendingRevealKey = ""
+        root.pendingRevealPurpose = ""
+        root.libraryModel.cancelReveal()
+    }
+
+    function finishReveal(purpose, row) {
+        if (purpose === "restore") {
+            root.finishRestoredViewState()
+            return
+        }
+        if (row < 0) {
+            return
+        }
+        const rowMap = root.libraryModel.rowDataForRow(row)
+        if (purpose === "open") {
+            const openPath = rowMap.openPath || rowMap.trackPath || ""
+            if (openPath.length > 0) {
+                root.uiBridge.openInFileBrowser(openPath)
+            }
+            return
+        }
+        if (purpose === "center") {
+            root.setSingleSelection(row, rowMap)
+            root.centerRow(row)
+        } else {
+            root.selectIndex(row)
+        }
+        root.focusViewForNavigation()
+    }
+
+    // Lay the view out with the rows it has now, then center `row`.
+    function centerRow(row) {
+        if (!root.view) {
+            return
+        }
+        if (typeof root.view.forceLayout === "function") {
+            root.view.forceLayout()
+        }
+        root.view.positionViewAtIndex(row, ListView.Center)
+        root.scheduleLibraryViewStatePersist()
     }
 
     function cancelPendingRestoredViewState() {
-        restoredViewRetryTimer.stop()
-        restoredViewSettleTimer.stop()
+        if (root.pendingRevealPurpose === "restore") {
+            root.pendingRevealKey = ""
+            root.pendingRevealPurpose = ""
+            root.libraryModel.cancelReveal()
+        }
         root.pendingRestoredSelectionKey = ""
         root.pendingRestoredAnchorKey = ""
         root.pendingRestoredExpandKeys = []
-        root.pendingRestoredAttempts = 0
-        root.pendingRestoredSettleAttempts = 0
         root.restoringViewState = false
+        root.restoreAwaitingView = false
     }
 
     function showTrackInLibrary(path) {
@@ -1009,211 +901,74 @@ QtObject {
         }
         root.restoredViewStateApplied = true
         root.restoringViewState = true
+        root.restoreRevealStarted = false
         root.pendingRestoredSelectionKey = root.uiBridge.libraryViewSelectionKey || ""
         root.pendingRestoredAnchorKey = root.uiBridge.libraryViewAnchorKey || ""
         root.pendingRestoredAnchorOffset = root.uiBridge.libraryViewAnchorOffset || 0
         root.pendingRestoredExpandKeys = root.uiBridge.libraryExpandedKeys || []
-        root.pendingRestoredAttempts = 80
         if (root.libraryModel.setExpandedKeys) {
             root.libraryModel.setExpandedKeys(root.pendingRestoredExpandKeys)
         }
         return true
     }
 
+    // Once the first tree is in the model, reveal the saved selection, or
+    // the saved top row, with the saved expansions.
     function tryApplyPersistedViewState() {
         if (!root.hasReceivedTreeFrame) {
             return
         }
-        if (!root.preparePersistedViewState() && !root.restoringViewState) {
+        root.preparePersistedViewState()
+        if (!root.restoringViewState || root.restoreRevealStarted || root.libraryModel.parsing) {
             return
         }
-        Qt.callLater(root.applyPendingRestoredViewState)
+        root.restoreRevealStarted = true
+        const target = root.pendingRestoredSelectionKey.length > 0
+            ? root.pendingRestoredSelectionKey
+            : root.pendingRestoredAnchorKey
+        if (target.length === 0) {
+            root.finishRestoredViewState()
+            return
+        }
+        root.revealRow(root.pendingRestoredExpandKeys, target, "restore")
     }
 
-    function applyPendingRestoredViewState() {
-        for (let i = 0; i < root.pendingRestoredExpandKeys.length; ++i) {
-            root.ensureKeyExpanded(root.pendingRestoredExpandKeys[i] || "")
-        }
-
-        let selectionReady = root.pendingRestoredSelectionKey.length === 0
-        if (!selectionReady) {
-            const selectionIndex = root.libraryModel.indexForSelectionKey(
-                root.pendingRestoredSelectionKey)
-            if (selectionIndex >= 0) {
-                const rowMap = root.libraryModel.rowDataForRow(selectionIndex)
-                root.setSingleSelection(selectionIndex, rowMap)
-                selectionReady = true
-            }
-        }
-
-        let anchorReady = root.pendingRestoredAnchorKey.length === 0
-        if (!anchorReady && root.view) {
-            const anchorIndex = root.libraryModel.indexForSelectionKey(
-                root.pendingRestoredAnchorKey)
-            if (anchorIndex >= 0) {
-                root.restoreViewAnchor({
-                    key: root.pendingRestoredAnchorKey,
-                    offset: root.pendingRestoredAnchorOffset,
-                    fallbackY: anchorIndex * root.rowHeight()
-                })
-                anchorReady = true
-            }
-        }
-
-        if (selectionReady && anchorReady) {
-            root.pendingRestoredAttempts = 0
-            if (root.pendingRestoredSettleAttempts <= 0) {
-                root.pendingRestoredSettleAttempts = 4
-            }
-            root.settleRestoredViewState()
-            return
-        }
-        if (root.pendingRestoredAttempts <= 0) {
-            root.cancelPendingRestoredViewState()
-            root.scheduleLibraryViewStatePersist()
-            return
-        }
-        root.pendingRestoredAttempts -= 1
-        restoredViewRetryTimer.restart()
-    }
-
-    function settleRestoredViewState() {
+    function finishRestoredViewState() {
         if (!root.restoringViewState) {
             return
         }
-        if (root.pendingRestoredAnchorKey.length > 0 && root.view) {
+        // The top row goes back once the view can show it.
+        if (!root.view) {
+            root.restoreAwaitingView = true
+            return
+        }
+        if (root.pendingRestoredSelectionKey.length > 0) {
+            const selectionIndex = root.libraryModel.indexForSelectionKey(
+                root.pendingRestoredSelectionKey)
+            if (selectionIndex >= 0) {
+                root.setSingleSelection(
+                    selectionIndex, root.libraryModel.rowDataForRow(selectionIndex))
+            }
+        }
+        if (root.pendingRestoredAnchorKey.length > 0) {
             const anchorIndex = root.libraryModel.indexForSelectionKey(
                 root.pendingRestoredAnchorKey)
             if (anchorIndex >= 0) {
+                if (typeof root.view.forceLayout === "function") {
+                    root.view.forceLayout()
+                }
                 root.restoreViewAnchor({
                     key: root.pendingRestoredAnchorKey,
                     offset: root.pendingRestoredAnchorOffset,
                     fallbackY: anchorIndex * root.rowHeight()
                 })
             }
-        }
-        root.pendingRestoredSettleAttempts -= 1
-        if (root.pendingRestoredSettleAttempts > 0) {
-            restoredViewSettleTimer.restart()
-            return
         }
         root.pendingRestoredSelectionKey = ""
         root.pendingRestoredAnchorKey = ""
         root.pendingRestoredExpandKeys = []
         root.restoringViewState = false
         root.scheduleLibraryViewStatePersist()
-    }
-
-    function ensureKeyExpanded(key) {
-        const normalized = (key || "").trim()
-        if (normalized.length === 0) {
-            return true
-        }
-        const rowIndex = root.libraryModel.indexForSelectionKey(normalized)
-        if (rowIndex < 0) {
-            return false
-        }
-        const rowMap = root.libraryModel.rowDataForRow(rowIndex)
-        if (!rowMap) {
-            return false
-        }
-        const rowType = rowMap.rowType || ""
-        const hasChildren = rowType !== "track" && (rowMap.count || 0) > 0
-        if (!hasChildren || !!rowMap.expanded) {
-            return true
-        }
-        root.libraryModel.toggleKey(normalized)
-        return false
-    }
-
-    function applyPendingReveal() {
-        if (root.pendingRevealSelectionKey.length === 0) {
-            return
-        }
-        for (let i = 0; i < root.pendingRevealExpandKeys.length; ++i) {
-            const expandKey = root.pendingRevealExpandKeys[i] || ""
-            if (expandKey.length > 0) {
-                root.ensureKeyExpanded(expandKey)
-            }
-        }
-        const index = root.libraryModel.indexForSelectionKey(root.pendingRevealSelectionKey)
-        if (index >= 0) {
-            const selectionKey = root.pendingRevealSelectionKey
-            const centerSelection = root.pendingRevealCentersSelection
-            if (centerSelection) {
-                const rowMap = root.libraryModel.rowDataForRow(index)
-                root.setSingleSelection(index, rowMap)
-                root.pendingCenteredRevealKey = selectionKey
-                root.pendingCenteredRevealAttempts = 4
-                root.applyPendingCenteredReveal()
-            } else {
-                root.selectIndex(index)
-            }
-            root.focusViewForNavigation()
-            root.pendingRevealSelectionKey = ""
-            root.pendingRevealExpandKeys = []
-            root.pendingRevealAttempts = 0
-            root.pendingRevealCentersSelection = false
-            return
-        }
-        if (root.pendingRevealAttempts <= 0) {
-            root.pendingRevealSelectionKey = ""
-            root.pendingRevealExpandKeys = []
-            return
-        }
-        root.pendingRevealAttempts -= 1
-        revealRetryTimer.restart()
-    }
-
-    function applyPendingCenteredReveal() {
-        if (!root.view || root.pendingCenteredRevealKey.length === 0) {
-            return
-        }
-        const index = root.libraryModel.indexForSelectionKey(root.pendingCenteredRevealKey)
-        if (index < 0) {
-            root.pendingCenteredRevealKey = ""
-            root.pendingCenteredRevealAttempts = 0
-            return
-        }
-        root.view.positionViewAtIndex(index, ListView.Center)
-        root.pendingCenteredRevealAttempts -= 1
-        if (root.pendingCenteredRevealAttempts > 0) {
-            centeredRevealTimer.restart()
-            return
-        }
-        root.pendingCenteredRevealKey = ""
-        root.scheduleLibraryViewStatePersist()
-    }
-
-    function applyPendingSearchOpen() {
-        if (root.pendingSearchOpenSelectionKey.length === 0) {
-            return
-        }
-        for (let i = 0; i < root.pendingSearchOpenExpandKeys.length; ++i) {
-            const expandKey = root.pendingSearchOpenExpandKeys[i] || ""
-            if (expandKey.length > 0) {
-                root.ensureKeyExpanded(expandKey)
-            }
-        }
-        const index = root.libraryModel.indexForSelectionKey(root.pendingSearchOpenSelectionKey)
-        if (index >= 0) {
-            const rowMap = root.libraryModel.rowDataForRow(index)
-            const openPath = rowMap.openPath || rowMap.trackPath || ""
-            if (openPath.length > 0) {
-                root.uiBridge.openInFileBrowser(openPath)
-            }
-            root.pendingSearchOpenSelectionKey = ""
-            root.pendingSearchOpenExpandKeys = []
-            root.pendingSearchOpenAttempts = 0
-            return
-        }
-        if (root.pendingSearchOpenAttempts <= 0) {
-            root.pendingSearchOpenSelectionKey = ""
-            root.pendingSearchOpenExpandKeys = []
-            return
-        }
-        root.pendingSearchOpenAttempts -= 1
-        searchOpenRetryTimer.restart()
     }
 
     function requestOpenInFileBrowserForSearchRow(row) {
@@ -1236,9 +991,6 @@ QtObject {
         if (rowType === "album" && (row.albumKey || "").length > 0) {
             expandKeys.push(row.albumKey)
         }
-        root.pendingSearchOpenSelectionKey = selectionKey
-        root.pendingSearchOpenExpandKeys = expandKeys
-        root.pendingSearchOpenAttempts = 80
-        Qt.callLater(root.applyPendingSearchOpen)
+        root.revealRow(expandKeys, selectionKey, "open")
     }
 }

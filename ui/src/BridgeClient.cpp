@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <utility>
 
@@ -726,6 +727,28 @@ bool QueueRowsModel::moveRow(int from, int to) {
         return false;
     }
     m_rows.move(from, to);
+    endMoveRows();
+    return true;
+}
+
+bool QueueRowsModel::moveRows(int from, int count, int to) {
+    const int size = static_cast<int>(m_rows.size());
+    if (from < 0 || count <= 0 || to < 0 || count > size - from || count > size - to) {
+        return false;
+    }
+    if (from == to) {
+        return true;
+    }
+    // Qt names the row the moved ones go before, counted before the move.
+    if (!beginMoveRows(QModelIndex(), from, from + count - 1, QModelIndex(),
+                       to > from ? to + count : to)) {
+        return false;
+    }
+    QVector<QueueRowData> moved(std::make_move_iterator(m_rows.begin() + from),
+                                std::make_move_iterator(m_rows.begin() + from + count));
+    m_rows.remove(from, count);
+    m_rows.insert(to, count, QueueRowData{});
+    std::move(moved.begin(), moved.end(), m_rows.begin() + to);
     endMoveRows();
     return true;
 }
@@ -2725,6 +2748,44 @@ void BridgeClient::moveQueue(int from, int to) {
         static_cast<quint32>(to)));
 }
 
+QList<quint32> BridgeClient::queueRowList(const QVariantList &rows) const {
+    QSet<quint32> unique;
+    for (const QVariant &value : rows) {
+        bool ok = false;
+        const int row = value.toInt(&ok);
+        if (ok && row >= 0 && row < m_queueLength) {
+            unique.insert(static_cast<quint32>(row));
+        }
+    }
+    QList<quint32> sorted = unique.values();
+    std::sort(sorted.begin(), sorted.end());
+    return sorted;
+}
+
+void BridgeClient::moveQueueRows(const QVariantList &rows, int before) {
+    const QList<quint32> sorted = queueRowList(rows);
+    if (sorted.isEmpty() || before < 0) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandMoveQueueRows(
+        m_queueRevision,
+        BinaryBridgeCodec::QueueRowsMoveBefore,
+        static_cast<quint32>(std::min(before, m_queueLength)),
+        sorted));
+}
+
+void BridgeClient::shiftQueueRows(const QVariantList &rows, int direction) {
+    const QList<quint32> sorted = queueRowList(rows);
+    if (sorted.isEmpty() || direction == 0) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandMoveQueueRows(
+        m_queueRevision,
+        direction < 0 ? BinaryBridgeCodec::QueueRowsMoveUp : BinaryBridgeCodec::QueueRowsMoveDown,
+        0,
+        sorted));
+}
+
 void BridgeClient::clearQueue() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdClearQueue));
 }
@@ -2866,6 +2927,77 @@ void BridgeClient::appendPaths(const QStringList &paths) {
                        "backend takes in one command. The queue was not changed."));
 }
 
+void BridgeClient::insertPaths(const QStringList &paths, int row) {
+    BinaryBridgeCodec::LibraryQueueItem item;
+    item.paths.reserve(paths.size());
+    for (const QString &path : paths) {
+        const QString normalized = normalizeLocalPathArg(path);
+        if (!normalized.isEmpty()) {
+            item.paths.push_back(normalized);
+        }
+    }
+    sendLibraryItems(BinaryBridgeCodec::QueuePlacementInsert, {item}, row);
+}
+
+void BridgeClient::playLibraryItems(const QVariant &items) {
+    sendLibraryItems(BinaryBridgeCodec::QueuePlacementReplace,
+                     items.value<BinaryBridgeCodec::LibraryQueueItems>(), -1);
+}
+
+void BridgeClient::appendLibraryItems(const QVariant &items) {
+    sendLibraryItems(BinaryBridgeCodec::QueuePlacementAppend,
+                     items.value<BinaryBridgeCodec::LibraryQueueItems>(), -1);
+}
+
+void BridgeClient::insertLibraryItems(const QVariant &items, int row) {
+    sendLibraryItems(BinaryBridgeCodec::QueuePlacementInsert,
+                     items.value<BinaryBridgeCodec::LibraryQueueItems>(), row);
+}
+
+void BridgeClient::sendLibraryItems(
+    BinaryBridgeCodec::QueuePlacement placement,
+    BinaryBridgeCodec::LibraryQueueItems items,
+    int row) {
+    // The library model's rows hold local paths already.
+    qsizetype trackCount = 0;
+    items.removeIf([&trackCount](const BinaryBridgeCodec::LibraryQueueItem &item) {
+        if (item.kind == BinaryBridgeCodec::LibraryQueueItem::Paths) {
+            trackCount += item.paths.size();
+            return item.paths.isEmpty();
+        }
+        return item.value.trimmed().isEmpty();
+    });
+    if (items.isEmpty()) {
+        return;
+    }
+    if (placement == BinaryBridgeCodec::QueuePlacementInsert && (row < 0 || row >= m_queueLength)) {
+        // After the last row is where an append goes.
+        placement = BinaryBridgeCodec::QueuePlacementAppend;
+    }
+    // One command keeps the rows a single queue change, so they are never
+    // split; rows over the bound are refused whole.
+    const QByteArray command = BinaryBridgeCodec::encodeCommandQueueLibraryItems(
+        placement,
+        m_queueRevision,
+        placement == BinaryBridgeCodec::QueuePlacementInsert ? static_cast<quint32>(row) : 0U,
+        items);
+    if (command.isEmpty()) {
+        logDiagnostic(
+            QStringLiteral("bridge"),
+            QStringLiteral("refuse library rows command rows=%1 paths=%2: over the command bound")
+                .arg(items.size())
+                .arg(trackCount));
+        reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                    QStringLiteral("Couldn't queue %1 library rows at once: they are over the %2 "
+                                   "MiB the backend takes in one command. The queue was not "
+                                   "changed.")
+                        .arg(items.size())
+                        .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
+        return;
+    }
+    sendBinaryCommand(command);
+}
+
 void BridgeClient::sendPathListCommand(
     quint16 cmdId,
     const QStringList &paths,
@@ -2985,6 +3117,9 @@ bool BridgeClient::applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue) 
             break;
         case BinaryBridgeCodec::QueueOpMove:
             applied = m_queueRowsModel.moveRow(op.index, op.to);
+            break;
+        case BinaryBridgeCodec::QueueOpMoveRows:
+            applied = m_queueRowsModel.moveRows(op.index, op.count, op.to);
             break;
         case BinaryBridgeCodec::QueueOpUpdate:
             applied = op.tracks.size() == 1

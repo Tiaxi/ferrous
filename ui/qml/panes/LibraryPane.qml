@@ -19,6 +19,7 @@ Rectangle {
     required property var stepScrollView
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
+    required property var addLibraryFolderAction
 
     color: root.uiPalette.uiPaneColor
 
@@ -159,8 +160,9 @@ Rectangle {
                     && (y <= libraryAlbumView.contentY + libraryAlbumView.height + 48)
                 readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
                 readonly property int depthResolved: depth !== undefined ? depth : 0
-                readonly property bool rowSelected: root.controller.isSelectionKeySelected(
-                    selectionKey || "")
+                // The model's role, so a row costs the same with any
+                // number of rows selected.
+                readonly property bool rowSelected: !!model.selected
                 readonly property string rowKindText: isTrackRow
                     ? "Track"
                     : (isAlbumRow
@@ -316,10 +318,7 @@ Rectangle {
                             root.controller.toggleNode(key)
                             return
                         }
-                        const rows = root.controller.rowsForAction(rowMap)
-                        if (rows.length > 0) {
-                            root.controller.playRows(rows)
-                        }
+                        root.controller.playRowItems(rowMap)
                     }
                 }
 
@@ -333,23 +332,13 @@ Rectangle {
                     MenuItem {
                         text: "Play"
                         enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
-                        onTriggered: {
-                            const rows = root.controller.rowsForAction(libraryContextMenu.rowMap)
-                            if (rows.length > 0) {
-                                root.controller.playRows(rows)
-                            }
-                        }
+                        onTriggered: root.controller.playRowItems(libraryContextMenu.rowMap)
                     }
 
                     MenuItem {
                         text: "Queue"
                         enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
-                        onTriggered: {
-                            const rows = root.controller.rowsForAction(libraryContextMenu.rowMap)
-                            if (rows.length > 0) {
-                                root.controller.appendRows(rows)
-                            }
-                        }
+                        onTriggered: root.controller.appendRowItems(libraryContextMenu.rowMap)
                     }
 
                     MenuItem {
@@ -383,13 +372,33 @@ Rectangle {
             }
         }
 
-        Label {
+        ColumnLayout {
+            id: libraryEmptyState
+            readonly property bool loading: root.controller.isTreeLoading()
             visible: libraryAlbumView.count === 0
                 && libraryAlbumView.contentHeight <= libraryAlbumView.height
-            text: root.controller.isTreeLoading() ? "Loading library..." : "Library is empty"
-            color: root.uiPalette.uiMutedTextColor
             Layout.fillWidth: true
-            horizontalAlignment: Text.AlignHCenter
+            spacing: 6
+
+            Label {
+                objectName: "libraryEmptyStateLabel"
+                text: libraryEmptyState.loading
+                    ? "Loading library..."
+                    : (root.uiBridge.libraryRootCount > 0
+                        ? "No music found in the library folders"
+                        : "Add a folder with your music to the library")
+                color: root.uiPalette.uiMutedTextColor
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+            }
+
+            Button {
+                objectName: "libraryAddFolderButton"
+                visible: !libraryEmptyState.loading
+                action: root.addLibraryFolderAction
+                Layout.alignment: Qt.AlignHCenter
+            }
         }
     }
 }

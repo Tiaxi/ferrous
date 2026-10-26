@@ -740,6 +740,12 @@ void clearCapturedMessages() {
     capturedMessages().clear();
 }
 
+// Drop the captured messages that are `message`, which the test expects.
+void dropCapturedMessages(const QString &message) {
+    QMutexLocker locker(&capturedMessageMutex());
+    capturedMessages().removeAll(message);
+}
+
 QString takeCapturedMessagesText() {
     QMutexLocker locker(&capturedMessageMutex());
     const QString text = capturedMessages().join('\n');
@@ -884,6 +890,14 @@ private slots:
     void libraryControllerUsesDelegateCoordinatesForViewportAnchor();
     void libraryControllerForwardsShowTrackRequest();
     void libraryControllerCentersBridgeRevealAfterExpansion();
+    void shiftSelectingTenThousandLibraryRowsStaysFast();
+    void librarySelectionFollowsItsRowsThroughTreeUpdates();
+    void playingALibrarySelectionSendsOneBatch();
+    void revealKeyExpandsADeepKeyInOneCall();
+    void revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers();
+    void queueMovesAndDropsActOnEveryHighlightedRow();
+    void queueSelectionFollowsRowRangeMoves();
+    void emptyLibraryAndFileMenuAddALibraryFolder();
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
@@ -1456,6 +1470,7 @@ Item {
     Action { id: replaceFromItunesAction }
     Action { id: playAllLibraryTracksAction }
     Action { id: appendAllLibraryTracksAction }
+    Action { id: addLibraryFolderAction }
 
     Dialogs.PreferencesDialog {
         id: preferencesDialog
@@ -1609,6 +1624,7 @@ Item {
         stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
         playAllLibraryTracksAction: playAllLibraryTracksAction
         appendAllLibraryTracksAction: appendAllLibraryTracksAction
+        addLibraryFolderAction: addLibraryFolderAction
     }
 
     Panes.QueuePane {
@@ -1631,7 +1647,6 @@ Item {
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
         droppedExternalPaths: function(drop) { return [] }
-        submitExternalImport: function(paths, replaceQueue) { return false }
     }
 
     Viewers.SpectrogramSurface {
@@ -4438,30 +4453,30 @@ Item {
 
     QObject *controller = qvariant_cast<QObject *>(root->property("controllerRef"));
     QVERIFY(controller != nullptr);
-    QCOMPARE(controller->property("selectedSelectionKeys").toStringList(), QStringList({
+    QCOMPARE(model.selectedKeys(), QStringList({
         QStringLiteral("artist|Artist A"),
     }));
 
     QVERIFY(QMetaObject::invokeMethod(root.get(), "pressShiftDown"));
     QCOMPARE(root->property("lastAccepted").toBool(), true);
-    QCOMPARE(controller->property("selectedSelectionKeys").toStringList(), QStringList({
+    QCOMPARE(model.selectedKeys(), QStringList({
         QStringLiteral("artist|Artist A"),
         QStringLiteral("album|Artist A|Album A"),
     }));
 
     QVERIFY(QMetaObject::invokeMethod(root.get(), "pressShiftDown"));
-    QCOMPARE(controller->property("selectedSelectionKeys").toStringList(), QStringList({
+    QCOMPARE(model.selectedKeys(), QStringList({
         QStringLiteral("artist|Artist A"),
         QStringLiteral("album|Artist A|Album A"),
         QStringLiteral("track|/music/artist/album/track01.flac"),
     }));
 
     QVERIFY(QMetaObject::invokeMethod(root.get(), "pressShiftUp"));
-    QCOMPARE(controller->property("selectedSelectionKeys").toStringList(), QStringList({
+    QCOMPARE(model.selectedKeys(), QStringList({
         QStringLiteral("artist|Artist A"),
         QStringLiteral("album|Artist A|Album A"),
     }));
-    QCOMPARE(controller->property("selectionAnchorIndex").toInt(), 0);
+    QCOMPARE(model.anchorRow(), 0);
 }
 
 void QmlSmokeTest::libraryControllerRestoresExpandedSelectionAndViewport() {
@@ -4718,9 +4733,11 @@ Item {
         Component.onCompleted: controller.registerView(view)
     }
 
-    Component.onCompleted: controller.requestBridgeReveal(
-        ["artist|Artist A", "album|Artist A|Album 20"],
-        "track|/music/artist/album20/track.flac")
+    function reveal() {
+        controller.requestBridgeReveal(
+            ["artist|Artist A", "album|Artist A|Album 20"],
+            "track|/music/artist/album20/track.flac")
+    }
 }
 )QML"), baseUrl, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
@@ -4729,10 +4746,13 @@ Item {
     QObject *view = qvariant_cast<QObject *>(root->property("viewRef"));
     QVERIFY(controller != nullptr);
     QVERIFY(view != nullptr);
-    QTRY_COMPARE(
+    // The rows are in the model, so the reveal selects and centers the
+    // track in the call, with no retries.
+    QVERIFY(QMetaObject::invokeMethod(root.get(), "reveal"));
+    QCOMPARE(
         controller->property("selectedSelectionKey").toString(),
         QStringLiteral("track|/music/artist/album20/track.flac"));
-    QTRY_VERIFY(view->property("contentY").toDouble() > 300.0);
+    QVERIFY(view->property("contentY").toDouble() > 300.0);
 }
 
 void QmlSmokeTest::playbackControllerReadsTheBridgeClock() {
@@ -9573,8 +9593,7 @@ Window {
 
     QtObject {
         id: libraryControllerStub
-        function rowsForAction(row) { return [] }
-        function appendRows(rows) {}
+        function insertRowItems(rowMap, row) {}
         function showTrackInLibrary(path) {}
     }
 
@@ -9594,7 +9613,6 @@ Window {
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
         droppedExternalPaths: function(drop) { return [] }
-        submitExternalImport: function(paths, replaceQueue) { return false }
     }
 }
 )QML"), baseUrl, &errorText));
@@ -9712,6 +9730,9 @@ Item {
         function removeAt(index) { record("remove " + index) }
         function removeIndices(indices) { record("remove " + indices.join(",")) }
         function moveQueue(from, to) { record("move " + from + "," + to) }
+        function shiftQueueRows(rows, direction) {
+            record("shift " + rows.join(",") + " by " + direction)
+        }
         function clearQueue() { record("clear") }
         function queuePathAt(index) { return "" }
     }
@@ -9851,13 +9872,13 @@ Item {
 
     // A removal from elsewhere of one row of a multi-selection keeps the
     // rest. The backend's selection was that row, so it moved to a row
-    // that is not highlighted; moving acts on a highlighted row anyway.
+    // that is not highlighted; moving acts on the highlighted rows anyway.
     start(10, {2, 5, 7}, 5);
     backendRemove({5});
     QCOMPARE(selection(), (QList<int>{2, 6}));
     QCOMPARE(bridge->property("selectedQueueIndex").toInt(), 5);
     QVERIFY(QMetaObject::invokeMethod(controller, "moveSelected", Q_ARG(QVariant, 1)));
-    QCOMPARE(takeCommands(), QStringLiteral("move 6,7"));
+    QCOMPARE(takeCommands(), QStringLiteral("shift 2,6 by 1"));
     snapshotArrives();
     QCOMPARE(takeCommands(), QStringLiteral("select 6"));
     QCOMPARE(selection(), (QList<int>{2, 6}));
@@ -13527,8 +13548,8 @@ void QmlSmokeTest::libraryKeysReachBothEndsAndOpenTheContextMenu() {
         }
         return false;
     };
-    const auto selectedCount = [library]() {
-        return library->property("selectedSelectionKeys").toStringList().size();
+    const auto selectedCount = [&libraryModel]() {
+        return libraryModel.selectionCount();
     };
 
     QTest::keyClick(window, Qt::Key_End);
@@ -15438,6 +15459,637 @@ void addHiDpiTestScreens(const QTemporaryDir &storage) {
     qputenv("QT_QPA_PLATFORM", "offscreen:configfile=" + QFile::encodeName(config.fileName()));
     qputenv("QT_SCREEN_SCALE_FACTORS",
         "ferrous-hidpi-200=2;ferrous-hidpi-150=1.5;ferrous-hidpi-125=1.25");
+}
+
+namespace {
+
+// The library controller, with a bridge that records what it is asked to
+// queue, over `testLibraryModel`.
+const QByteArray kLibraryControllerHarness = QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+
+Item {
+    id: harness
+    width: 320
+    height: 240
+    property alias controllerRef: controller
+    property alias viewRef: view
+    property var played: []
+    property var appended: []
+    property var inserted: []
+    property var insertedRows: []
+
+    function clickRow(row, modifiers) {
+        controller.handleRowSelection(
+            row, testLibraryModel.rowDataForRow(row), Qt.LeftButton, modifiers)
+    }
+    function canPlay() { return controller.canPlaySelection() }
+    function playSelection() { controller.playSelection() }
+    function appendSelection() { controller.appendSelection() }
+    function playRow(row) { controller.playRowItems(testLibraryModel.rowDataForRow(row)) }
+    function insertRow(row, at) {
+        controller.insertRowItems(testLibraryModel.rowDataForRow(row), at)
+    }
+    function rowSelectedInView(row) {
+        const item = view.itemAtIndex(row)
+        return item ? item.rowSelected : null
+    }
+
+    QtObject {
+        id: bridge
+        property int libraryTrackCount: 1
+        function setLibraryViewState(selectionKey, anchorKey, anchorOffset) {}
+        function setLibraryNodeExpanded(key, expanded) {}
+        function playLibraryItems(items) { harness.played = harness.played.concat([items]) }
+        function appendLibraryItems(items) { harness.appended = harness.appended.concat([items]) }
+        function insertLibraryItems(items, row) {
+            harness.inserted = harness.inserted.concat([items])
+            harness.insertedRows = harness.insertedRows.concat([row])
+        }
+        function openInFileBrowser(path) {}
+    }
+    QtObject { id: tagEditorApi }
+
+    Controllers.LibraryController {
+        id: controller
+        uiBridge: bridge
+        libraryModel: testLibraryModel
+        tryCaptureGlobalSearchPrefill: function(event) { return false }
+        tagEditorApi: tagEditorApi
+        openTagEditorDialog: function() {}
+    }
+
+    // As the library pane's rows: reused delegates that show the role.
+    ListView {
+        id: view
+        readonly property real rowHeight: 24
+        anchors.fill: parent
+        model: testLibraryModel
+        reuseItems: true
+        delegate: Rectangle {
+            readonly property bool rowSelected: !!model.selected
+            width: ListView.view.width
+            height: view.rowHeight
+            color: rowSelected ? "blue" : "white"
+        }
+        Component.onCompleted: controller.registerView(view)
+    }
+}
+)QML");
+
+QObject *createLibraryControllerHarness(QQmlApplicationEngine &engine, LibraryTreeModel &model,
+                                        QString *errorText) {
+    engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    return createQmlObjectFromSource(engine, kLibraryControllerHarness, baseUrl, errorText);
+}
+
+void callWith(QObject *object, const char *method, const QVariant &first,
+              const QVariant &second = {}) {
+    if (second.isValid()) {
+        QVERIFY(QMetaObject::invokeMethod(object, method, Q_ARG(QVariant, first),
+                                          Q_ARG(QVariant, second)));
+    } else {
+        QVERIFY(QMetaObject::invokeMethod(object, method, Q_ARG(QVariant, first)));
+    }
+}
+
+// The queue items each call of the harness bridge's `property` received.
+QVector<BinaryBridgeCodec::LibraryQueueItems> recordedItems(QObject *harness, const char *property) {
+    QVector<BinaryBridgeCodec::LibraryQueueItems> calls;
+    for (const QVariant &call : harness->property(property).toList()) {
+        calls.push_back(call.value<BinaryBridgeCodec::LibraryQueueItems>());
+    }
+    return calls;
+}
+
+BinaryBridgeCodec::LibraryQueueItem pathsItem(const QStringList &paths) {
+    BinaryBridgeCodec::LibraryQueueItem item;
+    item.paths = paths;
+    return item;
+}
+
+} // namespace
+
+void QmlSmokeTest::shiftSelectingTenThousandLibraryRowsStaysFast() {
+    const QString root = QStringLiteral("/music");
+    // 260 expanded artists of 38 tracks: 10,400 rows.
+    const QVector<int> artists = artistRange(0, 259);
+    LibraryTreeModel model;
+    model.setExpandedKeys(expandedArtistAlbumKeys(root, artists));
+    QVERIFY(applyLibraryTree(model, encodeRows(artistAlbumRows(root, artists, 38, plainTrackTitle))));
+    QCOMPARE(model.rowCount(), 10400);
+
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> harness(createLibraryControllerHarness(engine, model, &errorText));
+    QVERIFY2(harness != nullptr, qPrintable(errorText));
+
+    callWith(harness.get(), "clickRow", 0, int(Qt::NoModifier));
+    QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+    QElapsedTimer timer;
+    timer.start();
+    callWith(harness.get(), "clickRow", 9999, int(Qt::ShiftModifier));
+    const qint64 rangeMs = timer.elapsed();
+    QVERIFY2(rangeMs < 2000, qPrintable(QStringLiteral("Shift-select took %1 ms").arg(rangeMs)));
+    QCOMPARE(model.selectionCount(), 10000);
+    QVERIFY(model.isRowSelected(9999));
+    QVERIFY(!model.isRowSelected(10000));
+    // Views hear of the rows that changed as a run, not one by one.
+    QVERIFY2(changed.count() <= 2, qPrintable(QString::number(changed.count())));
+    QCOMPARE(harness->property("controllerRef").value<QObject *>()
+                 ->property("selectedSelectionKey").toString(),
+             model.selectionKeyForRow(9999));
+    QVariant shown;
+    QVERIFY(QMetaObject::invokeMethod(harness.get(), "rowSelectedInView",
+                                      Q_RETURN_ARG(QVariant, shown), Q_ARG(QVariant, 3)));
+    QCOMPARE(shown.toBool(), true);
+
+    // The actions' enabled checks ask the model, which keeps the answer.
+    timer.restart();
+    for (int i = 0; i < 200; ++i) {
+        QVariant enabled;
+        QVERIFY(QMetaObject::invokeMethod(harness.get(), "canPlay", Q_RETURN_ARG(QVariant, enabled)));
+        QVERIFY(enabled.toBool());
+    }
+    QVERIFY2(timer.elapsed() < 1000, qPrintable(QString::number(timer.elapsed())));
+
+    // A row's check costs the same however many rows are selected.
+    const auto timeRowChecks = [&model]() {
+        QElapsedTimer checks;
+        checks.start();
+        int selected = 0;
+        for (int pass = 0; pass < 10; ++pass) {
+            for (int row = 0; row < model.rowCount(); ++row) {
+                selected += model.data(model.index(row), LibraryTreeModel::SelectedRole).toBool();
+            }
+        }
+        return std::pair{checks.nsecsElapsed(), selected};
+    };
+    const auto [withMany, manySelected] = timeRowChecks();
+    QCOMPARE(manySelected, 10 * 10000);
+    callWith(harness.get(), "clickRow", 5, int(Qt::NoModifier));
+    QCOMPARE(model.selectionCount(), 1);
+    QVERIFY(QMetaObject::invokeMethod(harness.get(), "rowSelectedInView",
+                                      Q_RETURN_ARG(QVariant, shown), Q_ARG(QVariant, 3)));
+    QCOMPARE(shown.toBool(), false);
+    const auto [withOne, oneSelected] = timeRowChecks();
+    QCOMPARE(oneSelected, 10);
+    QVERIFY2(withMany < withOne * 4 + 100'000'000,
+             qPrintable(QStringLiteral("%1 ns with 10,000 selected, %2 ns with one")
+                            .arg(withMany)
+                            .arg(withOne)));
+}
+
+void QmlSmokeTest::librarySelectionFollowsItsRowsThroughTreeUpdates() {
+    const QString root = QStringLiteral("/music");
+    LibraryTreeModel model;
+    model.setExpandedKeys(expandedArtistAlbumKeys(root, artistRange(0, 20)));
+    QVERIFY(applyLibraryTree(model, encodeRows(artistAlbumRows(root, artistRange(0, 9), 3, plainTrackTitle))));
+    const QString removedKey = QStringLiteral("track|/music/Artist 0002/Album/01.flac");
+    const QString movedKey = QStringLiteral("track|/music/Artist 0005/Album/02.flac");
+    const QString keptKey = QStringLiteral("album|/music|Artist 0007|Album");
+    model.selectRow(model.indexForSelectionKey(removedKey));
+    model.toggleRowSelected(model.indexForSelectionKey(keptKey));
+    model.toggleRowSelected(model.indexForSelectionKey(movedKey));
+    QCOMPARE(model.selectionCount(), 3);
+
+    // A new artist comes first, artist 2 goes, and artist 5's tracks are
+    // in the opposite order, so its second track moves.
+    QVector<BinaryTreeRow> rows = artistAlbumRows(root, {15}, 3, plainTrackTitle);
+    rows += artistAlbumRows(root, {0, 1, 3, 4, 5, 6, 7, 8, 9}, 3, plainTrackTitle);
+    const auto album = std::find_if(rows.begin(), rows.end(), [](const BinaryTreeRow &row) {
+        return row.key == QStringLiteral("album|/music|Artist 0005|Album");
+    });
+    std::reverse(album + 1, album + 4);
+    QSignalSpy resets(&model, &QAbstractItemModel::modelReset);
+    QSignalSpy selection(&model, &LibraryTreeModel::selectionChanged);
+    QVERIFY(applyLibraryTree(model, encodeRows(rows)));
+    QCOMPARE(resets.count(), 0);
+    QVERIFY(selection.count() > 0);
+
+    QCOMPARE(model.selectedKeys(), (QStringList{movedKey, keptKey}));
+    const int movedRow = model.indexForSelectionKey(movedKey);
+    QVERIFY(model.isRowSelected(movedRow));
+    QVERIFY(model.data(model.index(movedRow), LibraryTreeModel::SelectedRole).toBool());
+    QVERIFY(!model.data(model.index(movedRow - 1), LibraryTreeModel::SelectedRole).toBool());
+    QVERIFY(!model.data(model.index(movedRow + 1), LibraryTreeModel::SelectedRole).toBool());
+    QVERIFY(model.isRowSelected(model.indexForSelectionKey(keptKey)));
+    for (int row = 0; row < 5; ++row) {
+        QVERIFY2(!model.isRowSelected(row), qPrintable(model.selectionKeyForRow(row)));
+    }
+    QCOMPARE(model.anchorRow(), movedRow);
+    QCOMPARE(model.firstSelectedRow(), movedRow);
+    // A range from the anchor starts at the row's new place.
+    model.selectRange(movedRow + 1);
+    QCOMPARE(model.selectedKeys(),
+             (QStringList{movedKey, QStringLiteral("track|/music/Artist 0005/Album/01.flac")}));
+
+    // Rows a collapse hides leave the selection too.
+    model.toggleKey(QStringLiteral("artist|/music|Artist 0005"));
+    QCOMPARE(model.selectionCount(), 0);
+    QCOMPARE(model.anchorRow(), -1);
+}
+
+void QmlSmokeTest::playingALibrarySelectionSendsOneBatch() {
+    const QString a = QStringLiteral("/music/Artist/Album/01.flac");
+    const QString b = QStringLiteral("/music/Artist/Album/02.flac");
+    QVector<BinaryTreeRow> rows;
+    rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist"),
+        QStringLiteral("artist|/music|Artist"), QStringLiteral("Artist"),
+        QStringLiteral("/music/Artist"), {}, {}, {}});
+    rows.push_back(BinaryTreeRow{2, 1, -1, 0, 2, QStringLiteral("Album"),
+        QStringLiteral("album|/music|Artist|Album"), QStringLiteral("Artist"),
+        QStringLiteral("/music/Artist/Album"), {}, {}, QStringList{a, b}});
+    for (const QString &path : {a, b}) {
+        rows.push_back(BinaryTreeRow{4, 2, -1, 1, 0, QFileInfo(path).fileName(),
+            QStringLiteral("track|") + path, QStringLiteral("Artist"), path, {}, path,
+            QStringList{path}});
+    }
+    LibraryTreeModel model;
+    model.setExpandedKeys(QStringList{QStringLiteral("artist|/music|Artist"),
+                                      QStringLiteral("album|/music|Artist|Album")});
+    QVERIFY(applyLibraryTree(model, encodeRows(rows)));
+    QCOMPARE(model.rowCount(), 4);
+
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> harness(createLibraryControllerHarness(engine, model, &errorText));
+    QVERIFY2(harness != nullptr, qPrintable(errorText));
+
+    // Selected from the last row up, played as one batch in tree order.
+    callWith(harness.get(), "clickRow", 3, int(Qt::NoModifier));
+    callWith(harness.get(), "clickRow", 0, int(Qt::ShiftModifier));
+    QVERIFY(QMetaObject::invokeMethod(harness.get(), "playSelection"));
+    BinaryBridgeCodec::LibraryQueueItem artist;
+    artist.kind = BinaryBridgeCodec::LibraryQueueItem::Artist;
+    artist.value = QStringLiteral("artist|/music|Artist");
+    const BinaryBridgeCodec::LibraryQueueItems all{
+        artist, pathsItem({a, b}), pathsItem({a}), pathsItem({b})};
+    QCOMPARE(recordedItems(harness.get(), "played"), (QVector<BinaryBridgeCodec::LibraryQueueItems>{all}));
+    QVERIFY(QMetaObject::invokeMethod(harness.get(), "appendSelection"));
+    QCOMPARE(recordedItems(harness.get(), "appended"), (QVector<BinaryBridgeCodec::LibraryQueueItems>{all}));
+
+    // A selected row acts for the selection; another row for itself.
+    callWith(harness.get(), "playRow", 2);
+    callWith(harness.get(), "clickRow", 1, int(Qt::ControlModifier));
+    callWith(harness.get(), "insertRow", 1, 7);
+    QCOMPARE(recordedItems(harness.get(), "played").size(), 2);
+    QCOMPARE(recordedItems(harness.get(), "played").at(1), all);
+    QCOMPARE(recordedItems(harness.get(), "inserted"),
+             (QVector<BinaryBridgeCodec::LibraryQueueItems>{{pathsItem({a, b})}}));
+    QCOMPARE(harness->property("insertedRows").toList(), (QVariantList{7}));
+}
+
+void QmlSmokeTest::revealKeyExpandsADeepKeyInOneCall() {
+    // root > artist > album > disc section > track, all collapsed below
+    // the root.
+    const QString track = QStringLiteral("/music/Artist/Album/CD 2/01.flac");
+    QVector<BinaryTreeRow> rows;
+    rows.push_back(BinaryTreeRow{0, 0, -1, 0, 1, QStringLiteral("/music"),
+        QStringLiteral("root|/music"), {}, QStringLiteral("/music"), {}, {}, {}});
+    rows.push_back(BinaryTreeRow{1, 1, -1, 0, 1, QStringLiteral("Artist"),
+        QStringLiteral("artist|/music|Artist"), QStringLiteral("Artist"),
+        QStringLiteral("/music/Artist"), {}, {}, {}});
+    rows.push_back(BinaryTreeRow{2, 2, -1, 0, 1, QStringLiteral("Album"),
+        QStringLiteral("album|/music|Artist|Album"), QStringLiteral("Artist"),
+        QStringLiteral("/music/Artist/Album"), {}, {}, QStringList{track}});
+    rows.push_back(BinaryTreeRow{3, 3, -1, 0, 1, QStringLiteral("CD 2"),
+        QStringLiteral("section|/music|Artist|Album|CD 2"), QStringLiteral("Artist"),
+        QStringLiteral("/music/Artist/Album/CD 2"), {}, {}, QStringList{track}});
+    rows.push_back(BinaryTreeRow{4, 4, -1, 1, 0, QStringLiteral("01"),
+        QStringLiteral("track|") + track, QStringLiteral("Artist"), track, {}, track,
+        QStringList{track}});
+    LibraryTreeModel model;
+    QVERIFY(applyLibraryTree(model, encodeRows(rows)));
+    QCOMPARE(model.rowCount(), 2);
+
+    QSignalSpy expansions(&model, &LibraryTreeModel::nodeExpansionRequested);
+    QSignalSpy finished(&model, &LibraryTreeModel::revealFinished);
+    const int row = model.revealKey(
+        QStringList{QStringLiteral("root|/music"), QStringLiteral("artist|/music|Artist"),
+                    QStringLiteral("album|/music|Artist|Album"),
+                    QStringLiteral("section|/music|Artist|Album|CD 2")},
+        QStringLiteral("track|") + track);
+    QCOMPARE(row, 4);
+    QCOMPARE(model.rowCount(), 5);
+    QCOMPARE(model.selectionKeyForRow(row), QStringLiteral("track|") + track);
+    QVERIFY(!model.revealPending());
+    QCOMPARE(finished.count(), 0);
+    // The backend hears of each expanded branch; the root is always whole.
+    QCOMPARE(expansions.count(), 3);
+    // A key the tree lacks is not waited for.
+    QCOMPARE(model.revealKey({QStringLiteral("artist|/music|Artist")},
+                             QStringLiteral("track|/music/missing.flac")),
+             -1);
+    QVERIFY(!model.revealPending());
+}
+
+void QmlSmokeTest::revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers() {
+    // The artist's rows come once the backend knows it is expanded.
+    const QString lazyArtist = QStringLiteral("artist|/music|Artist A");
+    const QString trackKey = QStringLiteral("track|/music/Artist A/Album/02.flac");
+    LibraryTreeModel model;
+    QVERIFY(applyLibraryTree(model, artistOnlyLazyBinary()));
+    QSignalSpy expansions(&model, &LibraryTreeModel::nodeExpansionRequested);
+    QSignalSpy finished(&model, &LibraryTreeModel::revealFinished);
+    const QStringList expandKeys{lazyArtist, QStringLiteral("album|/music|Artist A|Album")};
+    QCOMPARE(model.revealKey(expandKeys, trackKey), -1);
+    QVERIFY(model.revealPending());
+    QCOMPARE(expansions.count(), 2);
+
+    // A tree from before the expansion still lacks the rows: it waits.
+    QVERIFY(applyLibraryTree(model, artistOnlyLazyBinary()));
+    QCOMPARE(finished.count(), 0);
+    QVERIFY(model.revealPending());
+
+    // The tree with the artist's rows settles it as it is applied.
+    QVector<BinaryTreeRow> rows;
+    rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist A (2)"), lazyArtist,
+        QStringLiteral("Artist A"), QStringLiteral("/music/Artist A"), {}, {}, {}});
+    rows.push_back(BinaryTreeRow{2, 1, -1, 0, 2, QStringLiteral("Album"),
+        QStringLiteral("album|/music|Artist A|Album"), QStringLiteral("Artist A"),
+        QStringLiteral("/music/Artist A/Album"), {}, {}, {}});
+    for (int number = 1; number <= 2; ++number) {
+        const QString path = QStringLiteral("/music/Artist A/Album/%1.flac")
+                                 .arg(number, 2, 10, QLatin1Char('0'));
+        rows.push_back(BinaryTreeRow{4, 2, -1, static_cast<quint32>(number), 0,
+            QStringLiteral("Track"), QStringLiteral("track|") + path,
+            QStringLiteral("Artist A"), path, {}, path, QStringList{path}});
+    }
+    model.setLibraryTreeFromBinary(encodeRows(rows));
+    QCOMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(0).toString(), trackKey);
+    QCOMPARE(finished.at(0).at(1).toInt(), model.indexForSelectionKey(trackKey));
+    QCOMPARE(finished.at(0).at(1).toInt(), 3);
+    QVERIFY(!model.revealPending());
+
+    // Once the rows are there and the key is not, the wait ends empty.
+    model.collapseAll();
+    QCOMPARE(model.revealKey(expandKeys, QStringLiteral("track|/music/gone.flac")), -1);
+    QVERIFY(!model.revealPending());
+
+    // A wait the user overrides is dropped.
+    LibraryTreeModel lazy;
+    QVERIFY(applyLibraryTree(lazy, artistOnlyLazyBinary()));
+    QSignalSpy lazyFinished(&lazy, &LibraryTreeModel::revealFinished);
+    QCOMPARE(lazy.revealKey({lazyArtist}, trackKey), -1);
+    lazy.cancelReveal();
+    QVERIFY(!lazy.revealPending());
+    lazy.setLibraryTreeFromBinary(encodeRows(rows));
+    QCOMPARE(lazyFinished.count(), 0);
+}
+
+void QmlSmokeTest::queueMovesAndDropsActOnEveryHighlightedRow() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+Item {
+    id: harness
+    property var commands: []
+    property alias controller: controller
+    property var libraryInserts: []
+    QtObject {
+        id: bridge
+        property var queueRows: null
+        property int queueLength: 8
+        property int selectedQueueIndex: -1
+        property int playingQueueIndex: -1
+        property string playbackState: "Stopped"
+        property string currentTrackPath: ""
+        function record(command) { harness.commands = harness.commands.concat([command]) }
+        function selectQueueIndex(index) { selectedQueueIndex = index }
+        function moveQueueRows(rows, before) { record("move " + rows.join(",") + " before " + before) }
+        function shiftQueueRows(rows, direction) { record("shift " + rows.join(",") + " by " + direction) }
+        function insertPaths(paths, row) { record("insert " + paths.join(",") + " at " + row) }
+        function queuePathAt(index) { return "" }
+    }
+    QtObject {
+        id: libraryController
+        function insertRowItems(rowMap, row) {
+            harness.libraryInserts = harness.libraryInserts.concat([rowMap.selectionKey + "@" + row])
+        }
+    }
+    Controllers.QueueController {
+        id: controller
+        uiBridge: bridge
+        tagEditorApi: null
+        openTagEditorDialog: function() {}
+        autoCenterSelection: false
+    }
+    function select(rows) { controller.setSelectedIndices(rows) }
+    function dropQueueRows(from, at) { controller.dropQueueRows(from, at) }
+    function dropLibraryRow(key, at) {
+        controller.dropLibraryRow(libraryController, { selectionKey: key }, at)
+    }
+    function takeCommands() {
+        const taken = harness.commands.join("; ")
+        harness.commands = []
+        return taken
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QVERIFY(controller != nullptr);
+    const auto takeCommands = [&root]() {
+        QVariant taken;
+        QMetaObject::invokeMethod(root.data(), "takeCommands", Q_RETURN_ARG(QVariant, taken));
+        return taken.toString();
+    };
+    const auto select = [&root](const QVariantList &rows) {
+        QVERIFY(QMetaObject::invokeMethod(root.data(), "select", Q_ARG(QVariant, QVariant(rows))));
+    };
+    const auto drop = [&root](int from, int at) {
+        QVERIFY(QMetaObject::invokeMethod(root.data(), "dropQueueRows",
+            Q_ARG(QVariant, from), Q_ARG(QVariant, at)));
+    };
+
+    // Move up and down take every highlighted row, contiguous or not.
+    select({2, 3});
+    QVERIFY(QMetaObject::invokeMethod(controller, "moveSelected", Q_ARG(QVariant, -1)));
+    select({1, 4, 6});
+    QVERIFY(QMetaObject::invokeMethod(controller, "moveSelected", Q_ARG(QVariant, 1)));
+    // The context menu moves the selection it was opened on, or its row.
+    QVERIFY(QMetaObject::invokeMethod(controller, "moveRowsOf", Q_ARG(QVariant, 4),
+        Q_ARG(QVariant, -1)));
+    QVERIFY(QMetaObject::invokeMethod(controller, "moveRowsOf", Q_ARG(QVariant, 5),
+        Q_ARG(QVariant, 1)));
+    QCOMPARE(takeCommands(), QStringLiteral(
+        "shift 2,3 by -1; shift 1,4,6 by 1; shift 1,4,6 by -1; shift 5 by 1"));
+
+    // A drag of a highlighted row moves all of them to the drop line:
+    // before, after and between them.
+    select({2, 3, 6});
+    drop(3, 0);
+    drop(2, 8);
+    drop(6, 5);
+    drop(6, 3);
+    // A drag of another row moves that row alone.
+    drop(4, 1);
+    QCOMPARE(takeCommands(), QStringLiteral(
+        "move 2,3,6 before 0; move 2,3,6 before 8; move 2,3,6 before 5; "
+        "move 2,3,6 before 3; move 4 before 1"));
+
+    // Library rows and files go in at the drop line too.
+    QVERIFY(QMetaObject::invokeMethod(root.data(), "dropLibraryRow",
+        Q_ARG(QVariant, QStringLiteral("album|/music|A|B")), Q_ARG(QVariant, 2)));
+    QCOMPARE(root->property("libraryInserts").toStringList(),
+             QStringList{QStringLiteral("album|/music|A|B@2")});
+    QVERIFY(QMetaObject::invokeMethod(controller, "dropExternalPaths",
+        Q_ARG(QVariant, QVariant(QStringList{QStringLiteral("/dropped.flac")})),
+        Q_ARG(QVariant, 5)));
+    QCOMPARE(takeCommands(), QStringLiteral("insert /dropped.flac at 5"));
+
+    // The drop line is between the rows the drop is nearest.
+    const auto insertIndex = [controller](double contentY) {
+        QVariant index;
+        QMetaObject::invokeMethod(controller, "dropInsertIndex", Q_RETURN_ARG(QVariant, index),
+            Q_ARG(QVariant, contentY), Q_ARG(QVariant, 20.0));
+        return index.toInt();
+    };
+    QCOMPARE(insertIndex(0.0), 0);
+    QCOMPARE(insertIndex(9.0), 0);
+    QCOMPARE(insertIndex(11.0), 1);
+    QCOMPARE(insertIndex(75.0), 4);
+    QCOMPARE(insertIndex(5000.0), 8);
+    QCOMPARE(insertIndex(-40.0), 0);
+}
+
+void QmlSmokeTest::queueSelectionFollowsRowRangeMoves() {
+    QueueRowsModel rows;
+    QVector<QueueRowData> initial;
+    for (int number = 0; number < 8; ++number) {
+        QueueRowData row;
+        row.title = QStringLiteral("Track %1").arg(number);
+        row.path = QStringLiteral("/music/%1.flac").arg(number);
+        initial.push_back(row);
+    }
+    rows.setRows(initial);
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "controllers" as Controllers
+Item {
+    property alias controller: controller
+    QtObject {
+        id: bridge
+        property var queueRows: queueRowsModel
+        property int queueLength: 8
+        property int selectedQueueIndex: 2
+        property int playingQueueIndex: -1
+        property string playbackState: "Stopped"
+        property string currentTrackPath: ""
+        function selectQueueIndex(index) { selectedQueueIndex = index }
+        function queuePathAt(index) { return "" }
+    }
+    Controllers.QueueController {
+        id: controller
+        uiBridge: bridge
+        tagEditorApi: null
+        openTagEditorDialog: function() {}
+        autoCenterSelection: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
+        Q_ARG(QVariant, QVariant(QVariantList{2, 3, 6}))));
+    controller->setProperty("selectionAnchorIndex", 6);
+    const auto selection = [controller]() {
+        QList<int> indices;
+        for (const QVariant &value : controller->property("selectedIndices").toList()) {
+            indices.push_back(value.toInt());
+        }
+        return indices;
+    };
+
+    // The backend's row moves for gathering 2, 3 and 6 before row 1: the
+    // unmoved rows between them move down past them.
+    QVERIFY(rows.moveRows(2, 2, 1));
+    QVERIFY(rows.moveRows(6, 1, 3));
+    QCOMPARE(rows.rowAt(1)->title, QStringLiteral("Track 2"));
+    QCOMPARE(rows.rowAt(3)->title, QStringLiteral("Track 6"));
+    QCOMPARE(selection(), (QList<int>{1, 2, 3}));
+    QCOMPARE(controller->property("selectionAnchorIndex").toInt(), 3);
+    // Rows moved down past the selection leave it in place.
+    QVERIFY(rows.moveRows(0, 1, 7));
+    QCOMPARE(selection(), (QList<int>{0, 1, 2}));
+}
+
+void QmlSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
+    // The bridge runs with the test's own data directories; see main().
+    QTemporaryDir music;
+    QVERIFY(music.isValid());
+    QVERIFY(QDir(music.path()).mkpath(QStringLiteral("First")));
+    QVERIFY(QDir(music.path()).mkpath(QStringLiteral("Second")));
+    const QString first = QDir(music.path()).filePath(QStringLiteral("First"));
+    const QString second = QDir(music.path()).filePath(QStringLiteral("Second"));
+
+    BridgeClient bridge;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(bridge.property("libraryRootCount").toInt(), 0);
+
+    QObject *folderDialog = window->findChild<QObject *>(QStringLiteral("scanFolderDialog"));
+    QObject *nameDialog = window->findChild<QObject *>(QStringLiteral("libraryRootNameDialog"));
+    QVERIFY(folderDialog != nullptr && nameDialog != nullptr);
+    // Picks `folder` in the folder dialog the action opened, then keeps the
+    // name the root gets by default.
+    const auto chooseFolder = [&](const QString &folder) {
+        QTRY_COMPARE(window->property("pendingFolderDialogContext").toString(),
+                     QStringLiteral("add-library-root"));
+        QVERIFY(QMetaObject::invokeMethod(window, "takeChosenFolder",
+                                          Q_ARG(QVariant, folder)));
+        QVERIFY(QMetaObject::invokeMethod(folderDialog, "close"));
+        QTRY_VERIFY(nameDialog->property("opened").toBool());
+        QCOMPARE(nameDialog->property("pathValue").toString(), folder);
+        QVERIFY(QMetaObject::invokeMethod(nameDialog, "accept"));
+        QTRY_VERIFY(!nameDialog->property("visible").toBool());
+    };
+
+    // The empty library offers to add a folder.
+    QTRY_VERIFY(clickVisibleButton(window, QStringLiteral("libraryAddFolderButton")));
+    QCOMPARE(folderDialog->property("title").toString(), QStringLiteral("Add Library Folder"));
+    chooseFolder(first);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.property("libraryRootCount").toInt(), 1, 10000);
+
+    // So does the File menu, beside the item that adds a folder to the queue.
+    QObject *action = window->findChild<QObject *>(QStringLiteral("addLibraryFolderAction"));
+    QVERIFY(action != nullptr);
+    QCOMPARE(action->property("text").toString(), QStringLiteral("Add Library Fol&der..."));
+    QVERIFY(QMetaObject::invokeMethod(action, "trigger"));
+    chooseFolder(second);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.property("libraryRootCount").toInt(), 2, 10000);
+    QStringList roots;
+    for (const QVariant &entry : bridge.property("libraryRootEntries").toList()) {
+        roots.push_back(entry.toMap().value(QStringLiteral("path")).toString());
+    }
+    roots.sort();
+    QCOMPARE(roots, (QStringList{first, second}));
+    bool queueItemFound = false;
+    for (QObject *object : window->findChildren<QObject *>()) {
+        if (object->property("text").toString() == QStringLiteral("Add &Folder to Queue...")) {
+            queueItemFound = true;
+        }
+    }
+    QVERIFY(queueItemFound);
+    // The offscreen platform says so for the folder dialog's widget window.
+    dropCapturedMessages(QStringLiteral("This plugin does not support propagateSizeHints()"));
 }
 
 int main(int argc, char **argv) {

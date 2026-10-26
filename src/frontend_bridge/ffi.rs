@@ -17,7 +17,8 @@ use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand,
     BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame,
     BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory, FrontendBridgeHandle,
-    LibrarySortMode, QueueUndoState, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
+    LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueUndoState, RowsMove,
+    ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
@@ -67,7 +68,7 @@ const SECTION_LASTFM: u16 = 1 << 8;
 /// what to show the user otherwise.
 const SECTION_STATE_SAVED: u16 = 1 << 9;
 /// The queue change the UI can undo: the u64 ID to undo it with (0 for
-/// none), a u8 kind (1 cleared, 2 removed, 3 replaced; 0 for none) and the
+/// none), a u8 kind (1 cleared, 2 removed, 3 replaced, 4 moved; 0 for none) and the
 /// u32 count of tracks the change took. Then the latest undo: the u64 ID it
 /// undid (0 for none), the u64 queue revision it left, and a u32 count of
 /// (u32 start, u32 count) ranges of the rows it brought back, ascending.
@@ -1948,7 +1949,7 @@ fn parse_queue_command(
         reader.expect_done()?;
         return Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Undo(id))));
     }
-    if !matches!(cmd_id, 8 | 9 | 10 | 11 | 63) {
+    if !matches!(cmd_id, 8 | 9 | 10 | 11 | 63 | 70) {
         return Ok(None);
     }
     let revision = reader.read_u64()?;
@@ -1970,6 +1971,24 @@ fn parse_queue_command(
             BridgeQueueCommand::RemoveMany(indices)
         }
         10 => BridgeQueueCommand::Remove(usize_from_u32(reader.read_u32()?)),
+        // A u8 for where the rows go (0 before row `at`, 1 one row up, 2
+        // one row down), the u32 row `at`, then the u32 rows.
+        70 => {
+            let how = reader.read_u8()?;
+            let at = usize_from_u32(reader.read_u32()?);
+            let to = match how {
+                0 => RowsMove::Before(at),
+                1 => RowsMove::Up,
+                2 => RowsMove::Down,
+                _ => return Err("unknown queue rows move".to_string()),
+            };
+            let count = reader.read_count(4)?;
+            let mut rows = Vec::with_capacity(count);
+            for _ in 0..count {
+                rows.push(usize_from_u32(reader.read_u32()?));
+            }
+            BridgeQueueCommand::MoveRows { rows, to }
+        }
         _ => {
             let from = usize_from_u32(reader.read_u32()?);
             let to = usize_from_u32(reader.read_u32()?);
@@ -2022,6 +2041,7 @@ fn parse_library_collection_command(
             },
         },
         47 => BridgeLibraryCommand::RefreshEditedPaths(read_path_vec(reader)?),
+        69 => read_queue_items(reader)?,
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -2150,6 +2170,34 @@ fn parse_system_command(
     };
     reader.expect_done()?;
     Ok(Some(command))
+}
+
+/// Library rows to queue: a u8 placement (0 append, 1 replace and play, 2
+/// insert), the u64 queue revision and u32 row an insertion goes before,
+/// and a u32 count of rows, each a u8 kind and its value: 0 a list of
+/// paths, 1 an artist's tree key or name, 2 a library root's path.
+fn read_queue_items(reader: &mut BinaryReader<'_>) -> Result<BridgeLibraryCommand, String> {
+    let placement = reader.read_u8()?;
+    let revision = reader.read_u64()?;
+    let at = usize_from_u32(reader.read_u32()?);
+    let placement = match placement {
+        0 => QueuePlacement::Append,
+        1 => QueuePlacement::Replace,
+        2 => QueuePlacement::Insert { revision, at },
+        _ => return Err("unknown queue placement".to_string()),
+    };
+    // A row is at least its kind and a u32 length or count.
+    let count = reader.read_count(5)?;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        items.push(match reader.read_u8()? {
+            0 => LibraryQueueItem::Paths(read_path_vec(reader)?),
+            1 => LibraryQueueItem::Artist(reader.read_string()?),
+            2 => LibraryQueueItem::Root(reader.read_string()?),
+            _ => return Err("unknown library queue row".to_string()),
+        });
+    }
+    Ok(BridgeLibraryCommand::QueueItems { items, placement })
 }
 
 fn read_path_vec(reader: &mut BinaryReader<'_>) -> Result<Vec<PathBuf>, String> {
@@ -3317,6 +3365,105 @@ mod tests {
     }
 
     #[test]
+    fn move_rows_command_decodes_its_rows_and_destination() {
+        let payload = |how: u8, at: u32, rows: &[u32]| {
+            let mut payload = Vec::new();
+            push_u64(&mut payload, 12);
+            payload.push(how);
+            push_u32(&mut payload, at);
+            push_u32(&mut payload, u32::try_from(rows.len()).expect("count"));
+            for row in rows {
+                push_u32(&mut payload, *row);
+            }
+            payload
+        };
+        for (how, at, to) in [
+            (0, 4, RowsMove::Before(4)),
+            (1, 0, RowsMove::Up),
+            (2, 0, RowsMove::Down),
+        ] {
+            let parsed = parse_binary_command(&encode_command(70, &payload(how, at, &[5, 1, 2])))
+                .expect("parse")
+                .expect("command");
+            assert!(
+                matches!(
+                    &parsed,
+                    BridgeCommand::QueueAt {
+                        revision: 12,
+                        command: BridgeQueueCommand::MoveRows { rows, to: parsed_to },
+                    } if *rows == vec![5, 1, 2] && *parsed_to == to
+                ),
+                "{parsed:?}"
+            );
+        }
+        assert!(parse_binary_command(&encode_command(70, &payload(3, 0, &[1]))).is_err());
+        let mut truncated = payload(0, 1, &[1, 2]);
+        truncated.pop();
+        assert!(parse_binary_command(&encode_command(70, &truncated)).is_err());
+    }
+
+    #[test]
+    fn queue_items_command_decodes_each_row_and_its_placement() {
+        let payload = |placement: u8| {
+            let mut payload = vec![placement];
+            push_u64(&mut payload, 33);
+            push_u32(&mut payload, 2);
+            push_u32(&mut payload, 3);
+            payload.push(0);
+            push_u32(&mut payload, 2);
+            push_string(&mut payload, "/music/a.flac");
+            push_string(&mut payload, "/music/b.flac");
+            payload.push(1);
+            push_string(&mut payload, "artist|/music|Artist");
+            payload.push(2);
+            push_string(&mut payload, "/music");
+            payload
+        };
+        let items = vec![
+            LibraryQueueItem::Paths(vec![
+                PathBuf::from("/music/a.flac"),
+                PathBuf::from("/music/b.flac"),
+            ]),
+            LibraryQueueItem::Artist("artist|/music|Artist".to_string()),
+            LibraryQueueItem::Root("/music".to_string()),
+        ];
+        for (byte, placement) in [
+            (0, QueuePlacement::Append),
+            (1, QueuePlacement::Replace),
+            (
+                2,
+                QueuePlacement::Insert {
+                    revision: 33,
+                    at: 2,
+                },
+            ),
+        ] {
+            let parsed = parse_binary_command(&encode_command(69, &payload(byte)))
+                .expect("parse")
+                .expect("command");
+            assert!(
+                matches!(
+                    &parsed,
+                    BridgeCommand::Library(BridgeLibraryCommand::QueueItems {
+                        items: parsed_items,
+                        placement: parsed_placement,
+                    }) if *parsed_items == items && *parsed_placement == placement
+                ),
+                "{parsed:?}"
+            );
+        }
+        assert!(parse_binary_command(&encode_command(69, &payload(3))).is_err());
+        let mut unknown = payload(0);
+        unknown[17] = 9;
+        assert!(parse_binary_command(&encode_command(69, &unknown)).is_err());
+        let mut huge = vec![0];
+        push_u64(&mut huge, 0);
+        push_u32(&mut huge, 0);
+        push_u32(&mut huge, u32::MAX);
+        assert!(parse_binary_command(&encode_command(69, &huge)).is_err());
+    }
+
+    #[test]
     fn row_commands_carry_the_revision_the_ui_showed() {
         let with_revision = |fields: &[u32]| {
             let mut payload = Vec::new();
@@ -3983,6 +4130,7 @@ mod tests {
         Remove(u32, u32),
         Move(u32, u32),
         Update(u32, String, String),
+        MoveRows(u32, u32, u32),
     }
 
     /// A queue section as the UI decodes it. Rows are (title, path).
@@ -4052,6 +4200,10 @@ mod tests {
                             let (title, path) = read_queue_row(section, &mut offset);
                             TestQueueOp::Update(first, title, path)
                         }
+                        5 => {
+                            let count = read_u32(section, &mut offset);
+                            TestQueueOp::MoveRows(first, count, read_u32(section, &mut offset))
+                        }
                         other => panic!("unknown queue operation {other}"),
                     });
                 }
@@ -4094,6 +4246,15 @@ mod tests {
                             }
                             TestQueueOp::Update(index, _, path) => {
                                 self.paths[usize_from_u32(index)] = path;
+                            }
+                            TestQueueOp::MoveRows(from, count, to) => {
+                                let from = usize_from_u32(from);
+                                let moved: Vec<String> = self
+                                    .paths
+                                    .drain(from..from + usize_from_u32(count))
+                                    .collect();
+                                let to = usize_from_u32(to);
+                                self.paths.splice(to..to, moved);
                             }
                         }
                     }
@@ -4227,8 +4388,15 @@ mod tests {
             QueueEdit::Move { from: 0, to: 3 },
             // [x, 3, 4, 1]
             QueueEdit::SetPaths(vec![(1, PathBuf::from("/renamed"))]),
+            // [x, renamed, 4, 1]
+            QueueEdit::MoveRows {
+                from: 1,
+                count: 2,
+                to: 2,
+            },
+            // [x, 1, renamed, 4]
         ];
-        let snapshot = snapshot_with_update(edits(1, edit_list.clone()), 5);
+        let snapshot = snapshot_with_update(edits(1, edit_list.clone()), 6);
         let section = queue_sections(&mut relay, [&snapshot]).unwrap();
         let decoded = decode_queue_section(&section);
         assert_eq!(
@@ -4241,6 +4409,7 @@ mod tests {
                 TestQueueOp::Remove(0, 1),
                 TestQueueOp::Move(0, 3),
                 TestQueueOp::Update(1, "renamed".to_string(), "/renamed".to_string()),
+                TestQueueOp::MoveRows(1, 2, 2),
             ]
         );
         ui.apply(&section);
@@ -4249,7 +4418,8 @@ mod tests {
             assert!(edit.apply_to(&mut expected));
         }
         assert_eq!(ui.paths, path_strings(&expected));
-        assert_eq!(ui.revision, 5);
+        assert_eq!(ui.paths, ["/x", "/1", "/renamed", "/4"]);
+        assert_eq!(ui.revision, 6);
         assert_eq!(decoded.selected, 0);
     }
 

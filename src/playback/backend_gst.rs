@@ -1031,6 +1031,40 @@ impl GstPlaybackRuntime {
         self.continue_after_cancelled_advance(cancelled);
     }
 
+    /// See [`PlaybackCommand::ReorderQueue`].
+    fn reorder_queue(&mut self, order: &[usize]) {
+        self.edit_queue_rows(|state| state.reorder(order));
+    }
+
+    /// See [`PlaybackCommand::InsertIntoQueue`].
+    fn insert_into_queue(&mut self, at: usize, paths: Vec<PathBuf>) {
+        self.edit_queue_rows(|state| state.insert(at, paths));
+    }
+
+    /// Apply `edit`, which moves rows but keeps the committed track open,
+    /// and follow the committed track's row.
+    fn edit_queue_rows(
+        &mut self,
+        edit: impl FnOnce(&mut GaplessQueue) -> Option<CancelledAdvance>,
+    ) {
+        let Some((cancelled, repeat_mode, shuffle_enabled, current_index)) =
+            (match self.queue_state.lock() {
+                Ok(mut state) => Some((
+                    edit(&mut state),
+                    state.repeat_mode(),
+                    state.shuffle_enabled(),
+                    state.current_index(),
+                )),
+                Err(_) => None,
+            })
+        else {
+            return;
+        };
+        self.set_queue_flags(repeat_mode, shuffle_enabled);
+        self.snapshot.current_queue_index = current_index;
+        self.continue_after_cancelled_advance(cancelled);
+    }
+
     /// See [`PlaybackCommand::RestoreQueue`].
     fn restore_queue(&mut self, paths: Vec<PathBuf>, current: usize) {
         let Some(last) = paths.len().checked_sub(1) else {
@@ -2211,6 +2245,8 @@ impl GstPlaybackRuntime {
             PlaybackCommand::RemoveAt(idx) => self.remove_at(idx),
             PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
             PlaybackCommand::MoveQueue { from, to } => self.move_queue_item(from, to),
+            PlaybackCommand::ReorderQueue(order) => self.reorder_queue(&order),
+            PlaybackCommand::InsertIntoQueue { at, paths } => self.insert_into_queue(at, paths),
             PlaybackCommand::ClearQueue => self.clear_queue(),
             PlaybackCommand::PlayAt(idx) => self.play_at(idx),
             PlaybackCommand::Next => self.navigate(&[true]),
@@ -5774,6 +5810,76 @@ mod engine_tests {
             Expect::Gapless,
         );
         engine.wait_for_playing(1, millis(4_500));
+    }
+
+    #[test]
+    fn reordering_rows_inside_the_window_keeps_the_audible_track_and_its_successor() {
+        let fixtures = Fixtures::new("reorder-keep");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let c = fixtures.wav("c.wav", 3_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone(), c]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_settled_window(&b);
+        let changes = engine.changes.len();
+        // C moves to the top, above the audible track and its successor.
+        engine.send(PlaybackCommand::ReorderQueue(vec![2, 0, 1]));
+        engine.wait_until("the audible track did not follow its row", |engine| {
+            engine.snapshot.current_queue_index == Some(1)
+        });
+        assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+        assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+        assert_change(
+            &engine.wait_for_changes(changes + 1),
+            &b,
+            2,
+            Expect::Gapless,
+        );
+        assert_eq!(engine.cancelled_staging, 0);
+    }
+
+    #[test]
+    fn rows_moved_or_inserted_after_the_audible_track_are_staged_next() {
+        for insert in [false, true] {
+            let fixtures = Fixtures::new(if insert {
+                "insert-next"
+            } else {
+                "reorder-next"
+            });
+            let a = fixtures.wav("a.wav", 4_000);
+            let b = fixtures.wav("b.wav", 4_500);
+            let c = fixtures.wav("c.wav", 5_000);
+            let mut engine = Engine::start();
+            let loaded = if insert {
+                vec![a.clone(), c.clone()]
+            } else {
+                vec![a.clone(), c.clone(), b.clone()]
+            };
+            engine.send(PlaybackCommand::LoadQueue(loaded));
+            engine.send(PlaybackCommand::Play);
+            engine.wait_for_settled_window(&c);
+            let changes = engine.changes.len();
+            engine.send(if insert {
+                PlaybackCommand::InsertIntoQueue {
+                    at: 1,
+                    paths: vec![b.clone()],
+                }
+            } else {
+                PlaybackCommand::ReorderQueue(vec![0, 2, 1])
+            });
+            engine.wait_until("the staged successor was not cancelled", |engine| {
+                engine.cancelled_staging == 1
+            });
+            assert_eq!(engine.snapshot.current.as_deref(), Some(a.as_path()));
+            assert_change(
+                &engine.wait_for_changes(changes + 1),
+                &b,
+                1,
+                Expect::Gapless,
+            );
+            engine.wait_for_playing(1, millis(4_500));
+        }
     }
 
     #[test]

@@ -23,6 +23,7 @@ Rectangle {
     required property var stepScrollView
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
+    required property var addLibraryFolderAction
 
     color: root.uiPalette.uiPaneColor
     SplitView.preferredWidth: root.splitPreferredWidth
@@ -54,6 +55,7 @@ Rectangle {
             stepScrollView: root.stepScrollView
             playAllLibraryTracksAction: root.playAllLibraryTracksAction
             appendAllLibraryTracksAction: root.appendAllLibraryTracksAction
+            addLibraryFolderAction: root.addLibraryFolderAction
         }
     }
 }
