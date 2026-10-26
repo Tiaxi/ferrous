@@ -51,13 +51,24 @@ impl StftComputer {
         self.pending_skip = 0;
     }
 
+    #[cfg(test)]
     pub(super) fn enqueue_samples(&mut self, samples: &[f32]) {
+        self.enqueue_with(samples.len(), |pending, first| {
+            pending.extend_from_slice(&samples[first..]);
+        });
+    }
+
+    /// Queue `samples` samples that `fill` appends to the queue from the
+    /// given one on, so that a batch is copied once, straight into the queue.
+    pub(super) fn enqueue_with(&mut self, samples: usize, fill: impl FnOnce(&mut Vec<f32>, usize)) {
         self.compact_pending_if_needed();
-        let skip = self.pending_skip.min(samples.len());
+        let skip = self.pending_skip.min(samples);
         self.pending_skip -= skip;
         // Decode workers drain each packet before reading the next. Never drop
         // queued audio: packet size must not change the absolute FFT grid.
-        self.pending.extend_from_slice(&samples[skip..]);
+        let queued = self.pending.len();
+        fill(&mut self.pending, skip);
+        debug_assert_eq!(self.pending.len() - queued, samples - skip);
     }
 
     pub(super) fn has_row(&self) -> bool {
@@ -91,6 +102,12 @@ impl StftComputer {
         (0..max_rows)
             .map_while(|_| self.take_row().map(<[f32]>::to_vec))
             .collect()
+    }
+
+    /// The queued samples the next window starts at.
+    #[cfg(test)]
+    pub(super) fn pending_samples(&self) -> &[f32] {
+        &self.pending[self.pending_start..]
     }
 
     pub(super) fn pending_len(&self) -> usize {
