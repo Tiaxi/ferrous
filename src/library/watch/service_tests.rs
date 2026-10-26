@@ -290,6 +290,44 @@ fn files_added_changed_removed_and_renamed_reach_the_library_without_a_rescan() 
     assert!(running.mirror.status.unwatched_roots.is_empty());
 }
 
+#[test]
+fn files_of_the_same_size_and_time_swapped_outside_the_app_get_their_own_tags() {
+    let fixture = Fixture::new("outside-swap");
+    // One size, as the titles have one length, and one modification time.
+    // FLAC files, which, unlike raw surround files without a duration,
+    // a scan reads only when they changed.
+    let (alpha, bravo) = (fixture.path("alpha.flac"), fixture.path("bravo.flac"));
+    let time = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    for (path, title) in [(&alpha, "Alpha"), (&bravo, "Bravo")] {
+        crate::tag_write::write_test_flac(path, &[("TITLE", title)]);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(time))
+            .expect("modification time");
+    }
+    let mut running = fixture.start_watching(tuning(Duration::from_secs(3600)));
+    assert_eq!(running.title_of(&alpha).as_deref(), Some("Alpha"));
+
+    let aside = fixture.path("aside.tmp");
+    fs::rename(&alpha, &aside).expect("aside");
+    fs::rename(&bravo, &alpha).expect("bravo to alpha");
+    fs::rename(&aside, &bravo).expect("alpha to bravo");
+
+    running.wait_for("each file with its own tags", |mirror| {
+        let title = |path: &Path| {
+            mirror
+                .snapshot
+                .tracks
+                .iter()
+                .find(|track| track.path == path)
+                .map(|track| track.title.clone())
+        };
+        title(&alpha).as_deref() == Some("Bravo") && title(&bravo).as_deref() == Some("Alpha")
+    });
+    assert_eq!(running.mirror.status.last_error, None);
+}
+
 fn cover_of(mirror: &LibraryMirror, track: &Path) -> Option<String> {
     mirror
         .snapshot

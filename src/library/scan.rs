@@ -18,6 +18,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use walkdir::WalkDir;
 
 use crate::file_edit_lock;
+use crate::file_identity::FileId;
 use crate::folder_cover::{CoverStamp, FolderImages};
 use crate::metadata::EmbeddedCoverCache;
 use crate::no_replace::rename_no_replace;
@@ -31,8 +32,8 @@ use super::schema::{
     stamp_from_column, stamp_to_column, u128_to_i64, u64_to_i64, usize_to_f32,
 };
 use super::{
-    CoverReadAt, IndexedTrack, LibraryEvent, LibraryScanProgress, LibrarySnapshot, LibraryTrack,
-    TrackFileFingerprint,
+    file_id_columns, file_id_from_columns, identity_changed, CoverReadAt, IndexedTrack,
+    LibraryEvent, LibraryScanProgress, LibrarySnapshot, LibraryTrack, TrackFileFingerprint,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -973,15 +974,25 @@ fn summarize_scan_problems(problems: &[String]) -> String {
 }
 
 pub(crate) fn track_file_fingerprint(path: &Path) -> Option<TrackFileFingerprint> {
+    file_state(path).map(|(fingerprint, _)| fingerprint)
+}
+
+/// The fingerprint and identity of the file at `path`, from one read of its
+/// metadata.
+fn file_state(path: &Path) -> Option<(TrackFileFingerprint, Option<FileId>)> {
     let metadata = fs::metadata(path).ok()?;
-    Some(TrackFileFingerprint {
+    Some((fingerprint_of(&metadata), Some(FileId::of(&metadata))))
+}
+
+fn fingerprint_of(metadata: &fs::Metadata) -> TrackFileFingerprint {
+    TrackFileFingerprint {
         mtime_ns: metadata
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |duration| u128_to_i64(duration.as_nanos())),
         size_bytes: u64_to_i64(metadata.len()),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -1164,17 +1175,31 @@ struct ExistingTrackScanState {
 }
 
 /// What tells a scan that another connection wrote a library row since the
-/// scan read it: an edit's refresh writes the file's new state, and a cover
-/// refresh writes a new cover or stamp.
+/// scan read it: an edit's refresh writes the file's new state, a cover
+/// refresh writes a new cover or stamp, and a rename moves another file's
+/// row, of another identity, to the path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RowState {
     mtime_ns: i64,
     size_bytes: i64,
     cover_hash: u64,
+    /// The identity of the file the row was written for; `None` if not
+    /// known, as for a row from before identities were stored.
+    file_id: Option<FileId>,
 }
 
+/// The columns of [`RowState::from_row`].
+const ROW_STATE_COLUMNS: &str = "mtime_ns, size_bytes, cover_path, cover_stamp, file_device, \
+    file_inode";
+
 impl RowState {
-    fn new(mtime_ns: i64, size_bytes: i64, cover_path: &str, cover_stamp: CoverStamp) -> Self {
+    fn new(
+        mtime_ns: i64,
+        size_bytes: i64,
+        cover_path: &str,
+        cover_stamp: CoverStamp,
+        file_id: Option<FileId>,
+    ) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(cover_path, &mut hasher);
         std::hash::Hash::hash(&cover_stamp, &mut hasher);
@@ -1182,8 +1207,33 @@ impl RowState {
             mtime_ns,
             size_bytes,
             cover_hash: std::hash::Hasher::finish(&hasher),
+            file_id,
         }
     }
+
+    /// The state of a row selected with [`ROW_STATE_COLUMNS`].
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self::new(
+            row.get(0)?,
+            row.get(1)?,
+            &row.get::<_, String>(2)?,
+            stamp_from_column(row.get(3)?),
+            file_id_from_columns(row.get(4)?, row.get(5)?),
+        ))
+    }
+}
+
+/// Whether a library row other than that of `path` has a file of the same
+/// size and modification time, so that only identities tell the files
+/// apart; see `super::file_id`. A failed query counts as one, which only
+/// makes the scan read the file again.
+fn shares_size_and_time(conn: &Connection, path: &str, size_bytes: i64, mtime_ns: i64) -> bool {
+    conn.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM tracks \
+         WHERE size_bytes = ?1 AND mtime_ns = ?2 AND path <> ?3)",
+    )
+    .and_then(|mut stmt| stmt.query_row(params![size_bytes, mtime_ns, path], |row| row.get(0)))
+    .unwrap_or(true)
 }
 
 fn leading_track_number(input: &str) -> Option<u32> {
@@ -1309,7 +1359,11 @@ fn refresh_indexed_metadata_in_conn(
         failures.note(path, &read);
         let complete = read.is_complete();
         let path_string = path.to_string_lossy().to_string();
-        let fingerprint = track_file_fingerprint(path);
+        let state = file_state(path);
+        let fingerprint = state.map(|(fingerprint, _)| fingerprint);
+        // An edit saves the file by replacing it, which gives it another
+        // identity.
+        let (file_device, file_inode) = file_id_columns(state.and_then(|(_, id)| id));
         let update = row_update(read, || stored_track(&tx, &path_string))?;
 
         if let RowUpdate::Write {
@@ -1333,7 +1387,9 @@ fn refresh_indexed_metadata_in_conn(
                     size_bytes = COALESCE(?12, size_bytes),
                     indexed_at = ?13,
                     search_tags = ?14,
-                    cover_stamp = ?15
+                    cover_stamp = ?15,
+                    file_device = CASE WHEN ?11 IS NULL THEN file_device ELSE ?16 END,
+                    file_inode = CASE WHEN ?11 IS NULL THEN file_inode ELSE ?17 END
                 WHERE path = ?1
                 ",
                 params![
@@ -1352,6 +1408,8 @@ fn refresh_indexed_metadata_in_conn(
                     now,
                     serde_json::to_string(&indexed.search_tags).ok(),
                     stamp_to_column(indexed.cover_stamp),
+                    file_device,
+                    file_inode,
                 ],
             )
             .map_err(|e| format!("failed to refresh indexed track metadata: {e}"))?;
@@ -1845,6 +1903,8 @@ struct RenamedTrackRow<'a> {
     /// Whether the file was read fully, so that its cache row may be replaced.
     complete: bool,
     fingerprint: TrackFileFingerprint,
+    /// The file's identity, which the rename kept.
+    file_id: Option<FileId>,
     /// The file's external-track cache row before the rename.
     external: Option<(IndexedTrack, TrackFileFingerprint)>,
 }
@@ -1869,7 +1929,7 @@ fn read_renamed_track_rows<'a>(
             refreshed.insert(new_path.clone(), update.into_indexed());
             continue;
         }
-        let fingerprint = track_file_fingerprint(new_path)
+        let (fingerprint, file_id) = file_state(new_path)
             .ok_or_else(|| format!("failed to fingerprint {}", new_path.to_string_lossy()))?;
         let external = external_row(tx, &old_key)?;
         rows.push(RenamedTrackRow {
@@ -1879,6 +1939,7 @@ fn read_renamed_track_rows<'a>(
             update,
             complete,
             fingerprint,
+            file_id,
             external,
         });
     }
@@ -1892,11 +1953,12 @@ fn rename_placeholder(index: usize, old_key: &str) -> String {
     format!("ferrous-rename-pending/{index}/{old_key}")
 }
 
-/// Moves the saved waveforms of renamed files with them. A waveform is
-/// matched to its file by size and modification time, which a rename keeps,
-/// so a waveform left at a path would be taken for that of a file renamed
-/// there with the same size and time, as in a swap. A waveform saved at a
-/// new path before is dropped: no file was there.
+/// Moves the saved waveforms of renamed files with them, with the identity
+/// of their files, which a rename keeps as it keeps their size and time. A
+/// waveform left at a path would be decoded again for a file renamed there,
+/// or, if saved before identities were, taken for its waveform if it had
+/// the same size and time, as in a swap. A waveform saved at a new path
+/// before is dropped: no file was there.
 fn move_renamed_waveforms(tx: &Connection, rows: &[RenamedTrackRow<'_>]) -> rusqlite::Result<()> {
     for (index, row) in rows.iter().enumerate() {
         tx.execute(
@@ -1968,11 +2030,19 @@ fn update_renamed_track_rows(
             update,
             complete,
             fingerprint,
+            file_id,
             external,
             ..
         } = row;
-        move_renamed_track_row(tx, &current_key, &new_key, &update, fingerprint, now)
-            .map_err(|e| format!("failed to update renamed track row: {e}"))?;
+        move_renamed_track_row(
+            tx,
+            &current_key,
+            &new_key,
+            &update,
+            (fingerprint, file_id),
+            now,
+        )
+        .map_err(|e| format!("failed to update renamed track row: {e}"))?;
         let indexed = update.into_indexed();
         // A cache row that the file could not be read for moves as it is.
         match external {
@@ -1991,15 +2061,18 @@ fn update_renamed_track_rows(
 }
 
 /// Moves the row at `current_key` to `new_key`, with the file's new state
-/// and, unless the file could not be read, what was read from it.
+/// and, unless the file could not be read, what was read from it. A row
+/// that keeps what it had keeps the identity of its file too, which the
+/// rename kept.
 fn move_renamed_track_row(
     tx: &Connection,
     current_key: &str,
     new_key: &str,
     update: &RowUpdate,
-    fingerprint: TrackFileFingerprint,
+    (fingerprint, file_id): (TrackFileFingerprint, Option<FileId>),
     now: i64,
 ) -> rusqlite::Result<usize> {
+    let (file_device, file_inode) = file_id_columns(file_id);
     match update {
         RowUpdate::Keep(_) => tx.execute(
             "UPDATE tracks SET path = ?2 WHERE path = ?1",
@@ -2025,7 +2098,9 @@ fn move_renamed_track_row(
                 size_bytes = ?13,
                 indexed_at = ?14,
                 search_tags = ?15,
-                cover_stamp = ?16
+                cover_stamp = ?16,
+                file_device = ?17,
+                file_inode = ?18
             WHERE path = ?1
             ",
             params![
@@ -2045,6 +2120,8 @@ fn move_renamed_track_row(
                 now,
                 serde_json::to_string(&indexed.search_tags).ok(),
                 stamp_to_column(indexed.cover_stamp),
+                file_device,
+                file_inode,
             ],
         ),
     }
@@ -2070,12 +2147,13 @@ fn insert_indexed_tracks(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
     {
         let mut writer = TrackWriter::new(&tx).expect("track statements");
         for path in paths {
-            let fingerprint = track_file_fingerprint(path).expect("fixture fingerprint");
+            let (fingerprint, file_id) = file_state(path).expect("fixture fingerprint");
             let task = MetadataTask {
                 path: path.clone(),
                 path_string: path.to_string_lossy().to_string(),
                 mtime_ns: fingerprint.mtime_ns,
                 size_bytes: fingerprint.size_bytes,
+                file_id,
             };
             let read = read_track_catching_panic(path, EmbeddedCoverCache::shared());
             apply_metadata_result(
@@ -2230,6 +2308,9 @@ struct MetadataTask {
     path_string: String,
     mtime_ns: i64,
     size_bytes: i64,
+    /// The file's identity when the scan found it, before it read the file:
+    /// if another file replaced it since, the row's identity tells.
+    file_id: Option<FileId>,
 }
 
 #[derive(Debug)]
@@ -2342,6 +2423,7 @@ pub(crate) mod scan_test_hooks {
     /// Held walks, as held reads, by root.
     static WALK_GATES: Mutex<Vec<ReadGate>> = Mutex::new(Vec::new());
     static SCANS: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
+    static READS: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
 
     thread_local! {
         static TUNING: Cell<Option<ScanTuning>> = const { Cell::new(None) };
@@ -2426,7 +2508,23 @@ pub(crate) mod scan_test_hooks {
             .or_default() += 1;
     }
 
+    /// How many times the tags of `path` were read.
+    pub(crate) fn reads_of(path: &Path) -> usize {
+        READS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|reads| reads.get(path).copied())
+            .unwrap_or(0)
+    }
+
     pub(super) fn before_read(path: &Path) {
+        *READS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .entry(path.to_path_buf())
+            .or_default() += 1;
         let panics = PANIC_ON_READ
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2542,7 +2640,8 @@ fn load_existing_tracks_in_scope(
 }
 
 const EXISTING_TRACK_COLUMNS: &str = "path, title, track_no, mtime_ns, size_bytes, \
-    cover_checked, duration_secs, search_tags IS NULL, cover_path, cover_stamp";
+    cover_checked, duration_secs, search_tags IS NULL, cover_path, cover_stamp, file_device, \
+    file_inode";
 
 /// The rows of root `?1`, whose descendants start with `?2`, including rows
 /// from before tracks had a root.
@@ -2560,6 +2659,7 @@ type ExistingTrackRow = (
     bool,
     String,
     Option<i64>,
+    Option<FileId>,
 );
 
 fn existing_track_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExistingTrackRow> {
@@ -2574,6 +2674,7 @@ fn existing_track_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExistingTrack
         row.get(7)?,
         row.get(8)?,
         row.get(9)?,
+        file_id_from_columns(row.get(10)?, row.get(11)?),
     ))
 }
 
@@ -2590,7 +2691,7 @@ fn existing_track_state(item: ExistingTrackRow) -> (String, ExistingTrackScanSta
         || (missing_duration && is_raw_surround_file(path));
     let cover_stamp = stamp_from_column(item.9);
     let state = ExistingTrackScanState {
-        row: RowState::new(item.3, item.4, &item.8, cover_stamp),
+        row: RowState::new(item.3, item.4, &item.8, cover_stamp, item.10),
         has_cover_path: item.5 != 0,
         suspicious_metadata,
         cover_stamp,
@@ -2620,9 +2721,11 @@ fn prepare_track_upsert_statement<'conn>(
             size_bytes,
             indexed_at,
             search_tags,
-            cover_stamp
+            cover_stamp,
+            file_device,
+            file_inode
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
         ON CONFLICT(path) DO UPDATE SET
             root_path=excluded.root_path,
             title=excluded.title,
@@ -2638,7 +2741,9 @@ fn prepare_track_upsert_statement<'conn>(
             size_bytes=excluded.size_bytes,
             indexed_at=excluded.indexed_at,
             search_tags=excluded.search_tags,
-            cover_stamp=excluded.cover_stamp
+            cover_stamp=excluded.cover_stamp,
+            file_device=excluded.file_device,
+            file_inode=excluded.file_inode
         ",
     )
     .map_err(|e| format!("failed to prepare track upsert statement: {e}"))
@@ -2650,6 +2755,8 @@ struct TrackWriter<'conn> {
     stored: rusqlite::CachedStatement<'conn>,
     state: rusqlite::CachedStatement<'conn>,
     cover: rusqlite::CachedStatement<'conn>,
+    identity: rusqlite::CachedStatement<'conn>,
+    forget_waveform: rusqlite::CachedStatement<'conn>,
 }
 
 impl<'conn> TrackWriter<'conn> {
@@ -2658,17 +2765,29 @@ impl<'conn> TrackWriter<'conn> {
             upsert: prepare_track_upsert_statement(tx)?,
             stored: prepare_library_row_statement(tx)?,
             state: tx
-                .prepare_cached(
-                    "SELECT mtime_ns, size_bytes, cover_path, cover_stamp FROM tracks \
-                     WHERE path = ?1",
-                )
+                .prepare_cached(&format!(
+                    "SELECT {ROW_STATE_COLUMNS} FROM tracks WHERE path = ?1"
+                ))
                 .map_err(|e| format!("failed to prepare track state statement: {e}"))?,
             cover: tx
                 .prepare_cached(
                     "UPDATE tracks SET cover_path = COALESCE(?2, cover_path), \
-                     cover_checked = 1, cover_stamp = ?3 WHERE path = ?1",
+                     cover_checked = 1, cover_stamp = ?3, file_device = ?4, file_inode = ?5 \
+                     WHERE path = ?1",
                 )
                 .map_err(|e| format!("failed to prepare track cover statement: {e}"))?,
+            identity: tx
+                .prepare_cached(
+                    "UPDATE tracks SET file_device = ?2, file_inode = ?3 \
+                     WHERE path = ?1 AND mtime_ns = ?4 AND size_bytes = ?5",
+                )
+                .map_err(|e| format!("failed to prepare track identity statement: {e}"))?,
+            forget_waveform: tx
+                .prepare_cached(
+                    "DELETE FROM waveform_cache WHERE path = ?1 AND file_device IS NOT NULL \
+                     AND (file_device <> ?2 OR file_inode <> ?3)",
+                )
+                .map_err(|e| format!("failed to prepare waveform statement: {e}"))?,
         })
     }
 
@@ -2697,14 +2816,7 @@ impl<'conn> TrackWriter<'conn> {
         };
         let row = self
             .state
-            .query_row(params![task.path_string], |row| {
-                Ok(RowState::new(
-                    row.get(0)?,
-                    row.get(1)?,
-                    &row.get::<_, String>(2)?,
-                    stamp_from_column(row.get(3)?),
-                ))
-            })
+            .query_row(params![task.path_string], RowState::from_row)
             .optional()
             .map_err(|e| {
                 format!(
@@ -2772,6 +2884,7 @@ fn apply_metadata_result(
     else {
         return Ok(None);
     };
+    let (file_device, file_inode) = file_id_columns(task.file_id);
     writer
         .upsert
         .execute(params![
@@ -2791,8 +2904,24 @@ fn apply_metadata_result(
             now,
             serde_json::to_string(&indexed.search_tags).ok(),
             stamp_to_column(indexed.cover_stamp),
+            file_device,
+            file_inode,
         ])
         .map_err(|e| format!("failed to index '{}': {e}", task.path.display()))?;
+    // A saved waveform of a file of another identity is another file's; the
+    // analysis worker uses one whose identity alone changed once the row
+    // has the file's identity (see `super::file_id`), as it has now.
+    if file_device.is_some() {
+        writer
+            .forget_waveform
+            .execute(params![task.path_string.as_str(), file_device, file_inode])
+            .map_err(|e| {
+                format!(
+                    "failed to forget the waveform of '{}': {e}",
+                    task.path.display()
+                )
+            })?;
+    }
     Ok(Some((task, indexed)))
 }
 
@@ -2826,12 +2955,15 @@ fn apply_cover_update(
     if !writer.still_current(&task, seen.get(&task.path_string))? {
         return Ok(None);
     }
+    let (file_device, file_inode) = file_id_columns(task.file_id);
     writer
         .cover
         .execute(params![
             task.path_string.as_str(),
             cover_path,
-            stamp_to_column(stamp)
+            stamp_to_column(stamp),
+            file_device,
+            file_inode,
         ])
         .map_err(|e| {
             format!(
@@ -2848,6 +2980,34 @@ fn apply_cover_update(
             },
         )
     }))
+}
+
+/// Writes the identity of an unchanged file to its row, which had none or
+/// one the file system did not keep (see `super::file_id`), unless
+/// the file's size or time changed since. The file is not read, nor is
+/// anything published: the row shows what it showed.
+///
+/// A file that another one with the same size and time replaced
+/// meanwhile, as in a swap, gives its row a wrong identity, which only
+/// makes the next scan read the file again.
+fn apply_identity_update(writer: &mut TrackWriter<'_>, task: &MetadataTask) -> Result<(), String> {
+    let (file_device, file_inode) = file_id_columns(task.file_id);
+    writer
+        .identity
+        .execute(params![
+            task.path_string.as_str(),
+            file_device,
+            file_inode,
+            task.mtime_ns,
+            task.size_bytes,
+        ])
+        .map_err(|e| {
+            format!(
+                "failed to store the identity of '{}': {e}",
+                task.path.display()
+            )
+        })?;
+    Ok(())
 }
 
 /// Identity of a file independent of the path that reached it.
@@ -2881,6 +3041,7 @@ struct ScanCandidate {
     path: PathBuf,
     mtime_ns: i64,
     size_bytes: i64,
+    file_id: Option<FileId>,
 }
 
 /// A directory on the walk's current path.
@@ -3139,14 +3300,12 @@ impl LibraryWalk {
                 return WalkStep::Continue;
             }
         };
+        let fingerprint = fingerprint_of(&metadata);
         let candidate = ScanCandidate {
             path: path.to_path_buf(),
-            mtime_ns: metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |duration| u128_to_i64(duration.as_nanos())),
-            size_bytes: u64_to_i64(metadata.len()),
+            mtime_ns: fingerprint.mtime_ns,
+            size_bytes: fingerprint.size_bytes,
+            file_id: Some(FileId::of(&metadata)),
         };
         #[cfg(unix)]
         if metadata.nlink() > 1 {
@@ -3350,9 +3509,145 @@ struct RootScan<'a> {
     processed: usize,
     progress: ScanProgressReporter,
     read_failures: ReadFailures,
+    identities: IdentityCounts,
+}
+
+/// How a walked file's identity compares with its row's, for a file of the
+/// row's size and time; see `super::file_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityCheck {
+    /// The same, or not known; or the size or time changed, which tells.
+    Kept,
+    /// Changed, and another known file has the same size and time.
+    Tied,
+    /// Changed, and only the other files of the device can tell what that
+    /// means.
+    Unconfirmed,
+}
+
+/// By stored device, how many unchanged files a scan found that kept their
+/// identity, and how many did not.
+#[derive(Default)]
+struct IdentityCounts(HashMap<u64, (usize, usize)>);
+
+impl IdentityCounts {
+    fn note(&mut self, stored: FileId, kept: bool) {
+        let (kept_count, changed_count) = self.0.entry(stored.numbers().0).or_default();
+        if kept {
+            *kept_count += 1;
+        } else {
+            *changed_count += 1;
+        }
+    }
+
+    /// Whether most unchanged files of the device the row of `existing`
+    /// was stored on kept their identity, so that the device keeps them.
+    fn kept_on_device_of(&self, existing: &ExistingTrackScanState) -> bool {
+        existing.row.file_id.is_some_and(|stored| {
+            self.0
+                .get(&stored.numbers().0)
+                .is_some_and(|(kept, changed)| kept > changed)
+        })
+    }
 }
 
 impl RootScan<'_> {
+    /// Compares the identity of the file of `task` with its row's, counting
+    /// it for its device if the file's size and time are unchanged.
+    fn check_identity(
+        &mut self,
+        task: &MetadataTask,
+        existing: &ExistingTrackScanState,
+    ) -> IdentityCheck {
+        let (Some(stored), Some(_)) = (existing.row.file_id, task.file_id) else {
+            return IdentityCheck::Kept;
+        };
+        if existing.row.mtime_ns != task.mtime_ns || existing.row.size_bytes != task.size_bytes {
+            return IdentityCheck::Kept;
+        }
+        let changed = identity_changed(Some(stored), task.file_id);
+        self.identities.note(stored, !changed);
+        if !changed {
+            IdentityCheck::Kept
+        } else if shares_size_and_time(self.conn, &task.path_string, task.size_bytes, task.mtime_ns)
+        {
+            IdentityCheck::Tied
+        } else {
+            IdentityCheck::Unconfirmed
+        }
+    }
+
+    /// Has the file of `task` read if `read`; otherwise brings the row of
+    /// the unchanged file up to date: its cover, and its identity if it has
+    /// none or another (see `super::file_id`).
+    fn dispatch(
+        &mut self,
+        task: MetadataTask,
+        existing_state: Option<&ExistingTrackScanState>,
+        read: bool,
+        workers: &mut MetadataWorkerPool,
+        covers: Option<&'static EmbeddedCoverCache>,
+        sink: &mut dyn ScanSink,
+    ) -> Result<(), String> {
+        let cover_check = match existing_state {
+            Some(existing_state) if !read => self.check_cover(&task.path, existing_state),
+            _ => CoverCheck::Current,
+        };
+        if let CoverCheck::Update {
+            cover_path,
+            stamp,
+            read_at,
+        } = cover_check
+        {
+            self.accept_cover(
+                CoverUpdate {
+                    task,
+                    cover_path,
+                    stamp,
+                    read_at,
+                },
+                sink,
+            )
+        } else if read || cover_check == CoverCheck::Read {
+            match workers.submit(task) {
+                Ok(()) => Ok(()),
+                Err(task) => self.accept(read_scan_task(task, covers), sink),
+            }
+        } else if task.file_id.is_some()
+            && existing_state
+                .is_some_and(|existing_state| existing_state.row.file_id != task.file_id)
+        {
+            self.push(ScanRow::Identity(task), sink)
+        } else {
+            self.skip_unchanged(sink);
+            Ok(())
+        }
+    }
+
+    /// Takes the reads the workers finished, waiting while all are busy,
+    /// and writes the batch if it is due. Returns `false` if the scan is to
+    /// stop.
+    fn take_reads(
+        &mut self,
+        workers: &mut MetadataWorkerPool,
+        sink: &mut dyn ScanSink,
+    ) -> Result<bool, String> {
+        for result in workers.drain_ready()? {
+            self.accept(result, sink)?;
+        }
+        while workers.at_capacity() {
+            if sink.should_stop(self.conn) {
+                return Ok(false);
+            }
+            match workers.next_result(SCAN_POLL_INTERVAL)? {
+                Some(result) => self.accept(result, sink)?,
+                None => self.flush_if_due(sink)?,
+            }
+        }
+        self.flush_if_due(sink)?;
+        Ok(true)
+    }
+
     fn report(&mut self, sink: &mut dyn ScanSink, force: bool) {
         if let Some(progress) = self.progress.emit(force, self.discovered, self.processed) {
             sink.progress(self.conn, progress);
@@ -3366,20 +3661,10 @@ impl RootScan<'_> {
     fn note_row(&mut self, path: &str) -> Result<(), String> {
         let row = self
             .conn
-            .prepare_cached(
-                "SELECT mtime_ns, size_bytes, cover_path, cover_stamp FROM tracks WHERE path = ?1",
-            )
-            .and_then(|mut stmt| {
-                stmt.query_row(params![path], |row| {
-                    Ok(RowState::new(
-                        row.get(0)?,
-                        row.get(1)?,
-                        &row.get::<_, String>(2)?,
-                        stamp_from_column(row.get(3)?),
-                    ))
-                })
-                .optional()
-            })
+            .prepare_cached(&format!(
+                "SELECT {ROW_STATE_COLUMNS} FROM tracks WHERE path = ?1"
+            ))
+            .and_then(|mut stmt| stmt.query_row(params![path], RowState::from_row).optional())
             .map_err(|e| format!("failed to read the indexed row of '{path}': {e}"))?;
         if let Some(row) = row {
             self.found.insert(path.to_string(), row);
@@ -3483,6 +3768,9 @@ enum ScanRow {
     Read(MetadataResult),
     /// The cover of a file it did not need to read.
     Cover(CoverUpdate),
+    /// The identity of a file it did not need to read; see
+    /// [`apply_identity_update`].
+    Identity(MetadataTask),
 }
 
 /// A folder's cover choice and the stamp of its images.
@@ -3545,6 +3833,10 @@ fn write_batch(
                     apply_metadata_result(&mut writer, root_str, now, seen, result)?
                 }
                 ScanRow::Cover(update) => apply_cover_update(&mut writer, seen, update)?,
+                ScanRow::Identity(task) => {
+                    apply_identity_update(&mut writer, &task)?;
+                    None
+                }
             });
         }
     }
@@ -3662,6 +3954,7 @@ fn scan_root_in(
         processed: 0,
         progress: ScanProgressReporter::new(previous_index_count),
         read_failures: ReadFailures::default(),
+        identities: IdentityCounts::default(),
     };
     scan.report(sink, true);
 
@@ -3671,11 +3964,16 @@ fn scan_root_in(
         None => LibraryWalk::new(&root, &roots),
     };
 
+    // Unchanged files whose identity changed, with no other file of their
+    // size and time: decided once the walk has counted the identities their
+    // devices kept; see `super::file_id`.
+    let mut unconfirmed: Vec<(MetadataTask, &ExistingTrackScanState)> = Vec::new();
     let complete = 'scan: {
         for ScanCandidate {
             path,
             mtime_ns,
             size_bytes,
+            file_id,
         } in walk.by_ref()
         {
             if sink.should_stop(conn) {
@@ -3690,65 +3988,59 @@ fn scan_root_in(
             if existing_state.is_none() {
                 scan.note_row(&path_string)?;
             }
-            let needs_update = existing_state.is_none_or(|existing_state| {
-                existing_state.row.mtime_ns != mtime_ns
-                    || existing_state.row.size_bytes != size_bytes
-                    || !existing_state.has_cover_path
-                    || existing_state.suspicious_metadata
-            });
-            let cover_check = match existing_state {
-                Some(existing_state) if !needs_update => scan.check_cover(&path, existing_state),
-                _ => CoverCheck::Current,
+            let task = MetadataTask {
+                path,
+                path_string,
+                mtime_ns,
+                size_bytes,
+                file_id,
             };
+            let read = match existing_state {
+                None => true,
+                Some(existing_state) => {
+                    let identity = scan.check_identity(&task, existing_state);
+                    let stale = existing_state.row.mtime_ns != mtime_ns
+                        || existing_state.row.size_bytes != size_bytes
+                        || !existing_state.has_cover_path
+                        || existing_state.suspicious_metadata;
+                    if identity == IdentityCheck::Unconfirmed && !stale {
+                        unconfirmed.push((task, existing_state));
+                        continue;
+                    }
+                    stale || identity == IdentityCheck::Tied
+                }
+            };
+            scan.dispatch(task, existing_state, read, &mut workers, covers, sink)?;
+            if !scan.take_reads(&mut workers, sink)? {
+                break 'scan false;
+            }
+        }
 
-            if let CoverCheck::Update {
-                cover_path,
-                stamp,
-                read_at,
-            } = cover_check
-            {
-                let task = MetadataTask {
-                    path,
-                    path_string,
-                    mtime_ns,
-                    size_bytes,
-                };
-                scan.accept_cover(
-                    CoverUpdate {
-                        task,
-                        cover_path,
-                        stamp,
-                        read_at,
-                    },
+        for (task, existing_state) in std::mem::take(&mut unconfirmed) {
+            if sink.should_stop(conn) {
+                break 'scan false;
+            }
+            if scan.identities.kept_on_device_of(existing_state) {
+                // Another file, such as one swapped in from outside the
+                // library.
+                scan.dispatch(task, Some(existing_state), true, &mut workers, covers, sink)?;
+            } else if scope.is_none() {
+                // The file system did not keep the identities.
+                scan.dispatch(
+                    task,
+                    Some(existing_state),
+                    false,
+                    &mut workers,
+                    covers,
                     sink,
                 )?;
-            } else if needs_update || cover_check == CoverCheck::Read {
-                let task = MetadataTask {
-                    path,
-                    path_string,
-                    mtime_ns,
-                    size_bytes,
-                };
-                if let Err(task) = workers.submit(task) {
-                    scan.accept(read_scan_task(task, covers), sink)?;
-                }
             } else {
+                // A few changed paths cannot tell; the next full scan will.
                 scan.skip_unchanged(sink);
             }
-
-            for result in workers.drain_ready()? {
-                scan.accept(result, sink)?;
+            if !scan.take_reads(&mut workers, sink)? {
+                break 'scan false;
             }
-            while workers.at_capacity() {
-                if sink.should_stop(conn) {
-                    break 'scan false;
-                }
-                match workers.next_result(SCAN_POLL_INTERVAL)? {
-                    Some(result) => scan.accept(result, sink)?,
-                    None => scan.flush_if_due(sink)?,
-                }
-            }
-            scan.flush_if_due(sink)?;
         }
 
         workers.close_tasks();
@@ -4596,6 +4888,8 @@ where
 mod batch_tests;
 #[cfg(test)]
 mod cover_tests;
+#[cfg(test)]
+mod identity_tests;
 #[cfg(test)]
 mod refresh_tests;
 #[cfg(test)]

@@ -41,6 +41,17 @@ impl FileId {
             inode: metadata.ino(),
         }
     }
+
+    /// The identity of device number `device` and inode number `inode`,
+    /// as [`Self::numbers`] gave them.
+    pub(crate) fn from_numbers(device: u64, inode: u64) -> Self {
+        Self { device, inode }
+    }
+
+    /// The device and inode numbers, for storing the identity.
+    pub(crate) fn numbers(self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
 }
 
 #[cfg(any(test, feature = "gst"))]
