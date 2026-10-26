@@ -622,6 +622,8 @@ private slots:
     void repeatedErrorsAreCounted();
     void errorHistoryKeepsTheLatestErrors();
     void aLongErrorIsShownWhole();
+    void aLongMultiLineErrorKeepsTheControlsInTheWindow();
+    void escapeClosesFullscreenViewersWhileTheirErrorHasFocus();
     void quitTimeErrorClosesAFullscreenViewerFirst();
     void displaySleepFailureShowsInTheFullscreenViewer();
     void stoppedBackendShowsMessageAndDisablesControls();
@@ -2185,25 +2187,77 @@ void QmlSmokeTest::aLongErrorIsShownWhole() {
     QVERIFY(sendBridgeError(bridge, message, 2, 0));
 
     const QString shown = QStringLiteral("Library: ") + message;
-    QQuickItem *banner = nullptr;
-    QTRY_VERIFY((banner = qvariant_cast<QQuickItem *>(mainBanner->property("message"))) != nullptr);
-    QTRY_COMPARE(banner->property("text").toString(), shown);
-    // The message wraps over lines rather than being cut off.
-    QList<QQuickItem *> labels;
-    QTRY_VERIFY(!(labels = visibleTextItems(banner, shown)).isEmpty());
-    QTRY_VERIFY(!banner->property("animating").toBool());
-    for (QQuickItem *label : labels) {
-        QVERIFY(!label->property("truncated").toBool());
-        QVERIFY(label->property("lineCount").toInt() > 1);
-        QVERIFY(label->width() <= window->width());
-        QVERIFY(label->property("contentWidth").toReal() <= label->width() + 1);
-        QTRY_VERIFY(banner->height() >= label->height());
-    }
-    // Its actions stay in reach below it.
-    QTRY_VERIFY(!visibleTextItems(banner, QStringLiteral("Dismiss")).isEmpty());
+    auto *banner = qvariant_cast<QQuickItem *>(mainBanner->property("message"));
+    auto *text = window->findChild<QQuickItem *>(QStringLiteral("errorBannerText"));
+    QVERIFY(banner != nullptr && text != nullptr);
+    QTRY_VERIFY(banner->isVisible());
+    QCOMPARE(banner->property("text").toString(), shown);
+    // The whole message wraps over lines rather than being cut off; past
+    // the banner's lines it scrolls.
+    QCOMPARE(text->property("text").toString(), shown);
+    QVERIFY(!text->property("truncated").toBool());
+    QTRY_VERIFY(text->property("lineCount").toInt() > 1);
+    QVERIFY(text->property("contentWidth").toReal() <= text->width() + 1);
+    QVERIFY(text->width() <= window->width());
+    // And the history shows it whole too.
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(errors != nullptr);
+    QCOMPARE(errorHistoryMessages(errors), QStringList{message});
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
+}
+
+void QmlSmokeTest::aLongMultiLineErrorKeepsTheControlsInTheWindow() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    // The smallest window Ferrous allows.
+    window->resize(1280, 780);
+    QTRY_COMPARE(window->height(), 780);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *mainBanner = window->findChild<QQuickItem *>(QStringLiteral("mainErrorBanner"));
+    auto *body = window->findChild<QQuickItem *>(QStringLiteral("errorBannerBody"));
+    auto *text = window->findChild<QQuickItem *>(QStringLiteral("errorBannerText"));
+    auto *dismiss = window->findChild<QQuickItem *>(QStringLiteral("errorBannerDismissButton"));
+    auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
+    QVERIFY(bridge != nullptr && mainBanner != nullptr && body != nullptr && text != nullptr
+            && dismiss != nullptr && transport != nullptr);
+    const int maximumLines = mainBanner->property("maximumLines").toInt();
+    QVERIFY(maximumLines > 0);
+
+    // A batch tag save that failed for ten files with long paths, as the tag
+    // editor reports it.
+    QStringList lines{QStringLiteral("Saved 0 file(s); 10 failed.")};
+    for (int file = 0; file < 10; ++file) {
+        lines.push_back(QStringLiteral(
+            "/music/Some Artist With A Long Name/Some Album With An Even Longer Name (Deluxe "
+            "Edition, Remastered)/%1 A Track Title That Goes On For Quite A While.flac: "
+            "Permission denied (os error 13)").arg(file + 1, 2, 10, QLatin1Char('0')));
+    }
+    QVERIFY(sendBridgeError(bridge, lines.join(QLatin1Char('\n')), 4, 1));
+
+    // The banner keeps to its lines; the rest of the text scrolls.
+    QTRY_VERIFY(mainBanner->isVisible());
+    QTRY_VERIFY(text->property("lineCount").toInt() > maximumLines);
+    const QFontMetricsF metrics(qvariant_cast<QFont>(text->property("font")));
+    QTRY_VERIFY(body->height() <= metrics.lineSpacing() * maximumLines + 1);
+    QVERIFY(body->height() < text->height());
+    QVERIFY(mainBanner->height() <= metrics.lineSpacing() * (maximumLines + 3));
+
+    // Its buttons and the playback controls stay inside the window.
+    const auto insideWindow = [window](QQuickItem *item) {
+        const QRectF rect = item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+        return item->isVisible() && rect.top() >= 0 && rect.bottom() <= window->height()
+            && rect.left() >= 0 && rect.right() <= window->width();
+    };
+    QTRY_VERIFY(insideWindow(dismiss));
+    QVERIFY(insideWindow(transport));
+    QVERIFY(QMetaObject::invokeMethod(dismiss, "clicked"));
+    QTRY_VERIFY(!mainBanner->isVisible());
+    QVERIFY(finishIncubation(engine));
+    QCOMPARE(takeCapturedMessagesText().count(QStringLiteral("error [Tags]:")), 1);
 }
 
 void QmlSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
@@ -12943,6 +12997,82 @@ void QmlSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview() {
     QCOMPARE(drawnCanvasScale(node), 1.0);
 
     delete node;
+}
+
+void QmlSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(16, 16, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr);
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QVERIFY(playPause != nullptr);
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+    bridge->setProperty("viewerFullscreenMode", 1);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+
+    struct Viewer {
+        const char *open;
+        const char *openProperty;
+        QString windowName;
+        QString bannerName;
+    };
+    const QList<Viewer> viewers{
+        {"openSpectrogramViewer", "spectrogramViewerOpen",
+         QStringLiteral("spectrogramFullscreenWindow"),
+         QStringLiteral("spectrogramFullscreenErrorBanner")},
+        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen",
+         QStringLiteral("albumArtFullscreenWindow"),
+         QStringLiteral("albumArtFullscreenErrorBanner")},
+    };
+    for (const Viewer &shown : viewers) {
+        auto *fullscreen = qobject_cast<QQuickWindow *>(
+            engine.rootObjects().constFirst()->findChild<QObject *>(shown.windowName));
+        QVERIFY(fullscreen != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
+        QTRY_VERIFY(viewer->property(shown.openProperty).toBool());
+        QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+        QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it."),
+                                1, 0, QStringLiteral("/music/bad.flac")));
+        auto *banner = fullscreen->findChild<QQuickItem *>(shown.bannerName);
+        QVERIFY(banner != nullptr);
+        QTRY_VERIFY(banner->isVisible());
+        QQuickItem *dismiss = nullptr;
+        for (QQuickItem *item : banner->findChildren<QQuickItem *>()) {
+            if (item->objectName() == QStringLiteral("errorBannerDismissButton")) {
+                dismiss = item;
+            }
+        }
+        QVERIFY(dismiss != nullptr);
+
+        // Tab moves into the error's buttons.
+        for (int press = 0; press < 8 && !dismiss->hasActiveFocus(); ++press) {
+            QTest::keyClick(fullscreen, Qt::Key_Tab);
+        }
+        QVERIFY2(dismiss->hasActiveFocus(), qPrintable(shown.windowName));
+
+        // The main window's shortcuts still work, and Escape still closes
+        // the viewer.
+        const int toggles = toggled.count();
+        QTest::keyClick(fullscreen, Qt::Key_Space);
+        QTRY_VERIFY(toggled.count() > toggles);
+        QVERIFY(viewer->property(shown.openProperty).toBool());
+        QTest::keyClick(fullscreen, Qt::Key_Escape);
+        QTRY_VERIFY2(!viewer->property(shown.openProperty).toBool(), qPrintable(shown.windowName));
+        QTRY_VERIFY(!fullscreen->isVisible());
+    }
+    QVERIFY(finishIncubation(engine));
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
 int main(int argc, char **argv) {

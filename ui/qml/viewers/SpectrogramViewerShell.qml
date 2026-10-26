@@ -218,12 +218,27 @@ Item {
             id: spectrogramFullscreenFocusSink
             anchors.fill: parent
             focus: spectrogramFullscreenWindow.visibility === Window.FullScreen
+            // Above the viewer, and inside the scope that handles the
+            // viewer's keys, so they work while the error's buttons have focus.
+            z: 30
 
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Escape) {
                     event.accepted = true
                     root.closeViewer()
                 }
+            }
+
+            Components.ErrorBanner {
+                objectName: "spectrogramFullscreenErrorBanner"
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottomMargin: 24
+                width: Math.min(parent.width - 48, 720)
+                errorController: root.errorController
+                uiPalette: root.uiPalette
+                historyAvailable: false
+                active: root.viewerOpen && root.useWholeScreenViewerMode
             }
         }
 
@@ -282,19 +297,6 @@ Item {
                 id: spectrogramWindowHost
                 anchors.fill: parent
             }
-        }
-
-        Components.ErrorBanner {
-            objectName: "spectrogramFullscreenErrorBanner"
-            z: 30
-            anchors.bottom: parent.bottom
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottomMargin: 24
-            width: Math.min(parent.width - 48, 720)
-            errorController: root.errorController
-            uiPalette: root.uiPalette
-            historyAvailable: false
-            active: root.viewerOpen && root.useWholeScreenViewerMode
         }
     }
 }

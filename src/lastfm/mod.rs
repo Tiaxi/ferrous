@@ -3,7 +3,7 @@
 mod queue_file;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,10 @@ pub struct RuntimeState {
     /// Whether queued scrobbles exist only in memory, because the queue
     /// file could not be read or saved, so quitting would lose them.
     pub unsaved_scrobbles: bool,
+    /// How many [`Command::QueueScrobble`] the service has queued and tried
+    /// to save. Published before the scrobble is sent to Last.fm, so it
+    /// matches [`Handle::scrobbles_sent`] unless one waits behind a request.
+    pub scrobbles_received: u64,
     /// What went wrong since the previous state, for the user. The status
     /// text shows the latest; these are shown once each.
     pub problems: Vec<Problem>,
@@ -149,6 +153,8 @@ pub enum Event {
 pub struct Handle {
     tx: Sender<Command>,
     requests: Arc<RequestCancellation>,
+    /// How many [`Command::QueueScrobble`] reached the service's channel.
+    scrobbles_sent: Arc<AtomicU64>,
 }
 
 impl Handle {
@@ -156,11 +162,22 @@ impl Handle {
         Self {
             tx,
             requests: Arc::new(RequestCancellation::new()),
+            scrobbles_sent: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn command(&self, command: Command) {
-        let _ = self.tx.send(command);
+        let scrobble = matches!(command, Command::QueueScrobble(_));
+        if self.tx.send(command).is_ok() && scrobble {
+            self.scrobbles_sent.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// How many scrobbles were sent to the service. Those beyond
+    /// [`RuntimeState::scrobbles_received`] are not saved yet.
+    #[must_use]
+    pub fn scrobbles_sent(&self) -> u64 {
+        self.scrobbles_sent.load(Ordering::SeqCst)
     }
 
     /// Stops the service once it has handled the commands sent before this
@@ -574,6 +591,14 @@ fn run_service_loop(cmd_rx: &Receiver<Command>, event_tx: &Sender<Event>, mut se
                     service.publish(event_tx);
                     let _ = event_tx.send(Event::SavedForQuit { request_id, result });
                 }
+                Command::QueueScrobble(entry) => {
+                    // Whether the scrobble is saved is told before it is
+                    // sent, which can wait for the network.
+                    service.queue_scrobble(entry);
+                    service.publish(event_tx);
+                    service.flush_queue();
+                    service.publish(event_tx);
+                }
                 command => {
                     service.handle_command(command);
                     service.publish(event_tx);
@@ -715,14 +740,20 @@ impl Service {
             Command::Disconnect { clear_queue } => self.disconnect(clear_queue),
             Command::SendNowPlaying(track) => self.send_now_playing(&track),
             Command::QueueScrobble(entry) => {
-                self.queue.push(entry);
-                self.save_queue();
+                self.queue_scrobble(entry);
                 self.flush_queue();
             }
             Command::Flush => self.flush_queue(),
             // The service loop answers these itself.
             Command::SaveForQuit(_) | Command::Shutdown(_) => {}
         }
+    }
+
+    /// Queue `entry` and save the queue.
+    fn queue_scrobble(&mut self, entry: ScrobbleEntry) {
+        self.queue.push(entry);
+        self.save_queue();
+        self.state.scrobbles_received += 1;
     }
 
     fn begin_desktop_auth(&mut self) {

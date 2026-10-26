@@ -17,8 +17,10 @@ Item {
     property bool historyAvailable: true
     // Whether the banner may show at all, such as while its viewer is open.
     property bool active: true
-    // The message showing the newest error, while one is shown.
-    readonly property alias message: bannerLoader.item
+    // The message showing the newest error.
+    readonly property alias message: banner
+    // How many lines of the newest error show before its text scrolls.
+    property int maximumLines: 4
     // The palette's colors; viewers made without one show no history.
     readonly property color paletteTextColor: root.uiPalette ? root.uiPalette.uiTextColor : "black"
     readonly property color paletteMutedTextColor: root.uiPalette
@@ -63,39 +65,93 @@ Item {
         anchors.top: parent.top
         spacing: 0
 
-        // Built only while an error is shown: the message's actions build
-        // their overflow menu in the background.
-        Loader {
-            id: bannerLoader
+        // The newest error, styled as Kirigami's inline messages. Its text
+        // scrolls past a few lines, so a long error cannot push the window's
+        // controls, or its own buttons, out of reach.
+        Rectangle {
+            id: banner
+            objectName: "errorBanner"
+            readonly property bool warning: root.entry !== null
+                && root.entry.severity === ErrorUtils.SeverityWarning
+            readonly property string text: ErrorUtils.describe(root.entry)
+            readonly property color accentColor: banner.warning
+                ? Kirigami.Theme.neutralTextColor
+                : Kirigami.Theme.negativeTextColor
+
             Layout.fillWidth: true
-            active: root.bannerShown
-            visible: active
-            sourceComponent: Kirigami.InlineMessage {
-                objectName: "errorBanner"
-                visible: true
-                type: root.entry && root.entry.severity === ErrorUtils.SeverityWarning
-                    ? Kirigami.MessageType.Warning
-                    : Kirigami.MessageType.Error
-                // Wraps; the whole message is shown however long it is.
-                text: ErrorUtils.describe(root.entry)
-                // The close button would hide the message for good, so
-                // dismissing is an action that only hides the newest error.
-                showCloseButton: false
-                actions: [
-                    Kirigami.Action {
+            Layout.preferredHeight: bannerRow.implicitHeight + 2 * bannerRow.anchors.margins
+            visible: root.bannerShown
+            radius: Kirigami.Units.cornerRadius
+            color: banner.warning
+                ? Kirigami.Theme.neutralBackgroundColor
+                : Kirigami.Theme.negativeBackgroundColor
+            border.color: banner.accentColor
+            Accessible.role: Accessible.AlertMessage
+            Accessible.name: (banner.warning ? "Warning: " : "Error: ") + banner.text
+
+            RowLayout {
+                id: bannerRow
+                anchors.fill: parent
+                anchors.margins: Kirigami.Units.smallSpacing * 2
+                spacing: Kirigami.Units.largeSpacing
+
+                Kirigami.Icon {
+                    Layout.alignment: Qt.AlignTop
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
+                    source: banner.warning ? "dialog-warning" : "dialog-error"
+                    color: banner.accentColor
+                    Accessible.ignored: true
+                }
+
+                ScrollView {
+                    id: bannerBody
+                    objectName: "errorBannerBody"
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.preferredHeight: Math.min(
+                        bannerText.implicitHeight, bannerMetrics.lineSpacing * root.maximumLines)
+                    contentWidth: availableWidth
+                    clip: true
+
+                    Label {
+                        id: bannerText
+                        objectName: "errorBannerText"
+                        width: bannerBody.availableWidth
+                        text: banner.text
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        color: Kirigami.Theme.textColor
+                        Accessible.ignored: true
+                    }
+                }
+
+                RowLayout {
+                    Layout.alignment: Qt.AlignTop
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Button {
+                        objectName: "errorBannerHistoryButton"
+                        visible: root.historyAvailable
+                        icon.name: "view-list-details"
                         text: root.historyShown
                             ? "Hide Recent Errors"
                             : "Recent Errors (" + root.errorCount + ")"
-                        icon.name: "view-list-details"
-                        visible: root.historyAvailable
-                        onTriggered: root.errorController.toggleHistory()
-                    },
-                    Kirigami.Action {
-                        text: "Dismiss"
-                        icon.name: "dialog-close"
-                        onTriggered: root.errorController.dismissLatest()
+                        onClicked: root.errorController.toggleHistory()
                     }
-                ]
+                    Button {
+                        objectName: "errorBannerDismissButton"
+                        icon.name: "dialog-close"
+                        text: "Dismiss"
+                        Accessible.name: "Dismiss this error"
+                        onClicked: root.errorController.dismissLatest()
+                    }
+                }
+            }
+
+            FontMetrics {
+                id: bannerMetrics
+                font: bannerText.font
             }
         }
 
