@@ -160,8 +160,8 @@ ApplicationWindow {
     }
 
     // The window opens where it was, unless that is off the screens there
-    // are now; see BridgeClient::savedWindowLayout. Set before the window
-    // is shown, as a binding would not be.
+    // are now; see BridgeClient::savedWindowLayout. Without a saved
+    // geometry, the window manager places it.
     Binding {
         target: root
         property: "x"

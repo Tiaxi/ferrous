@@ -112,8 +112,9 @@ fn saved_position(state: &BridgeState) -> Option<SavedPosition> {
     })
 }
 
-/// How often the position of a track that plays is saved. A pause, a stop,
-/// a track change, or quitting saves it at once.
+/// How often the position of a track that plays is saved. After a pause,
+/// a stop, or a track change it is saved with the next periodic save, and
+/// quitting saves it too.
 pub(super) const PLAYING_POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Whether `next` has to be saved over `saved`, the session saved last.
