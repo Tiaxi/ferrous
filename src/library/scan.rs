@@ -3837,16 +3837,16 @@ fn linked_duplicate_rows(
         else {
             continue;
         };
+        // A path that is not UTF-8 is stored lossily, so a row with the same
+        // text may be another file's.
+        let (Some(target), Some(owner)) = (target.to_str(), owner.to_str()) else {
+            continue;
+        };
         let indexed: bool = conn
             .prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM tracks WHERE path = ?1 AND root_path = ?2)",
             )
-            .and_then(|mut stmt| {
-                stmt.query_row(
-                    params![target.to_string_lossy(), owner.to_string_lossy()],
-                    |row| row.get(0),
-                )
-            })
+            .and_then(|mut stmt| stmt.query_row(params![target, owner], |row| row.get(0)))
             .map_err(|e| e.to_string())?;
         if indexed {
             duplicates.push(path.clone());
@@ -6054,27 +6054,37 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
-    /// Whether `folder`, locked to searchable but not readable, still cannot
-    /// be listed; root and `CAP_DAC_OVERRIDE` ignore the permissions. If it
-    /// can, unlocks it and logs that the test is skipped.
+    /// Restores the permissions of a folder [`lock_listing`] locked, even
+    /// when the test panics.
     #[cfg(unix)]
-    fn lock_listing(folder: &Path) -> bool {
+    struct ListingLock<'a>(&'a Path);
+
+    #[cfg(unix)]
+    impl Drop for ListingLock<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+
+            if let Err(err) = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755)) {
+                eprintln!("could not unlock '{}': {err}", self.0.display());
+            }
+        }
+    }
+
+    /// Locks `folder` to searchable but not readable, until the returned
+    /// lock is dropped. `None`, with the folder unlocked and the test logged
+    /// as skipped, when it can still be listed: root and `CAP_DAC_OVERRIDE`
+    /// ignore the permissions.
+    #[cfg(unix)]
+    fn lock_listing(folder: &Path) -> Option<ListingLock<'_>> {
         use std::os::unix::fs::PermissionsExt;
 
         fs::set_permissions(folder, fs::Permissions::from_mode(0o111)).expect("lock folder");
+        let lock = ListingLock(folder);
         if fs::read_dir(folder).is_ok() {
-            fs::set_permissions(folder, fs::Permissions::from_mode(0o755)).expect("unlock");
             eprintln!("skipping: permission-denied folders are readable for this user");
-            return false;
+            return None;
         }
-        true
-    }
-
-    #[cfg(unix)]
-    fn unlock(folder: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(folder, fs::Permissions::from_mode(0o755)).expect("unlock");
+        Some(lock)
     }
 
     #[cfg(unix)]
@@ -6095,14 +6105,14 @@ mod tests {
 
         // The link still resolves, but `b`'s scan cannot list the folder, as
         // on a network share whose lookups are cached, and indexes nothing.
-        if !lock_listing(&b) {
+        let Some(lock) = lock_listing(&b) else {
             let _ = fs::remove_dir_all(base);
             return;
-        }
+        };
         insert_root(&conn, &b, "").expect("root b");
         let b_outcome = scan(&conn, &b);
         let outcome = scan(&conn, &a);
-        unlock(&b);
+        drop(lock);
 
         assert!(b_outcome
             .problem
@@ -6115,6 +6125,46 @@ mod tests {
             "{problem}"
         );
         assert_eq!(indexed_paths(&conn), [song]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_to_a_file_whose_name_is_not_utf8_keeps_the_row() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let base = test_dir("non-utf8-target");
+        fs::create_dir_all(base.join("a")).expect("mkdir a");
+        fs::create_dir_all(base.join("b/Album")).expect("mkdir b");
+        fs::create_dir_all(base.join("aside")).expect("mkdir aside");
+        let base = base.canonicalize().expect("canonical base");
+        let (a, b) = (base.join("a"), base.join("b"));
+        let target = b.join("Album").join(OsStr::from_bytes(b"\xFF.mp3"));
+        let song = a.join("song.mp3");
+        write_stub(&target, b"not utf-8");
+        std::os::unix::fs::symlink(&target, &song).expect("link");
+        scan(&conn, &a);
+        assert_eq!(indexed_paths(&conn), [song.clone()]);
+
+        // While the target is away, `b` indexes another file, whose name is
+        // the target's name with its byte replaced as a lossy conversion does.
+        let aside = base.join("aside/target.mp3");
+        fs::rename(&target, &aside).expect("move aside");
+        let lookalike = b.join("Album/\u{FFFD}.mp3");
+        write_stub(&lookalike, b"utf-8");
+        insert_root(&conn, &b, "").expect("root b");
+        scan(&conn, &b);
+        fs::rename(&aside, &target).expect("move back");
+
+        let outcome = scan(&conn, &a);
+
+        assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+        let problem = outcome.problem.expect("the kept track is reported");
+        assert!(problem.contains("kept its 1 indexed track"), "{problem}");
+        assert_eq!(indexed_paths(&conn), [song, lookalike]);
         let _ = fs::remove_dir_all(base);
     }
 
