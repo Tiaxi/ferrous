@@ -753,13 +753,12 @@ impl ScanRun<'_> {
                         stale_set.contains(track.path.to_string_lossy().as_ref())
                     });
                 }
-                // A scan of part of the root says nothing about the rest.
-                if stopped.is_none() && (scope.is_none() || outcome.problem.is_some()) {
-                    self.library
-                        .status
-                        .set_root_problem(root, outcome.problem.clone());
+                if stopped.is_none() {
+                    self.note_root_problem(root, scope.is_some(), outcome.problem);
+                } else {
+                    // An interrupted scan says nothing lasting about the root.
+                    self.problems.extend(outcome.problem);
                 }
-                self.problems.extend(outcome.problem);
             }
             Err(err) => {
                 // The batches committed before the failure stay, and the
@@ -771,10 +770,7 @@ impl ScanRun<'_> {
                     self.library.reload(conn);
                 }
                 let problem = format!("failed to scan '{}': {err}", root.display());
-                self.library
-                    .status
-                    .set_root_problem(root, Some(problem.clone()));
-                self.problems.push(problem);
+                self.note_root_problem(root, false, Some(problem));
             }
         }
         if stopped == Some(ScanDirective::StopAll) {
@@ -798,6 +794,16 @@ impl ScanRun<'_> {
         });
         self.library.publish(self.event_tx);
         end
+    }
+
+    /// Record what a finished scan of `root` found, for the command and for
+    /// the root. A scan of part of the root says nothing about the rest, so
+    /// it does not clear the root's problem.
+    fn note_root_problem(&mut self, root: &Path, partial: bool, problem: Option<String>) {
+        if !partial || problem.is_some() {
+            self.library.status.set_root_problem(root, problem.clone());
+        }
+        self.problems.extend(problem);
     }
 
     /// Tracks that a scan kept or could not finish still reference their
