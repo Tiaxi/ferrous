@@ -3049,9 +3049,10 @@ impl LibraryWalk {
                 return WalkStep::Continue;
             }
             Some(false) => self.found = self.found.saturating_add(1),
-            // A `._` file that cannot be read may be a sidecar, as on the
-            // mount point of an unmounted share: it does not show that the
-            // root holds audio.
+            // A `._` file that cannot be read, or that is too short for the
+            // header, may be a sidecar, as on the mount point of an unmounted
+            // share: it does not show that the root holds audio. It is still
+            // indexed, as it is not known to be a sidecar.
             None => {}
         }
         let metadata = match fs::metadata(path) {
@@ -3755,7 +3756,9 @@ fn is_apple_double_sidecar(path: &Path) -> bool {
 }
 
 /// Whether `path` is an `AppleDouble` file (see [`is_apple_double_sidecar`]);
-/// `None` for a file with such a name that cannot be read, which may be one.
+/// `None` for a file with such a name that cannot be read, or is too short
+/// for the header, which may be one: an interrupted write can leave a
+/// sidecar empty or truncated.
 fn apple_double_check(path: &Path) -> Option<bool> {
     const APPLE_DOUBLE_MAGIC: [u8; 4] = 0x0005_1607_u32.to_be_bytes();
     let has_sidecar_name = path
@@ -3767,8 +3770,6 @@ fn apple_double_check(path: &Path) -> Option<bool> {
     let mut magic = [0; 4];
     match fs::File::open(path).and_then(|mut file| file.read_exact(&mut magic)) {
         Ok(()) => Some(magic == APPLE_DOUBLE_MAGIC),
-        // Too short for the header: not an `AppleDouble` file.
-        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => Some(false),
         Err(_) => None,
     }
 }
@@ -4777,6 +4778,89 @@ mod tests {
                 "{problem}"
             );
         }
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// A library with two tracks in `Album` and one in `Other`, all indexed,
+    /// whose files are then removed as when its share is unmounted.
+    fn unmounted_library(conn: &mut Connection, name: &str) -> (PathBuf, Vec<PathBuf>) {
+        let root = test_dir(name);
+        fs::create_dir_all(root.join("Album")).expect("mkdir");
+        fs::create_dir_all(root.join("Other")).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let tracks = vec![
+            root.join("Album/01.mp3"),
+            root.join("Album/02.mp3"),
+            root.join("Other/01.mp3"),
+        ];
+        for track in &tracks {
+            write_stub(track, crate::tag_write::TEST_MP3);
+        }
+        insert_indexed_tracks(conn, &root, &tracks);
+        for track in &tracks {
+            fs::remove_file(track).expect("unmount");
+        }
+        (root, tracks)
+    }
+
+    fn assert_kept_as_offline(conn: &Connection, outcome: RootScanOutcome, tracks: &[PathBuf]) {
+        let indexed = indexed_paths(conn);
+        assert!(
+            tracks.iter().all(|track| indexed.contains(track)),
+            "{indexed:?}"
+        );
+        assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+        let problem = outcome.problem.expect("the offline root is reported");
+        assert!(
+            problem.contains("found no audio files")
+                && problem.contains("kept its 3 indexed tracks"),
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn a_dot_underscore_file_too_short_for_the_header_does_not_show_the_root_is_mounted() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let (root, tracks) = unmounted_library(&mut conn, "apple-double-truncated");
+        // Sidecars left empty or partly written by an interrupted write.
+        let leftovers = [root.join("Album/._01.mp3"), root.join("Other/._01.mp3")];
+        write_stub(&leftovers[0], b"");
+        write_stub(&leftovers[1], &[0x00, 0x05, 0x16]);
+
+        let outcome = scan(&conn, &root);
+
+        // They are still indexed, as before.
+        let indexed = indexed_paths(&conn);
+        assert!(
+            leftovers.iter().all(|leftover| indexed.contains(leftover)),
+            "{indexed:?}"
+        );
+        assert_kept_as_offline(&conn, outcome, &tracks);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn a_dot_underscore_track_shows_the_root_is_mounted() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let (root, tracks) = unmounted_library(&mut conn, "dot-underscore-track");
+        let live = root.join("Album/._live.mp3");
+        write_stub(&live, crate::tag_write::TEST_MP3);
+
+        let outcome = scan(&conn, &root);
+
+        assert_eq!(indexed_paths(&conn), [live]);
+        let mut removed = outcome.removed;
+        removed.sort();
+        assert_eq!(
+            removed,
+            tracks
+                .iter()
+                .map(|track| track.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(outcome.problem, None);
         fs::remove_dir_all(root).expect("cleanup");
     }
 
