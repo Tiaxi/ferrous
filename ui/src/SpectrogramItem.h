@@ -81,6 +81,31 @@ struct SpectrogramRasterJob {
     std::vector<int> columnSlots;
 };
 
+// A small image an overlay places on the pane: a label, or a crosshair's
+// dotted line. The scene node keeps its texture while the overlay shows it.
+struct SpectrogramOverlayImage {
+    enum Kind { GridLabel, CrosshairLabel, DottedColumn, DottedRow };
+    Kind kind{GridLabel};
+    // A label's text, or a dotted line's length in device pixels.
+    QString text;
+    int length{0};
+    // Where it goes, in logical pixels: one texel to a device pixel.
+    QRectF rect;
+    // The name of its texture, at the scale it was laid out for.
+    QString key;
+};
+
+// What an overlay draws: solid lines, in device pixels, and small images.
+// Nothing as large as the pane is drawn, so laying one out costs little at
+// any device pixel ratio.
+struct SpectrogramOverlayLayout {
+    bool valid{false};
+    // The device pixels it was laid out for.
+    QSize size;
+    QVector<QRect> lines;
+    QVector<SpectrogramOverlayImage> images;
+};
+
 struct SpectrogramRasterResult {
     quint64 serial{0};
     SpectrogramRasterTarget target;
@@ -328,6 +353,8 @@ private:
         double columnsPerSecond, double drawX);
     // The device column (or row) of `logical`, clamped to the overlay.
     int crosshairDeviceColumnLocked(double logical, int devicePixelCount) const;
+    // Names the layout's images' textures, at the canvas scale.
+    void nameOverlayImagesLocked(SpectrogramOverlayLayout &layout) const;
     void updateFreqGridOverlayLocked(int width, int height);
     void updateTimeGridOverlayLocked(
         int width, int height, int padding,
@@ -559,7 +586,9 @@ private:
     bool m_hoverActive{false};
     QPointF m_hoverPosition;
     double m_crosshairSharedX{-1.0};
-    QImage m_crosshairImage;
+    // Its dotted lines are images; their rects below are in device pixels,
+    // its labels' in logical ones.
+    SpectrogramOverlayLayout m_crosshair;
     bool m_crosshairDirty{true};
     qint64 m_crosshairCachedDisplayLeft{0};
     double m_crosshairCachedDrawX{0.0};
@@ -575,17 +604,18 @@ private:
     bool m_showTimeLabels{false};
 
     // Frequency grid: horizontal lines + labels. Only depends on
-    // height/sampleRate/binsPerColumn/logScale. Never rebuilt during playback.
-    QImage m_freqGridImage;
+    // height/sampleRate/binsPerColumn/logScale. Never laid out again during
+    // playback.
+    SpectrogramOverlayLayout m_freqGrid;
     bool m_freqGridDirty{true};
     int m_freqGridCachedSampleRateHz{0};
     int m_freqGridCachedBinsPerColumn{0};
 
-    // Time grid: vertical lines + labels (bottom pane only). Rendered
-    // wider than the widget with right-side padding so the texture
-    // source rect can be shifted cheaply on each frame. Only rebuilt
-    // when the shift exhausts the padding (~every 8-10 seconds).
-    QImage m_timeGridImage;
+    // Time grid: vertical lines + labels (bottom pane only). Laid out
+    // wider than the widget, with right-side padding, from where the view
+    // was then; each frame shifts it by how far the view has moved since,
+    // and it is laid out again once the shift exhausts the padding.
+    SpectrogramOverlayLayout m_timeGrid;
     bool m_timeGridDirty{true};
     qint64 m_timeGridRenderDisplayLeft{0};
     double m_timeGridRenderDrawX{0.0};

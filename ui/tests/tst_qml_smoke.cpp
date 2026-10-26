@@ -48,6 +48,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <numeric>
 
 #include "../src/BridgeClient.h"
 #include "../src/DiagnosticsLog.h"
@@ -217,6 +218,39 @@ bool moveWindowToScreen(QQuickWindow &window, QScreen *screen) {
         return window.screen() == screen
             && std::abs(window.effectiveDevicePixelRatio() - screen->devicePixelRatio()) < 1e-9;
     }, 5000);
+}
+
+// What an overlay layer of a spectrogram's scene node shows: its lines,
+// and its images with their textures' sizes.
+struct OverlayOnScreen {
+    QVector<QRectF> lines;
+    QVector<QPair<QRectF, QSize>> images;
+};
+
+// Rects equal to the scene graph's single precision.
+bool nearlyEqual(const QRectF &a, const QRectF &b) {
+    return std::abs(a.x() - b.x()) < 1e-4 && std::abs(a.y() - b.y()) < 1e-4
+        && std::abs(a.width() - b.width()) < 1e-4 && std::abs(a.height() - b.height()) < 1e-4;
+}
+
+OverlayOnScreen overlayOnScreen(QSGNode *node, int layer) {
+    OverlayOnScreen shown;
+    QSGNode *root = node->childAtIndex(layer);
+    QSGNode *lines = root->childAtIndex(0);
+    QSGNode *images = root->childAtIndex(1);
+    for (int i = 0; i < lines->childCount(); ++i) {
+        const auto *line = static_cast<QSGSimpleRectNode *>(lines->childAtIndex(i));
+        if (!line->rect().isEmpty()) {
+            shown.lines.push_back(line->rect());
+        }
+    }
+    for (int i = 0; i < images->childCount(); ++i) {
+        const auto *image = static_cast<QSGSimpleTextureNode *>(images->childAtIndex(i));
+        if (!image->rect().isEmpty() && image->texture() != nullptr) {
+            shown.images.push_back({image->rect(), image->texture()->textureSize()});
+        }
+    }
+    return shown;
 }
 
 // Lets the item's zoom debounce send its request to the backend.
@@ -984,10 +1018,11 @@ private slots:
     void spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans();
     void spectrogramProjectionWritesPreserveSharedCanvasImages();
     void spectrogramRebuildBenchmark();
+    void spectrogramOverlayBenchmark();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
     void spectrogramCrosshairOverlayGeneratesOnHover();
-    void spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry();
+    void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
     void spectrogramGridOverlayGeneratesWhenEnabled();
     void spectrogramOverlayDisabledProducesNullImage();
     void spectrogramOverlayDirtiedByGeometryChange();
@@ -1016,6 +1051,9 @@ private slots:
     void spectrogramDrawsAtDevicePixels();
     void spectrogramWideCanvasDrawsEveryTile();
     void spectrogramClickToSeekMatchesCrosshairAtDevicePixels();
+    void spectrogramOverlaysDrawNoPaneSizedImages();
+    void spectrogramScaleChangeKeepsAnUnalignedCanvasCovering_data();
+    void spectrogramScaleChangeKeepsAnUnalignedCanvasCovering();
     void spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters_data();
     void spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters();
     void spectrogramDevicePixelCanvasAdvancesAsItsRasterization_data();
@@ -10333,6 +10371,95 @@ void QmlSmokeTest::spectrogramRebuildBenchmark() {
     }
 }
 
+void QmlSmokeTest::spectrogramOverlayBenchmark() {
+    if (qEnvironmentVariableIntValue("FERROUS_BENCHMARK_SPECTROGRAM") != 1) {
+        QSKIP("Set FERROUS_BENCHMARK_SPECTROGRAM=1 to measure overlay refreshes");
+    }
+    // The render sync's part of the grid and crosshair overlays of a
+    // 3440 x 719 pane with both grids and their labels, in a window at
+    // FERROUS_BENCHMARK_SPECTROGRAM_SCALE (default 1).
+    const double scale = qEnvironmentVariableIsSet("FERROUS_BENCHMARK_SPECTROGRAM_SCALE")
+        ? qEnvironmentVariable("FERROUS_BENCHMARK_SPECTROGRAM_SCALE").toDouble()
+        : 1.0;
+    QQuickWindow window;
+    window.resize(240, 160);
+    if (scale != 1.0) {
+        QScreen *screen = hiDpiTestScreen(scale);
+        if (screen == nullptr) {
+            QSKIP("Needs the offscreen platform's HiDPI test screen at that scale");
+        }
+        QVERIFY(moveWindowToScreen(window, screen));
+    }
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    QCOMPARE(window.effectiveDevicePixelRatio(), scale);
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(3440);
+    item.setHeight(719);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setGridEnabled(true);
+    item.setShowTimeLabels(true);
+    item.setCrosshairEnabled(true);
+    constexpr int bins = 1025;
+    constexpr int columns = 20'000;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 100.0);
+    QHoverEvent hover(QEvent::HoverEnter, QPointF(500.0, 300.0), QPointF(500.0, 300.0), QPointF());
+    item.hoverEnterEvent(&hover);
+    QSGNode *node = paintSettled(item, nullptr);
+    constexpr int iterations = 12;
+    QElapsedTimer elapsed;
+    const auto frame = [&]() {
+        elapsed.restart();
+        node = item.updatePaintNode(node, nullptr);
+        return static_cast<double>(elapsed.nsecsElapsed()) / 1e6;
+    };
+    const auto report = [](const char *name, const std::vector<double> &ms) {
+        const double total = std::accumulate(ms.begin(), ms.end(), 0.0);
+        qInfo("overlay %s mean_ms=%.3f worst_ms=%.3f", name, total / static_cast<double>(ms.size()),
+            *std::max_element(ms.begin(), ms.end()));
+    };
+    std::vector<double> idle, timeGrid, grids, crosshair, resize;
+    for (int i = 0; i < iterations; ++i) {
+        idle.push_back(frame());
+    }
+    for (int i = 0; i < iterations; ++i) {
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_timeGridDirty = true;
+        }
+        timeGrid.push_back(frame());
+    }
+    for (int i = 0; i < iterations; ++i) {
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_timeGridDirty = true;
+            item.m_freqGridDirty = true;
+        }
+        grids.push_back(frame());
+    }
+    for (int i = 0; i < iterations; ++i) {
+        const QPointF to(600.0 + 7.0 * i, 280.0 + 3.0 * i);
+        QHoverEvent move(QEvent::HoverMove, to, to, QPointF());
+        item.hoverMoveEvent(&move);
+        crosshair.push_back(frame());
+    }
+    for (int i = 0; i < iterations; ++i) {
+        item.setHeight(i % 2 == 0 ? 718 : 719);
+        resize.push_back(frame());
+        QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
+    }
+    qInfo("overlay scale=%g", scale);
+    report("idle_frame", idle);
+    report("time_grid_refresh", timeGrid);
+    report("both_grids_refresh", grids);
+    report("crosshair_move", crosshair);
+    report("resize_frame", resize);
+    delete node;
+}
+
 void QmlSmokeTest::spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans() {
     SpectrogramItem first;
     SpectrogramItem second;
@@ -10475,29 +10602,30 @@ void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
         item.m_hoverActive = true;
         item.m_hoverPosition = QPointF(50.0, 40.0);
         item.m_crosshairDirty = true;
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
         item.ensureMapping(100);
         const double cps = 48000.0 / 1024.0;
         item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
     }
 
-    QVERIFY(!item.m_crosshairImage.isNull());
-    QCOMPARE(item.m_crosshairImage.width(), 200);
-    QCOMPARE(item.m_crosshairImage.height(), 100);
+    QVERIFY(item.m_crosshair.valid);
+    QCOMPARE(item.m_crosshair.size, QSize(200, 100));
 
-    // The image must contain visible content (lines + labels).
-    bool hasContent = false;
-    for (int y = 0; y < item.m_crosshairImage.height() && !hasContent; ++y) {
-        for (int x = 0; x < item.m_crosshairImage.width(); ++x) {
-            if (qAlpha(item.m_crosshairImage.pixel(x, y)) > 0) {
-                hasContent = true;
-                break;
-            }
-        }
+    // Its dotted lines through the pointer, and its frequency label.
+    QVector<SpectrogramOverlayImage::Kind> kinds;
+    for (const SpectrogramOverlayImage &image : item.m_crosshair.images) {
+        kinds.push_back(image.kind);
     }
-    QVERIFY(hasContent);
+    QCOMPARE(kinds, (QVector<SpectrogramOverlayImage::Kind>{
+        SpectrogramOverlayImage::DottedColumn,
+        SpectrogramOverlayImage::DottedRow,
+        SpectrogramOverlayImage::CrosshairLabel}));
+    QCOMPARE(item.m_crosshair.images[0].rect, QRectF(50.0, 0.0, 1.0, 100.0));
+    QCOMPARE(item.m_crosshair.images[1].rect, QRectF(0.0, 40.0, 200.0, 1.0));
+    QVERIFY(item.m_crosshair.images[2].text.endsWith(QStringLiteral("Hz")));
 }
 
-void QmlSmokeTest::spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry() {
+void QmlSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     item.setCrosshairEnabled(true);
@@ -10509,7 +10637,6 @@ void QmlSmokeTest::spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry() 
                                false, true, 1, false);
 
     const double cps = 48000.0 / 1024.0;
-    const uchar *firstBits = nullptr;
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.m_hoverActive = true;
@@ -10517,12 +10644,19 @@ void QmlSmokeTest::spectrogramCrosshairOverlayReusesImageBufferAtSameGeometry() 
         item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
         item.ensureMapping(100);
         item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.0);
-        QVERIFY(!item.m_crosshairImage.isNull());
-        firstBits = item.m_crosshairImage.constBits();
-        QVERIFY(firstBits != nullptr);
+        QVERIFY(item.m_crosshair.valid);
+        const SpectrogramOverlayLayout first = item.m_crosshair;
+        // The view moving on moves the time label, and nothing else.
         item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.5);
-        QVERIFY(!item.m_crosshairImage.isNull());
-        QCOMPARE(item.m_crosshairImage.constBits(), firstBits);
+        QVERIFY(item.m_crosshair.valid);
+        QCOMPARE(item.m_crosshair.images.size(), first.images.size());
+        QCOMPARE(item.m_crosshair.images[0].rect, first.images[0].rect);
+        QCOMPARE(item.m_crosshair.images[1].rect, first.images[1].rect);
+        // No image is as large as the pane: lines are a pixel thick.
+        for (const SpectrogramOverlayImage &image : item.m_crosshair.images) {
+            QVERIFY(image.rect.width() <= 1.0 || image.rect.height() <= 1.0
+                || image.rect.width() * image.rect.height() < 200.0 * 100.0 / 8.0);
+        }
     }
 }
 
@@ -10546,20 +10680,17 @@ void QmlSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
         item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
     }
 
-    QVERIFY(!item.m_freqGridImage.isNull());
-    QCOMPARE(item.m_freqGridImage.width(), 200);
-    QCOMPARE(item.m_freqGridImage.height(), 100);
-
-    bool hasContent = false;
-    for (int y = 0; y < item.m_freqGridImage.height() && !hasContent; ++y) {
-        for (int x = 0; x < item.m_freqGridImage.width(); ++x) {
-            if (qAlpha(item.m_freqGridImage.pixel(x, y)) > 0) {
-                hasContent = true;
-                break;
-            }
-        }
+    QVERIFY(item.m_freqGrid.valid);
+    QCOMPARE(item.m_freqGrid.size, QSize(200, 100));
+    // Lines across the pane, each with its label.
+    QVERIFY(!item.m_freqGrid.lines.isEmpty());
+    QCOMPARE(item.m_freqGrid.images.size(), item.m_freqGrid.lines.size());
+    for (const QRect &line : item.m_freqGrid.lines) {
+        QCOMPARE(line.width(), 200);
+        QCOMPARE(line.height(), 1);
     }
-    QVERIFY(hasContent);
+    QVERIFY(item.m_timeGrid.valid);
+    QVERIFY(!item.m_timeGrid.lines.isEmpty());
 }
 
 void QmlSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
@@ -10581,9 +10712,9 @@ void QmlSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
         const double cps = 48000.0 / 1024.0;
         item.updateCrosshairOverlayLocked(200, 100, 0, false, cps, 0.0);
     }
-    QVERIFY(item.m_crosshairImage.isNull());
+    QVERIFY(!item.m_crosshair.valid);
 
-    // Grid disabled: null image.
+    // Grid disabled: nothing to draw.
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.ensureMapping(100);
@@ -10591,7 +10722,8 @@ void QmlSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
         item.updateFreqGridOverlayLocked(200, 100);
         item.updateTimeGridOverlayLocked(200, 100, 0, 0, false, cps, 0.0);
     }
-    QVERIFY(item.m_freqGridImage.isNull());
+    QVERIFY(!item.m_freqGrid.valid);
+    QVERIFY(!item.m_timeGrid.valid);
 }
 
 void QmlSmokeTest::spectrogramOverlayDirtiedByGeometryChange() {
@@ -10698,6 +10830,8 @@ void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
     item.setDisplayMode(1); // Centered
     item.setCrosshairEnabled(true);
     item.setGridEnabled(true);
+    // The crosshair's time label follows the view.
+    item.setShowTimeLabels(true);
 
     const int bins = 4097;
     const int columns = 500;
@@ -10717,16 +10851,16 @@ void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
     QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
 
-    qint64 firstGridDisplayLeft;
     qint64 firstCrosshairDisplayLeft;
+    const QVector<QRectF> firstTimeGridLines = overlayOnScreen(node, 5).lines;
+    QVERIFY(!firstTimeGridLines.isEmpty());
     {
         QMutexLocker lock(&item.m_stateMutex);
-        QVERIFY(!item.m_crosshairImage.isNull());
-        QVERIFY(!item.m_freqGridImage.isNull());
+        QVERIFY(item.m_crosshair.valid);
+        QVERIFY(item.m_freqGrid.valid);
         QVERIFY(!item.m_crosshairDirty);
         QVERIFY(!item.m_freqGridDirty);
-    QVERIFY(!item.m_timeGridDirty);
-        firstGridDisplayLeft = item.m_timeGridRenderDisplayLeft;
+        QVERIFY(!item.m_timeGridDirty);
         firstCrosshairDisplayLeft = item.m_crosshairCachedDisplayLeft;
     }
 
@@ -10737,11 +10871,12 @@ void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        QVERIFY(!item.m_crosshairImage.isNull());
-        QVERIFY(!item.m_freqGridImage.isNull());
-        QVERIFY(item.m_timeGridRenderDisplayLeft != firstGridDisplayLeft);
+        QVERIFY(item.m_crosshair.valid);
+        QVERIFY(item.m_freqGrid.valid);
         QVERIFY(item.m_crosshairCachedDisplayLeft != firstCrosshairDisplayLeft);
     }
+    // The time grid follows the view.
+    QVERIFY(overlayOnScreen(node2, 5).lines != firstTimeGridLines);
 
     delete node2;
 }
@@ -14536,10 +14671,7 @@ bool hasDetailFinerThan(const QImage &image, const QRect &area, int scale) {
     return false;
 }
 
-// The texture node of a scene node's child.
-const QSGSimpleTextureNode *textureChild(QSGNode *node, int index) {
-    return static_cast<const QSGSimpleTextureNode *>(node->childAtIndex(index));
-}
+
 
 } // namespace
 
@@ -14618,81 +14750,78 @@ void QmlSmokeTest::spectrogramDrawsAtDevicePixels() {
     QCOMPARE(static_cast<int>(rowsOfColor(item.m_canvas, loudPixel - lineWidth - 1, quietColor).size()),
         deviceHeight);
 
-    // The frequency grid's lines are on device rows, its labels drawn at
-    // device resolution, and the whole of it one texel to a device pixel.
-    const QImage &freqGrid = item.m_freqGridImage;
-    QCOMPARE(freqGrid.size(), QSize(deviceWidth, deviceHeight));
-    QCOMPARE(freqGrid.devicePixelRatio(), scale);
-    int gridLines = 0;
-    for (int y = 0; y < deviceHeight; ++y) {
-        if (qAlpha(freqGrid.pixel(4, y)) == 0) {
-            continue;
+    // Overlay images are whole device pixels, one texel to each, and their
+    // lines whole device pixels thick.
+    const auto onDevicePixels = [scale](const QRectF &rect) {
+        // Scene graph rects are single precision.
+        const auto whole = [](double value) { return std::abs(value - std::round(value)) < 1e-3; };
+        return whole(rect.x() * scale) && whole(rect.y() * scale)
+            && whole(rect.width() * scale) && whole(rect.height() * scale);
+    };
+    const auto checkImages = [&](const OverlayOnScreen &overlay) {
+        for (const auto &[rect, textureSize] : overlay.images) {
+            QVERIFY(onDevicePixels(rect));
+            QCOMPARE(QSize(static_cast<int>(std::lround(rect.width() * scale)),
+                         static_cast<int>(std::lround(rect.height() * scale))),
+                textureSize);
         }
-        const int top = y;
-        while (y < deviceHeight && qAlpha(freqGrid.pixel(4, y)) != 0) {
-            ++y;
-        }
-        QCOMPARE(y - top, lineWidth);
-        // On the row of a whole number of hundreds of hertz.
-        const double hz = item.pixelToFrequencyHzLocked(top, deviceHeight);
+    };
+
+    // The frequency grid's lines are on device rows, on whole hundreds of
+    // hertz; its labels are drawn at device resolution.
+    QVERIFY(item.m_freqGrid.valid);
+    QCOMPARE(item.m_freqGrid.size, QSize(deviceWidth, deviceHeight));
+    QVERIFY(!item.m_freqGrid.lines.isEmpty());
+    const OverlayOnScreen freqGrid = overlayOnScreen(node, 4);
+    QCOMPARE(freqGrid.lines.size(), item.m_freqGrid.lines.size());
+    for (int i = 0; i < item.m_freqGrid.lines.size(); ++i) {
+        const QRect line = item.m_freqGrid.lines[i];
+        QCOMPARE(line, QRect(0, line.y(), deviceWidth, lineWidth));
+        QVERIFY(nearlyEqual(freqGrid.lines[i],
+            QRectF(0.0, line.y() / scale, deviceWidth / scale, lineWidth / scale)));
+        const double hz = item.pixelToFrequencyHzLocked(line.y(), deviceHeight);
         const double hzPerRow = 24000.0 / deviceHeight;
         QVERIFY2(std::abs(hz - std::round(hz / 100.0) * 100.0) <= hzPerRow,
                  qPrintable(QStringLiteral("line at %1 Hz").arg(hz)));
-        ++gridLines;
     }
-    QVERIFY(gridLines > 0);
-    if (lineWidth > 1) {
-        QVERIFY(hasDetailFinerThan(
-            freqGrid, QRect(deviceWidth - 60 * lineWidth, 0, 60 * lineWidth, deviceHeight), lineWidth));
-    }
-    const auto *freqGridNode = textureChild(node, 4);
-    QCOMPARE(freqGridNode->rect(), QRectF(0.0, 0.0, deviceWidth / scale, deviceHeight / scale));
-    QCOMPARE(freqGridNode->sourceRect(), QRectF(0.0, 0.0, deviceWidth, deviceHeight));
+    QCOMPARE(freqGrid.images.size(), item.m_freqGrid.images.size());
+    checkImages(freqGrid);
 
     // The time grid's lines are on the device columns of whole seconds.
-    const QImage &timeGrid = item.m_timeGridImage;
-    QCOMPARE(timeGrid.height(), deviceHeight);
-    QCOMPARE(timeGrid.devicePixelRatio(), scale);
+    QVERIFY(item.m_timeGrid.valid);
+    QCOMPARE(item.m_timeGrid.size.height(), deviceHeight);
     const double canvasZoom = item.canvasZoomLocked();
     const double columnsPerSecond = 48000.0 / 1024.0;
-    int timeLines = 0;
-    for (int x = 0; x < timeGrid.width(); ++x) {
-        if (qAlpha(timeGrid.pixel(x, 2)) == 0) {
-            continue;
-        }
-        const int left = x;
-        while (x < timeGrid.width() && qAlpha(timeGrid.pixel(x, 2)) != 0) {
-            ++x;
-        }
-        QCOMPARE(x - left, lineWidth);
+    QVERIFY(!item.m_timeGrid.lines.isEmpty());
+    for (const QRect &line : item.m_timeGrid.lines) {
+        QCOMPARE(line, QRect(line.x(), 0, lineWidth, deviceHeight));
         const double seconds = (static_cast<double>(item.m_timeGridRenderDisplayLeft)
-            + (left - item.m_timeGridRenderDrawX) / canvasZoom) / columnsPerSecond;
+            + (line.x() - item.m_timeGridRenderDrawX) / canvasZoom) / columnsPerSecond;
         QVERIFY2(std::abs(seconds - std::round(seconds)) * columnsPerSecond * canvasZoom <= 0.5 + 1e-9,
                  qPrintable(QStringLiteral("line at %1 s").arg(seconds)));
-        ++timeLines;
     }
-    QVERIFY(timeLines > 0);
-    const auto *timeGridNode = textureChild(node, 5);
-    QCOMPARE(timeGridNode->rect(), QRectF(0.0, 0.0, deviceWidth / scale, deviceHeight / scale));
-    QCOMPARE(timeGridNode->sourceRect().size(), QSizeF(deviceWidth, deviceHeight));
+    const OverlayOnScreen timeGrid = overlayOnScreen(node, 5);
+    QVERIFY(!timeGrid.lines.isEmpty());
+    for (const QRectF &line : timeGrid.lines) {
+        QVERIFY(onDevicePixels(line));
+        QVERIFY(std::abs(line.width() - lineWidth / scale) < 1e-4);
+    }
+    QVERIFY(!timeGrid.images.isEmpty());
+    checkImages(timeGrid);
 
     // The crosshair is on the device column and row under the pointer.
-    const QImage &crosshair = item.m_crosshairImage;
-    QCOMPARE(crosshair.size(), QSize(deviceWidth, deviceHeight));
-    QCOMPARE(crosshair.devicePixelRatio(), scale);
+    QVERIFY(item.m_crosshair.valid);
     const int crosshairX = static_cast<int>(std::floor(73.25 * scale));
     const int crosshairY = static_cast<int>(std::floor(41.0 * scale));
     QCOMPARE(item.m_crosshairVerticalLineRect, QRect(crosshairX, 0, lineWidth, deviceHeight));
     QCOMPARE(item.m_crosshairHorizontalLineRect, QRect(0, crosshairY, deviceWidth, lineWidth));
-    int lineRows = 0;
-    for (int y = 0; y < crosshairY - 1; ++y) {
-        lineRows += qAlpha(crosshair.pixel(crosshairX, y)) != 0 ? 1 : 0;
-        QCOMPARE(qAlpha(crosshair.pixel(crosshairX + lineWidth, y)), 0);
-        QCOMPARE(qAlpha(crosshair.pixel(crosshairX - 1, y)), 0);
-    }
-    QVERIFY(lineRows > 0);
-    const auto *crosshairNode = textureChild(node, 6);
-    QCOMPARE(crosshairNode->rect(), QRectF(0.0, 0.0, deviceWidth / scale, deviceHeight / scale));
+    const OverlayOnScreen crosshair = overlayOnScreen(node, 6);
+    checkImages(crosshair);
+    QVERIFY(crosshair.images.size() >= 3);
+    QVERIFY(nearlyEqual(crosshair.images[0].first,
+        QRectF(crosshairX / scale, 0.0, lineWidth / scale, deviceHeight / scale)));
+    QVERIFY(nearlyEqual(crosshair.images[1].first,
+        QRectF(0.0, crosshairY / scale, deviceWidth / scale, lineWidth / scale)));
     lock.unlock();
     delete node;
 }
@@ -14723,6 +14852,153 @@ void QmlSmokeTest::spectrogramWideCanvasDrawsEveryTile() {
     const QPair<double, double> extent = drawnCanvasExtent(node);
     QCOMPARE(extent.first, 0.0);
     QCOMPARE(extent.second, 7000.0);
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {
+    // The grids and the crosshair of a 3440 x 719 pane at a scale of 2,
+    // refreshed as playback, the pointer and a resize refresh them. No
+    // overlay image may approach the pane's 6880 x 1438 device pixels, which
+    // would take tens of milliseconds of the render sync to draw and upload.
+    QQuickWindow window;
+    if (!showOnScreen(window, 2.0)) {
+        QSKIP("Needs the offscreen platform's HiDPI test screens");
+    }
+    const int widestSeen = SpectrogramItem::s_maxWidgetWidthSeen;
+    const auto restoreWidest = qScopeGuard(
+        [widestSeen]() { SpectrogramItem::s_maxWidgetWidthSeen = widestSeen; });
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(3440);
+    item.setHeight(719);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setGridEnabled(true);
+    item.setShowTimeLabels(true);
+    item.setCrosshairEnabled(true);
+    constexpr int bins = 64;
+    constexpr int columns = 20'000;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 100.0);
+    QHoverEvent hover(QEvent::HoverEnter, QPointF(500.0, 300.0), QPointF(500.0, 300.0), QPointF());
+    item.hoverEnterEvent(&hover);
+    QSGNode *node = paintSettled(item, nullptr);
+
+    const auto largestOverlayTexture = [&node]() {
+        // Every texture under the grid and crosshair layers, which are
+        // children 4 to 6, the layer nodes included.
+        QSize largest;
+        std::function<void(QSGNode *)> visit = [&](QSGNode *visited) {
+            if (const auto *texture = dynamic_cast<QSGSimpleTextureNode *>(visited);
+                texture != nullptr && !texture->rect().isEmpty() && texture->texture() != nullptr) {
+                const QSize size = texture->texture()->textureSize();
+                // A crosshair line is a pixel or two thick, however long.
+                if (std::min(size.width(), size.height()) > 2
+                    && size.width() * size.height() > largest.width() * largest.height()) {
+                    largest = size;
+                }
+            }
+            for (int i = 0; i < visited->childCount(); ++i) {
+                visit(visited->childAtIndex(i));
+            }
+        };
+        for (int layer = 4; layer <= 6; ++layer) {
+            visit(node->childAtIndex(layer));
+        }
+        return largest;
+    };
+    const auto checkFrame = [&](const char *what) {
+        const QSize largest = largestOverlayTexture();
+        QVERIFY2(largest.width() <= 400 && largest.height() <= 100,
+                 qPrintable(QStringLiteral("%1: a %2 x %3 overlay image")
+                     .arg(QLatin1String(what)).arg(largest.width()).arg(largest.height())));
+    };
+    QVERIFY(!overlayOnScreen(node, 4).lines.isEmpty());
+    QVERIFY(!overlayOnScreen(node, 5).images.isEmpty());
+    QVERIFY(!overlayOnScreen(node, 6).images.isEmpty());
+    checkFrame("first frame");
+
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_timeGridDirty = true;
+    }
+    node = item.updatePaintNode(node, nullptr);
+    checkFrame("time grid refresh");
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_timeGridDirty = true;
+        item.m_freqGridDirty = true;
+    }
+    node = item.updatePaintNode(node, nullptr);
+    checkFrame("both grids' refresh");
+    const QPointF to(900.0, 200.0);
+    QHoverEvent move(QEvent::HoverMove, to, to, QPointF());
+    item.hoverMoveEvent(&move);
+    node = item.updatePaintNode(node, nullptr);
+    checkFrame("crosshair move");
+    item.setHeight(700);
+    node = paintSettled(item, node);
+    checkFrame("resize");
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramScaleChangeKeepsAnUnalignedCanvasCovering_data() {
+    QTest::addColumn<bool>("seek");
+    QTest::newRow("cached seek") << true;
+    QTest::newRow("another track") << false;
+}
+
+void QmlSmokeTest::spectrogramScaleChangeKeepsAnUnalignedCanvasCovering() {
+    QFETCH(bool, seek);
+    QScreen *screen = hiDpiTestScreen(2.0);
+    if (screen == nullptr) {
+        QSKIP("Needs the offscreen platform's HiDPI test screens");
+    }
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 1500;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 15.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    // Across the pane, scrolled by part of a column.
+    const QPair<double, double> before = drawnCanvasExtent(node);
+    QVERIFY(before.first <= 0.0 && before.first > -1.0);
+    QVERIFY(before.second >= 199.0);
+
+    // Back to 5 s, or columns of another track ahead, as the window moves
+    // to a screen at 2: the canvas is not aligned to the view, and stays on
+    // screen as it was until its replacement arrives.
+    if (seek) {
+        setTestPosition(item, 5.0);
+    } else {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_precomputedTrackToken = 2;
+    }
+    QVERIFY(moveWindowToScreen(window, screen));
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.markAllTilesDirtyLocked();
+    }
+    node = item.updatePaintNode(node, nullptr);
+    // The screen change reaches the item at once, and this is its first
+    // frame since: its canvas at 1x is still the one on screen.
+    QVERIFY(spectrogramRasterPending(item));
+    QCOMPARE(item.m_canvas.width(), 200);
+    // A texel to a logical pixel, still across the pane, at the view's
+    // start.
+    QVERIFY(std::abs(drawnCanvasScale(node) - 1.0) < 1e-6);
+    const QPair<double, double> extent = drawnCanvasExtent(node);
+    QVERIFY2(extent.first > -1.0 && extent.first <= 0.0 && extent.second >= 199.0,
+             qPrintable(QStringLiteral("drawn over %1 to %2").arg(extent.first).arg(extent.second)));
     delete node;
 }
 
