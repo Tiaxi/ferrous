@@ -536,7 +536,8 @@ QString GlobalSearchResultsModel::highlightText(const QString &text, const QStri
             // highlights the whole "Æ" it matches the start of, and the marks
             // that fold away after it, as in "e" + U+0301.
             const auto nextStart = end < positions.size() ? positions[end] : text.size();
-            const auto originalEnd = std::max(positions[end - 1] + 1, nextStart);
+            auto originalEnd = std::max(positions[end - 1] + 1, nextStart);
+            while (originalEnd < text.size() && fold(text.mid(originalEnd, 1)).isEmpty()) ++originalEnd;
             for (auto i = positions[offset]; i < originalEnd; ++i) matched[i] = true;
             offset = end;
         }

@@ -4296,6 +4296,8 @@ void BridgeClientTest::searchResultsRankFilterAndHighlight() {
     QCOMPARE(model.highlightText(QString::fromUtf8("Ægir"), "eg"), QString::fromUtf8("<b>Æg</b>ir"));
     QCOMPARE(model.highlightText(QString::fromUtf8("Œuvre"), "o"), QString::fromUtf8("<b>Œ</b>uvre"));
     QCOMPARE(model.highlightText(QString::fromUtf8("Þór"), "t"), QString::fromUtf8("<b>Þ</b>ór"));
+    QCOMPARE(model.highlightText(QString::fromUtf8("\xc3\x86\xcc\x81x"), "a"),
+             QString::fromUtf8("<b>\xc3\x86\xcc\x81</b>x")); // Ǽ decomposed
 }
 
 void BridgeClientTest::searchProtocolTotalsAndExpansion() {

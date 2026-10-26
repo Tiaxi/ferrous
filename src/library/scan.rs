@@ -2999,12 +2999,17 @@ impl LibraryWalk {
         if !entry.file_type().is_file() || !is_supported_audio(path) {
             return WalkStep::Continue;
         }
-        if is_apple_double_sidecar(path) {
-            self.sidecars.insert(path.to_path_buf());
-            return WalkStep::Continue;
+        match apple_double_check(path) {
+            Some(true) => {
+                self.sidecars.insert(path.to_path_buf());
+                return WalkStep::Continue;
+            }
+            Some(false) => self.found = self.found.saturating_add(1),
+            // A `._` file that cannot be read may be a sidecar, as on the
+            // mount point of an unmounted share: it does not show that the
+            // root holds audio.
+            None => {}
         }
-
-        self.found = self.found.saturating_add(1);
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(err) => {
@@ -3702,17 +3707,26 @@ pub(crate) fn is_audio_track_file(path: &Path) -> bool {
 /// Only files with such a name are read, to check for the `AppleDouble` magic
 /// number, so a track that merely starts with `._` is still a track.
 fn is_apple_double_sidecar(path: &Path) -> bool {
+    apple_double_check(path) == Some(true)
+}
+
+/// Whether `path` is an `AppleDouble` file (see [`is_apple_double_sidecar`]);
+/// `None` for a file with such a name that cannot be read, which may be one.
+fn apple_double_check(path: &Path) -> Option<bool> {
     const APPLE_DOUBLE_MAGIC: [u8; 4] = 0x0005_1607_u32.to_be_bytes();
     let has_sidecar_name = path
         .file_name()
         .is_some_and(|name| name.as_encoded_bytes().starts_with(b"._"));
     if !has_sidecar_name {
-        return false;
+        return Some(false);
     }
     let mut magic = [0; 4];
-    fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut magic))
-        .is_ok_and(|()| magic == APPLE_DOUBLE_MAGIC)
+    match fs::File::open(path).and_then(|mut file| file.read_exact(&mut magic)) {
+        Ok(()) => Some(magic == APPLE_DOUBLE_MAGIC),
+        // Too short for the header: not an `AppleDouble` file.
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => Some(false),
+        Err(_) => None,
+    }
 }
 
 /// An `AppleDouble` file as macOS writes one next to a file it copies: the
@@ -4661,6 +4675,64 @@ mod tests {
         assert_eq!(indexed_paths(&conn), tracks);
         assert_eq!(outcome.removed, [sidecar.to_string_lossy().to_string()]);
         assert_eq!(outcome.problem, None);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_dot_underscore_file_does_not_show_the_root_is_mounted() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("apple-double-unreadable");
+        fs::create_dir_all(root.join("Album")).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let tracks = [root.join("Album/01.mp3"), root.join("Album/02.mp3")];
+        for track in &tracks {
+            write_stub(track, crate::tag_write::TEST_MP3);
+        }
+        insert_indexed_tracks(&mut conn, &root, &tracks);
+        // The share is unmounted; its mount point shows a leftover file
+        // named as a sidecar that cannot be read.
+        for track in &tracks {
+            fs::remove_file(track).expect("unmount");
+        }
+        let leftover = root.join("Album/._01.mp3");
+        write_stub(&leftover, crate::tag_write::TEST_MP3);
+        fs::set_permissions(&leftover, fs::Permissions::from_mode(0o000)).expect("lock");
+        // Root, or a process with CAP_DAC_OVERRIDE, reads it anyway.
+        let readable = fs::File::open(&leftover).is_ok();
+
+        let outcome = scan(&conn, &root);
+        fs::set_permissions(&leftover, fs::Permissions::from_mode(0o644)).expect("unlock");
+
+        let indexed = indexed_paths(&conn);
+        if readable {
+            // A readable `._` file without the header is a track (#201), so
+            // the root is reachable and the missing tracks are gone.
+            assert_eq!(indexed, [leftover.clone()]);
+            let mut removed = outcome.removed.clone();
+            removed.sort();
+            assert_eq!(
+                removed,
+                tracks
+                    .iter()
+                    .map(|track| track.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            assert!(
+                tracks.iter().all(|track| indexed.contains(track)),
+                "{indexed:?}"
+            );
+            assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+            let problem = outcome.problem.expect("the offline root is reported");
+            assert!(
+                problem.contains("found no audio files")
+                    && problem.contains("kept its 2 indexed tracks"),
+                "{problem}"
+            );
+        }
         fs::remove_dir_all(root).expect("cleanup");
     }
 
