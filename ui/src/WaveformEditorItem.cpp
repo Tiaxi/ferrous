@@ -1222,31 +1222,38 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
     schedulePlaybackFrame(frameDelayNs);
 }
 
-qint64 WaveformEditorItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
-    if (m_zoomOutHandoffPending || !m_stagedCache.isNull()) return 0;
-    const auto [start, end] = visibleRangeLocked();
-    const double span = end - start;
-    const int width = std::max(1, static_cast<int>(std::floor(this->width())));
-    if (span <= 0.0 || width < 2) return -1;
-    if (playbackTilesEligibleLocked(start, end)) return 0;
-    const double position = displayedPositionSecondsLocked();
+double WaveformEditorItem::frameChangeSecondsLocked(
+    double visibleStart, double visibleEnd, double position, int width) const {
+    constexpr double kMoving = std::numeric_limits<double>::quiet_NaN();
+    const double span = visibleEnd - visibleStart;
+    if (span <= 0.0 || width < 2) return std::numeric_limits<double>::infinity();
+    if (playbackTilesEligibleLocked(visibleStart, visibleEnd)) return kMoving;
     // The view follows the playhead, unless it shows the whole track or
     // an end of it.
     const bool wholeTrack = span >= m_durationSeconds * 0.9999;
     const double followFrom = span * 0.5;
     const double followTo = m_durationSeconds - span * 0.5;
-    if (!wholeTrack && position > followFrom && position < followTo) return 0;
+    if (!wholeTrack && position > followFrom && position < followTo) return kMoving;
     // Until then, the playhead moves a pixel at a time: see paint.
     const double secondsPerPixel = span / static_cast<double>(width - 1);
     double change = std::numeric_limits<double>::infinity();
-    if (position < start) {
-        change = start;
-    } else if (position <= end) {
-        const double pixel = std::round((position - start) / secondsPerPixel);
-        change = start + (pixel + 0.5) * secondsPerPixel;
+    if (position < visibleStart) {
+        change = visibleStart;
+    } else if (position <= visibleEnd) {
+        const double pixel = std::round((position - visibleStart) / secondsPerPixel);
+        change = visibleStart + (pixel + 0.5) * secondsPerPixel;
     }
     if (!wholeTrack && position <= followFrom) change = std::min(change, followFrom);
-    if (!std::isfinite(change)) return -1;
+    return change;
+}
+
+qint64 WaveformEditorItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
+    if (m_zoomOutHandoffPending || !m_stagedCache.isNull()) return 0;
+    // From the frame on screen: once playback has passed where it stops
+    // being current, the next frame is due, even before this is called.
+    const double change = m_paintedFrameChangeSeconds;
+    if (std::isnan(change)) return 0;
+    if (std::isinf(change)) return -1;
     const std::optional<qint64> changesAt = m_clockState.reachesAt(change);
     if (!changesAt) return -1;
     return *changesAt > nowNs ? *changesAt - nowNs : 0;
@@ -1581,6 +1588,8 @@ void WaveformEditorItem::paint(QPainter *painter) {
         hoverActive = m_hoverActive;
         crosshair = m_crosshairEnabled;
         position = displayedPositionSecondsLocked();
+        m_paintedFrameChangeSeconds = frameChangeSecondsLocked(
+            visibleStart, visibleEnd, position, canvasWidth);
         cacheStart = m_cacheStartSeconds;
         cacheSecondsPerPixel = m_cacheSecondsPerPixel;
         channels = displayedChannelCountLocked();

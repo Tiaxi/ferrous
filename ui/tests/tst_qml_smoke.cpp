@@ -996,6 +996,7 @@ private slots:
     void waveformEditorPlaybackBenchmark();
     void waveformSceneGraphLaysOutEachLabelOnce();
     void waveformEditorIdleViewWaitsForThePlayheadsNextPixel();
+    void waveformEditorLateFrameCallbackDrawsAtOnce();
     void waveformEditorIdleViewDrawsOnlyFramesThatDiffer();
     void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
     void spectrogramStaleTokenChunksAreDropped();
@@ -1032,6 +1033,7 @@ private slots:
     void spectrogramStillFramesLeaveTextureNodesAlone();
     void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data();
     void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel();
+    void spectrogramLateFrameCallbackDrawsAtOnce();
     void spectrogramMovingViewsRequestEveryFrame();
     void spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce();
     void spectrogramIdleViewDrawsOnlyFramesThatDiffer();
@@ -8032,10 +8034,17 @@ void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     item.setDurationSeconds(100.0);
     item.setOverviewComplete(true);
     item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    // The window paints, then hears that the frame is on screen.
+    QImage canvas(1001, 100, QImage::Format_RGB32);
+    const auto paint = [&item, &canvas]() {
+        QPainter painter(&canvas);
+        item.paint(&painter);
+    };
     setTestPosition(item, 10.02);
     item.setPlaying(true);
     setTestPosition(item, 10.02);
     const quint64 requested = item.m_playbackFrameRequests;
+    paint();
     item.handleWindowFrameSwapped();
     // The whole track is in view: no frame until pixel 101 at 10.05 s.
     QCOMPARE(item.m_playbackFrameRequests, requested);
@@ -8051,6 +8060,7 @@ void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     setTestPosition(item, 50.0);
     const quint64 zoomed = item.m_playbackFrameRequests;
     for (int frame = 1; frame <= 3; ++frame) {
+        paint();
         item.handleWindowFrameSwapped();
         QCOMPARE(item.m_playbackFrameRequests, zoomed + frame);
     }
@@ -8058,6 +8068,7 @@ void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     // track's start, the view stays where it is.
     setTestPosition(item, 6.2);
     const quint64 atStart = item.m_playbackFrameRequests;
+    paint();
     item.handleWindowFrameSwapped();
     QCOMPARE(item.m_playbackFrameRequests, atStart);
     QVERIFY(item.m_playbackFrameTimer.isActive());
@@ -8077,6 +8088,49 @@ void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     QCOMPARE(item.m_playbackFrameRequests, atStart + 1);
     item.setPlaying(false);
     QVERIFY(!item.m_playbackFrameTimer.isActive());
+}
+
+void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
+    // 100 s over 101 pixels: a pixel a second. The frame painted at 10.4 s
+    // shows pixel 10 until 10.5 s. Its frame-swapped callback arrives late,
+    // after playback has passed that: the next frame is due at once, not
+    // at the boundary after.
+    WaveformEditorItem item;
+    item.setWidth(101);
+    item.setHeight(50);
+    item.setDurationSeconds(100.0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    setTestPosition(item, 10.4);
+    item.setPlaying(true);
+    setTestPosition(item, 10.4);
+    QImage canvas(101, 50, QImage::Format_RGB32);
+    {
+        QPainter painter(&canvas);
+        item.paint(&painter);
+    }
+    PlaybackClock &clock = testClock(item);
+    QVERIFY(QTest::qWaitFor(
+        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 10.52; }, 2000));
+    const quint64 requested = item.m_playbackFrameRequests;
+    item.handleWindowFrameSwapped();
+    QCOMPARE(item.m_playbackFrameRequests, requested + 1);
+    QVERIFY(!item.m_playbackFrameTimer.isActive());
+    // A course correction then does not postpone it either.
+    {
+        QPainter painter(&canvas);
+        item.paint(&painter);
+    }
+    QVERIFY(QTest::qWaitFor(
+        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 11.52; }, 2000));
+    PlaybackSample sample;
+    sample.positionSeconds = clock.positionAt(monotonicNowNs()) + 0.001;
+    sample.sampledAtNs = monotonicNowNs();
+    sample.advancing = true;
+    sample.trackToken = clock.state().trackToken;
+    const quint64 corrected = item.m_playbackFrameRequests;
+    clock.applySample(sample, false);
+    QCOMPARE(item.m_playbackFrameRequests, corrected + 1);
 }
 
 void QmlSmokeTest::waveformEditorIdleViewDrawsOnlyFramesThatDiffer() {
@@ -9767,6 +9821,24 @@ void QmlSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel() {
     QVERIFY(item.m_playbackFrameTimer->remainingTime() > 300);
     // Paused, it waits for the clock.
     item.setPlaying(false);
+    QVERIFY(!item.m_playbackFrameTimer->isActive());
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramLateFrameCallbackDrawsAtOnce() {
+    // The frame painted at 50 s shows column 117 until column 118 at
+    // 50.35 s. Its frame-swapped callback arrives after that: the next
+    // frame is due at once.
+    SpectrogramItem item;
+    prepareWholeTrackPlayback(item, 50.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    PlaybackClock &clock = testClock(item);
+    QVERIFY(QTest::qWaitFor([&clock]() {
+        return clock.positionAt(monotonicNowNs()) >= 118.2 / kWholeTrackColumnsPerSecond;
+    }, 2000));
+    const quint64 requested = item.m_playbackFrameRequests;
+    item.handleWindowAfterAnimating();
+    QCOMPARE(item.m_playbackFrameRequests, requested + 1);
     QVERIFY(!item.m_playbackFrameTimer->isActive());
     delete node;
 }
