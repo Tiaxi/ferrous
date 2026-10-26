@@ -62,6 +62,8 @@ struct SpectrogramRasterTarget {
     qint64 epoch{0};
     quint64 trackToken{0};
     quint64 ringGeneration{0};
+    // When the inputs were taken, which the canvas then shows.
+    std::chrono::steady_clock::time_point capturedAt{};
     std::shared_ptr<const SpectrogramProjection> projection;
 };
 
@@ -279,6 +281,7 @@ private:
         bool rollingMode,
         double effectiveZoom,
         double columnsPerSecond) const;
+    int maxSyncAppendPixelsLocked(int canvasWidth, double effectiveZoom) const;
     bool advancePrecomputedCanvasLocked(
         qint64 displayLeft,
         qint64 displayRight,
@@ -524,6 +527,8 @@ private:
     // a rolling one's.
     quint64 m_precomputedCanvasTrackToken{0};
     quint64 m_precomputedCanvasRingGeneration{0};
+    // When the canvas's columns were last brought up to the view.
+    std::chrono::steady_clock::time_point m_precomputedCanvasDrawnAt{};
     // The scaled canvas drawn last, so that clicks seek where it shows:
     // the track time at anchor X, and pixels per second.
     bool m_zoomPreviewShown{false};

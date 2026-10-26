@@ -721,16 +721,6 @@ void rasterPixel(
     }
 }
 
-// The most pixels the render sync draws to move a canvas on. Playback
-// moves it at most about 100 a frame (6000 columns a second at 384 kHz and
-// 16x zoom, at 60 fps), which costs about a millisecond at 719 rows and
-// 4097 bins. More comes from a jump, such as a seek, and is rasterized on a
-// worker like a full rebuild: the whole 3440-pixel view takes about 30 ms.
-int maxSyncAppendPixels(int canvasWidth) {
-    constexpr int kMaxSyncAppendPixels = 128;
-    return std::min(canvasWidth - 1, kMaxSyncAppendPixels);
-}
-
 // How many pixels a full rasterization of display columns
 // [displayLeft, displayRight] fills.
 int rasterDrawPixels(int width, qint64 displayLeft, qint64 displayRight, double effectiveZoom) {
@@ -4832,6 +4822,7 @@ std::shared_ptr<SpectrogramRasterJob> SpectrogramItem::makeRasterJobLocked(
     target.epoch = rollingMode ? m_rollingEpoch : 0;
     target.trackToken = m_precomputedTrackToken;
     target.ringGeneration = m_ringGeneration;
+    target.capturedAt = std::chrono::steady_clock::now();
     target.projection = precomputedProjectionLocked(height);
     // Copying the ring shares its blocks; only the slot lookup, one per
     // display column, costs anything here.
@@ -5031,6 +5022,7 @@ bool SpectrogramItem::installRasterResultLocked(const SpectrogramRasterResult &r
     m_precomputedCanvasEpoch = target.epoch;
     m_precomputedCanvasTrackToken = target.trackToken;
     m_precomputedCanvasRingGeneration = target.ringGeneration;
+    m_precomputedCanvasDrawnAt = target.capturedAt;
     m_precomputedCanvasPixelsPerSecond = target.effectiveZoom * target.columnsPerSecond;
     if (!target.rollingMode) {
         // Draw in the centered columns that arrived during the rasterization.
@@ -5088,6 +5080,33 @@ void SpectrogramItem::drawCenteredColumnsInPlaceLocked(
     }
 }
 
+int SpectrogramItem::maxSyncAppendPixelsLocked(int canvasWidth, double effectiveZoom) const {
+    // The render sync moves the canvas on as far as playback can have moved
+    // it since it was drawn, with half again for uneven frames, and at least
+    // 128 pixels (about a millisecond at 719 rows and 4097 bins). That is
+    // 6000 columns a second at 384 kHz and 16x zoom: 200 pixels a frame at
+    // 30 fps, and more after a slow frame or a slow rasterization, whose
+    // columns are caught up here. A jump beyond that, such as a seek, goes
+    // to a worker like a full rebuild, and so does a whole canvas.
+    constexpr int kMinSyncAppendPixels = 128;
+    constexpr double kPlaybackSlack = 1.5;
+    const double rate = std::max(
+        m_clockState.rate, m_positionJumpHoldActive ? m_positionHoldTrajectory.rate : 0.0);
+    double playbackPixels = 0.0;
+    if (rate > 0.0
+        && m_precomputedHopSize > 0
+        && m_precomputedCanvasDrawnAt != std::chrono::steady_clock::time_point{}) {
+        const double elapsedSeconds = std::max(0.0, std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - m_precomputedCanvasDrawnAt).count());
+        const double columnsPerSecond = static_cast<double>(m_precomputedSampleRateHz)
+            / static_cast<double>(m_precomputedHopSize);
+        playbackPixels =
+            elapsedSeconds * rate * columnsPerSecond * effectiveZoom * kPlaybackSlack;
+    }
+    const double budget = std::max(static_cast<double>(kMinSyncAppendPixels), std::ceil(playbackPixels));
+    return static_cast<int>(std::min(static_cast<double>(canvasWidth - 1), budget));
+}
+
 bool SpectrogramItem::advancePrecomputedCanvasLocked(
     qint64 displayLeft,
     qint64 displayRight,
@@ -5121,6 +5140,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
         m_precomputedCanvasDisplayRight = displayLeft - 1;
         m_precomputedCanvasDirty = false;
         m_precomputedCanvasSubpixelOffset = 0.0;
+        m_precomputedCanvasDrawnAt = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -5129,7 +5149,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
             std::max(m_precomputedCanvasDisplayRight + 1, displayLeft);
         const qint64 appendCount =
             std::max<qint64>(0, displayRight - appendStart + 1);
-        if (appendCount > maxSyncAppendPixels(width)) {
+        if (appendCount > maxSyncAppendPixelsLocked(width, effectiveZoom)) {
             return false;
         }
 
@@ -5153,6 +5173,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
             displayLeft + static_cast<qint64>(nextVisibleCols) - 1;
         m_precomputedCanvasDirty = false;
         m_precomputedCanvasSubpixelOffset = 0.0;
+        m_precomputedCanvasDrawnAt = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -5188,7 +5209,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
 
     const int preservedPixels = std::max(0, oldFilledPixels - shiftPixels);
     const int appendPixels = newFilledPixels - preservedPixels;
-    if (appendPixels < 0 || appendPixels > maxSyncAppendPixels(width)) {
+    if (appendPixels < 0 || appendPixels > maxSyncAppendPixelsLocked(width, effectiveZoom)) {
         return false;
     }
 
@@ -5218,6 +5239,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
             : (displayLeft - 1);
     m_precomputedCanvasDirty = false;
     m_precomputedCanvasSubpixelOffset = nextSubpixelOffset;
+    m_precomputedCanvasDrawnAt = std::chrono::steady_clock::now();
     return true;
 }
 

@@ -163,6 +163,25 @@ void prepareFullscreenForwardSeek(SpectrogramItem &item) {
     setTestPosition(item, 30.0);
 }
 
+// A pane playing back at 384 kHz and 16x zoom: 6000 columns a second, one
+// a pixel, with 12000 columns decoded and the playhead at 0.5 s.
+void prepareHighRatePlayback(SpectrogramItem &item, int width, int height, int bins, bool rolling) {
+    item.setWidth(width);
+    item.setHeight(height);
+    item.setDisplayMode(rolling ? 0 : 1);
+    item.setPlaying(true);
+    constexpr int columns = 12'000;
+    constexpr int hop = 64;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, 200'000, 384'000, hop, false, true, 1, true, 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_renderZoomLevel = 1024.0 / hop;
+    }
+    setTestPosition(item, 0.5);
+}
+
 // The drawn spans' extent on screen.
 QPair<double, double> drawnCanvasExtent(QSGNode *node) {
     QSGNode *tilesRoot = node->childAtIndex(1);
@@ -950,6 +969,9 @@ private slots:
     void spectrogramStaleRasterIsDiscarded();
     void spectrogramCachedBackwardSeekKeepsTheCanvasOnScreen();
     void spectrogramCachedForwardSeekRasterizesOffTheRenderSync();
+    void spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data();
+    void spectrogramHighRatePlaybackAdvancesWithoutRebuilds();
+    void spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback();
     void spectrogramZoomDataKeepsThePreviewUntilItsRasterArrives();
     void spectrogramColumnsArrivingDuringARasterAreDrawnIn();
     void spectrogramItemDestroyedDuringRasterIsSafe();
@@ -10188,6 +10210,42 @@ void QmlSmokeTest::spectrogramRebuildBenchmark() {
                         delete seekNode;
                     }
                     qInfo("forward_seek_frame_ms=%.3f", seekNs / (iterations * 1e6));
+
+                    // Playback at 384 kHz and 16x zoom, painted at 30 fps:
+                    // each frame draws the 200 columns playback moved on.
+                    // The item's own repaint loop is cut off, so that only
+                    // these frames move its canvas.
+                    for (const bool rolling : {true, false}) {
+                        SpectrogramItem playing(window.contentItem());
+                        prepareHighRatePlayback(playing, width, height, bins, rolling);
+                        QSGNode *playNode = paintSettled(playing, nullptr);
+                        QObject::disconnect(playing.m_animationTickConnection);
+                        quint64 serial = 0;
+                        {
+                            QMutexLocker lock(&playing.m_stateMutex);
+                            serial = playing.m_rasterSerial;
+                        }
+                        double totalNs = 0.0;
+                        double worstNs = 0.0;
+                        constexpr int frames = 15;
+                        for (int frame = 0; frame < frames; ++frame) {
+                            QTest::qWait(33);
+                            elapsed.restart();
+                            playNode = playing.updatePaintNode(playNode, nullptr);
+                            const double ns = static_cast<double>(elapsed.nsecsElapsed());
+                            totalNs += ns;
+                            worstNs = std::max(worstNs, ns);
+                        }
+                        QVERIFY(!spectrogramRasterPending(playing));
+                        {
+                            QMutexLocker lock(&playing.m_stateMutex);
+                            QCOMPARE(playing.m_rasterSerial, serial);
+                        }
+                        delete playNode;
+                        qInfo("high_rate_playback_frame mode=%s mean_ms=%.3f worst_ms=%.3f",
+                            rolling ? "rolling" : "centered",
+                            totalNs / (frames * 1e6), worstNs / 1e6);
+                    }
                 }
                 qInfo("bins=%d height=%d log=%d raster_ms=%.3f request_ms=%.3f "
                       "install_ms=%.3f handoff_ms=%.3f checksum=%llu",
@@ -11439,6 +11497,80 @@ void QmlSmokeTest::spectrogramCachedForwardSeekRasterizesOffTheRenderSync() {
 
     node = paintSettled(item, node);
     QCOMPARE(item.m_precomputedCanvasDisplayLeft, qint64(5390 - 1720));
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data() {
+    QTest::addColumn<bool>("rolling");
+    QTest::newRow("rolling") << true;
+    QTest::newRow("centered") << false;
+}
+
+void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds() {
+    QFETCH(bool, rolling);
+    constexpr int width = 1000;
+    SpectrogramItem item;
+    prepareHighRatePlayback(item, width, 50, 8, rolling);
+    QSGNode *node = paintSettled(item, nullptr);
+    quint64 serial = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        serial = item.m_rasterSerial;
+    }
+
+    // Painting at about 30 fps, playback moves the view about 200 pixels a
+    // frame: the paint draws them in, and asks a worker for nothing.
+    for (int frame = 0; frame < 10; ++frame) {
+        QTest::qWait(33);
+        node = item.updatePaintNode(node, nullptr);
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(!item.m_rasterPending && item.m_rasterSerial == serial,
+                 qPrintable(QStringLiteral("frame %1 asked for a rasterization").arg(frame)));
+        // The canvas is the view's, to its right edge.
+        QCOMPARE(item.m_canvasFilledCols, width);
+        if (rolling) {
+            QCOMPARE(item.m_precomputedCanvasDisplayRight, item.m_precomputedLastDisplaySeq);
+        } else {
+            QVERIFY(item.m_precomputedCanvasDisplayLeft <= item.m_precomputedLastDisplaySeq);
+            QVERIFY(item.m_precomputedCanvasDisplayRight >= item.m_precomputedLastDisplaySeq);
+        }
+    }
+    QVERIFY(item.m_precomputedLastDisplaySeq > 3000 + 10 * 33 * 6);
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback() {
+    constexpr int width = 2000;
+    SpectrogramItem item;
+    prepareHighRatePlayback(item, width, 50, 8, true);
+    QSGNode *node = paintSettled(item, nullptr);
+
+    // A rasterization is delivered 120 ms after the frame that asked for
+    // it, by when playback has moved on by 700 columns.
+    item.setDbRange(120.0);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(item));
+    QTest::qSleep(120);
+    QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
+    quint64 serial = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        serial = item.m_rasterSerial;
+    }
+
+    // The next frame draws those columns in, and so on: no rasterization
+    // follows the late one.
+    for (int frame = 0; frame < 6; ++frame) {
+        node = item.updatePaintNode(node, nullptr);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY2(!item.m_rasterPending && item.m_rasterSerial == serial,
+                     qPrintable(QStringLiteral("frame %1 asked for a rasterization").arg(frame)));
+            QCOMPARE(item.m_canvasFilledCols, width);
+            QCOMPARE(item.m_precomputedCanvasDisplayRight, item.m_precomputedLastDisplaySeq);
+        }
+        QTest::qWait(33);
+    }
     delete node;
 }
 
