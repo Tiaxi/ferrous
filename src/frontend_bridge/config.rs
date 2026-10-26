@@ -181,7 +181,12 @@ pub(super) fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
         .get("library_view_anchor_offset")
         .and_then(|offset| offset.to_string().parse::<f32>().ok())
         .filter(|offset| offset.is_finite())
-        .map_or(0.0, |offset| offset.clamp(-24.0, 24.0));
+        .map_or(0.0, |offset| {
+            offset.clamp(
+                -super::MAX_LIBRARY_VIEW_ANCHOR_OFFSET,
+                super::MAX_LIBRARY_VIEW_ANCHOR_OFFSET,
+            )
+        });
     Some(SessionSnapshot {
         queue,
         selected_queue_index,
@@ -756,6 +761,33 @@ mod tests {
         let text = format_session_text(&session);
         let parsed = parse_session_text(&text).expect("parse session text");
         assert_eq!(parsed, session);
+    }
+
+    #[test]
+    fn library_view_anchor_offset_survives_rows_taller_than_the_default() {
+        // Rows follow the font size, so the view's top can be well over
+        // 24 pixels into the row at it.
+        for offset in [40.0_f32, -40.0, 300.0] {
+            let session = SessionSnapshot {
+                library_view_anchor_key: "album|/music|Artist|Album".to_string(),
+                library_view_anchor_offset: offset,
+                ..SessionSnapshot::default()
+            };
+            let parsed =
+                parse_session_text(&format_session_text(&session)).expect("parse session text");
+            assert!(
+                (parsed.library_view_anchor_offset - offset).abs() < f32::EPSILON,
+                "{offset} came back as {}",
+                parsed.library_view_anchor_offset
+            );
+        }
+        let parsed = parse_session_text(r#"{"queue": [], "library_view_anchor_offset": 1e9}"#)
+            .expect("parse session text");
+        assert!(
+            (parsed.library_view_anchor_offset - super::super::MAX_LIBRARY_VIEW_ANCHOR_OFFSET)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     #[cfg(unix)]

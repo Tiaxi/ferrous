@@ -447,7 +447,10 @@ fn handle_library_view_command(
             let selection_key = selection_key.trim();
             let anchor_key = anchor_key.trim();
             let anchor_offset = if anchor_offset.is_finite() {
-                anchor_offset.clamp(-24.0, 24.0)
+                anchor_offset.clamp(
+                    -super::MAX_LIBRARY_VIEW_ANCHOR_OFFSET,
+                    super::MAX_LIBRARY_VIEW_ANCHOR_OFFSET,
+                )
             } else {
                 0.0
             };
