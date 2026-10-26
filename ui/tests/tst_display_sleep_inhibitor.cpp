@@ -80,6 +80,7 @@ private slots:
     void keepsOneRequestWhenToggledBeforeReply();
     void destructionReleasesHeldCookie();
     void failedInhibitHoldsNoCookie();
+    void failedInhibitIsReportedWhileRequested();
 };
 
 void DisplaySleepInhibitorTest::forwardsOnlyStateTransitionsToBackend() {
@@ -183,6 +184,28 @@ void DisplaySleepInhibitorTest::failedInhibitHoldsNoCookie() {
     screenSaver.failInhibit = false;
     backend.setInhibited(true);
     QCOMPARE(screenSaver.members(), (QStringList{QStringLiteral("Inhibit"), QStringLiteral("Inhibit")}));
+}
+
+void DisplaySleepInhibitorTest::failedInhibitIsReportedWhileRequested() {
+    FakeScreenSaver screenSaver;
+    screenSaver.failInhibit = true;
+    DisplaySleepInhibitor inhibitor(std::make_unique<ScreenSaverInhibitorBackend>(screenSaver.caller()));
+    QSignalSpy failures(&inhibitor, &DisplaySleepInhibitor::inhibitionFailed);
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("Unable to inhibit display sleep")));
+    inhibitor.setInhibited(true);
+    deliverReplies();
+    QCOMPARE(failures.size(), 1);
+    const QString message = failures.at(0).at(0).toString();
+    QVERIFY2(message.contains(QStringLiteral("Couldn't keep the screen awake")), qPrintable(message));
+    QVERIFY2(message.contains(QStringLiteral("no idle service")), qPrintable(message));
+
+    // A request released before its reply failed is not reported.
+    inhibitor.setInhibited(false);
+    inhibitor.setInhibited(true);
+    inhibitor.setInhibited(false);
+    deliverReplies();
+    QCOMPARE(failures.size(), 1);
 }
 
 QTEST_GUILESS_MAIN(DisplaySleepInhibitorTest)

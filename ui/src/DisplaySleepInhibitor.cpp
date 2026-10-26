@@ -95,10 +95,11 @@ void ScreenSaverInhibitorBackend::finishAcquire(QDBusPendingCallWatcher *watcher
     const QVariant cookie = reply.arguments().value(0);
     if (reply.type() != QDBusMessage::ReplyMessage || cookie.metaType() != QMetaType::fromType<quint32>()) {
         if (m_inhibited) {
-            qWarning() << "Unable to inhibit display sleep:"
-                       << (reply.type() == QDBusMessage::ErrorMessage
-                               ? reply.errorMessage()
-                               : QStringLiteral("unexpected reply"));
+            const QString reason = reply.type() == QDBusMessage::ErrorMessage
+                ? reply.errorMessage()
+                : QStringLiteral("unexpected reply");
+            qWarning() << "Unable to inhibit display sleep:" << reason;
+            reportFailure(reason);
         }
         return;
     }
@@ -124,7 +125,16 @@ DisplaySleepInhibitor::DisplaySleepInhibitor(
     std::unique_ptr<DisplaySleepInhibitorBackend> backend,
     QObject *parent)
     : QObject(parent),
-      m_backend(std::move(backend)) {}
+      m_backend(std::move(backend)) {
+    m_backend->setFailureHandler([this](const QString &reason) {
+        // Only a request still standing failed; a released one no longer matters.
+        if (m_inhibited) {
+            emit inhibitionFailed(
+                QStringLiteral("Couldn't keep the screen awake during fullscreen playback: %1")
+                    .arg(reason));
+        }
+    });
+}
 
 DisplaySleepInhibitor::~DisplaySleepInhibitor() = default;
 

@@ -104,6 +104,7 @@ qt_add_qml_module(ferrous
         qml/components/ActionShortcuts.qml
         qml/components/AlbumArtTile.qml
         qml/components/ColumnHeaderRow.qml
+        qml/components/ErrorBanner.qml
         qml/components/SearchResultIcon.qml
         qml/components/FullscreenControlsAutoHide.qml
         qml/components/MetadataMarqueeRow.qml
@@ -113,6 +114,7 @@ qt_add_qml_module(ferrous
         qml/components/UiPalette.qml
         qml/components/ViewerCloseButton.qml
         qml/components/VisualizationModeSwitch.qml
+        qml/controllers/ErrorController.qml
         qml/controllers/GlobalSearchController.qml
         qml/controllers/LibraryController.qml
         qml/controllers/PlaybackController.qml
@@ -155,6 +157,7 @@ qt_add_qml_module(ferrous
         qml/assets/channel-7_1.svg
         qml/logic/ChannelLabels.js
         qml/logic/ColorUtils.js
+        qml/logic/ErrorUtils.js
         qml/logic/FormatUtils.js
         qml/logic/PathUtils.js
         qml/logic/WheelUtils.js
@@ -237,6 +240,7 @@ if(BUILD_TESTING)
         src/BridgeClient.cpp
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
+        src/DisplaySleepInhibitor.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
         src/MprisController.cpp

@@ -31,6 +31,7 @@ use crate::worker_thread::{spawn_joinable, JoinableThread};
 mod commands;
 mod config;
 mod edit_refresh;
+mod errors;
 mod events;
 pub mod ffi;
 mod imports;
@@ -50,11 +51,12 @@ use config::{
     apply_session_restore, load_session_snapshot, load_settings_into, save_session_snapshot,
     save_settings, session_snapshot_for_state, SaveFailure, SessionSnapshot,
 };
+pub use errors::{BridgeError, ErrorCategory, ErrorSeverity};
 use events::{
-    apply_library_events, drain_analysis_events, drain_apply_album_art_events, drain_lastfm_events,
+    apply_library_events, drain_analysis_events, drain_apply_album_art_events,
     drain_metadata_events, drain_playback_events, finalize_lastfm_track,
     note_precomputed_spectrogram_chunk, process_analysis_event, process_apply_album_art_event,
-    process_lastfm_event, process_metadata_event, process_playback_event, tick_lastfm_playback,
+    process_lastfm_state, process_metadata_event, process_playback_event, tick_lastfm_playback,
 };
 pub use queue_sync::{QueueEdit, QueueUpdate};
 pub(crate) use search::is_main_album_disc_section;
@@ -346,7 +348,7 @@ pub enum BridgeEvent {
     Snapshot(Box<BridgeSnapshot>),
     SearchResults(Box<BridgeSearchResultsFrame>),
     PrecomputedSpectrogramChunk(crate::analysis::PrecomputedSpectrogramChunk),
-    Error(String),
+    Error(BridgeError),
     Stopped,
     /// The bridge stopped without being asked to, for this reason.
     Failed(String),
@@ -864,6 +866,10 @@ impl FrontendBridgeHandle {
 
 /// How long shutdown waits for the Last.fm service to save its queue.
 const LASTFM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a save before quitting waits for Last.fm to save its
+/// scrobbles. Last.fm may be waiting for the network, which the save does
+/// not wait for; the UI gives up on the whole save after 5 s.
+const QUIT_SAVE_LASTFM_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long shutdown waits for the playback engine to stop and tell which
 /// files it could not release. Stopping takes milliseconds, as the engine
@@ -914,6 +920,7 @@ struct BridgeLoopRuntime {
     last_session_save: Instant,
     last_saved_session: Option<SessionSnapshot>,
     save_errors: SaveErrors,
+    quit_save: QuitSave,
     playing_poll_interval: Duration,
     last_playing_poll: Instant,
     paused_poll_interval: Duration,
@@ -1040,6 +1047,21 @@ impl Worker {
         }
     }
 
+    /// The category of the errors that say the worker stopped.
+    fn category(self) -> ErrorCategory {
+        match self {
+            Self::Imports | Self::QueueValidation | Self::Playback => ErrorCategory::Playback,
+            Self::LibraryTree
+            | Self::Metadata
+            | Self::Library
+            | Self::Search
+            | Self::ApplyAlbumArt => ErrorCategory::Library,
+            Self::EditRefresh => ErrorCategory::Tags,
+            Self::Analysis => ErrorCategory::Analysis,
+            Self::LastFm => ErrorCategory::LastFm,
+        }
+    }
+
     /// Whether a new thread can take over: it must hold no state that
     /// outlives a request, and the loop must own all of its channels.
     fn restartable(self) -> bool {
@@ -1141,6 +1163,7 @@ impl BridgeLoopRuntime {
             last_session_save: Instant::now(),
             last_saved_session: None,
             save_errors: SaveErrors::default(),
+            quit_save: QuitSave::default(),
             playing_poll_interval,
             last_playing_poll: Instant::now()
                 .checked_sub(playing_poll_interval)
@@ -1184,6 +1207,7 @@ impl BridgeLoopRuntime {
         while self.flags.running {
             let wake = self.wait_for_wake(cmd_rx);
             self.handle_wake(wake, event_tx);
+            self.expire_quit_save(Instant::now(), event_tx);
             self.maybe_log_profile();
             self.maybe_persist(event_tx);
         }
@@ -1271,6 +1295,9 @@ impl BridgeLoopRuntime {
             self.next_deferred_tree_rebuild_delay(),
             self.next_settings_save_delay(),
             self.next_session_save_delay(),
+            self.quit_save
+                .deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now())),
         ]
         .into_iter()
         .flatten()
@@ -1321,7 +1348,15 @@ impl BridgeLoopRuntime {
             }) => self.apply_renamed_paths(number, renames, details, sequence, event_tx),
             BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
             BridgeLoopWake::QueueValidated(result) => {
-                if self.queue_validator.apply(result, &mut self.state) {
+                let (changed, problem) = self.queue_validator.apply(result, &mut self.state);
+                if let Some(problem) = problem {
+                    eprintln!("[ferrous] {problem}");
+                    let _ = try_send_event(
+                        event_tx,
+                        BridgeEvent::Error(BridgeError::warning(ErrorCategory::Playback, problem)),
+                    );
+                }
+                if changed {
                     self.state.refresh_queue_rows();
                     self.flags.session_dirty = true;
                     SnapshotUrgency::Immediate
@@ -1339,7 +1374,7 @@ impl BridgeLoopRuntime {
             BridgeLoopWake::ApplyAlbumArt(event) => {
                 self.handle_apply_album_art_event(event, event_tx)
             }
-            BridgeLoopWake::LastFm(event) => self.handle_lastfm_event(event),
+            BridgeLoopWake::LastFm(event) => self.handle_lastfm_event(event, event_tx),
             BridgeLoopWake::WorkerStopped(worker) => {
                 self.handle_stopped_worker(worker, event_tx);
                 SnapshotUrgency::None
@@ -1430,11 +1465,11 @@ impl BridgeLoopRuntime {
         if self.edit_refreshes.request(paths).is_none() {
             let _ = try_send_event(
                 event_tx,
-                BridgeEvent::Error(
+                BridgeEvent::Error(BridgeError::warning(
+                    ErrorCategory::Tags,
                     "The library could not be updated with the saved tag edits; \
-                     a rescan of the library will show them."
-                        .to_string(),
-                ),
+                     a rescan of the library will show them.",
+                )),
             );
         }
     }
@@ -1447,7 +1482,10 @@ impl BridgeLoopRuntime {
         let refresh = self.edit_refreshes.accept(result);
         self.forget_applied_rows_once_renames_arrived();
         if let Some(problem) = refresh.problem {
-            let _ = try_send_event(event_tx, BridgeEvent::Error(problem));
+            let _ = try_send_event(
+                event_tx,
+                BridgeEvent::Error(BridgeError::warning(ErrorCategory::Tags, problem)),
+            );
         }
         if !commands::apply_edited_details(
             &mut self.state,
@@ -1486,7 +1524,10 @@ impl BridgeLoopRuntime {
         let mut urgency = SnapshotUrgency::None;
         for change in changes {
             if let Some(warning) = change.warning {
-                let _ = try_send_event(event_tx, BridgeEvent::Error(warning));
+                let _ = try_send_event(
+                    event_tx,
+                    BridgeEvent::Error(BridgeError::warning(ErrorCategory::Playback, warning)),
+                );
             }
             let Some(command) = change.command else {
                 continue;
@@ -1542,7 +1583,20 @@ impl BridgeLoopRuntime {
             Worker::Analysis => self.analysis_rx = never(),
             Worker::Metadata => self.metadata_rx = never(),
             Worker::Library => self.library_rx = never(),
-            Worker::LastFm => self.lastfm_rx = never(),
+            Worker::LastFm => {
+                self.lastfm_rx = never();
+                self.quit_save.lastfm_stopped = true;
+                if let Some(request_id) = self.quit_save_waiting_for_lastfm() {
+                    self.finish_quit_save(
+                        request_id,
+                        Some(
+                            "Last.fm stopped unexpectedly; scrobbles it had not saved are lost."
+                                .to_string(),
+                        ),
+                        event_tx,
+                    );
+                }
+            }
         }
         let message = if restart {
             format!(
@@ -1557,7 +1611,10 @@ impl BridgeLoopRuntime {
             )
         };
         eprintln!("[ferrous] {message}");
-        let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+        let _ = try_send_event(
+            event_tx,
+            BridgeEvent::Error(BridgeError::error(worker.category(), message)),
+        );
     }
 
     fn request_tree(&mut self) {
@@ -1599,7 +1656,13 @@ impl BridgeLoopRuntime {
                     Ok(Some(command)) => BridgeCommand::Queue(command),
                     Ok(None) => return SnapshotUrgency::None,
                     Err(message) => {
-                        let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+                        let _ = try_send_event(
+                            event_tx,
+                            BridgeEvent::Error(BridgeError::error(
+                                ErrorCategory::Playback,
+                                message,
+                            )),
+                        );
                         return SnapshotUrgency::None;
                     }
                 }
@@ -1610,7 +1673,10 @@ impl BridgeLoopRuntime {
             return match self.imports.submit(request) {
                 Ok(changes) => self.apply_queue_changes(changes, event_tx),
                 Err(error) => {
-                    let _ = try_send_event(event_tx, BridgeEvent::Error(error));
+                    let _ = try_send_event(
+                        event_tx,
+                        BridgeEvent::Error(BridgeError::error(ErrorCategory::Playback, error)),
+                    );
                     SnapshotUrgency::None
                 }
             };
@@ -1627,14 +1693,7 @@ impl BridgeLoopRuntime {
                 self.imports.discard_pending();
             }
             BridgeCommand::SaveState(request_id) => {
-                let result = self.save_state_now();
-                let _ = try_send_event(
-                    event_tx,
-                    BridgeEvent::StateSaved {
-                        request_id: *request_id,
-                        result,
-                    },
-                );
+                self.save_state_for_quit(*request_id, event_tx);
                 return SnapshotUrgency::None;
             }
             _ => {}
@@ -1723,7 +1782,10 @@ impl BridgeLoopRuntime {
                 urgency
             }
             AnalysisEvent::WorkerFailed(message) => {
-                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+                let _ = try_send_event(
+                    event_tx,
+                    BridgeEvent::Error(BridgeError::error(ErrorCategory::Analysis, message)),
+                );
                 SnapshotUrgency::None
             }
         }
@@ -1778,12 +1840,145 @@ impl BridgeLoopRuntime {
         urgency
     }
 
-    fn handle_lastfm_event(&mut self, event: LastFmEvent) -> SnapshotUrgency {
-        let urgency = process_lastfm_event(event, &mut self.state, &mut self.flags);
-        if urgency.is_pending() {
-            self.flags.session_dirty = true;
+    fn handle_lastfm_event(
+        &mut self,
+        event: LastFmEvent,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
+        match event {
+            LastFmEvent::State(runtime) => {
+                let urgency =
+                    process_lastfm_state(runtime, &mut self.state, &mut self.flags, event_tx);
+                if urgency.is_pending() {
+                    self.flags.session_dirty = true;
+                }
+                // Last.fm tells the scrobbles it saved before it sends them,
+                // which can wait for the network; a save that waits for them
+                // need not wait for the network too.
+                if !self.lastfm_may_hold_unsaved_scrobbles() {
+                    if let Some(request_id) = self.quit_save_waiting_for_lastfm() {
+                        self.finish_quit_save(request_id, None, event_tx);
+                    }
+                }
+                urgency
+            }
+            LastFmEvent::SavedForQuit { request_id, result } => {
+                self.finish_quit_save(request_id, result.err(), event_tx);
+                SnapshotUrgency::None
+            }
         }
-        urgency
+    }
+
+    /// Save the state for the UI to quit, and answer with what could not be
+    /// saved.
+    fn save_state_for_quit(&mut self, request_id: u32, event_tx: &Sender<BridgeEvent>) {
+        let result = self.save_state_now();
+        if self.lastfm_may_hold_unsaved_scrobbles() && !self.quit_save.lastfm_stopped {
+            // Quitting could lose them, so the user is told before the
+            // window closes. Last.fm saves on its own thread, after the
+            // scrobbles sent before, and its answer completes this one.
+            self.lastfm.command(LastFmCommand::SaveForQuit(request_id));
+            self.quit_save.waiting_for_lastfm = Some((request_id, result));
+            self.quit_save.deadline = Some(Instant::now() + QUIT_SAVE_LASTFM_TIMEOUT);
+        } else {
+            let _ = try_send_event(event_tx, BridgeEvent::StateSaved { request_id, result });
+        }
+    }
+
+    /// Whether Last.fm holds scrobbles only in memory, or has not yet said
+    /// whether it saved the latest ones it was sent.
+    fn lastfm_may_hold_unsaved_scrobbles(&self) -> bool {
+        self.state.lastfm.unsaved_scrobbles || self.unconfirmed_lastfm_scrobbles() > 0
+    }
+
+    fn unconfirmed_lastfm_scrobbles(&self) -> u64 {
+        self.lastfm
+            .scrobbles_sent()
+            .saturating_sub(self.state.lastfm.scrobbles_received)
+    }
+
+    /// Answer a save before quitting that Last.fm has kept waiting past its
+    /// deadline, with the scrobbles that may be lost: Last.fm may be waiting
+    /// for the network, which quitting does not wait for.
+    fn expire_quit_save(&mut self, now: Instant, event_tx: &Sender<BridgeEvent>) {
+        if self
+            .quit_save
+            .deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return;
+        }
+        let Some(request_id) = self.quit_save_waiting_for_lastfm() else {
+            self.quit_save.deadline = None;
+            return;
+        };
+        let unconfirmed = self.unconfirmed_lastfm_scrobbles();
+        let unsaved = if self.state.lastfm.unsaved_scrobbles {
+            self.state.lastfm.pending_scrobble_count
+        } else {
+            0
+        };
+        let at_risk = u64::try_from(unsaved)
+            .unwrap_or(u64::MAX)
+            .saturating_add(unconfirmed);
+        if at_risk == 0 {
+            // Nothing quitting would lose.
+            self.finish_quit_save(request_id, None, event_tx);
+            return;
+        }
+        let problem = format!(
+            "Last.fm: {at_risk} {} not saved and would be lost on quit. Last.fm is busy, \
+             possibly waiting for the network, and could not save {} in time.",
+            if at_risk == 1 {
+                "scrobble is"
+            } else {
+                "scrobbles are"
+            },
+            if at_risk == 1 { "it" } else { "them" }
+        );
+        self.finish_quit_save(request_id, Some(problem), event_tx);
+    }
+
+    fn quit_save_waiting_for_lastfm(&self) -> Option<u32> {
+        self.quit_save
+            .waiting_for_lastfm
+            .as_ref()
+            .map(|(request_id, _)| *request_id)
+    }
+
+    /// Answer the save before quitting with that request ID, if it waits for
+    /// Last.fm, with what Last.fm could not save.
+    fn finish_quit_save(
+        &mut self,
+        request_id: u32,
+        lastfm_problem: Option<String>,
+        event_tx: &Sender<BridgeEvent>,
+    ) {
+        if self
+            .quit_save
+            .waiting_for_lastfm
+            .as_ref()
+            .is_none_or(|(waiting, _)| *waiting != request_id)
+        {
+            // A save that a retry has replaced.
+            return;
+        }
+        let Some((_, saved)) = self.quit_save.waiting_for_lastfm.take() else {
+            return;
+        };
+        self.quit_save.deadline = None;
+        let failures: Vec<String> = saved.err().into_iter().chain(lastfm_problem).collect();
+        let _ = try_send_event(
+            event_tx,
+            BridgeEvent::StateSaved {
+                request_id,
+                result: if failures.is_empty() {
+                    Ok(())
+                } else {
+                    Err(failures.join("\n"))
+                },
+            },
+        );
     }
 
     fn poll_playback_if_due(&mut self) {
@@ -1832,7 +2027,13 @@ impl BridgeLoopRuntime {
             event_tx,
             &mut self.state,
         );
-        let lastfm_urgency = drain_lastfm_events(&self.lastfm_rx, &mut self.state, &mut self.flags);
+        let mut lastfm_urgency = SnapshotUrgency::None;
+        for _ in 0..8 {
+            let Ok(event) = self.lastfm_rx.try_recv() else {
+                break;
+            };
+            lastfm_urgency = lastfm_urgency.max(self.handle_lastfm_event(event, event_tx));
+        }
         drain_search_results(&self.search_results_rx, &mut self.state);
         tick_lastfm_playback(&self.state, &self.lastfm, &mut self.lastfm_tracker);
         if self.state.queue_detail_validation_requested {
@@ -2072,7 +2273,10 @@ impl BridgeLoopRuntime {
         // A file whose read has not returned stays open after the app quits.
         if let Some(message) = self.playback.shutdown(PLAYBACK_SHUTDOWN_TIMEOUT).problem() {
             eprintln!("[ferrous] {message}");
-            let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+            let _ = try_send_event(
+                event_tx,
+                BridgeEvent::Error(BridgeError::error(ErrorCategory::Playback, message)),
+            );
             saved = false;
         }
         let lastfm_problem = match self.lastfm.shutdown(LASTFM_SHUTDOWN_TIMEOUT) {
@@ -2085,12 +2289,29 @@ impl BridgeLoopRuntime {
         };
         if let Some(message) = lastfm_problem {
             eprintln!("{message}");
-            let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+            let _ = try_send_event(
+                event_tx,
+                BridgeEvent::Error(BridgeError::error(ErrorCategory::LastFm, message)),
+            );
             saved = false;
         }
         let _ = try_send_event(event_tx, BridgeEvent::Stopped);
         saved
     }
+}
+
+/// What a save before quitting waits for.
+#[derive(Default)]
+struct QuitSave {
+    /// A save that waits for Last.fm to save scrobbles it holds only in
+    /// memory: its request ID, and how saving the settings and the session
+    /// went.
+    waiting_for_lastfm: Option<(u32, Result<(), String>)>,
+    /// Set once the Last.fm service has stopped unexpectedly; nothing waits
+    /// for it then.
+    lastfm_stopped: bool,
+    /// When the waiting save is answered without Last.fm.
+    deadline: Option<Instant>,
 }
 
 /// The save failures last shown to the user, so a save that keeps failing
@@ -2114,7 +2335,9 @@ fn report_save(
     };
     if reported.as_ref() != Some(&failure.identity) {
         eprintln!("[ferrous] {}", failure.message);
-        if try_send_event(event_tx, BridgeEvent::Error(failure.message)).is_ok() {
+        let error = BridgeError::error(ErrorCategory::Settings, failure.message)
+            .about(failure.identity.0.to_string_lossy());
+        if try_send_event(event_tx, BridgeEvent::Error(error)).is_ok() {
             *reported = Some(failure.identity);
         }
     }
@@ -2412,7 +2635,7 @@ mod tests {
         event_rx
             .try_iter()
             .filter_map(|event| match event {
-                BridgeEvent::Error(message) => Some(message),
+                BridgeEvent::Error(error) => Some(error.message),
                 _ => None,
             })
             .collect()
@@ -2680,7 +2903,7 @@ mod tests {
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         let (event_tx, _event_rx) = unbounded();
 
-        runtime.handle_lastfm_event(lastfm_connected_as("tester"));
+        runtime.handle_lastfm_event(lastfm_connected_as("tester"), &event_tx);
         runtime.maybe_persist(&event_tx);
 
         assert_eq!(
@@ -2712,7 +2935,7 @@ mod tests {
 
         // Without waiting for the periodic save.
         runtime.last_settings_save = Instant::now();
-        runtime.handle_lastfm_event(lastfm_connected_as("first"));
+        runtime.handle_lastfm_event(lastfm_connected_as("first"), &event_tx);
         assert_eq!(runtime.next_settings_save_delay(), Some(Duration::ZERO));
         runtime.maybe_persist(&event_tx);
         assert_eq!(saved_username(), "first");
@@ -2722,7 +2945,7 @@ mod tests {
         // Nothing can be renamed over a directory.
         std::fs::remove_file(&settings_path).expect("remove the settings");
         std::fs::create_dir(&settings_path).expect("block the settings");
-        runtime.handle_lastfm_event(lastfm_connected_as("second"));
+        runtime.handle_lastfm_event(lastfm_connected_as("second"), &event_tx);
         runtime.maybe_persist(&event_tx);
         let messages = error_messages(&event_rx);
         assert_eq!(messages.len(), 1, "{messages:?}");
@@ -2842,6 +3065,329 @@ mod tests {
     }
 
     #[test]
+    fn quitting_while_lastfm_sends_a_scrobble_it_saved_does_not_wait_for_the_network() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = event_channel();
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let dir = crate::paths::test_root().join("quit-while-sending-a-saved-scrobble");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture folder");
+        let (transport, network) = crate::lastfm::test_support::BlockingTransport::new();
+        let (lastfm, lastfm_events) =
+            crate::lastfm::test_support::spawn_connected(transport, dir.join("lastfm_queue.json"));
+        runtime.lastfm = lastfm.clone();
+        // The test hands the bridge Last.fm's events itself, in order.
+        runtime.lastfm_rx = never();
+
+        lastfm.command(LastFmCommand::QueueScrobble(crate::lastfm::ScrobbleEntry {
+            artist: "Artist".to_string(),
+            track: "Track".to_string(),
+            album: String::new(),
+            track_number: None,
+            duration_seconds: Some(200),
+            timestamp_utc: 1_700_000_000,
+        }));
+        // The scrobble is saved, then its request waits for the network.
+        network
+            .started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the scrobble's request starts");
+        assert!(dir.join("lastfm_queue.json").is_file());
+
+        // Quitting before the bridge has heard of the save waits for it...
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(1)),
+            &event_tx,
+        );
+        let state_saved = |event_rx: &Receiver<BridgeEvent>| {
+            event_rx.try_iter().find_map(|event| match event {
+                BridgeEvent::StateSaved { request_id, result } => Some((request_id, result)),
+                _ => None,
+            })
+        };
+        assert_eq!(state_saved(&event_rx), None);
+        // ...and the save's confirmation settles it, while the request still
+        // waits: no deadline, no dialog.
+        for event in lastfm_events.try_iter() {
+            runtime.handle_wake(BridgeLoopWake::LastFm(event), &event_tx);
+        }
+        assert_eq!(state_saved(&event_rx), Some((1, Ok(()))));
+        assert_eq!(network.answered(), 0, "the request still waits");
+        runtime.expire_quit_save(Instant::now() + QUIT_SAVE_LASTFM_TIMEOUT, &event_tx);
+        assert_eq!(state_saved(&event_rx), None, "nothing is reported lost");
+
+        network.release.send(()).expect("release the request");
+        let _ = lastfm.shutdown(Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quitting_while_lastfm_sends_a_scrobble_it_could_not_save_reports_the_loss() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = event_channel();
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let dir = crate::paths::test_root().join("quit-while-scrobbling");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture folder");
+        // A file where the queue's folder should be: every save fails.
+        let blocked_folder = dir.join("config");
+        std::fs::write(&blocked_folder, b"").expect("blocking file");
+        let (transport, network) = crate::lastfm::test_support::BlockingTransport::new();
+        let (lastfm, lastfm_events) = crate::lastfm::test_support::spawn_connected(
+            transport,
+            blocked_folder.join("lastfm_queue.json"),
+        );
+        runtime.lastfm = lastfm.clone();
+        runtime.lastfm_rx = lastfm_events.clone();
+        let state_saved = |event_rx: &Receiver<BridgeEvent>| {
+            event_rx.try_iter().find_map(|event| match event {
+                BridgeEvent::StateSaved { request_id, result } => Some((request_id, result)),
+                _ => None,
+            })
+        };
+
+        lastfm.command(LastFmCommand::QueueScrobble(crate::lastfm::ScrobbleEntry {
+            artist: "Artist".to_string(),
+            track: "Track".to_string(),
+            album: String::new(),
+            track_number: None,
+            duration_seconds: Some(200),
+            timestamp_utc: 1_700_000_000,
+        }));
+        // The failed save is told, then the scrobble's request waits for
+        // the network.
+        network
+            .started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the scrobble's request starts");
+
+        // Quitting now, whether or not the bridge has heard of the failed
+        // save yet, waits for Last.fm rather than approving the quit.
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(1)),
+            &event_tx,
+        );
+        assert_eq!(state_saved(&event_rx), None, "the save waits for Last.fm");
+        for event in lastfm_events.try_iter() {
+            runtime.handle_wake(BridgeLoopWake::LastFm(event), &event_tx);
+        }
+        assert!(runtime.state.lastfm.unsaved_scrobbles);
+        assert_eq!(runtime.state.lastfm.scrobbles_received, 1);
+        assert_eq!(
+            state_saved(&event_rx),
+            None,
+            "Last.fm waits for the network"
+        );
+
+        // The save does not wait for the network: past its deadline it
+        // reports the loss, and the UI keeps the window open.
+        runtime.expire_quit_save(Instant::now() + QUIT_SAVE_LASTFM_TIMEOUT, &event_tx);
+        match state_saved(&event_rx) {
+            Some((1, Err(message))) => assert!(
+                message.contains("1 scrobble is not saved and would be lost on quit"),
+                "{message}"
+            ),
+            other => panic!("expected the loss, got {other:?}"),
+        }
+
+        // Last.fm's late answer settles nothing more.
+        network.release.send(()).expect("release the request");
+        let answer = lastfm_events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Last.fm answers");
+        runtime.handle_wake(BridgeLoopWake::LastFm(answer), &event_tx);
+        for event in lastfm_events.try_iter() {
+            runtime.handle_wake(BridgeLoopWake::LastFm(event), &event_tx);
+        }
+        assert_eq!(state_saved(&event_rx), None);
+        drop(network);
+        let _ = lastfm.shutdown(Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_before_quitting_reports_scrobbles_that_lastfm_holds_only_in_memory() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (lastfm, commands) = crate::lastfm::test_support::command_handle();
+        runtime.lastfm = lastfm;
+        // The runtime's own Last.fm service is not heard from.
+        runtime.lastfm_rx = never();
+        let (event_tx, event_rx) = event_channel();
+        let state_saved = |event_rx: &Receiver<BridgeEvent>| {
+            event_rx.try_iter().find_map(|event| match event {
+                BridgeEvent::StateSaved { request_id, result } => Some((request_id, result)),
+                _ => None,
+            })
+        };
+
+        // With nothing held only in memory, Last.fm is not asked.
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(1)),
+            &event_tx,
+        );
+        assert_eq!(state_saved(&event_rx), Some((1, Ok(()))));
+        assert!(commands.try_recv().is_err());
+
+        // A scrobble Last.fm has not said it saved is not taken as saved:
+        // the save waits for Last.fm, which handles the scrobble first.
+        runtime
+            .lastfm
+            .command(LastFmCommand::QueueScrobble(crate::lastfm::ScrobbleEntry {
+                artist: "Artist".to_string(),
+                track: "Track".to_string(),
+                album: String::new(),
+                track_number: None,
+                duration_seconds: Some(200),
+                timestamp_utc: 1_700_000_000,
+            }));
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(10)),
+            &event_tx,
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(LastFmCommand::QueueScrobble(_))
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(LastFmCommand::SaveForQuit(10))
+        ));
+        assert_eq!(state_saved(&event_rx), None);
+        // Once Last.fm says it received and saved it, and answers, the
+        // save succeeds.
+        let received = LastFmRuntimeState {
+            scrobbles_received: 1,
+            ..runtime.state.lastfm.clone()
+        };
+        runtime.handle_wake(
+            BridgeLoopWake::LastFm(LastFmEvent::State(received)),
+            &event_tx,
+        );
+        runtime.handle_wake(
+            BridgeLoopWake::LastFm(LastFmEvent::SavedForQuit {
+                request_id: 10,
+                result: Ok(()),
+            }),
+            &event_tx,
+        );
+        assert_eq!(state_saved(&event_rx), Some((10, Ok(()))));
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(11)),
+            &event_tx,
+        );
+        assert_eq!(
+            state_saved(&event_rx),
+            Some((11, Ok(()))),
+            "nothing is left unconfirmed"
+        );
+
+        runtime.state.lastfm.unsaved_scrobbles = true;
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(2)),
+            &event_tx,
+        );
+        assert!(
+            matches!(commands.try_recv(), Ok(LastFmCommand::SaveForQuit(2))),
+            "Last.fm saves them first"
+        );
+        assert_eq!(state_saved(&event_rx), None, "the answer waits for Last.fm");
+        let lost = "Last.fm: 2 scrobbles were not saved and would be lost on quit.";
+        runtime.handle_wake(
+            BridgeLoopWake::LastFm(LastFmEvent::SavedForQuit {
+                request_id: 2,
+                result: Err(lost.to_string()),
+            }),
+            &event_tx,
+        );
+        assert_eq!(state_saved(&event_rx), Some((2, Err(lost.to_string()))));
+
+        // A retry replaces the save it retries; Last.fm's answer to the
+        // older one is not taken for it.
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(3)),
+            &event_tx,
+        );
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(4)),
+            &event_tx,
+        );
+        for request_id in [3, 4] {
+            runtime.handle_wake(
+                BridgeLoopWake::LastFm(LastFmEvent::SavedForQuit {
+                    request_id,
+                    result: Ok(()),
+                }),
+                &event_tx,
+            );
+        }
+        assert_eq!(state_saved(&event_rx), Some((4, Ok(()))));
+        assert_eq!(state_saved(&event_rx), None);
+
+        // A Last.fm service that stops answers the save that waits for it.
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(5)),
+            &event_tx,
+        );
+        runtime.handle_wake(BridgeLoopWake::WorkerStopped(Worker::LastFm), &event_tx);
+        assert!(matches!(
+            state_saved(&event_rx),
+            Some((5, Err(message))) if message.contains("Last.fm stopped unexpectedly")
+        ));
+        runtime.handle_wake(
+            BridgeLoopWake::Command(BridgeCommand::SaveState(6)),
+            &event_tx,
+        );
+        assert_eq!(state_saved(&event_rx), Some((6, Ok(()))));
+    }
+
+    #[test]
+    fn lastfm_problems_are_shown_once_each_as_lastfm_errors() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = event_channel();
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let state = LastFmRuntimeState {
+            status_text: "Last.fm session expired.".to_string(),
+            problems: vec![
+                crate::lastfm::Problem {
+                    message: "Last.fm session expired.".to_string(),
+                    warning: false,
+                },
+                crate::lastfm::Problem {
+                    message: "Last.fm is unreachable; Ferrous keeps retrying.".to_string(),
+                    warning: true,
+                },
+            ],
+            ..LastFmRuntimeState::default()
+        };
+        runtime.handle_wake(BridgeLoopWake::LastFm(LastFmEvent::State(state)), &event_tx);
+
+        let errors: Vec<BridgeError> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                BridgeError::error(ErrorCategory::LastFm, "Last.fm session expired."),
+                BridgeError::warning(
+                    ErrorCategory::LastFm,
+                    "Last.fm is unreachable; Ferrous keeps retrying."
+                ),
+            ]
+        );
+        // The bridge keeps the state without them, so they are not sent again.
+        assert!(runtime.state.lastfm.problems.is_empty());
+        assert_eq!(runtime.state.lastfm.status_text, "Last.fm session expired.");
+    }
+
+    #[test]
     fn shutdown_reports_scrobbles_that_lastfm_could_not_save() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
@@ -2862,7 +3408,8 @@ mod tests {
 
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(BridgeEvent::Error(message)) if message == "Last.fm: 2 scrobbles were lost on quit."
+            Ok(BridgeEvent::Error(error)) if error.message == "Last.fm: 2 scrobbles were lost on quit."
+                && error.category == ErrorCategory::LastFm
         ));
         assert!(matches!(event_rx.try_recv(), Ok(BridgeEvent::Stopped)));
     }
@@ -3251,7 +3798,7 @@ mod tests {
         let errors: Vec<String> = event_rx
             .try_iter()
             .filter_map(|event| match event {
-                BridgeEvent::Error(message) => Some(message),
+                BridgeEvent::Error(error) => Some(error.message),
                 _ => None,
             })
             .collect();
@@ -4601,6 +5148,54 @@ mod tests {
     }
 
     #[test]
+    fn queue_files_whose_tags_could_not_be_read_are_shown_counted_per_batch() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = event_channel();
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let dir = crate::paths::test_root().join("queue-detail-failures");
+        std::fs::create_dir_all(&dir).expect("fixture folder");
+        let paths: Vec<PathBuf> = ["a.ac3", "b.ac3"]
+            .iter()
+            .map(|name| dir.join(name))
+            .collect();
+        for path in &paths {
+            std::fs::write(path, [0u8; 128]).expect("fixture");
+            // Stands in for a tag reader that panics on the file.
+            crate::library::panic_on_read(path);
+        }
+        runtime.state.queue.clone_from(&paths);
+        runtime.state.queue_detail_generation += 1;
+
+        runtime.queue_validator.request(&runtime.state);
+        let result = runtime
+            .queue_validator
+            .results
+            .recv_timeout(Duration::from_secs(5))
+            .expect("validation result");
+        runtime.handle_wake(BridgeLoopWake::QueueValidated(result), &event_tx);
+
+        let errors: Vec<BridgeError> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "one error for the batch: {errors:?}");
+        assert_eq!(errors[0].category, ErrorCategory::Playback);
+        assert_eq!(errors[0].severity, ErrorSeverity::Warning);
+        assert!(
+            errors[0]
+                .message
+                .starts_with("Could not read the tags of 2 files in the queue"),
+            "{}",
+            errors[0].message
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn errors_and_save_answers_reach_a_relay_that_is_behind() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
@@ -4627,7 +5222,8 @@ mod tests {
             .all(|event| matches!(event, BridgeEvent::Snapshot(_))));
         assert!(matches!(
             &events[MAX_RELAY_BACKLOG],
-            BridgeEvent::Error(message) if message == "worker failed"
+            BridgeEvent::Error(error) if error.message == "worker failed"
+                && error.category == ErrorCategory::Analysis
         ));
         assert!(matches!(
             events[MAX_RELAY_BACKLOG + 1],
@@ -4689,7 +5285,7 @@ mod tests {
         let errors: Vec<String> = event_rx
             .try_iter()
             .filter_map(|event| match event {
-                BridgeEvent::Error(message) => Some(message),
+                BridgeEvent::Error(error) => Some(error.message),
                 _ => None,
             })
             .collect();

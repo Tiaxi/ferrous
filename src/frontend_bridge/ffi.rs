@@ -14,10 +14,10 @@ use std::os::fd::RawFd;
 use super::imports::{ImportGate, RenamedDetails};
 use super::queue_relay::{QueueBatch, QueueRelay};
 use super::{
-    BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
-    BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeSettingsCommand,
-    BridgeSnapshot, BridgeThread, FrontendBridgeHandle, LibrarySortMode, ViewerFullscreenMode,
-    BRIDGE_SHUTDOWN_TIMEOUT,
+    BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand,
+    BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame,
+    BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory, FrontendBridgeHandle,
+    LibrarySortMode, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
@@ -479,7 +479,10 @@ impl FfiRuntime {
                 false
             }
             Err(message) => {
-                self.push_error(encode_error_event(&message));
+                self.push_error(encode_error_event(&BridgeError::error(
+                    ErrorCategory::System,
+                    message,
+                )));
                 false
             }
         }
@@ -626,8 +629,8 @@ impl FfiEncoder {
                         encode_precomputed_spectrogram_chunk(&chunk),
                     ));
                 }
-                BridgeEvent::Error(message) => {
-                    prepared.push(PreparedEvent::Error(encode_error_event(&message)));
+                BridgeEvent::Error(error) => {
+                    prepared.push(PreparedEvent::Error(encode_error_event(&error)));
                 }
                 BridgeEvent::SearchResults(frame) => {
                     prepared.push(PreparedEvent::Search(
@@ -746,8 +749,9 @@ fn run_spectral_relay(shared: &FfiShared, event_rx: &crossbeam_channel::Receiver
         // Playback goes on; only the spectrogram stops updating.
         shared
             .lock_runtime()
-            .push_error(encode_error_event(&format!(
-                "The spectrogram stopped updating after an {message}."
+            .push_error(encode_error_event(&BridgeError::error(
+                ErrorCategory::Analysis,
+                format!("The spectrogram stopped updating after an {message}."),
             )));
     }
 }
@@ -2224,19 +2228,32 @@ fn snapshot_sections(
     sections
 }
 
-fn encode_error_event(message: &str) -> Vec<u8> {
-    let mut payload = Vec::new();
-    push_string(&mut payload, message);
-    encode_packet(&[(SECTION_ERROR, payload)])
+/// The error section: the category, the severity, the subject, and the
+/// message. `decodeErrorSection` in `ui/src/BinaryBridgeCodec.cpp` reads it.
+fn encode_error_section(error: &BridgeError) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(10 + error.subject.len() + error.message.len());
+    push_u8(&mut payload, error.category as u8);
+    push_u8(&mut payload, error.severity as u8);
+    push_string(&mut payload, &error.subject);
+    push_string(&mut payload, &error.message);
+    payload
+}
+
+fn encode_error_event(error: &BridgeError) -> Vec<u8> {
+    encode_packet(&[(SECTION_ERROR, encode_error_section(error))])
 }
 
 /// The error that stands for `count` errors the UI did not take in time.
+/// They may be of any category, so it is the system's.
 fn encode_earlier_errors_event(count: usize) -> Vec<u8> {
-    encode_error_event(&if count == 1 {
-        "1 earlier error was not shown.".to_string()
-    } else {
-        format!("{count} earlier errors were not shown.")
-    })
+    encode_error_event(&BridgeError::warning(
+        ErrorCategory::System,
+        if count == 1 {
+            "1 earlier error was not shown.".to_string()
+        } else {
+            format!("{count} earlier errors were not shown.")
+        },
+    ))
 }
 
 fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec<u8> {
@@ -2256,8 +2273,7 @@ fn encode_stopped_event() -> Vec<u8> {
 
 /// A stop the UI did not ask for: the stopped section with the reason.
 fn encode_failure_event(message: &str) -> Vec<u8> {
-    let mut payload = Vec::new();
-    push_string(&mut payload, message);
+    let payload = encode_error_section(&BridgeError::error(ErrorCategory::System, message));
     encode_packet(&[(SECTION_ERROR, payload), (SECTION_STOPPED, Vec::new())])
 }
 
@@ -2478,6 +2494,16 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         push_string(
             &mut out,
             unwatched.map_or("", |unwatched| unwatched.reason.as_str()),
+        );
+        // What the latest scan of the root could not do; empty if nothing.
+        let problem = snapshot
+            .library_status
+            .root_problems
+            .iter()
+            .find(|problem| problem.path == root.path);
+        push_string(
+            &mut out,
+            problem.map_or("", |problem| problem.problem.as_str()),
         );
     }
     if snapshot.pre_built_tree_bytes.is_some() {
@@ -2878,21 +2904,30 @@ fn downsample_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod error_packet_tests {
-    use super::{encode_error_event, encode_failure_event};
+    use super::{encode_error_event, encode_failure_event, BridgeError, ErrorCategory};
+
+    /// The error section of `category`, `severity`, `subject`, and `message`.
+    fn error_section(category: u8, severity: u8, subject: &str, message: &str) -> Vec<u8> {
+        let mut section = vec![category, severity];
+        for text in [subject, message] {
+            section.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
+            section.extend_from_slice(text.as_bytes());
+        }
+        section
+    }
 
     #[test]
     fn failure_packet_layout_matches_the_qt_decoder() {
         // Mirrored by BridgeClientTest::backendFailurePacketShowsStoppedState.
         let message = "The Ferrous backend stopped.";
-        let text = message.as_bytes();
+        let section = error_section(0, 1, "", message);
         let mut expected = Vec::new();
         expected.extend_from_slice(&0xFE55_0001_u32.to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(24 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(20 + section.len()).unwrap().to_le_bytes());
         expected.extend_from_slice(&((1_u16 << 6) | (1_u16 << 7)).to_le_bytes());
         expected.extend_from_slice(&0_u16.to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(4 + text.len()).unwrap().to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
-        expected.extend_from_slice(text);
+        expected.extend_from_slice(&u32::try_from(section.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&section);
         expected.extend_from_slice(&0_u32.to_le_bytes());
         assert_eq!(encode_failure_event(message), expected);
     }
@@ -2901,16 +2936,49 @@ mod error_packet_tests {
     fn playback_error_packet_layout_matches_the_qt_decoder() {
         // Mirrored by BridgeClientTest::playbackErrorPacketReachesBridgeError.
         let message = "Couldn't play \u{201c}bad.flac\u{201d} (Resource not found); skipped it.";
-        let text = message.as_bytes();
+        let subject = "/music/bad.flac";
+        let section = error_section(1, 0, subject, message);
         let mut expected = Vec::new();
         expected.extend_from_slice(&0xFE55_0001_u32.to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(20 + text.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&u32::try_from(16 + section.len()).unwrap().to_le_bytes());
         expected.extend_from_slice(&(1_u16 << 6).to_le_bytes());
         expected.extend_from_slice(&0_u16.to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(4 + text.len()).unwrap().to_le_bytes());
-        expected.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
-        expected.extend_from_slice(text);
-        assert_eq!(encode_error_event(message), expected);
+        expected.extend_from_slice(&u32::try_from(section.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&section);
+        let error = BridgeError::warning(ErrorCategory::Playback, message).about(subject);
+        assert_eq!(encode_error_event(&error), expected);
+    }
+
+    #[test]
+    fn every_category_and_severity_has_the_value_the_qt_decoder_reads() {
+        // Mirrored by BinaryBridgeCodec::ErrorCategory and ErrorSeverity.
+        use super::super::ErrorSeverity;
+        let categories = [
+            (ErrorCategory::System, 0),
+            (ErrorCategory::Playback, 1),
+            (ErrorCategory::Library, 2),
+            (ErrorCategory::Analysis, 3),
+            (ErrorCategory::Tags, 4),
+            (ErrorCategory::LastFm, 5),
+            (ErrorCategory::Settings, 6),
+        ];
+        for (category, value) in categories {
+            for (severity, severity_value) in
+                [(ErrorSeverity::Warning, 0), (ErrorSeverity::Error, 1)]
+            {
+                let error = BridgeError {
+                    category,
+                    severity,
+                    subject: "s".to_string(),
+                    message: "m".to_string(),
+                };
+                let packet = encode_error_event(&error);
+                assert_eq!(
+                    &packet[16..],
+                    error_section(value, severity_value, "s", "m")
+                );
+            }
+        }
     }
 }
 
@@ -3048,6 +3116,7 @@ mod tests {
                 pending_scrobble_count: 2,
                 status_text: "Connected".to_string(),
                 auth_url: String::new(),
+                ..crate::lastfm::RuntimeState::default()
             },
         }
     }
@@ -3288,8 +3357,9 @@ mod tests {
         let packet = runtime.pop_binary_event().expect("error event");
         let (_, _, mask) = parse_packet_header(&packet);
         assert_eq!(mask, SECTION_ERROR);
-        let mut offset = 16;
-        assert_eq!(read_string(&packet, &mut offset), message);
+        let error = decode_error_section(&section(&packet, SECTION_ERROR).expect("error"));
+        assert_eq!(error.category, ErrorCategory::System);
+        assert_eq!(error.message, message);
 
         // A header that claims more than the bound is refused before the
         // payload is looked at.
@@ -3360,7 +3430,7 @@ mod tests {
                 .try_lock()
                 .expect("UI can lock during encoding");
             assert!(runtime.send_command(parse_binary_command(&encode_command(1, &[]))));
-            runtime.push_binary_event(encode_error_event("existing"));
+            runtime.push_binary_event(encode_error_event(&"existing".into()));
             assert!(runtime.pop_binary_event().is_some());
             BridgeEvent::Snapshot(Box::new(sample_snapshot()))
         });
@@ -4369,7 +4439,7 @@ mod tests {
     }
 
     #[test]
-    fn library_roots_carry_why_they_are_not_watched() {
+    fn library_roots_carry_why_they_are_not_watched_and_their_scan_problems() {
         let mut snapshot = sample_snapshot();
         let mut library = (*snapshot.library).clone();
         library.roots = vec![
@@ -4387,16 +4457,32 @@ mod tests {
             path: PathBuf::from("/nas"),
             reason: "it is on nfs4".to_string(),
         }];
+        snapshot.library_status.root_problems = vec![crate::library::RootProblem {
+            path: PathBuf::from("/music"),
+            problem: "could not read 1 folder".to_string(),
+        }];
         snapshot.pre_built_tree_bytes = None;
 
         let section = encode_library_meta_section(&snapshot);
 
         let mut tail = Vec::new();
         push_u16(&mut tail, 2);
-        for value in ["/music", "Music", "", "/nas", "", "it is on nfs4"] {
+        for value in [
+            "/music",
+            "Music",
+            "",
+            "could not read 1 folder",
+            "/nas",
+            "",
+            "it is on nfs4",
+            "",
+        ] {
             push_string(&mut tail, value);
         }
-        assert!(section.ends_with(&tail), "path, name and reason per root");
+        assert!(
+            section.ends_with(&tail),
+            "path, name, reason and problem per root"
+        );
     }
 
     #[test]
@@ -4828,7 +4914,7 @@ mod tests {
                 second,
             )))];
             if second % 3 == 0 {
-                batch.push(BridgeEvent::Error(format!("error {second}")));
+                batch.push(BridgeEvent::Error(format!("error {second}").into()));
             }
             runtime.process_bridge_events(batch);
         }
@@ -4841,7 +4927,7 @@ mod tests {
         let errors: Vec<String> = packets
             .iter()
             .filter_map(|packet| section(packet, SECTION_ERROR))
-            .map(|payload| read_string(&payload, &mut 0))
+            .map(|payload| decode_error_section(&payload).message)
             .collect();
         let expected: Vec<String> = (2..60)
             .filter(|second| second % 3 == 0)
@@ -4987,7 +5073,7 @@ mod tests {
         for second in 1..4 {
             runtime.process_bridge_events([
                 BridgeEvent::Snapshot(Box::new(snapshot_without_queue(second))),
-                BridgeEvent::Error(format!("error {second}")),
+                BridgeEvent::Error(format!("error {second}").into()),
             ]);
         }
         runtime.process_bridge_events([BridgeEvent::StateSaved {
@@ -5043,7 +5129,7 @@ mod tests {
     }
 
     fn error_message(packet: &[u8]) -> Option<String> {
-        section(packet, SECTION_ERROR).map(|payload| read_string(&payload, &mut 0))
+        section(packet, SECTION_ERROR).map(|payload| decode_error_section(&payload).message)
     }
 
     #[test]
@@ -5052,7 +5138,7 @@ mod tests {
         let mut runtime = FfiRuntime::new(command_tx, -1, -1);
         let total = MAX_PENDING_ERRORS + 5;
         for index in 0..total {
-            runtime.process_bridge_events([BridgeEvent::Error(format!("error {index}"))]);
+            runtime.process_bridge_events([BridgeEvent::Error(format!("error {index}").into())]);
             // Save answers are never collapsed.
             runtime.process_bridge_events([BridgeEvent::StateSaved {
                 request_id: u32::try_from(index).expect("small index"),
@@ -5077,10 +5163,57 @@ mod tests {
         assert_eq!(answers, expected_answers);
 
         // Once the UI has caught up, errors are shown one by one again.
-        runtime.process_bridge_events([BridgeEvent::Error("later".to_string())]);
+        runtime.process_bridge_events([BridgeEvent::Error("later".to_string().into())]);
         let packets = pending_packets(&mut runtime);
         assert_eq!(packets.len(), 1);
         assert_eq!(error_message(&packets[0]).as_deref(), Some("later"));
+    }
+
+    #[test]
+    fn errors_keep_their_category_severity_and_subject_through_the_relay_and_the_bound() {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        let categories = [
+            ErrorCategory::Playback,
+            ErrorCategory::Library,
+            ErrorCategory::Analysis,
+            ErrorCategory::Tags,
+            ErrorCategory::LastFm,
+            ErrorCategory::Settings,
+        ];
+        let error_at = |index: usize| {
+            let error = BridgeError::error(
+                categories[index % categories.len()],
+                format!("error {index}"),
+            )
+            .about(format!("/music/{index}.flac"));
+            if index % 2 == 0 {
+                error
+            } else {
+                BridgeError {
+                    severity: super::super::ErrorSeverity::Warning,
+                    ..error
+                }
+            }
+        };
+        let total = MAX_PENDING_ERRORS + 3;
+        for index in 0..total {
+            runtime.process_bridge_events([BridgeEvent::Error(error_at(index))]);
+        }
+
+        let errors: Vec<BridgeError> = pending_packets(&mut runtime)
+            .iter()
+            .filter_map(|packet| section(packet, SECTION_ERROR))
+            .map(|payload| decode_error_section(&payload))
+            .collect();
+        assert_eq!(errors.len(), MAX_PENDING_ERRORS + 1);
+        // The count of earlier errors stands for errors of any category.
+        assert_eq!(
+            errors[0],
+            BridgeError::warning(ErrorCategory::System, "3 earlier errors were not shown.")
+        );
+        let expected: Vec<BridgeError> = (3..total).map(error_at).collect();
+        assert_eq!(errors[1..], expected[..]);
     }
 
     #[test]
@@ -5088,7 +5221,7 @@ mod tests {
         let (command_tx, _command_rx) = crossbeam_channel::unbounded();
         let mut runtime = FfiRuntime::new(command_tx, -1, -1);
         for index in 0..=MAX_PENDING_ERRORS {
-            runtime.process_bridge_events([BridgeEvent::Error(format!("error {index}"))]);
+            runtime.process_bridge_events([BridgeEvent::Error(format!("error {index}").into())]);
         }
         let packets = pending_packets(&mut runtime);
         assert_eq!(packets.len(), MAX_PENDING_ERRORS + 1);
@@ -5106,7 +5239,7 @@ mod tests {
         for second in 0..20 {
             runtime.process_bridge_events([
                 BridgeEvent::Snapshot(Box::new(snapshot_without_queue(second))),
-                BridgeEvent::Error(format!("error {second}")),
+                BridgeEvent::Error(format!("error {second}").into()),
             ]);
         }
         assert_eq!(drain_wakeup_fd(runtime.wake_read_fd), 1);
@@ -5121,8 +5254,8 @@ mod tests {
 
         // A drain cut short by its budget is woken again for the rest.
         runtime.process_bridge_events([
-            BridgeEvent::Error("first".to_string()),
-            BridgeEvent::Error("second".to_string()),
+            BridgeEvent::Error("first".to_string().into()),
+            BridgeEvent::Error("second".to_string().into()),
         ]);
         assert!(runtime.pop_binary_event().is_some());
         runtime.ack_wakeup();
@@ -5309,7 +5442,7 @@ mod tests {
             Duration::from_millis(0)
         ));
 
-        runtime.process_bridge_events(vec![BridgeEvent::Error("bad command".to_string())]);
+        runtime.process_bridge_events(vec![BridgeEvent::Error("bad command".to_string().into())]);
         assert!(wake_fd_is_readable(
             runtime.wake_read_fd,
             Duration::from_millis(50)
@@ -5361,7 +5494,7 @@ mod tests {
     fn ack_wakeup_clears_readiness_after_drain() {
         let mut runtime = test_runtime_with_wake_pipe();
 
-        runtime.process_bridge_events(vec![BridgeEvent::Error("oops".to_string())]);
+        runtime.process_bridge_events(vec![BridgeEvent::Error("oops".to_string().into())]);
         assert!(wake_fd_is_readable(
             runtime.wake_read_fd,
             Duration::from_millis(50)
@@ -5750,8 +5883,40 @@ mod tests {
             return None;
         }
         let mut offset = 12;
-        let _section_len = read_u32(packet, &mut offset);
-        Some(read_string(packet, &mut offset))
+        let section_len = read_u32(packet, &mut offset) as usize;
+        let error = decode_error_section(&packet[offset..offset + section_len]);
+        assert_eq!(error.category, ErrorCategory::System);
+        assert_eq!(error.severity, super::super::ErrorSeverity::Error);
+        Some(error.message)
+    }
+
+    /// The error in an error section, as the UI reads it.
+    fn decode_error_section(payload: &[u8]) -> BridgeError {
+        let category = match payload[0] {
+            0 => ErrorCategory::System,
+            1 => ErrorCategory::Playback,
+            2 => ErrorCategory::Library,
+            3 => ErrorCategory::Analysis,
+            4 => ErrorCategory::Tags,
+            5 => ErrorCategory::LastFm,
+            6 => ErrorCategory::Settings,
+            other => panic!("unknown error category {other}"),
+        };
+        let severity = match payload[1] {
+            0 => super::super::ErrorSeverity::Warning,
+            1 => super::super::ErrorSeverity::Error,
+            other => panic!("unknown error severity {other}"),
+        };
+        let mut offset = 2;
+        let subject = read_string(payload, &mut offset);
+        let message = read_string(payload, &mut offset);
+        assert_eq!(offset, payload.len(), "nothing follows the message");
+        BridgeError {
+            category,
+            severity,
+            subject,
+            message,
+        }
     }
 
     fn relay_shared() -> Arc<FfiShared> {

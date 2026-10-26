@@ -427,7 +427,9 @@ signals:
     void diagnosticsChanged();
     void connectedChanged();
     void backendFailureChanged();
-    void bridgeError(const QString &message);
+    // An error for the user: the message, its BinaryBridgeCodec::ErrorCategory
+    // and ErrorSeverity, and the file or folder it is about, or empty.
+    void bridgeError(const QString &message, int category, int severity, const QString &subject);
     // The answer to the saveStateBeforeQuit call that returned requestId:
     // whether the settings and the queue were saved, and what to show the
     // user if not.
@@ -616,6 +618,11 @@ private:
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     // Returns whether the bridge took the command.
     bool sendBinaryCommand(const QByteArray &payload);
+    // Tell the UI about an error; see bridgeError.
+    void reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
+                     const QString &subject = {},
+                     BinaryBridgeCodec::ErrorSeverity severity =
+                         BinaryBridgeCodec::ErrorSeverityError);
     void sendPathListCommand(quint16 cmdId, const QStringList &paths, const QString &tooLargeMessage);
     void sendLibraryRootCommand(quint16 cmdId, const QString &path);
     void sendLibraryRootCommand(quint16 cmdId, const QString &path, const QString &name);

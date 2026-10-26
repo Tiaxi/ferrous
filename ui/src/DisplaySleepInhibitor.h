@@ -3,9 +3,12 @@
 #pragma once
 
 #include <QObject>
+#include <QString>
 #include <QtGlobal>
 
+#include <functional>
 #include <memory>
+#include <utility>
 
 #if defined(Q_OS_LINUX)
 #include <QDBusMessage>
@@ -20,9 +23,24 @@ class QDBusPendingCallWatcher;
 
 class DisplaySleepInhibitorBackend {
 public:
+    using FailureHandler = std::function<void(const QString &reason)>;
+
     virtual ~DisplaySleepInhibitorBackend() = default;
 
     virtual void setInhibited(bool inhibited) = 0;
+
+    // Called when the display could not be kept awake while it was asked to.
+    void setFailureHandler(FailureHandler handler) { m_onFailure = std::move(handler); }
+
+protected:
+    void reportFailure(const QString &reason) const {
+        if (m_onFailure) {
+            m_onFailure(reason);
+        }
+    }
+
+private:
+    FailureHandler m_onFailure;
 };
 
 #if defined(Q_OS_LINUX)
@@ -70,6 +88,8 @@ public slots:
 
 signals:
     void inhibitedChanged();
+    // The display could not be kept awake although it was asked to be.
+    void inhibitionFailed(const QString &message);
 
 private:
     std::unique_ptr<DisplaySleepInhibitorBackend> m_backend;

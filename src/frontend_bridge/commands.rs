@@ -25,8 +25,8 @@ use super::queue_sync::QueueEdit;
 use super::search::{keyed_roots, tree_key_is, tree_path_parts};
 use super::{
     library_tree, try_send_event, ApplyAlbumArtRequest, BridgeAnalysisCommand, BridgeCommand,
-    BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
-    BridgeSettingsCommand, BridgeState, LibrarySortMode, SearchWorkerQuery,
+    BridgeError, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
+    BridgeSettingsCommand, BridgeState, ErrorCategory, LibrarySortMode, SearchWorkerQuery,
 };
 
 pub(super) struct BridgeCommandContext<'a> {
@@ -225,7 +225,9 @@ fn save_settings_now(state: &BridgeState, context: &mut BridgeCommandContext<'_>
     match save_settings(&state.settings) {
         Ok(()) => *context.settings_dirty = false,
         Err(failure) => {
-            let _ = try_send_event(context.event_tx, BridgeEvent::Error(failure.message));
+            let error = BridgeError::error(ErrorCategory::Settings, failure.message)
+                .about(failure.identity.0.to_string_lossy());
+            let _ = try_send_event(context.event_tx, BridgeEvent::Error(error));
         }
     }
 }
@@ -410,7 +412,10 @@ fn handle_library_view_command(
             {
                 let _ = try_send_event(
                     runtime.event_tx,
-                    BridgeEvent::Error("failed to queue album art apply request".to_string()),
+                    BridgeEvent::Error(BridgeError::error(
+                        ErrorCategory::Library,
+                        "failed to queue album art apply request",
+                    )),
                 );
             }
             Some(false)
@@ -1129,7 +1134,10 @@ pub(super) fn refresh_renamed_paths(
         return false;
     }
     if let Some(problem) = details.problem.take() {
-        let _ = try_send_event(event_tx, BridgeEvent::Error(problem));
+        let _ = try_send_event(
+            event_tx,
+            BridgeEvent::Error(BridgeError::warning(ErrorCategory::Tags, problem)),
+        );
     }
 
     let mut changed = false;
@@ -2295,7 +2303,7 @@ mod tests {
         let errors: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                BridgeEvent::Error(message) => Some(message.as_str()),
+                BridgeEvent::Error(error) => Some(error.message.as_str()),
                 _ => None,
             })
             .collect();
@@ -2490,10 +2498,15 @@ mod tests {
             &mut state,
         );
         match event_rx.try_recv() {
-            Ok(BridgeEvent::Error(message)) => assert_eq!(
-                message,
-                "Couldn't play \u{201c}next.flac\u{201d} (Resource not found); skipped it."
-            ),
+            Ok(BridgeEvent::Error(error)) => {
+                assert_eq!(
+                    error.message,
+                    "Couldn't play \u{201c}next.flac\u{201d} (Resource not found); skipped it."
+                );
+                assert_eq!(error.category, super::super::ErrorCategory::Playback);
+                assert_eq!(error.severity, super::super::ErrorSeverity::Warning);
+                assert!(error.subject.ends_with("next.flac"), "{}", error.subject);
+            }
             other => panic!("expected the playback error, got {other:?}"),
         }
 
@@ -2546,7 +2559,8 @@ mod tests {
         assert_eq!(state.queue, vec![new]);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(BridgeEvent::Error(message)) if message == "could not read the tags of 1 file"
+            Ok(BridgeEvent::Error(error)) if error.message == "could not read the tags of 1 file"
+                && error.category == super::super::ErrorCategory::Tags
         ));
     }
 

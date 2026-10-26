@@ -14,7 +14,8 @@ ToolBar {
     required property var uiPalette
     required property var channelStatusIconSource
     required property bool themeIsDark
-    property string transientError: ""
+    // The app's ErrorController; the status bar shows how many errors it keeps.
+    property var errorController: null
     property string positionText: "00:00"
 
     implicitHeight: Math.max(contentItem.implicitHeight, 20) + topPadding + bottomPadding
@@ -34,13 +35,11 @@ ToolBar {
         }
     }
 
-    readonly property bool hasError: root.transientError.length > 0
+    readonly property int errorCount: root.errorController ? root.errorController.count : 0
     readonly property string backendFailure: root.uiBridge.backendFailure || ""
     readonly property bool backendStopped: root.backendFailure.length > 0
-    readonly property bool isDisconnected: !root.uiBridge.connected && !root.hasError
-        && !root.backendStopped
-    readonly property bool showTrackSections: !root.hasError && !root.isDisconnected
-        && !root.backendStopped
+    readonly property bool isDisconnected: !root.uiBridge.connected && !root.backendStopped
+    readonly property bool showTrackSections: !root.isDisconnected && !root.backendStopped
 
     readonly property string channelText: (root.uiBridge.currentTrackChannelLayoutText || "").trim()
     readonly property string channelIconKey: (root.uiBridge.currentTrackChannelLayoutIconKey || "").trim()
@@ -62,19 +61,8 @@ ToolBar {
         spacing: 6
 
         Label {
-            objectName: "statusBarErrorLabel"
-            visible: root.hasError
-            text: "Error: " + root.transientError
-            color: ColorUtils.mixColor(
-                Kirigami.Theme.negativeTextColor,
-                root.uiPalette.uiTextColor,
-                root.themeIsDark ? 0.18 : 0.08)
-            font.weight: Font.DemiBold
-        }
-
-        Label {
             objectName: "statusBarBackendStoppedLabel"
-            visible: root.backendStopped && !root.hasError
+            visible: root.backendStopped
             text: "Backend stopped"
             color: ColorUtils.mixColor(
                 Kirigami.Theme.negativeTextColor,
@@ -178,6 +166,32 @@ ToolBar {
             text: root.playlistSummary
             elide: Text.ElideRight
             color: root.uiPalette.uiTextColor
+        }
+
+        Item {
+            visible: !root.showTrackSections
+            Layout.fillWidth: true
+        }
+
+        // Opens the recent errors, which stay after their banner is dismissed.
+        ToolButton {
+            objectName: "statusBarErrorsButton"
+            visible: root.errorCount > 0
+            Layout.preferredHeight: 20
+            padding: 0
+            icon.name: "dialog-warning"
+            icon.width: 16
+            icon.height: 16
+            text: root.errorCount === 1 ? "1 error" : root.errorCount + " errors"
+            display: AbstractButton.TextBesideIcon
+            palette.buttonText: ColorUtils.mixColor(
+                Kirigami.Theme.negativeTextColor,
+                root.uiPalette.uiTextColor,
+                root.themeIsDark ? 0.18 : 0.08)
+            Accessible.name: text + ": show recent errors"
+            ToolTip.visible: hovered
+            ToolTip.text: "Show recent errors"
+            onClicked: root.errorController.toggleHistory()
         }
     }
 }

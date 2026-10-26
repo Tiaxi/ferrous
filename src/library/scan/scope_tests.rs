@@ -244,3 +244,76 @@ fn removing_the_indexed_name_of_a_hard_linked_file_indexes_its_other_name() {
     assert_eq!(library.paths(), vec![root.join("b.mp3")]);
     assert_eq!(library.status.last_error, None);
 }
+
+#[test]
+fn a_root_keeps_its_scan_problem_until_a_scan_of_the_whole_root_finds_none() {
+    let root = test_root("root-problem");
+    write(&root.join("a/1.mp3"));
+    write(&root.join("2.mp3"));
+    let (conn, mut library, _rx, tx) = scanned(&root);
+    assert!(library.status.root_problems.is_empty());
+    // An unmounted drive leaves its mount point empty.
+    fs::rename(&root, root.with_extension("away")).expect("unmount");
+    fs::create_dir_all(&root).expect("empty mount point");
+
+    handle_command(
+        &conn,
+        LibraryCommand::RescanRoot(root.clone()),
+        &mut library,
+        &tx,
+        &mut Control::detached(),
+    );
+    let problems = library.status.root_problems.clone();
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0].path, root);
+    assert!(problems[0]
+        .problem
+        .contains("in case the folder is offline"));
+
+    // Another command, and a scan of part of the root that finds nothing
+    // wrong, leave the problem shown.
+    fs::remove_dir_all(&root).expect("unmount");
+    fs::rename(root.with_extension("away"), &root).expect("mount");
+    handle_command(
+        &conn,
+        LibraryCommand::RenameRoot {
+            path: root.clone(),
+            name: "Music".to_string(),
+        },
+        &mut library,
+        &tx,
+        &mut Control::detached(),
+    );
+    scan_paths(&conn, &mut library, &tx, &root, &[root.join("a")]);
+    assert_eq!(library.status.root_problems, problems);
+
+    // A scan of the whole root that finds nothing wrong clears it.
+    handle_command(
+        &conn,
+        LibraryCommand::RescanRoot(root.clone()),
+        &mut library,
+        &tx,
+        &mut Control::detached(),
+    );
+    assert!(library.status.root_problems.is_empty());
+
+    // The problem of a removed root goes with it.
+    fs::remove_dir_all(root.join("a")).expect("remove");
+    fs::remove_file(root.join("2.mp3")).expect("remove");
+    handle_command(
+        &conn,
+        LibraryCommand::RescanRoot(root.clone()),
+        &mut library,
+        &tx,
+        &mut Control::detached(),
+    );
+    assert_eq!(library.status.root_problems.len(), 1);
+    handle_command(
+        &conn,
+        LibraryCommand::RemoveRoot(root.clone()),
+        &mut library,
+        &tx,
+        &mut Control::detached(),
+    );
+    assert!(library.status.root_problems.is_empty());
+}

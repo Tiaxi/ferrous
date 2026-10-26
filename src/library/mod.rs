@@ -23,7 +23,7 @@ use crate::worker_thread::JoinableThread;
 pub(crate) use publish::LibraryMirror;
 pub(crate) use publish::{AppliedChanges, LibraryChanges};
 #[cfg(test)]
-pub(crate) use scan::scan_test_hooks::hold_read;
+pub(crate) use scan::scan_test_hooks::{hold_read, panic_on_read};
 #[cfg(test)]
 pub(crate) use scan::{index_tracks_for_test, load_external_track_caches, write_test_apple_double};
 pub(crate) use scan::{
@@ -32,7 +32,7 @@ pub(crate) use scan::{
     refresh_indexed_metadata_for_paths, rename_indexed_metadata_paths, track_file_fingerprint,
     TrackRefresh,
 };
-pub(crate) use scan::{read_library_snapshot_from_db, ExternalTrackCache};
+pub(crate) use scan::{read_library_snapshot_from_db, ExternalReadFailures, ExternalTrackCache};
 
 /// Additional, potentially repeated text tags collected during library scans.
 pub type SearchTags = std::collections::BTreeMap<String, Vec<String>>;
@@ -202,6 +202,45 @@ pub struct LibraryStatus {
     pub last_error: Option<String>,
     /// The roots that changes on disk are not watched for, sorted by path.
     pub unwatched_roots: Vec<UnwatchedRoot>,
+    /// The problems the latest scan of each root found, sorted by path.
+    /// A root's problem lasts until a scan of the whole root finds none.
+    pub root_problems: Vec<RootProblem>,
+}
+
+impl LibraryStatus {
+    /// Record what the latest scan of `root` found: `problem`, or none.
+    pub(crate) fn set_root_problem(&mut self, root: &std::path::Path, problem: Option<String>) {
+        let index = self
+            .root_problems
+            .binary_search_by(|known| known.path.as_path().cmp(root));
+        match (index, problem) {
+            (Ok(index), Some(problem)) => self.root_problems[index].problem = problem,
+            (Ok(index), None) => {
+                self.root_problems.remove(index);
+            }
+            (Err(index), Some(problem)) => self.root_problems.insert(
+                index,
+                RootProblem {
+                    path: root.to_path_buf(),
+                    problem,
+                },
+            ),
+            (Err(_), None) => {}
+        }
+    }
+
+    /// Forget the problems of roots that are not in `roots`.
+    pub(crate) fn retain_root_problems(&mut self, roots: &[LibraryRoot]) {
+        self.root_problems
+            .retain(|known| roots.iter().any(|root| root.path == known.path));
+    }
+}
+
+/// What the latest scan of a library root could not do, for the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootProblem {
+    pub path: PathBuf,
+    pub problem: String,
 }
 
 /// A library root whose changes on disk the library does not see as they

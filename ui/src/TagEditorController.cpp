@@ -563,6 +563,9 @@ void TagEditorController::applyLoadResult(LoadResult result) {
         emit openChanged();
     }
     setStatusText(errorText, buildActionDetails({}, result.failureLines), !errorText.isEmpty());
+    if (!errorText.isEmpty()) {
+        reportFailures(errorText, result.failureLines);
+    }
 
     m_loading = false;
     emit loadingChanged();
@@ -675,6 +678,9 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
     successLines.sort();
     failureLines.sort();
     setStatusText(status, buildActionDetails(successLines, failureLines), !success);
+    if (!success) {
+        reportFailures(status, failureLines);
+    }
 
     m_operationFiles.clear();
     m_saving = false;
@@ -787,6 +793,9 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
     renamedLines.sort();
     failureLines.sort();
     setStatusText(status, buildActionDetails(renamedLines, failureLines), failed);
+    if (failed) {
+        reportFailures(status, failureLines);
+    }
     emit bulkSummaryChanged();
     m_operationFiles.clear();
     m_saving = false;
@@ -1077,6 +1086,18 @@ QVector<int> TagEditorController::targetRows() const {
         rows.push_back(row);
     }
     return rows;
+}
+
+void TagEditorController::reportFailures(const QString &status, const QStringList &failureLines) {
+    // The tag editor lists every failure; the error list shows the first.
+    constexpr qsizetype kShownFailures = 10;
+    QStringList lines{status};
+    lines.append(failureLines.mid(0, kShownFailures));
+    if (failureLines.size() > kShownFailures) {
+        lines.push_back(QStringLiteral("…and %1 more; the tag editor lists them all.")
+                            .arg(failureLines.size() - kShownFailures));
+    }
+    emit errorReported(lines.join(QLatin1Char('\n')));
 }
 
 void TagEditorController::setStatusText(const QString &text, const QString &details, bool isError) {

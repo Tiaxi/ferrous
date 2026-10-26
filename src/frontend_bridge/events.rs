@@ -13,7 +13,7 @@ use crate::analysis::{
     AnalysisCommand, AnalysisEngine, AnalysisEvent, AnalysisSnapshot, SpectrogramDisplayMode,
 };
 use crate::lastfm::{
-    self, Command as LastFmCommand, Event as LastFmEvent, Handle as LastFmHandle,
+    self, Command as LastFmCommand, Handle as LastFmHandle,
     NowPlayingTrack as LastFmNowPlayingTrack, ScrobbleEntry as LastFmScrobbleEntry,
 };
 use crate::library::{
@@ -21,13 +21,15 @@ use crate::library::{
 };
 use crate::metadata::{MetadataEvent, MetadataService};
 use crate::playback::{
-    remap_path, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind,
+    remap_path, PlaybackErrorOutcome, PlaybackEvent, PlaybackSnapshot, PlaybackState,
+    TrackChangeKind,
 };
 use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
-    try_send_event, ApplyAlbumArtEvent, BridgeEvent, BridgeLoopFlags, BridgeState,
-    LastFmPlaybackTracker, PendingWaveformTrack, SettingsSaveTiming, SnapshotUrgency,
+    try_send_event, ApplyAlbumArtEvent, BridgeError, BridgeEvent, BridgeLoopFlags, BridgeState,
+    ErrorCategory, ErrorSeverity, LastFmPlaybackTracker, PendingWaveformTrack, SettingsSaveTiming,
+    SnapshotUrgency,
 };
 
 #[cfg(feature = "profiling-logs")]
@@ -49,7 +51,9 @@ pub(super) fn process_apply_album_art_event(
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
     if let Some(error) = event.error.as_ref() {
-        let _ = try_send_event(event_tx, BridgeEvent::Error(error.clone()));
+        let error = BridgeError::error(ErrorCategory::Library, error.clone())
+            .about(event.track_path.to_string_lossy());
+        let _ = try_send_event(event_tx, BridgeEvent::Error(error));
         if event.indexed_by_path.is_empty() {
             return SnapshotUrgency::None;
         }
@@ -282,9 +286,31 @@ pub(super) fn process_playback_event(
             if let Some(path) = error.path.as_mut() {
                 remap_unacknowledged_engine_path(state, path);
             }
-            let _ = try_send_event(event_tx, BridgeEvent::Error(error.message()));
+            let _ = try_send_event(event_tx, BridgeEvent::Error(playback_error(&error)));
             SnapshotUrgency::None
         }
+    }
+}
+
+/// The error the user is shown for `error`, about its file. A skipped file
+/// leaves playback going.
+fn playback_error(error: &crate::playback::PlaybackError) -> BridgeError {
+    let severity = match error.outcome {
+        PlaybackErrorOutcome::Skipped => ErrorSeverity::Warning,
+        PlaybackErrorOutcome::Stopped
+        | PlaybackErrorOutcome::StoppedAfterFailures(_)
+        | PlaybackErrorOutcome::EngineUnavailable
+        | PlaybackErrorOutcome::NotReleased => ErrorSeverity::Error,
+    };
+    BridgeError {
+        category: ErrorCategory::Playback,
+        severity,
+        subject: error
+            .path
+            .as_deref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        message: error.message(),
     }
 }
 
@@ -501,7 +527,10 @@ pub(super) fn drain_analysis_events(
                 let _ = event_tx.send(BridgeEvent::PrecomputedSpectrogramChunk(chunk));
             }
             AnalysisEvent::WorkerFailed(message) => {
-                let _ = try_send_event(event_tx, BridgeEvent::Error(message));
+                let _ = try_send_event(
+                    event_tx,
+                    BridgeEvent::Error(BridgeError::error(ErrorCategory::Analysis, message)),
+                );
             }
         }
     }
@@ -554,55 +583,37 @@ pub(super) fn pump_metadata_events(
     drain_metadata_events(metadata_rx, state).is_pending()
 }
 
-pub(super) fn process_lastfm_event(
-    event: LastFmEvent,
+/// Take Last.fm's new state, and show the user what went wrong since the
+/// previous one.
+pub(super) fn process_lastfm_state(
+    mut runtime: lastfm::RuntimeState,
     state: &mut BridgeState,
     flags: &mut BridgeLoopFlags,
+    event_tx: &Sender<BridgeEvent>,
 ) -> SnapshotUrgency {
-    match event {
-        LastFmEvent::State(runtime) => {
-            let mut urgency = SnapshotUrgency::None;
-            if state.lastfm != runtime {
-                state.lastfm = runtime.clone();
-                urgency = SnapshotUrgency::Immediate;
-            }
-            if state.settings.integrations.lastfm_username != runtime.username {
-                state.settings.integrations.lastfm_username = runtime.username;
-                flags.settings_dirty = true;
-                // Save now — the username is the lookup key for the session
-                // in the keyring.  Losing it (e.g. Ctrl+C before the
-                // periodic 2 s save) makes the session irrecoverable.
-                flags.settings_save_timing = SettingsSaveTiming::Now;
-                urgency = SnapshotUrgency::Immediate;
-            }
-            urgency
-        }
-    }
-}
-
-pub(super) fn drain_lastfm_events(
-    lastfm_rx: &Receiver<LastFmEvent>,
-    state: &mut BridgeState,
-    flags: &mut BridgeLoopFlags,
-) -> SnapshotUrgency {
-    let mut urgency = SnapshotUrgency::None;
-    for _ in 0..8 {
-        let Ok(event) = lastfm_rx.try_recv() else {
-            break;
+    for problem in std::mem::take(&mut runtime.problems) {
+        let error = if problem.warning {
+            BridgeError::warning(ErrorCategory::LastFm, problem.message)
+        } else {
+            BridgeError::error(ErrorCategory::LastFm, problem.message)
         };
-        urgency = urgency.max(process_lastfm_event(event, state, flags));
+        let _ = try_send_event(event_tx, BridgeEvent::Error(error));
+    }
+    let mut urgency = SnapshotUrgency::None;
+    if state.lastfm != runtime {
+        state.lastfm = runtime.clone();
+        urgency = SnapshotUrgency::Immediate;
+    }
+    if state.settings.integrations.lastfm_username != runtime.username {
+        state.settings.integrations.lastfm_username = runtime.username;
+        flags.settings_dirty = true;
+        // Save now — the username is the lookup key for the session
+        // in the keyring.  Losing it (e.g. Ctrl+C before the
+        // periodic 2 s save) makes the session irrecoverable.
+        flags.settings_save_timing = SettingsSaveTiming::Now;
+        urgency = SnapshotUrgency::Immediate;
     }
     urgency
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(super) fn pump_lastfm_events(
-    lastfm_rx: &Receiver<LastFmEvent>,
-    state: &mut BridgeState,
-    flags: &mut BridgeLoopFlags,
-) -> bool {
-    drain_lastfm_events(lastfm_rx, state, flags).is_pending()
 }
 
 pub(super) fn tick_lastfm_playback(

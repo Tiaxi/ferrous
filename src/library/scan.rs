@@ -753,7 +753,12 @@ impl ScanRun<'_> {
                         stale_set.contains(track.path.to_string_lossy().as_ref())
                     });
                 }
-                self.problems.extend(outcome.problem);
+                if stopped.is_none() {
+                    self.note_root_problem(root, scope.is_some(), outcome.problem);
+                } else {
+                    // An interrupted scan says nothing lasting about the root.
+                    self.problems.extend(outcome.problem);
+                }
             }
             Err(err) => {
                 // The batches committed before the failure stay, and the
@@ -764,8 +769,8 @@ impl ScanRun<'_> {
                     self.control.external_writes(conn);
                     self.library.reload(conn);
                 }
-                self.problems
-                    .push(format!("failed to scan '{}': {err}", root.display()));
+                let problem = format!("failed to scan '{}': {err}", root.display());
+                self.note_root_problem(root, false, Some(problem));
             }
         }
         if stopped == Some(ScanDirective::StopAll) {
@@ -789,6 +794,16 @@ impl ScanRun<'_> {
         });
         self.library.publish(self.event_tx);
         end
+    }
+
+    /// Record what a finished scan of `root` found, for the command and for
+    /// the root. A scan of part of the root says nothing about the rest, so
+    /// it does not clear the root's problem.
+    fn note_root_problem(&mut self, root: &Path, partial: bool, problem: Option<String>) {
+        if !partial || problem.is_some() {
+            self.library.status.set_root_problem(root, problem.clone());
+        }
+        self.problems.extend(problem);
     }
 
     /// Tracks that a scan kept or could not finish still reference their
@@ -1030,6 +1045,35 @@ impl ExternalTrackRead {
     /// The details read, for a file that is not cached.
     pub(crate) fn into_indexed(self) -> IndexedTrack {
         self.0.indexed
+    }
+}
+
+/// The reads of external files, such as those in the queue, that could not
+/// get all a file has, counted per batch of reads.
+#[derive(Default)]
+pub(crate) struct ExternalReadFailures(ReadFailures);
+
+impl ExternalReadFailures {
+    pub(crate) fn note(&mut self, path: &Path, read: &ExternalTrackRead) {
+        self.0.note(path, &read.0);
+    }
+
+    /// The failures, for the user; `None` if every read got all.
+    pub(crate) fn problem(&self) -> Option<String> {
+        let tags = self.0.tags.describe(|files| {
+            format!(
+                "Could not read the tags of {files} in the queue; showing what was read \
+                 before, or their file names"
+            )
+        });
+        let covers = self.0.covers.describe(|files| {
+            format!(
+                "Could not cache the embedded covers of {files} in the queue; \
+                 they keep their previous covers"
+            )
+        });
+        let problems: Vec<String> = tags.into_iter().chain(covers).collect();
+        (!problems.is_empty()).then(|| problems.join("; "))
     }
 }
 

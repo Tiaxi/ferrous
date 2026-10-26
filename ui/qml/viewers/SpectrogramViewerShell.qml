@@ -21,6 +21,10 @@ Item {
     property bool playbackPlaying: false
     // Actions whose shortcuts also work in the viewer.
     property var viewerActions: []
+    // The app's errors and palette; the viewer shows the newest error, as
+    // it hides the main window's, such as a screen it cannot keep awake.
+    property var errorController: null
+    property var uiPalette: null
 
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
@@ -169,6 +173,19 @@ Item {
                 anchors.fill: parent
             }
         }
+
+        Components.ErrorBanner {
+            objectName: "spectrogramPopupErrorBanner"
+            z: 30
+            anchors.bottom: parent.bottom
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottomMargin: 24
+            width: Math.min(parent.width - 48, 720)
+            errorController: root.errorController
+            uiPalette: root.uiPalette
+            historyAvailable: false
+            active: root.viewerOpen && !root.useWholeScreenViewerMode
+        }
     }
 
     Window {
@@ -201,12 +218,27 @@ Item {
             id: spectrogramFullscreenFocusSink
             anchors.fill: parent
             focus: spectrogramFullscreenWindow.visibility === Window.FullScreen
+            // Above the viewer, and inside the scope that handles the
+            // viewer's keys, so they work while the error's buttons have focus.
+            z: 30
 
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Escape) {
                     event.accepted = true
                     root.closeViewer()
                 }
+            }
+
+            Components.ErrorBanner {
+                objectName: "spectrogramFullscreenErrorBanner"
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottomMargin: 24
+                width: Math.min(parent.width - 48, 720)
+                errorController: root.errorController
+                uiPalette: root.uiPalette
+                historyAvailable: false
+                active: root.viewerOpen && root.useWholeScreenViewerMode
             }
         }
 

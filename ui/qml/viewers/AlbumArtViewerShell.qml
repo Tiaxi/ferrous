@@ -19,6 +19,10 @@ Item {
     required property var openContextMenu
     // Actions whose shortcuts also work in the viewer.
     property var viewerActions: []
+    // The app's errors and palette; the viewer shows the newest error, as
+    // it hides the main window's.
+    property var errorController: null
+    property var uiPalette: null
 
     property alias popupHost: albumArtPopupHost
     property alias windowHost: albumArtWindowHost
@@ -137,6 +141,19 @@ Item {
             id: albumArtPopupHost
             anchors.fill: parent
         }
+
+        Components.ErrorBanner {
+            objectName: "albumArtPopupErrorBanner"
+            z: 30
+            anchors.bottom: parent.bottom
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottomMargin: 24
+            width: Math.min(parent.width - 48, 720)
+            errorController: root.errorController
+            uiPalette: root.uiPalette
+            historyAvailable: false
+            active: root.viewerOpen && !root.useWholeScreenViewerMode
+        }
     }
 
     Window {
@@ -169,6 +186,9 @@ Item {
             id: albumArtFullscreenFocusSink
             anchors.fill: parent
             focus: albumArtFullscreenWindow.visibility === Window.FullScreen
+            // Above the viewer, and inside the scope that handles the
+            // viewer's keys, so they work while the error's buttons have focus.
+            z: 30
 
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Escape) {
@@ -182,6 +202,18 @@ Item {
                     event.accepted = true
                     root.openContextMenu()
                 }
+            }
+
+            Components.ErrorBanner {
+                objectName: "albumArtFullscreenErrorBanner"
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottomMargin: 24
+                width: Math.min(parent.width - 48, 720)
+                errorController: root.errorController
+                uiPalette: root.uiPalette
+                historyAvailable: false
+                active: root.viewerOpen && root.useWholeScreenViewerMode
             }
         }
 

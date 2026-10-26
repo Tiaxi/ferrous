@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <QAccessible>
 #include <QApplication>
 #include <QFont>
 #include "../src/GlobalSearchResultsModel.h"
@@ -24,6 +25,7 @@
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlIncubator>
 #include <QJSValue>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -49,6 +51,7 @@
 
 #include "../src/BridgeClient.h"
 #include "../src/DiagnosticsLog.h"
+#include "../src/DisplaySleepInhibitor.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/MprisController.h"
 #include "../src/SpectrogramSeekTrace.h"
@@ -616,7 +619,15 @@ private slots:
     void spectrogramHoverChannelButtonsRemainClickable();
     void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
     void mainWindowContentStartsBelowMenuBar();
-    void playbackErrorShowsInStatusBar();
+    void consecutiveErrorsAreBothVisible();
+    void repeatedErrorsAreCounted();
+    void errorHistoryKeepsTheLatestErrors();
+    void aLongErrorIsShownWhole();
+    void aLongMultiLineErrorKeepsTheControlsInTheWindow();
+    void escapeClosesFullscreenViewersWhileTheirErrorHasFocus();
+    void fullscreenErrorTextScrollsWithTheKeyboard();
+    void quitTimeErrorClosesAFullscreenViewerFirst();
+    void displaySleepFailureShowsInTheFullscreenViewer();
     void stoppedBackendShowsMessageAndDisablesControls();
     void quitActionClosesTheWindowThroughItsCloseHandler();
     void failedSaveBeforeQuitShowsTheErrorAndRetrySaves();
@@ -1947,34 +1958,365 @@ void QmlSmokeTest::mainWindowContentStartsBelowMenuBar() {
         "Application content must start below the menu bar");
 }
 
-void QmlSmokeTest::playbackErrorShowsInStatusBar() {
+namespace {
+
+// Main.qml with the fallback bridge, shown.
+QQuickWindow *loadMainWindowShown(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
     engine.load(QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
-    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
-    QObject *root = engine.rootObjects().constFirst();
-    QObject *bridge = qvariant_cast<QObject *>(root->property("uiBridge"));
-    QVERIFY(bridge != nullptr);
-    QObject *errorLabel = root->findChild<QObject *>(QStringLiteral("statusBarErrorLabel"));
-    QVERIFY(errorLabel != nullptr);
-    QVERIFY(!errorLabel->property("visible").toBool());
+    if (engine.rootObjects().isEmpty()) {
+        return nullptr;
+    }
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
+        return nullptr;
+    }
+    return window;
+}
 
-    // The message the Rust bridge sends for a skipped track.
-    const QString message = QStringLiteral(
+// Sends an error from the bridge as BridgeClient does. The categories and
+// severities are BinaryBridgeCodec's.
+bool sendBridgeError(QObject *bridge, const QString &message, int category = 1,
+                     int severity = 1, const QString &subject = QString()) {
+    return QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, message),
+                                     Q_ARG(int, category), Q_ARG(int, severity),
+                                     Q_ARG(QString, subject));
+}
+
+// The messages of the error history, newest first.
+QStringList errorHistoryMessages(QObject *errors) {
+    QStringList messages;
+    auto *entries = qvariant_cast<QAbstractItemModel *>(errors->property("entries"));
+    if (entries == nullptr) {
+        return messages;
+    }
+    const int messageRole = entries->roleNames().key("message");
+    for (int row = 0; row < entries->rowCount(); ++row) {
+        messages.push_back(entries->index(row, 0).data(messageRole).toString());
+    }
+    return messages;
+}
+
+// The shown text items under `root` whose text is `text`.
+QList<QQuickItem *> visibleTextItems(QQuickItem *root, const QString &text) {
+    QList<QQuickItem *> found;
+    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+        if (!item->isVisible()) {
+            return;
+        }
+        if (item->property("text").toString() == text && item->property("lineCount").isValid()) {
+            found.push_back(item);
+        }
+        for (QQuickItem *child : item->childItems()) {
+            visit(child);
+        }
+    };
+    visit(root);
+    return found;
+}
+
+// Waits until the engine has built the objects it builds in the background,
+// such as the overflow menus of Kirigami's inline messages, so that
+// destroying the engine leaves none half made.
+bool finishIncubation(QQmlEngine &engine) {
+    QQmlIncubationController *controller = engine.incubationController();
+    if (controller == nullptr) {
+        return true;
+    }
+    return QTest::qWaitFor([controller]() { return controller->incubatingObjectCount() == 0; });
+}
+
+// Whether `log` holds only the error controller's reports to the
+// diagnostics log, which the error tests expect.
+bool onlyErrorReports(const QString &log) {
+    const QStringList lines = log.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    return std::all_of(lines.begin(), lines.end(), [](const QString &line) {
+        return line.startsWith(QStringLiteral("error ["));
+    });
+}
+
+} // namespace
+
+void QmlSmokeTest::consecutiveErrorsAreBothVisible() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    auto *mainBanner = window->findChild<QQuickItem *>(QStringLiteral("mainErrorBanner"));
+    const auto bannerText = [mainBanner]() {
+        auto *message = qvariant_cast<QQuickItem *>(mainBanner->property("message"));
+        return message != nullptr && message->isVisible() ? message->property("text").toString()
+                                                          : QString();
+    };
+    auto *history = window->findChild<QQuickItem *>(QStringLiteral("errorHistory"));
+    auto *historyList = window->findChild<QQuickItem *>(QStringLiteral("errorHistoryList"));
+    QObject *statusButton = window->findChild<QObject *>(QStringLiteral("statusBarErrorsButton"));
+    QVERIFY(bridge != nullptr && errors != nullptr && mainBanner != nullptr
+            && history != nullptr && historyList != nullptr && statusButton != nullptr);
+    QVERIFY(!mainBanner->isVisible());
+    QVERIFY(!statusButton->property("visible").toBool());
+
+    // The message the Rust bridge sends for a skipped track, then a library error.
+    const QString skipped = QStringLiteral(
         "Couldn't play \u201cbad.flac\u201d (Resource not found); skipped it.");
+    const QString scan = QStringLiteral("could not read 1 folder or file in '/music'");
     clearCapturedMessages();
-    QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, message)));
-    QCOMPARE(root->property("transientBridgeError").toString(), message);
-    QTRY_VERIFY(errorLabel->property("visible").toBool());
-    QCOMPARE(errorLabel->property("text").toString(), QStringLiteral("Error: ") + message);
-    // The error also goes to the diagnostics log.
-    QCOMPARE(takeCapturedMessagesText(), QStringLiteral("bridge error: ") + message);
+    QVERIFY(sendBridgeError(bridge, skipped, 1, 0, QStringLiteral("/music/bad.flac")));
+    QTRY_COMPARE(bannerText(), QStringLiteral("Playback: ") + skipped);
+    QVERIFY(sendBridgeError(bridge, scan, 2, 1));
+
+    // The newest is shown in full; the first is not lost.
+    QTRY_COMPARE(bannerText(), QStringLiteral("Library: ") + scan);
+    QCOMPARE(errorHistoryMessages(errors), (QStringList{scan, skipped}));
+    QTRY_VERIFY(statusButton->property("visible").toBool());
+    QCOMPARE(statusButton->property("text").toString(), QStringLiteral("2 errors"));
+    // Both are in the diagnostics log, with their category.
+    QCOMPARE(takeCapturedMessagesText(),
+             QStringLiteral("error [Playback]: ") + skipped + QStringLiteral(" (/music/bad.flac)\n")
+                 + QStringLiteral("error [Library]: ") + scan);
+
+    // The status bar opens the history, which lists both.
+    QVERIFY(QMetaObject::invokeMethod(statusButton, "clicked"));
+    QTRY_VERIFY(history->isVisible());
+    QTRY_COMPARE(historyList->property("count").toInt(), 2);
+    QTRY_COMPARE(visibleTextItems(historyList, skipped).size(), 1);
+    QCOMPARE(visibleTextItems(historyList, scan).size(), 1);
+
+    // Dismissing the banner keeps the history; a new error shows again.
+    QVERIFY(QMetaObject::invokeMethod(errors, "dismissLatest"));
+    QTRY_VERIFY(bannerText().isEmpty());
+    QVERIFY(history->isVisible());
+    QCOMPARE(errorHistoryMessages(errors).size(), 2);
+    QVERIFY(sendBridgeError(bridge, QStringLiteral("Last.fm session expired."), 5, 1));
+    QTRY_COMPARE(bannerText(), QStringLiteral("Last.fm: Last.fm session expired."));
+
+    // Removing entries and clearing the history.
+    QVERIFY(QMetaObject::invokeMethod(errors, "remove", Q_ARG(QVariant, 1)));
+    QCOMPARE(errorHistoryMessages(errors),
+             (QStringList{QStringLiteral("Last.fm session expired."), skipped}));
+    QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
+    QTRY_VERIFY(!mainBanner->isVisible());
+    QVERIFY(!statusButton->property("visible").toBool());
+    QVERIFY(finishIncubation(engine));
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+}
+
+void QmlSmokeTest::repeatedErrorsAreCounted() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    auto *mainBanner = window->findChild<QQuickItem *>(QStringLiteral("mainErrorBanner"));
+    QVERIFY(bridge != nullptr && errors != nullptr && mainBanner != nullptr);
+    const QString message = QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it.");
+    const QString subject = QStringLiteral("/music/bad.flac");
+
+    QVERIFY(sendBridgeError(bridge, message, 1, 0, subject));
+    QVERIFY(sendBridgeError(bridge, QStringLiteral("other"), 2, 1));
+    QVERIFY(sendBridgeError(bridge, message, 1, 0, subject));
+    QVERIFY(sendBridgeError(bridge, message, 1, 0, subject));
+
+    // One entry, counted, and moved to the front as the newest.
+    QCOMPARE(errorHistoryMessages(errors), (QStringList{message, QStringLiteral("other")}));
+    auto *entries = qvariant_cast<QAbstractItemModel *>(errors->property("entries"));
+    QVERIFY(entries != nullptr);
+    QCOMPARE(entries->index(0, 0).data(entries->roleNames().key("count")).toInt(), 3);
+    QQuickItem *banner = nullptr;
+    QTRY_VERIFY((banner = qvariant_cast<QQuickItem *>(mainBanner->property("message"))) != nullptr);
+    QTRY_COMPARE(banner->property("text").toString(),
+                 QStringLiteral("Playback: ") + message + QStringLiteral(" (\u00d73)"));
+
+    // The same message about another file, or of another category, is another error.
+    QVERIFY(sendBridgeError(bridge, message, 1, 0, QStringLiteral("/music/other.flac")));
+    QVERIFY(sendBridgeError(bridge, message, 2, 0, subject));
+    QCOMPARE(errorHistoryMessages(errors).size(), 4);
+    QVERIFY(finishIncubation(engine));
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+}
+
+void QmlSmokeTest::errorHistoryKeepsTheLatestErrors() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(bridge != nullptr && errors != nullptr);
+    const int limit = errors->property("historyLimit").toInt();
+    QCOMPARE(limit, 20);
+
+    for (int index = 0; index < limit + 5; ++index) {
+        QVERIFY(sendBridgeError(bridge, QStringLiteral("error %1").arg(index)));
+    }
+
+    QStringList expected;
+    for (int index = limit + 4; index >= 5; --index) {
+        expected.push_back(QStringLiteral("error %1").arg(index));
+    }
+    QCOMPARE(errorHistoryMessages(errors), expected);
+    QVERIFY(finishIncubation(engine));
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+}
+
+void QmlSmokeTest::aLongErrorIsShownWhole() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *mainBanner = window->findChild<QQuickItem *>(QStringLiteral("mainErrorBanner"));
+    QVERIFY(bridge != nullptr && mainBanner != nullptr);
+    QString message = QStringLiteral(
+        "could not cache the embedded covers of 3 files in '/music'; kept their previous covers "
+        "and will retry at the next scan (first: '/music/");
+    for (int folder = 0; folder < 12; ++folder) {
+        message += QStringLiteral("Some Artist %1 - Some Album With A Long Name/").arg(folder);
+    }
+    message += QStringLiteral("01 Track.flac': No space left on device (os error 28))");
+    QVERIFY(message.size() > 600);
+
+    QVERIFY(sendBridgeError(bridge, message, 2, 0));
+
+    const QString shown = QStringLiteral("Library: ") + message;
+    auto *banner = qvariant_cast<QQuickItem *>(mainBanner->property("message"));
+    auto *text = window->findChild<QQuickItem *>(QStringLiteral("errorBannerText"));
+    QVERIFY(banner != nullptr && text != nullptr);
+    QTRY_VERIFY(banner->isVisible());
+    QCOMPARE(banner->property("text").toString(), shown);
+    // The whole message wraps over lines rather than being cut off; past
+    // the banner's lines it scrolls.
+    QCOMPARE(text->property("text").toString(), shown);
+    QVERIFY(!text->property("truncated").toBool());
+    QTRY_VERIFY(text->property("lineCount").toInt() > 1);
+    QVERIFY(text->property("contentWidth").toReal() <= text->width() + 1);
+    QVERIFY(text->width() <= window->width());
+    // And the history shows it whole too.
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(errors != nullptr);
+    QCOMPARE(errorHistoryMessages(errors), QStringList{message});
+    QVERIFY(finishIncubation(engine));
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+}
+
+void QmlSmokeTest::aLongMultiLineErrorKeepsTheControlsInTheWindow() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    // The smallest window Ferrous allows.
+    window->resize(1280, 780);
+    QTRY_COMPARE(window->height(), 780);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *mainBanner = window->findChild<QQuickItem *>(QStringLiteral("mainErrorBanner"));
+    auto *body = window->findChild<QQuickItem *>(QStringLiteral("errorBannerBody"));
+    auto *text = window->findChild<QQuickItem *>(QStringLiteral("errorBannerText"));
+    auto *dismiss = window->findChild<QQuickItem *>(QStringLiteral("errorBannerDismissButton"));
+    auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
+    QVERIFY(bridge != nullptr && mainBanner != nullptr && body != nullptr && text != nullptr
+            && dismiss != nullptr && transport != nullptr);
+    const int maximumLines = mainBanner->property("maximumLines").toInt();
+    QVERIFY(maximumLines > 0);
+
+    // A batch tag save that failed for ten files with long paths, as the tag
+    // editor reports it.
+    QStringList lines{QStringLiteral("Saved 0 file(s); 10 failed.")};
+    for (int file = 0; file < 10; ++file) {
+        lines.push_back(QStringLiteral(
+            "/music/Some Artist With A Long Name/Some Album With An Even Longer Name (Deluxe "
+            "Edition, Remastered)/%1 A Track Title That Goes On For Quite A While.flac: "
+            "Permission denied (os error 13)").arg(file + 1, 2, 10, QLatin1Char('0')));
+    }
+    QVERIFY(sendBridgeError(bridge, lines.join(QLatin1Char('\n')), 4, 1));
+
+    // The banner keeps to its lines; the rest of the text scrolls.
+    QTRY_VERIFY(mainBanner->isVisible());
+    QTRY_VERIFY(text->property("lineCount").toInt() > maximumLines);
+    const QFontMetricsF metrics(qvariant_cast<QFont>(text->property("font")));
+    QTRY_VERIFY(body->height() <= metrics.lineSpacing() * maximumLines + 1);
+    QVERIFY(body->height() < text->height());
+    QVERIFY(mainBanner->height() <= metrics.lineSpacing() * (maximumLines + 3));
+
+    // Its buttons and the playback controls stay inside the window.
+    const auto insideWindow = [window](QQuickItem *item) {
+        const QRectF rect = item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+        return item->isVisible() && rect.top() >= 0 && rect.bottom() <= window->height()
+            && rect.left() >= 0 && rect.right() <= window->width();
+    };
+    QTRY_VERIFY(insideWindow(dismiss));
+    QVERIFY(insideWindow(transport));
+    QVERIFY(QMetaObject::invokeMethod(dismiss, "clicked"));
+    QTRY_VERIFY(!mainBanner->isVisible());
+    QVERIFY(finishIncubation(engine));
+    QCOMPARE(takeCapturedMessagesText().count(QStringLiteral("error [Tags]:")), 1);
+}
+
+void QmlSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
+    // Stands in for a desktop without org.freedesktop.ScreenSaver.
+    class FailingBackend final : public DisplaySleepInhibitorBackend {
+    public:
+        void setInhibited(bool inhibited) override {
+            if (inhibited) {
+                reportFailure(QStringLiteral("no idle service"));
+            }
+        }
+    };
+    DisplaySleepInhibitor inhibitor(std::make_unique<FailingBackend>());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("displaySleepInhibitor"), &inhibitor);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && surface != nullptr && errors != nullptr);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(bridge->property("preventDisplaySleepInFullscreen").toBool());
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(surface->window() != nullptr && surface->window() != window);
+    QQuickWindow *fullscreen = surface->window();
+    QTRY_VERIFY(inhibitor.inhibited());
+
+    // Shown where the user is looking: over the viewer.
+    auto *viewerBanner =
+        fullscreen->findChild<QQuickItem *>(QStringLiteral("spectrogramFullscreenErrorBanner"));
+    QVERIFY(viewerBanner != nullptr);
+    QTRY_VERIFY(viewerBanner->isVisible());
+    const QStringList messages = errorHistoryMessages(errors);
+    QCOMPARE(messages.size(), 1);
+    QVERIFY2(messages.first().contains(QStringLiteral("Couldn't keep the screen awake")),
+             qPrintable(messages.first()));
+    QVERIFY(messages.first().contains(QStringLiteral("no idle service")));
+    auto *message = qvariant_cast<QQuickItem *>(viewerBanner->property("message"));
+    QVERIFY(message != nullptr);
+    QCOMPARE(message->property("text").toString(), QStringLiteral("System: ") + messages.first());
+
+    // A click on the message does not close the viewer.
+    QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier,
+                      viewerBanner->mapToScene(QPointF(4, 4)).toPoint());
+    QCoreApplication::processEvents();
+    QVERIFY(viewer->property("spectrogramViewerOpen").toBool());
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!inhibitor.inhibited());
+    QVERIFY(finishIncubation(engine));
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
 void QmlSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
@@ -2537,6 +2879,39 @@ struct TagEditorWindow {
 
 } // namespace
 
+void QmlSmokeTest::quitTimeErrorClosesAFullscreenViewerFirst() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && surface != nullptr && dialog != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    const auto restoreMainWindow = useAsMainWindow(window);
+    QVERIFY(bridge->setProperty("stateSaveError", QStringLiteral("Settings could not be saved")));
+
+    // The visualization viewer over the whole screen, a modal window of its own.
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(surface->window() != nullptr && surface->window() != window);
+    QQuickWindow *fullscreen = surface->window();
+    QVERIFY(QTest::qWaitForWindowExposed(fullscreen));
+
+    callMprisQuit();
+
+    // The dialog opens in the main window, so the viewer closes first.
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QVERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    QTRY_VERIFY(!fullscreen->isVisible());
+    QVERIFY(window->isVisible());
+    QVERIFY(finishIncubation(engine));
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+}
+
 void QmlSmokeTest::tagEditorOpensALargeSelectionWithoutBuildingEveryRow() {
     constexpr int kRows = 2000;
     TagEditorWindow fixture;
@@ -2663,6 +3038,14 @@ void QmlSmokeTest::tagEditorStaysOpenWhileSavingAndShowsTheResult() {
     QVERIFY(fixture.dialog->property("statusHasFailure").toBool());
     QVERIFY(fixture.editor.dirty());
     QVERIFY(cancel->property("enabled").toBool());
+    // The app's error list has it too, with the file that failed.
+    QObject *errors = fixture.window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(errors != nullptr);
+    QCOMPARE(errorHistoryMessages(errors),
+             QStringList{QStringLiteral("Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied")});
+    QVERIFY(finishIncubation(fixture.engine));
+    QCOMPARE(takeCapturedMessagesText(),
+             QStringLiteral("error [Tags]: Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied"));
 }
 
 void QmlSmokeTest::closingTheWindowWithTagEditsAsksAndCancelKeepsThem() {
@@ -2758,6 +3141,9 @@ void QmlSmokeTest::tagSaveFailureWhileQuittingKeepsTheWindowOpen() {
     QVERIFY(fixture.editor.statusIsError());
     QVERIFY(fixture.editor.dirty());
     QCOMPARE(fixture.stateSaves(), 0);
+    QVERIFY(finishIncubation(fixture.engine));
+    QCOMPARE(takeCapturedMessagesText(),
+             QStringLiteral("error [Tags]: Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied"));
 
     // Quitting again asks again.
     fixture.window->close();
@@ -12613,6 +12999,167 @@ void QmlSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview() {
     QCOMPARE(drawnCanvasScale(node), 1.0);
 
     delete node;
+}
+
+void QmlSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(16, 16, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr);
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QVERIFY(playPause != nullptr);
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+    bridge->setProperty("viewerFullscreenMode", 1);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+
+    struct Viewer {
+        const char *open;
+        const char *openProperty;
+        QString windowName;
+        QString bannerName;
+    };
+    const QList<Viewer> viewers{
+        {"openSpectrogramViewer", "spectrogramViewerOpen",
+         QStringLiteral("spectrogramFullscreenWindow"),
+         QStringLiteral("spectrogramFullscreenErrorBanner")},
+        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen",
+         QStringLiteral("albumArtFullscreenWindow"),
+         QStringLiteral("albumArtFullscreenErrorBanner")},
+    };
+    for (const Viewer &shown : viewers) {
+        auto *fullscreen = qobject_cast<QQuickWindow *>(
+            engine.rootObjects().constFirst()->findChild<QObject *>(shown.windowName));
+        QVERIFY(fullscreen != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
+        QTRY_VERIFY(viewer->property(shown.openProperty).toBool());
+        QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+        QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it."),
+                                1, 0, QStringLiteral("/music/bad.flac")));
+        auto *banner = fullscreen->findChild<QQuickItem *>(shown.bannerName);
+        QVERIFY(banner != nullptr);
+        QTRY_VERIFY(banner->isVisible());
+        QQuickItem *dismiss = nullptr;
+        for (QQuickItem *item : banner->findChildren<QQuickItem *>()) {
+            if (item->objectName() == QStringLiteral("errorBannerDismissButton")) {
+                dismiss = item;
+            }
+        }
+        QVERIFY(dismiss != nullptr);
+
+        // Tab moves into the error's buttons.
+        for (int press = 0; press < 8 && !dismiss->hasActiveFocus(); ++press) {
+            QTest::keyClick(fullscreen, Qt::Key_Tab);
+        }
+        QVERIFY2(dismiss->hasActiveFocus(), qPrintable(shown.windowName));
+
+        // The main window's shortcuts still work, and Escape still closes
+        // the viewer.
+        const int toggles = toggled.count();
+        QTest::keyClick(fullscreen, Qt::Key_Space);
+        QTRY_VERIFY(toggled.count() > toggles);
+        QVERIFY(viewer->property(shown.openProperty).toBool());
+        QTest::keyClick(fullscreen, Qt::Key_Escape);
+        QTRY_VERIFY2(!viewer->property(shown.openProperty).toBool(), qPrintable(shown.windowName));
+        QTRY_VERIFY(!fullscreen->isVisible());
+    }
+    QVERIFY(finishIncubation(engine));
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+}
+
+void QmlSmokeTest::fullscreenErrorTextScrollsWithTheKeyboard() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(16, 16, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && errors != nullptr);
+    bridge->setProperty("viewerFullscreenMode", 1);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    QStringList lines{QStringLiteral("Saved 0 file(s); 10 failed.")};
+    for (int file = 0; file < 10; ++file) {
+        lines.push_back(QStringLiteral("/music/Some Artist/Some Album/%1 A Track Title.flac: "
+                                       "Permission denied (os error 13)")
+                            .arg(file + 1, 2, 10, QLatin1Char('0')));
+    }
+
+    const QList<std::array<const char *, 4>> viewers{
+        {"openSpectrogramViewer", "spectrogramViewerOpen", "spectrogramFullscreenWindow",
+         "spectrogramFullscreenErrorBanner"},
+        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", "albumArtFullscreenWindow",
+         "albumArtFullscreenErrorBanner"},
+    };
+    for (const auto &[open, openProperty, windowName, bannerName] : viewers) {
+        auto *fullscreen = qobject_cast<QQuickWindow *>(
+            engine.rootObjects().constFirst()->findChild<QObject *>(QLatin1String(windowName)));
+        QVERIFY(fullscreen != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(viewer, open));
+        QTRY_VERIFY(viewer->property(openProperty).toBool());
+        QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+        QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
+        QVERIFY(sendBridgeError(bridge, lines.join(QLatin1Char('\n')), 4, 1));
+        auto *banner = fullscreen->findChild<QQuickItem *>(QLatin1String(bannerName));
+        QVERIFY(banner != nullptr);
+        QTRY_VERIFY(banner->isVisible());
+        QQuickItem *body = nullptr;
+        for (QQuickItem *item : banner->findChildren<QQuickItem *>()) {
+            if (item->objectName() == QStringLiteral("errorBannerBody")) {
+                body = item;
+            }
+        }
+        QVERIFY(body != nullptr);
+        auto *flickable = qvariant_cast<QQuickItem *>(body->property("contentItem"));
+        QVERIFY(flickable != nullptr);
+        QTRY_VERIFY(flickable->property("contentHeight").toReal() > body->height());
+
+        // Tab reaches the text, which says what it holds.
+        for (int press = 0; press < 8 && !body->hasActiveFocus(); ++press) {
+            QTest::keyClick(fullscreen, Qt::Key_Tab);
+        }
+        QVERIFY2(body->hasActiveFocus(), windowName);
+        QVERIFY(QAccessible::queryAccessibleInterface(body) != nullptr);
+        QCOMPARE(QAccessible::queryAccessibleInterface(body)->text(QAccessible::Name),
+                 QStringLiteral("Tags: ") + lines.join(QLatin1Char('\n')));
+
+        // Down scrolls it, and End and Home go to its ends.
+        QCOMPARE(flickable->property("contentY").toReal(), 0.0);
+        QTest::keyClick(fullscreen, Qt::Key_Down);
+        QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
+        QTest::keyClick(fullscreen, Qt::Key_End);
+        // Within a pixel: the view keeps to whole pixels.
+        QTRY_VERIFY(std::abs(flickable->property("contentY").toReal()
+                             - (flickable->property("contentHeight").toReal() - flickable->height()))
+                    <= 1.0);
+        QTest::keyClick(fullscreen, Qt::Key_Home);
+        QTRY_COMPARE(flickable->property("contentY").toReal(), 0.0);
+        QVERIFY(viewer->property(openProperty).toBool());
+
+        // Escape still closes the viewer.
+        QTest::keyClick(fullscreen, Qt::Key_Escape);
+        QTRY_VERIFY2(!viewer->property(openProperty).toBool(), windowName);
+        QTRY_VERIFY(!fullscreen->isVisible());
+    }
+    QVERIFY(finishIncubation(engine));
+    takeCapturedMessagesText();
 }
 
 int main(int argc, char **argv) {

@@ -4,7 +4,8 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 
-// Shown when the settings and the queue could not be saved before quitting.
+// Shown when the settings, the queue, or Last.fm's scrobbles could not be
+// saved before quitting.
 Dialog {
     id: root
 
@@ -47,8 +48,8 @@ Dialog {
             wrapMode: Text.WordWrap
             color: root.uiPalette.uiMutedTextColor
             text: "Retry saves again, for example after freeing disk space. Quit Anyway "
-                + "closes Ferrous, and the settings and queue changes that could not be "
-                + "saved are lost."
+                + "closes Ferrous, and the settings, queue changes, and Last.fm scrobbles "
+                + "that could not be saved are lost."
         }
 
         RowLayout {
