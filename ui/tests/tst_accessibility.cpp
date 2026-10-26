@@ -265,6 +265,9 @@ private slots:
     void seekDragSeeksOnceOnRelease();
     void heldArrowKeysAccumulateVolumeSteps();
     void heldArrowKeysSeekOnceWhenReleased();
+    void overlappingArrowKeysAreOneGesture();
+    void seekDragOutlastsAKeyRelease();
+    void seekDragOutlastsTheFocus();
     void seekClickSeeksOnce();
     void transportBarHasNoWarnings();
     void transportBarHasNoWarningsUnderTheBasicStyle();
@@ -700,20 +703,37 @@ bool sameValues(const QList<double> &actual, const QList<double> &expected) {
         && std::equal(actual.begin(), actual.end(), expected.begin(), fuzzyEqual);
 }
 
+// Sends a key event as the window system does, marked as autorepeat or not.
+void sendKey(QQuickWindow *window, QEvent::Type type, Qt::Key key, bool autoRepeat) {
+    QKeyEvent event(type, key, Qt::NoModifier, QString(), autoRepeat);
+    QSpontaneKeyEvent::setSpontaneous(&event);
+    QCoreApplication::sendEvent(window, &event);
+}
+
 // Holds `key` down for `steps` steps as Qt sends autorepeat: a press,
 // autorepeat release and press pairs, and the final release.
 void holdKey(QQuickWindow *window, Qt::Key key, int steps) {
-    const auto send = [window, key](QEvent::Type type, bool autoRepeat) {
-        QKeyEvent event(type, key, Qt::NoModifier, QString(), autoRepeat);
-        QSpontaneKeyEvent::setSpontaneous(&event);
-        QCoreApplication::sendEvent(window, &event);
-    };
-    send(QEvent::KeyPress, false);
+    sendKey(window, QEvent::KeyPress, key, false);
     for (int step = 1; step < steps; ++step) {
-        send(QEvent::KeyRelease, true);
-        send(QEvent::KeyPress, true);
+        sendKey(window, QEvent::KeyRelease, key, true);
+        sendKey(window, QEvent::KeyPress, key, true);
     }
-    send(QEvent::KeyRelease, false);
+    sendKey(window, QEvent::KeyRelease, key, false);
+}
+
+// Holds Left for three steps, steps once with Right while it is held, then
+// steps Left once more by autorepeat before releasing it.
+void overlapArrowKeys(QQuickWindow *window) {
+    sendKey(window, QEvent::KeyPress, Qt::Key_Left, false);
+    for (int step = 1; step < 3; ++step) {
+        sendKey(window, QEvent::KeyRelease, Qt::Key_Left, true);
+        sendKey(window, QEvent::KeyPress, Qt::Key_Left, true);
+    }
+    sendKey(window, QEvent::KeyPress, Qt::Key_Right, false);
+    sendKey(window, QEvent::KeyRelease, Qt::Key_Right, false);
+    sendKey(window, QEvent::KeyRelease, Qt::Key_Left, true);
+    sendKey(window, QEvent::KeyPress, Qt::Key_Left, true);
+    sendKey(window, QEvent::KeyRelease, Qt::Key_Left, false);
 }
 
 QString describeValues(const QList<double> &values) {
@@ -934,6 +954,110 @@ void AccessibilityTest::heldArrowKeysSeekOnceWhenReleased() {
     QCOMPARE(seek->property("value").toDouble(), 71.0);
     QTest::keyRelease(window, Qt::Key_Right);
     QCOMPARE(seeks(), (QList<double>{80.0, 65.0, 70.0}));
+}
+
+void AccessibilityTest::overlappingArrowKeysAreOneGesture() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QVERIFY(volume != nullptr && seek != nullptr);
+    root->setProperty("echoLags", true);
+
+    // Right's release leaves Left held, so the lagging echo does not reset
+    // the next step.
+    QVERIFY(tabTo(window, volume));
+    overlapArrowKeys(window);
+    const QList<double> volumes = recordedValues(root.data(), "volumes");
+    QVERIFY2(sameValues(volumes, {0.4, 0.3, 0.2, 0.3, 0.2}), qPrintable(describeValues(volumes)));
+    QVERIFY(!volume->property("adjusting").toBool());
+
+    // The seek slider seeks once, when the last key is released.
+    QVERIFY(tabTo(window, seek));
+    overlapArrowKeys(window);
+    QCOMPARE(recordedValues(root.data(), "seeks"), (QList<double>{35.0}));
+    QVERIFY(!seek->property("adjusting").toBool());
+}
+
+// Loads the transport harness with a lagging echo and the focus on the seek
+// slider.
+QQuickWindow *loadSeekHarness(QQmlEngine &engine, QScopedPointer<QObject> &root, QString *errorText) {
+    QQuickWindow *window = loadTransportHarness(engine, root, errorText);
+    if (window == nullptr) {
+        return nullptr;
+    }
+    root->setProperty("echoLags", true);
+    return tabTo(window, visibleItemNamed(window, QStringLiteral("seekSlider"))) ? window : nullptr;
+}
+
+void AccessibilityTest::seekDragOutlastsAKeyRelease() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadSeekHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    const qreal y = seek->height() / 2;
+    const auto scenePoint = [seek, y](qreal fraction) {
+        return seek->mapToScene(QPointF(seek->width() * fraction, y)).toPoint();
+    };
+
+    // A key's press and release during a drag leave the drag to the mouse,
+    // which seeks once, where it releases the slider.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.25));
+    QTest::mouseMove(window, scenePoint(0.3));
+    QTest::keyClick(window, Qt::Key_Right);
+    for (int step = 1; step <= 4; ++step) {
+        QTest::mouseMove(window, scenePoint(0.3 + 0.05 * step));
+    }
+    QVERIFY(seek->property("adjusting").toBool());
+    const double dragged = seek->property("value").toDouble();
+    QVERIFY2(dragged > 80.0 && dragged < 120.0, qPrintable(QString::number(dragged)));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.5));
+    const QList<double> seeks = recordedValues(root.data(), "seeks");
+    QVERIFY2(sameValues(seeks, {dragged}), qPrintable(describeValues(seeks)));
+    QVERIFY(!seek->property("adjusting").toBool());
+}
+
+void AccessibilityTest::seekDragOutlastsTheFocus() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadSeekHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    auto *start = qvariant_cast<QQuickItem *>(root->property("startButton"));
+    const qreal y = seek->height() / 2;
+    const auto scenePoint = [seek, y](qreal fraction) {
+        return seek->mapToScene(QPointF(seek->width() * fraction, y)).toPoint();
+    };
+    const auto seeksText = [&root]() {
+        return describeValues(recordedValues(root.data(), "seeks"));
+    };
+
+    // The focus leaves while a key is held: the drag still seeks once, to
+    // where the mouse releases the slider.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.4));
+    QTest::mouseMove(window, scenePoint(0.45));
+    QTest::keyPress(window, Qt::Key_Right);
+    start->forceActiveFocus(Qt::TabFocusReason);
+    QVERIFY(start->hasActiveFocus());
+    for (int step = 1; step <= 6; ++step) {
+        QTest::mouseMove(window, scenePoint(0.45 + 0.05 * step));
+    }
+    QVERIFY(seek->property("adjusting").toBool());
+    const double dragged = seek->property("value").toDouble();
+    QVERIFY2(dragged > 130.0 && dragged < 170.0, qPrintable(QString::number(dragged)));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
+    QVERIFY2(sameValues(recordedValues(root.data(), "seeks"), {dragged}), qPrintable(seeksText()));
+    QVERIFY(!seek->property("adjusting").toBool());
+
+    // The key's release, which reaches the button, seeks nothing more.
+    QTest::keyRelease(window, Qt::Key_Right);
+    QVERIFY2(sameValues(recordedValues(root.data(), "seeks"), {dragged}), qPrintable(seeksText()));
 }
 
 void AccessibilityTest::seekClickSeeksOnce() {
