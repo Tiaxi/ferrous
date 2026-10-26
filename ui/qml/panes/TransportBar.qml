@@ -6,6 +6,7 @@ import QtQuick.Layouts 1.15
 import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
+import "../logic/KeyUtils.js" as KeyUtils
 
 ToolBar {
     id: root
@@ -69,6 +70,9 @@ ToolBar {
                     objectName: "transportButton_" + modelData.name
                     action: modelData.action
                     display: AbstractButton.IconOnly
+                    // Tab reaches it, but a click leaves the focus where it
+                    // was, so Space still plays or pauses after a click.
+                    focusPolicy: Qt.TabFocus
                     Accessible.name: label
                     ToolTip.visible: hovered || visualFocus
                     ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
@@ -76,9 +80,9 @@ ToolBar {
                         ? label + " (" + shortcutText + ")"
                         : label
                     // Space presses the focused button rather than playing
-                    // or pausing.
+                    // or pausing; keys with modifiers stay the shortcuts'.
                     Keys.onShortcutOverride: function(event) {
-                        event.accepted = event.key === Qt.Key_Space
+                        event.accepted = KeyUtils.isPlainSpace(event)
                     }
                 }
             }
@@ -87,6 +91,9 @@ ToolBar {
         Slider {
             id: seekSlider
             objectName: "seekSlider"
+            // A drag leaves the focus where it was, so the arrow keys keep
+            // working there; Tab reaches the slider for keyboard seeking.
+            focusPolicy: Qt.TabFocus
             Layout.fillWidth: true
             from: 0
             to: Math.max(root.uiBridge.durationSeconds, 1.0)
@@ -251,8 +258,9 @@ ToolBar {
             ToolTip.visible: hovered || visualFocus
             ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
             ToolTip.text: text
+            focusPolicy: Qt.TabFocus
             Keys.onShortcutOverride: function(event) {
-                event.accepted = event.key === Qt.Key_Space
+                event.accepted = KeyUtils.isPlainSpace(event)
             }
             onClicked: root.toggleMutedVolume()
         }
@@ -260,6 +268,7 @@ ToolBar {
         Slider {
             id: volumeSlider
             objectName: "volumeSlider"
+            focusPolicy: Qt.TabFocus
             Layout.preferredWidth: root.uiPalette.rowHeight * 6
             from: 0
             to: 1

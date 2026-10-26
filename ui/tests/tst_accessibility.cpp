@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <functional>
+#include <memory>
 
 #include "../src/BridgeClient.h"
 #include "../src/LevelMeterItem.h"
@@ -255,6 +256,8 @@ private slots:
     void libraryAndQueueRowsHaveAccessibleNames();
     void slidersAndIconButtonsHaveNamesAndTooltips();
     void keyboardMovesOfTheSeekSliderSeek();
+    void clicksLeaveSpaceToPlayOrPause();
+    void modifiedKeysReachTheShortcutsFromFocusedButtons();
     void rowHeightsAndScrollingFollowTheFont();
     void queueHeaderAndRowsShareTheColumnWidths();
     void lightPaletteLeavesNoFixedColours();
@@ -508,6 +511,133 @@ void AccessibilityTest::keyboardMovesOfTheSeekSliderSeek() {
     QTRY_COMPARE(bridge->property("lastSeekSeconds").toDouble(), 5.0);
     QTest::keyClick(window, Qt::Key_Right);
     QTRY_COMPARE(bridge->property("lastSeekSeconds").toDouble(), 10.0);
+}
+
+namespace {
+
+// The transport bar's controls in the main window, and its actions' spies.
+struct TransportFixture {
+    QQuickItem *next = nullptr;
+    QQuickItem *mute = nullptr;
+    QQuickItem *seek = nullptr;
+    QQuickItem *volume = nullptr;
+    QQuickItem *modeButton = nullptr;
+    QQuickItem *library = nullptr;
+    QObject *bridge = nullptr;
+    QObject *viewer = nullptr;
+    std::unique_ptr<QSignalSpy> nextTriggered;
+    std::unique_ptr<QSignalSpy> playPauseTriggered;
+    std::unique_ptr<QSignalSpy> stopTriggered;
+
+    bool load(QQuickWindow *window) {
+        bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+        bridge->setProperty("durationSeconds", 200.0);
+        bridge->setProperty("playbackState", QStringLiteral("Playing"));
+        next = visibleItemNamed(window, QStringLiteral("transportButton_next"));
+        mute = visibleItemNamed(window, QStringLiteral("muteButton"));
+        seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+        volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
+        modeButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
+        viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+        library = qvariant_cast<QQuickItem *>(window->property("libraryViewRef"));
+        if (!next || !mute || !seek || !volume || !modeButton || !viewer || !library) {
+            return false;
+        }
+        QObject *nextAction = qvariant_cast<QObject *>(next->property("action"));
+        QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+        QObject *stop = window->findChild<QObject *>(QStringLiteral("stopAction"));
+        if (!nextAction || !playPause || !stop) {
+            return false;
+        }
+        nextTriggered = std::make_unique<QSignalSpy>(nextAction, SIGNAL(triggered(QObject*)));
+        playPauseTriggered = std::make_unique<QSignalSpy>(playPause, SIGNAL(triggered(QObject*)));
+        stopTriggered = std::make_unique<QSignalSpy>(stop, SIGNAL(triggered(QObject*)));
+        library->forceActiveFocus();
+        return library->hasActiveFocus();
+    }
+};
+
+QPoint centerOf(QQuickItem *item) {
+    return item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
+}
+
+// Presses Tab until `target` has the focus; returns whether it got it.
+bool tabTo(QQuickWindow *window, QQuickItem *target) {
+    for (int presses = 0; presses < 100 && !target->hasActiveFocus(); ++presses) {
+        QTest::keyClick(window, Qt::Key_Tab);
+    }
+    return target->hasActiveFocus();
+}
+
+} // namespace
+
+void AccessibilityTest::clicksLeaveSpaceToPlayOrPause() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    TransportFixture f;
+    QVERIFY(f.load(window));
+    QTRY_VERIFY(f.seek->isEnabled());
+
+    // A click on a button leaves the focus where it was, so Space still
+    // plays or pauses.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerOf(f.next));
+    QTRY_COMPARE(f.nextTriggered->count(), 1);
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_COMPARE(f.playPauseTriggered->count(), 1);
+    QCOMPARE(f.nextTriggered->count(), 1);
+    QVERIFY(!f.next->hasActiveFocus());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerOf(f.mute));
+    QTRY_COMPARE(accessibleText(f.mute, QAccessible::Name), QStringLiteral("Unmute"));
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_COMPARE(f.playPauseTriggered->count(), 2);
+    QCOMPARE(accessibleText(f.mute, QAccessible::Name), QStringLiteral("Unmute"));
+    QVERIFY(!f.mute->hasActiveFocus());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerOf(f.mute));
+    QTRY_COMPARE(accessibleText(f.mute, QAccessible::Name), QStringLiteral("Mute"));
+
+    // So does a click on the sliders, so the arrow keys keep working
+    // where they did.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerOf(f.seek));
+    QTRY_VERIFY(f.bridge->property("lastSeekSeconds").toDouble() > 50.0);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerOf(f.volume));
+    QVERIFY(!f.seek->hasActiveFocus());
+    QVERIFY(!f.volume->hasActiveFocus());
+    QVERIFY(f.library->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_COMPARE(f.playPauseTriggered->count(), 3);
+
+    // Tab still reaches Next, and Space presses it.
+    QVERIFY(tabTo(window, f.next));
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_COMPARE(f.nextTriggered->count(), 2);
+    QCOMPARE(f.playPauseTriggered->count(), 3);
+}
+
+void AccessibilityTest::modifiedKeysReachTheShortcutsFromFocusedButtons() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    TransportFixture f;
+    QVERIFY(f.load(window));
+
+    // Ctrl+Shift+Space stops whichever button has the focus, and the
+    // button does nothing.
+    QVERIFY(tabTo(window, f.next));
+    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier);
+    QTRY_COMPARE(f.stopTriggered->count(), 1);
+    QCOMPARE(f.nextTriggered->count(), 0);
+    QVERIFY(tabTo(window, f.mute));
+    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier);
+    QTRY_COMPARE(f.stopTriggered->count(), 2);
+    QCOMPARE(accessibleText(f.mute, QAccessible::Name), QStringLiteral("Mute"));
+    QVERIFY(tabTo(window, f.modeButton));
+    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier);
+    QTRY_COMPARE(f.stopTriggered->count(), 3);
+    QCOMPARE(f.viewer->property("visualizationMode").toInt(), 0);
+    QCOMPARE(f.playPauseTriggered->count(), 0);
 }
 
 void AccessibilityTest::rowHeightsAndScrollingFollowTheFont() {

@@ -162,6 +162,7 @@ qt_add_qml_module(ferrous
         qml/logic/ColorUtils.js
         qml/logic/ErrorUtils.js
         qml/logic/FormatUtils.js
+        qml/logic/KeyUtils.js
         qml/logic/PathUtils.js
         qml/logic/WheelUtils.js
 )

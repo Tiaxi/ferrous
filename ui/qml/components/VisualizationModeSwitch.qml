@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import QtQuick.Shapes 1.15
+import "../logic/KeyUtils.js" as KeyUtils
 
 Row {
     id: root
@@ -71,14 +72,16 @@ Row {
 
             onActiveFocusChanged: root.keyboardFocused = activeFocus
 
-            // Space presses the focused button rather than playing or pausing.
+            // Space presses the focused button rather than playing or
+            // pausing; keys with modifiers stay the shortcuts'.
             Keys.onShortcutOverride: function(event) {
-                event.accepted = event.key === Qt.Key_Space
+                event.accepted = KeyUtils.isPlainSpace(event)
             }
             Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Space
-                        || event.key === Qt.Key_Return
-                        || event.key === Qt.Key_Enter) {
+                if (KeyUtils.isUnmodified(event)
+                        && (event.key === Qt.Key_Space
+                            || event.key === Qt.Key_Return
+                            || event.key === Qt.Key_Enter)) {
                     root.setMode(button.index)
                     event.accepted = true
                 }
