@@ -37,8 +37,14 @@ pub(super) struct SessionSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SavedPosition {
     pub(super) position: Duration,
+    /// The track's duration, if playback knew it then.
+    pub(super) duration: Option<Duration>,
     pub(super) file: FileStamp,
 }
+
+/// The largest position in milliseconds that playback can seek to: a
+/// `GStreamer` seek takes a signed 64-bit count of nanoseconds.
+const MAX_POSITION_MS: u64 = i64::MAX.unsigned_abs() / 1_000_000;
 
 /// The keys of the session file that this build reads and writes. Others
 /// are kept as they were.
@@ -108,6 +114,7 @@ fn saved_position(state: &BridgeState) -> Option<SavedPosition> {
     }
     Some(SavedPosition {
         position: playback.position,
+        duration: Some(playback.duration).filter(|duration| !duration.is_zero()),
         file: playback.current_file?,
     })
 }
@@ -363,15 +370,22 @@ fn parse_repeat_mode(value: &str) -> Option<RepeatMode> {
 }
 
 /// A position saved by [`format_session_text`]; `None` unless every part is
-/// there and the position is past the start.
+/// there, and the position is past the start, before the track's end, and
+/// one that playback can seek to.
 fn parse_saved_position(value: &serde_json::Value) -> Option<SavedPosition> {
     let number = |key: &str| value.get(key).and_then(serde_json::Value::as_u64);
-    let position = Duration::from_millis(number("ms")?);
-    if position.is_zero() {
+    let millis = number("ms").filter(|ms| (1..=MAX_POSITION_MS).contains(ms))?;
+    let position = Duration::from_millis(millis);
+    let duration = match value.get("duration_ms") {
+        None => None,
+        Some(duration) => Some(Duration::from_millis(duration.as_u64()?)),
+    };
+    if duration.is_some_and(|duration| position >= duration) {
         return None;
     }
     Some(SavedPosition {
         position,
+        duration,
         file: FileStamp {
             size: number("file_size")?,
             modified_ns: number("file_modified_ns")?,
@@ -405,6 +419,11 @@ pub(super) fn format_session_text(session: &SessionSnapshot) -> String {
             "file_size": saved.file.size,
             "file_modified_ns": saved.file.modified_ns,
         });
+        if let Some(duration) = saved.duration {
+            payload["playback_position"]["duration_ms"] = u64::try_from(duration.as_millis())
+                .unwrap_or(u64::MAX)
+                .into();
+        }
     }
     // JSON strings hold only Unicode, so a path that is not UTF-8 is also
     // saved as its bytes. Builds that don't read them still find each entry
@@ -989,6 +1008,7 @@ mod tests {
             shuffle_enabled: true,
             position: Some(SavedPosition {
                 position: Duration::from_millis(83_250),
+                duration: Some(Duration::from_millis(241_000)),
                 file: FileStamp {
                     size: 31_337_000,
                     modified_ns: 1_761_000_000_123_456_789,
@@ -1079,6 +1099,7 @@ mod tests {
     fn at(millis: u64) -> Option<SavedPosition> {
         Some(SavedPosition {
             position: Duration::from_millis(millis),
+            duration: None,
             file: stamp(),
         })
     }
@@ -1134,6 +1155,34 @@ mod tests {
             // A key this build knows is not kept as an unknown one.
             assert!(parsed.unknown_keys.is_empty(), "{text}");
         }
+    }
+
+    #[test]
+    fn positions_playback_cannot_seek_to_are_not_restored() {
+        let parse = |position: &str| {
+            let text = format!(
+                r#"{{"queue": ["/a.flac"], "playback_position": {{{position}, "file_size": 1, "file_modified_ns": 2}}}}"#
+            );
+            parse_session_text(&text)
+                .expect("parse session text")
+                .position
+                .map(|saved| saved.position)
+        };
+        // Saturated, as a corrupt or hand-edited file may have it.
+        assert_eq!(parse(&format!(r#""ms": {}"#, u64::MAX)), None);
+        assert_eq!(parse(&format!(r#""ms": {}"#, MAX_POSITION_MS + 1)), None);
+        assert_eq!(
+            parse(&format!(r#""ms": {MAX_POSITION_MS}"#)),
+            Some(Duration::from_millis(MAX_POSITION_MS))
+        );
+        // At or past the end of the track.
+        assert_eq!(parse(r#""ms": 60000, "duration_ms": 60000"#), None);
+        assert_eq!(parse(r#""ms": 90000, "duration_ms": 60000"#), None);
+        assert_eq!(parse(r#""ms": 59000, "duration_ms": "long""#), None);
+        assert_eq!(
+            parse(r#""ms": 59000, "duration_ms": 60000"#),
+            Some(Duration::from_millis(59_000))
+        );
     }
 
     #[test]

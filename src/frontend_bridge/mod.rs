@@ -37,6 +37,7 @@ pub mod ffi;
 mod imports;
 mod library_index;
 pub mod library_tree;
+mod persist;
 mod queue;
 mod queue_relay;
 mod queue_sync;
@@ -50,8 +51,8 @@ mod workers;
 
 use commands::{handle_bridge_command, sync_queue_details, BridgeCommandContext};
 use config::{
-    apply_session_restore, load_session_snapshot, load_settings_into, save_session_snapshot,
-    save_settings, session_save_due, session_snapshot_for_state, SaveFailure, SessionSnapshot,
+    apply_session_restore, load_session_snapshot, load_settings_into, session_save_due,
+    session_snapshot_for_state, SaveFailure, SessionSnapshot,
 };
 pub use errors::{BridgeError, ErrorCategory, ErrorSeverity};
 use events::{
@@ -1009,8 +1010,10 @@ struct BridgeLoopRuntime {
     last_session_save: Instant,
     last_saved_session: Option<SessionSnapshot>,
     /// When the session, with the position of the current track, was last
-    /// saved.
+    /// handed over to be saved.
     last_position_save: Instant,
+    /// Saves the settings and the session off the bridge thread.
+    persist: persist::PersistWorker,
     save_errors: SaveErrors,
     quit_save: QuitSave,
     playing_poll_interval: Duration,
@@ -1040,6 +1043,9 @@ struct BridgeLoopRuntime {
     /// How often the loop woke because a worker had stopped.
     #[cfg(test)]
     stopped_worker_wakes: usize,
+    /// The newest persistence request answered.
+    #[cfg(test)]
+    persist_answered: u64,
 }
 
 struct BridgeLoopFlags {
@@ -1063,7 +1069,7 @@ struct BridgeSnapshotPlan {
 
 /// When dirty settings are saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum SettingsSaveTiming {
+pub(super) enum SettingsSaveTiming {
     /// With the periodic save.
     #[default]
     Periodic,
@@ -1099,6 +1105,7 @@ enum BridgeLoopWake {
     SearchResults(BridgeSearchResultsFrame),
     ApplyAlbumArt(ApplyAlbumArtEvent),
     LastFm(LastFmEvent),
+    Persisted(persist::PersistOutcome),
     /// A worker's channel to the loop closed: the worker thread has ended.
     WorkerStopped(Worker),
     Tick,
@@ -1119,6 +1126,7 @@ enum Worker {
     Search,
     ApplyAlbumArt,
     LastFm,
+    Persist,
 }
 
 impl Worker {
@@ -1136,6 +1144,7 @@ impl Worker {
             Self::Search => "Search",
             Self::ApplyAlbumArt => "Applying album art",
             Self::LastFm => "Last.fm scrobbling",
+            Self::Persist => "Saving the settings and the queue",
         }
     }
 
@@ -1151,6 +1160,7 @@ impl Worker {
             Self::EditRefresh => ErrorCategory::Tags,
             Self::Analysis => ErrorCategory::Analysis,
             Self::LastFm => ErrorCategory::LastFm,
+            Self::Persist => ErrorCategory::Settings,
         }
     }
 
@@ -1164,6 +1174,7 @@ impl Worker {
                 | Self::EditRefresh
                 | Self::Search
                 | Self::ApplyAlbumArt
+                | Self::Persist
         )
     }
 }
@@ -1260,6 +1271,7 @@ impl BridgeLoopRuntime {
             last_session_save: Instant::now(),
             last_saved_session: None,
             last_position_save: Instant::now(),
+            persist: persist::PersistWorker::new(),
             save_errors: SaveErrors::default(),
             quit_save: QuitSave::default(),
             playing_poll_interval,
@@ -1295,6 +1307,8 @@ impl BridgeLoopRuntime {
             worker_restarts: HashMap::new(),
             #[cfg(test)]
             stopped_worker_wakes: 0,
+            #[cfg(test)]
+            persist_answered: 0,
         }
     }
 
@@ -1307,7 +1321,7 @@ impl BridgeLoopRuntime {
             self.handle_wake(wake, event_tx);
             self.expire_quit_save(Instant::now(), event_tx);
             self.maybe_log_profile();
-            self.maybe_persist(event_tx);
+            self.maybe_persist();
         }
         self.shutdown(event_tx)
     }
@@ -1338,6 +1352,7 @@ impl BridgeLoopRuntime {
             recv(&self.search_results_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Search), BridgeLoopWake::SearchResults),
             recv(&self.apply_album_art_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::ApplyAlbumArt), BridgeLoopWake::ApplyAlbumArt),
             recv(&self.lastfm_rx) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::LastFm), BridgeLoopWake::LastFm),
+            recv(&self.persist.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Persist), BridgeLoopWake::Persisted),
             recv(after(wake_delay)) -> _ => BridgeLoopWake::Tick,
         }
     }
@@ -1473,6 +1488,10 @@ impl BridgeLoopRuntime {
                 self.handle_apply_album_art_event(event, event_tx)
             }
             BridgeLoopWake::LastFm(event) => self.handle_lastfm_event(event, event_tx),
+            BridgeLoopWake::Persisted(outcome) => {
+                self.apply_persist_outcome(outcome, event_tx);
+                SnapshotUrgency::None
+            }
             BridgeLoopWake::WorkerStopped(worker) => {
                 self.handle_stopped_worker(worker, event_tx);
                 SnapshotUrgency::None
@@ -1681,6 +1700,14 @@ impl BridgeLoopRuntime {
             Worker::Analysis => self.analysis_rx = never(),
             Worker::Metadata => self.metadata_rx = never(),
             Worker::Library => self.library_rx = never(),
+            Worker::Persist => {
+                if restart {
+                    self.persist.restart();
+                } else {
+                    self.persist.results = never();
+                }
+                self.persist_stopped(event_tx);
+            }
             Worker::LastFm => {
                 self.lastfm_rx = never();
                 self.quit_save.lastfm_stopped = true;
@@ -1816,6 +1843,7 @@ impl BridgeLoopRuntime {
             event_tx,
             running: &mut self.flags.running,
             settings_dirty: &mut self.flags.settings_dirty,
+            settings_save_timing: &mut self.flags.settings_save_timing,
         };
         let changed = handle_bridge_command(cmd, &mut self.state, &mut command_context);
         let mut urgency = SnapshotUrgency::None;
@@ -1971,7 +1999,22 @@ impl BridgeLoopRuntime {
     /// Save the state for the UI to quit, and answer with what could not be
     /// saved.
     fn save_state_for_quit(&mut self, request_id: u32, event_tx: &Sender<BridgeEvent>) {
-        let result = self.save_state_now();
+        match self.request_save_for_quit() {
+            // Answered once the persistence worker has saved them.
+            Ok(Some(id)) => self.quit_save.persisting.push((id, request_id)),
+            Ok(None) => self.answer_save_for_quit(request_id, Ok(()), event_tx),
+            Err(problem) => self.answer_save_for_quit(request_id, Err(problem), event_tx),
+        }
+    }
+
+    /// Answer the save before quitting with `result`, the outcome of saving
+    /// the settings and the session, once Last.fm has saved its scrobbles.
+    fn answer_save_for_quit(
+        &mut self,
+        request_id: u32,
+        result: Result<(), String>,
+        event_tx: &Sender<BridgeEvent>,
+    ) {
         if self.lastfm_may_hold_unsaved_scrobbles() && !self.quit_save.lastfm_stopped {
             // Quitting could lose them, so the user is told before the
             // window closes. Last.fm saves on its own thread, after the
@@ -2276,7 +2319,9 @@ impl BridgeLoopRuntime {
         self.diagnostics.profile_last = Instant::now();
     }
 
-    fn maybe_persist(&mut self, event_tx: &Sender<BridgeEvent>) {
+    /// Hand the settings and the session to the persistence worker when
+    /// they are due. Its answer comes as [`BridgeLoopWake::Persisted`].
+    fn maybe_persist(&mut self) {
         let save_now =
             std::mem::take(&mut self.flags.settings_save_timing) == SettingsSaveTiming::Now;
         if !self.persisted_state_enabled {
@@ -2284,76 +2329,164 @@ impl BridgeLoopRuntime {
             self.flags.session_dirty = false;
             return;
         }
-        // A failed save stays dirty, so the periodic save tries it again.
-        if self.flags.settings_dirty
-            && (save_now || self.last_settings_save.elapsed() >= Duration::from_secs(2))
-        {
-            let saved = self.save_settings_reported(event_tx);
-            self.flags.settings_dirty = !saved;
+        let settings = (self.flags.settings_dirty
+            && (save_now || self.last_settings_save.elapsed() >= Duration::from_secs(2)))
+        .then(|| {
+            self.flags.settings_dirty = false;
             self.last_settings_save = Instant::now();
+            self.state.settings.clone()
+        });
+        let mut session = None;
+        if self.flags.session_dirty && self.last_session_save.elapsed() >= Duration::from_secs(2) {
+            self.flags.session_dirty = false;
+            self.last_session_save = Instant::now();
+            let next = session_snapshot_for_state(&self.state);
+            if session_save_due(
+                self.last_saved_session.as_ref(),
+                &next,
+                self.state.playback.state == PlaybackState::Playing,
+                self.last_position_save.elapsed(),
+            ) {
+                self.last_saved_session = Some(next.clone());
+                self.last_position_save = Instant::now();
+                session = Some(next);
+            }
         }
-        if !self.flags.session_dirty || self.last_session_save.elapsed() < Duration::from_secs(2) {
+        if (settings.is_some() || session.is_some())
+            && self.persist.request(settings, session).is_err()
+        {
+            // The worker has stopped; it is restarted, or the user was told
+            // that nothing is saved anymore. Either way, try again later.
+            self.persist_failed();
+        }
+    }
+
+    /// A save failed or never happened: keep both files due, so the
+    /// periodic save tries them again.
+    fn persist_failed(&mut self) {
+        self.flags.settings_dirty = true;
+        self.flags.session_dirty = true;
+        self.last_saved_session = None;
+    }
+
+    /// Account for the saves up to `outcome.id`. A failed save is shown to
+    /// the user, or, for a save before quitting, in its answer.
+    fn apply_persist_outcome(
+        &mut self,
+        outcome: persist::PersistOutcome,
+        event_tx: &Sender<BridgeEvent>,
+    ) {
+        if matches!(outcome.settings, Some(Err(_))) {
+            self.flags.settings_dirty = true;
+        }
+        if matches!(outcome.session, Some(Err(_))) {
+            self.flags.session_dirty = true;
+            self.last_saved_session = None;
+        }
+        #[cfg(test)]
+        {
+            self.persist_answered = outcome.id;
+        }
+        let answered = self
+            .quit_save
+            .persisting
+            .iter()
+            .take_while(|(id, _)| outcome.id >= *id)
+            .count();
+        let quit_requests: Vec<u32> = self
+            .quit_save
+            .persisting
+            .drain(..answered)
+            .map(|(_, request_id)| request_id)
+            .collect();
+        if quit_requests.is_empty() {
+            if let Some(result) = outcome.settings {
+                report_save(result, &mut self.save_errors.settings, event_tx);
+            }
+            if let Some(result) = outcome.session {
+                report_save(result, &mut self.save_errors.session, event_tx);
+            }
             return;
         }
-        let session = session_snapshot_for_state(&self.state);
-        let mut saved = true;
-        if session_save_due(
-            self.last_saved_session.as_ref(),
-            &session,
-            self.state.playback.state == PlaybackState::Playing,
-            self.last_position_save.elapsed(),
-        ) {
-            saved = report_save(
-                save_session_snapshot(&session),
-                &mut self.save_errors.session,
-                event_tx,
-            );
-            if saved {
-                self.last_saved_session = Some(session);
-                self.last_position_save = Instant::now();
-            }
-        }
-        self.flags.session_dirty = !saved;
-        self.last_session_save = Instant::now();
-    }
-
-    fn save_settings_reported(&mut self, event_tx: &Sender<BridgeEvent>) -> bool {
-        report_save(
-            save_settings(&self.state.settings),
-            &mut self.save_errors.settings,
-            event_tx,
-        )
-    }
-
-    /// Save the settings and the session now, for the UI to close the
-    /// window only once they are on disk. Returns what to show the user if
-    /// either save failed.
-    fn save_state_now(&mut self) -> Result<(), String> {
-        if !self.persisted_state_enabled {
-            return Ok(());
-        }
         let mut failures = Vec::new();
-        match save_settings(&self.state.settings) {
-            Ok(()) => {
-                self.flags.settings_dirty = false;
-                self.save_errors.settings = None;
+        for (result, reported) in [
+            (outcome.settings, &mut self.save_errors.settings),
+            (outcome.session, &mut self.save_errors.session),
+        ] {
+            match result {
+                Some(Ok(())) => *reported = None,
+                Some(Err(failure)) => failures.push(failure.message),
+                None => {}
             }
-            Err(failure) => failures.push(failure.message),
         }
-        let session = session_snapshot_for_state(&self.state);
-        match save_session_snapshot(&session) {
-            Ok(()) => {
-                self.flags.session_dirty = false;
-                self.save_errors.session = None;
-                self.last_saved_session = Some(session);
-                self.last_position_save = Instant::now();
-            }
-            Err(failure) => failures.push(failure.message),
-        }
-        if failures.is_empty() {
+        let result = if failures.is_empty() {
             Ok(())
         } else {
             Err(failures.join("\n"))
+        };
+        for request_id in quit_requests {
+            self.answer_save_for_quit(request_id, result.clone(), event_tx);
+        }
+    }
+
+    /// The persistence worker stopped with saves it had not answered.
+    fn persist_stopped(&mut self, event_tx: &Sender<BridgeEvent>) {
+        self.persist_failed();
+        for (_, request_id) in std::mem::take(&mut self.quit_save.persisting) {
+            self.answer_save_for_quit(
+                request_id,
+                Err(PERSIST_STOPPED_MESSAGE.to_string()),
+                event_tx,
+            );
+        }
+    }
+
+    /// Hand the settings and the session over to be saved for quitting.
+    /// Returns the request to wait for, or why there is none to wait for.
+    fn request_save_for_quit(&mut self) -> Result<Option<u64>, String> {
+        if !self.persisted_state_enabled {
+            return Ok(None);
+        }
+        let session = session_snapshot_for_state(&self.state);
+        self.flags.settings_dirty = false;
+        self.flags.session_dirty = false;
+        self.last_saved_session = Some(session.clone());
+        self.last_position_save = Instant::now();
+        let requested = self
+            .persist
+            .request(Some(self.state.settings.clone()), Some(session));
+        requested.map(Some).map_err(|persist::PersistStopped| {
+            self.persist_failed();
+            PERSIST_STOPPED_MESSAGE.to_string()
+        })
+    }
+
+    /// Save the settings and the session, after the saves asked for before,
+    /// and wait for them. Returns whether they were saved.
+    fn flush_persistence(&mut self, event_tx: &Sender<BridgeEvent>) -> bool {
+        let Ok(Some(id)) = self.request_save_for_quit() else {
+            return !self.persisted_state_enabled;
+        };
+        while let Ok(outcome) = self.persist.results.recv() {
+            let done = outcome.id >= id;
+            let saved = outcome.saved();
+            self.apply_persist_outcome(outcome, event_tx);
+            if done {
+                return saved;
+            }
+        }
+        false
+    }
+
+    /// Wait for the saves handed to the persistence worker, as the loop
+    /// would, so a test can read the files.
+    #[cfg(test)]
+    fn settle_persistence(&mut self, event_tx: &Sender<BridgeEvent>) {
+        while self.persist_answered < self.persist.last_requested() {
+            let Ok(outcome) = self.persist.results.recv_timeout(Duration::from_secs(10)) else {
+                panic!("the persistence worker answers");
+            };
+            self.apply_persist_outcome(outcome, event_tx);
         }
     }
 
@@ -2361,15 +2494,8 @@ impl BridgeLoopRuntime {
     /// the session, and Last.fm's queue were saved, and playback stopped
     /// with every file released.
     fn shutdown(&mut self, event_tx: &Sender<BridgeEvent>) -> bool {
-        let mut saved = true;
-        if self.persisted_state_enabled {
-            saved &= self.save_settings_reported(event_tx);
-            saved &= report_save(
-                save_session_snapshot(&session_snapshot_for_state(&self.state)),
-                &mut self.save_errors.session,
-                event_tx,
-            );
-        }
+        // After the saves asked for before; the worker only writes files.
+        let mut saved = self.flush_persistence(event_tx);
         finalize_lastfm_track(
             &self.state,
             &self.lastfm,
@@ -2406,9 +2532,16 @@ impl BridgeLoopRuntime {
     }
 }
 
+/// Why a save was not made: the thread that saves has stopped.
+const PERSIST_STOPPED_MESSAGE: &str =
+    "The settings and the queue could not be saved: the thread that saves them stopped.";
+
 /// What a save before quitting waits for.
 #[derive(Default)]
 struct QuitSave {
+    /// Saves whose files the persistence worker saves: the persistence
+    /// request each waits for, and its request ID, oldest first.
+    persisting: Vec<(u64, u32)>,
     /// A save that waits for Last.fm to save scrobbles it holds only in
     /// memory: its request ID, and how saving the settings and the session
     /// went.
@@ -2687,6 +2820,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::config::{save_session_snapshot, save_settings};
     use super::*;
     use crate::library::{LibraryRoot, LibraryTrack};
     use std::path::Path;
@@ -3052,7 +3186,8 @@ mod tests {
             runtime.last_session_save = Instant::now()
                 .checked_sub(Duration::from_secs(3))
                 .expect("an earlier instant");
-            runtime.maybe_persist(&event_tx);
+            runtime.maybe_persist();
+            runtime.settle_persistence(&event_tx);
         };
         runtime.state.queue = vec![p("/music/a.flac")];
         runtime.state.playback.current = Some(p("/music/a.flac"));
@@ -3082,6 +3217,53 @@ mod tests {
         assert_eq!(error_messages(&event_rx), Vec::<String>::new());
     }
 
+    #[test]
+    fn saves_wait_off_the_bridge_thread_and_quitting_waits_for_them() {
+        let _guard = test_guard();
+        let _config = crate::paths::TestConfigDir::new();
+        let mut runtime = BridgeLoopRuntime::new(
+            BridgeRuntimeOptions {
+                persisted_state_enabled: true,
+                ..BridgeRuntimeOptions::default()
+            },
+            None,
+        );
+        // As on storage that does not answer.
+        runtime.persist = persist::stalled_worker();
+        let (event_tx, event_rx) = unbounded();
+        runtime.state.queue = vec![p("/music/a.flac")];
+        runtime.flags.session_dirty = true;
+        runtime.last_session_save = Instant::now()
+            .checked_sub(Duration::from_secs(3))
+            .expect("an earlier instant");
+        // The loop hands the session over and goes on.
+        runtime.maybe_persist();
+        assert!(!config::session_path().expect("session path").exists());
+
+        // Quitting is answered only once the saves have landed.
+        runtime.handle_command(BridgeCommand::SaveState(5), &event_tx);
+        assert!(!event_rx
+            .try_iter()
+            .any(|event| matches!(event, BridgeEvent::StateSaved { .. })));
+        persist::STALL_GATE.0.send(()).expect("open");
+        persist::STALL_GATE.0.send(()).expect("open");
+        runtime.settle_persistence(&event_tx);
+        let answers: Vec<_> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::StateSaved { request_id, result } => Some((request_id, result)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers, vec![(5, Ok(()))]);
+        let text = std::fs::read_to_string(config::session_path().expect("session path"))
+            .expect("the session");
+        assert_eq!(
+            config::parse_session_text(&text).expect("parse").queue,
+            vec![p("/music/a.flac")]
+        );
+    }
+
     fn lastfm_connected_as(username: &str) -> LastFmEvent {
         LastFmEvent::State(crate::lastfm::RuntimeState {
             username: username.to_string(),
@@ -3097,7 +3279,8 @@ mod tests {
         let (event_tx, _event_rx) = unbounded();
 
         runtime.handle_lastfm_event(lastfm_connected_as("tester"), &event_tx);
-        runtime.maybe_persist(&event_tx);
+        runtime.maybe_persist();
+        runtime.settle_persistence(&event_tx);
 
         assert_eq!(
             runtime.state.settings.integrations.lastfm_username,
@@ -3130,7 +3313,8 @@ mod tests {
         runtime.last_settings_save = Instant::now();
         runtime.handle_lastfm_event(lastfm_connected_as("first"), &event_tx);
         assert_eq!(runtime.next_settings_save_delay(), Some(Duration::ZERO));
-        runtime.maybe_persist(&event_tx);
+        runtime.maybe_persist();
+        runtime.settle_persistence(&event_tx);
         assert_eq!(saved_username(), "first");
         assert!(!runtime.flags.settings_dirty);
         assert_eq!(error_messages(&event_rx), Vec::<String>::new());
@@ -3139,7 +3323,8 @@ mod tests {
         std::fs::remove_file(&settings_path).expect("remove the settings");
         std::fs::create_dir(&settings_path).expect("block the settings");
         runtime.handle_lastfm_event(lastfm_connected_as("second"), &event_tx);
-        runtime.maybe_persist(&event_tx);
+        runtime.maybe_persist();
+        runtime.settle_persistence(&event_tx);
         let messages = error_messages(&event_rx);
         assert_eq!(messages.len(), 1, "{messages:?}");
         assert!(
@@ -3155,7 +3340,8 @@ mod tests {
         // The periodic save tries again.
         std::fs::remove_dir(&settings_path).expect("unblock the settings");
         runtime.last_settings_save = Instant::now() - Duration::from_secs(3);
-        runtime.maybe_persist(&event_tx);
+        runtime.maybe_persist();
+        runtime.settle_persistence(&event_tx);
         assert_eq!(saved_username(), "second");
         assert!(!runtime.flags.settings_dirty);
     }

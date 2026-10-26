@@ -2,8 +2,8 @@
 
 use super::queue::{same_audio_extension, CancelledAdvance, GaplessQueue, Handoff};
 use super::{
-    EngineExit, FileStamp, PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState,
-    TrackChangeKind,
+    EngineExit, FileStamp, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
+    PlaybackSnapshot, PlaybackState, TrackChangeKind,
 };
 use crate::analysis::AnalysisCommand;
 use crossbeam_channel::{unbounded, Sender};
@@ -339,11 +339,25 @@ impl MockPlaybackRuntime {
     }
     /// Like the `GStreamer` backend; see [`PlaybackCommand::Cue`].
     fn cue(&mut self, position: Duration, expected: FileStamp) {
-        if self.snapshot.current.is_none()
-            || self.snapshot.state != PlaybackState::Stopped
-            || self.snapshot.current_file != Some(expected)
-        {
+        let Some(path) = self
+            .snapshot
+            .current
+            .clone()
+            .filter(|_| self.snapshot.state == PlaybackState::Stopped)
+        else {
             return;
+        };
+        match self.snapshot.current_file {
+            None => {
+                let _ = self.event_tx.send(PlaybackEvent::Error(PlaybackError {
+                    detail: FileStamp::missing_detail(&path),
+                    path: Some(path),
+                    outcome: PlaybackErrorOutcome::NotResumed,
+                }));
+                return;
+            }
+            Some(stamp) if stamp != expected => return,
+            Some(_) => {}
         }
         self.snapshot.state = PlaybackState::Paused;
         self.snapshot.current_queue_index = self.queue.current_index();

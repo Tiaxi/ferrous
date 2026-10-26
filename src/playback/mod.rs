@@ -56,6 +56,18 @@ pub struct FileStamp {
 }
 
 impl FileStamp {
+    /// Why the file at `path` has no stamp, for the user.
+    #[must_use]
+    pub fn missing_detail(path: &Path) -> String {
+        match std::fs::metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                "the file is gone, or its drive is not connected".to_string()
+            }
+            Err(error) => format!("the file cannot be read ({error})"),
+            Ok(_) => "the file could not be read".to_string(),
+        }
+    }
+
     /// The stamp of the file at `path` now, or `None` when there is none or
     /// it has no modification time.
     #[must_use]
@@ -228,6 +240,9 @@ pub enum PlaybackErrorOutcome {
     /// stopped reading it, behind a read or in a close that has not
     /// returned, so it stays open.
     NotReleased,
+    /// A [`PlaybackCommand::Cue`] found no file to open, so the track stays
+    /// stopped at its start.
+    NotResumed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +276,14 @@ impl PlaybackError {
             PlaybackErrorOutcome::EngineUnavailable => {
                 format!("Playback is unavailable: {detail}.")
             }
+            PlaybackErrorOutcome::NotResumed => match self.path.as_deref() {
+                // The whole path, which names the drive that may be gone.
+                Some(path) => format!(
+                    "Couldn't resume \u{201c}{}\u{201d} where it was left: {detail}.",
+                    path.display()
+                ),
+                None => format!("Couldn't resume the last track where it was left: {detail}."),
+            },
             // The whole path, which names the drive or share that hangs.
             PlaybackErrorOutcome::NotReleased => match self.path.as_deref() {
                 Some(path) => format!(
@@ -544,6 +567,15 @@ mod shared_tests {
             "Can't release \u{201c}/mnt/share/b.flac\u{201d}: reading or closing it has not \
              finished for 15 s."
         );
+        assert_eq!(
+            error(
+                Some("/media/usb/b.flac"),
+                "the file is gone, or its drive is not connected",
+                PlaybackErrorOutcome::NotResumed
+            ),
+            "Couldn't resume \u{201c}/media/usb/b.flac\u{201d} where it was left: the file is \
+             gone, or its drive is not connected."
+        );
     }
 
     #[test]
@@ -792,6 +824,27 @@ mod tests {
         assert_eq!(snapshot.state, PlaybackState::Paused);
         assert_eq!(snapshot.position, Duration::from_secs(42));
         assert_eq!(snapshot.current_queue_index, Some(0));
+
+        // A file that is gone is reported, and its track stays stopped.
+        let (engine, rx) = make_test_engine();
+        let gone = dir.join("gone.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![gone.clone()]));
+        engine.command(PlaybackCommand::Cue {
+            position: Duration::from_secs(42),
+            expected: stamp,
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut error = None;
+        while error.is_none() && Instant::now() < deadline {
+            if let Ok(PlaybackEvent::Error(reported)) = rx.recv_timeout(Duration::from_millis(10)) {
+                error = Some(reported);
+            }
+        }
+        let error = error.expect("the missing file is reported");
+        assert_eq!(error.path.as_deref(), Some(gone.as_path()));
+        assert_eq!(error.outcome, super::PlaybackErrorOutcome::NotResumed);
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("snapshot");
+        assert_eq!(snapshot.state, PlaybackState::Stopped);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

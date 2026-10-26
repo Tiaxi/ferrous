@@ -296,7 +296,7 @@ pub(super) fn process_playback_event(
 /// leaves playback going.
 fn playback_error(error: &crate::playback::PlaybackError) -> BridgeError {
     let severity = match error.outcome {
-        PlaybackErrorOutcome::Skipped => ErrorSeverity::Warning,
+        PlaybackErrorOutcome::Skipped | PlaybackErrorOutcome::NotResumed => ErrorSeverity::Warning,
         PlaybackErrorOutcome::Stopped
         | PlaybackErrorOutcome::StoppedAfterFailures(_)
         | PlaybackErrorOutcome::EngineUnavailable
@@ -951,6 +951,23 @@ mod tests {
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
+    }
+
+    #[test]
+    fn a_track_that_could_not_resume_is_a_playback_warning_about_its_file() {
+        let error = playback_error(&crate::playback::PlaybackError {
+            path: Some(PathBuf::from("/media/usb/a.flac")),
+            detail: "the file is gone, or its drive is not connected".to_string(),
+            outcome: PlaybackErrorOutcome::NotResumed,
+        });
+        assert_eq!(error.category, ErrorCategory::Playback);
+        assert_eq!(error.severity, ErrorSeverity::Warning);
+        assert_eq!(error.subject, "/media/usb/a.flac");
+        assert!(
+            error.message.starts_with("Couldn't resume"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

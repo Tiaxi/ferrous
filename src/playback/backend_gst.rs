@@ -1331,11 +1331,25 @@ impl GstPlaybackRuntime {
     /// restarted run does: Play before the seek has landed plays once it
     /// has, and a newer seek replaces it.
     fn cue(&mut self, position: Duration, expected: FileStamp) {
-        if self.snapshot.current.is_none()
-            || self.snapshot.state != PlaybackState::Stopped
-            || self.snapshot.current_file != Some(expected)
-        {
+        let Some(path) = self
+            .snapshot
+            .current
+            .clone()
+            .filter(|_| self.snapshot.state == PlaybackState::Stopped)
+        else {
             return;
+        };
+        match self.snapshot.current_file {
+            // Gone, or its drive is not connected: tell the user why the
+            // track did not resume.
+            None => {
+                let detail = FileStamp::missing_detail(&path);
+                self.report_failure(Some(path), detail, PlaybackErrorOutcome::NotResumed);
+                return;
+            }
+            // Changed since: it plays from its start, which needs no word.
+            Some(stamp) if stamp != expected => return,
+            Some(_) => {}
         }
         if let Ok(state) = self.queue_state.lock() {
             self.snapshot.current_queue_index = state.current_index();
@@ -3910,6 +3924,16 @@ mod tests {
     use crate::playback::PathRenames;
     use std::sync::TryLockError;
 
+    #[test]
+    fn positions_beyond_any_seek_become_the_latest_one() {
+        assert_eq!(clock_time(Duration::MAX), MAX_SEEK_TIME);
+        assert_eq!(clock_time(Duration::from_millis(u64::MAX)), MAX_SEEK_TIME);
+        assert_eq!(
+            clock_time(Duration::from_millis(1_500)),
+            gst::ClockTime::from_mseconds(1_500)
+        );
+    }
+
     fn make_volume_test_runtime() -> (GstPlaybackRuntime, Receiver<PlaybackEvent>) {
         gst::init().unwrap();
         let playbin = gst::ElementFactory::make("playbin3")
@@ -4295,8 +4319,15 @@ mod tests {
     }
 }
 
+/// The latest time a seek can go to: seeks take a signed 64-bit time.
+const MAX_SEEK_TIME: gst::ClockTime = gst::ClockTime::from_nseconds(i64::MAX.unsigned_abs());
+
+/// `position` as a clock time a seek can go to, at most [`MAX_SEEK_TIME`].
+/// `from_nseconds` also panics on `u64::MAX`, which is
+/// `GST_CLOCK_TIME_NONE`.
 fn clock_time(position: Duration) -> gst::ClockTime {
-    gst::ClockTime::from_nseconds(u64::try_from(position.as_nanos()).unwrap_or(u64::MAX))
+    let nanos = u64::try_from(position.as_nanos()).unwrap_or(u64::MAX);
+    gst::ClockTime::from_nseconds(nanos.min(MAX_SEEK_TIME.nseconds()))
 }
 
 fn file_uri(path: &Path) -> Option<String> {
@@ -5687,6 +5718,54 @@ mod engine_tests {
             "played from the start"
         );
         assert_eq!(engine.changes.len(), 2, "{:?}", engine.changes);
+    }
+
+    #[test]
+    fn a_cue_for_a_missing_file_says_why_the_track_did_not_resume() {
+        let fixtures = Fixtures::new("cue-missing");
+        // Removed, or on a drive that is not connected, since it was saved.
+        let gone = fixtures.dir.join("gone.wav");
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![gone.clone()]));
+        engine.send(PlaybackCommand::Cue {
+            position: millis(2_500),
+            expected: FileStamp {
+                size: 1,
+                modified_ns: 2,
+            },
+        });
+        let error = engine.wait_for_errors(1);
+        assert_eq!(error.path.as_deref(), Some(gone.as_path()));
+        assert_eq!(error.outcome, PlaybackErrorOutcome::NotResumed);
+        assert!(
+            error.message().contains("the file is gone"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
+        assert_eq!(engine.snapshot.position, Duration::ZERO);
+        assert!(engine.seeked.is_empty());
+    }
+
+    #[test]
+    fn a_cue_past_any_clock_time_does_not_stop_the_engine() {
+        let fixtures = Fixtures::new("cue-overflow");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Cue {
+            position: Duration::from_millis(u64::MAX),
+            expected: FileStamp::of(&a).expect("stamp"),
+        });
+        engine.wait_until("the cue was not taken", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        // The engine still takes commands.
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("the engine did not stop the track", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        assert!(!engine.thread.is_finished(), "the engine thread ended");
     }
 
     #[test]

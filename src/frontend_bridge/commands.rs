@@ -19,7 +19,7 @@ use crate::library::{
 use crate::metadata::MetadataService;
 use crate::playback::{remap_path, PathRenames, PlaybackCommand, PlaybackEngine};
 
-use super::config::{load_settings_into, save_settings};
+use super::config::load_settings_into;
 use super::imports::{QueueRequest, RenamedDetails};
 use super::library_tree::tree_key_is;
 use super::queue::handle_queue_command;
@@ -29,6 +29,7 @@ use super::{
     library_tree, try_send_event, ApplyAlbumArtRequest, BridgeAnalysisCommand, BridgeCommand,
     BridgeError, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
     BridgeSettingsCommand, BridgeState, ErrorCategory, LibrarySortMode, SearchWorkerQuery,
+    SettingsSaveTiming,
 };
 use crate::collation::CollationKey;
 
@@ -42,6 +43,7 @@ pub(super) struct BridgeCommandContext<'a> {
     pub(super) event_tx: &'a Sender<BridgeEvent>,
     pub(super) running: &'a mut bool,
     pub(super) settings_dirty: &'a mut bool,
+    pub(super) settings_save_timing: &'a mut SettingsSaveTiming,
 }
 
 struct LibraryCommandRuntime<'a> {
@@ -223,16 +225,10 @@ fn set_fft_size(state: &mut BridgeState, context: &mut BridgeCommandContext<'_>,
     *context.settings_dirty = true;
 }
 
-/// Save the settings, showing the user a failure.
-fn save_settings_now(state: &BridgeState, context: &mut BridgeCommandContext<'_>) {
-    match save_settings(&state.settings) {
-        Ok(()) => *context.settings_dirty = false,
-        Err(failure) => {
-            let error = BridgeError::error(ErrorCategory::Settings, failure.message)
-                .about(failure.identity.0.to_string_lossy());
-            let _ = try_send_event(context.event_tx, BridgeEvent::Error(error));
-        }
-    }
+/// Save the settings without waiting for the periodic save.
+fn save_settings_now(context: &mut BridgeCommandContext<'_>) {
+    *context.settings_dirty = true;
+    *context.settings_save_timing = SettingsSaveTiming::Now;
 }
 
 /// Keep the window layout the UI sent, to save it with the settings.
@@ -256,7 +252,7 @@ fn handle_settings_bridge_command(
         BridgeSettingsCommand::LoadFromDisk => {
             handle_load_settings_from_disk(state, context);
         }
-        BridgeSettingsCommand::SaveToDisk => save_settings_now(state, context),
+        BridgeSettingsCommand::SaveToDisk => save_settings_now(context),
         BridgeSettingsCommand::SetVolume(volume) => {
             let volume = volume.clamp(0.0, 1.0);
             state.settings.volume = volume;
