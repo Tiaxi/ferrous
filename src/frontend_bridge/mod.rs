@@ -832,23 +832,6 @@ impl Default for BridgeRuntimeOptions {
     }
 }
 
-/// Wait until `GStreamer` has loaded its plugin registry, before a test's
-/// bridge starts playback.
-///
-/// With an empty cache directory, as in a new CI job, the first
-/// initialization rebuilds the registry, which takes about a second, and
-/// longer on a busy machine. The playback engine initializes `GStreamer` as
-/// it starts, and confirms that it stopped only once it has started, so a
-/// test that stops its bridge soon after starting it would wait for the
-/// rebuild within [`PLAYBACK_SHUTDOWN_TIMEOUT`]. Initialization happens once
-/// per process, and callers wait while it runs, so the tests wait for one
-/// rebuild here instead.
-#[cfg(all(test, feature = "gst"))]
-fn wait_for_gstreamer_registry() {
-    // The engine reports a failure when it starts.
-    let _ = gstreamer::init();
-}
-
 impl FrontendBridgeHandle {
     /// Start the bridge thread.
     ///
@@ -884,8 +867,6 @@ impl FrontendBridgeHandle {
         // The bridge saves in the config directory of the test that starts it.
         #[cfg(test)]
         let config_dir = crate::paths::config_dir_override();
-        #[cfg(all(test, feature = "gst"))]
-        wait_for_gstreamer_registry();
         let thread = spawn_joinable("ferrous-bridge", move || {
             #[cfg(test)]
             crate::paths::set_config_dir_override(config_dir);
@@ -3545,6 +3526,71 @@ mod tests {
         assert!(matches!(event_rx.try_recv(), Ok(BridgeEvent::Stopped)));
     }
 
+    /// Tells the child process that
+    /// `test_bridges_stop_in_time_while_gstreamer_rebuilds_its_registry`
+    /// starts to run its part.
+    #[cfg(feature = "gst")]
+    const COLD_REGISTRY_CHILD_ENV: &str = "FERROUS_TEST_COLD_GSTREAMER_REGISTRY";
+
+    /// With an empty cache directory, `GStreamer` rebuilds its plugin
+    /// registry when it is first initialized (#241). A process initializes
+    /// it only once, and another test may have done so already, so the
+    /// bridge starts and stops in a child process with a cache directory of
+    /// its own.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn test_bridges_stop_in_time_while_gstreamer_rebuilds_its_registry() {
+        let cache = crate::paths::test_root().join("cold-gstreamer-cache");
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&cache).expect("create the cache directory");
+
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, module)| module);
+        let name = format!("{module}::cold_gstreamer_registry_bridge");
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        child
+            .args(["--exact", &name, "--ignored"])
+            .env(COLD_REGISTRY_CHILD_ENV, "1")
+            .env_remove("GST_REGISTRY")
+            .env_remove("GST_REGISTRY_1_0")
+            .env_remove("GST_REGISTRY_UPDATE");
+        crate::paths::set_child_cache_home(&mut child, &cache);
+        let output = child.output().expect("run the child process");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(&format!("test {name} ... ok")),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The child rebuilt the registry in its own cache directory.
+        assert!(cache.join("gstreamer-1.0").is_dir());
+        std::fs::remove_dir_all(cache).expect("remove the cache directory");
+    }
+
+    /// The child process's part of
+    /// `test_bridges_stop_in_time_while_gstreamer_rebuilds_its_registry`.
+    #[cfg(feature = "gst")]
+    #[test]
+    #[ignore = "run in a child process by test_bridges_stop_in_time_while_gstreamer_rebuilds_its_registry"]
+    fn cold_gstreamer_registry_bridge() {
+        if std::env::var_os(COLD_REGISTRY_CHILD_ENV).is_none() {
+            return;
+        }
+        assert!(
+            !gstreamer::INITIALIZED.load(Ordering::SeqCst),
+            "the bridge starts before GStreamer is initialized"
+        );
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = unbounded();
+
+        assert!(
+            runtime.shutdown(&event_tx),
+            "{:?}",
+            error_messages(&event_rx)
+        );
+    }
+
     #[test]
     fn renaming_the_playing_file_continues_its_lastfm_play() {
         let _guard = test_guard();
@@ -4857,16 +4903,6 @@ mod tests {
             (snapshot.playback.volume - volume).abs() < 1e-3
         })
         .is_some()
-    }
-
-    /// Run alone with an empty cache directory, the bridge would otherwise
-    /// stop while the engine waits for the registry rebuild.
-    #[cfg(feature = "gst")]
-    #[test]
-    fn test_bridges_start_playback_once_gstreamer_has_loaded_its_registry() {
-        let bridge = FrontendBridgeHandle::spawn().expect("spawn bridge");
-        assert!(gstreamer::INITIALIZED.load(Ordering::SeqCst));
-        assert!(bridge.shutdown(), "the bridge stops in time");
     }
 
     #[test]

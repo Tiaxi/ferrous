@@ -442,6 +442,23 @@ pub fn spawn_engine(
     spawn_engine_with_output(analysis_tx, event_tx, failure, exit_tx, build_output_sink)
 }
 
+/// Wait until `GStreamer` has loaded its plugin registry, before a test
+/// starts an engine.
+///
+/// With an empty cache directory, as in a new CI job, the first
+/// initialization rebuilds the registry, which takes about a second, and
+/// longer on a busy machine. The engine initializes `GStreamer` as it
+/// starts, and confirms that it stopped only once it has started, so a test
+/// that stops an engine soon after starting it, as the bridge's shutdown
+/// tests do, would wait for the rebuild within the bridge's playback
+/// shutdown timeout. Initialization happens once per process, and callers
+/// wait while it runs, so the tests wait for one rebuild here instead.
+#[cfg(test)]
+fn wait_for_gstreamer_registry() {
+    // The engine reports a failure when it starts.
+    let _ = gst::init();
+}
+
 /// Spawn the engine with the audio output that `build_output` creates
 /// after `GStreamer` is initialized. When the engine cannot start, the
 /// thread records why in `failure`, reports it, and exits, so that later
@@ -454,6 +471,8 @@ fn spawn_engine_with_output(
     exit_tx: Sender<EngineExit>,
     build_output: fn() -> anyhow::Result<gst::Element>,
 ) -> Sender<PlaybackCommand> {
+    #[cfg(test)]
+    wait_for_gstreamer_registry();
     let (cmd_tx, cmd_rx) = unbounded::<PlaybackCommand>();
     let failure = Arc::clone(failure);
 
