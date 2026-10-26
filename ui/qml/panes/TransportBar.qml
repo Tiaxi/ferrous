@@ -118,8 +118,8 @@ ToolBar {
                     root.seekCommitted(value)
                 }
             }
-            // The arrow keys move the slider without pressing it, so their
-            // moves seek at once.
+            // The arrow keys and drags press the slider and seek on release;
+            // other moves, such as the wheel's, seek at once.
             onMoved: {
                 if (!pressed && seekAllowed) {
                     root.seekCommitted(value)
@@ -183,7 +183,9 @@ ToolBar {
                     * (seekSlider.availableWidth - width)
                 y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
                 implicitWidth: 3
-                implicitHeight: seekSlider.height - 4
+                // From the background's height rather than the slider's,
+                // which depends on the handle's.
+                implicitHeight: root.uiPalette.rowHeight - 4
                 radius: 1
                 color: root.uiPalette.uiAccentColor
                 border.color: ColorUtils.mixColor(
@@ -231,6 +233,9 @@ ToolBar {
             property: "value"
             value: seekSlider.durationKnown ? root.displayedPositionSeconds : 0
             when: !seekSlider.pressed
+            // A press keeps the position it starts from; restoring the value
+            // from before the binding would make the arrow keys step from it.
+            restoreMode: Binding.RestoreNone
         }
 
         Label {
@@ -288,6 +293,8 @@ ToolBar {
             property: "value"
             value: root.uiBridge.volume
             when: !volumeSlider.pressed
+            // As for the seek slider.
+            restoreMode: Binding.RestoreNone
         }
     }
 }

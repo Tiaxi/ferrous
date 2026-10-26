@@ -9,11 +9,13 @@
 #include <QJSValue>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlExpression>
 #include <QQuickItem>
+#include <QQuickStyle>
 #include <QQuickWindow>
 #include <QTemporaryDir>
 #include <QWheelEvent>
@@ -21,6 +23,7 @@
 #include <QtTest/QtTest>
 #include <qqml.h>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -256,6 +259,12 @@ private slots:
     void libraryAndQueueRowsHaveAccessibleNames();
     void slidersAndIconButtonsHaveNamesAndTooltips();
     void keyboardMovesOfTheSeekSliderSeek();
+    void arrowKeysStepTheVolumeFromItsValue();
+    void bridgeEchoesWaitForTheVolumeGesture();
+    void arrowKeysSeekFromThePlaybackPosition();
+    void seekDragSeeksOnceOnRelease();
+    void transportBarHasNoWarnings();
+    void transportBarHasNoWarningsUnderTheBasicStyle();
     void clicksLeaveSpaceToPlayOrPause();
     void modifiedKeysReachTheShortcutsFromFocusedButtons();
     void rowHeightsAndScrollingFollowTheFont();
@@ -506,11 +515,11 @@ void AccessibilityTest::keyboardMovesOfTheSeekSliderSeek() {
     QTRY_VERIFY(seek->isEnabled());
     seek->forceActiveFocus(Qt::TabFocusReason);
     QVERIFY(seek->hasActiveFocus());
-    // The arrow keys seek by the keyboard's seek step.
+    // The arrow keys seek by the keyboard's seek step. The fallback bridge
+    // has no playback clock, so arrowKeysSeekFromThePlaybackPosition covers
+    // steps from a moving position.
     QTest::keyClick(window, Qt::Key_Right);
     QTRY_COMPARE(bridge->property("lastSeekSeconds").toDouble(), 5.0);
-    QTest::keyClick(window, Qt::Key_Right);
-    QTRY_COMPARE(bridge->property("lastSeekSeconds").toDouble(), 10.0);
 }
 
 namespace {
@@ -570,6 +579,300 @@ bool tabTo(QQuickWindow *window, QQuickItem *target) {
 }
 
 } // namespace
+
+// The transport bar alone. Its bridge is updated only by the test, as the
+// real bridge's echo comes later, and the harness records what it sends.
+static QByteArray transportHarnessQml() {
+    return QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "panes" as Panes
+
+ApplicationWindow {
+    id: harness
+    width: 1000
+    height: 200
+    visible: true
+    property alias bridge: bridge
+    property alias startButton: startButton
+    property real positionSeconds: 50
+    // What the transport bar sent, in order.
+    property var seeks: []
+    property var volumes: []
+
+    Components.UiPalette {
+        id: uiPalette
+        windowRoot: harness
+    }
+
+    QtObject {
+        id: bridge
+        property real durationSeconds: 200
+        property string durationText: "03:20"
+        property string playbackState: "Playing"
+        property real volume: 0.5
+        property var waveformPeaksPacked: ""
+        property real waveformCoverageSeconds: 0
+        property bool waveformComplete: false
+    }
+
+    Action { id: previousAction; text: "Previous" }
+    Action { id: playAction; text: "Play" }
+    Action { id: pauseAction; text: "Pause" }
+    Action { id: stopAction; text: "Stop" }
+    Action { id: nextAction; text: "Next" }
+
+    Column {
+        anchors.fill: parent
+
+        Button {
+            id: startButton
+            text: "Start"
+        }
+
+        Panes.TransportBar {
+            width: parent.width
+            uiBridge: bridge
+            uiPalette: uiPalette
+            previousAction: previousAction
+            playAction: playAction
+            pauseAction: pauseAction
+            stopAction: stopAction
+            nextAction: nextAction
+            volumeMuted: false
+            keyboardSeekStepSeconds: 5
+            displayedPositionSeconds: harness.positionSeconds
+            toggleMutedVolume: function() {}
+            setAppVolume: function(value) { harness.volumes = harness.volumes.concat([value]) }
+            normalizedVolumeValue: function(value) { return value }
+            seekCommitted: function(value) { harness.seeks = harness.seeks.concat([value]) }
+        }
+    }
+}
+)QML");
+}
+
+namespace {
+
+QList<double> recordedValues(QObject *harness, const char *name) {
+    QList<double> values;
+    for (const QVariant &value : qvariant_cast<QJSValue>(harness->property(name)).toVariant().toList()) {
+        values.push_back(value.toDouble());
+    }
+    return values;
+}
+
+bool fuzzyEqual(double a, double b) {
+    return std::abs(a - b) < 1e-6;
+}
+
+// Whether the harness recorded values under `name` after the first `from`,
+// and all of those are `expected`.
+bool onlyRecordedSince(QObject *harness, const char *name, qsizetype from, double expected) {
+    const QList<double> values = recordedValues(harness, name).mid(from);
+    return !values.isEmpty()
+        && std::all_of(values.begin(), values.end(),
+                       [expected](double value) { return fuzzyEqual(value, expected); });
+}
+
+QString describeValues(const QList<double> &values) {
+    QStringList parts;
+    for (double value : values) {
+        parts.push_back(QString::number(value));
+    }
+    return QStringLiteral("[") + parts.join(QStringLiteral(", ")) + QStringLiteral("]");
+}
+
+// Loads the transport harness with the focus on its start button.
+QQuickWindow *loadTransportHarness(QQmlEngine &engine, QScopedPointer<QObject> &root, QString *errorText) {
+    root.reset(createQml(engine, transportHarnessQml(), errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
+        return nullptr;
+    }
+    window->requestActivate();
+    if (!QTest::qWaitForWindowActive(window)) {
+        return nullptr;
+    }
+    auto *start = qvariant_cast<QQuickItem *>(root->property("startButton"));
+    start->forceActiveFocus(Qt::TabFocusReason);
+    return start->hasActiveFocus() ? window : nullptr;
+}
+
+} // namespace
+
+void AccessibilityTest::arrowKeysStepTheVolumeFromItsValue() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
+    QVERIFY(bridge != nullptr && volume != nullptr);
+    QCOMPARE(volume->property("value").toDouble(), 0.5);
+    QVERIFY(tabTo(window, volume));
+    const auto volumesText = [&root]() {
+        return describeValues(recordedValues(root.data(), "volumes"));
+    };
+
+    // Right steps up from the bridge's volume, and the bridge gets it.
+    QTest::keyClick(window, Qt::Key_Right);
+    QVERIFY2(onlyRecordedSince(root.data(), "volumes", 0, 0.6), qPrintable(volumesText()));
+    bridge->setProperty("volume", 0.6);
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.6));
+
+    // Left steps back down.
+    const qsizetype sent = recordedValues(root.data(), "volumes").size();
+    QTest::keyClick(window, Qt::Key_Left);
+    QVERIFY2(onlyRecordedSince(root.data(), "volumes", sent, 0.5), qPrintable(volumesText()));
+    bridge->setProperty("volume", 0.5);
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.5));
+}
+
+void AccessibilityTest::bridgeEchoesWaitForTheVolumeGesture() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
+    QVERIFY(bridge != nullptr && volume != nullptr);
+    QVERIFY(tabTo(window, volume));
+    const auto volumesText = [&root]() {
+        return describeValues(recordedValues(root.data(), "volumes"));
+    };
+
+    // A held arrow key: a stale echo neither moves the slider nor is sent.
+    QTest::keyPress(window, Qt::Key_Right);
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.6));
+    bridge->setProperty("volume", 0.3);
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.6));
+    QTest::keyRelease(window, Qt::Key_Right);
+    QVERIFY2(onlyRecordedSince(root.data(), "volumes", 0, 0.6), qPrintable(volumesText()));
+    bridge->setProperty("volume", 0.6);
+
+    // A drag from a quarter to three quarters of the slider, likewise.
+    const qsizetype sent = recordedValues(root.data(), "volumes").size();
+    const qreal y = volume->height() / 2;
+    const auto scenePoint = [volume, y](qreal fraction) {
+        return volume->mapToScene(QPointF(volume->width() * fraction, y)).toPoint();
+    };
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.25));
+    for (int step = 1; step <= 10; ++step) {
+        QTest::mouseMove(window, scenePoint(0.25 + 0.05 * step));
+    }
+    const double dragged = volume->property("value").toDouble();
+    QVERIFY2(dragged > 0.6 && dragged < 0.9, qPrintable(QString::number(dragged)));
+    bridge->setProperty("volume", 0.05);
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), dragged));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
+    const QList<double> dragVolumes = recordedValues(root.data(), "volumes").mid(sent);
+    QVERIFY2(!dragVolumes.isEmpty() && fuzzyEqual(dragVolumes.constLast(), dragged),
+             qPrintable(volumesText()));
+    QVERIFY2(std::none_of(dragVolumes.begin(), dragVolumes.end(),
+                          [](double value) { return value < 0.15; }),
+             qPrintable(volumesText()));
+}
+
+void AccessibilityTest::arrowKeysSeekFromThePlaybackPosition() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QVERIFY(seek != nullptr);
+    QCOMPARE(seek->property("value").toDouble(), 50.0);
+    QVERIFY(tabTo(window, seek));
+    const auto seeks = [&root]() { return recordedValues(root.data(), "seeks"); };
+
+    // One seek per press, by the step from the playback position.
+    QTest::keyClick(window, Qt::Key_Right);
+    QCOMPARE(seeks(), (QList<double>{55.0}));
+    root->setProperty("positionSeconds", 55.0);
+    QCOMPARE(seek->property("value").toDouble(), 55.0);
+    QTest::keyClick(window, Qt::Key_Left);
+    QCOMPARE(seeks(), (QList<double>{55.0, 50.0}));
+
+    // Playback moves on between presses.
+    root->setProperty("positionSeconds", 80.0);
+    QTest::keyClick(window, Qt::Key_Right);
+    QCOMPARE(seeks(), (QList<double>{55.0, 50.0, 85.0}));
+
+    // While the key is held, the advancing position does not move the
+    // slider or the seek.
+    root->setProperty("positionSeconds", 85.0);
+    QTest::keyPress(window, Qt::Key_Right);
+    QCOMPARE(seek->property("value").toDouble(), 90.0);
+    root->setProperty("positionSeconds", 86.0);
+    QCOMPARE(seek->property("value").toDouble(), 90.0);
+    QTest::keyRelease(window, Qt::Key_Right);
+    QCOMPARE(seeks(), (QList<double>{55.0, 50.0, 85.0, 90.0}));
+}
+
+void AccessibilityTest::seekDragSeeksOnceOnRelease() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QVERIFY(seek != nullptr);
+    const qreal y = seek->height() / 2;
+    const auto scenePoint = [seek, y](qreal fraction) {
+        return seek->mapToScene(QPointF(seek->width() * fraction, y)).toPoint();
+    };
+
+    // The advancing position does not move the slider during the drag.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.25));
+    for (int step = 1; step <= 10; ++step) {
+        QTest::mouseMove(window, scenePoint(0.25 + 0.05 * step));
+    }
+    const double dragged = seek->property("value").toDouble();
+    QVERIFY2(dragged > 130.0 && dragged < 170.0, qPrintable(QString::number(dragged)));
+    root->setProperty("positionSeconds", 51.0);
+    QCOMPARE(seek->property("value").toDouble(), dragged);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
+    QCOMPARE(recordedValues(root.data(), "seeks"), (QList<double>{dragged}));
+}
+
+void AccessibilityTest::transportBarHasNoWarnings() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    qInfo("Qt Quick Controls style: %s", qPrintable(QQuickStyle::name()));
+    // Lay the bar out again at other sizes.
+    window->resize(640, 160);
+    QTRY_COMPARE(window->width(), 640);
+    window->resize(1400, 240);
+    QTRY_COMPARE(window->width(), 1400);
+    QQuickItem *handle = visibleItemNamed(window, QStringLiteral("seekHandle"));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QVERIFY(handle != nullptr && seek != nullptr);
+    qInfo("seek slider height %g, handle height %g", seek->height(), handle->height());
+    // cleanup() fails on any warning, such as a binding loop.
+}
+
+void AccessibilityTest::transportBarHasNoWarningsUnderTheBasicStyle() {
+    // The style is fixed once a control loads, so a child process runs the
+    // check above under the Basic style.
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("QT_QUICK_CONTROLS_STYLE"), QStringLiteral("Basic"));
+    QProcess child;
+    child.setProcessEnvironment(environment);
+    child.setProcessChannelMode(QProcess::MergedChannels);
+    child.start(QCoreApplication::applicationFilePath(),
+                {QStringLiteral("transportBarHasNoWarnings")});
+    QVERIFY2(child.waitForFinished(120000), "the child test did not finish");
+    const QString output = QString::fromLocal8Bit(child.readAll());
+    QVERIFY2(output.contains(QStringLiteral("Qt Quick Controls style: Basic")), qPrintable(output));
+    QVERIFY2(child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0, qPrintable(output));
+}
 
 void AccessibilityTest::clicksLeaveSpaceToPlayOrPause() {
     LibraryTreeModel libraryModel;
