@@ -14,8 +14,8 @@
 //!   is rescanned, so that changes made meanwhile appear.
 //! - The worker is told when the roots it sent are watched, and walks a
 //!   root it added only then: a change after the watches are set up is
-//!   seen by the walk or by them. The worker also passes on the watching
-//!   setting, so that it comes in order with the roots.
+//!   seen by the walk or by them. While watching is off, it walks without
+//!   waiting: turning watching on rescans every root once it is watched.
 //! - A root that cannot be watched (a network or FUSE file system, the
 //!   inotify watch limit, a folder that is gone) is rescanned every
 //!   [`WatchTuning::periodic`] instead, and the worker publishes it, with
@@ -34,7 +34,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -109,6 +109,10 @@ enum WatchMessage {
 pub(super) struct WatchHandle {
     tx: Sender<WatchMessage>,
     waker: Option<Arc<Waker>>,
+    /// The watching setting the watcher was last sent. It is changed and
+    /// sent under its lock, so that a reader knows that a later change is
+    /// sent after the messages it sent before it read.
+    enabled: Arc<Mutex<bool>>,
 }
 
 impl WatchHandle {
@@ -117,9 +121,10 @@ impl WatchHandle {
         self.send(WatchMessage::Roots(roots));
     }
 
-    /// Turns watching on or off.
-    pub(super) fn set_enabled(&self, enabled: bool) {
-        self.send(WatchMessage::Enabled(enabled));
+    /// Whether the watcher was last told to watch; see
+    /// [`WatchService::set_enabled`].
+    pub(super) fn is_enabled(&self) -> bool {
+        *self.enabled.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn send(&self, message: WatchMessage) {
@@ -155,7 +160,11 @@ impl WatchService {
             crate::worker_thread::spawn_worker("ferrous-library-watch", move || watcher.run());
         (
             Self {
-                handle: WatchHandle { tx, waker },
+                handle: WatchHandle {
+                    tx,
+                    waker,
+                    enabled: Arc::new(Mutex::new(false)),
+                },
                 stop,
                 thread,
             },
@@ -166,6 +175,17 @@ impl WatchService {
 
     pub(super) fn handle(&self) -> WatchHandle {
         self.handle.clone()
+    }
+
+    /// Turns watching on or off, at once, whatever the library worker does.
+    pub(super) fn set_enabled(&self, enabled: bool) {
+        let mut setting = self
+            .handle
+            .enabled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *setting = enabled;
+        self.handle.send(WatchMessage::Enabled(enabled));
     }
 
     /// Tells the watcher to stop, also in the middle of adding watches.

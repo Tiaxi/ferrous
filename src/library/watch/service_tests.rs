@@ -12,7 +12,7 @@ use super::watch_test_hooks::{
     observe_watched, set_fs_type,
 };
 use super::*;
-use crate::library::scan::scan_test_hooks::scans_of;
+use crate::library::scan::scan_test_hooks::{hold_walk, scans_of};
 use crate::library::scan::ScanTuning;
 use crate::library::{LibraryEvent, LibraryMirror, LibraryService};
 use crate::raw_audio::write_test_apev2_file;
@@ -673,6 +673,80 @@ fn turning_watching_off_walks_an_added_root_waiting_for_its_watches() {
         mirror.paths().contains(&fixture.path("a.mp3")) && !mirror.status.scan_in_progress
     });
     drop(held);
+}
+
+/// Turning watching off reaches the watcher at once, also while the worker
+/// is held in a walk, between whose files it checks for commands.
+#[test]
+fn turning_watching_off_reaches_the_watcher_while_a_walk_is_held() {
+    let fixture = Fixture::new("off-during-walk");
+    fixture.write("a.mp3");
+    let watched = observe_watched(&fixture.root);
+    let running = fixture.start_watching(tuning(Duration::from_secs(3600)));
+    let (walking, release) = hold_walk(&fixture.root);
+    running
+        .service
+        .command(LibraryCommand::RescanRoot(fixture.root.clone()));
+    walking.recv_timeout(WAIT).expect("the walk held");
+
+    running.service.set_watching(false);
+    wait_for_count(
+        &watched,
+        "the watches removed, with the walk held",
+        |count| count == 0,
+    );
+    drop(release);
+}
+
+/// Turning watching off and on while the watcher is held before it watches
+/// an added root, and the worker is held in a walk of another root, leaves
+/// the roots watched once, and the added root walked once.
+#[test]
+fn turning_watching_off_and_on_while_an_added_root_waits_watches_and_walks_it_once() {
+    let fixture = Fixture::new("off-on-before-watched");
+    fixture.write("a.mp3");
+    let other = fixture.folder.join("other");
+    fs::create_dir_all(&other).expect("other root");
+    let other = other.canonicalize().expect("canonical other root");
+    fs::write(other.join("x.mp3"), b"x").expect("track");
+    let watched = observe_watched(&fixture.root);
+    let mut running = fixture.start(tuning(Duration::from_secs(3600)));
+    running.service.set_watching(true);
+    running.service.command(LibraryCommand::AddRoot {
+        path: other.clone(),
+        name: String::new(),
+    });
+    running.wait_for("the other root added", |mirror| {
+        mirror.paths() == vec![other.join("x.mp3")] && !mirror.status.scan_in_progress
+    });
+    let held = add_root_while_watching_is_held(&fixture, &mut running);
+    let other_scans = scans_of(&other);
+    let (walking, release) = hold_walk(&other);
+    running
+        .service
+        .command(LibraryCommand::RescanRoot(other.clone()));
+    walking
+        .recv_timeout(WAIT)
+        .expect("the other root's walk held");
+
+    running.service.set_watching(false);
+    drop(held);
+    // The late watches are removed, with the worker still held.
+    wait_for_count(&watched, "the added root watched late", |count| count > 0);
+    wait_for_count(&watched, "the late watches removed", |count| count == 0);
+    running.service.set_watching(true);
+    let count = wait_for_count(&watched, "watched again", |count| count > 0);
+    assert_eq!(count, 1, "the root's one folder");
+
+    drop(release);
+    running.wait_for("the walks and the catch-up rescans", |mirror| {
+        mirror.paths().contains(&fixture.path("a.mp3"))
+            && !mirror.status.scan_in_progress
+            && scans_of(&other) == other_scans + 2
+    });
+    // The deferred walk and the catch-up rescan of the added root are one.
+    assert_eq!(scans_of(&fixture.root), 1);
+    assert_eq!(watched.try_iter().collect::<Vec<_>>(), Vec::<usize>::new());
 }
 
 /// The worker stops while an added root waits for its watches.

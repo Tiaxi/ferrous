@@ -38,9 +38,9 @@ pub(super) struct Inputs {
     pub(super) roots: WatchHandle,
     /// How many of the roots messages the watcher has handled, after each.
     pub(super) roots_watched: Receiver<u64>,
-    /// Whether to watch the roots. The worker passes it on to the watcher,
-    /// in order with the roots.
-    pub(super) watching: Receiver<bool>,
+    /// Wakes the worker when the watching setting changes, to start the
+    /// walks that waited for watches once it is off.
+    pub(super) watching: Receiver<()>,
 }
 
 /// Runs the library worker until its commands close.
@@ -230,10 +230,9 @@ pub(super) struct Control {
     /// The roots that the watcher may not watch yet, with the number of the
     /// message that first told it about each.
     unconfirmed: HashMap<PathBuf, u64>,
-    /// The service's watching setting; `never` once the service is gone.
-    watching: Receiver<bool>,
-    /// Whether the watcher was last told to watch.
-    watching_on: bool,
+    /// Woken when the watching setting changes; `never` once the service
+    /// is gone.
+    watching: Receiver<()>,
     /// Roots removed while the command ran, which its scans skip.
     removed: HashSet<PathBuf>,
     /// Failures of the commands run during the command.
@@ -258,7 +257,6 @@ impl Control {
             roots_handled: 0,
             unconfirmed: HashMap::new(),
             watching: never(),
-            watching_on: false,
             removed: HashSet::new(),
             errors: Vec::new(),
             external: ExternalWrites::default(),
@@ -331,20 +329,20 @@ impl Control {
         self.roots_handled = u64::MAX;
     }
 
-    /// Tells the watcher whether to watch, after the roots told so far.
-    fn set_watching(&mut self, enabled: bool) {
-        if let Some(watcher) = &self.watcher {
-            watcher.set_enabled(enabled);
-        }
-        self.watching_on = enabled;
+    /// Whether the watcher was last told to watch. Read after the roots
+    /// were sent, so that if it is off, turning watching on is sent after
+    /// them, and rescans them once they are watched.
+    fn watching_on(&self) -> bool {
+        self.watcher.as_ref().is_some_and(WatchHandle::is_enabled)
     }
 
     /// Whether a queued walk waits for the watches of its root.
     fn walks_deferred(&self) -> bool {
+        let watching_on = self.watching_on();
         self.queue
             .normal
             .iter()
-            .any(|cmd| waits_for_watches(cmd, self.watching_on, &self.unconfirmed))
+            .any(|cmd| waits_for_watches(cmd, watching_on, &self.unconfirmed))
     }
 
     /// Queues the commands that have arrived, merging them with those
@@ -353,7 +351,7 @@ impl Control {
         self.note_roots_watched();
         loop {
             match self.watching.try_recv() {
-                Ok(enabled) => self.set_watching(enabled),
+                Ok(()) => {}
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.watching = never();
@@ -389,7 +387,7 @@ impl Control {
     fn next_command(&mut self) -> Option<LibraryCommand> {
         loop {
             self.receive(None);
-            let (watching_on, unconfirmed) = (self.watching_on, &self.unconfirmed);
+            let (watching_on, unconfirmed) = (self.watching_on(), &self.unconfirmed);
             if let Some(cmd) = self.queue.pop(self.shutting_down, |cmd| {
                 waits_for_watches(cmd, watching_on, unconfirmed)
             }) {
@@ -411,9 +409,8 @@ impl Control {
                     Ok(handled) => self.roots_handled = handled,
                     Err(_) => self.watcher_gone(),
                 },
-                recv(self.watching) -> enabled => match enabled {
-                    Ok(enabled) => self.set_watching(enabled),
-                    Err(_) => self.watching = never(),
+                recv(self.watching) -> changed => if changed.is_err() {
+                    self.watching = never();
                 },
             }
         }
@@ -491,7 +488,7 @@ impl ScanControl for Control {
         self.note_roots_watched();
         if !waits_for_watches(
             &LibraryCommand::RescanRoot(root.to_path_buf()),
-            self.watching_on,
+            self.watching_on(),
             &self.unconfirmed,
         ) {
             return false;
