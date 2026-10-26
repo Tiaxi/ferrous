@@ -24,7 +24,13 @@ use super::LibraryTrack;
 ///   (`coverage_seconds`). Rows from before tell neither, since a decode
 ///   error could have cut them short, so the next play of each track decodes
 ///   its waveform again, once. `updated_at` is the time of the last use.
-pub(super) const SCHEMA_VERSION: i32 = 3;
+/// - 4: `tracks` and `waveform_cache` rows have the identity of their file
+///   (`file_device`, `file_inode`; see [`crate::file_identity::FileId`]), which tells it
+///   from another file of the same size and time, and an index finds the
+///   rows of a size and time. Rows from before have none, and take that of
+///   the file they match next, without being read or decoded again; see
+///   [`migrate_to_version_4`].
+pub(super) const SCHEMA_VERSION: i32 = 4;
 
 /// How long a connection waits for another connection's write lock.
 pub(super) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -59,8 +65,9 @@ pub(super) fn usize_to_f32(value: usize) -> f32 {
     value.to_string().parse::<f32>().unwrap_or(f32::MAX)
 }
 
-/// The library tables of the current schema. A database from before a
-/// column was added gets it from [`add_missing_columns`].
+/// The library tables as of version 3. A database from before a column was
+/// added gets it from [`add_missing_columns`]; version 4 adds its own
+/// columns in [`migrate_to_version_4`].
 const CREATE_TABLES: &str = r"
     CREATE TABLE IF NOT EXISTS roots (
         path TEXT PRIMARY KEY,
@@ -126,6 +133,14 @@ const CREATE_WAVEFORM_CACHE: &str = r"
 const WAVEFORM_CACHE_ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("waveform_cache", "complete", "INTEGER NOT NULL DEFAULT 0"),
     ("waveform_cache", "coverage_seconds", "REAL"),
+];
+
+/// The columns of version 4: the identity of each row's file.
+const FILE_ID_COLUMNS: &[(&str, &str, &str)] = &[
+    ("tracks", "file_device", "INTEGER"),
+    ("tracks", "file_inode", "INTEGER"),
+    ("waveform_cache", "file_device", "INTEGER"),
+    ("waveform_cache", "file_inode", "INTEGER"),
 ];
 
 /// Columns that later versions added to the library tables, with the
@@ -202,6 +217,9 @@ pub(super) fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     if version < 3 {
         migrate_to_version_3(&tx)?;
     }
+    if version < 4 {
+        migrate_to_version_4(&tx)?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -250,6 +268,33 @@ fn migrate_to_version_3(conn: &Connection) -> anyhow::Result<()> {
     add_missing_columns(conn, WAVEFORM_CACHE_ADDED_COLUMNS)?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_waveform_cache_updated_at ON waveform_cache(updated_at)",
+    )?;
+    Ok(())
+}
+
+/// Version 3 to 4: add the identity of each row's file to `tracks` and to
+/// the waveform cache, which [`migrate_to_version_3`] made sure of, NULL in
+/// every row, and index the tracks by size and time, which tell when an
+/// identity breaks a tie (see [`super::identity_contradicts`]).
+///
+/// A row without an identity matches the file at its path by size and time
+/// alone, as before, and takes the file's identity then: a scan writes it
+/// without reading the file's tags again, and the analysis worker when it
+/// loads the saved waveform. So the first scan reads no file, and no
+/// waveform is decoded again. That trusts size and time once more for each
+/// row, which a swap of two files with the same size and time since the
+/// row was written deceives, as it did before; the rows that the library
+/// renamed moved with their files.
+///
+/// Version 3 made the waveform cache. One deleted since, which no build
+/// does, is made again, empty, as version 3 made it.
+fn migrate_to_version_4(conn: &Connection) -> anyhow::Result<()> {
+    if table_columns(conn, "waveform_cache")?.is_empty() {
+        migrate_to_version_3(conn)?;
+    }
+    add_missing_columns(conn, FILE_ID_COLUMNS)?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_size_mtime ON tracks(size_bytes, mtime_ns)",
     )?;
     Ok(())
 }
@@ -430,10 +475,35 @@ mod tests {
         );
     }
 
+    /// Takes a current database back to version 3: without the identities
+    /// of files and the index by size and time.
+    fn back_to_version_3(conn: &Connection) {
+        conn.execute_batch(
+            "DROP INDEX idx_tracks_size_mtime;
+             ALTER TABLE tracks DROP COLUMN file_device;
+             ALTER TABLE tracks DROP COLUMN file_inode;
+             ALTER TABLE waveform_cache DROP COLUMN file_device;
+             ALTER TABLE waveform_cache DROP COLUMN file_inode;
+             PRAGMA user_version = 3;",
+        )
+        .expect("version 3 schema");
+    }
+
+    /// The `CREATE` statements of the schema.
+    fn schema_sql(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("schema")
+            .collect::<rusqlite::Result<_>>()
+            .expect("schema rows")
+    }
+
     #[test]
     fn version_1_rows_get_an_unknown_cover_stamp_so_the_next_scan_checks_them() {
         let conn = Connection::open_in_memory().expect("db");
         init_schema(&conn).expect("schema");
+        back_to_version_3(&conn);
         // Version 1 is the same schema without `tracks.cover_stamp`.
         conn.execute_batch("ALTER TABLE tracks DROP COLUMN cover_stamp; PRAGMA user_version = 1;")
             .expect("version 1 schema");
@@ -482,6 +552,7 @@ mod tests {
     fn version_2_database(waveforms: bool) -> Connection {
         let conn = Connection::open_in_memory().expect("db");
         init_schema(&conn).expect("schema");
+        back_to_version_3(&conn);
         conn.execute_batch("DROP TABLE waveform_cache; PRAGMA user_version = 2;")
             .expect("version 2 schema");
         conn.execute(
@@ -530,34 +601,26 @@ mod tests {
 
         init_schema(&conn).expect("migration");
 
-        assert_eq!(user_version(&conn).expect("version"), 3);
+        assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
+        let mut tracks = tracks;
+        for row in &mut tracks {
+            row.extend([Value::Null, Value::Null]);
+        }
         assert_eq!(rows(&conn, "tracks"), tracks);
-        // Not known to be complete, and of unknown coverage.
+        // Not known to be complete, of unknown coverage, and of a file of
+        // unknown identity.
         for row in &mut waveforms {
-            row.extend([Value::Integer(0), Value::Null]);
+            row.extend([Value::Integer(0), Value::Null, Value::Null, Value::Null]);
         }
         assert_eq!(rows(&conn, "waveform_cache"), waveforms);
 
         // A second run changes nothing.
-        let schema: Vec<String> = conn
-            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
-            .expect("prepare")
-            .query_map([], |row| row.get(0))
-            .expect("schema")
-            .collect::<rusqlite::Result<_>>()
-            .expect("schema rows");
+        let schema = schema_sql(&conn);
         let changes = conn.total_changes();
         init_schema(&conn).expect("second run");
         assert_eq!(conn.total_changes(), changes);
         assert_eq!(rows(&conn, "waveform_cache"), waveforms);
-        let after: Vec<String> = conn
-            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
-            .expect("prepare")
-            .query_map([], |row| row.get(0))
-            .expect("schema")
-            .collect::<rusqlite::Result<_>>()
-            .expect("schema rows");
-        assert_eq!(after, schema);
+        assert_eq!(schema_sql(&conn), schema);
     }
 
     /// A version 1 database: one without `tracks.cover_stamp`, holding a
@@ -567,6 +630,7 @@ mod tests {
     fn version_1_database(waveforms: bool) -> Connection {
         let conn = Connection::open_in_memory().expect("db");
         init_schema(&conn).expect("schema");
+        back_to_version_3(&conn);
         conn.execute_batch(
             "DROP TABLE waveform_cache; ALTER TABLE tracks DROP COLUMN cover_stamp; \
              PRAGMA user_version = 1;",
@@ -608,11 +672,11 @@ mod tests {
 
             assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
             for row in &mut tracks {
-                row.push(Value::Null);
+                row.extend([Value::Null, Value::Null, Value::Null]);
             }
             assert_eq!(rows(&conn, "tracks"), tracks, "waveforms {waveforms}");
             for row in &mut saved {
-                row.extend([Value::Integer(0), Value::Null]);
+                row.extend([Value::Integer(0), Value::Null, Value::Null, Value::Null]);
             }
             assert_eq!(
                 rows(&conn, "waveform_cache"),
@@ -634,9 +698,10 @@ mod tests {
 
         init_schema(&conn).expect("migration");
 
-        assert_eq!(user_version(&conn).expect("version"), 3);
+        assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
         let columns = table_columns(&conn, "waveform_cache").expect("columns");
         assert!(columns.contains("complete") && columns.contains("coverage_seconds"));
+        assert!(columns.contains("file_device") && columns.contains("file_inode"));
         let index: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_waveform_cache_updated_at'",
@@ -646,5 +711,87 @@ mod tests {
             .expect("index");
         assert_eq!(index, 1);
         assert_eq!(rows(&conn, "tracks").len(), 1);
+    }
+
+    /// A version 3 database holding a track and two waveforms, one of a file
+    /// that is no track. Without `waveforms`, it lacks the waveform cache,
+    /// as no build leaves a version 3 database.
+    fn version_3_database(waveforms: bool) -> Connection {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        back_to_version_3(&conn);
+        conn.execute(
+            "INSERT INTO tracks(path, title, artist, album, mtime_ns, size_bytes, indexed_at, \
+             cover_stamp) VALUES ('/music/a.flac', 'A', 'Artist', 'Album', 1, 2, 3, 77)",
+            [],
+        )
+        .expect("track row");
+        for (path, complete) in [("/music/a.flac", 1), ("/elsewhere/b.flac", 0)] {
+            conn.execute(
+                "INSERT INTO waveform_cache(path, size_bytes, modified_secs, modified_nanos, \
+                 format_version, peak_count, peaks_blob, updated_at, complete, \
+                 coverage_seconds) VALUES (?1, 10, 1, 0, 3, 1, x'0000003f', 100, ?2, 2.5)",
+                params![path, complete],
+            )
+            .expect("waveform row");
+        }
+        if !waveforms {
+            conn.execute_batch("DROP TABLE waveform_cache;")
+                .expect("no waveform cache");
+        }
+        conn
+    }
+
+    #[test]
+    fn a_version_3_database_keeps_every_row_with_an_unknown_file_identity() {
+        use rusqlite::types::Value;
+        for waveforms in [true, false] {
+            let conn = version_3_database(waveforms);
+            let mut tracks = rows(&conn, "tracks");
+            let mut saved = if waveforms {
+                rows(&conn, "waveform_cache")
+            } else {
+                Vec::new()
+            };
+
+            init_schema(&conn).unwrap_or_else(|error| panic!("waveforms {waveforms}: {error:#}"));
+
+            assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
+            // Each row takes the identity of the file it matches next.
+            for row in tracks.iter_mut().chain(&mut saved) {
+                row.extend([Value::Null, Value::Null]);
+            }
+            assert_eq!(rows(&conn, "tracks"), tracks, "waveforms {waveforms}");
+            assert_eq!(rows(&conn, "waveform_cache"), saved);
+            let columns = table_columns(&conn, "waveform_cache").expect("columns");
+            assert!(columns.contains("complete") && columns.contains("file_inode"));
+            let index: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_tracks_size_mtime'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("index");
+            assert_eq!(index, 1);
+
+            let schema = schema_sql(&conn);
+            let changes = conn.total_changes();
+            init_schema(&conn).expect("second run");
+            assert_eq!(conn.total_changes(), changes, "a second run writes nothing");
+            assert_eq!(schema_sql(&conn), schema);
+            assert_eq!(rows(&conn, "tracks"), tracks);
+        }
+    }
+
+    #[test]
+    fn the_version_4_step_is_idempotent() {
+        let conn = version_3_database(true);
+        let tx = conn.unchecked_transaction().expect("transaction");
+        migrate_to_version_4(&tx).expect("first");
+        let schema = schema_sql(&tx);
+        let rows_after = rows(&tx, "waveform_cache");
+        migrate_to_version_4(&tx).expect("second");
+        assert_eq!(schema_sql(&tx), schema);
+        assert_eq!(rows(&tx, "waveform_cache"), rows_after);
     }
 }

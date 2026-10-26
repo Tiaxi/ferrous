@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
 
+use crate::file_identity::FileId;
+use crate::library::{file_id_columns, file_id_from_columns, identity_contradicts};
 use crate::playback::{remap_path, PathRenames};
 
 pub(super) const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
@@ -17,11 +19,17 @@ pub(super) const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 // its waveforms, untrimmed, are never taken for complete ones.
 const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 3;
 
+/// What tells whether a file changed since its waveform was decoded. In
+/// memory, every field must match; the saved waveforms compare identities
+/// only to break a tie, see [`load_waveform_from_db`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WaveformSourceStamp {
     pub(super) size_bytes: u64,
     pub(super) modified_secs: u64,
     pub(super) modified_nanos: u32,
+    /// What tells the file from another of the same size and time, such as
+    /// the other file of a swap.
+    pub(super) file_id: Option<FileId>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,16 +75,24 @@ fn remove_empty_waveforms(conn: &Connection) {
 /// The saved waveform of `path`, if its file still has `stamp` and the
 /// decode that saved it reached the end of the file. Loading it counts as a
 /// use, which keeps it from being pruned.
+///
+/// The file's identity breaks a tie (see [`identity_contradicts`]): when
+/// another file has the same size and time, a waveform saved for a file of
+/// another identity is not this file's, as after a swap, or after a decode
+/// of the other file was saved under this path once the rename had moved
+/// the saved waveforms (`crate::library::rename_indexed_metadata_paths`).
+/// Otherwise the waveform is this file's, and takes its identity, as does a
+/// waveform saved before identities were.
 pub(super) fn load_waveform_from_db(
     conn: &Connection,
     path: &Path,
     stamp: WaveformSourceStamp,
 ) -> Option<Vec<f32>> {
     let path = path.to_string_lossy().to_string();
-    let row: (i64, i64, Vec<u8>) = conn
+    let row: (i64, i64, Vec<u8>, Option<FileId>) = conn
         .query_row(
             r"
-            SELECT format_version, peak_count, peaks_blob
+            SELECT format_version, peak_count, peaks_blob, file_device, file_inode
             FROM waveform_cache
             WHERE path=?1
               AND size_bytes=?2
@@ -95,6 +111,7 @@ pub(super) fn load_waveform_from_db(
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
+                    file_id_from_columns(row.get(3)?, row.get(4)?),
                 ))
             },
         )
@@ -102,13 +119,62 @@ pub(super) fn load_waveform_from_db(
     if row.0 != WAVEFORM_CACHE_FORMAT_VERSION {
         return None;
     }
+    if identity_contradicts(row.3, stamp.file_id, || {
+        shares_size_and_time(conn, &path, stamp)
+    }) {
+        return None;
+    }
     let peak_count = usize::try_from(row.1).ok()?;
     if peak_count == 0 {
         return None;
     }
     let peaks = decode_peaks_blob(&row.2, peak_count)?;
+    if stamp.file_id.is_some() && row.3 != stamp.file_id {
+        adopt_file_id(conn, &path, stamp.file_id);
+    }
     touch_waveform_in_db(conn, Path::new(&path));
     Some(peaks)
+}
+
+/// Whether a file other than that of `path`, with a saved waveform or in
+/// the library, has the size and time of `stamp`, so that only identities
+/// tell the files apart. A failed query counts as one, which only costs a
+/// decode.
+fn shares_size_and_time(conn: &Connection, path: &str, stamp: WaveformSourceStamp) -> bool {
+    // The library's modification time, in nanoseconds since the epoch.
+    let mtime_ns =
+        u128::from(stamp.modified_secs) * 1_000_000_000 + u128::from(stamp.modified_nanos);
+    conn.query_row(
+        r"
+        SELECT EXISTS(
+            SELECT 1 FROM waveform_cache
+            WHERE size_bytes = ?2 AND modified_secs = ?3 AND modified_nanos = ?4
+              AND path <> ?1
+        ) OR EXISTS(
+            SELECT 1 FROM tracks WHERE size_bytes = ?2 AND mtime_ns = ?5 AND path <> ?1
+        )
+        ",
+        params![
+            path,
+            u64_to_i64(stamp.size_bytes),
+            u64_to_i64(stamp.modified_secs),
+            i64::from(stamp.modified_nanos),
+            i64::try_from(mtime_ns).unwrap_or(i64::MAX),
+        ],
+        |row| row.get(0),
+    )
+    .unwrap_or(true)
+}
+
+/// Give the saved waveform of `path` the identity of the file it matched.
+/// A failed write leaves the old one, which only costs a decode if another
+/// file gets the same size and time.
+fn adopt_file_id(conn: &Connection, path: &str, file_id: Option<FileId>) {
+    let (device, inode) = file_id_columns(file_id);
+    let _ = conn.execute(
+        "UPDATE waveform_cache SET file_device = ?2, file_inode = ?3 WHERE path = ?1",
+        params![path, device, inode],
+    );
 }
 
 /// Record a use of the saved waveform of `path`; pruning keeps the waveforms
@@ -135,14 +201,15 @@ pub(super) fn persist_waveform_to_db(
     }
     let blob = encode_peaks_blob(peaks);
     let now = unix_ts_i64();
+    let (device, inode) = file_id_columns(stamp.file_id);
     conn.execute(
         r"
         INSERT INTO waveform_cache(
             path, size_bytes, modified_secs, modified_nanos,
             format_version, peak_count, peaks_blob, updated_at,
-            complete, coverage_seconds
+            complete, coverage_seconds, file_device, file_inode
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11)
         ON CONFLICT(path) DO UPDATE SET
             size_bytes=excluded.size_bytes,
             modified_secs=excluded.modified_secs,
@@ -152,7 +219,9 @@ pub(super) fn persist_waveform_to_db(
             peaks_blob=excluded.peaks_blob,
             updated_at=excluded.updated_at,
             complete=excluded.complete,
-            coverage_seconds=excluded.coverage_seconds
+            coverage_seconds=excluded.coverage_seconds,
+            file_device=excluded.file_device,
+            file_inode=excluded.file_inode
         ",
         params![
             path.to_string_lossy().to_string(),
@@ -164,6 +233,8 @@ pub(super) fn persist_waveform_to_db(
             blob,
             now,
             f64::from(coverage_seconds),
+            device,
+            inode,
         ],
     )?;
     Ok(())
@@ -171,7 +242,7 @@ pub(super) fn persist_waveform_to_db(
 
 /// Forget the saved waveform of `path`. A failed write leaves it to the
 /// stamp check.
-pub(super) fn delete_waveform_from_db(conn: &Connection, path: &Path) {
+fn delete_waveform_from_db(conn: &Connection, path: &Path) {
     let _ = conn.execute(
         "DELETE FROM waveform_cache WHERE path = ?1",
         params![path.to_string_lossy().to_string()],
@@ -299,6 +370,7 @@ mod tests {
             size_bytes: 10,
             modified_secs: 1,
             modified_nanos: 0,
+            file_id: None,
         };
         let path = Path::new("fixture.wav");
         persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("cache fixture");
@@ -315,6 +387,7 @@ mod tests {
             size_bytes: 10,
             modified_secs: 1,
             modified_nanos: 0,
+            file_id: None,
         };
         let path = Path::new("/music/a.mp3");
         persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("save");
@@ -350,6 +423,7 @@ mod tests {
                 size_bytes: 10,
                 modified_secs: 1,
                 modified_nanos: 0,
+                file_id: None,
             }),
             peaks: vec![peak],
         };
@@ -392,6 +466,7 @@ mod tests {
             size_bytes: 1234,
             modified_secs: 100,
             modified_nanos: 55,
+            file_id: None,
         };
         let peaks = vec![0.1f32, 0.3, 0.9];
         persist_waveform_to_db(&conn, &path, stamp, &peaks, 3.0).expect("persist");
@@ -416,6 +491,7 @@ mod tests {
             size_bytes: 10,
             modified_secs: 1,
             modified_nanos: 0,
+            file_id: None,
         };
         let (played, newer) = (
             Path::new("/music/played.flac"),
@@ -451,6 +527,7 @@ mod tests {
             size_bytes: 10,
             modified_secs: 1,
             modified_nanos: 0,
+            file_id: None,
         };
         let path = Path::new("/music/legacy.flac");
         persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("save");
@@ -474,5 +551,65 @@ mod tests {
             .expect("row");
         assert_eq!((complete, coverage), (1, 2.5));
         assert_eq!(load_waveform_from_db(&conn, path, stamp), Some(vec![0.25]));
+    }
+
+    fn stamp_of(inode: Option<u64>) -> WaveformSourceStamp {
+        WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+            file_id: inode.map(|inode| FileId::from_numbers(1, inode)),
+        }
+    }
+
+    fn stored_file_id(conn: &Connection, path: &Path) -> Option<FileId> {
+        conn.query_row(
+            "SELECT file_device, file_inode FROM waveform_cache WHERE path = ?1",
+            params![path.to_string_lossy().to_string()],
+            |row| Ok(file_id_from_columns(row.get(0)?, row.get(1)?)),
+        )
+        .expect("row")
+    }
+
+    #[test]
+    fn a_saved_waveform_takes_the_identity_of_the_file_it_alone_matches() {
+        let path = Path::new("/music/a.flac");
+        // Saved before identities were, or with one the file system did not
+        // keep, as after it was mounted again.
+        for saved in [None, Some(7)] {
+            let conn = Connection::open_in_memory().expect("database");
+            init_waveform_cache_schema(&conn).expect("schema");
+            persist_waveform_to_db(&conn, path, stamp_of(saved), &[0.5], 1.0).expect("save");
+
+            assert_eq!(
+                load_waveform_from_db(&conn, path, stamp_of(Some(8))),
+                Some(vec![0.5]),
+                "{saved:?}"
+            );
+            assert_eq!(stored_file_id(&conn, path), stamp_of(Some(8)).file_id);
+        }
+    }
+
+    #[test]
+    fn a_waveform_of_another_file_is_not_taken_when_its_size_and_time_tie() {
+        let conn = Connection::open_in_memory().expect("database");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        persist_waveform_to_db(&conn, a, stamp_of(Some(7)), &[0.5], 1.0).expect("a");
+        persist_waveform_to_db(&conn, b, stamp_of(Some(8)), &[0.25], 1.0).expect("b");
+
+        // The file at `a` is the one saved at `b`, as after a swap.
+        assert_eq!(load_waveform_from_db(&conn, a, stamp_of(Some(8))), None);
+        assert_eq!(stored_file_id(&conn, a), stamp_of(Some(7)).file_id);
+        assert_eq!(
+            load_waveform_from_db(&conn, a, stamp_of(Some(7))),
+            Some(vec![0.5])
+        );
+        // A file of unknown identity is matched by size and time alone.
+        assert_eq!(
+            load_waveform_from_db(&conn, a, stamp_of(None)),
+            Some(vec![0.5])
+        );
+        assert_eq!(stored_file_id(&conn, a), stamp_of(Some(7)).file_id);
     }
 }

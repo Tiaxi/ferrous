@@ -5442,6 +5442,7 @@ mod tests {
                 size_bytes: 10,
                 modified_secs: 1,
                 modified_nanos: 0,
+                file_id: None,
             };
             let loaded = |track_token| TrackIoReply::TrackLoaded {
                 track_token,
@@ -5659,6 +5660,7 @@ mod tests {
                     size_bytes: 10,
                     modified_secs: 1,
                     modified_nanos: 0,
+                    file_id: None,
                 }),
                 format: compatible,
             },
@@ -5759,6 +5761,7 @@ mod tests {
                         size_bytes: 10,
                         modified_secs: 1,
                         modified_nanos: 0,
+                        file_id: None,
                     }),
                     format: Some(TrackFormat::Known {
                         sample_rate: 44_100,
@@ -5824,6 +5827,7 @@ mod tests {
             size_bytes: 10,
             modified_secs: 1,
             modified_nanos: 0,
+            file_id: None,
         };
         let changed = WaveformSourceStamp {
             modified_secs: 2,

@@ -336,6 +336,7 @@ fn a_cover_check_does_not_overwrite_a_cover_written_since_the_scan_saw_the_row()
                 path_string: key.clone(),
                 mtime_ns: fingerprint.mtime_ns,
                 size_bytes: fingerprint.size_bytes,
+                file_id: None,
             },
             cover_path: Some(path_string(&root.join("Album/cover.jpg"))),
             stamp: 9,

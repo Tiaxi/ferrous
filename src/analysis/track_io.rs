@@ -13,13 +13,13 @@ use crossbeam_channel::{Receiver, Sender};
 use rusqlite::Connection;
 
 use super::cache::{
-    delete_waveform_from_db, insert_waveform_cache_entry, load_waveform_from_db,
-    open_waveform_cache_db, persist_waveform_to_db, prune_persistent_waveform_cache,
-    remap_waveform_cache_entries, touch_waveform_cache_lru, touch_waveform_in_db,
-    WaveformCacheEntry, WaveformSourceStamp, PERSISTENT_WAVEFORM_CACHE_MAX_ROWS,
-    PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL,
+    insert_waveform_cache_entry, load_waveform_from_db, open_waveform_cache_db,
+    persist_waveform_to_db, prune_persistent_waveform_cache, remap_waveform_cache_entries,
+    touch_waveform_cache_lru, touch_waveform_in_db, WaveformCacheEntry, WaveformSourceStamp,
+    PERSISTENT_WAVEFORM_CACHE_MAX_ROWS, PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL,
 };
 use super::decoders::{open_symphonia_file, SymphoniaFile};
+use crate::file_identity::FileId;
 use crate::playback::{remap_path, PathRenames};
 #[cfg(feature = "gst")]
 use crate::raw_audio::is_raw_surround_file;
@@ -110,18 +110,20 @@ pub(super) enum TrackIoReply {
     },
 }
 
-/// How many of the last saves to the database a rename is checked against;
-/// see [`TrackIo::drop_saves_renamed_away`].
-const RECENT_SAVES: usize = 8;
-
 /// Waveforms decoded before, in memory and in the library database.
+///
+/// A rename through the library moves the saved waveforms with their files
+/// before this thread hears of it (`crate::library::rename_indexed_metadata_paths`),
+/// and the entries in memory move when it does. In between, a load reads
+/// the moved waveforms under the new names, and a decode of a file renamed
+/// away is saved under its old name. Neither is taken for the waveform of
+/// another file: each waveform keeps the identity of its file, which a file
+/// renamed to that name, such as the other file of a swap, does not have.
 pub(super) struct TrackIo {
     waveforms: HashMap<PathBuf, WaveformCacheEntry>,
     lru: VecDeque<PathBuf>,
     db: Option<Connection>,
     writes_since_prune: usize,
-    /// The paths of the last waveforms saved to the database, oldest first.
-    recent_saves: VecDeque<PathBuf>,
 }
 
 impl TrackIo {
@@ -131,7 +133,6 @@ impl TrackIo {
             lru: VecDeque::new(),
             db,
             writes_since_prune: 0,
-            recent_saves: VecDeque::new(),
         }
     }
 
@@ -170,31 +171,10 @@ impl TrackIo {
                 None
             }
             TrackIoRequest::RemapPaths(renames) => {
-                self.drop_saves_renamed_away(&renames);
                 remap_waveform_cache_entries(&mut self.waveforms, &mut self.lru, &renames);
                 None
             }
         }
-    }
-
-    /// The rename moved the saved waveforms in the database with their files
-    /// before this thread heard of it (`crate::library::rename_indexed_metadata_paths`).
-    /// A save under an old path in between, of a decode of the file renamed
-    /// away, would be taken for the waveform of a file renamed there with the
-    /// same size and time, as in a swap. Which side of the rename a save
-    /// fell on is not known, so the recent saves at old paths are dropped;
-    /// the entries in memory move with their files.
-    fn drop_saves_renamed_away(&mut self, renames: &PathRenames) {
-        let Some(db) = self.db.as_ref() else {
-            return;
-        };
-        self.recent_saves.retain(|path| {
-            let moved_away = renames.contains_key(path);
-            if moved_away {
-                delete_waveform_from_db(db, path);
-            }
-            !moved_away
-        });
     }
 
     fn saved_waveform(
@@ -202,6 +182,8 @@ impl TrackIo {
         path: &Path,
         stamp: Option<WaveformSourceStamp>,
     ) -> Option<Vec<f32>> {
+        // An entry moved here before the file was, or that a load read
+        // before the remap moved it, has another file's identity.
         let in_memory = self
             .waveforms
             .get(path)
@@ -236,11 +218,6 @@ impl TrackIo {
     ) {
         if let (Some(db), Some(stamp)) = (self.db.as_ref(), stamp) {
             let _ = persist_waveform_to_db(db, path, stamp, &peaks, coverage_seconds);
-            self.recent_saves.retain(|saved| saved != path);
-            if self.recent_saves.len() >= RECENT_SAVES {
-                self.recent_saves.pop_front();
-            }
-            self.recent_saves.push_back(path.to_path_buf());
             self.writes_since_prune = self.writes_since_prune.saturating_add(1);
             if self.writes_since_prune >= PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL {
                 let _ = prune_persistent_waveform_cache(db, PERSISTENT_WAVEFORM_CACHE_MAX_ROWS);
@@ -308,6 +285,7 @@ pub(super) fn source_stamp(path: &Path) -> Option<WaveformSourceStamp> {
         size_bytes: meta.len(),
         modified_secs: since_epoch.as_secs(),
         modified_nanos: since_epoch.subsec_nanos(),
+        file_id: Some(FileId::of(&meta)),
     })
 }
 
@@ -372,6 +350,7 @@ mod tests {
             size_bytes,
             modified_secs: 1,
             modified_nanos: 0,
+            file_id: None,
         }
     }
 
@@ -436,37 +415,205 @@ mod tests {
         assert_eq!(io.saved_waveform(a, Some(stamp(10))), Some(vec![0.2]));
     }
 
+    /// Two files of the same size and modification time, `a.flac` and
+    /// `b.flac`, in a new folder.
+    fn same_size_and_time(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let folder = crate::paths::test_root().join(format!("track-io-{name}"));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("folder");
+        let (a, b) = (folder.join("a.flac"), folder.join("b.flac"));
+        let time = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for (path, bytes) in [(&a, b"first"), (&b, b"other")] {
+            std::fs::write(path, bytes).expect("file");
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(time))
+                .expect("modification time");
+        }
+        (folder, a, b)
+    }
+
+    /// Swaps the files at `a` and `b` by renaming them, which keeps their
+    /// size and time.
+    fn swap_files(a: &Path, b: &Path) {
+        let aside = a.with_extension("aside");
+        std::fs::rename(a, &aside).expect("aside");
+        std::fs::rename(b, a).expect("b to a");
+        std::fs::rename(&aside, b).expect("a to b");
+    }
+
+    /// Swaps the saved waveforms of `a` and `b` as the library's rename
+    /// does when it swaps the files.
+    fn swap_saved_waveforms(db: &Connection, a: &Path, b: &Path) {
+        let (a, b) = (a.to_string_lossy(), b.to_string_lossy());
+        for (from, to) in [(&*a, "pending"), (&*b, &*a), ("pending", &*b)] {
+            db.execute(
+                "UPDATE waveform_cache SET path = ?2 WHERE path = ?1",
+                rusqlite::params![from, to],
+            )
+            .expect("move waveform");
+        }
+    }
+
+    fn swap_renames(a: &Path, b: &Path) -> TrackIoRequest {
+        TrackIoRequest::RemapPaths(Arc::new(PathRenames::from([
+            (a.to_path_buf(), b.to_path_buf()),
+            (b.to_path_buf(), a.to_path_buf()),
+        ])))
+    }
+
+    /// The file helper with the waveforms of `a` (0.1) and `b` (0.2) saved
+    /// in the database at `db_path`, after the library swapped the files and
+    /// the saved waveforms, and the decode of the file first at `a`,
+    /// started before, was saved under that name, before the analysis
+    /// thread heard of the rename.
+    fn saved_after_a_swap(db_path: &Path, a: &Path, b: &Path) -> TrackIo {
+        let db = Connection::open(db_path).expect("database");
+        init_waveform_cache_schema(&db).expect("schema");
+        let mut io = TrackIo::new(Some(db));
+        let decoded_at = source_stamp(a);
+        io.save_waveform(a, decoded_at, vec![0.1], 1.0);
+        io.save_waveform(b, source_stamp(b), vec![0.2], 1.0);
+        swap_files(a, b);
+        swap_saved_waveforms(io.db.as_ref().expect("database"), a, b);
+        io.save_waveform(a, decoded_at, vec![0.1], 1.0);
+        io
+    }
+
     #[test]
     fn a_save_under_an_old_name_after_a_swap_is_not_taken_for_the_other_file() {
-        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
-        let mut io = TrackIo::new(Some(database()));
-        io.save_waveform(a, Some(stamp(10)), vec![0.1], 1.0);
-        io.save_waveform(b, Some(stamp(10)), vec![0.2], 1.0);
-        // The rename swaps the files and their saved waveforms; then the
-        // decode of A, started before, is saved under A's old name.
+        let (folder, a, b) = same_size_and_time("late-save");
+        let mut io = saved_after_a_swap(&folder.join("library.sqlite3"), &a, &b);
+        io.handle(swap_renames(&a, &b));
+        assert_eq!(io.saved_waveform(&b, source_stamp(&b)), Some(vec![0.1]));
+        assert_eq!(io.saved_waveform(&a, source_stamp(&a)), Some(vec![0.2]));
+
+        // A new session finds the waveform of the file now at `b` there.
+        // The late save replaced the one moved to `a`, whose file has
+        // another identity, so that file is decoded again.
+        let mut reopened = TrackIo::new(io.db.take());
+        assert_eq!(
+            reopened.saved_waveform(&b, source_stamp(&b)),
+            Some(vec![0.1])
+        );
+        assert_eq!(reopened.saved_waveform(&a, source_stamp(&a)), None);
+        std::fs::remove_dir_all(folder).expect("cleanup");
+    }
+
+    #[test]
+    fn a_save_under_an_old_name_is_not_taken_for_the_other_file_while_the_database_is_locked() {
+        let (folder, a, b) = same_size_and_time("late-save-locked");
+        let db_path = folder.join("library.sqlite3");
+        let mut io = saved_after_a_swap(&db_path, &a, &b);
+        // Another writer holds the database for longer than the analysis
+        // connection waits when the rename reaches it.
         io.db
             .as_ref()
             .expect("database")
-            .execute_batch(
-                "UPDATE waveform_cache SET path = 'pending' WHERE path = '/music/a.flac';
-                 UPDATE waveform_cache SET path = '/music/a.flac' WHERE path = '/music/b.flac';
-                 UPDATE waveform_cache SET path = '/music/b.flac' WHERE path = 'pending';",
-            )
-            .expect("swap");
-        io.save_waveform(a, Some(stamp(10)), vec![0.1], 1.0);
-        io.handle(TrackIoRequest::RemapPaths(Arc::new(PathRenames::from([
-            (a.to_path_buf(), b.to_path_buf()),
-            (b.to_path_buf(), a.to_path_buf()),
-        ]))));
-        assert_eq!(io.saved_waveform(b, Some(stamp(10))), Some(vec![0.1]));
-        assert_eq!(io.saved_waveform(a, Some(stamp(10))), Some(vec![0.2]));
+            .busy_timeout(std::time::Duration::ZERO)
+            .expect("no waits");
+        let writer = Connection::open(&db_path).expect("writer");
+        writer.execute_batch("BEGIN IMMEDIATE").expect("lock");
+        io.handle(swap_renames(&a, &b));
+        writer.execute_batch("COMMIT").expect("unlock");
 
-        // A new session finds nothing of A's at its old name. Both names
-        // were saved recently, so B's moved waveform is dropped as well,
-        // and both files are decoded again.
         let mut reopened = TrackIo::new(io.db.take());
-        assert_eq!(reopened.saved_waveform(a, Some(stamp(10))), None);
-        assert_eq!(reopened.saved_waveform(b, Some(stamp(10))), None);
+        assert_eq!(reopened.saved_waveform(&a, source_stamp(&a)), None);
+        assert_eq!(
+            reopened.saved_waveform(&b, source_stamp(&b)),
+            Some(vec![0.1])
+        );
+        std::fs::remove_dir_all(folder).expect("cleanup");
+    }
+
+    #[test]
+    fn a_save_under_an_old_name_is_not_taken_for_the_other_file_after_more_saves() {
+        let (folder, a, b) = same_size_and_time("late-save-then-more");
+        let mut io = saved_after_a_swap(&folder.join("library.sqlite3"), &a, &b);
+        // Other tracks are decoded and saved before the rename reaches the
+        // analysis thread.
+        for index in 0..8 {
+            let other = folder.join(format!("{index}.flac"));
+            io.save_waveform(&other, source_stamp(&b), vec![0.5], 1.0);
+        }
+        io.handle(swap_renames(&a, &b));
+
+        let mut reopened = TrackIo::new(io.db.take());
+        assert_eq!(reopened.saved_waveform(&a, source_stamp(&a)), None);
+        assert_eq!(
+            reopened.saved_waveform(&b, source_stamp(&b)),
+            Some(vec![0.1])
+        );
+        std::fs::remove_dir_all(folder).expect("cleanup");
+    }
+
+    #[test]
+    fn a_load_between_a_rename_and_its_remap_gives_no_file_the_other_files_waveform() {
+        let (folder, a, b) = same_size_and_time("load-before-remap");
+        let mut io = TrackIo::new(Some(database()));
+        io.save_waveform(&a, source_stamp(&a), vec![0.1], 1.0);
+        io.save_waveform(&b, source_stamp(&b), vec![0.2], 1.0);
+        // A new session, with nothing in memory.
+        let mut io = TrackIo::new(io.db.take());
+        swap_files(&a, &b);
+        swap_saved_waveforms(io.db.as_ref().expect("database"), &a, &b);
+
+        // A load before the analysis thread hears of the rename reads the
+        // moved waveform, which the remap then moves again.
+        assert_eq!(io.saved_waveform(&a, source_stamp(&a)), Some(vec![0.2]));
+        io.handle(swap_renames(&a, &b));
+
+        assert_eq!(io.saved_waveform(&b, source_stamp(&b)), Some(vec![0.1]));
+        assert_eq!(io.saved_waveform(&a, source_stamp(&a)), Some(vec![0.2]));
+        std::fs::remove_dir_all(folder).expect("cleanup");
+    }
+
+    #[test]
+    fn files_swapped_outside_the_app_are_decoded_again() {
+        let (folder, a, b) = same_size_and_time("outside-swap");
+        let mut io = TrackIo::new(Some(database()));
+        io.save_waveform(&a, source_stamp(&a), vec![0.1], 1.0);
+        io.save_waveform(&b, source_stamp(&b), vec![0.2], 1.0);
+        // Nothing moves the saved waveforms, nor tells the analysis thread.
+        swap_files(&a, &b);
+
+        assert_eq!(io.saved_waveform(&a, source_stamp(&a)), None);
+        assert_eq!(io.saved_waveform(&b, source_stamp(&b)), None);
+        let mut reopened = TrackIo::new(io.db.take());
+        assert_eq!(reopened.saved_waveform(&a, source_stamp(&a)), None);
+        assert_eq!(reopened.saved_waveform(&b, source_stamp(&b)), None);
+        std::fs::remove_dir_all(folder).expect("cleanup");
+    }
+
+    #[test]
+    fn a_file_swapped_outside_the_app_with_a_library_track_is_decoded_again() {
+        let (folder, a, b) = same_size_and_time("outside-swap-with-track");
+        let db = database();
+        // Only `a` has a saved waveform, but both are library tracks, of the
+        // same size and time.
+        for path in [&a, &b] {
+            let stamp = source_stamp(path).expect("stamp");
+            let mtime_ns = i64::try_from(stamp.modified_secs * 1_000_000_000).expect("time")
+                + i64::from(stamp.modified_nanos);
+            db.execute(
+                "INSERT INTO tracks(path, title, artist, album, mtime_ns, size_bytes, \
+                 indexed_at) VALUES (?1, '', '', '', ?2, ?3, 0)",
+                rusqlite::params![
+                    path.to_string_lossy(),
+                    mtime_ns,
+                    i64::try_from(stamp.size_bytes).expect("size")
+                ],
+            )
+            .expect("track");
+        }
+        let mut io = TrackIo::new(Some(db));
+        io.save_waveform(&a, source_stamp(&a), vec![0.1], 1.0);
+        swap_files(&a, &b);
+
+        let mut reopened = TrackIo::new(io.db.take());
+        assert_eq!(reopened.saved_waveform(&a, source_stamp(&a)), None);
+        std::fs::remove_dir_all(folder).expect("cleanup");
     }
 
     #[test]

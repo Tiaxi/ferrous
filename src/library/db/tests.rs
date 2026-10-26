@@ -86,15 +86,17 @@ fn a_version_0_library_migrates_without_losing_a_row_and_a_second_run_changes_no
     assert_eq!(full_text_objects(&conn), Vec::<String>::new());
     // Every track gets a cover stamp, unknown until the next scan checks
     // its cover; see `migrate_to_version_2`.
+    // Every track and saved waveform has an unknown file identity, which
+    // it takes from the file it matches next; see `migrate_to_version_4`.
     let mut before = before;
     for row in &mut before[1] {
-        row.push(Value::Null);
+        row.extend([Value::Null, Value::Null, Value::Null]);
     }
     // Every saved waveform is decoded again, once, since nothing tells
     // whether its decode reached the end of the file; see
     // `migrate_to_version_3`.
     for row in &mut before[3] {
-        row.extend([Value::Integer(0), Value::Null]);
+        row.extend([Value::Integer(0), Value::Null, Value::Null, Value::Null]);
     }
     assert_eq!(library_rows(&conn), before, "every row and cover is kept");
     let indexes: Vec<String> = schema_objects(&conn)
@@ -112,6 +114,7 @@ fn a_version_0_library_migrates_without_losing_a_row_and_a_second_run_changes_no
             "idx_tracks_genre",
             "idx_tracks_root_path",
             "idx_tracks_root_path_path_nocase",
+            "idx_tracks_size_mtime",
             "idx_tracks_title",
             "idx_waveform_cache_updated_at",
         ]
@@ -131,6 +134,53 @@ fn a_version_0_library_migrates_without_losing_a_row_and_a_second_run_changes_no
     assert_eq!(library_rows(&conn), before);
     drop(conn);
     assert_eq!(entries(&folder), ["library.sqlite3"], "nothing moved aside");
+    fs::remove_dir_all(folder).expect("cleanup");
+}
+
+#[test]
+fn a_version_0_library_without_the_waveform_cache_gets_it_and_keeps_its_rows() {
+    let folder = test_folder("migrate-v0-no-waveforms");
+    let path = folder.join("library.sqlite3");
+    build_version_0_library(&path, 40);
+    let library_tables = |conn: &Connection| {
+        ["roots", "tracks", "external_tracks"].map(|table| table_rows(conn, table))
+    };
+    let mut before = {
+        let conn = Connection::open(&path).expect("open fixture");
+        // The analysis worker may never have made it, as when another
+        // writer held the database.
+        conn.execute_batch("DROP TABLE waveform_cache")
+            .expect("no waveform cache");
+        library_tables(&conn)
+    };
+    assert!(before.iter().all(|rows| !rows.is_empty()));
+
+    let OpenedLibrary { conn, notice } = open_worker_db(&path, SHORT_WAIT).expect("migrate");
+
+    assert_eq!(notice, None);
+    assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
+    for row in &mut before[1] {
+        row.extend([Value::Null, Value::Null, Value::Null]);
+    }
+    assert_eq!(library_tables(&conn), before);
+    assert!(table_rows(&conn, "waveform_cache").is_empty());
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('waveform_cache')")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("columns")
+        .collect::<rusqlite::Result<_>>()
+        .expect("column names");
+    assert!(
+        ["complete", "coverage_seconds", "file_device", "file_inode"]
+            .iter()
+            .all(|column| columns.iter().any(|name| name == column))
+    );
+    drop(conn);
+
+    let OpenedLibrary { conn, .. } = open_worker_db(&path, SHORT_WAIT).expect("reopen");
+    assert_eq!(conn.total_changes(), 0, "a second migration writes nothing");
+    drop(conn);
     fs::remove_dir_all(folder).expect("cleanup");
 }
 

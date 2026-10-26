@@ -462,7 +462,7 @@ fn removing_gone_tracks_keeps_a_row_written_since_the_scan_started() {
             (
                 path.to_string(),
                 ExistingTrackScanState {
-                    row: RowState::new(1, 1, "", 0),
+                    row: RowState::new(1, 1, "", 0, None),
                     has_cover_path: true,
                     suspicious_metadata: false,
                     cover_stamp: 0,
