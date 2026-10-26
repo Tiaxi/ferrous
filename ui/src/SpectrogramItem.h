@@ -263,6 +263,42 @@ private:
     static constexpr int kGradientTableSize = 2048;
     static constexpr int kCanvasTileWidth = 64;
 
+    // The track columns that centered mode shows: the playhead in the
+    // middle, unless that would show past either end of the track, or the
+    // whole track when it nearly fits. The decoder models this view
+    // (src/analysis/centered_view.rs); both are tested against
+    // src/analysis/fixtures/centered-view.txt.
+    struct CenteredDisplayRange {
+        qint64 left{0};
+        qint64 right{-1};
+        bool decodedTailLooksFinal{false};
+    };
+    static CenteredDisplayRange centeredDisplayRange(
+        qint64 nowCol,
+        int visibleWindowCols,
+        qint64 maxColCount,
+        qint64 estimateCount,
+        double columnsPerSecond);
+    // The view a centered frame shows with the playhead at `positionSeconds`:
+    // centeredDisplayRange, held at the canvas's range while that is about
+    // the same, so that the view does not jitter. The paint draws it, and a
+    // click seeks to where it shows.
+    struct CenteredView {
+        qint64 left{0};
+        qint64 right{-1};
+        bool decodedTailLooksFinal{false};
+        // Whether it scrolls under the playhead, by part of a column.
+        bool scrolls{false};
+        // Where display column `left` starts, in canvas pixels.
+        double drawX{0.0};
+    };
+    CenteredView centeredViewLocked(
+        double positionSeconds,
+        int canvasWidth,
+        int canvasHeight,
+        double canvasZoom,
+        double columnsPerSecond) const;
+
     void rebuildPalette();
     void invalidateMapping();
     void ensureMapping(int height);

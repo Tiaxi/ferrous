@@ -1,0 +1,15 @@
+# Where a centered spectrogram view starts. The decoder's model of the view
+# (src/analysis/centered_view.rs) and the view itself
+# (centeredDisplayRange in ui/src/SpectrogramItem.cpp) are both tested
+# against these cases, at 100 columns a second.
+#
+# position window duration left, in seconds
+30 10 100 25
+2 10 100 0
+94 10 100 89
+95 10 100 90
+98 10 100 90
+50 89 100 5.5
+99 89 100 11
+50 90 100 0
+50 95 100 0

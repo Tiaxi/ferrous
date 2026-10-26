@@ -25,6 +25,12 @@ Item {
                                    root.uiBridge.currentTrackChannelLabels || [])
     }
 
+    // Whether a mask of muted channels has `index`. QML numbers hold 64-bit
+    // masks only to 53 bits, so this divides instead of shifting 32-bit ints.
+    function channelInMask(mask, index) {
+        return Math.floor(mask / Math.pow(2, index)) % 2 === 1
+    }
+
     Rectangle {
         anchors.fill: parent
         color: "#050907"
@@ -105,7 +111,11 @@ Item {
                 }
 
                 Rectangle {
-                    property bool active: root.uiBridge.isChannelMuted(index)
+                    objectName: "waveformChannelMuteButton"
+                    readonly property int channelIndex: index
+                    // The mask notifies when it changes; isChannelMuted()
+                    // does not.
+                    property bool active: root.channelInMask(waveform.mutedChannelsMask, index)
                     visible: root.interactiveOverlaysVisible
                         && (root.uiBridge.channelButtonsVisibility === 2
                             || (root.uiBridge.channelButtonsVisibility === 1

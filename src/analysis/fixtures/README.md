@@ -58,3 +58,9 @@ lame -t -b 64 --resample 22.05 -m j stereo.wav stereo.mp3
 lame -t -b 32 --resample 22.05 -m m mono.wav mono.mp3
 cat stereo.mp3 mono.mp3 > channel-change.mp3
 ```
+
+`centered-view.txt` lists where a centered spectrogram view starts for a
+playhead position, a window and a track duration. The decoder's model of the
+view (`src/analysis/centered_view.rs`) and the Qt view
+(`SpectrogramItem::centeredDisplayRange`) are both tested against it, so the
+two agree.
