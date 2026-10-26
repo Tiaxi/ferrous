@@ -721,6 +721,16 @@ void rasterPixel(
     }
 }
 
+// The most pixels the render sync draws to move a canvas on. Playback
+// moves it at most about 100 a frame (6000 columns a second at 384 kHz and
+// 16x zoom, at 60 fps), which costs about a millisecond at 719 rows and
+// 4097 bins. More comes from a jump, such as a seek, and is rasterized on a
+// worker like a full rebuild: the whole 3440-pixel view takes about 30 ms.
+int maxSyncAppendPixels(int canvasWidth) {
+    constexpr int kMaxSyncAppendPixels = 128;
+    return std::min(canvasWidth - 1, kMaxSyncAppendPixels);
+}
+
 // How many pixels a full rasterization of display columns
 // [displayLeft, displayRight] fills.
 int rasterDrawPixels(int width, qint64 displayLeft, qint64 displayRight, double effectiveZoom) {
@@ -866,6 +876,12 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
 }
 
 SpectrogramItem::~SpectrogramItem() {
+    // ~QQuickItem takes the item out of its window, which emits
+    // windowChanged and visibleChanged once this item's members are gone:
+    // its handlers for them must not run then.
+    disconnect(this, nullptr, this, nullptr);
+    disconnect(m_animationTickConnection);
+    disconnect(m_windowVisibilityConnection);
     // A rasterization still running stops at its next check, and none
     // delivers to this item from now on.
     QMutexLocker lock(&m_rasterMailbox->mutex);
@@ -3120,7 +3136,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     zoomPreviewShown = preview.active;
                 } else if (!canvasIsView) {
                     preview = staleCanvasAlignmentLocked(
-                        canvasDrawX, drawX, displayLeft, rollingMode,
+                        canvasDrawX, drawCols, static_cast<double>(w), drawX, displayLeft, rollingMode,
                         effectiveZoom, columnsPerSecond);
                 }
                 latestX = (m_canvasWriteX - 1 + canvasSize.width()) % canvasSize.width();
@@ -4336,6 +4352,8 @@ void SpectrogramItem::markCanvasStaleLocked() {
 
 SpectrogramZoomPreview SpectrogramItem::staleCanvasAlignmentLocked(
     double canvasDrawX,
+    int canvasPixels,
+    double viewWidth,
     double viewDrawX,
     qint64 displayLeft,
     bool rollingMode,
@@ -4381,6 +4399,21 @@ SpectrogramZoomPreview SpectrogramItem::staleCanvasAlignmentLocked(
         && scale > 0.0
         && std::isfinite(alignment.toX)
         && (std::abs(scale - 1.0) > 1e-9 || std::abs(alignment.toX - alignment.fromX) > 1e-6);
+    if (!alignment.active) {
+        return alignment;
+    }
+    // A jump, such as a seek, would move the canvas mostly or wholly off
+    // screen and leave the view blank until its replacement arrives. It
+    // stays where it is instead, as a zoom fill keeps it.
+    const auto visibleWidth = [viewWidth](double left, double right) {
+        return std::max(0.0, std::min(right, viewWidth) - std::max(left, 0.0));
+    };
+    const double shown = visibleWidth(canvasDrawX, canvasDrawX + canvasPixels);
+    const double aligned = visibleWidth(
+        alignment.map(canvasDrawX), alignment.map(canvasDrawX + canvasPixels));
+    if (aligned < 0.5 * std::min(shown * scale, viewWidth)) {
+        alignment.active = false;
+    }
     return alignment;
 }
 
@@ -5096,7 +5129,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
             std::max(m_precomputedCanvasDisplayRight + 1, displayLeft);
         const qint64 appendCount =
             std::max<qint64>(0, displayRight - appendStart + 1);
-        if (appendCount > width) {
+        if (appendCount > maxSyncAppendPixels(width)) {
             return false;
         }
 
@@ -5155,7 +5188,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
 
     const int preservedPixels = std::max(0, oldFilledPixels - shiftPixels);
     const int appendPixels = newFilledPixels - preservedPixels;
-    if (appendPixels < 0 || appendPixels > width) {
+    if (appendPixels < 0 || appendPixels > maxSyncAppendPixels(width)) {
         return false;
     }
 

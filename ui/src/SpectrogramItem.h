@@ -272,6 +272,8 @@ private:
     void markCanvasStaleLocked();
     SpectrogramZoomPreview staleCanvasAlignmentLocked(
         double canvasDrawX,
+        int canvasPixels,
+        double viewWidth,
         double viewDrawX,
         qint64 displayLeft,
         bool rollingMode,
