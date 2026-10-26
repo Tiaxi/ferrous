@@ -687,6 +687,8 @@ ApplicationWindow {
                 return "&Undo Remove Tracks"
             case 3:
                 return "&Undo Replace Queue"
+            case 4:
+                return "&Undo Move Tracks"
             default:
                 return "&Undo"
             }

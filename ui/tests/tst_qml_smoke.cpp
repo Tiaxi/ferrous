@@ -14283,6 +14283,19 @@ void QmlSmokeTest::queueRemovalOffersAnUndoThatSelectsTheRestoredRows() {
     QTRY_VERIFY(notice->property("visible").toBool());
     QCOMPARE(text->property("text").toString(),
              QStringLiteral("Queue replaced; the previous queue had 1 track."));
+
+    // Moved rows lose nothing, so no notice asks; Edit > Undo and Ctrl+Z
+    // put the whole move back.
+    bridge->setProperty("queueUndoKind", 4);
+    bridge->setProperty("queueUndoTrackCount", 3);
+    bridge->setProperty("queueUndoId", 10.0);
+    QTRY_VERIFY(!notice->property("visible").toBool());
+    QVERIFY(undoAction->property("enabled").toBool());
+    QCOMPARE(undoAction->property("text").toString(), QStringLiteral("&Undo Move Tracks"));
+    QVERIFY(QMetaObject::invokeMethod(queueView, "forceActiveFocus"));
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 10"));
 }
 
 void QmlSmokeTest::removingALibraryRootAsksFirstAndNamesIt() {

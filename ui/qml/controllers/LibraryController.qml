@@ -339,6 +339,8 @@ QtObject {
         }
         root.pendingAnchorValid = false
         root.libraryModel.toggleKey(key)
+        // Rows a collapse hides leave the selection.
+        root.syncSelectionToVisibleRows()
         if (expanding) {
             Qt.callLater(function() {
                 root.applyPendingExpansionFit()

@@ -8,7 +8,8 @@ import org.kde.kirigami 2.20 as Kirigami
 // Offers to undo the latest change that removed tracks from the queue:
 // Clear, removing rows, or replacing the queue. It shows while the backend
 // offers the undo, which any later queue change withdraws, until the user
-// dismisses it; a new change shows it again.
+// dismisses it; a new change shows it again. Moved rows lose nothing, so
+// their undo is in the Edit menu only.
 Rectangle {
     id: root
 
@@ -17,6 +18,7 @@ Rectangle {
     property double dismissedId: 0
     readonly property double offerId: root.uiBridge.queueUndoId || 0
     readonly property bool shown: root.offerId > 0 && root.offerId !== root.dismissedId
+        && root.text.length > 0
     readonly property string text: root.describe(
         root.uiBridge.queueUndoKind || 0,
         root.uiBridge.queueUndoTrackCount || 0)
