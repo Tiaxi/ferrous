@@ -22,6 +22,8 @@ Install these tools and development libraries:
 - GLib/GIO and GStreamer development libraries, including app, audio, and pbutils
 - GStreamer runtime codec plugins for the formats you want to play
 
+To run Ferrous, also install the KDE `qqc2-desktop-style` QML module (`kf6-qqc2-desktop-style` on Fedora). Ferrous uses its `org.kde.desktop` controls style and does not start without it. Plasma desktops include it.
+
 Although CMake declares a Qt 6.6 minimum, it unconditionally enables [QTP0004, introduced in Qt 6.8](https://doc.qt.io/qt-6/qt-cmake-policy-qtp0004.html), so source builds need Qt 6.8 or newer. See [UI CI](../.github/workflows/ci.yml) for the reference distribution and Rust toolchain.
 
 For Fedora, the build package set used by CI is:
@@ -63,15 +65,24 @@ Manual CMake and Cargo commands do not load `build.env`; export any build creden
 
 ## Local package builds
 
-On Fedora, install the build dependencies above plus `rpm-build` and `desktop-file-utils`, then run:
+On Fedora, install the packaging tools and the spec's build dependencies, then run:
 
 ```bash
+sudo dnf install rpm-build appstream desktop-file-utils
+sudo dnf builddep packaging/rpm/ferrous.spec
 ./scripts/build-rpm.sh
 # Or build and install:
 ./scripts/build-rpm.sh --install
 ```
 
-The helper packages the current working tree, runs package checks, and writes RPMs under `dist/rpm/RPMS/`.
+The helper packages the current working tree, vendors the crates that `Cargo.lock` lists into a second source tarball, validates the desktop entry and AppStream metadata, runs package checks, and writes RPMs under `dist/rpm/RPMS/`. Vendoring needs network access unless Cargo has already downloaded the crates; the package build itself runs offline. Package builds do not treat compiler warnings as errors.
+
+rpmbuild checks that Fedora's `rust` and `cargo` packages are installed, but it does not choose the compiler: CMake runs the first `cargo` on the path after loading `~/.cargo/env`. Release packages are built in a clean Fedora container, where Fedora's toolchain is the only one. On a machine with rustup, a local package build uses the rustup toolchain unless you link Fedora's toolchain into rustup and select it:
+
+```bash
+rustup toolchain link fedora /usr
+RUSTUP_TOOLCHAIN=fedora ./scripts/build-rpm.sh
+```
 
 ## Formats
 

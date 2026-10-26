@@ -23,7 +23,11 @@ usage() {
     cat <<USAGE
 Usage: $(basename "$0") [options]
 
-Build a local Ferrous RPM from the current working tree.
+Build a local Ferrous RPM from the current working tree. Crates are vendored
+into a second source tarball so that rpmbuild builds offline. rpmbuild checks
+the spec's BuildRequires; install them with:
+
+  sudo dnf builddep packaging/rpm/ferrous.spec
 
 Options:
   --install            Install the resulting RPM via scripts/install-rpm.sh
@@ -86,6 +90,7 @@ require_cmd() {
     fi
 }
 
+require_cmd appstreamcli
 require_cmd desktop-file-validate
 require_cmd cargo
 require_cmd cmake
@@ -94,6 +99,7 @@ require_cmd ninja
 require_cmd rpm
 require_cmd rpmbuild
 require_cmd rpmspec
+require_cmd tar
 if [[ ${DO_CHECK} -eq 1 ]]; then
     require_cmd ctest
 fi
@@ -123,7 +129,15 @@ else
     fi
 fi
 
+# The newest commit's date, so rebuilding a commit gives the same changelog.
+changelog_date="$(LC_ALL=C TZ=UTC git -C "${REPO_ROOT}" log -1 --date=format-local:'%a %b %d %Y' \
+    --format=%cd 2>/dev/null || true)"
+if [[ -z "${changelog_date}" ]]; then
+    changelog_date="$(LC_ALL=C date -u +'%a %b %d %Y')"
+fi
+
 desktop-file-validate "${REPO_ROOT}/ui/ferrous.desktop"
+appstreamcli validate --no-net "${REPO_ROOT}/ui/io.github.tiaxi.ferrous.metainfo.xml"
 
 snapshot_root="${RPM_TOPDIR}/SOURCES/ferrous-${version}"
 snapshot_tar="${RPM_TOPDIR}/SOURCES/ferrous-${version}.tar.gz"
@@ -151,22 +165,30 @@ for relpath in "${repo_files[@]}"; do
 done
 
 tar -C "${RPM_TOPDIR}/SOURCES" -czf "${snapshot_tar}" "ferrous-${version}"
+rm -rf "${snapshot_root}"
 
-rpmspec -P "${SPEC_FILE}" \
-    --define "_topdir ${RPM_TOPDIR}" \
-    --define "ferrous_version ${version}" \
-    --define "ferrous_release ${release}" \
-    --define "ferrous_license ${LICENSE_VALUE}" \
-    >/dev/null
+vendor_stage="${RPM_TOPDIR}/SOURCES/ferrous-${version}-vendor"
+vendor_tar="${RPM_TOPDIR}/SOURCES/ferrous-${version}-vendor.tar.gz"
+rm -rf "${vendor_stage}" "${vendor_tar}"
+mkdir -p "${vendor_stage}"
+cargo vendor --quiet --locked --manifest-path "${REPO_ROOT}/Cargo.toml" "${vendor_stage}/vendor" >/dev/null
+tar -C "${vendor_stage}" -czf "${vendor_tar}" vendor
+rm -rf "${vendor_stage}"
 
-rpmbuild_args=(
-    --nodeps
-    -bb
-    "${SPEC_FILE}"
+rpm_defines=(
     --define "_topdir ${RPM_TOPDIR}"
     --define "ferrous_version ${version}"
     --define "ferrous_release ${release}"
     --define "ferrous_license ${LICENSE_VALUE}"
+    --define "ferrous_changelog_date ${changelog_date}"
+)
+
+rpmspec -P "${SPEC_FILE}" "${rpm_defines[@]}" >/dev/null
+
+rpmbuild_args=(
+    -bb
+    "${SPEC_FILE}"
+    "${rpm_defines[@]}"
 )
 
 if [[ ${DO_CHECK} -eq 0 ]]; then
