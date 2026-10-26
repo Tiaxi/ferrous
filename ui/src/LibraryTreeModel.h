@@ -28,6 +28,7 @@ public:
         TrackNumberRole,
         TrackPathRole,
         CoverPathRole,
+        CoverStampRole,
         SelectionKeyRole,
         DepthRole,
         OpenPathRole,
@@ -77,6 +78,7 @@ private:
         QString trackPath;
         QString openPath;
         QString coverPath;
+        quint64 coverStamp{0};
         QStringList playPaths;
         QVector<TreeNode> children;
     };
@@ -95,6 +97,7 @@ private:
         QString trackPath;
         QString openPath;
         QString coverPath;
+        quint64 coverStamp{0};
         QStringList playPaths;
         int depth{0};
         bool hasChildren{false};

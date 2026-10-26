@@ -7,6 +7,9 @@
 //!   [`WatchTuning::quiet`], or for at most [`WatchTuning::max_delay`]
 //!   since the first, and then sent as one [`LibraryCommand::ScanPaths`].
 //!   The worker merges it with other scans and runs it between commands.
+//! - A changed audio file is scanned; a changed image that a folder's
+//!   cover could be chosen from scans its folder, so the covers of the
+//!   tracks there are checked again.
 //! - When watching starts, at startup or when it is turned on, every root
 //!   is rescanned, so that changes made meanwhile appear.
 //! - A root that cannot be watched (a network or FUSE file system, the
@@ -35,6 +38,7 @@ use walkdir::WalkDir;
 
 use self::inotify::{Inotify, RawEvent, Waker};
 use super::{is_supported_audio, LibraryCommand, UnwatchedRoot};
+use crate::folder_cover::is_cover_image;
 use crate::worker_thread::JoinableThread;
 
 /// How the watcher batches changes and rescans the roots it cannot watch.
@@ -1093,6 +1097,13 @@ impl Watcher {
         }
         if is_supported_audio(&path) {
             self.pending.add(&root, path, now, self.tuning.max_paths);
+        } else if is_cover_image(&path) {
+            // An image added, removed, renamed or rewritten can change the
+            // cover of every track in its folder, so the folder is scanned.
+            if let Some(folder) = path.parent() {
+                self.pending
+                    .add(&root, folder.to_path_buf(), now, self.tuning.max_paths);
+            }
         }
     }
 

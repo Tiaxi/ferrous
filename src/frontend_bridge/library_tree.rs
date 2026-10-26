@@ -6,7 +6,7 @@ use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::folder_cover::find_folder_cover;
+use crate::folder_cover::FolderImages;
 use crate::library::{LibraryRoot, LibrarySnapshot, LibraryTrack};
 
 use super::ffi::push_string;
@@ -25,6 +25,7 @@ struct TrackLeaf {
     file_stem: String,
     album_tag: String,
     cover_path: String,
+    cover_stamp: u64,
     year: Option<i32>,
     track_no: Option<u32>,
 }
@@ -66,6 +67,8 @@ struct ResolvedAlbum {
     folder_name: String,
     folder_path: PathBuf,
     cover_path: Option<String>,
+    /// See [`crate::library::LibraryTrack::cover_stamp`].
+    cover_stamp: u64,
     root_tracks: Vec<OrderedTrack>,
     sections: Vec<ResolvedSection>,
 }
@@ -75,6 +78,7 @@ struct ResolvedSection {
     name: String,
     path: PathBuf,
     cover_path: Option<String>,
+    cover_stamp: u64,
     year: Option<i32>,
     tracks: Vec<OrderedTrack>,
 }
@@ -91,6 +95,7 @@ struct FlatTreeRow {
     artist: String,
     path: String,
     cover_path: String,
+    cover_stamp: u64,
     track_path: String,
     play_paths: Vec<String>,
 }
@@ -108,6 +113,7 @@ impl FlatTreeRow {
             artist: String::new(),
             path: path.to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             track_path: String::new(),
             play_paths: Vec::new(),
         }
@@ -132,6 +138,7 @@ impl FlatTreeRow {
             artist: artist_name.to_string(),
             path: path.to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             track_path: String::new(),
             play_paths: Vec::new(),
         }
@@ -157,6 +164,7 @@ impl FlatTreeRow {
             artist: artist_name.to_string(),
             path: album_path.to_string(),
             cover_path: album.cover_path.as_deref().unwrap_or_default().to_string(),
+            cover_stamp: album.cover_stamp,
             track_path: String::new(),
             play_paths,
         }
@@ -167,7 +175,7 @@ impl FlatTreeRow {
         key: String,
         title: &str,
         path: &str,
-        cover_path: &str,
+        (cover_path, cover_stamp): (&str, u64),
         play_paths: Vec<String>,
         child_count: usize,
     ) -> Self {
@@ -182,6 +190,7 @@ impl FlatTreeRow {
             artist: String::new(),
             path: path.to_string(),
             cover_path: cover_path.to_string(),
+            cover_stamp,
             track_path: String::new(),
             play_paths,
         }
@@ -199,6 +208,7 @@ impl FlatTreeRow {
             artist: artist_name.to_string(),
             path: path.to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             track_path: path.to_string(),
             play_paths: vec![path.to_string()],
         }
@@ -489,6 +499,7 @@ fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, tra
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
         album_tag: track.album.trim().to_string(),
         cover_path: track.cover_path.clone(),
+        cover_stamp: track.cover_stamp,
         year: track.year,
         track_no: track.track_no,
     };
@@ -724,7 +735,7 @@ fn append_album_tracks(
             section_row_key(root_path, artist_name, &album.folder_name, &section.name),
             &section_title,
             &section_path,
-            section_cover,
+            (section_cover, section.cover_stamp),
             section_play_paths,
             section.tracks.len(),
         ));
@@ -754,6 +765,7 @@ fn encode_flat_rows(rows: &[FlatTreeRow]) -> Vec<u8> {
         push_string(&mut out, &row.artist);
         push_string(&mut out, &row.path);
         push_string(&mut out, &row.cover_path);
+        push_u64(&mut out, row.cover_stamp);
         push_string(&mut out, &row.track_path);
         push_u32(
             &mut out,
@@ -782,6 +794,10 @@ fn push_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
+fn push_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
 fn push_i32(out: &mut Vec<u8>, value: i32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
@@ -798,8 +814,15 @@ fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
             album_tracks.extend(tracks.iter().cloned());
         }
 
-        let section_cover = resolve_album_cover(tracks)
-            .or_else(|| find_image_in_dir(&album.folder_path.join(name)));
+        // Disc sections show the album's cover.
+        let (section_cover, section_cover_stamp) = if is_disc {
+            (None, 0)
+        } else {
+            split_cover(
+                resolve_album_cover(tracks)
+                    .or_else(|| find_image_in_dir(&album.folder_path.join(name))),
+            )
+        };
         let section_year = if is_disc {
             None // disc sections don't get independent year
         } else {
@@ -809,7 +832,8 @@ fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
         sections.push(ResolvedSection {
             name: name.clone(),
             path: album.folder_path.join(name),
-            cover_path: if is_disc { None } else { section_cover },
+            cover_path: section_cover,
+            cover_stamp: section_cover_stamp,
             year: section_year,
             tracks: order_tracks(tracks),
         });
@@ -821,14 +845,16 @@ fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
 
     // Album cover fallback: embedded art from album tracks, then image in album dir,
     // then image in disc section dirs (not non-disc sections).
-    let cover_path = resolve_album_cover(&album_tracks)
-        .or_else(|| find_image_in_dir(&album.folder_path))
-        .or_else(|| {
-            sections
-                .iter()
-                .filter(|s| super::is_main_album_disc_section(&s.name))
-                .find_map(|s| find_image_in_dir(&s.path))
-        });
+    let (cover_path, cover_stamp) = split_cover(
+        resolve_album_cover(&album_tracks)
+            .or_else(|| find_image_in_dir(&album.folder_path))
+            .or_else(|| {
+                sections
+                    .iter()
+                    .filter(|s| super::is_main_album_disc_section(&s.name))
+                    .find_map(|s| find_image_in_dir(&s.path))
+            }),
+    );
 
     ResolvedAlbum {
         title,
@@ -836,6 +862,7 @@ fn resolve_album(album: &AlbumNodeBuilder) -> ResolvedAlbum {
         folder_name: album.folder_name.clone(),
         folder_path: album.folder_path.clone(),
         cover_path,
+        cover_stamp,
         root_tracks: order_tracks(&album.root_tracks),
         sections,
     }
@@ -889,16 +916,24 @@ fn resolve_album_year(all_tracks: &[TrackLeaf]) -> Option<i32> {
     super::resolve_uniform_year(all_tracks.iter().map(|track| track.year))
 }
 
-fn resolve_album_cover(all_tracks: &[TrackLeaf]) -> Option<String> {
-    all_tracks
-        .iter()
-        .map(|track| track.cover_path.trim())
-        .find(|path| !path.is_empty())
-        .map(ToString::to_string)
+/// A cover and its stamp; see [`crate::library::LibraryTrack::cover_stamp`].
+type TreeCover = (String, u64);
+
+fn split_cover(cover: Option<TreeCover>) -> (Option<String>, u64) {
+    cover.map_or((None, 0), |(path, stamp)| (Some(path), stamp))
 }
 
-fn find_image_in_dir(dir: &Path) -> Option<String> {
-    find_folder_cover(dir).map(|cover| cover.to_string_lossy().into_owned())
+fn resolve_album_cover(all_tracks: &[TrackLeaf]) -> Option<TreeCover> {
+    all_tracks
+        .iter()
+        .find(|track| !track.cover_path.trim().is_empty())
+        .map(|track| (track.cover_path.trim().to_string(), track.cover_stamp))
+}
+
+fn find_image_in_dir(dir: &Path) -> Option<TreeCover> {
+    let images = FolderImages::read(dir).ok()?;
+    let cover = images.cover()?.to_string_lossy().into_owned();
+    Some((cover, images.stamp()))
 }
 
 fn order_tracks(tracks: &[TrackLeaf]) -> Vec<OrderedTrack> {
@@ -1216,6 +1251,7 @@ mod tests {
         artist: String,
         path: String,
         cover_path: String,
+        cover_stamp: u64,
         track_path: String,
         play_paths: Vec<String>,
     }
@@ -1313,6 +1349,14 @@ mod tests {
             let Some(cover_path) = read_string(bytes, &mut offset) else {
                 break;
             };
+            let Some(cover_stamp) = bytes
+                .get(offset..offset + 8)
+                .and_then(|stamp| stamp.try_into().ok())
+                .map(u64::from_le_bytes)
+            else {
+                break;
+            };
+            offset += 8;
             let Some(track_path) = read_string(bytes, &mut offset) else {
                 break;
             };
@@ -1342,6 +1386,7 @@ mod tests {
                 artist,
                 path,
                 cover_path,
+                cover_stamp,
                 track_path,
                 play_paths,
             });
@@ -1364,6 +1409,8 @@ mod tests {
             artist: String::new(),
             album: album.to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year,
             track_no,
@@ -1438,6 +1485,7 @@ mod tests {
                     file_stem: "01".to_string(),
                     album_tag: "Tag".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
                     year: Some(2024),
                     track_no: Some(1),
                 },
@@ -1447,6 +1495,7 @@ mod tests {
                     file_stem: "02".to_string(),
                     album_tag: "Tag".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
                     year: Some(2023),
                     track_no: Some(2),
                 },
@@ -1469,6 +1518,7 @@ mod tests {
                     file_stem: "01".to_string(),
                     album_tag: "Tag".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
                     year: Some(2023),
                     track_no: Some(1),
                 },
@@ -1478,6 +1528,7 @@ mod tests {
                     file_stem: "02".to_string(),
                     album_tag: "Tag".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
                     year: Some(2023),
                     track_no: Some(2),
                 },
@@ -1525,6 +1576,8 @@ mod tests {
                     artist: String::new(),
                     album: "Album".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
+                    cover_read_at: crate::library::CoverReadAt::default(),
                     genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
@@ -1538,6 +1591,8 @@ mod tests {
                     artist: String::new(),
                     album: "Album".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
+                    cover_read_at: crate::library::CoverReadAt::default(),
                     genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
@@ -1573,6 +1628,8 @@ mod tests {
                     artist: String::new(),
                     album: "Album A".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
+                    cover_read_at: crate::library::CoverReadAt::default(),
                     genre: String::new(),
                     year: Some(2020),
                     track_no: Some(1),
@@ -1586,6 +1643,8 @@ mod tests {
                     artist: String::new(),
                     album: "Album B".to_string(),
                     cover_path: String::new(),
+                    cover_stamp: 0,
+                    cover_read_at: crate::library::CoverReadAt::default(),
                     genre: String::new(),
                     year: Some(2021),
                     track_no: Some(1),
@@ -1698,6 +1757,7 @@ mod tests {
                 file_stem: "1".to_string(),
                 album_tag: String::new(),
                 cover_path: String::new(),
+                cover_stamp: 0,
                 year: None,
                 track_no: Some(1),
             },
@@ -1707,6 +1767,7 @@ mod tests {
                 file_stem: "10".to_string(),
                 album_tag: String::new(),
                 cover_path: String::new(),
+                cover_stamp: 0,
                 year: None,
                 track_no: Some(10),
             },
@@ -1863,6 +1924,7 @@ mod tests {
             file_stem,
             album_tag: album.to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
             year,
             track_no,
         }
@@ -1960,7 +2022,44 @@ mod tests {
 
         let front = album_dir.join("front.jpg");
         assert_eq!(resolved.cover_path.as_deref(), front.to_str());
+        assert_eq!(
+            resolved.cover_stamp,
+            FolderImages::read(&album_dir).expect("folder").stamp(),
+            "a cover found in the folder has the folder's stamp"
+        );
         std::fs::remove_dir_all(dir).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn album_rows_carry_the_cover_stamp_of_their_tracks_cover() {
+        let mut song = track(
+            "/music/Artist/Album/01.flac",
+            "Album",
+            None,
+            Some(1),
+            "Song",
+        );
+        song.cover_path = "/music/Artist/Album/cover.jpg".to_string();
+        song.cover_stamp = 0x0102_0304_0506_0708;
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: crate::library::shared_tracks(vec![song]),
+            ..Default::default()
+        };
+        let expanded = HashSet::from([artist_row_key("/music", "Artist")]);
+
+        let rows = decode_rows(&build_library_tree_flat_binary(
+            &library,
+            LibrarySortMode::Year,
+            Some(&expanded),
+        ));
+
+        let album = rows
+            .iter()
+            .find(|row| row.row_type == ROW_TYPE_ALBUM)
+            .expect("album row");
+        assert_eq!(album.cover_path, "/music/Artist/Album/cover.jpg");
+        assert_eq!(album.cover_stamp, 0x0102_0304_0506_0708);
     }
 
     #[test]
@@ -2121,11 +2220,13 @@ mod tests {
             folder_name: "Muut".to_string(),
             folder_path: PathBuf::from("/music/PT/Muut"),
             cover_path: None,
+            cover_stamp: 0,
             root_tracks: vec![],
             sections: vec![ResolvedSection {
                 name: "Lightbulb Sun".to_string(),
                 path: PathBuf::from("/music/PT/Muut/Lightbulb Sun"),
                 cover_path: Some("/cover.jpg".to_string()),
+                cover_stamp: 7,
                 year: Some(2000),
                 tracks: vec![OrderedTrack {
                     label: "01 - Track".to_string(),
@@ -2142,6 +2243,7 @@ mod tests {
             .unwrap();
         assert_eq!(section_row.title, "Lightbulb Sun (2000)");
         assert_eq!(section_row.cover_path, "/cover.jpg");
+        assert_eq!(section_row.cover_stamp, 7);
     }
 
     #[test]
@@ -2230,6 +2332,8 @@ mod tests {
             artist: String::new(),
             album: album.to_string(),
             cover_path: String::new(),
+            cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: String::new(),
             year,
             track_no,

@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QDBusAbstractAdaptor>
+#include <QDBusArgument>
 #include <QDBusObjectPath>
 #include <QDir>
 #include <QFile>
@@ -11,6 +12,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QQmlComponent>
+#include <QQmlEngine>
 #include <QQuickWindow>
 #include <QSignalSpy>
 #include <QSemaphore>
@@ -18,6 +21,7 @@
 #include <QSocketNotifier>
 #include <QFutureWatcher>
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -31,6 +35,7 @@
 #include "../src/BridgeClient.h"
 #include "../src/TagEditorController.h"
 #include "../src/CoverImageProvider.h"
+#include "../src/CoverRevisionLinks.h"
 #include "../src/GlobalSearchResultsModel.h"
 #include "../src/MprisController.h"
 #include "../src/SpectrogramItem.h"
@@ -265,13 +270,17 @@ private slots:
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void trackOnlySnapshotSetsTrackFlagOnly();
     void gaplessHandoffSetsIdentityFlagBeforeMetadata();
-    void coverLookupSchedulesTrackChangedNotSnapshotChanged();
+    void trackCoverIsTheBackendsChoiceWithItsStamp();
+    void trackCoverHasNoFallbackOfTheUisOwn();
     void mprisRepublishesOnTrackMetadataChanged();
     void mprisRepublishesOnTrackIdentityChanged();
     void mprisPublishesPlaybackStateOnPlaybackSignal();
     void mprisCanPauseWhilePaused();
     void mprisControllerConstructionDoesNotCrash();
     void mprisArtUrlConvertsImageProviderToFileUrl();
+    void mprisPublishesNewArtWhenTheCoverIsReplacedAtTheSamePath();
+    void coverRevisionLinksAreMadeOncePerStampAndOldOnesRemoved();
+    void coverRevisionLinksKeepThePublishedLinkThroughABurst();
     void mprisMetadataIsRebuiltOnlyForTrackChanges();
     void mprisAlbumArtistComesFromAlbumArtistTag();
     void albumArtistFollowsMatchingMetadataAcrossTracks();
@@ -316,6 +325,8 @@ private slots:
     void coverImageProviderHandlesMissingFile();
     void coverImageProviderCancelDoesNotCrash();
     void coverImageProviderUrlForPathFormat();
+    void coverImageProviderReadsTheFileOfAStampedId();
+    void replacedCoverReloadsForANewStampButNotFromTheCache();
 };
 
 void BridgeClientTest::spectrogramActivityFollowsVisibleItemsAndWindows() {
@@ -1535,9 +1546,12 @@ void putString(QByteArray &out, const QString &value) {
 
 void putQueueRow(QByteArray &out, const QString &path, const QString &title) {
     putString(out, title);
-    for (int i = 0; i < 4; ++i) {
+    // Artist, album and cover path, the cover stamp, and genre.
+    for (int i = 0; i < 3; ++i) {
         putString(out, QString{});
     }
+    putLe<quint64>(out, 0);
+    putString(out, QString{});
     putLe<qint32>(out, std::numeric_limits<qint32>::min());
     putLe<quint16>(out, 0);
     const float seconds = 60.0f;
@@ -2628,23 +2642,70 @@ void BridgeClientTest::gaplessHandoffSetsIdentityFlagBeforeMetadata() {
     QVERIFY(client.m_pollTrackMetadataChanged);
 }
 
-void BridgeClientTest::coverLookupSchedulesTrackChangedNotSnapshotChanged() {
+namespace {
+
+BinaryBridgeCodec::DecodedSnapshot playingWithCover(
+    const QString &trackPath, const QString &coverPath, quint64 coverStamp) {
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = trackPath;
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = trackPath;
+    snapshot.metadata.coverPath = coverPath;
+    snapshot.metadata.coverStamp = coverStamp;
+    return snapshot;
+}
+
+} // namespace
+
+void BridgeClientTest::trackCoverIsTheBackendsChoiceWithItsStamp() {
     BridgeClient client;
     isolateBridgeClient(client);
+    const QString track = QStringLiteral("/music/Album/01.flac");
+    const QString cover = QStringLiteral("/music/Album/cover.jpg");
 
-    client.m_currentTrackPath = QStringLiteral("/music/track.flac");
-    client.m_currentTrackCoverPath = QStringLiteral("file:///old-cover.jpg");
+    QVERIFY(client.processBinarySnapshot(playingWithCover(track, cover, 5)));
+    QCOMPARE(client.currentTrackCoverPath(),
+             QStringLiteral("image://covers//music/Album/cover.jpg#v=5"));
 
-    // Apply a new cover via the async lookup path.
-    client.applyTrackCoverLookupResult(
-        QStringLiteral("/music/track.flac"),
-        QStringLiteral("file:///new-cover.jpg"));
+    // The image was replaced at the same path: a new URL, which QML loads.
+    client.m_pollTrackMetadataChanged = false;
+    client.m_pollTrackIdentityChanged = false;
+    client.m_pollSnapshotChanged = false;
+    QVERIFY(client.processBinarySnapshot(playingWithCover(track, cover, 6)));
+    QCOMPARE(client.currentTrackCoverPath(),
+             QStringLiteral("image://covers//music/Album/cover.jpg#v=6"));
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    QVERIFY(!client.m_pollTrackIdentityChanged);
+    QVERIFY(!client.m_pollSnapshotChanged);
+}
 
-    // The cover update must schedule trackMetadataChanged, not identity or snapshot.
-    QVERIFY(client.m_trackMetadataChangedPending);
-    QVERIFY(!client.m_trackIdentityChangedPending);
-    QVERIFY(!client.m_snapshotChangedPending);
-    QCOMPARE(client.m_currentTrackCoverPath, QStringLiteral("file:///new-cover.jpg"));
+void BridgeClientTest::trackCoverHasNoFallbackOfTheUisOwn() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // Images the backend's rule does not take, which the UI used to.
+    for (const QString &name : {QStringLiteral("cover.webp"), QStringLiteral("albumart.bmp")}) {
+        QImage image(4, 4, QImage::Format_RGB32);
+        image.fill(Qt::red);
+        QVERIFY(image.save(dir.filePath(name), name.endsWith(QStringLiteral("webp")) ? "PNG" : "BMP"));
+    }
+    const QString first = dir.filePath(QStringLiteral("01.flac"));
+    const QString second = dir.filePath(QStringLiteral("02.flac"));
+    const QString cover = dir.filePath(QStringLiteral("front.jpg"));
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(client.processBinarySnapshot(playingWithCover(first, cover, 1)));
+    QVERIFY(!client.currentTrackCoverPath().isEmpty());
+
+    // The backend now finds no cover, for this track and the next one of the
+    // folder: the UI shows none rather than one it chose or kept itself.
+    QVERIFY(client.processBinarySnapshot(playingWithCover(first, QString(), 0)));
+    QCOMPARE(client.currentTrackCoverPath(), QString());
+    QVERIFY(client.processBinarySnapshot(playingWithCover(second, QString(), 0)));
+    QCOMPARE(client.currentTrackCoverPath(), QString());
+    QCoreApplication::processEvents();
+    QCOMPARE(client.currentTrackCoverPath(), QString());
 }
 
 void BridgeClientTest::mprisRepublishesOnTrackMetadataChanged() {
@@ -2792,15 +2853,42 @@ void BridgeClientTest::mprisControllerConstructionDoesNotCrash() {
 }
 
 
+namespace {
+
+QString publishedArtUrl(const MprisController &controller) {
+    return controller.m_lastPlayerState.metadata.value(QStringLiteral("mpris:artUrl")).toString();
+}
+
+// Waits for the controller's revision link, and returns the art it publishes.
+QString artOnceLinked(MprisController &controller) {
+    QSignalSpy ready(&controller.m_artLinks, &CoverRevisionLinks::linkReady);
+    if (controller.m_artLinks.pending() && !ready.wait(5000)) {
+        return {};
+    }
+    return publishedArtUrl(controller);
+}
+
+bool sentMetadataChange(const QList<QDBusMessage> &signalsSent) {
+    return std::any_of(signalsSent.cbegin(), signalsSent.cend(), [](const QDBusMessage &message) {
+        return message.member() == QStringLiteral("PropertiesChanged")
+            && message.arguments().size() > 1
+            && qdbus_cast<QVariantMap>(message.arguments().at(1))
+                   .contains(QStringLiteral("Metadata"));
+    });
+}
+
+} // namespace
+
 void BridgeClientTest::mprisArtUrlConvertsImageProviderToFileUrl() {
     BridgeClient client;
     isolateBridgeClient(client);
     client.m_queueLength = 1;
     client.m_playbackState = QStringLiteral("Playing");
     client.m_currentTrackPath = QStringLiteral("/music/track.flac");
-    // Simulate the async image provider URL that coverUrlForPath() produces.
+    // The async image provider URL of a stamped cover, in a folder whose
+    // name has a '#'.
     client.m_currentTrackCoverPath =
-        QStringLiteral("image://covers//music/cover.jpg#w=600&r=1");
+        QStringLiteral("image://covers//music/a#b/cover.jpg#v=12");
 
     MprisController controller(&client);
     controller.m_serviceRegistered = true;
@@ -2809,19 +2897,126 @@ void BridgeClientTest::mprisArtUrlConvertsImageProviderToFileUrl() {
     emit client.trackMetadataChanged();
 
     QVERIFY(controller.m_hasPublishedPlayerState);
-    const QVariantMap meta = controller.m_lastPlayerState.metadata;
-    const QString artUrl = meta.value(QStringLiteral("mpris:artUrl")).toString();
-    // Must be a file:// URL, not an image:// URL.
+    // Until the revision's link exists, the cover file itself.
+    QCOMPARE(publishedArtUrl(controller), QStringLiteral("file:///music/a%23b/cover.jpg"));
+    const QString artUrl = artOnceLinked(controller);
+    // Must be a file:// URL, not an image:// URL, and with no query or
+    // fragment, which GNOME Shell drops or refuses.
     QVERIFY2(artUrl.startsWith(QStringLiteral("file://")),
              qPrintable(QStringLiteral("Expected file:// URL, got: ") + artUrl));
-    QVERIFY2(!artUrl.contains(QStringLiteral("image://")),
-             qPrintable(QStringLiteral("image:// leaked into MPRIS artUrl: ") + artUrl));
-    // Fragment (nonce) must be stripped.
-    QVERIFY2(!artUrl.contains(QLatin1Char('#')),
-             qPrintable(QStringLiteral("Fragment not stripped: ") + artUrl));
+    const QUrl url(artUrl);
+    QVERIFY(!url.hasQuery());
+    QVERIFY(!url.hasFragment());
+    const QFileInfo link(url.toLocalFile());
+    QCOMPARE(link.absolutePath(), CoverRevisionLinks::defaultDirectory());
+    QVERIFY(link.isSymLink());
+    QCOMPARE(link.symLinkTarget(), QStringLiteral("/music/a#b/cover.jpg"));
 
     controller.m_serviceRegistered = false;
     controller.m_objectRegistered = false;
+}
+
+void BridgeClientTest::mprisPublishesNewArtWhenTheCoverIsReplacedAtTheSamePath() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString cover = dir.filePath(QStringLiteral("cover.jpg"));
+    QFile file(cover);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write("first cover");
+    file.close();
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_queueLength = 1;
+    const QString track = dir.filePath(QStringLiteral("01.flac"));
+    QVERIFY(client.processBinarySnapshot(playingWithCover(track, cover, 1)));
+
+    MprisController controller(&client);
+    QList<QDBusMessage> signalsSent;
+    controller.m_signalSink = [&signalsSent](const QDBusMessage &message) {
+        signalsSent.append(message);
+    };
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+    emit client.trackMetadataChanged();
+    const QString firstArt = artOnceLinked(controller);
+    QVERIFY(QUrl(firstArt).toLocalFile().startsWith(CoverRevisionLinks::defaultDirectory()));
+    signalsSent.clear();
+
+    // The image is replaced at the same path, and the backend gives it stamp 2.
+    QVERIFY(client.processBinarySnapshot(playingWithCover(track, cover, 2)));
+    emit client.trackMetadataChanged();
+    QCOMPARE(publishedArtUrl(controller), firstArt);
+    const QString secondArt = artOnceLinked(controller);
+
+    // A path of its own, which GNOME Shell's file comparison sees as new art.
+    QVERIFY(QUrl(secondArt).toLocalFile() != QUrl(firstArt).toLocalFile());
+    QCOMPARE(QFileInfo(QUrl(secondArt).toLocalFile()).symLinkTarget(), cover);
+    QVERIFY2(sentMetadataChange(signalsSent), "the new art is published");
+    // The cover itself is left as it was.
+    QVERIFY(!QFileInfo(cover).isSymLink());
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QCOMPARE(file.readAll(), QByteArray("first cover"));
+
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
+}
+
+void BridgeClientTest::coverRevisionLinksAreMadeOncePerStampAndOldOnesRemoved() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString linkDir = dir.filePath(QStringLiteral("cache/ferrous/mpris_art"));
+    const QString cover = dir.filePath(QStringLiteral("Album/Cover.JPG"));
+    QVERIFY(QDir().mkpath(QFileInfo(cover).absolutePath()));
+    QFile coverFile(cover);
+    QVERIFY(coverFile.open(QIODevice::WriteOnly));
+    coverFile.write("cover");
+    coverFile.close();
+
+    CoverRevisionLinks links(linkDir);
+    QSignalSpy ready(&links, &CoverRevisionLinks::linkReady);
+    QSignalSpy failed(&links, &CoverRevisionLinks::linkFailed);
+    QStringList made;
+    for (quint64 stamp = 1; stamp <= 7; ++stamp) {
+        QCOMPARE(links.linkFor(cover, stamp), QString());
+        QVERIFY(links.pending());
+        QVERIFY(ready.wait(5000));
+        const QString link = links.linkFor(cover, stamp);
+        QVERIFY(!link.isEmpty());
+        QVERIFY(!made.contains(link));
+        QCOMPARE(QFileInfo(link).symLinkTarget(), cover);
+        QVERIFY(link.endsWith(QStringLiteral("-%1.jpg").arg(stamp)));
+        made.append(link);
+        if (stamp == 1) {
+            // Files Ferrous did not make there stay, whatever their names.
+            QFile foreign(QDir(linkDir).filePath(QFileInfo(link).fileName().replace(
+                QStringLiteral("-1.jpg"), QStringLiteral("-0.jpg"))));
+            QVERIFY(foreign.open(QIODevice::WriteOnly));
+            foreign.close();
+            QFile notes(QDir(linkDir).filePath(QStringLiteral("notes.txt")));
+            QVERIFY(notes.open(QIODevice::WriteOnly));
+            notes.close();
+        }
+    }
+    QCOMPARE(failed.count(), 0);
+
+    // The newest links stay, so a consumer reading the previous one finds it.
+    const QStringList names = QDir(linkDir).entryList(
+        QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot, QDir::Name);
+    QStringList expected;
+    for (qsizetype index = made.size() - CoverRevisionLinks::kKeptLinks; index < made.size(); ++index) {
+        expected.append(QFileInfo(made.at(index)).fileName());
+    }
+    expected.append(QFileInfo(made.first()).fileName().replace(
+        QStringLiteral("-1.jpg"), QStringLiteral("-0.jpg")));
+    expected.append(QStringLiteral("notes.txt"));
+    expected.sort();
+    QCOMPARE(names, expected);
+    QVERIFY(QFileInfo(cover).isFile() && !QFileInfo(cover).isSymLink());
+
+    // Asking again for a revision that exists needs no work.
+    QCOMPARE(links.linkFor(cover, 7), made.last());
+    QVERIFY(!links.pending());
 }
 
 void BridgeClientTest::mprisMetadataIsRebuiltOnlyForTrackChanges() {
@@ -2933,7 +3128,8 @@ void BridgeClientTest::albumArtistFollowsMatchingMetadataAcrossTracks() {
     stream << qint32(2001) << quint32(44100) << quint32(0) << quint16(2) << quint16(16);
     appendText("FLAC");
     stream << quint32(0);
-    appendText("");
+    appendText("/fixture/cover.jpg");
+    stream << quint64(0x0102030405060708ULL); // cover stamp, after the cover path
     stream << quint32(0);
     QByteArray packet;
     QDataStream header(&packet, QIODevice::WriteOnly);
@@ -2948,6 +3144,8 @@ void BridgeClientTest::albumArtistFollowsMatchingMetadataAcrossTracks() {
     QCOMPARE(decoded.metadata.albumArtist, QStringLiteral("Album Artist"));
     QCOMPARE(decoded.metadata.genre, QStringLiteral("Genre"));
     QCOMPARE(decoded.metadata.year, 2001);
+    QCOMPARE(decoded.metadata.coverPath, QStringLiteral("/fixture/cover.jpg"));
+    QCOMPARE(decoded.metadata.coverStamp, quint64(0x0102030405060708ULL));
 }
 
 void BridgeClientTest::mprisPositionReadsThePlaybackClock() {
@@ -3565,6 +3763,7 @@ void BridgeClientTest::metadataChannelLabelsDecodeOptionalTail()
     appendText("WAV");
     stream << quint32(0);
     appendText("");
+    stream << quint64(0); // cover stamp
     stream << quint32(0);
     auto decode = [](const QByteArray &body, BinaryBridgeCodec::DecodedSnapshot *decoded) {
         QByteArray packet;
@@ -4440,6 +4639,135 @@ void BridgeClientTest::coverImageProviderUrlForPathFormat() {
     const QString url = CoverImageProvider::urlForPath(
         QStringLiteral("/mnt/nassikka/Music/cover.jpg"));
     QCOMPARE(url, QStringLiteral("image://covers//mnt/nassikka/Music/cover.jpg"));
+    QCOMPARE(CoverImageProvider::urlForPath(QStringLiteral("/music/cover.jpg"), 42),
+             QStringLiteral("image://covers//music/cover.jpg#v=42"));
+
+    // Qt passes the fragment in the image id; only a trailing stamp is the
+    // provider's, whatever else the path holds.
+    QCOMPARE(CoverImageProvider::pathForId(QStringLiteral("/music/cover.jpg#v=42")),
+             QStringLiteral("/music/cover.jpg"));
+    QCOMPARE(CoverImageProvider::stampForId(QStringLiteral("/music/cover.jpg#v=42")), quint64(42));
+    QCOMPARE(CoverImageProvider::pathForId(QStringLiteral("/music/#v=1/cover.jpg")),
+             QStringLiteral("/music/#v=1/cover.jpg"));
+    QCOMPARE(CoverImageProvider::stampForId(QStringLiteral("/music/#v=1/cover.jpg")), quint64(0));
+    QCOMPARE(CoverImageProvider::pathForId(QStringLiteral("/music/a#b/cover.jpg")),
+             QStringLiteral("/music/a#b/cover.jpg"));
+}
+
+void BridgeClientTest::coverImageProviderReadsTheFileOfAStampedId() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString imagePath = tempDir.filePath(QStringLiteral("cover.png"));
+    QImage source(20, 10, QImage::Format_ARGB32);
+    source.fill(Qt::blue);
+    QVERIFY(source.save(imagePath, "PNG"));
+
+    CoverImageProvider provider;
+    std::unique_ptr<QQuickImageResponse> response(
+        provider.requestImageResponse(imagePath + QStringLiteral("#v=7"), QSize()));
+    provider.waitForDone();
+
+    std::unique_ptr<QQuickTextureFactory> factory(response->textureFactory());
+    QVERIFY2(factory != nullptr, qPrintable(response->errorString()));
+    QCOMPARE(factory->image().size(), QSize(20, 10));
+}
+
+namespace {
+
+// Loads `source` into a QML Image and returns the size it shows.
+QSize shownImageSize(QObject *image, const QString &source) {
+    // Image.Ready is 1, Image.Loading 2.
+    image->setProperty("source", QUrl(source));
+    const bool loaded = QTest::qWaitFor(
+        [image]() { return image->property("status").toInt() != 2; }, 5000);
+    if (!loaded || image->property("status").toInt() != 1) {
+        return {};
+    }
+    return QSize(image->property("implicitWidth").toInt(), image->property("implicitHeight").toInt());
+}
+
+} // namespace
+
+void BridgeClientTest::replacedCoverReloadsForANewStampButNotFromTheCache() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString coverPath = tempDir.filePath(QStringLiteral("cover.png"));
+    const auto writeCover = [&coverPath](const QSize &size) {
+        QImage image(size, QImage::Format_ARGB32);
+        image.fill(Qt::green);
+        // As artwork apply does: a new file renamed over the old one.
+        const QString next = coverPath + QStringLiteral(".next.png");
+        return image.save(next, "PNG") && std::rename(
+            QFile::encodeName(next).constData(), QFile::encodeName(coverPath).constData()) == 0;
+    };
+    QVERIFY(writeCover(QSize(4, 3)));
+
+    QQmlEngine engine;
+    engine.addImageProvider(QStringLiteral("covers"), new CoverImageProvider);
+    QQmlComponent component(&engine);
+    component.setData("import QtQuick\nImage { asynchronous: true; cache: true }", QUrl());
+    std::unique_ptr<QObject> image(component.create());
+    QVERIFY2(image != nullptr, qPrintable(component.errorString()));
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    // The now-playing view, through the provider, and the library tree,
+    // through a file URL, show the image of their stamp.
+    const QList<std::function<QString(quint64)>> views{
+        [&coverPath](quint64 stamp) { return CoverImageProvider::urlForPath(coverPath, stamp); },
+        [&client, &coverPath](quint64 stamp) {
+            return client.libraryThumbnailSource(coverPath, QString::number(stamp));
+        },
+    };
+    for (const auto &url : views) {
+        QVERIFY(writeCover(QSize(4, 3)));
+        QCOMPARE(shownImageSize(image.get(), url(1)), QSize(4, 3));
+        QVERIFY(writeCover(QSize(8, 6)));
+        image->setProperty("source", QUrl());
+        // The same URL comes from Qt's cache, as it did before stamps.
+        QCOMPARE(shownImageSize(image.get(), url(1)), QSize(4, 3));
+        // The scan gives the replaced file a new stamp, so a new URL.
+        QCOMPARE(shownImageSize(image.get(), url(2)), QSize(8, 6));
+    }
+}
+
+void BridgeClientTest::coverRevisionLinksKeepThePublishedLinkThroughABurst() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString linkDir = dir.filePath(QStringLiteral("cache/ferrous/mpris_art"));
+    const QString cover = dir.filePath(QStringLiteral("cover.jpg"));
+    QFile coverFile(cover);
+    QVERIFY(coverFile.open(QIODevice::WriteOnly));
+    coverFile.write("cover");
+    coverFile.close();
+
+    CoverRevisionLinks links(linkDir);
+    QSignalSpy ready(&links, &CoverRevisionLinks::linkReady);
+    QCOMPARE(links.linkFor(cover, 1), QString());
+    QVERIFY(ready.wait(5000));
+    const QString published = links.linkFor(cover, 1);
+    QVERIFY(!published.isEmpty());
+
+    // Six revisions arrive before any of their links reaches the UI: the
+    // worker makes them all, more than the links it keeps.
+    for (quint64 stamp = 2; stamp <= 7; ++stamp) {
+        QCOMPARE(links.linkFor(cover, stamp), QString());
+    }
+    links.waitForDone();
+    QVERIFY2(QFileInfo(published).isSymLink(), "the published link is still there");
+    QFile readable(published);
+    QVERIFY(readable.open(QIODevice::ReadOnly));
+    QCOMPARE(readable.readAll(), QByteArray("cover"));
+
+    // The newest link reaches the UI and replaces it; the next revision's
+    // cleanup may then remove the old one.
+    QTRY_VERIFY_WITH_TIMEOUT(!links.pending(), 5000);
+    const QString newest = links.linkFor(cover, 7);
+    QVERIFY(!newest.isEmpty() && newest != published);
+    QCOMPARE(links.linkFor(cover, 8), QString());
+    QVERIFY(ready.wait(5000));
+    QVERIFY(!QFileInfo(published).exists() && !QFileInfo(published).isSymLink());
+    QVERIFY(QFileInfo(newest).isSymLink());
 }
 
 int main(int argc, char **argv) {

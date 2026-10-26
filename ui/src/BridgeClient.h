@@ -47,6 +47,7 @@ struct QueueRowData {
     QString path;
     int trackNumber{0};
     int year{std::numeric_limits<int>::min()};
+    quint64 coverStamp{0};
 
     bool operator==(const QueueRowData &other) const = default;
 };
@@ -196,6 +197,9 @@ class BridgeClient : public QObject {
 public:
     explicit BridgeClient(QObject *parent = nullptr);
     ~BridgeClient() override;
+
+    // Adds a line to the diagnostics log (Help > Diagnostics).
+    void logDiagnostic(const QString &category, const QString &message);
 
     QString playbackState() const;
     PlaybackClock *playbackClock() const { return m_playbackClock; }
@@ -352,7 +356,9 @@ public:
     Q_INVOKABLE void replaceWithPaths(const QStringList &paths);
     Q_INVOKABLE void appendPaths(const QStringList &paths);
     Q_INVOKABLE QString libraryAlbumCoverAt(int index) const;
-    Q_INVOKABLE QString libraryThumbnailSource(const QString &path) const;
+    // stamp is the library tree's coverStamp role.
+    Q_INVOKABLE QString libraryThumbnailSource(
+        const QString &path, const QString &stamp = QString()) const;
     Q_INVOKABLE QString queuePathAt(int index) const;
     Q_INVOKABLE QVariant queueTrackNumberAt(int index) const;
     Q_INVOKABLE void addLibraryRoot(const QString &path, const QString &name = QString());
@@ -554,20 +560,12 @@ private:
     int searchApplyDispatchDelayMs() const;
     bool applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame);
     void applyDeferredSearchDisplayRows();
-    void startCoverLookupWorker();
-    void stopCoverLookupWorker();
-    void requestTrackCoverLookup(const QString &trackPath);
-    void coverLookupWorkerLoop();
-    void applyTrackCoverLookupResult(const QString &trackPath, const QString &coverUrl);
-    void cacheTrackCoverForPath(const QString &trackPath, const QString &coverUrl);
     int queuePathFirstIndex(const QString &path) const;
     // Apply the rows of a queue section that fits the client's rows.
     // Returns false if its operations did not fit them after all.
     bool applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue);
     // Ask for the whole queue, once, after a section the rows cannot take.
     void requestQueueResync();
-    QString coverUrlForPath(const QString &path) const;
-    void bumpCoverRefreshNonce(const QString &path);
     void cancelItunesArtworkRequests();
     static ItunesArtworkAssetJobResult processItunesArtworkAssetPayload(
         const QByteArray &payload,
@@ -600,7 +598,6 @@ private:
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
     void logProfileDiagnostic(const QString &category, const QString &message) const;
-    void logDiagnostic(const QString &category, const QString &message);
     void appendDiagnosticLine(const QString &line);
     void flushPendingDiagnosticDiskLines();
     void rebuildDiagnosticsText();
@@ -708,10 +705,6 @@ private:
     QStringList m_libraryAlbumNames;
     QStringList m_libraryAlbumCoverPaths;
     QList<QStringList> m_libraryAlbumTrackPaths;
-    QHash<QString, QString> m_trackCoverByPath;
-    QHash<QString, QString> m_trackCoverByDirectory;
-    mutable QHash<QString, QString> m_coverUrlCacheByPath;
-    mutable QHash<QString, QString> m_coverCanonicalPathCacheByPath;
     mutable QHash<QString, QString> m_libraryThumbnailSourceCache;
     bool m_libraryScanInProgress{false};
     int m_libraryRootCount{0};
@@ -751,8 +744,6 @@ private:
     quint32 m_nextGlobalSearchSeq{1};
     quint32 m_latestGlobalSearchSeqSent{0};
     QHash<quint32, qint64> m_globalSearchSentAtMs;
-    QHash<QString, quint64> m_coverRefreshNonceByPath;
-    quint64 m_nextCoverRefreshNonce{1};
     int m_globalSearchDebounceMs{90};
     int m_globalSearchShortDebounceMs{160};
     int m_globalSearchShortDebounceChars{1};
@@ -832,13 +823,6 @@ private:
     mutable std::mutex m_searchOutputMutex;
     std::optional<SearchWorkerOutputFrame> m_searchPendingOutputFrame;
     quint64 m_searchOutputCoalescedDrops{0};
-    std::thread m_coverLookupThread;
-    std::mutex m_coverLookupMutex;
-    std::condition_variable m_coverLookupCv;
-    bool m_coverLookupStop{false};
-    std::optional<QString> m_coverLookupPendingPath;
-    QString m_coverLookupInFlightPath;
-    QString m_pendingAppliedArtworkTrackPath;
     quint64 m_searchFramesReceived{0};
     quint64 m_searchFramesApplied{0};
     quint64 m_searchFramesDroppedStale{0};

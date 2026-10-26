@@ -189,6 +189,8 @@ struct BinaryTreeRow {
     QString coverPath;
     QString trackPath;
     QStringList playPaths;
+    // Encoded after coverPath.
+    quint64 coverStamp{0};
 };
 
 template <typename T>
@@ -217,6 +219,7 @@ QByteArray encodeRows(const QVector<BinaryTreeRow> &rows) {
         appendUtf8(out, row.artist);
         appendUtf8(out, row.path);
         appendUtf8(out, row.coverPath);
+        appendLe<quint64>(out, row.coverStamp);
         appendUtf8(out, row.trackPath);
         appendLe<quint32>(out, static_cast<quint32>(row.playPaths.size()));
         for (const QString &playPath : row.playPaths) {
@@ -226,7 +229,7 @@ QByteArray encodeRows(const QVector<BinaryTreeRow> &rows) {
     return out;
 }
 
-QByteArray sampleArtistAlbumTreeBinary() {
+QByteArray sampleArtistAlbumTreeBinary(quint64 albumCoverStamp = 0) {
     const QString trackPath = QStringLiteral("/music/artist/album/track01.flac");
     QVector<BinaryTreeRow> rows;
     rows.push_back(BinaryTreeRow{
@@ -256,6 +259,7 @@ QByteArray sampleArtistAlbumTreeBinary() {
         QStringLiteral("/music/Artist A/Album A/cover.jpg"),
         {},
         {},
+        albumCoverStamp,
     });
     rows.push_back(BinaryTreeRow{
         4,
@@ -646,6 +650,7 @@ private slots:
     void albumArtViewerInfoUsesImageProviderLocalPath();
     void tagEditorLibrarySupportGateMatchesSupportedRows();
     void libraryTreeStartsCollapsedByDefault();
+    void libraryTreeRowsCarryTheirCoverStamp();
     void rootRowsStartExpandedByDefault();
     void artistExpansionPopulatesInBatches();
     void lazyArtistRowRequestsBackendExpansion();
@@ -1095,7 +1100,7 @@ Item {
         function applyItunesArtworkSuggestion(index) {}
         function reloadDiagnosticsFromDisk() {}
         function clearDiagnostics() {}
-        function libraryThumbnailSource(path) { return "" }
+        function libraryThumbnailSource(path, stamp) { return "" }
         function queuePathAt(index) { return "" }
         function playAt(index) {}
         function removeAt(index) {}
@@ -3458,6 +3463,34 @@ void QmlSmokeTest::tagEditorLibrarySupportGateMatchesSupportedRows() {
     QVERIFY(unsupportedInvoked);
     QCOMPARE(supported.toBool(), true);
     QCOMPARE(unsupported.toBool(), false);
+}
+
+void QmlSmokeTest::libraryTreeRowsCarryTheirCoverStamp() {
+    LibraryTreeModel model;
+    model.setExpandedKeys(QStringList{QStringLiteral("artist|Artist A")});
+    // Above 2^53, which a QML number could not hold exactly.
+    model.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary(0x0102030405060708ULL));
+    QTRY_COMPARE(model.rowCount(), 2);
+    const QModelIndex album = model.index(1, 0);
+    QCOMPARE(model.data(album, LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("album"));
+    QCOMPARE(model.data(album, LibraryTreeModel::CoverStampRole).toString(),
+             QString::number(0x0102030405060708ULL));
+    QVERIFY(model.roleNames().value(LibraryTreeModel::CoverStampRole) == "coverStamp");
+
+    // The cover was replaced at the same path: the row changes in place, so
+    // its delegate binds the new stamp and loads the new image.
+    QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+    QSignalSpy reset(&model, &QAbstractItemModel::modelReset);
+    model.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary(9));
+    QTRY_COMPARE(model.data(album, LibraryTreeModel::CoverStampRole).toString(), QStringLiteral("9"));
+    QCOMPARE(reset.count(), 0);
+    QVERIFY(std::any_of(changed.cbegin(), changed.cend(), [](const QList<QVariant> &arguments) {
+        const auto topLeft = arguments.at(0).value<QModelIndex>();
+        const auto bottomRight = arguments.at(1).value<QModelIndex>();
+        return topLeft.row() <= 1 && bottomRight.row() >= 1;
+    }));
+    QCOMPARE(model.data(album, LibraryTreeModel::CoverPathRole).toString(),
+             QStringLiteral("/music/Artist A/Album A/cover.jpg"));
 }
 
 void QmlSmokeTest::libraryTreeStartsCollapsedByDefault() {

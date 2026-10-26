@@ -237,6 +237,7 @@ bool readQueueTrack(Reader &reader, DecodedQueueTrack *out) {
         || !reader.readUtf8(&out->artist)
         || !reader.readUtf8(&out->album)
         || !reader.readUtf8(&out->coverPath)
+        || !reader.readU64(&out->coverStamp)
         || !reader.readUtf8(&out->genre)
         || !reader.readI32(&year)
         || !reader.readU16(&trackNumber)
@@ -498,6 +499,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
         || !reader.readUtf8(&out->formatLabel)
         || !reader.readU32(&currentBitrateKbps)
         || !reader.readUtf8(&out->coverPath)
+        || !reader.readU64(&out->coverStamp)
         || !reader.readU32(&trackNumber)) {
         return false;
     }
@@ -958,7 +960,7 @@ bool decodeSearchResultsFrame(
         }
         return false;
     }
-    if (version != 2 && version != 3 && version != 4) {
+    if (version < 2 || version > 5) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("unsupported search frame version: %1").arg(version);
         }
@@ -988,6 +990,7 @@ bool decodeSearchResultsFrame(
         QString rootLabel;
         QString genre;
         QString coverPath;
+        quint64 coverStamp = 0;
         QString artistKey;
         QString albumKey;
         QString sectionKey;
@@ -1006,6 +1009,7 @@ bool decodeSearchResultsFrame(
             || !reader.readUtf8(&rootLabel)
             || !reader.readUtf8(&genre)
             || !reader.readUtf8(&coverPath)
+            || (version >= 5 && !reader.readU64(&coverStamp))
             || !reader.readUtf8(&artistKey)
             || !reader.readUtf8(&albumKey)
             || !reader.readUtf8(&sectionKey)
@@ -1043,6 +1047,7 @@ bool decodeSearchResultsFrame(
         row.rootLabel = rootLabel;
         row.genre = genre;
         row.coverPath = coverPath;
+        row.coverStamp = coverStamp;
         row.artistKey = artistKey;
         row.albumKey = albumKey;
         row.sectionKey = sectionKey;

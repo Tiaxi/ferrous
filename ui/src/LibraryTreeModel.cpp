@@ -33,6 +33,7 @@ struct ParsedBinaryRow {
     QString artist;
     QString path;
     QString coverPath;
+    quint64 coverStamp{0};
     QString trackPath;
     QStringList playPaths;
 };
@@ -84,6 +85,15 @@ public:
         }
         *out = qFromLittleEndian<quint32>(reinterpret_cast<const uchar *>(m_bytes.constData() + m_offset));
         m_offset += 4;
+        return true;
+    }
+
+    bool readU64(quint64 *out) {
+        if (!out || m_offset + 8 > m_bytes.size()) {
+            return false;
+        }
+        *out = qFromLittleEndian<quint64>(reinterpret_cast<const uchar *>(m_bytes.constData() + m_offset));
+        m_offset += 8;
         return true;
     }
 
@@ -169,6 +179,7 @@ bool parseRows(const QByteArray &treeBytes, QVector<ParsedBinaryRow> *rowsOut) {
             || !reader.readUtf8(&row.artist)
             || !reader.readUtf8(&row.path)
             || !reader.readUtf8(&row.coverPath)
+            || !reader.readU64(&row.coverStamp)
             || !reader.readUtf8(&row.trackPath)
             || !reader.readU32(&playPathCount)) {
             return false;
@@ -306,6 +317,10 @@ QVariant LibraryTreeModel::data(const QModelIndex &index, int role) const {
     if (role == CoverPathRole) {
         return item.coverPath;
     }
+    if (role == CoverStampRole) {
+        // A string: QML numbers cannot hold every 64-bit stamp exactly.
+        return QString::number(item.coverStamp);
+    }
     if (role == SelectionKeyRole) {
         return item.selectionKey;
     }
@@ -334,6 +349,7 @@ QHash<int, QByteArray> LibraryTreeModel::roleNames() const {
         {TrackNumberRole, "trackNumber"},
         {TrackPathRole, "trackPath"},
         {CoverPathRole, "coverPath"},
+        {CoverStampRole, "coverStamp"},
         {SelectionKeyRole, "selectionKey"},
         {DepthRole, "depth"},
         {OpenPathRole, "openPath"},
@@ -554,6 +570,7 @@ bool LibraryTreeModel::rowsEqual(const FlatRow &a, const FlatRow &b) {
         && a.trackPath == b.trackPath
         && a.openPath == b.openPath
         && a.coverPath == b.coverPath
+        && a.coverStamp == b.coverStamp
         && a.playPaths == b.playPaths
         && a.depth == b.depth
         && a.hasChildren == b.hasChildren;
@@ -602,6 +619,7 @@ QVector<LibraryTreeModel::TreeNode> LibraryTreeModel::parseTreeNodesFromBinary(c
         node.trackPath = row.trackPath;
         node.openPath = row.path;
         node.coverPath = row.coverPath;
+        node.coverStamp = row.coverStamp;
         node.playPaths = row.playPaths;
 
         if (node.rowType == QStringLiteral("track") && node.trackPath.isEmpty()) {
@@ -706,6 +724,7 @@ void LibraryTreeModel::appendFlatRows(
         row.trackPath = node.trackPath;
         row.openPath = node.openPath;
         row.coverPath = node.coverPath;
+        row.coverStamp = node.coverStamp;
         row.playPaths = node.playPaths;
         row.depth = depth;
         row.hasChildren = !node.children.isEmpty()

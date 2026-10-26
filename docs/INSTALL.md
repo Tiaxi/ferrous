@@ -87,7 +87,10 @@ See [supported formats](../README.md#supported-formats). Playback codec support 
 | Pending Last.fm scrobbles | `$XDG_CONFIG_HOME/ferrous/lastfm_queue.json`; an unreadable file is kept as `lastfm_queue.json.corrupt` |
 | Session restore | `$XDG_CONFIG_HOME/ferrous/session.json` |
 | Embedded cover art | `$XDG_CACHE_HOME/ferrous/embedded_covers` |
+| Album art links for desktop media controls (MPRIS) | `$XDG_CACHE_HOME/ferrous/mpris_art` |
 
 Unset XDG variables fall back to `~/.local/share`, `~/.config`, and `~/.cache`. Last.fm session keys are stored in the system keyring.
 
 The embedded cover cache keeps one file per distinct embedded picture. Files that the library database no longer references are removed after library scans.
+
+The media controls folder holds symbolic links to the current track's cover, one per revision of the image, so that desktop shells show a cover replaced at the same path. Ferrous keeps the four newest links and removes older ones; the cover files themselves are not changed.

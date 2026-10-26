@@ -3,6 +3,7 @@
 #include "MprisController.h"
 
 #include "BridgeClient.h"
+#include "CoverImageProvider.h"
 #include "WindowActivation.h"
 
 #include <algorithm>
@@ -149,9 +150,20 @@ private:
 
 MprisController::MprisController(BridgeClient *bridge, QObject *parent)
     : QObject(parent)
-    , m_bridge(bridge) {
+    , m_bridge(bridge)
+    , m_artLinks(CoverRevisionLinks::defaultDirectory()) {
     new MprisRootAdaptor(this);
     new MprisPlayerAdaptor(this);
+    connect(&m_artLinks, &CoverRevisionLinks::linkReady, this, [this]() {
+        handleBridgeChange(true);
+    });
+    connect(&m_artLinks, &CoverRevisionLinks::linkFailed, this, [this](const QString &message) {
+        if (m_bridge != nullptr) {
+            m_bridge->logDiagnostic(
+                QStringLiteral("mpris"),
+                QStringLiteral("album art keeps its own path: %1").arg(message));
+        }
+    });
     rebuildMetadata();
     if (m_bridge != nullptr) {
         connect(m_bridge, &BridgeClient::playbackChanged, this, [this]() {
@@ -652,7 +664,38 @@ void MprisController::rebuildMetadata() {
         m_trackIdPath = QStringLiteral("/org/mpris/MediaPlayer2/Track/%1").arg(QString::fromLatin1(digest));
     }
     m_metadataLengthUs = currentLengthUs();
+    m_artUrl = currentArtUrl();
     m_metadata = buildMetadata();
+}
+
+QString MprisController::currentArtUrl() {
+    if (m_bridge == nullptr) {
+        return {};
+    }
+    // currentTrackCoverPath() may return an internal image://covers/ URL
+    // (from the async QML image provider). MPRIS consumers need file:// URLs.
+    const QString cover = m_bridge->currentTrackCoverPath().trimmed();
+    constexpr QLatin1StringView coversPrefix("image://covers/");
+    if (!cover.startsWith(coversPrefix)) {
+        return cover;
+    }
+    const QString id = cover.mid(coversPrefix.size());
+    const QString localPath = CoverImageProvider::pathForId(id);
+    // The stamp changes when the image is replaced at the same path. GNOME
+    // Shell compares art by file, so a replaced cover needs a path of its
+    // own: a link named by the stamp.
+    const QString link = m_artLinks.linkFor(localPath, CoverImageProvider::stampForId(id));
+    QString url;
+    if (!link.isEmpty()) {
+        url = QUrl::fromLocalFile(link).toString(QUrl::FullyEncoded);
+    } else if (m_artLinks.pending() && localPath == m_artCoverPath) {
+        // The image changed; keep its last link until the new one exists.
+        url = m_artUrl;
+    } else {
+        url = QUrl::fromLocalFile(localPath).toString(QUrl::FullyEncoded);
+    }
+    m_artCoverPath = localPath;
+    return url;
 }
 
 QString MprisController::currentTrackIdPath() const {
@@ -706,20 +749,8 @@ QVariantMap MprisController::buildMetadata() const {
     if (year.isValid() && !year.isNull()) {
         out.insert(QStringLiteral("xesam:contentCreated"), QString::number(year.toInt()));
     }
-    // currentTrackCoverPath() may return an internal image://covers/ URL
-    // (from the async QML image provider). MPRIS consumers need file:// URLs.
-    QString artUrl = m_bridge->currentTrackCoverPath().trimmed();
-    if (artUrl.startsWith(QStringLiteral("image://covers/"))) {
-        QString localPath = artUrl.mid(QStringLiteral("image://covers/").size());
-        // Strip any fragment (nonce for QML cache busting)
-        const int hashPos = localPath.indexOf(QLatin1Char('#'));
-        if (hashPos >= 0) {
-            localPath.truncate(hashPos);
-        }
-        artUrl = QUrl::fromLocalFile(localPath).toString(QUrl::FullyEncoded);
-    }
-    if (!artUrl.isEmpty()) {
-        out.insert(QStringLiteral("mpris:artUrl"), artUrl);
+    if (!m_artUrl.isEmpty()) {
+        out.insert(QStringLiteral("mpris:artUrl"), m_artUrl);
     }
     if (m_metadataLengthUs > 0) {
         out.insert(QStringLiteral("mpris:length"), m_metadataLengthUs);

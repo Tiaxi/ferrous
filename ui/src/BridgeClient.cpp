@@ -204,7 +204,9 @@ QString canonicalizeSearchQuery(const QString &query) {
     return query.simplified();
 }
 
-QString searchCoverUrlFast(const QString &path) {
+// The URL that shows the backend's cover at path; stamp is the backend's
+// cover stamp, which changes when the image is replaced at the same path.
+QString searchCoverUrlFast(const QString &path, quint64 stamp) {
     if (path.isEmpty()) {
         return {};
     }
@@ -219,7 +221,7 @@ QString searchCoverUrlFast(const QString &path) {
     }
     // Route through the async image provider so file I/O never blocks
     // the main thread — critical for network-mounted libraries.
-    return CoverImageProvider::urlForPath(path);
+    return CoverImageProvider::urlForPath(path, stamp);
 }
 
 QString cacheOnlyLocalFileUrl(const QString &path) {
@@ -528,86 +530,6 @@ BridgeClient::ItunesArtworkAssetJobResult BridgeClient::processItunesArtworkAsse
 }
 
 namespace {
-
-QString findAlbumCoverPath(const QStringList &trackPaths) {
-    static const QSet<QString> kImageExts{
-        QStringLiteral("jpg"),
-        QStringLiteral("jpeg"),
-        QStringLiteral("png"),
-        QStringLiteral("webp"),
-        QStringLiteral("bmp"),
-    };
-    static const QStringList kPreferredBases{
-        QStringLiteral("cover"),
-        QStringLiteral("folder"),
-        QStringLiteral("front"),
-        QStringLiteral("album"),
-        QStringLiteral("artwork"),
-    };
-
-    QString bestPath;
-    int bestScore = std::numeric_limits<int>::max();
-    QSet<QString> scannedDirs;
-    for (const QString &trackPath : trackPaths) {
-        const QFileInfo trackInfo(trackPath);
-        if (!trackInfo.exists()) {
-            continue;
-        }
-        const QDir dir = trackInfo.dir();
-        const QString dirPath = dir.absolutePath();
-        if (scannedDirs.contains(dirPath)) {
-            continue;
-        }
-        scannedDirs.insert(dirPath);
-
-        const QFileInfoList files = dir.entryInfoList(
-            QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden,
-            QDir::Name);
-        for (const QFileInfo &info : files) {
-            const QString ext = info.suffix().toLower();
-            if (!kImageExts.contains(ext)) {
-                continue;
-            }
-            const QString base = info.completeBaseName().toLower();
-            int score = 4;
-            for (int i = 0; i < kPreferredBases.size(); ++i) {
-                const QString &preferred = kPreferredBases[i];
-                if (base == preferred) {
-                    score = i;
-                    break;
-                }
-                if (base.startsWith(preferred)) {
-                    score = i + 1;
-                }
-            }
-            if (bestPath.isEmpty() || score < bestScore
-                || (score == bestScore && info.absoluteFilePath() < bestPath)) {
-                bestPath = info.absoluteFilePath();
-                bestScore = score;
-            }
-        }
-    }
-    return bestPath;
-}
-
-QString findTrackCoverUrl(const QString &trackPath) {
-    if (trackPath.trimmed().isEmpty()) {
-        return {};
-    }
-    const QString coverPath = findAlbumCoverPath({trackPath});
-    if (coverPath.isEmpty()) {
-        return {};
-    }
-    return CoverImageProvider::urlForPath(coverPath);
-}
-
-QString trackDirectoryPath(const QString &trackPath) {
-    if (trackPath.trimmed().isEmpty()) {
-        return {};
-    }
-    const QFileInfo info(trackPath);
-    return info.absoluteDir().absolutePath();
-}
 
 QString playbackStateText(int state, const QString &fallback) {
     switch (state) {
@@ -965,7 +887,6 @@ BridgeClient::BridgeClient(QObject *parent)
     }
 
     startSearchApplyWorker();
-    startCoverLookupWorker();
     startFileBrowserNameDetection();
     startInProcessBridge();
     scheduleSpectrogramActivityUpdate();
@@ -985,7 +906,6 @@ BridgeClient::~BridgeClient() {
     cancelItunesArtworkRequests();
     resetItunesArtworkTempDir();
     shutdownBridgeGracefully();
-    stopCoverLookupWorker();
     stopSearchApplyWorker();
     if (m_ffiBridge != nullptr) {
         // The app's window is gone by now, so waiting for the backend's
@@ -1110,118 +1030,6 @@ void BridgeClient::stopSearchApplyWorker() {
     }
 }
 
-void BridgeClient::startCoverLookupWorker() {
-    std::lock_guard<std::mutex> lock(m_coverLookupMutex);
-    if (m_coverLookupThread.joinable()) {
-        return;
-    }
-    m_coverLookupStop = false;
-    m_coverLookupThread = std::thread([this]() {
-        coverLookupWorkerLoop();
-    });
-}
-
-void BridgeClient::stopCoverLookupWorker() {
-    {
-        std::lock_guard<std::mutex> lock(m_coverLookupMutex);
-        m_coverLookupStop = true;
-        m_coverLookupPendingPath.reset();
-        m_coverLookupInFlightPath.clear();
-    }
-    m_coverLookupCv.notify_all();
-    if (m_coverLookupThread.joinable()) {
-        m_coverLookupThread.join();
-    }
-}
-
-void BridgeClient::requestTrackCoverLookup(const QString &trackPath) {
-    const QString normalizedPath = trackPath.trimmed();
-    if (normalizedPath.isEmpty()) {
-        return;
-    }
-    if (m_trackCoverByPath.contains(normalizedPath)) {
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(m_coverLookupMutex);
-        if (m_coverLookupPendingPath.has_value() && *m_coverLookupPendingPath == normalizedPath) {
-            return;
-        }
-        if (m_coverLookupInFlightPath == normalizedPath) {
-            return;
-        }
-        m_coverLookupPendingPath = normalizedPath;
-    }
-    m_coverLookupCv.notify_one();
-}
-
-void BridgeClient::coverLookupWorkerLoop() {
-    for (;;) {
-        QString trackPath;
-        {
-            std::unique_lock<std::mutex> lock(m_coverLookupMutex);
-            m_coverLookupCv.wait(lock, [this]() {
-                return m_coverLookupStop || m_coverLookupPendingPath.has_value();
-            });
-            if (m_coverLookupStop) {
-                return;
-            }
-            if (!m_coverLookupPendingPath.has_value()) {
-                continue;
-            }
-            trackPath = std::move(*m_coverLookupPendingPath);
-            m_coverLookupPendingPath.reset();
-            m_coverLookupInFlightPath = trackPath;
-        }
-
-        const QString coverUrl = findTrackCoverUrl(trackPath);
-
-        {
-            std::lock_guard<std::mutex> lock(m_coverLookupMutex);
-            if (m_coverLookupInFlightPath == trackPath) {
-                m_coverLookupInFlightPath.clear();
-            }
-        }
-        QMetaObject::invokeMethod(
-            this,
-            [this, trackPath, coverUrl]() {
-                applyTrackCoverLookupResult(trackPath, coverUrl);
-            },
-            Qt::QueuedConnection);
-    }
-}
-
-void BridgeClient::applyTrackCoverLookupResult(const QString &trackPath, const QString &coverUrl) {
-    if (trackPath.trimmed().isEmpty()) {
-        return;
-    }
-    cacheTrackCoverForPath(trackPath, coverUrl);
-    if (m_currentTrackPath == trackPath && m_currentTrackCoverPath != coverUrl) {
-        m_currentTrackCoverPath = coverUrl;
-        scheduleTrackMetadataChanged();
-    }
-}
-
-void BridgeClient::cacheTrackCoverForPath(const QString &trackPath, const QString &coverUrl) {
-    const QString normalizedPath = trackPath.trimmed();
-    if (normalizedPath.isEmpty()) {
-        return;
-    }
-    m_trackCoverByPath.insert(normalizedPath, coverUrl);
-    const QString dirPath = trackDirectoryPath(normalizedPath);
-    if (!dirPath.isEmpty()) {
-        m_trackCoverByDirectory.insert(dirPath, coverUrl);
-    }
-    if (m_trackCoverByPath.size() > 4096) {
-        m_trackCoverByPath.clear();
-        m_trackCoverByPath.insert(normalizedPath, coverUrl);
-    }
-    if (!dirPath.isEmpty() && m_trackCoverByDirectory.size() > 2048) {
-        m_trackCoverByDirectory.clear();
-        m_trackCoverByDirectory.insert(dirPath, coverUrl);
-    }
-}
-
 int BridgeClient::queuePathFirstIndex(const QString &path) const {
     if (path.isEmpty()) {
         return -1;
@@ -1239,100 +1047,6 @@ int BridgeClient::queuePathFirstIndex(const QString &path) const {
         m_queuePathFirstIndexStale = false;
     }
     return m_queuePathFirstIndex.value(path, -1);
-}
-
-QString BridgeClient::coverUrlForPath(const QString &path) const {
-    const QString localPath = normalizeLocalPathArg(path);
-    QString baseUrl;
-    if (!localPath.isEmpty()) {
-        const auto urlIt = m_coverUrlCacheByPath.constFind(localPath);
-        if (urlIt != m_coverUrlCacheByPath.constEnd()) {
-            baseUrl = urlIt.value();
-        } else {
-            baseUrl = searchCoverUrlFast(localPath);
-            m_coverUrlCacheByPath.insert(localPath, baseUrl);
-            if (m_coverUrlCacheByPath.size() > 4096) {
-                m_coverUrlCacheByPath.clear();
-                m_coverUrlCacheByPath.insert(localPath, baseUrl);
-            }
-        }
-    } else {
-        baseUrl = searchCoverUrlFast(path);
-    }
-    if (localPath.isEmpty()) {
-        return baseUrl;
-    }
-    if (m_coverRefreshNonceByPath.isEmpty()) {
-        return baseUrl;
-    }
-
-    QString canonicalPath;
-    const auto canonicalIt = m_coverCanonicalPathCacheByPath.constFind(localPath);
-    if (canonicalIt != m_coverCanonicalPathCacheByPath.constEnd()) {
-        canonicalPath = canonicalIt.value();
-    } else {
-        const QFileInfo info(localPath);
-        canonicalPath = info.canonicalFilePath().isEmpty()
-            ? info.absoluteFilePath()
-            : info.canonicalFilePath();
-        if (!canonicalPath.isEmpty()) {
-            m_coverCanonicalPathCacheByPath.insert(localPath, canonicalPath);
-            if (m_coverCanonicalPathCacheByPath.size() > 4096) {
-                m_coverCanonicalPathCacheByPath.clear();
-                m_coverCanonicalPathCacheByPath.insert(localPath, canonicalPath);
-            }
-        }
-    }
-    if (canonicalPath.isEmpty()) {
-        return baseUrl;
-    }
-
-    const auto nonceIt = m_coverRefreshNonceByPath.constFind(canonicalPath);
-    if (nonceIt == m_coverRefreshNonceByPath.constEnd()) {
-        return baseUrl;
-    }
-
-    QUrl url(baseUrl);
-    if (!url.isValid()) {
-        url = QUrl(CoverImageProvider::urlForPath(canonicalPath));
-    }
-    QString fragment = url.fragment(QUrl::FullyDecoded);
-    const int refreshPos = fragment.indexOf(QStringLiteral("&r="));
-    if (refreshPos >= 0) {
-        fragment = fragment.left(refreshPos);
-    } else if (fragment.startsWith(QStringLiteral("r="))) {
-        fragment.clear();
-    }
-    if (!fragment.isEmpty()) {
-        fragment += QStringLiteral("&");
-    }
-    fragment += QStringLiteral("r=%1").arg(nonceIt.value());
-    url.setFragment(fragment);
-    return url.toString(QUrl::FullyEncoded);
-}
-
-void BridgeClient::bumpCoverRefreshNonce(const QString &path) {
-    const QString localPath = normalizeLocalPathArg(path);
-    if (localPath.isEmpty()) {
-        return;
-    }
-
-    m_coverUrlCacheByPath.remove(localPath);
-    m_coverCanonicalPathCacheByPath.remove(localPath);
-
-    const QFileInfo info(localPath);
-    const QString canonicalPath = info.canonicalFilePath().isEmpty()
-        ? info.absoluteFilePath()
-        : info.canonicalFilePath();
-    if (canonicalPath.isEmpty()) {
-        return;
-    }
-
-    m_coverRefreshNonceByPath.insert(canonicalPath, m_nextCoverRefreshNonce++);
-    if (m_coverRefreshNonceByPath.size() > 4096) {
-        m_coverRefreshNonceByPath.clear();
-        m_coverRefreshNonceByPath.insert(canonicalPath, m_nextCoverRefreshNonce++);
-    }
 }
 
 void BridgeClient::cancelItunesArtworkRequests() {
@@ -1857,16 +1571,18 @@ void BridgeClient::searchApplyWorkerLoop() {
             materializeTimer.start();
             QHash<QString, QString> coverUrlCache;
             coverUrlCache.reserve(decoded.rows.size());
-            const auto coverUrlForSearchRow = [&coverUrlCache](const QString &coverPath) {
+            const auto coverUrlForSearchRow = [&coverUrlCache](
+                const QString &coverPath, quint64 coverStamp) {
                 if (coverPath.isEmpty()) {
                     return QString{};
                 }
-                const auto existing = coverUrlCache.constFind(coverPath);
+                const QString key = QString::number(coverStamp) + QLatin1Char('|') + coverPath;
+                const auto existing = coverUrlCache.constFind(key);
                 if (existing != coverUrlCache.constEnd()) {
                     return existing.value();
                 }
-                const QString coverUrl = searchCoverUrlFast(coverPath);
-                coverUrlCache.insert(coverPath, coverUrl);
+                const QString coverUrl = searchCoverUrlFast(coverPath, coverStamp);
+                coverUrlCache.insert(key, coverUrl);
                 return coverUrl;
             };
             QVector<GlobalSearchResultsModel::SearchDisplayRow> artistRows;
@@ -1910,7 +1626,7 @@ void BridgeClient::searchApplyWorkerLoop() {
                 item.rootLabel = row.rootLabel;
                 item.genre = row.genre;
                 item.coverPath = row.coverPath;
-                item.coverUrl = coverUrlForSearchRow(row.coverPath);
+                item.coverUrl = coverUrlForSearchRow(row.coverPath, row.coverStamp);
                 item.artistKey = row.artistKey;
                 item.albumKey = row.albumKey;
                 item.sectionKey = row.sectionKey;
@@ -3162,22 +2878,28 @@ QString BridgeClient::libraryAlbumCoverAt(int index) const {
     return QUrl::fromLocalFile(path).toString();
 }
 
-QString BridgeClient::libraryThumbnailSource(const QString &path) const {
+QString BridgeClient::libraryThumbnailSource(const QString &path, const QString &stamp) const {
     const QString normalizedPath = normalizeLocalPathArg(path);
     if (normalizedPath.isEmpty()) {
         return {};
     }
 
-    if (const auto it = m_libraryThumbnailSourceCache.constFind(normalizedPath);
+    // The stamp changes when the image is replaced at the same path, and Qt
+    // caches images by URL, so a new stamp makes a new URL that loads it.
+    const QString cacheKey = stamp + QLatin1Char('|') + normalizedPath;
+    if (const auto it = m_libraryThumbnailSourceCache.constFind(cacheKey);
         it != m_libraryThumbnailSourceCache.constEnd()) {
         return it.value();
     }
 
-    const QString result = cacheOnlyLocalFileUrl(normalizedPath);
-    m_libraryThumbnailSourceCache.insert(normalizedPath, result);
+    QString result = cacheOnlyLocalFileUrl(normalizedPath);
+    if (!result.isEmpty() && !stamp.isEmpty() && stamp != QStringLiteral("0")) {
+        result += QStringLiteral("#v=") + stamp;
+    }
+    m_libraryThumbnailSourceCache.insert(cacheKey, result);
     if (m_libraryThumbnailSourceCache.size() > 4096) {
         m_libraryThumbnailSourceCache.clear();
-        m_libraryThumbnailSourceCache.insert(normalizedPath, result);
+        m_libraryThumbnailSourceCache.insert(cacheKey, result);
     }
     return result;
 }
@@ -3193,6 +2915,7 @@ QueueRowData BridgeClient::queueRowFromTrack(const BinaryBridgeCodec::DecodedQue
     row.artist = track.artist;
     row.album = track.album;
     row.coverPath = track.coverPath;
+    row.coverStamp = track.coverStamp;
     row.genre = track.genre;
     row.lengthText = track.lengthSeconds >= 0.0f
         ? formatDurationCompact(static_cast<double>(track.lengthSeconds))
@@ -3865,13 +3588,8 @@ void BridgeClient::applyItunesArtworkSuggestion(int index) {
         return;
     }
 
-    m_trackCoverByPath.remove(trackPath);
-    const QString dirPath = trackDirectoryPath(trackPath);
-    if (!dirPath.isEmpty()) {
-        m_trackCoverByDirectory.remove(dirPath);
-    }
-    m_pendingAppliedArtworkTrackPath = trackPath;
-
+    // The new cover reaches the views with a new path or cover stamp from
+    // the backend, which reloads it.
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandStringPair(
         BinaryBridgeCodec::CmdApplyAlbumArt,
         trackPath,
@@ -4064,16 +3782,18 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
     for (auto total : frame.totals) out.totals.push_back(total);
     QHash<QString, QString> coverUrlCache;
     coverUrlCache.reserve(frame.rows.size());
-    const auto coverUrlForSearchRow = [&coverUrlCache](const QString &coverPath) {
+    const auto coverUrlForSearchRow = [&coverUrlCache](
+        const QString &coverPath, quint64 coverStamp) {
         if (coverPath.isEmpty()) {
             return QString{};
         }
-        const auto existing = coverUrlCache.constFind(coverPath);
+        const QString key = QString::number(coverStamp) + QLatin1Char('|') + coverPath;
+        const auto existing = coverUrlCache.constFind(key);
         if (existing != coverUrlCache.constEnd()) {
             return existing.value();
         }
-        const QString coverUrl = searchCoverUrlFast(coverPath);
-        coverUrlCache.insert(coverPath, coverUrl);
+        const QString coverUrl = searchCoverUrlFast(coverPath, coverStamp);
+        coverUrlCache.insert(key, coverUrl);
         return coverUrl;
     };
     QVector<GlobalSearchResultsModel::SearchDisplayRow> artistRows;
@@ -4117,7 +3837,7 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
         item.rootLabel = row.rootLabel;
         item.genre = row.genre;
         item.coverPath = row.coverPath;
-        item.coverUrl = coverUrlForSearchRow(row.coverPath);
+        item.coverUrl = coverUrlForSearchRow(row.coverPath, row.coverStamp);
         item.artistKey = row.artistKey;
         item.albumKey = row.albumKey;
         item.sectionKey = row.sectionKey;
@@ -4979,11 +4699,6 @@ void BridgeClient::applyLibraryTreeFrame(int version, const QByteArray &treeByte
     m_libraryAlbumNames.clear();
     m_libraryAlbumCoverPaths.clear();
     m_libraryAlbumTrackPaths.clear();
-    m_trackCoverByPath.clear();
-    m_trackCoverByDirectory.clear();
-    if (!m_currentTrackPath.isEmpty()) {
-        requestTrackCoverLookup(m_currentTrackPath);
-    }
 
     emit libraryTreeFrameReceived(version, treeBytes);
 }
@@ -5088,12 +4803,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         : 0;
     QString metadataCoverUrl;
     if (!metadataCoverPath.trimmed().isEmpty() && metadataSourcePath == currentPath) {
-        if (!m_pendingAppliedArtworkTrackPath.isEmpty()
-            && m_pendingAppliedArtworkTrackPath == currentPath) {
-            bumpCoverRefreshNonce(metadataCoverPath);
-            m_pendingAppliedArtworkTrackPath.clear();
-        }
-        metadataCoverUrl = coverUrlForPath(metadataCoverPath);
+        metadataCoverUrl = searchCoverUrlFast(metadataCoverPath, snapshot.metadata.coverStamp);
     }
 
     bool changed = false;
@@ -5388,7 +5098,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             nextTrackArtist = row->artist;
             nextTrackAlbum = row->album;
             nextTrackGenre = row->genre;
-            queueTrackCover = coverUrlForPath(row->coverPath);
+            queueTrackCover = searchCoverUrlFast(row->coverPath, row->coverStamp);
             if (row->year != std::numeric_limits<int>::min()) {
                 nextTrackYear = row->year;
             }
@@ -5501,29 +5211,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         trackMetadataSignalChanged = true;
     }
 
-    QString currentCover = metadataCoverUrl;
-    if (currentCover.isEmpty() && !queueTrackCover.isEmpty()) {
-        currentCover = queueTrackCover;
-    }
-    if (isStopped && !stoppedTrackAdvanced && currentCover.isEmpty()) {
+    // The backend's cover choice: the track's metadata, or its queue row
+    // until the metadata arrives.
+    QString currentCover = metadataCoverUrl.isEmpty() ? queueTrackCover : metadataCoverUrl;
+    const bool waitingForMetadata =
+        !currentPath.isEmpty() && !currentPathChanged && !metadataMatchesCurrentPath;
+    if (currentCover.isEmpty() && ((isStopped && !stoppedTrackAdvanced) || waitingForMetadata)) {
         currentCover = m_currentTrackCoverPath;
-    } else if (currentCover.isEmpty() && !currentPath.isEmpty()) {
-        const auto cached = m_trackCoverByPath.constFind(currentPath);
-        if (cached != m_trackCoverByPath.constEnd()) {
-            currentCover = cached.value();
-        } else {
-            const QString dirPath = trackDirectoryPath(currentPath);
-            const auto dirCached = m_trackCoverByDirectory.constFind(dirPath);
-            if (!dirPath.isEmpty() && dirCached != m_trackCoverByDirectory.constEnd()) {
-                currentCover = dirCached.value();
-                cacheTrackCoverForPath(currentPath, currentCover);
-            } else {
-                requestTrackCoverLookup(currentPath);
-            }
-        }
-    }
-    if (!currentPath.isEmpty() && !currentCover.isEmpty()) {
-        cacheTrackCoverForPath(currentPath, currentCover);
     }
     if (m_currentTrackCoverPath != currentCover) {
         m_currentTrackCoverPath = currentCover;

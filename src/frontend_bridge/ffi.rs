@@ -2264,7 +2264,8 @@ fn encode_failure_event(message: &str) -> Vec<u8> {
 fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + frame.rows.len() * 128);
     push_u8(&mut out, b'S');
-    push_u8(&mut out, 4);
+    // Version 5 added each row's cover stamp.
+    push_u8(&mut out, 5);
     push_u16(&mut out, clamp_u16(frame.rows.len()));
     push_u32(&mut out, frame.seq);
     for total in frame.totals {
@@ -2288,6 +2289,7 @@ fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
         push_string(&mut out, &row.root_label);
         push_string(&mut out, &row.genre);
         push_string(&mut out, &row.cover_path);
+        push_u64(&mut out, row.cover_stamp);
         push_string(&mut out, &row.artist_key);
         push_string(&mut out, &row.album_key);
         push_string(&mut out, &row.section_key);
@@ -2525,6 +2527,7 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
             .as_deref()
             .unwrap_or_default(),
     );
+    push_u64(&mut out, snapshot.metadata.cover_art_stamp);
     push_u32(&mut out, snapshot.metadata.track_number.unwrap_or(0));
     // Optional metadata tail: native decoder order, not inferred from channel count.
     push_u16(&mut out, clamp_u16(snapshot.metadata.channel_labels.len()));
@@ -2975,6 +2978,8 @@ mod tests {
                 current_bitrate_kbps: Some(905),
                 bitrate_timeline_kbps: vec![905, 877, 901],
                 cover_art_path: Some("/music/a.cover.png".to_string()),
+                cover_art_stamp: 0x0102_0304_0506_0708,
+                cover_read_at: crate::library::CoverReadAt::default(),
             },
             library: Arc::new(LibrarySnapshot {
                 roots: vec![root("/music")],
@@ -2986,6 +2991,8 @@ mod tests {
                     artist: "Sample Artist".to_string(),
                     album: "Sample Album".to_string(),
                     cover_path: "/music/a.cover.png".to_string(),
+                    cover_stamp: 0x1112_1314_1516_1718,
+                    cover_read_at: crate::library::CoverReadAt::default(),
                     genre: "Rock".to_string(),
                     year: Some(2020),
                     track_no: Some(1),
@@ -3663,7 +3670,7 @@ mod tests {
             totals: [7, 12, 500],
             rows: Vec::new(),
         });
-        assert_eq!(&bytes[..8], &[b'S', 4, 0, 0, 9, 0, 0, 0]);
+        assert_eq!(&bytes[..8], &[b'S', 5, 0, 0, 9, 0, 0, 0]);
         assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
         assert_eq!(&bytes[12..16], &12u32.to_le_bytes());
         assert_eq!(&bytes[16..20], &500u32.to_le_bytes());
@@ -3680,7 +3687,8 @@ mod tests {
             album: String::new(),
             root_label: String::new(),
             genre: String::new(),
-            cover_path: String::new(),
+            cover_path: "/fixture/cover.jpg".into(),
+            cover_stamp: 0x2122_2324_2526_2728,
             artist_key: String::new(),
             album_key: String::new(),
             section_key: String::new(),
@@ -3695,6 +3703,13 @@ mod tests {
         let mut suffix = Vec::new();
         push_string(&mut suffix, "Comment: remaster");
         assert!(bytes.ends_with(&suffix));
+        let mut cover = Vec::new();
+        push_string(&mut cover, "/fixture/cover.jpg");
+        push_u64(&mut cover, 0x2122_2324_2526_2728);
+        assert!(
+            bytes.windows(cover.len()).any(|window| window == cover),
+            "a row carries its cover stamp after its cover path"
+        );
     }
 
     #[test]
@@ -3774,6 +3789,8 @@ mod tests {
             artist: "Outside Artist".to_string(),
             album: "Outside Album".to_string(),
             cover_path: "/outside/cover.jpg".to_string(),
+            cover_stamp: 0,
+            cover_read_at: crate::library::CoverReadAt::default(),
             genre: "Ambient".to_string(),
             year: Some(2024),
             track_no: Some(7),
@@ -3825,9 +3842,11 @@ mod tests {
 
     fn read_queue_row(bytes: &[u8], offset: &mut usize) -> (String, String) {
         let title = read_string(bytes, offset);
-        for _ in 0..4 {
+        for _ in 0..3 {
             read_string(bytes, offset);
         }
+        let _cover_stamp = read_u64(bytes, offset);
+        read_string(bytes, offset);
         let _year = read_i32(bytes, offset);
         let _track = read_u16(bytes, offset);
         let _length = read_f32(bytes, offset);
@@ -3952,6 +3971,7 @@ mod tests {
         assert_eq!(read_string(&encoded, &mut offset), "Sample Artist");
         assert_eq!(read_string(&encoded, &mut offset), "Sample Album");
         assert_eq!(read_string(&encoded, &mut offset), "/music/a.cover.png");
+        assert_eq!(read_u64(&encoded, &mut offset), 0x1112_1314_1516_1718);
         assert_eq!(read_string(&encoded, &mut offset), "Rock");
         assert_eq!(read_i32(&encoded, &mut offset), 2020);
         assert_eq!(read_u16(&encoded, &mut offset), 1);
@@ -4284,6 +4304,7 @@ mod tests {
         assert_eq!(read_string(&encoded, &mut offset), "FLAC");
         assert_eq!(read_u32(&encoded, &mut offset), 905);
         assert_eq!(read_string(&encoded, &mut offset), "/music/a.cover.png");
+        assert_eq!(read_u64(&encoded, &mut offset), 0x0102_0304_0506_0708);
         assert_eq!(read_u32(&encoded, &mut offset), 3);
         assert_eq!(&encoded[offset..offset + 2], &2u16.to_le_bytes());
         offset += 2;
