@@ -78,9 +78,9 @@ jobs:
           rustc --version
           cargo --version
           if [ "${{ matrix.toolchain }}" = fedora ]; then
-            # No rustup toolchain may shadow the packaged one.
-            test "$(command -v rustc)" = /usr/bin/rustc
-            test "$(command -v cargo)" = /usr/bin/cargo
+            # The tools on the path must be the packaged ones, not a rustup
+            # toolchain; rpm fails for files that no package owns.
+            rpm -qf "$(realpath "$(command -v rustc)")" "$(realpath "$(command -v cargo)")"
           fi
 
       - name: Cache Rust build artifacts
