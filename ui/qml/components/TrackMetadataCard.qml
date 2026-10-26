@@ -86,6 +86,15 @@ Components.SurfaceCard {
         return "----"
     }
 
+    // The labels' column fits the widest label.
+    readonly property real labelColumnWidth: Math.ceil(Math.max(
+        titleRow.implicitLabelWidth,
+        artistRow.implicitLabelWidth,
+        albumRow.implicitLabelWidth,
+        trackLabel.implicitWidth,
+        yearLabel.implicitWidth,
+        genreRow.implicitLabelWidth))
+
     color: root.uiPalette.uiSurfaceRaisedColor
     borderColor: root.uiPalette.uiBorderColor
     implicitHeight: nowPlayingColumn.implicitHeight + 12
@@ -97,26 +106,32 @@ Components.SurfaceCard {
         spacing: 2
 
         Components.MetadataMarqueeRow {
+            id: titleRow
             labelText: "Title:"
             valueText: root.resolvedTitle
             resetKey: root.marqueeResetKey
+            labelWidth: root.labelColumnWidth
             labelColor: root.uiPalette.uiMutedTextColor
             textColor: root.uiPalette.uiTextColor
             emphasized: true
         }
 
         Components.MetadataMarqueeRow {
+            id: artistRow
             labelText: "Artist:"
             valueText: root.resolvedArtist
             resetKey: root.marqueeResetKey
+            labelWidth: root.labelColumnWidth
             labelColor: root.uiPalette.uiMutedTextColor
             textColor: root.uiPalette.uiTextColor
         }
 
         Components.MetadataMarqueeRow {
+            id: albumRow
             labelText: "Album:"
             valueText: root.resolvedAlbum
             resetKey: root.marqueeResetKey
+            labelWidth: root.labelColumnWidth
             labelColor: root.uiPalette.uiMutedTextColor
             textColor: root.uiPalette.uiTextColor
         }
@@ -126,11 +141,11 @@ Components.SurfaceCard {
             spacing: 8
 
             Label {
+                id: trackLabel
                 text: "Track:"
-                Layout.preferredWidth: 44
+                Layout.preferredWidth: root.labelColumnWidth
                 horizontalAlignment: Text.AlignRight
                 color: root.uiPalette.uiMutedTextColor
-                font.pixelSize: 12
             }
 
             Label {
@@ -138,7 +153,6 @@ Components.SurfaceCard {
                 text: root.resolvedTrackNumber
                 elide: Text.ElideRight
                 color: root.uiPalette.uiTextColor
-                font.pixelSize: 12
             }
         }
 
@@ -147,11 +161,11 @@ Components.SurfaceCard {
             spacing: 8
 
             Label {
+                id: yearLabel
                 text: "Year:"
-                Layout.preferredWidth: 44
+                Layout.preferredWidth: root.labelColumnWidth
                 horizontalAlignment: Text.AlignRight
                 color: root.uiPalette.uiMutedTextColor
-                font.pixelSize: 12
             }
 
             Label {
@@ -159,14 +173,15 @@ Components.SurfaceCard {
                 text: root.resolvedYear
                 elide: Text.ElideRight
                 color: root.uiPalette.uiTextColor
-                font.pixelSize: 12
             }
         }
 
         Components.MetadataMarqueeRow {
+            id: genreRow
             labelText: "Genre:"
             valueText: root.resolvedGenre
             resetKey: root.marqueeResetKey
+            labelWidth: root.labelColumnWidth
             labelColor: root.uiPalette.uiMutedTextColor
             textColor: root.uiPalette.uiTextColor
         }

@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import FerrousUi 1.0
+import org.kde.kirigami 2.20 as Kirigami
 import "../logic/ChannelLabels.js" as ChannelLabels
 
 Item {
@@ -14,6 +15,10 @@ Item {
     property bool interactiveOverlaysVisible: true
     property var pointerActivity: null
     readonly property alias waveformItem: waveform
+
+    Accessible.role: Accessible.Graphic
+    Accessible.name: "Waveform"
+    Accessible.description: "Amplitude of the playing track over time"
 
     function channelLabel(index) {
         return ChannelLabels.label(waveform.channelCount, index,
@@ -95,7 +100,7 @@ Item {
                         anchors.centerIn: parent
                         text: root.channelLabel(index)
                         color: "#d6ded9"
-                        font.pixelSize: 12
+                        font: Kirigami.Theme.smallFont
                     }
                 }
 
@@ -105,12 +110,23 @@ Item {
                         && (root.uiBridge.channelButtonsVisibility === 2
                             || (root.uiBridge.channelButtonsVisibility === 1
                                 && channelHover.hovered))
-                    width: 24
-                    height: 18
+                    width: Math.max(muteText.implicitWidth + 10, height * 4 / 3)
+                    height: muteText.implicitHeight + 4
                     radius: 3
                     color: active ? "#7d3434" : Qt.rgba(0, 0, 0, 0.5)
                     border.color: Qt.rgba(1, 1, 1, 0.16)
-                    Text { anchors.centerIn: parent; text: "M"; color: "#e2e5e3"; font.pixelSize: 10 }
+                    Accessible.role: Accessible.CheckBox
+                    Accessible.name: "Mute " + root.channelLabel(index)
+                    Accessible.checkable: true
+                    Accessible.checked: active
+                    Accessible.onPressAction: root.uiBridge.toggleChannelMute(index)
+                    Text {
+                        id: muteText
+                        anchors.centerIn: parent
+                        text: "M"
+                        color: "#e2e5e3"
+                        font: Kirigami.Theme.smallFont
+                    }
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -124,12 +140,23 @@ Item {
                         && (root.uiBridge.channelButtonsVisibility === 2
                             || (root.uiBridge.channelButtonsVisibility === 1
                                 && channelHover.hovered))
-                    width: 24
-                    height: 18
+                    width: Math.max(soloText.implicitWidth + 10, height * 4 / 3)
+                    height: soloText.implicitHeight + 4
                     radius: 3
                     color: active ? "#706522" : Qt.rgba(0, 0, 0, 0.5)
                     border.color: Qt.rgba(1, 1, 1, 0.16)
-                    Text { anchors.centerIn: parent; text: "S"; color: "#e2e5e3"; font.pixelSize: 10 }
+                    Accessible.role: Accessible.CheckBox
+                    Accessible.name: "Solo " + root.channelLabel(index)
+                    Accessible.checkable: true
+                    Accessible.checked: active
+                    Accessible.onPressAction: root.uiBridge.soloChannel(index)
+                    Text {
+                        id: soloText
+                        anchors.centerIn: parent
+                        text: "S"
+                        color: "#e2e5e3"
+                        font: Kirigami.Theme.smallFont
+                    }
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -158,7 +185,7 @@ Item {
             text: waveform.formatViewportDuration(
                 waveform.durationSeconds / Math.max(1, waveform.zoomLevel))
             color: "#c8d0cb"
-            font.pixelSize: 10
+            font: Kirigami.Theme.smallFont
         }
     }
 }

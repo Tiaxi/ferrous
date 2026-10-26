@@ -206,6 +206,7 @@ class BridgeClientTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void libraryViewStateKeepsOffsetsIntoTallRows();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
@@ -1066,6 +1067,31 @@ QString stringPastTheOldLengthLimit() {
 }
 
 } // namespace
+
+void BridgeClientTest::libraryViewStateKeepsOffsetsIntoTallRows() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+
+    // Rows follow the font size, so the view's top can be well over 24
+    // pixels into the row at it.
+    client.setLibraryViewState(QStringLiteral("sel"), QStringLiteral("anchor"), 40.0);
+    client.setLibraryViewState(QStringLiteral("sel"), QStringLiteral("anchor"), -40.0);
+    client.setLibraryViewState(QStringLiteral("sel"), QStringLiteral("anchor"), 1e9);
+    QCOMPARE(sent.size(), 3);
+    const float expected[] = {40.0F, -40.0F, 4096.0F};
+    for (int i = 0; i < sent.size(); ++i) {
+        QCOMPARE(sent[i], BinaryBridgeCodec::encodeCommandLibraryViewState(
+            BinaryBridgeCodec::CmdSetLibraryViewState,
+            QStringLiteral("sel"),
+            QStringLiteral("anchor"),
+            expected[i]));
+    }
+}
 
 void BridgeClientTest::pathListsFarBeyond64KiBAreSentWholeInOneCommand() {
     BridgeClient client;

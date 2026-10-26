@@ -265,7 +265,7 @@ Dialog {
                         Layout.fillWidth: true
                         text: "Current album art"
                         color: root.uiPalette.uiTextColor
-                        font.pixelSize: 16
+                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2
                         font.weight: Font.DemiBold
                         elide: Text.ElideRight
                     }
@@ -366,7 +366,7 @@ Dialog {
                             Layout.fillWidth: true
                             text: (modelData && (modelData.albumTitle || "")) || ""
                             color: root.uiPalette.uiTextColor
-                            font.pixelSize: 16
+                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2
                             font.weight: Font.DemiBold
                             elide: Text.ElideRight
                         }

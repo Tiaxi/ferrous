@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import "../logic/WheelUtils.js" as WheelUtils
 
 Item {
@@ -245,14 +246,14 @@ Item {
                     visible: root.comparisonModeAvailable
                     text: "\u25C0 \u25B6"
                     color: Qt.rgba(1, 1, 1, 0.45)
-                    font.pixelSize: 13
+                    font: Kirigami.Theme.defaultFont
                     anchors.verticalCenter: parent.verticalCenter
                 }
 
                 Text {
                     text: root.comparisonLabel
                     color: "#ffffff"
-                    font.pixelSize: 14
+                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.05
                     font.weight: Font.DemiBold
                     anchors.verticalCenter: parent.verticalCenter
                 }
@@ -280,10 +281,14 @@ Item {
 
             ToolButton {
                 anchors.fill: parent
+                Accessible.name: "Album art information"
+                ToolTip.visible: hovered || visualFocus
+                ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
+                ToolTip.text: Accessible.name
                 contentItem: Text {
                     text: "i"
                     color: "#ffffff"
-                    font.pixelSize: 16
+                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2
                     font.weight: Font.DemiBold
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter

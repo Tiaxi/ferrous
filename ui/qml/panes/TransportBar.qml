@@ -6,6 +6,7 @@ import QtQuick.Layouts 1.15
 import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
+import "../logic/KeyUtils.js" as KeyUtils
 
 ToolBar {
     id: root
@@ -17,8 +18,9 @@ ToolBar {
     required property var pauseAction
     required property var stopAction
     required property var nextAction
-    required property bool themeIsDark
     required property bool volumeMuted
+    // How far the arrow keys move the seek bar.
+    required property real keyboardSeekStepSeconds
     required property real displayedPositionSeconds
     property string positionText: "00:00"
     required property var toggleMutedVolume
@@ -27,6 +29,8 @@ ToolBar {
     required property var seekCommitted
 
     readonly property alias seekPressed: seekSlider.pressed
+    readonly property bool volumeSilent: root.volumeMuted
+        || root.normalizedVolumeValue(root.uiBridge.volume) <= 0.0001
 
     implicitHeight: contentItem.implicitHeight + topPadding + bottomPadding
     leftPadding: 8
@@ -44,15 +48,52 @@ ToolBar {
 
         RowLayout {
             spacing: 2
-            ToolButton { action: root.previousAction; display: AbstractButton.IconOnly }
-            ToolButton { action: root.playAction; display: AbstractButton.IconOnly }
-            ToolButton { action: root.pauseAction; display: AbstractButton.IconOnly }
-            ToolButton { action: root.stopAction; display: AbstractButton.IconOnly }
-            ToolButton { action: root.nextAction; display: AbstractButton.IconOnly }
+
+            Repeater {
+                model: [
+                    { name: "previous", action: root.previousAction },
+                    { name: "play", action: root.playAction },
+                    { name: "pause", action: root.pauseAction },
+                    { name: "stop", action: root.stopAction },
+                    { name: "next", action: root.nextAction }
+                ]
+
+                delegate: ToolButton {
+                    required property var modelData
+                    // The action's text without its mnemonic, and its shortcut.
+                    readonly property string label: FormatUtils.withoutMnemonic(
+                        modelData.action.text || "")
+                    readonly property string shortcutText: modelData.action.shortcut
+                        ? String(modelData.action.shortcut)
+                        : ""
+
+                    objectName: "transportButton_" + modelData.name
+                    action: modelData.action
+                    display: AbstractButton.IconOnly
+                    // Tab reaches it, but a click leaves the focus where it
+                    // was, so Space still plays or pauses after a click.
+                    focusPolicy: Qt.TabFocus
+                    Accessible.name: label
+                    ToolTip.visible: hovered || visualFocus
+                    ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
+                    ToolTip.text: shortcutText.length > 0
+                        ? label + " (" + shortcutText + ")"
+                        : label
+                    // Space presses the focused button rather than playing
+                    // or pausing; keys with modifiers stay the shortcuts'.
+                    Keys.onShortcutOverride: function(event) {
+                        event.accepted = KeyUtils.isPlainSpace(event)
+                    }
+                }
+            }
         }
 
         Slider {
             id: seekSlider
+            objectName: "seekSlider"
+            // A drag leaves the focus where it was, so the arrow keys keep
+            // working there; Tab reaches the slider for keyboard seeking.
+            focusPolicy: Qt.TabFocus
             Layout.fillWidth: true
             from: 0
             to: Math.max(root.uiBridge.durationSeconds, 1.0)
@@ -62,22 +103,38 @@ ToolBar {
             readonly property real stableVisualPosition: seekAllowed ? visualPosition : 0.0
 
             enabled: seekAllowed
-            stepSize: 0
+            // The arrow keys' step; a drag does not snap to it.
+            stepSize: root.keyboardSeekStepSeconds
+            snapMode: Slider.NoSnap
+
+            Accessible.name: "Seek"
+            Accessible.description: seekAllowed
+                ? FormatUtils.formatSeekTime(value) + " of "
+                    + FormatUtils.formatSeekTime(root.uiBridge.durationSeconds)
+                : "No track playing"
 
             onPressedChanged: {
                 if (!pressed && seekAllowed) {
                     root.seekCommitted(value)
                 }
             }
+            // The arrow keys move the slider without pressing it, so their
+            // moves seek at once.
+            onMoved: {
+                if (!pressed && seekAllowed) {
+                    root.seekCommitted(value)
+                }
+            }
 
             background: Item {
-                implicitHeight: 24
+                implicitHeight: root.uiPalette.rowHeight
                 anchors.verticalCenter: parent.verticalCenter
 
                 Rectangle {
+                    objectName: "seekBackground"
                     anchors.fill: parent
-                    color: root.themeIsDark ? "#1a1e24" : "white"
-                    border.color: root.themeIsDark ? "#404854" : "#a0a9b3"
+                    color: root.uiPalette.uiSurfaceRaisedColor
+                    border.color: root.uiPalette.uiBorderColor
                     radius: 1
                 }
 
@@ -93,31 +150,34 @@ ToolBar {
                     waveformComplete: root.uiBridge.waveformComplete
                     positionSeconds: root.displayedPositionSeconds
                     durationSeconds: root.uiBridge.durationSeconds
-                    barColor: root.themeIsDark ? "#a8bcd0" : "#0f2e5d"
-                    bgColor: root.themeIsDark ? "#1a1e24" : "#ffffff"
+                    barColor: root.uiPalette.uiWaveformColor
+                    bgColor: root.uiPalette.uiSurfaceRaisedColor
                 }
 
                 Rectangle {
+                    objectName: "seekProgress"
                     anchors.left: parent.left
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
                     visible: seekSlider.seekAllowed
                     width: parent.width * seekSlider.stableVisualPosition
-                    color: Qt.rgba(120 / 255, 190 / 255, 1.0, 0.26)
+                    color: ColorUtils.withAlpha(root.uiPalette.uiAccentColor, 0.26)
                 }
 
                 Rectangle {
+                    objectName: "seekPlayhead"
                     visible: seekSlider.seekAllowed
                     width: 1
                     antialiasing: true
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
                     x: seekSlider.stableVisualPosition * (parent.width - 1)
-                    color: "#2f7cd6"
+                    color: root.uiPalette.uiAccentColor
                 }
             }
 
             handle: Rectangle {
+                objectName: "seekHandle"
                 visible: seekSlider.seekAllowed
                 x: seekSlider.leftPadding + seekSlider.stableVisualPosition
                     * (seekSlider.availableWidth - width)
@@ -125,8 +185,9 @@ ToolBar {
                 implicitWidth: 3
                 implicitHeight: seekSlider.height - 4
                 radius: 1
-                color: "#2f7cd6"
-                border.color: "#1f5aa7"
+                color: root.uiPalette.uiAccentColor
+                border.color: ColorUtils.mixColor(
+                    root.uiPalette.uiAccentColor, root.uiPalette.uiTextColor, 0.3)
             }
 
             Item {
@@ -138,7 +199,7 @@ ToolBar {
                 property real leftCandidateX: playheadX - width - 8
                 property real rightCandidateX: playheadX + 8
                 width: dragTimeLabel.implicitWidth + 14
-                height: Math.max(18, seekSlider.availableHeight - 4)
+                height: Math.max(dragTimeLabel.implicitHeight, seekSlider.availableHeight - 4)
                 y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
                 x: {
                     const minX = 2
@@ -152,14 +213,14 @@ ToolBar {
                 Rectangle {
                     anchors.fill: parent
                     radius: 2
-                    color: Qt.rgba(52 / 255, 137 / 255, 235 / 255, 0.76)
-                    border.color: Qt.rgba(198 / 255, 229 / 255, 1.0, 0.52)
+                    color: ColorUtils.withAlpha(root.uiPalette.uiAccentColor, 0.85)
+                    border.color: ColorUtils.withAlpha(root.uiPalette.uiAccentTextColor, 0.5)
 
                     Label {
                         id: dragTimeLabel
                         anchors.centerIn: parent
                         text: FormatUtils.formatSeekTime(seekSlider.value)
-                        color: "white"
+                        color: root.uiPalette.uiAccentTextColor
                     }
                 }
             }
@@ -173,34 +234,47 @@ ToolBar {
         }
 
         Label {
+            id: timeLabel
             text: root.positionText + "/" + root.uiBridge.durationText
             horizontalAlignment: Text.AlignHCenter
-            Layout.preferredWidth: 96
+            Layout.preferredWidth: Math.ceil(timeTextMetrics.advanceWidth)
             Layout.alignment: Qt.AlignVCenter
+
+            TextMetrics {
+                id: timeTextMetrics
+                font: timeLabel.font
+                text: "00:00:00/00:00:00"
+            }
         }
 
         ToolButton {
-            Layout.preferredWidth: 28
-            Layout.preferredHeight: 28
+            objectName: "muteButton"
             Layout.alignment: Qt.AlignVCenter
             display: AbstractButton.IconOnly
             flat: true
-            icon.name: (root.volumeMuted || root.normalizedVolumeValue(root.uiBridge.volume) <= 0.0001)
-                ? "audio-volume-muted"
-                : "audio-volume-high"
-            icon.color: ColorUtils.mixColor(
-                root.uiPalette.uiTextColor,
-                "#ffffff",
-                root.themeIsDark ? 0.16 : 0.04)
+            text: root.volumeMuted ? "Unmute" : "Mute"
+            icon.name: root.volumeSilent ? "audio-volume-muted" : "audio-volume-high"
+            icon.color: root.uiPalette.uiTextColor
+            ToolTip.visible: hovered || visualFocus
+            ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
+            ToolTip.text: text
+            focusPolicy: Qt.TabFocus
+            Keys.onShortcutOverride: function(event) {
+                event.accepted = KeyUtils.isPlainSpace(event)
+            }
             onClicked: root.toggleMutedVolume()
         }
 
         Slider {
             id: volumeSlider
-            Layout.preferredWidth: 140
+            objectName: "volumeSlider"
+            focusPolicy: Qt.TabFocus
+            Layout.preferredWidth: root.uiPalette.rowHeight * 6
             from: 0
             to: 1
             stepSize: 0
+            Accessible.name: "Volume"
+            Accessible.description: Math.round(value * 100) + "%"
             onMoved: root.setAppVolume(value)
             onPressedChanged: {
                 if (!pressed) {

@@ -33,10 +33,10 @@ ScrollView {
                 anchors.margins: 18
                 spacing: 14
 
-                Label {
+                Kirigami.Heading {
                     Layout.fillWidth: true
+                    level: 2
                     text: "Spectrogram"
-                    font.pixelSize: 16
                     font.weight: Font.DemiBold
                 }
 
@@ -53,11 +53,11 @@ ScrollView {
 
                     Label {
                         text: "View"
-                        Layout.preferredWidth: 120
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
-                        Layout.preferredWidth: 220
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
                         model: ["Downmix", "Per-channel"]
                         currentIndex: Math.max(0, Math.min(1, root.uiBridge.spectrogramViewMode))
                         onActivated: root.uiBridge.setSpectrogramViewMode(currentIndex)
@@ -72,11 +72,11 @@ ScrollView {
 
                     Label {
                         text: "Display"
-                        Layout.preferredWidth: 120
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
-                        Layout.preferredWidth: 220
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
                         model: ["Rolling", "Centered"]
                         currentIndex: Math.max(0, Math.min(1, root.uiBridge.spectrogramDisplayMode))
                         onActivated: root.uiBridge.setSpectrogramDisplayMode(currentIndex)
@@ -91,11 +91,11 @@ ScrollView {
 
                     Label {
                         text: "FFT Window"
-                        Layout.preferredWidth: 120
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
-                        Layout.preferredWidth: 220
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
                         model: root.spectrogramFftChoices
                         currentIndex: {
                             const index = root.spectrogramFftChoices.indexOf(root.uiBridge.fftSize)
@@ -114,7 +114,7 @@ ScrollView {
 
                     Label {
                         text: "dB Range"
-                        Layout.preferredWidth: 120
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     Slider {
@@ -134,28 +134,25 @@ ScrollView {
 
                     Label {
                         text: Math.round(dbRangeSlider.value).toString()
-                        Layout.preferredWidth: 32
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 1.5
                         horizontalAlignment: Text.AlignRight
                     }
                 }
 
                 CheckBox {
                     text: "Log Scale Spectrogram"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.logScale
                     onToggled: root.uiBridge.setLogScale(checked)
                 }
 
                 CheckBox {
                     text: "Show Visualization FPS Overlay"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.showFps
                     onToggled: root.uiBridge.setShowFps(checked)
                 }
 
                 CheckBox {
                     text: "Show Crosshair on Hover"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.showSpectrogramCrosshair
                     onToggled: root.uiBridge.setShowSpectrogramCrosshair(checked)
                 }
@@ -165,20 +162,18 @@ ScrollView {
                     Layout.leftMargin: 32
                     wrapMode: Text.Wrap
                     color: Kirigami.Theme.disabledTextColor
-                    font.pixelSize: 12
+                    font: Kirigami.Theme.smallFont
                     text: "When enabled, right-clicking the spectrogram in centered mode seeks to that position in the track."
                 }
 
                 CheckBox {
                     text: "Show Frequency/Time Scale"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.showSpectrogramScale
                     onToggled: root.uiBridge.setShowSpectrogramScale(checked)
                 }
 
                 CheckBox {
                     text: "Allow Spectrogram Zoom"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.spectrogramZoomEnabled
                     onToggled: root.uiBridge.setSpectrogramZoomEnabled(checked)
                 }
@@ -188,7 +183,7 @@ ScrollView {
                     Layout.leftMargin: 32
                     wrapMode: Text.Wrap
                     color: Kirigami.Theme.disabledTextColor
-                    font.pixelSize: 12
+                    font: Kirigami.Theme.smallFont
                     text: "Scroll to zoom in/out. Middle-click to reset."
                 }
 
@@ -198,11 +193,11 @@ ScrollView {
 
                     Label {
                         text: "Channel Buttons"
-                        Layout.preferredWidth: 120
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
-                        Layout.preferredWidth: 220
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
                         model: ["Disabled", "On Hover", "Always"]
                         currentIndex: Math.max(0, Math.min(2, root.uiBridge.channelButtonsVisibility))
                         onActivated: root.uiBridge.setChannelButtonsVisibility(currentIndex)

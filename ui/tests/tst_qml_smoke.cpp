@@ -1303,8 +1303,8 @@ Item {
         pauseAction: pauseAction
         stopAction: stopAction
         nextAction: nextAction
-        themeIsDark: palette.themeIsDark
         volumeMuted: playbackController.volumeMuted
+        keyboardSeekStepSeconds: 5
         displayedPositionSeconds: playbackController.positionSeconds
         toggleMutedVolume: playbackController.toggleMutedVolume
         setAppVolume: playbackController.setAppVolume
@@ -4281,9 +4281,10 @@ Item {
 
     ListView {
         id: view
+        readonly property real rowHeight: 24
         anchors.fill: parent
         model: testLibraryModel
-        delegate: Item { width: view.width; height: 24 }
+        delegate: Item { width: view.width; height: view.rowHeight }
         Component.onCompleted: controller.registerView(view)
     }
 
@@ -4358,6 +4359,7 @@ Item {
         property real contentHeight: 1000
         property real height: 100
         property real originY: 100
+        property real rowHeight: 24
         property bool activeFocus: false
         function indexAt(x, y) { return 10 }
         function itemAtIndex(index) { return index === 10 ? ({ y: 340 }) : null }
@@ -4474,9 +4476,10 @@ Item {
 
     ListView {
         id: view
+        readonly property real rowHeight: 24
         anchors.fill: parent
         model: testLibraryModel
-        delegate: Item { width: view.width; height: 24 }
+        delegate: Item { width: view.width; height: view.rowHeight }
         Component.onCompleted: controller.registerView(view)
     }
 
@@ -9387,7 +9390,7 @@ Window {
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(selected))));
     controller->setProperty("selectionAnchorIndex", 60);
-    view->setProperty("contentY", 50 * 24);
+    view->setProperty("contentY", 50 * view->property("rowHeight").toReal());
     QTRY_COMPARE(topRowTitle(), QStringLiteral("Track 50"));
     QSignalSpy resets(&rows, &QAbstractItemModel::modelReset);
 
@@ -9685,6 +9688,7 @@ Item {
         id: stubView
         objectName: "stubView"
         property bool visible: true
+        property real rowHeight: 24
         property real height: 400
         property real contentY: 0
         property real contentHeight: 2400
@@ -9764,6 +9768,7 @@ Item {
         id: stubView
         objectName: "stubView"
         property bool visible: true
+        property real rowHeight: 24
         property real height: 400
         property real contentY: 0
         property real contentHeight: 24000
@@ -12217,6 +12222,9 @@ void QmlSmokeTest::wheelScrollsListsByTheWheelDelta() {
     QTRY_VERIFY(view->property("contentHeight").toReal() > view->height() * 3);
     const QPointF center = view->mapToScene(QPointF(view->width() / 2, view->height() / 2));
     const auto contentY = [view]() { return view->property("contentY").toReal(); };
+    // The rows' height follows the font size.
+    const qreal rowHeight = view->property("rowHeight").toReal();
+    QVERIFY(rowHeight > 0);
 
     // A touchpad reports the pixels to scroll, along with an angle that
     // is a small part of a notch. The list scrolls by the pixels.
@@ -12225,17 +12233,18 @@ void QmlSmokeTest::wheelScrollsListsByTheWheelDelta() {
     QCOMPARE(contentY() - before, 3.0);
 
     // A high-resolution wheel reports an eighth of a notch; a notch
-    // scrolls three rows of 24 pixels.
+    // scrolls three rows.
     before = contentY();
     QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, -15)));
-    QCOMPARE(contentY() - before, 9.0);
+    QVERIFY2(std::abs(contentY() - before - 3 * rowHeight / 8) <= 1.0,
+             qPrintable(QStringLiteral("scrolled %1").arg(contentY() - before)));
 
     // Steps smaller than a pixel add up instead of being rounded away.
     before = contentY();
     for (int i = 0; i < 10; ++i) {
         QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, -2)));
     }
-    QVERIFY2(std::abs(contentY() - before - 12.0) <= 1.0,
+    QVERIFY2(std::abs(contentY() - before - rowHeight / 2) <= 1.0,
              qPrintable(QStringLiteral("scrolled %1").arg(contentY() - before)));
 
     // Scrolling back up works the same way.

@@ -43,6 +43,12 @@ In the library, typing the start of an artist's name selects that artist.
 
 Delete acts only while the queue has focus. Playing from the library or global search replaces the queue. After Clear Playlist, Delete, or a replacement, a message under the queue offers **Undo**, as does Undo in the **Edit** menu (Ctrl+Z), until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start.
 
+## Controls and dialogs
+
+Tab and Shift+Tab move between the controls, including the transport buttons, the seek bar and the volume. With the seek bar focused, Left and Right seek back or forward 5 seconds.
+
+In **Preferences**, Tab reaches the page tabs, and Space opens the focused one. Left and Right on a tab, Ctrl+Tab and Ctrl+Shift+Tab, or Ctrl+PageDown and Ctrl+PageUp move to the next or previous page.
+
 ## Viewers
 
 Double-click the visualization or the album art to open its viewer, and press Escape to close it. In the album art viewer, a double-click zooms in or out, I shows the image's details, Left and Right switch between the current and suggested artwork, and Menu or Shift+F10 opens the context menu.

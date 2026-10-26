@@ -3,12 +3,13 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import org.kde.kirigami 2.20 as Kirigami
 
 RowLayout {
     id: root
 
     required property var columns
-    property color textColor: "white"
+    property color textColor: Kirigami.Theme.textColor
     property int leftMargin: 0
     property int rightMargin: 0
     property int spacingValue: 6

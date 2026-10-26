@@ -18,7 +18,13 @@ Rectangle {
     border.color: root.borderColor
 
     ToolButton {
+        objectName: "viewerCloseButton"
         anchors.fill: parent
+        text: "Close"
+        display: AbstractButton.IconOnly
+        ToolTip.visible: hovered || visualFocus
+        ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
+        ToolTip.text: text
         icon.name: "window-close"
         icon.color: root.iconColor
         onClicked: root.clicked()

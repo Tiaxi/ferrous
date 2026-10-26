@@ -162,6 +162,7 @@ qt_add_qml_module(ferrous
         qml/logic/ColorUtils.js
         qml/logic/ErrorUtils.js
         qml/logic/FormatUtils.js
+        qml/logic/KeyUtils.js
         qml/logic/PathUtils.js
         qml/logic/WheelUtils.js
 )
@@ -292,6 +293,66 @@ if(BUILD_TESTING)
     )
     add_test(NAME ferrous_qml_smoke_tests COMMAND ferrous_qml_smoke_tests)
     set_tests_properties(ferrous_qml_smoke_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    qt_add_executable(ferrous_accessibility_tests
+        tests/tst_accessibility.cpp
+        src/BinaryBridgeCodec.cpp
+        src/BridgeClient.cpp
+        src/CoverImageProvider.cpp
+        src/DiagnosticsLog.cpp
+        src/DisplaySleepInhibitor.cpp
+        src/GlobalSearchResultsModel.cpp
+        src/LibraryTreeModel.cpp
+        src/MprisController.cpp
+        src/CoverRevisionLinks.cpp
+        src/PlaybackClock.cpp
+        src/TagEditorController.cpp
+        src/TagEditorTableModel.cpp
+        src/SpectrogramItem.cpp
+        src/WindowActivation.cpp
+        src/WaveformItem.cpp
+        src/WaveformSceneGraph.cpp
+        src/WaveformSceneGraph.h
+        src/WaveformEditorItem.cpp
+        src/LevelMeterItem.cpp
+    )
+    target_include_directories(ferrous_accessibility_tests PRIVATE src)
+    add_dependencies(ferrous_accessibility_tests ferrous_rust_bridge)
+    target_compile_definitions(ferrous_accessibility_tests PRIVATE
+        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(ferrous_accessibility_tests PRIVATE
+        Qt6::Core
+        Qt6::DBus
+        Qt6::Gui
+        Qt6::Qml
+        Qt6::Quick
+        Qt6::QuickControls2
+        Qt6::Concurrent
+        Qt6::Network
+        Qt6::Widgets
+        Qt6::Test
+        KF6::Kirigami
+        "${FERROUS_RUST_STATIC_LIB}"
+        PkgConfig::FERROUS_GSTREAMER
+        dl
+        m
+        pthread
+    )
+    ferrous_enable_strict_warnings(ferrous_accessibility_tests)
+    if(FERROUS_ENABLE_PROFILE_LOGS)
+        target_sources(ferrous_accessibility_tests PRIVATE src/SpectrogramSeekTrace.cpp)
+        target_compile_definitions(ferrous_accessibility_tests PRIVATE
+            FERROUS_ENABLE_PROFILE_LOGS=1
+        )
+    endif()
+    set_target_properties(ferrous_accessibility_tests PROPERTIES
+        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
+    )
+    add_test(NAME ferrous_accessibility_tests COMMAND ferrous_accessibility_tests)
+    set_tests_properties(ferrous_accessibility_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 

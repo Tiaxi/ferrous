@@ -446,8 +446,7 @@ ApplicationWindow {
         let maxPx = 0
         for (let i = 0; i < items.length; ++i) {
             const item = items[i]
-            // A mnemonic's "&" is not shown.
-            const label = (item.label || "").replace(/&(.)/g, "$1")
+            const label = FormatUtils.withoutMnemonic(item.label)
             const shortcut = item.shortcut || ""
             let px = menuFontMetrics.boundingRect(label).width + 72
             if (shortcut.length > 0) {
@@ -458,15 +457,13 @@ ApplicationWindow {
         return Math.max(140, Math.ceil(maxPx))
     }
 
-    readonly property int playlistOrderColumnWidth: {
-        const maxIndex = Math.max(0, uiBridge.queueLength - 1)
-        const widestOrderText = FormatUtils.playlistOrderText(maxIndex)
-        const valueWidth = playlistOrderFontMetrics.boundingRect(widestOrderText).width
-        const headerWidth = playlistOrderFontMetrics.boundingRect("#").width
-        return Math.max(28, Math.ceil(Math.max(valueWidth, headerWidth) + 10))
-    }
+    // Fits the widest number, and at least four characters.
+    readonly property int playlistOrderColumnWidth: Math.ceil(Math.max(
+        playlistOrderFontMetrics.averageCharacterWidth * 4,
+        playlistOrderTextMetrics.boundingRect.width + playlistOrderFontMetrics.averageCharacterWidth * 1.5))
     readonly property bool globalSearchShowsRootColumn: (uiBridge.libraryRootCount || 0) >= 2
-    readonly property int playlistIndicatorColumnWidth: 18
+    // Wide enough for the play, pause or stop symbol.
+    readonly property int playlistIndicatorColumnWidth: Math.ceil(playlistOrderFontMetrics.height)
 
     FontMetrics {
         id: menuFontMetrics
@@ -476,6 +473,12 @@ ApplicationWindow {
     FontMetrics {
         id: playlistOrderFontMetrics
         font: root.font
+    }
+
+    TextMetrics {
+        id: playlistOrderTextMetrics
+        font: root.font
+        text: FormatUtils.playlistOrderText(Math.max(0, uiBridge.queueLength - 1))
     }
 
     // Scroll left over from earlier wheel events that the view has not
@@ -1039,6 +1042,7 @@ ApplicationWindow {
 
     Dialogs.PreferencesDialog {
         id: preferencesDialog
+        objectName: "preferencesDialog"
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
         windowRoot: root
@@ -1159,8 +1163,8 @@ ApplicationWindow {
             pauseAction: pauseAction
             stopAction: stopAction
             nextAction: nextAction
-            themeIsDark: root.themeIsDark
             volumeMuted: playbackController.volumeMuted
+            keyboardSeekStepSeconds: root.keyboardSeekStepSeconds
             displayedPositionSeconds: playbackController.positionSeconds
             positionText: playbackController.positionText
             toggleMutedVolume: playbackController.toggleMutedVolume
@@ -1244,6 +1248,9 @@ ApplicationWindow {
         Viewers.SpectrogramSurface {
             id: spectrogramSurface
             objectName: "mainSpectrogramSurface"
+            Accessible.role: Accessible.Graphic
+            Accessible.name: "Spectrogram"
+            Accessible.description: "Frequencies of the playing track over time"
             anchors.fill: parent
             anchors.bottomMargin: levelMeter.height
             visible: viewerController.visualizationMode === 0
@@ -1271,6 +1278,8 @@ ApplicationWindow {
         LevelMeterItem {
             id: levelMeter
             objectName: "levelMeter"
+            Accessible.role: Accessible.Graphic
+            Accessible.name: "Level meter"
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom

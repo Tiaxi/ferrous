@@ -68,6 +68,9 @@ Rectangle {
 
         ListView {
             id: libraryAlbumView
+            objectName: "libraryView"
+            // The controller pages and scrolls by it.
+            readonly property real rowHeight: root.uiPalette.rowHeight
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
@@ -81,6 +84,8 @@ Rectangle {
             flickDeceleration: root.snappyScrollFlickDeceleration
             maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
             pixelAligned: true
+            Accessible.role: Accessible.Tree
+            Accessible.name: "Library"
 
             Component.onCompleted: root.controller.registerView(libraryAlbumView)
             onContentYChanged: root.controller.scheduleLibraryViewStatePersist()
@@ -102,7 +107,7 @@ Rectangle {
                 acceptedButtons: Qt.NoButton
                 preventStealing: true
                 onWheel: function(wheel) {
-                    root.stepScrollView(libraryAlbumView, wheel, 24, 3)
+                    root.stepScrollView(libraryAlbumView, wheel, libraryAlbumView.rowHeight, 3)
                 }
             }
 
@@ -131,6 +136,7 @@ Rectangle {
 
             delegate: Rectangle {
                 id: libraryRow
+                objectName: "libraryRow"
 
                 readonly property string rowTypeResolved: rowType || ""
                 readonly property bool isAlbumRow: rowTypeResolved === "album"
@@ -153,6 +159,15 @@ Rectangle {
                     && (y <= libraryAlbumView.contentY + libraryAlbumView.height + 48)
                 readonly property int sourceIndexResolved: sourceIndex !== undefined ? sourceIndex : -1
                 readonly property int depthResolved: depth !== undefined ? depth : 0
+                readonly property bool rowSelected: root.controller.isSelectionKeySelected(
+                    selectionKey || "")
+                readonly property string rowKindText: isTrackRow
+                    ? "Track"
+                    : (isAlbumRow
+                        ? "Album"
+                        : (rowTypeResolved === "artist"
+                            ? "Artist"
+                            : (rowTypeResolved === "root" ? "Library folder" : "")))
 
                 function actionRowMap() {
                     return {
@@ -174,12 +189,22 @@ Rectangle {
                 }
 
                 width: ListView.view.width
-                height: 24
-                color: root.controller.isSelectionKeySelected(selectionKey || "")
+                height: libraryAlbumView.rowHeight
+                color: rowSelected
                     ? root.uiPalette.uiSelectionColor
                     : (index % 2 === 0
                         ? root.uiPalette.uiSurfaceRaisedColor
                         : root.uiPalette.uiSurfaceAltColor)
+
+                Accessible.role: Accessible.TreeItem
+                Accessible.name: rowTitle
+                // QML cannot set the expanded state, so the description
+                // tells it.
+                Accessible.description: hasChildren
+                    ? rowKindText + (expanded ? ", expanded" : ", collapsed")
+                    : rowKindText
+                Accessible.selectable: true
+                Accessible.selected: rowSelected
 
                 RowLayout {
                     anchors.fill: parent
@@ -188,28 +213,30 @@ Rectangle {
                     spacing: 3
 
                     Item {
-                        Layout.preferredWidth: Math.max(0, depthResolved * 18)
+                        Layout.preferredWidth: Math.max(
+                            0, depthResolved * Math.round(libraryAlbumView.rowHeight * 0.75))
                     }
 
                     Label {
                         id: expanderIcon
-                        Layout.preferredWidth: 24
+                        Layout.preferredWidth: libraryAlbumView.rowHeight
                         Layout.fillHeight: true
                         Layout.alignment: Qt.AlignVCenter
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                         text: hasChildren ? (expanded ? "▾" : "▸") : ""
-                        font.pixelSize: 20
+                        // The triangles are small in most fonts.
+                        font.pointSize: root.uiPalette.basePointSize * 1.5
                         font.bold: true
-                        color: root.controller.isSelectionKeySelected(selectionKey || "")
+                        color: rowSelected
                             ? root.uiPalette.uiSelectionTextColor
                             : root.uiPalette.uiMutedTextColor
                     }
 
                     Item {
                         visible: isAlbumRow || (isSectionRow && (coverPath || "") !== "")
-                        Layout.preferredWidth: 18
-                        Layout.preferredHeight: 18
+                        Layout.preferredWidth: libraryAlbumView.rowHeight - 6
+                        Layout.preferredHeight: libraryAlbumView.rowHeight - 6
                         Layout.alignment: Qt.AlignVCenter
 
                         Image {
@@ -233,7 +260,7 @@ Rectangle {
                         elide: Text.ElideRight
                         verticalAlignment: Text.AlignVCenter
                         text: rowTitle
-                        color: root.controller.isSelectionKeySelected(selectionKey || "")
+                        color: rowSelected
                             ? root.uiPalette.uiSelectionTextColor
                             : root.uiPalette.uiTextColor
                     }

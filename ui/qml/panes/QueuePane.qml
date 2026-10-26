@@ -25,6 +25,33 @@ Rectangle {
     required property var droppedExternalPaths
     required property var submitExternalImport
 
+    // The columns, which the header and the rows share. The title takes the
+    // width the others leave; the others follow the font size.
+    readonly property real columnMargin: 8
+    readonly property real columnSpacing: 6
+    readonly property real artistColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 25)
+    readonly property real albumColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 28)
+    readonly property real lengthColumnWidth: Math.ceil(Math.max(
+        lengthHeaderMetrics.advanceWidth,
+        lengthValueMetrics.advanceWidth) + columnFontMetrics.averageCharacterWidth)
+
+    FontMetrics {
+        id: columnFontMetrics
+        font: root.uiPalette.baseFont
+    }
+
+    TextMetrics {
+        id: lengthHeaderMetrics
+        font: root.uiPalette.baseFont
+        text: "Length"
+    }
+
+    TextMetrics {
+        id: lengthValueMetrics
+        font: root.uiPalette.baseFont
+        text: "00:00:00"
+    }
+
     color: root.uiPalette.uiSurfaceRaisedColor
     SplitView.fillWidth: true
     SplitView.preferredHeight: root.preferredHeight
@@ -36,7 +63,7 @@ Rectangle {
 
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: 26
+            implicitHeight: root.uiPalette.rowHeight + 2
             color: root.uiPalette.uiHeaderColor
 
             Rectangle {
@@ -49,29 +76,53 @@ Rectangle {
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 8
-                anchors.rightMargin: 8 + (playlistView ? playlistView.reservedRightPadding : 0)
+                anchors.leftMargin: root.columnMargin
+                anchors.rightMargin: root.columnMargin
+                    + (playlistView ? playlistView.reservedRightPadding : 0)
+                spacing: root.columnSpacing
 
                 Label {
+                    objectName: "queueHeader_indicator"
                     text: "▶"
                     Layout.preferredWidth: root.playlistIndicatorColumnWidth
                     horizontalAlignment: Text.AlignHCenter
                     color: root.uiPalette.uiMutedTextColor
+                    Accessible.name: "Playing"
                 }
 
                 Label {
+                    objectName: "queueHeader_order"
                     text: "#"
                     Layout.preferredWidth: root.playlistOrderColumnWidth
                     horizontalAlignment: Text.AlignRight
                     color: root.uiPalette.uiMutedTextColor
+                    Accessible.name: "Number"
                 }
 
-                Label { text: "Title"; Layout.fillWidth: true; color: root.uiPalette.uiMutedTextColor }
-                Label { text: "Artist"; Layout.preferredWidth: 170; color: root.uiPalette.uiMutedTextColor }
-                Label { text: "Album"; Layout.preferredWidth: 190; color: root.uiPalette.uiMutedTextColor }
                 Label {
+                    objectName: "queueHeader_title"
+                    text: "Title"
+                    Layout.fillWidth: true
+                    color: root.uiPalette.uiMutedTextColor
+                }
+                Label {
+                    objectName: "queueHeader_artist"
+                    text: "Artist"
+                    Layout.preferredWidth: root.artistColumnWidth
+                    elide: Text.ElideRight
+                    color: root.uiPalette.uiMutedTextColor
+                }
+                Label {
+                    objectName: "queueHeader_album"
+                    text: "Album"
+                    Layout.preferredWidth: root.albumColumnWidth
+                    elide: Text.ElideRight
+                    color: root.uiPalette.uiMutedTextColor
+                }
+                Label {
+                    objectName: "queueHeader_length"
                     text: "Length"
-                    Layout.preferredWidth: 76
+                    Layout.preferredWidth: root.lengthColumnWidth
                     horizontalAlignment: Text.AlignRight
                     color: root.uiPalette.uiMutedTextColor
                 }
@@ -85,6 +136,8 @@ Rectangle {
             ListView {
                 id: playlistView
                 objectName: "playlistView"
+                // The controller scrolls and pages by it.
+                readonly property real rowHeight: root.uiPalette.rowHeight
                 anchors.fill: parent
                 clip: true
                 activeFocusOnTab: true
@@ -95,6 +148,8 @@ Rectangle {
                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
                 pixelAligned: true
                 cacheBuffer: 480
+                Accessible.role: Accessible.List
+                Accessible.name: "Queue"
                 property real reservedRightPadding: playlistVerticalScrollBar.visible
                     ? (playlistVerticalScrollBar.width + 6)
                     : 0
@@ -137,48 +192,66 @@ Rectangle {
                     acceptedButtons: Qt.NoButton
                     preventStealing: true
                     onWheel: function(wheel) {
-                        root.stepScrollView(playlistView, wheel, 24, 3)
+                        root.stepScrollView(playlistView, wheel, playlistView.rowHeight, 3)
                     }
                 }
 
                 delegate: Rectangle {
                     id: playlistRow
-                    readonly property string titleValue: (typeof title !== "undefined" && title !== undefined)
-                        ? title
-                        : ((modelData && typeof modelData === "object") ? (modelData.title || "") : "")
-                    readonly property string artistValue: (typeof artist !== "undefined" && artist !== undefined)
-                        ? artist
-                        : ((modelData && typeof modelData === "object") ? (modelData.artist || "") : "")
-                    readonly property string albumValue: (typeof album !== "undefined" && album !== undefined)
-                        ? album
-                        : ((modelData && typeof modelData === "object") ? (modelData.album || "") : "")
-                    readonly property string lengthTextValue: (typeof lengthText !== "undefined" && lengthText !== undefined)
-                        ? lengthText
-                        : ((modelData && typeof modelData === "object") ? (modelData.lengthText || "--:--") : "--:--")
+                    objectName: "queueRow"
+                    // The row's roles, or its object in a list of objects. A
+                    // bare `title` would find the window's title in a list.
+                    readonly property var rowValues: model.modelData
+                        && typeof model.modelData === "object"
+                        ? model.modelData
+                        : model
+                    readonly property string titleValue: rowValues.title || ""
+                    readonly property string artistValue: rowValues.artist || ""
+                    readonly property string albumValue: rowValues.album || ""
+                    readonly property string lengthTextValue: rowValues.lengthText || "--:--"
                     readonly property bool isCurrentQueueRow: index === root.uiBridge.playingQueueIndex
                     readonly property bool draggableQueueItem: true
                     readonly property int queueRowIndex: index
+                    readonly property bool rowSelected: root.controller.isIndexSelected(index)
+                    readonly property string playbackStateText: !isCurrentQueueRow
+                        ? ""
+                        : (root.uiBridge.playbackState === "Paused"
+                            ? "paused"
+                            : (root.uiBridge.playbackState === "Stopped" ? "stopped" : "playing"))
 
                     width: Math.max(0, ListView.view.width - (playlistView.reservedRightPadding || 0))
-                    height: 24
+                    height: playlistView.rowHeight
                     Drag.active: playlistRowMouseArea.drag.active
                     Drag.source: playlistRow
                     Drag.hotSpot.x: width * 0.5
                     Drag.hotSpot.y: height * 0.5
                     Drag.dragType: Drag.Automatic
                     Drag.supportedActions: Qt.MoveAction
-                    color: root.controller.isIndexSelected(index)
+                    color: rowSelected
                         ? root.uiPalette.uiSelectionColor
                         : (index % 2 === 0 ? root.uiPalette.uiSurfaceRaisedColor
                                             : root.uiPalette.uiSurfaceAltColor)
 
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: [
+                        root.playlistOrderText(index) + ".",
+                        titleValue,
+                        artistValue,
+                        albumValue,
+                        lengthTextValue,
+                        playbackStateText
+                    ].filter(function(part) { return part.length > 0 }).join(", ")
+                    Accessible.selectable: true
+                    Accessible.selected: rowSelected
+
                     RowLayout {
                         anchors.fill: parent
-                        anchors.leftMargin: 8
-                        anchors.rightMargin: 8
-                        spacing: 6
+                        anchors.leftMargin: root.columnMargin
+                        anchors.rightMargin: root.columnMargin
+                        spacing: root.columnSpacing
 
                         Label {
+                            objectName: "queueCell_indicator"
                             text: {
                                 if (!playlistRow.isCurrentQueueRow) {
                                     return ""
@@ -194,7 +267,7 @@ Rectangle {
                             Layout.preferredWidth: root.playlistIndicatorColumnWidth
                             horizontalAlignment: Text.AlignHCenter
                             font.bold: true
-                            color: root.controller.isIndexSelected(index)
+                            color: playlistRow.rowSelected
                                 ? root.uiPalette.uiSelectionTextColor
                                 : (playlistRow.isCurrentQueueRow
                                     ? (root.uiBridge.playbackState === "Playing"
@@ -204,46 +277,51 @@ Rectangle {
                         }
 
                         Label {
+                            objectName: "queueCell_order"
                             text: root.playlistOrderText(index)
                             Layout.preferredWidth: root.playlistOrderColumnWidth
                             horizontalAlignment: Text.AlignRight
-                            color: root.controller.isIndexSelected(index)
+                            color: playlistRow.rowSelected
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
 
                         Label {
+                            objectName: "queueCell_title"
                             text: titleValue
                             Layout.fillWidth: true
                             elide: Text.ElideRight
-                            color: root.controller.isIndexSelected(index)
+                            color: playlistRow.rowSelected
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
 
                         Label {
+                            objectName: "queueCell_artist"
                             text: artistValue
-                            Layout.preferredWidth: 170
+                            Layout.preferredWidth: root.artistColumnWidth
                             elide: Text.ElideRight
-                            color: root.controller.isIndexSelected(index)
+                            color: playlistRow.rowSelected
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
 
                         Label {
+                            objectName: "queueCell_album"
                             text: albumValue
-                            Layout.preferredWidth: 190
+                            Layout.preferredWidth: root.albumColumnWidth
                             elide: Text.ElideRight
-                            color: root.controller.isIndexSelected(index)
+                            color: playlistRow.rowSelected
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
 
                         Label {
+                            objectName: "queueCell_length"
                             text: lengthTextValue
-                            Layout.preferredWidth: 76
+                            Layout.preferredWidth: root.lengthColumnWidth
                             horizontalAlignment: Text.AlignRight
-                            color: root.controller.isIndexSelected(index)
+                            color: playlistRow.rowSelected
                                 ? root.uiPalette.uiSelectionTextColor
                                 : root.uiPalette.uiTextColor
                         }
@@ -428,7 +506,7 @@ Rectangle {
                 property real queueDropIndicatorY: 0
 
                 function updateQueueDropIndicator(dropY) {
-                    const rowHeight = 24
+                    const rowHeight = playlistView.rowHeight
                     const yInList = dropY - playlistView.y + playlistView.contentY
                     let insertIndex = Math.floor((yInList + rowHeight * 0.5) / rowHeight)
                     insertIndex = Math.max(0, Math.min(root.uiBridge.queueLength, insertIndex))

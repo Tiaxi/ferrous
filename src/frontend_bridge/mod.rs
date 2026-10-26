@@ -1102,6 +1102,11 @@ impl Worker {
 /// stops listening to it.
 const MAX_WORKER_RESTARTS: u32 = 3;
 
+/// The farthest the library view's top edge is saved from the top of the
+/// row at it, in pixels. The rows' height follows the font size, so this
+/// only rules out nonsense; the UI bounds it the same way.
+pub(super) const MAX_LIBRARY_VIEW_ANCHOR_OFFSET: f32 = 4096.0;
+
 fn env_duration_ms(var: &str, default: u64, min: u64, max: u64) -> Duration {
     Duration::from_millis(
         std::env::var(var)
@@ -2704,6 +2709,32 @@ mod tests {
         ));
         assert_eq!(error_messages(&event_rx), messages);
         std::fs::remove_dir(&settings_path).expect("unblock the settings");
+    }
+
+    #[test]
+    fn library_view_state_keeps_offsets_into_rows_taller_than_the_default() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = unbounded();
+        let mut set_offset = |anchor_offset: f32| {
+            runtime.handle_wake(
+                BridgeLoopWake::Command(BridgeCommand::Library(
+                    BridgeLibraryCommand::SetViewState {
+                        selection_key: String::new(),
+                        anchor_key: "album|/music|Artist|Album".to_string(),
+                        anchor_offset,
+                    },
+                )),
+                &event_tx,
+            );
+            runtime.state.library_view_anchor_offset
+        };
+        // Rows follow the font size, so the view's top can be well over
+        // 24 pixels into the row at it.
+        assert!((set_offset(40.0) - 40.0).abs() < f32::EPSILON);
+        assert!((set_offset(-40.0) + 40.0).abs() < f32::EPSILON);
+        assert!((set_offset(1e9) - MAX_LIBRARY_VIEW_ANCHOR_OFFSET).abs() < f32::EPSILON);
+        assert!(set_offset(f32::NAN).abs() < f32::EPSILON);
     }
 
     #[test]

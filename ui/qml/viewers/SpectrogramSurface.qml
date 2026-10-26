@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 import FerrousUi 1.0
+import org.kde.kirigami 2.20 as Kirigami
 import "../logic/ChannelLabels.js" as ChannelLabels
 
 Item {
@@ -340,7 +341,7 @@ Item {
                             color: spectrogramPaneItem.channelMuted
                                 ? Qt.rgba(0.65, 0.35, 0.35, 0.9)
                                 : Qt.rgba(0.90, 0.93, 0.98, 0.74)
-                            font.pixelSize: 12
+                            font.pointSize: Kirigami.Theme.smallFont.pointSize
                             font.weight: Font.Medium
                             font.strikeout: spectrogramPaneItem.channelMuted
                         }
@@ -366,7 +367,7 @@ Item {
                             color: parent.active
                                 ? Qt.rgba(1.0, 0.78, 0.78, 0.95)
                                 : Qt.rgba(0.71, 0.71, 0.78, 0.8)
-                            font.pixelSize: 10
+                            font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.9
                             font.weight: Font.DemiBold
                             font.letterSpacing: 0.5
                         }
@@ -405,7 +406,7 @@ Item {
                             color: parent.active
                                 ? Qt.rgba(1.0, 0.94, 0.55, 0.95)
                                 : Qt.rgba(0.71, 0.71, 0.78, 0.8)
-                            font.pixelSize: 10
+                            font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.9
                             font.weight: Font.DemiBold
                             font.letterSpacing: 0.5
                         }

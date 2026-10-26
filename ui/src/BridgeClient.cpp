@@ -82,6 +82,10 @@ constexpr quint32 kMaxAnalysisFrameBytes = 8 * 1024 * 1024;
 constexpr int kMaxDiagnosticsLines = 2000;
 constexpr int kItunesArtworkSearchRequestLimit = 50;
 constexpr int kItunesArtworkResultDisplayLimit = 40;
+// The farthest the library view's top edge is saved from the top of the
+// row at it, as MAX_LIBRARY_VIEW_ANCHOR_OFFSET bounds it in the bridge.
+// The rows' height follows the font size, so this only rules out nonsense.
+constexpr double kMaxLibraryViewAnchorOffset = 4096.0;
 
 bool shouldEmitUiProfileLog(qint64 nowMs, qint64 *lastMs, qint64 minIntervalMs = 250) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -3079,7 +3083,8 @@ void BridgeClient::setLibraryViewState(
         BinaryBridgeCodec::CmdSetLibraryViewState,
         selectionKey.trimmed(),
         anchorKey.trimmed(),
-        static_cast<float>(std::clamp(anchorOffset, -24.0, 24.0))));
+        static_cast<float>(std::clamp(
+            anchorOffset, -kMaxLibraryViewAnchorOffset, kMaxLibraryViewAnchorOffset))));
 }
 
 void BridgeClient::showTrackInLibrary(const QString &path) {

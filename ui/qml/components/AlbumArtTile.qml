@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import org.kde.kirigami 2.20 as Kirigami
 
 Rectangle {
     id: root
@@ -17,7 +18,11 @@ Rectangle {
     Layout.fillWidth: true
     Layout.preferredHeight: width
 
-    color: "#0c0c0c"
+    color: Kirigami.Theme.alternateBackgroundColor
+    Accessible.role: Accessible.Graphic
+    Accessible.name: root.uiBridge.currentTrackCoverPath.length > 0
+        ? "Album art"
+        : "No album art"
 
     Image {
         anchors.fill: parent
@@ -31,10 +36,10 @@ Rectangle {
         sourceSize.height: Math.max(256, height)
     }
 
-    Text {
+    Label {
         anchors.centerIn: parent
         text: "Album Art"
-        color: "#8c8c8c"
+        color: Kirigami.Theme.disabledTextColor
         visible: root.uiBridge.currentTrackCoverPath.length === 0
     }
 
