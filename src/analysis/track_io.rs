@@ -15,7 +15,7 @@ use rusqlite::Connection;
 use super::cache::{
     insert_waveform_cache_entry, load_waveform_from_db, open_waveform_cache_db,
     persist_waveform_to_db, prune_persistent_waveform_cache, remap_waveform_cache_entries,
-    touch_waveform_cache_lru, WaveformCacheEntry, WaveformSourceStamp,
+    touch_waveform_cache_lru, touch_waveform_in_db, WaveformCacheEntry, WaveformSourceStamp,
     PERSISTENT_WAVEFORM_CACHE_MAX_ROWS, PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL,
 };
 use super::decoders::{open_symphonia_file, SymphoniaFile};
@@ -81,11 +81,13 @@ pub(super) enum TrackIoRequest {
         request: u64,
         path: PathBuf,
     },
-    /// Keep a decoded waveform for when its file plays again.
+    /// Keep a waveform whose decode reached the end of the file, covering
+    /// `coverage_seconds` of audio, for when its file plays again.
     SaveWaveform {
         path: PathBuf,
         stamp: Option<WaveformSourceStamp>,
         peaks: Vec<f32>,
+        coverage_seconds: f32,
     },
     RemapPaths(Arc<PathRenames>),
 }
@@ -150,8 +152,13 @@ impl TrackIo {
                     format: probe_format(&path),
                 })
             }
-            TrackIoRequest::SaveWaveform { path, stamp, peaks } => {
-                self.save_waveform(&path, stamp, peaks);
+            TrackIoRequest::SaveWaveform {
+                path,
+                stamp,
+                peaks,
+                coverage_seconds,
+            } => {
+                self.save_waveform(&path, stamp, peaks, coverage_seconds);
                 None
             }
             TrackIoRequest::RemapPaths(renames) => {
@@ -173,6 +180,9 @@ impl TrackIo {
             .map(|entry| entry.peaks.clone());
         if in_memory.is_some() {
             touch_waveform_cache_lru(&mut self.lru, path);
+            if let Some(db) = self.db.as_ref() {
+                touch_waveform_in_db(db, path);
+            }
             return in_memory;
         }
         let peaks = load_waveform_from_db(self.db.as_ref()?, path, stamp?)?;
@@ -188,9 +198,15 @@ impl TrackIo {
         Some(peaks)
     }
 
-    fn save_waveform(&mut self, path: &Path, stamp: Option<WaveformSourceStamp>, peaks: Vec<f32>) {
+    fn save_waveform(
+        &mut self,
+        path: &Path,
+        stamp: Option<WaveformSourceStamp>,
+        peaks: Vec<f32>,
+        coverage_seconds: f32,
+    ) {
         if let (Some(db), Some(stamp)) = (self.db.as_ref(), stamp) {
-            let _ = persist_waveform_to_db(db, path, stamp, &peaks);
+            let _ = persist_waveform_to_db(db, path, stamp, &peaks, coverage_seconds);
             self.writes_since_prune = self.writes_since_prune.saturating_add(1);
             if self.writes_since_prune >= PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL {
                 let _ = prune_persistent_waveform_cache(db, PERSISTENT_WAVEFORM_CACHE_MAX_ROWS);
@@ -335,7 +351,7 @@ mod tests {
     fn saved_waveforms_come_back_while_their_files_are_unchanged() {
         let mut io = TrackIo::new(Some(database()));
         let path = Path::new("/music/a.flac");
-        io.save_waveform(path, Some(stamp(10)), vec![0.5, 0.25]);
+        io.save_waveform(path, Some(stamp(10)), vec![0.5, 0.25], 1.0);
         assert_eq!(
             io.saved_waveform(path, Some(stamp(10))),
             Some(vec![0.5, 0.25])
@@ -351,11 +367,33 @@ mod tests {
     }
 
     #[test]
+    fn a_waveform_found_in_memory_still_counts_as_a_use_in_the_database() {
+        let mut io = TrackIo::new(Some(database()));
+        let path = Path::new("/music/a.flac");
+        io.save_waveform(path, Some(stamp(10)), vec![0.5], 1.0);
+        let db = io.db.as_ref().expect("database");
+        db.execute("UPDATE waveform_cache SET updated_at = 100", [])
+            .expect("old use");
+
+        assert_eq!(io.saved_waveform(path, Some(stamp(10))), Some(vec![0.5]));
+
+        let used_at: i64 = io
+            .db
+            .as_ref()
+            .expect("database")
+            .query_row("SELECT updated_at FROM waveform_cache", [], |row| {
+                row.get(0)
+            })
+            .expect("row");
+        assert!(used_at > 100, "{used_at}");
+    }
+
+    #[test]
     fn a_swap_keeps_each_file_with_its_own_waveform() {
         let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
         let mut io = TrackIo::new(None);
-        io.save_waveform(a, Some(stamp(10)), vec![0.1]);
-        io.save_waveform(b, Some(stamp(10)), vec![0.2]);
+        io.save_waveform(a, Some(stamp(10)), vec![0.1], 1.0);
+        io.save_waveform(b, Some(stamp(10)), vec![0.2], 1.0);
         io.handle(TrackIoRequest::RemapPaths(Arc::new(PathRenames::from([
             (a.to_path_buf(), b.to_path_buf()),
             (b.to_path_buf(), a.to_path_buf()),
@@ -414,6 +452,7 @@ mod tests {
             path: PathBuf::from("/music/a.flac"),
             stamp: None,
             peaks: vec![0.5],
+            coverage_seconds: 1.0,
         };
         let kept: Vec<_> = without_superseded(vec![load(1), probe(1), save, load(2), probe(2)])
             .into_iter()

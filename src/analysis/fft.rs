@@ -93,12 +93,10 @@ impl StftComputer {
             .collect()
     }
 
-    #[allow(dead_code)]
     pub(super) fn pending_len(&self) -> usize {
         self.pending_available()
     }
 
-    #[allow(dead_code)]
     pub(super) fn fft_size(&self) -> usize {
         self.fft_size
     }
@@ -206,6 +204,18 @@ pub(super) fn blackman_harris_window(size: usize) -> Vec<f32> {
         .collect()
 }
 
+/// How far an overview waveform update reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OverviewProgress {
+    /// A preview while the decode goes on.
+    Partial,
+    /// The decode stopped at an error before the end of the file. The peaks
+    /// cover only the audio before it, and are not saved.
+    Truncated,
+    /// The decode reached the end of the file.
+    Complete,
+}
+
 pub(super) struct WaveformAccumulator {
     peaks: Vec<f32>,
     bucket_peak: f32,
@@ -238,7 +248,7 @@ impl WaveformAccumulator {
         on_update: &mut F,
     ) -> bool
     where
-        F: FnMut(Vec<f32>, f32, bool) -> bool,
+        F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
     {
         if amp > self.bucket_peak {
             self.bucket_peak = amp;
@@ -267,9 +277,14 @@ impl WaveformAccumulator {
         self.last_preview_emit = std::time::Instant::now();
         on_update(
             self.peaks.clone(),
-            seconds_from_frames(self.covered_frames, self.sample_rate_hz),
-            false,
+            self.coverage_seconds(),
+            OverviewProgress::Partial,
         )
+    }
+
+    /// The seconds of audio pushed so far.
+    pub(super) fn coverage_seconds(&self) -> f32 {
+        seconds_from_frames(self.covered_frames, self.sample_rate_hz)
     }
 
     pub(super) fn finish(mut self) -> Vec<f32> {

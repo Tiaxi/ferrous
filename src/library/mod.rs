@@ -34,6 +34,25 @@ pub(crate) use scan::{
 };
 pub(crate) use scan::{read_library_snapshot_from_db, ExternalReadFailures, ExternalTrackCache};
 
+/// Opens the library database, which also holds the analysis worker's
+/// waveform cache, and brings its schema up to date as every connection
+/// does. `busy_timeout` applies from then on; the migration may wait longer
+/// for another connection's.
+pub(crate) fn open_library_database(
+    busy_timeout: Duration,
+) -> anyhow::Result<rusqlite::Connection> {
+    let conn = schema::open_library_db()?;
+    schema::init_schema(&conn)?;
+    conn.busy_timeout(busy_timeout)?;
+    Ok(conn)
+}
+
+/// Brings the schema of the library database `conn` is open on up to date.
+#[cfg(test)]
+pub(crate) fn init_library_schema(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    schema::init_schema(conn)
+}
+
 /// Additional, potentially repeated text tags collected during library scans.
 pub type SearchTags = std::collections::BTreeMap<String, Vec<String>>;
 

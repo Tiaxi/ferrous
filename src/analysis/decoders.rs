@@ -41,6 +41,17 @@ macro_rules! profile_eprintln {
     ($($arg:tt)*) => {};
 }
 
+/// How analysis reads files with Symphonia: with gapless trimming, so that
+/// an MP3's encoder delay and padding (from its LAME or `FFmpeg` tag) and an
+/// Ogg Vorbis file's pre-skip are cut, as playback cuts them, and frame 0 is
+/// the first sample that plays. Symphonia 0.5 has no trimming for AAC.
+pub(super) fn analysis_format_options() -> FormatOptions {
+    FormatOptions {
+        enable_gapless: true,
+        ..FormatOptions::default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SymphoniaFile — output of opening a file with Symphonia
 // ---------------------------------------------------------------------------
@@ -353,6 +364,30 @@ fn read_gstreamer_frames(
             AudioRead::Pending
         });
     };
+    // The decoder may change its output mid-stream, as an MP3 that goes
+    // from stereo to mono does; each buffer has the format of its caps.
+    let (channels, rate) =
+        sample
+            .caps()
+            .and_then(|caps| caps.structure(0))
+            .map_or((None, None), |structure| {
+                (
+                    structure
+                        .get::<i32>("channels")
+                        .ok()
+                        .and_then(|channels| usize::try_from(channels).ok())
+                        .filter(|&channels| channels > 0),
+                    structure
+                        .get::<i32>("rate")
+                        .ok()
+                        .and_then(|rate| u32::try_from(rate).ok()),
+                )
+            });
+    if let Some(rate) = rate.filter(|&rate| rate != sample_rate) {
+        // Columns are laid out at the rate the session planned for.
+        anyhow::bail!("the sample rate changes from {sample_rate} Hz to {rate} Hz mid-stream");
+    }
+    let channels = channels.unwrap_or(native_channels);
     let buffer = sample
         .buffer()
         .ok_or_else(|| anyhow::anyhow!("missing audio buffer"))?;
@@ -366,7 +401,6 @@ fn read_gstreamer_frames(
         .chunks_exact(4)
         .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         .collect();
-    let channels = native_channels;
     Ok(AudioRead::Frames(AudioFrames {
         frames: samples.len() / channels,
         samples,
@@ -470,7 +504,7 @@ pub(super) fn open_symphonia_file(path: &Path) -> Option<SymphoniaFile> {
         .format(
             &hint,
             mss,
-            &FormatOptions::default(),
+            &analysis_format_options(),
             &MetadataOptions::default(),
         )
         .ok()?
@@ -545,7 +579,7 @@ fn spectrogram_seek_flags_for_path(path: &Path) -> gst::SeekFlags {
 /// Unlike the waveform pipeline, no `audioresample` — the spectrogram needs
 /// native sample rate for correct frequency resolution.
 #[cfg(feature = "gst")]
-fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
+pub(super) fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
     gst::init().ok()?;
     configure_raw_surround_decoding();
 
@@ -660,6 +694,13 @@ pub(super) fn u64_to_u32_saturating(v: u64) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
 }
 
+/// Split interleaved frames of `decoded_channels` into `channel_count`
+/// channels of `frames` samples each, whatever the decoder's channel count:
+/// a decoder may produce fewer or more channels than the file's header
+/// said, or change its count mid-stream. Every channel gets every frame, so
+/// their STFTs stay in step: a mono stream fills every channel, as playback
+/// plays it on every speaker, other missing channels are silent, and extra
+/// ones are left out.
 pub(super) fn deinterleave_samples(
     samples: &[f32],
     frames: usize,
@@ -667,29 +708,35 @@ pub(super) fn deinterleave_samples(
     channel_count: usize,
     view_mode: SpectrogramViewMode,
 ) -> Vec<Vec<f32>> {
+    let decoded_channels = decoded_channels.max(1);
+    let frames = frames.min(samples.len() / decoded_channels);
+    let frame_samples = |frame: usize| &samples[frame * decoded_channels..][..decoded_channels];
     // Preserve the native sample grid. Skipping samples here aliases ultrasonic
     // energy into the audible spectrum and loses phase at packet boundaries.
     let mut per_channel: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); channel_count];
 
     match view_mode {
         SpectrogramViewMode::Downmix => {
-            let mut downmixed = Vec::with_capacity(frames);
             let inv_channels = 1.0 / usize_to_f32_approx(decoded_channels);
-            for frame_idx in 0..frames {
-                let base = frame_idx * decoded_channels;
-                let mut sum = 0.0f32;
-                for ch in 0..decoded_channels {
-                    sum += samples[base + ch];
-                }
-                downmixed.push(sum * inv_channels);
+            if let Some(downmixed) = per_channel.first_mut() {
+                downmixed.extend(
+                    (0..frames)
+                        .map(|frame| frame_samples(frame).iter().sum::<f32>() * inv_channels),
+                );
             }
-            per_channel[0] = downmixed;
         }
         SpectrogramViewMode::PerChannel => {
-            for frame_idx in 0..frames {
-                let base = frame_idx * decoded_channels;
-                for ch in 0..channel_count.min(decoded_channels) {
-                    per_channel[ch].push(samples[base + ch]);
+            for (ch, channel) in per_channel.iter_mut().enumerate() {
+                let source = if decoded_channels == 1 {
+                    Some(0)
+                } else {
+                    (ch < decoded_channels).then_some(ch)
+                };
+                match source {
+                    Some(source) => {
+                        channel.extend((0..frames).map(|frame| frame_samples(frame)[source]));
+                    }
+                    None => channel.resize(frames, 0.0),
                 }
             }
         }
@@ -1112,5 +1159,135 @@ mod tests {
         // This confirms the Symphonia path is still active for non-surround.
         let result = open_audio_file(Path::new("/nonexistent/path/to/file.flac"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn every_channel_gets_every_frame_whatever_the_decoder_produces() {
+        let per_channel = |samples: &[f32], decoded, planned| {
+            deinterleave_samples(
+                samples,
+                samples.len() / decoded,
+                decoded,
+                planned,
+                SpectrogramViewMode::PerChannel,
+            )
+        };
+        // Mono plays on every speaker.
+        assert_eq!(
+            per_channel(&[0.1, 0.2, 0.3], 1, 2),
+            [vec![0.1, 0.2, 0.3], vec![0.1, 0.2, 0.3]]
+        );
+        // Channels the decoder does not produce are silent, and the ones a
+        // view has no room for are left out.
+        assert_eq!(
+            per_channel(&[0.1, -0.1, 0.2, -0.2], 2, 3),
+            [vec![0.1, 0.2], vec![-0.1, -0.2], vec![0.0, 0.0]]
+        );
+        assert_eq!(
+            per_channel(&[0.1, -0.1, 0.5, 0.2, -0.2, 0.5], 3, 2),
+            [vec![0.1, 0.2], vec![-0.1, -0.2]]
+        );
+        assert_eq!(
+            deinterleave_samples(
+                &[0.25, 0.75, 0.5, 1.0],
+                2,
+                2,
+                1,
+                SpectrogramViewMode::Downmix
+            ),
+            [vec![0.5, 0.75]]
+        );
+    }
+
+    /// The frame of the loudest sample `source` decodes, and how many it
+    /// decodes.
+    fn loudest_frame(mut source: AudioFrameSource) -> (u64, u64) {
+        let mut loudest = (0.0_f32, 0);
+        let mut frames = 0;
+        for _ in 0..100_000 {
+            match source.next_frames().expect("decode") {
+                AudioRead::Frames(audio) => {
+                    for (offset, frame) in audio.samples.chunks_exact(audio.channels).enumerate() {
+                        let peak = frame.iter().fold(0.0_f32, |peak, &s| peak.max(s.abs()));
+                        if peak > loudest.0 {
+                            loudest = (peak, audio.first_frame + usize_to_u64(offset));
+                        }
+                    }
+                    frames = audio.first_frame + usize_to_u64(audio.frames);
+                }
+                AudioRead::Pending => {}
+                AudioRead::Eof => return (loudest.1, frames),
+            }
+        }
+        panic!("no end of file");
+    }
+
+    /// A copy of `gapless-click.mp3` that no other test shares: tests run in
+    /// parallel, and each removes its copy.
+    fn gapless_click_mp3() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-decoders-gapless-click-{}-{}.mp3",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&path, include_bytes!("fixtures/gapless-click.mp3")).expect("fixture");
+        path
+    }
+
+    /// Whether `GStreamer` has a decoder for MPEG-1 Layer III audio, which
+    /// some installations leave out.
+    #[cfg(feature = "gst")]
+    fn gstreamer_decodes_mp3() -> bool {
+        gst::init().expect("GStreamer");
+        let caps = gst::Caps::builder("audio/mpeg")
+            .field("mpegversion", 1)
+            .field("layer", 3)
+            .build();
+        gst::ElementFactory::factories_with_type(
+            gst::ElementFactoryType::DECODER | gst::ElementFactoryType::MEDIA_AUDIO,
+            gst::Rank::MARGINAL,
+        )
+        .iter()
+        .any(|factory| factory.can_sink_any_caps(&caps))
+    }
+
+    /// `gapless-click.mp3` is 0.4 s of 44.1 kHz audio with a click at 0.2 s,
+    /// frame 8,820. Its LAME tag gives the encoder's delay, 1,105 frames
+    /// with the decoder's, and padding, which playback cuts.
+    #[test]
+    fn mp3_encoder_delay_and_padding_are_cut_as_playback_cuts_them() {
+        let path = gapless_click_mp3();
+        let (source, rate, _, _) = open_audio_file(&path).expect("open");
+        assert!(matches!(source, AudioFrameSource::Symphonia { .. }));
+        assert_eq!(rate, 44_100);
+        let (click, frames) = loudest_frame(source);
+        assert!(click.abs_diff(8_820) <= 4, "the click is at frame {click}");
+        assert_eq!(frames, 17_640);
+
+        // A seek lands on the same timeline.
+        let (mut source, ..) = open_audio_file(&path).expect("open");
+        source.seek_to_frame(4_410, 44_100).expect("seek");
+        let (click, _) = loudest_frame(source);
+        assert!(click.abs_diff(8_820) <= 4, "after a seek at frame {click}");
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    /// `GStreamer`, which plays the file, puts the click at the same frame.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn gstreamer_cuts_the_same_mp3_encoder_delay() {
+        if !gstreamer_decodes_mp3() {
+            eprintln!(
+                "SKIPPED: GStreamer has no MP3 decoder here, so playback's trimming is unknown"
+            );
+            return;
+        }
+        let path = gapless_click_mp3();
+        let (source, ..) = open_gstreamer_file(&path).expect("open");
+        let (click, frames) = loudest_frame(source);
+        assert!(click.abs_diff(8_820) <= 4, "the click is at frame {click}");
+        assert_eq!(frames, 17_640);
+        std::fs::remove_file(path).expect("remove fixture");
     }
 }

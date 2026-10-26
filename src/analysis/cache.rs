@@ -12,7 +12,10 @@ pub(super) const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 pub(super) const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
 pub(super) const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 // Version 2 preserves every sample peak; version 1 could omit transients.
-const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 2;
+// Version 3 cuts an MP3's encoder delay and padding. A build before it
+// writes version 2 into a version 3 table without updating `complete`, so
+// its waveforms, untrimmed, are never taken for complete ones.
+const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WaveformSourceStamp {
@@ -39,39 +42,31 @@ fn usize_to_i64(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
+/// Opens the waveform cache, a table of the library database, whose schema
+/// owns it; see `crate::library::open_library_database`.
 pub(super) fn open_waveform_cache_db() -> anyhow::Result<Connection> {
-    let db_path = crate::paths::library_db_path()?;
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let conn = Connection::open(db_path)?;
-    let _ = conn.busy_timeout(Duration::from_millis(250));
-    init_waveform_cache_schema(&conn)?;
+    let conn = crate::library::open_library_database(Duration::from_millis(250))?;
+    remove_empty_waveforms(&conn);
     Ok(conn)
 }
 
+/// Prepares a test database as [`open_waveform_cache_db`] prepares the
+/// library database.
+#[cfg(test)]
 pub(super) fn init_waveform_cache_schema(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch(
-        r"
-        CREATE TABLE IF NOT EXISTS waveform_cache (
-            path TEXT PRIMARY KEY,
-            size_bytes INTEGER NOT NULL,
-            modified_secs INTEGER NOT NULL,
-            modified_nanos INTEGER NOT NULL,
-            format_version INTEGER NOT NULL,
-            peak_count INTEGER NOT NULL,
-            peaks_blob BLOB NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_waveform_cache_updated_at
-            ON waveform_cache(updated_at);
-        ",
-    )?;
-    // Legacy/failed decodes may have written empty entries; treat them as invalid cache rows.
-    let _ = conn.execute("DELETE FROM waveform_cache WHERE peak_count <= 0", []);
+    crate::library::init_library_schema(conn)?;
+    remove_empty_waveforms(conn);
     Ok(())
 }
 
+/// Legacy/failed decodes may have written empty entries; treat them as invalid cache rows.
+fn remove_empty_waveforms(conn: &Connection) {
+    let _ = conn.execute("DELETE FROM waveform_cache WHERE peak_count <= 0", []);
+}
+
+/// The saved waveform of `path`, if its file still has `stamp` and the
+/// decode that saved it reached the end of the file. Loading it counts as a
+/// use, which keeps it from being pruned.
 pub(super) fn load_waveform_from_db(
     conn: &Connection,
     path: &Path,
@@ -87,6 +82,7 @@ pub(super) fn load_waveform_from_db(
               AND size_bytes=?2
               AND modified_secs=?3
               AND modified_nanos=?4
+              AND complete=1
             ",
             params![
                 path,
@@ -110,14 +106,28 @@ pub(super) fn load_waveform_from_db(
     if peak_count == 0 {
         return None;
     }
-    decode_peaks_blob(&row.2, peak_count)
+    let peaks = decode_peaks_blob(&row.2, peak_count)?;
+    touch_waveform_in_db(conn, Path::new(&path));
+    Some(peaks)
 }
 
+/// Record a use of the saved waveform of `path`; pruning keeps the waveforms
+/// used last. A failed write only makes the waveform likelier to be pruned.
+pub(super) fn touch_waveform_in_db(conn: &Connection, path: &Path) {
+    let _ = conn.execute(
+        "UPDATE waveform_cache SET updated_at = ?2 WHERE path = ?1 AND updated_at < ?2",
+        params![path.to_string_lossy().to_string(), unix_ts_i64()],
+    );
+}
+
+/// Save a waveform whose decode reached the end of the file, covering
+/// `coverage_seconds` of audio.
 pub(super) fn persist_waveform_to_db(
     conn: &Connection,
     path: &Path,
     stamp: WaveformSourceStamp,
     peaks: &[f32],
+    coverage_seconds: f32,
 ) -> rusqlite::Result<()> {
     if peaks.is_empty() {
         let _ = conn.execute(
@@ -132,9 +142,10 @@ pub(super) fn persist_waveform_to_db(
         r"
         INSERT INTO waveform_cache(
             path, size_bytes, modified_secs, modified_nanos,
-            format_version, peak_count, peaks_blob, updated_at
+            format_version, peak_count, peaks_blob, updated_at,
+            complete, coverage_seconds
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
         ON CONFLICT(path) DO UPDATE SET
             size_bytes=excluded.size_bytes,
             modified_secs=excluded.modified_secs,
@@ -142,7 +153,9 @@ pub(super) fn persist_waveform_to_db(
             format_version=excluded.format_version,
             peak_count=excluded.peak_count,
             peaks_blob=excluded.peaks_blob,
-            updated_at=excluded.updated_at
+            updated_at=excluded.updated_at,
+            complete=excluded.complete,
+            coverage_seconds=excluded.coverage_seconds
         ",
         params![
             path.to_string_lossy().to_string(),
@@ -153,11 +166,13 @@ pub(super) fn persist_waveform_to_db(
             usize_to_i64(peaks.len()),
             blob,
             now,
+            f64::from(coverage_seconds),
         ],
     )?;
     Ok(())
 }
 
+/// Keep the `max_rows` waveforms used last.
 pub(super) fn prune_persistent_waveform_cache(
     conn: &Connection,
     max_rows: usize,
@@ -280,9 +295,38 @@ mod tests {
             modified_nanos: 0,
         };
         let path = Path::new("fixture.wav");
-        persist_waveform_to_db(&conn, path, stamp, &[0.5]).expect("cache fixture");
+        persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("cache fixture");
         conn.execute("UPDATE waveform_cache SET format_version = 1", [])
             .expect("legacy version");
+        assert!(load_waveform_from_db(&conn, path, stamp).is_none());
+    }
+
+    #[test]
+    fn a_waveform_an_older_build_wrote_is_decoded_again() {
+        let conn = Connection::open_in_memory().expect("database");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let stamp = WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+        };
+        let path = Path::new("/music/a.mp3");
+        persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("save");
+        assert!(load_waveform_from_db(&conn, path, stamp).is_some());
+        // An older build's upsert, which knows neither `complete` nor
+        // `coverage_seconds`, over the complete row: version 2 peaks of the
+        // untrimmed audio.
+        conn.execute(
+            "INSERT INTO waveform_cache(path, size_bytes, modified_secs, modified_nanos, \
+             format_version, peak_count, peaks_blob, updated_at) \
+             VALUES (?1, 10, 1, 0, 2, 1, x'0000803e', 100) \
+             ON CONFLICT(path) DO UPDATE SET format_version = excluded.format_version, \
+             peak_count = excluded.peak_count, peaks_blob = excluded.peaks_blob, \
+             updated_at = excluded.updated_at",
+            params![path.to_string_lossy().to_string()],
+        )
+        .expect("older build's write");
+
         assert!(load_waveform_from_db(&conn, path, stamp).is_none());
     }
 
@@ -344,8 +388,85 @@ mod tests {
             modified_nanos: 55,
         };
         let peaks = vec![0.1f32, 0.3, 0.9];
-        persist_waveform_to_db(&conn, &path, stamp, &peaks).expect("persist");
+        persist_waveform_to_db(&conn, &path, stamp, &peaks, 3.0).expect("persist");
         let loaded = load_waveform_from_db(&conn, &path, stamp).expect("load");
         assert_eq!(loaded, peaks);
+    }
+
+    fn updated_at(conn: &Connection, path: &Path) -> i64 {
+        conn.query_row(
+            "SELECT updated_at FROM waveform_cache WHERE path = ?1",
+            params![path.to_string_lossy().to_string()],
+            |row| row.get(0),
+        )
+        .expect("cached row")
+    }
+
+    #[test]
+    fn a_load_counts_as_a_use_so_pruning_keeps_waveforms_played_often() {
+        let conn = Connection::open_in_memory().expect("database");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let stamp = WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+        };
+        let (played, newer) = (
+            Path::new("/music/played.flac"),
+            Path::new("/music/newer.flac"),
+        );
+        persist_waveform_to_db(&conn, played, stamp, &[0.5], 1.0).expect("played");
+        persist_waveform_to_db(&conn, newer, stamp, &[0.5], 1.0).expect("newer");
+        // The played track was saved long ago, the other one later.
+        conn.execute(
+            "UPDATE waveform_cache SET updated_at = 100 WHERE path = ?1",
+            params![played.to_string_lossy().to_string()],
+        )
+        .expect("old save");
+        conn.execute(
+            "UPDATE waveform_cache SET updated_at = 200 WHERE path = ?1",
+            params![newer.to_string_lossy().to_string()],
+        )
+        .expect("newer save");
+
+        assert!(load_waveform_from_db(&conn, played, stamp).is_some());
+
+        assert!(updated_at(&conn, played) >= unix_ts_i64() - 60);
+        prune_persistent_waveform_cache(&conn, 1).expect("prune");
+        assert!(load_waveform_from_db(&conn, played, stamp).is_some());
+        assert!(load_waveform_from_db(&conn, newer, stamp).is_none());
+    }
+
+    #[test]
+    fn a_waveform_not_known_to_reach_the_end_of_its_file_is_decoded_again() {
+        let conn = Connection::open_in_memory().expect("database");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let stamp = WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+        };
+        let path = Path::new("/music/legacy.flac");
+        persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("save");
+        // A row from before schema version 3 tells neither.
+        conn.execute(
+            "UPDATE waveform_cache SET complete = 0, coverage_seconds = NULL, updated_at = 100",
+            [],
+        )
+        .expect("legacy row");
+
+        assert!(load_waveform_from_db(&conn, path, stamp).is_none());
+        assert_eq!(updated_at(&conn, path), 100, "not a use");
+
+        persist_waveform_to_db(&conn, path, stamp, &[0.25], 2.5).expect("decoded again");
+        let (complete, coverage): (i64, f64) = conn
+            .query_row(
+                "SELECT complete, coverage_seconds FROM waveform_cache",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!((complete, coverage), (1, 2.5));
+        assert_eq!(load_waveform_from_db(&conn, path, stamp), Some(vec![0.25]));
     }
 }

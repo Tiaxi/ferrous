@@ -33,7 +33,8 @@ use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use symphonia::core::audio::SampleBuffer;
 
 use cache::{usize_to_u64, WaveformSourceStamp};
-use fft::{ensure_sample_buffer, peak_across_channels, WaveformAccumulator};
+use decoders::analysis_format_options;
+use fft::{ensure_sample_buffer, peak_across_channels, OverviewProgress, WaveformAccumulator};
 #[cfg(feature = "gst")]
 use gst_waveform::decode_waveform_peaks_stream_gst;
 use session::{
@@ -42,8 +43,7 @@ use session::{
 };
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use track_io::{
@@ -1963,7 +1963,9 @@ impl AnalysisRuntimeState {
         self.snapshot.waveform_peaks = peaks;
         self.snapshot.waveform_coverage_seconds = coverage_seconds;
         self.snapshot.waveform_complete = complete;
-        if done {
+        // A decode stopped by an error shows what it covered, and the next
+        // play decodes the file again.
+        if done && complete {
             self.save_active_waveform();
         }
         self.waveform_dirty = true;
@@ -1980,6 +1982,7 @@ impl AnalysisRuntimeState {
             path,
             stamp: self.active_track_stamp,
             peaks: self.snapshot.waveform_peaks.clone(),
+            coverage_seconds: self.snapshot.waveform_coverage_seconds,
         });
     }
 
@@ -2019,7 +2022,7 @@ fn spawn_waveform_decode_worker(
             let _ = decode_waveform_peaks_stream(
                 &job.path,
                 1024,
-                |peaks, coverage_seconds, done| {
+                |peaks, coverage_seconds, progress| {
                     if superseded() {
                         return false;
                     }
@@ -2027,8 +2030,8 @@ fn spawn_waveform_decode_worker(
                         track_token,
                         peaks,
                         coverage_seconds,
-                        complete: done,
-                        done,
+                        complete: progress == OverviewProgress::Complete,
+                        done: progress != OverviewProgress::Partial,
                     });
                     true
                 },
@@ -2207,7 +2210,7 @@ fn decode_waveform_peaks_stream<F, C>(
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
 where
-    F: FnMut(Vec<f32>, f32, bool) -> bool,
+    F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
     C: FnMut() -> bool,
 {
     #[cfg(feature = "gst")]
@@ -2215,12 +2218,17 @@ where
         return decode_waveform_peaks_stream_gst(path, max_points, on_update, is_cancelled);
     }
 
-    let unreadable = match decode_waveform_peaks_symphonia(
-        path,
-        max_points,
-        &mut on_update,
-        &mut is_cancelled,
-    ) {
+    let unreadable = match File::open(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|file| {
+            decode_waveform_peaks_symphonia(
+                Box::new(file),
+                path.extension().and_then(|e| e.to_str()),
+                max_points,
+                &mut on_update,
+                &mut is_cancelled,
+            )
+        }) {
         Ok(true) => return Ok(()),
         Ok(false) => anyhow::anyhow!("no audio could be decoded"),
         Err(error) => error,
@@ -2241,32 +2249,37 @@ where
 
 /// Decode the overview with Symphonia. Returns whether it decoded audio
 /// or was cancelled; `false` or an error means it could not read the file.
+///
+/// The last update is [`OverviewProgress::Complete`] only if the decode
+/// reached the end of the file. An error that stops it before, such as a
+/// read error, ends it with [`OverviewProgress::Truncated`] and the peaks of
+/// the audio before the error.
 fn decode_waveform_peaks_symphonia<F, C>(
-    path: &Path,
+    source: Box<dyn MediaSource>,
+    extension: Option<&str>,
     max_points: usize,
     on_update: &mut F,
     is_cancelled: &mut C,
 ) -> anyhow::Result<bool>
 where
-    F: FnMut(Vec<f32>, f32, bool) -> bool,
+    F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
     C: FnMut() -> bool,
 {
     if is_cancelled() {
         return Ok(true);
     }
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = extension {
         hint.with_extension(ext);
     }
 
-    let file = File::open(path)?;
-    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+    let mss = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
 
     let mut format = symphonia::default::get_probe()
         .format(
             &hint,
             mss,
-            &FormatOptions::default(),
+            &analysis_format_options(),
             &MetadataOptions::default(),
         )?
         .format;
@@ -2286,14 +2299,19 @@ where
 
     let mut packet_counter = 0usize;
     let mut decoded_any = false;
-    loop {
+    let reached_end = loop {
         if is_cancelled() {
             return Ok(true);
         }
         let packet = match format.next_packet() {
             Ok(packet) => packet,
-            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
-            Err(SymphoniaError::ResetRequired | _) => break,
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
+                break true;
+            }
+            // Any other error stops the decode short of the end. That
+            // includes a reset at the next link of a chained Ogg file:
+            // Symphonia 0.5 would go on with the last link, not the next.
+            Err(_) => break false,
         };
 
         if packet.track_id() != track_id {
@@ -2303,9 +2321,12 @@ where
 
         let decoded_audio = match audio_decoder.decode(&packet) {
             Ok(decoded_audio) => decoded_audio,
-            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
+            // A damaged packet; the next one may decode.
             Err(SymphoniaError::DecodeError(_)) => continue,
-            Err(_) => break,
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
+                continue;
+            }
+            Err(_) => break false,
         };
 
         let spec = *decoded_audio.spec();
@@ -2331,13 +2352,19 @@ where
         if packet_counter.is_multiple_of(64) {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-    }
+    };
 
     if !decoded_any {
         return Ok(false);
     }
     if !is_cancelled() {
-        let _ = on_update(waveform.finish(), 0.0, true);
+        let progress = if reached_end {
+            OverviewProgress::Complete
+        } else {
+            OverviewProgress::Truncated
+        };
+        let coverage_seconds = waveform.coverage_seconds();
+        let _ = on_update(waveform.finish(), coverage_seconds, progress);
     }
     Ok(true)
 }
@@ -2370,8 +2397,8 @@ mod tests {
                 decode_waveform_peaks_stream(
                     &path,
                     1024,
-                    |peaks, _, complete| {
-                        if complete {
+                    |peaks, _, progress| {
+                        if progress == OverviewProgress::Complete {
                             maximum = peaks.iter().copied().fold(0.0_f32, f32::max);
                         }
                         true
@@ -2440,8 +2467,8 @@ mod tests {
         let _ = decode_waveform_peaks_stream(
             path,
             1024,
-            |peaks, _, complete| {
-                if complete {
+            |peaks, _, progress| {
+                if progress == OverviewProgress::Complete {
                     overview = Some(peaks);
                 }
                 true
@@ -5453,6 +5480,141 @@ mod tests {
                 } if probed_at == stamp
             ));
         }
+    }
+
+    #[test]
+    fn an_overview_cut_short_by_an_error_is_shown_partial_and_not_saved() {
+        let path = Path::new("/music/a.flac");
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = AnalysisRuntimeState::new();
+        state.handle_track_change(path.to_path_buf(), true, false, 4, &ctx);
+        state.track_io_requests.try_iter().for_each(drop);
+        channels.event_rx.try_iter().for_each(drop);
+
+        // The decode stopped at an error 30 s into the file.
+        state.handle_waveform_progress(4, vec![0.5; 12], 30.0, false, true, ctx.event_tx);
+
+        let requests: Vec<_> = state.track_io_requests.try_iter().collect();
+        assert!(requests.is_empty(), "saved: {requests:?}");
+        assert!(channels.event_rx.try_iter().any(|event| matches!(event,
+            AnalysisEvent::Snapshot(snapshot)
+                if !snapshot.waveform_complete
+                    && (snapshot.waveform_coverage_seconds - 30.0).abs() < f32::EPSILON)));
+
+        // A decode that reaches the end of the file is saved, with what it
+        // covered.
+        state.handle_waveform_progress(4, vec![0.25; 12], 180.0, true, true, ctx.event_tx);
+        assert!(matches!(
+            only_track_io_request(&state),
+            TrackIoRequest::SaveWaveform { path: saved, peaks, coverage_seconds, .. }
+                if saved == path && peaks == [0.25; 12] && (coverage_seconds - 180.0).abs() < f32::EPSILON
+        ));
+    }
+
+    /// A file source that fails to read past `limit` bytes, as a file on a
+    /// share that goes away does.
+    struct FailingSource {
+        bytes: std::io::Cursor<Vec<u8>>,
+        limit: u64,
+    }
+
+    impl std::io::Read for FailingSource {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let left = self.limit.saturating_sub(self.bytes.position());
+            if left == 0 {
+                return Err(std::io::Error::other("the share went away"));
+            }
+            let len = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+            self.bytes.read(&mut buf[..len])
+        }
+    }
+
+    impl std::io::Seek for FailingSource {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.bytes.seek(pos)
+        }
+    }
+
+    impl MediaSource for FailingSource {
+        fn is_seekable(&self) -> bool {
+            true
+        }
+
+        fn byte_len(&self) -> Option<u64> {
+            u64::try_from(self.bytes.get_ref().len()).ok()
+        }
+    }
+
+    /// The overview updates of a Symphonia decode of `source`.
+    fn symphonia_overview(
+        source: Box<dyn MediaSource>,
+        extension: &str,
+    ) -> Vec<(Vec<f32>, f32, OverviewProgress)> {
+        let mut updates = Vec::new();
+        let decoded = decode_waveform_peaks_symphonia(
+            source,
+            Some(extension),
+            1024,
+            &mut |peaks, coverage, progress| {
+                updates.push((peaks, coverage, progress));
+                true
+            },
+            &mut || false,
+        )
+        .expect("overview decode");
+        assert!(decoded);
+        updates
+    }
+
+    #[test]
+    fn an_overview_reports_completion_only_when_it_reaches_the_end_of_the_file() {
+        let wave = write_engine_test_wave(8, 8_000);
+        let bytes = std::fs::read(&wave).expect("read fixture");
+        std::fs::remove_file(wave).expect("remove fixture");
+        let source = |limit| {
+            Box::new(FailingSource {
+                bytes: std::io::Cursor::new(bytes.clone()),
+                limit,
+            })
+        };
+
+        let updates = symphonia_overview(source(u64::MAX), "wav");
+        let (_, coverage, progress) = updates.last().expect("final update");
+        assert_eq!(*progress, OverviewProgress::Complete);
+        assert!((coverage - 8.0).abs() < 0.01, "covers {coverage} s");
+
+        // A read error half way through.
+        let updates = symphonia_overview(source(64 * 1024), "wav");
+        let (peaks, coverage, progress) = updates.last().expect("final update");
+        assert_eq!(*progress, OverviewProgress::Truncated);
+        assert!((0.5..6.0).contains(coverage), "covers {coverage} s");
+        assert!(!peaks.is_empty());
+        assert!(updates
+            .iter()
+            .all(|(_, _, progress)| *progress != OverviewProgress::Complete));
+    }
+
+    #[test]
+    fn an_mp3_overview_starts_where_playback_does() {
+        // A click at 0.2 s of 0.4 s; see `fixtures/README.md`.
+        let bytes = include_bytes!("fixtures/gapless-click.mp3").to_vec();
+        let updates = symphonia_overview(Box::new(std::io::Cursor::new(bytes)), "mp3");
+        let (peaks, coverage, progress) = updates.last().expect("final update");
+        assert_eq!(*progress, OverviewProgress::Complete);
+        assert!((coverage - 0.4).abs() < 0.001, "covers {coverage} s");
+        let loudest = (0..peaks.len())
+            .max_by(|&a, &b| peaks[a].total_cmp(&peaks[b]))
+            .expect("peaks");
+        // Each peak covers an equal share of the 17,640 frames.
+        #[allow(clippy::cast_precision_loss)]
+        let frames_per_peak = 17_640.0 / peaks.len() as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let click = loudest as f64 * frames_per_peak;
+        assert!(
+            (click - 8_820.0).abs() <= 2.0 * frames_per_peak,
+            "the click is near frame {click}"
+        );
     }
 
     #[test]
