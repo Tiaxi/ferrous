@@ -1222,13 +1222,34 @@ mod tests {
         panic!("no end of file");
     }
 
+    /// A copy of `gapless-click.mp3` that no other test shares: tests run in
+    /// parallel, and each removes its copy.
     fn gapless_click_mp3() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "ferrous-decoders-gapless-click-{}.mp3",
-            std::process::id()
+            "ferrous-decoders-gapless-click-{}-{}.mp3",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::write(&path, include_bytes!("fixtures/gapless-click.mp3")).expect("fixture");
         path
+    }
+
+    /// Whether `GStreamer` has a decoder for MPEG-1 Layer III audio, which
+    /// some installations leave out.
+    #[cfg(feature = "gst")]
+    fn gstreamer_decodes_mp3() -> bool {
+        gst::init().expect("GStreamer");
+        let caps = gst::Caps::builder("audio/mpeg")
+            .field("mpegversion", 1)
+            .field("layer", 3)
+            .build();
+        gst::ElementFactory::factories_with_type(
+            gst::ElementFactoryType::DECODER | gst::ElementFactoryType::MEDIA_AUDIO,
+            gst::Rank::MARGINAL,
+        )
+        .iter()
+        .any(|factory| factory.can_sink_any_caps(&caps))
     }
 
     /// `gapless-click.mp3` is 0.4 s of 44.1 kHz audio with a click at 0.2 s,
@@ -1256,6 +1277,12 @@ mod tests {
     #[cfg(feature = "gst")]
     #[test]
     fn gstreamer_cuts_the_same_mp3_encoder_delay() {
+        if !gstreamer_decodes_mp3() {
+            eprintln!(
+                "SKIPPED: GStreamer has no MP3 decoder here, so playback's trimming is unknown"
+            );
+            return;
+        }
         let path = gapless_click_mp3();
         let (source, ..) = open_gstreamer_file(&path).expect("open");
         let (click, frames) = loudest_frame(source);

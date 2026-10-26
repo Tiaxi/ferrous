@@ -12,7 +12,10 @@ pub(super) const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 pub(super) const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
 pub(super) const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 // Version 2 preserves every sample peak; version 1 could omit transients.
-const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 2;
+// Version 3 cuts an MP3's encoder delay and padding. A build before it
+// writes version 2 into a version 3 table without updating `complete`, so
+// its waveforms, untrimmed, are never taken for complete ones.
+const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WaveformSourceStamp {
@@ -295,6 +298,35 @@ mod tests {
         persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("cache fixture");
         conn.execute("UPDATE waveform_cache SET format_version = 1", [])
             .expect("legacy version");
+        assert!(load_waveform_from_db(&conn, path, stamp).is_none());
+    }
+
+    #[test]
+    fn a_waveform_an_older_build_wrote_is_decoded_again() {
+        let conn = Connection::open_in_memory().expect("database");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let stamp = WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+        };
+        let path = Path::new("/music/a.mp3");
+        persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("save");
+        assert!(load_waveform_from_db(&conn, path, stamp).is_some());
+        // An older build's upsert, which knows neither `complete` nor
+        // `coverage_seconds`, over the complete row: version 2 peaks of the
+        // untrimmed audio.
+        conn.execute(
+            "INSERT INTO waveform_cache(path, size_bytes, modified_secs, modified_nanos, \
+             format_version, peak_count, peaks_blob, updated_at) \
+             VALUES (?1, 10, 1, 0, 2, 1, x'0000803e', 100) \
+             ON CONFLICT(path) DO UPDATE SET format_version = excluded.format_version, \
+             peak_count = excluded.peak_count, peaks_blob = excluded.peaks_blob, \
+             updated_at = excluded.updated_at",
+            params![path.to_string_lossy().to_string()],
+        )
+        .expect("older build's write");
+
         assert!(load_waveform_from_db(&conn, path, stamp).is_none());
     }
 
