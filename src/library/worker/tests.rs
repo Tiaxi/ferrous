@@ -112,7 +112,7 @@ fn removing_a_root_drops_its_queued_commands_and_runs_first() {
         )
     );
     assert_eq!(
-        queue.pop(false),
+        queue.pop(false, |_| false),
         Some(LibraryCommand::RemoveRoot(root("/a")))
     );
 }
@@ -142,9 +142,9 @@ fn shutting_down_drops_queued_rescans_but_runs_other_commands() {
     queue.push(LibraryCommand::RescanAll, None);
     queue.push(rename("/c", "C"), None);
 
-    assert_eq!(queue.pop(true), Some(rename("/c", "C")));
-    assert_eq!(queue.pop(true), Some(add("/b", "B")));
-    assert_eq!(queue.pop(true), None);
+    assert_eq!(queue.pop(true, |_| false), Some(rename("/c", "C")));
+    assert_eq!(queue.pop(true, |_| false), Some(add("/b", "B")));
+    assert_eq!(queue.pop(true, |_| false), None);
 }
 
 fn changed(root_path: &str, paths: &[&str]) -> LibraryCommand {
@@ -239,8 +239,8 @@ fn the_watchers_newest_status_runs_first_and_its_scans_stop_at_shutdown() {
         queued(&queue),
         (vec![unwatched("/b")], vec![changed("/a", &["/a/1"])])
     );
-    assert_eq!(queue.pop(true), Some(unwatched("/b")));
-    assert_eq!(queue.pop(true), None);
+    assert_eq!(queue.pop(true, |_| false), Some(unwatched("/b")));
+    assert_eq!(queue.pop(true, |_| false), None);
 }
 
 /// A library folder with stub tracks, and a database beside it.
@@ -932,4 +932,42 @@ fn events_are_numbered_before_the_reads_of_their_rows() {
     assert!(!event.changes.upserted.is_empty());
     assert!(before_read < event.read_after);
     assert!(event.read_after < crate::library::next_file_sequence());
+}
+
+#[test]
+fn a_scan_waiting_for_watches_lets_the_commands_after_it_run() {
+    let mut queue = CommandQueue::default();
+    queue.push(rescan("/a"), None);
+    queue.push(rescan("/b"), None);
+    queue.push(add("/c", ""), None);
+    let waits = |cmd: &LibraryCommand| *cmd == rescan("/a");
+
+    assert_eq!(queue.pop(false, waits), Some(rescan("/b")));
+    assert_eq!(queue.pop(false, waits), Some(add("/c", "")));
+    assert_eq!(queue.pop(false, waits), None);
+    // Removing the root drops its walk.
+    queue.push(LibraryCommand::RemoveRoot(root("/a")), None);
+    assert_eq!(
+        queued(&queue),
+        (vec![LibraryCommand::RemoveRoot(root("/a"))], Vec::new())
+    );
+}
+
+#[test]
+fn only_walks_of_roots_not_yet_watched_wait_and_only_while_watching_is_on() {
+    let unconfirmed = HashMap::from([(root("/a"), 1)]);
+    let changed_a = LibraryCommand::ScanPaths {
+        root: root("/a"),
+        paths: vec![root("/a/1.mp3")],
+    };
+    assert!(waits_for_watches(&rescan("/a"), true, &unconfirmed));
+    assert!(waits_for_watches(&changed_a, true, &unconfirmed));
+    assert!(!waits_for_watches(&rescan("/b"), true, &unconfirmed));
+    assert!(!waits_for_watches(&add("/a", ""), true, &unconfirmed));
+    assert!(!waits_for_watches(
+        &LibraryCommand::RescanAll,
+        true,
+        &unconfirmed
+    ));
+    assert!(!waits_for_watches(&rescan("/a"), false, &unconfirmed));
 }

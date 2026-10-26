@@ -509,6 +509,11 @@ pub(super) trait ScanControl {
         remaining: &[PathBuf],
     ) -> ScanDirective;
 
+    /// Called before `root` is walked, after [`ScanControl::poll`]: whether
+    /// to leave it for later, because changes to it are not watched for
+    /// yet. A command queued meanwhile then scans it.
+    fn defer_walk(&mut self, root: &Path) -> bool;
+
     /// Whether another connection, such as a tag edit's, committed to the
     /// database since the last call, so that `library` must be read again
     /// before it is published.
@@ -552,6 +557,10 @@ impl ScanControl for Uninterrupted {
         _remaining: &[PathBuf],
     ) -> ScanDirective {
         ScanDirective::Continue
+    }
+
+    fn defer_walk(&mut self, _root: &Path) -> bool {
+        false
     }
 
     fn external_writes(&mut self, _conn: &Connection) -> bool {
@@ -688,6 +697,9 @@ impl ScanRun<'_> {
                     ..RootScanEnd::default()
                 }
             }
+        }
+        if self.control.defer_walk(root) {
+            return RootScanEnd::default();
         }
         let mut sink = SnapshotSink::new(
             self.library,
@@ -2247,6 +2259,8 @@ pub(crate) mod scan_test_hooks {
     type ReadGate = (PathBuf, Sender<()>, Receiver<()>);
 
     static READ_GATES: Mutex<Vec<ReadGate>> = Mutex::new(Vec::new());
+    /// Held walks, as held reads, by root.
+    static WALK_GATES: Mutex<Vec<ReadGate>> = Mutex::new(Vec::new());
     static SCANS: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
 
     thread_local! {
@@ -2272,6 +2286,22 @@ pub(crate) mod scan_test_hooks {
             .unwrap_or_else(PoisonError::into_inner)
             .push((path.to_path_buf(), started_tx, release_rx));
         (started_rx, release_tx)
+    }
+
+    /// Make the next walk of `root` wait, on the scan's thread, before it
+    /// reads the folder, as [`hold_read`] holds a read.
+    pub(crate) fn hold_walk(root: &Path) -> (Receiver<()>, Sender<()>) {
+        let (started_tx, started_rx) = bounded(1);
+        let (release_tx, release_rx) = bounded(1);
+        WALK_GATES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((root.to_path_buf(), started_tx, release_rx));
+        (started_rx, release_tx)
+    }
+
+    pub(super) fn before_walk(root: &Path) {
+        pass_gate(&WALK_GATES, root);
     }
 
     /// Scans on this thread use `tuning`.
@@ -2309,8 +2339,13 @@ pub(crate) mod scan_test_hooks {
             .iter()
             .any(|chosen| chosen == path);
         assert!(!panics, "test panic while reading {}", path.display());
+        pass_gate(&READ_GATES, path);
+    }
+
+    /// Waits at the gate of `path` in `gates`, if it has one.
+    fn pass_gate(gates: &Mutex<Vec<ReadGate>>, path: &Path) {
         let gate = {
-            let mut gates = READ_GATES.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut gates = gates.lock().unwrap_or_else(PoisonError::into_inner);
             gates
                 .iter()
                 .position(|(chosen, _, _)| chosen == path)
@@ -3322,6 +3357,8 @@ fn scan_root_in(
     insert_root(conn, &root, "")?;
     #[cfg(test)]
     scan_test_hooks::note_scan(&root);
+    #[cfg(test)]
+    scan_test_hooks::before_walk(&root);
 
     let root_str = root.to_string_lossy().to_string();
     let existing = match scope {

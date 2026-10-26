@@ -4,8 +4,13 @@
 //! connection, merges repeated scans, and runs the commands that must not
 //! wait between the files of a running scan. It tells the watcher which
 //! roots to watch, and takes the changes the watcher saw as scans.
+//!
+//! A root the watcher was just told about is walked only once its watches
+//! are set up: a change made after that is seen by the walk or by the
+//! watches, and none made before the walk is missed. Until then, its walk
+//! waits in the queue, and other commands run.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -31,6 +36,11 @@ pub(super) struct Inputs {
     pub(super) changes: Receiver<LibraryCommand>,
     /// Told the roots, once the library is ready and whenever they change.
     pub(super) roots: WatchHandle,
+    /// How many of the roots messages the watcher has handled, after each.
+    pub(super) roots_watched: Receiver<u64>,
+    /// Wakes the worker when the watching setting changes, to start the
+    /// walks that waited for watches once it is off.
+    pub(super) watching: Receiver<()>,
 }
 
 /// Runs the library worker until its commands close.
@@ -53,6 +63,8 @@ pub(super) fn run(
     let mut control = Control::new(inputs.commands);
     control.changes = inputs.changes;
     control.watcher = Some(inputs.roots);
+    control.roots_watched = inputs.roots_watched;
+    control.watching = inputs.watching;
     prepare_library(&conn, &mut library, event_tx, &mut control, notice);
     // The watcher starts watching, and rescans the roots, only now.
     control.tell_watcher_roots(&library);
@@ -187,7 +199,8 @@ pub(super) fn handle_command(
     } else {
         library.set_roots(load_roots(conn));
     }
-    library.status.scan_in_progress = false;
+    // A walk waiting for the watches of its root is a scan yet to run.
+    library.status.scan_in_progress = control.walks_deferred();
     library.status.scan_progress = None;
     library.publish(event_tx);
 }
@@ -209,6 +222,17 @@ pub(super) struct Control {
     watcher: Option<WatchHandle>,
     /// The roots the watcher was last told.
     watched_roots: Option<Vec<PathBuf>>,
+    /// How many roots messages the watcher was sent, and how many it has
+    /// handled; `never` once the watcher is gone.
+    roots_sent: u64,
+    roots_watched: Receiver<u64>,
+    roots_handled: u64,
+    /// The roots that the watcher may not watch yet, with the number of the
+    /// message that first told it about each.
+    unconfirmed: HashMap<PathBuf, u64>,
+    /// Woken when the watching setting changes; `never` once the service
+    /// is gone.
+    watching: Receiver<()>,
     /// Roots removed while the command ran, which its scans skip.
     removed: HashSet<PathBuf>,
     /// Failures of the commands run during the command.
@@ -228,6 +252,11 @@ impl Control {
             shutting_down: false,
             watcher: None,
             watched_roots: None,
+            roots_sent: 0,
+            roots_watched: never(),
+            roots_handled: 0,
+            unconfirmed: HashMap::new(),
+            watching: never(),
             removed: HashSet::new(),
             errors: Vec::new(),
             external: ExternalWrites::default(),
@@ -269,12 +298,67 @@ impl Control {
         }
         let paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
         watcher.set_roots(paths.clone());
+        self.roots_sent += 1;
+        let told = self.watched_roots.take().unwrap_or_default();
+        self.unconfirmed.retain(|root, _| paths.contains(root));
+        for root in paths.iter().filter(|root| !told.contains(root)) {
+            self.unconfirmed.insert(root.clone(), self.roots_sent);
+        }
         self.watched_roots = Some(paths);
+    }
+
+    /// Notes the roots messages the watcher has handled, without waiting.
+    fn note_roots_watched(&mut self) {
+        loop {
+            match self.roots_watched.try_recv() {
+                Ok(handled) => self.roots_handled = handled,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.watcher_gone();
+                    break;
+                }
+            }
+        }
+        let handled = self.roots_handled;
+        self.unconfirmed.retain(|_, told_in| *told_in > handled);
+    }
+
+    /// Nothing is waited for from a watcher that ended.
+    fn watcher_gone(&mut self) {
+        self.roots_watched = never();
+        self.roots_handled = u64::MAX;
+    }
+
+    /// Whether the watcher was last told to watch. Read after the roots
+    /// were sent, so that if it is off, turning watching on is sent after
+    /// them, and rescans them once they are watched.
+    fn watching_on(&self) -> bool {
+        self.watcher.as_ref().is_some_and(WatchHandle::is_enabled)
+    }
+
+    /// Whether a queued walk waits for the watches of its root.
+    fn walks_deferred(&self) -> bool {
+        let watching_on = self.watching_on();
+        self.queue
+            .normal
+            .iter()
+            .any(|cmd| waits_for_watches(cmd, watching_on, &self.unconfirmed))
     }
 
     /// Queues the commands that have arrived, merging them with those
     /// queued and with `running`.
     fn receive(&mut self, running: Option<RunningScan<'_>>) {
+        self.note_roots_watched();
+        loop {
+            match self.watching.try_recv() {
+                Ok(()) => {}
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.watching = never();
+                    break;
+                }
+            }
+        }
         loop {
             match self.commands.try_recv() {
                 Ok(cmd) => self.queue.push(resolve_command(cmd), running),
@@ -298,11 +382,15 @@ impl Control {
     }
 
     /// The next command to run, waiting for one. `None` once the service is
-    /// gone and the commands left are run.
+    /// gone and the commands left are run. A walk waiting for the watches
+    /// of its root stays queued, and the commands after it run.
     fn next_command(&mut self) -> Option<LibraryCommand> {
         loop {
             self.receive(None);
-            if let Some(cmd) = self.queue.pop(self.shutting_down) {
+            let (watching_on, unconfirmed) = (self.watching_on(), &self.unconfirmed);
+            if let Some(cmd) = self.queue.pop(self.shutting_down, |cmd| {
+                waits_for_watches(cmd, watching_on, unconfirmed)
+            }) {
                 return Some(cmd);
             }
             if self.shutting_down {
@@ -316,6 +404,13 @@ impl Control {
                 recv(self.changes) -> cmd => match cmd {
                     Ok(cmd) => self.queue.push(cmd, None),
                     Err(_) => self.changes = never(),
+                },
+                recv(self.roots_watched) -> handled => match handled {
+                    Ok(handled) => self.roots_handled = handled,
+                    Err(_) => self.watcher_gone(),
+                },
+                recv(self.watching) -> changed => if changed.is_err() {
+                    self.watching = never();
                 },
             }
         }
@@ -375,7 +470,7 @@ impl ScanControl for Control {
             library.status.last_error = joined(&self.errors);
             library.publish(event_tx);
         }
-        // An added root is watched while it is scanned.
+        // An added root is told before it is walked; see `defer_walk`.
         self.tell_watcher_roots(library);
         if self.shutting_down {
             ScanDirective::StopAll
@@ -386,8 +481,43 @@ impl ScanControl for Control {
         }
     }
 
+    /// Leaves the walk of `root` for later while the watcher may not watch
+    /// it yet: it is queued as a rescan, which runs once the watches are
+    /// set up or watching is turned off. Removing the root drops it.
+    fn defer_walk(&mut self, root: &Path) -> bool {
+        self.note_roots_watched();
+        if !waits_for_watches(
+            &LibraryCommand::RescanRoot(root.to_path_buf()),
+            self.watching_on(),
+            &self.unconfirmed,
+        ) {
+            return false;
+        }
+        #[cfg(test)]
+        super::watch::watch_test_hooks::note_walk_deferred(root);
+        self.queue
+            .push(LibraryCommand::RescanRoot(root.to_path_buf()), None);
+        true
+    }
+
     fn external_writes(&mut self, conn: &Connection) -> bool {
         self.external.since_last_check(conn)
+    }
+}
+
+/// Whether `cmd` walks a root that the watcher may not watch yet: one in
+/// `unconfirmed` while watching is on. With watching off, nothing is
+/// watched, and turning it on rescans every root once it is watched.
+fn waits_for_watches(
+    cmd: &LibraryCommand,
+    watching_on: bool,
+    unconfirmed: &HashMap<PathBuf, u64>,
+) -> bool {
+    match cmd {
+        LibraryCommand::RescanRoot(root) | LibraryCommand::ScanPaths { root, .. } => {
+            watching_on && unconfirmed.contains_key(root)
+        }
+        _ => false,
     }
 }
 
@@ -621,25 +751,28 @@ impl CommandQueue {
         }
     }
 
-    /// The next command to run. Once shutting down, scans are dropped.
-    fn pop(&mut self, shutting_down: bool) -> Option<LibraryCommand> {
+    /// The next command to run, skipping those that `waits`. Once shutting
+    /// down, scans are dropped.
+    fn pop(
+        &mut self,
+        shutting_down: bool,
+        waits: impl Fn(&LibraryCommand) -> bool,
+    ) -> Option<LibraryCommand> {
         if let Some(cmd) = self.priority.pop_front() {
             return Some(cmd);
         }
-        while let Some(cmd) = self.normal.pop_front() {
-            if shutting_down
-                && matches!(
+        if shutting_down {
+            self.normal.retain(|cmd| {
+                !matches!(
                     cmd,
                     LibraryCommand::RescanRoot(_)
                         | LibraryCommand::RescanAll
                         | LibraryCommand::ScanPaths { .. }
                 )
-            {
-                continue;
-            }
-            return Some(cmd);
+            });
         }
-        None
+        let index = self.normal.iter().position(|cmd| !waits(cmd))?;
+        self.normal.remove(index)
     }
 }
 
