@@ -1885,10 +1885,45 @@ fn read_renamed_track_rows<'a>(
     Ok(rows)
 }
 
-/// Moves the `tracks` and `external_tracks` rows of renamed files to their
-/// new paths. Rows keep their rowid and the columns a rename does not
-/// change. Swaps, renumbering chains and cycles reuse paths that other rows
-/// still hold, so those rows move to a placeholder path first.
+/// A path for the row of the `index`th renamed file while its new path is
+/// still held by another row. Library paths are absolute, so a relative
+/// placeholder cannot collide.
+fn rename_placeholder(index: usize, old_key: &str) -> String {
+    format!("ferrous-rename-pending/{index}/{old_key}")
+}
+
+/// Moves the saved waveforms of renamed files with them. A waveform is
+/// matched to its file by size and modification time, which a rename keeps,
+/// so a waveform left at a path would be taken for that of a file renamed
+/// there with the same size and time, as in a swap. A waveform saved at a
+/// new path before is dropped: no file was there.
+fn move_renamed_waveforms(tx: &Connection, rows: &[RenamedTrackRow<'_>]) -> rusqlite::Result<()> {
+    for (index, row) in rows.iter().enumerate() {
+        tx.execute(
+            "UPDATE waveform_cache SET path = ?2 WHERE path = ?1",
+            params![row.old_key, rename_placeholder(index, &row.old_key)],
+        )?;
+    }
+    for row in rows {
+        tx.execute(
+            "DELETE FROM waveform_cache WHERE path = ?1",
+            params![row.new_key],
+        )?;
+    }
+    for (index, row) in rows.iter().enumerate() {
+        tx.execute(
+            "UPDATE waveform_cache SET path = ?2 WHERE path = ?1",
+            params![rename_placeholder(index, &row.old_key), row.new_key],
+        )?;
+    }
+    Ok(())
+}
+
+/// Moves the `tracks`, `external_tracks` and `waveform_cache` rows of
+/// renamed files to their new paths. Rows keep their rowid and the columns
+/// a rename does not change. Swaps, renumbering chains and cycles reuse
+/// paths that other rows still hold, so those rows move to a placeholder
+/// path first.
 fn update_renamed_track_rows(
     tx: &Connection,
     renames: &[(PathBuf, PathBuf)],
@@ -1902,14 +1937,15 @@ fn update_renamed_track_rows(
         .iter()
         .map(|row| row.new_key.clone())
         .collect::<HashSet<_>>();
+    move_renamed_waveforms(tx, &rows)
+        .map_err(|e| format!("failed to move renamed waveform cache rows: {e}"))?;
     let mut current_keys = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
         if !new_keys.contains(&row.old_key) {
             current_keys.push(row.old_key.clone());
             continue;
         }
-        // Library paths are absolute, so a relative placeholder cannot collide.
-        let placeholder = format!("ferrous-rename-pending/{index}/{}", row.old_key);
+        let placeholder = rename_placeholder(index, &row.old_key);
         tx.execute(
             "UPDATE tracks SET path = ?2 WHERE path = ?1",
             params![row.old_key, placeholder],
@@ -7158,6 +7194,124 @@ mod tests {
                 ),
             ]
         );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// The size and modification time that the analysis worker stamps a
+    /// saved waveform with.
+    fn waveform_stamp(path: &Path) -> (i64, i64, i64) {
+        let metadata = fs::metadata(path).expect("metadata");
+        let modified = metadata
+            .modified()
+            .expect("modification time")
+            .duration_since(UNIX_EPOCH)
+            .expect("after the epoch");
+        (
+            i64::try_from(metadata.len()).expect("size"),
+            i64::try_from(modified.as_secs()).expect("seconds"),
+            i64::from(modified.subsec_nanos()),
+        )
+    }
+
+    /// Saves a complete one-peak waveform for the file now at `path`.
+    fn save_waveform(conn: &Connection, path: &Path, peak: f32) {
+        let (size, secs, nanos) = waveform_stamp(path);
+        conn.execute(
+            "INSERT OR REPLACE INTO waveform_cache(path, size_bytes, modified_secs, \
+             modified_nanos, format_version, peak_count, peaks_blob, updated_at, complete, \
+             coverage_seconds) VALUES (?1, ?2, ?3, ?4, 3, 1, ?5, 0, 1, 1.0)",
+            params![
+                path.to_string_lossy(),
+                size,
+                secs,
+                nanos,
+                peak.to_le_bytes().to_vec()
+            ],
+        )
+        .expect("save waveform");
+    }
+
+    /// The saved waveform the analysis worker finds for the file now at
+    /// `path`, with the lookup of `crate::analysis::cache`.
+    fn saved_waveform(conn: &Connection, path: &Path) -> Option<f32> {
+        let (size, secs, nanos) = waveform_stamp(path);
+        conn.query_row(
+            "SELECT peaks_blob FROM waveform_cache WHERE path = ?1 AND size_bytes = ?2 \
+             AND modified_secs = ?3 AND modified_nanos = ?4 AND complete = 1",
+            params![path.to_string_lossy(), size, secs, nanos],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .expect("lookup")
+        .map(|blob| f32::from_le_bytes(blob.try_into().expect("one peak")))
+    }
+
+    fn waveform_paths(conn: &Connection) -> Vec<PathBuf> {
+        let mut stmt = conn
+            .prepare("SELECT path FROM waveform_cache ORDER BY path")
+            .expect("prepare");
+        stmt.query_map([], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("paths")
+    }
+
+    #[test]
+    fn rename_swaps_the_saved_waveforms_of_files_with_the_same_size_and_time() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-swap-waveforms", &["One", "Two"]);
+        let (one, two) = (paths[0].clone(), paths[1].clone());
+        let modified = fs::metadata(&one).and_then(|m| m.modified()).expect("time");
+        fs::File::options()
+            .write(true)
+            .open(&two)
+            .and_then(|file| file.set_modified(modified))
+            .expect("same modification time");
+        assert_eq!(waveform_stamp(&one), waveform_stamp(&two));
+        insert_indexed_tracks(&mut conn, &dir, &paths);
+        save_waveform(&conn, &one, 0.25);
+        save_waveform(&conn, &two, 0.75);
+
+        rename_indexed_metadata_paths_in_conn(
+            &mut conn,
+            &[(one.clone(), two.clone()), (two.clone(), one.clone())],
+        )
+        .expect("swap");
+
+        // The file first named One is now at `two`, and its waveform with it.
+        assert_eq!(saved_waveform(&conn, &two), Some(0.25));
+        assert_eq!(saved_waveform(&conn, &one), Some(0.75));
+        assert_eq!(waveform_paths(&conn), [one, two]);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rename_moves_a_saved_waveform_to_the_new_name() {
+        let mut conn = rename_conn();
+        let (dir, paths) = rename_fixture("rename-move-waveform", &["One", "Two"]);
+        let (one, two) = (paths[0].clone(), paths[1].clone());
+        let renamed = dir.join("03 - Renamed.flac");
+        insert_indexed_tracks(&mut conn, &dir, &paths);
+        save_waveform(&conn, &one, 0.25);
+        save_waveform(&conn, &two, 0.75);
+        // A file deleted from the new name left its waveform there, with
+        // the stamp of the file renamed there.
+        fs::copy(&one, &renamed).expect("deleted file");
+        let modified = fs::metadata(&one).and_then(|m| m.modified()).expect("time");
+        fs::File::options()
+            .write(true)
+            .open(&renamed)
+            .and_then(|file| file.set_modified(modified))
+            .expect("same modification time");
+        save_waveform(&conn, &renamed, 0.5);
+        fs::remove_file(&renamed).expect("delete");
+
+        rename_indexed_metadata_paths_in_conn(&mut conn, &[(one.clone(), renamed.clone())])
+            .expect("rename");
+
+        assert_eq!(saved_waveform(&conn, &renamed), Some(0.25));
+        assert_eq!(saved_waveform(&conn, &two), Some(0.75));
+        assert_eq!(waveform_paths(&conn), [two, renamed]);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

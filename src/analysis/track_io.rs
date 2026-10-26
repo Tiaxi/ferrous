@@ -13,10 +13,11 @@ use crossbeam_channel::{Receiver, Sender};
 use rusqlite::Connection;
 
 use super::cache::{
-    insert_waveform_cache_entry, load_waveform_from_db, open_waveform_cache_db,
-    persist_waveform_to_db, prune_persistent_waveform_cache, remap_waveform_cache_entries,
-    touch_waveform_cache_lru, touch_waveform_in_db, WaveformCacheEntry, WaveformSourceStamp,
-    PERSISTENT_WAVEFORM_CACHE_MAX_ROWS, PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL,
+    delete_waveform_from_db, insert_waveform_cache_entry, load_waveform_from_db,
+    open_waveform_cache_db, persist_waveform_to_db, prune_persistent_waveform_cache,
+    remap_waveform_cache_entries, touch_waveform_cache_lru, touch_waveform_in_db,
+    WaveformCacheEntry, WaveformSourceStamp, PERSISTENT_WAVEFORM_CACHE_MAX_ROWS,
+    PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL,
 };
 use super::decoders::{open_symphonia_file, SymphoniaFile};
 use crate::playback::{remap_path, PathRenames};
@@ -109,12 +110,18 @@ pub(super) enum TrackIoReply {
     },
 }
 
+/// How many of the last saves to the database a rename is checked against;
+/// see [`TrackIo::drop_saves_renamed_away`].
+const RECENT_SAVES: usize = 8;
+
 /// Waveforms decoded before, in memory and in the library database.
 pub(super) struct TrackIo {
     waveforms: HashMap<PathBuf, WaveformCacheEntry>,
     lru: VecDeque<PathBuf>,
     db: Option<Connection>,
     writes_since_prune: usize,
+    /// The paths of the last waveforms saved to the database, oldest first.
+    recent_saves: VecDeque<PathBuf>,
 }
 
 impl TrackIo {
@@ -124,6 +131,7 @@ impl TrackIo {
             lru: VecDeque::new(),
             db,
             writes_since_prune: 0,
+            recent_saves: VecDeque::new(),
         }
     }
 
@@ -162,10 +170,31 @@ impl TrackIo {
                 None
             }
             TrackIoRequest::RemapPaths(renames) => {
+                self.drop_saves_renamed_away(&renames);
                 remap_waveform_cache_entries(&mut self.waveforms, &mut self.lru, &renames);
                 None
             }
         }
+    }
+
+    /// The rename moved the saved waveforms in the database with their files
+    /// before this thread heard of it (`crate::library::rename_indexed_metadata_paths`).
+    /// A save under an old path in between, of a decode of the file renamed
+    /// away, would be taken for the waveform of a file renamed there with the
+    /// same size and time, as in a swap. Which side of the rename a save
+    /// fell on is not known, so the recent saves at old paths are dropped;
+    /// the entries in memory move with their files.
+    fn drop_saves_renamed_away(&mut self, renames: &PathRenames) {
+        let Some(db) = self.db.as_ref() else {
+            return;
+        };
+        self.recent_saves.retain(|path| {
+            let moved_away = renames.contains_key(path);
+            if moved_away {
+                delete_waveform_from_db(db, path);
+            }
+            !moved_away
+        });
     }
 
     fn saved_waveform(
@@ -207,6 +236,11 @@ impl TrackIo {
     ) {
         if let (Some(db), Some(stamp)) = (self.db.as_ref(), stamp) {
             let _ = persist_waveform_to_db(db, path, stamp, &peaks, coverage_seconds);
+            self.recent_saves.retain(|saved| saved != path);
+            if self.recent_saves.len() >= RECENT_SAVES {
+                self.recent_saves.pop_front();
+            }
+            self.recent_saves.push_back(path.to_path_buf());
             self.writes_since_prune = self.writes_since_prune.saturating_add(1);
             if self.writes_since_prune >= PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL {
                 let _ = prune_persistent_waveform_cache(db, PERSISTENT_WAVEFORM_CACHE_MAX_ROWS);
@@ -400,6 +434,39 @@ mod tests {
         ]))));
         assert_eq!(io.saved_waveform(b, Some(stamp(10))), Some(vec![0.1]));
         assert_eq!(io.saved_waveform(a, Some(stamp(10))), Some(vec![0.2]));
+    }
+
+    #[test]
+    fn a_save_under_an_old_name_after_a_swap_is_not_taken_for_the_other_file() {
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        let mut io = TrackIo::new(Some(database()));
+        io.save_waveform(a, Some(stamp(10)), vec![0.1], 1.0);
+        io.save_waveform(b, Some(stamp(10)), vec![0.2], 1.0);
+        // The rename swaps the files and their saved waveforms; then the
+        // decode of A, started before, is saved under A's old name.
+        io.db
+            .as_ref()
+            .expect("database")
+            .execute_batch(
+                "UPDATE waveform_cache SET path = 'pending' WHERE path = '/music/a.flac';
+                 UPDATE waveform_cache SET path = '/music/a.flac' WHERE path = '/music/b.flac';
+                 UPDATE waveform_cache SET path = '/music/b.flac' WHERE path = 'pending';",
+            )
+            .expect("swap");
+        io.save_waveform(a, Some(stamp(10)), vec![0.1], 1.0);
+        io.handle(TrackIoRequest::RemapPaths(Arc::new(PathRenames::from([
+            (a.to_path_buf(), b.to_path_buf()),
+            (b.to_path_buf(), a.to_path_buf()),
+        ]))));
+        assert_eq!(io.saved_waveform(b, Some(stamp(10))), Some(vec![0.1]));
+        assert_eq!(io.saved_waveform(a, Some(stamp(10))), Some(vec![0.2]));
+
+        // A new session finds nothing of A's at its old name. Both names
+        // were saved recently, so B's moved waveform is dropped as well,
+        // and both files are decoded again.
+        let mut reopened = TrackIo::new(io.db.take());
+        assert_eq!(reopened.saved_waveform(a, Some(stamp(10))), None);
+        assert_eq!(reopened.saved_waveform(b, Some(stamp(10))), None);
     }
 
     #[test]
