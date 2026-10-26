@@ -418,6 +418,9 @@ pub struct LibraryTreeCache {
     resolved_albums: HashMap<String, Vec<ResolvedAlbum>>,
     keys: TreeKeys,
     pub(crate) counts: (usize, usize),
+    /// The tracks each root holds, which removing the root takes out of
+    /// the library.
+    pub(crate) root_track_counts: Arc<HashMap<PathBuf, usize>>,
 }
 
 impl LibraryTreeCache {
@@ -438,11 +441,18 @@ impl LibraryTreeCache {
                         .sum::<usize>(),
             )
         });
+        let mut root_track_counts = HashMap::new();
+        for track in &library.tracks {
+            *root_track_counts
+                .entry(track.root_path.clone())
+                .or_insert(0) += 1;
+        }
         Self {
             builders,
             resolved_albums: HashMap::new(),
             keys,
             counts,
+            root_track_counts: Arc::new(root_track_counts),
         }
     }
 
@@ -2215,7 +2225,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tree_counts_the_artists_and_albums_it_builds() {
+    fn the_tree_counts_the_artists_and_albums_it_builds_and_each_roots_tracks() {
         let library = LibrarySnapshot::new(
             vec![root("/music"), root("/more")],
             vec![
@@ -2267,6 +2277,12 @@ mod tests {
 
         // Artist A in each root, and Artist B; albums A, B and C.
         assert_eq!(cache.counts, (3, 3));
+        // Each root counts the tracks it owns, which removing it takes out
+        // of the library, even one the tree cannot place.
+        assert_eq!(
+            *cache.root_track_counts,
+            HashMap::from([(PathBuf::from("/music"), 5), (PathBuf::from("/more"), 1)])
+        );
     }
 
     fn leaf(path: &str, album: &str, year: Option<i32>, track_no: Option<u32>) -> TrackLeaf {

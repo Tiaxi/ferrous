@@ -52,6 +52,14 @@ public:
     Q_INVOKABLE void reload();
     Q_INVOKABLE bool save();
     Q_INVOKABLE bool renameSelectedFiles();
+    // Work out, without renaming anything, what renameSelectedFiles would
+    // do, and answer with renamePreviewReady.
+    Q_INVOKABLE bool previewRenameSelectedFiles();
+    // Rename the files of the latest preview, from the rows as they were
+    // previewed, whatever is selected or edited since. Returns false, and
+    // says so in the status, when that preview is gone, such as after the
+    // files were loaded again.
+    Q_INVOKABLE bool renamePreviewedFiles();
     Q_INVOKABLE void setSelectedRows(const QVariantList &rows);
     Q_INVOKABLE QVariantList selectedRows() const;
     // Selects rows `first` to `last`, in either order, and no others.
@@ -93,9 +101,14 @@ signals:
     // A load, save, or rename that failed, in whole or in part: the status
     // and the first failures, for the app's error list.
     void errorReported(const QString &message);
+    // Each row has the file's oldName and newName, its path, newPath (empty
+    // if it has none), and whether it would be renamed (`ok`, with
+    // `unchanged` for a name that stays) or why not (`error`). `error` is
+    // set instead when the preview failed as a whole.
+    void renamePreviewReady(const QVariantList &rows, const QString &error);
 
 private:
-    enum class Operation { Load, Save, Rename };
+    enum class Operation { Load, Save, Rename, PreviewRename };
     using RenameGate = std::shared_ptr<FerrousFfiRenameGate>;
     static QByteArray executeOperation(Operation operation, const QByteArray &payload,
                                        const RenameGate &renameGate);
@@ -114,6 +127,19 @@ private:
     void applyLoadResult(LoadResult result);
     void applySaveResult(const QByteArray &response);
     void applyRenameResult(const QByteArray &response);
+    void applyRenamePreview(const QByteArray &response);
+    // The rename request for the selected rows and their file names; empty
+    // when no row is selected.
+    QByteArray buildRenameRequest(QStringList *fileNames) const;
+    // A rename request and the names of its files: the one a preview runs,
+    // then the one it answered, which renamePreviewedFiles renames.
+    struct RenameRequest {
+        QByteArray payload;
+        QStringList fileNames;
+    };
+    RenameRequest m_pendingRenamePreview;
+    RenameRequest m_renamePreview;
+    bool startRename(RenameRequest request);
     std::function<QByteArray(Operation, const QByteArray &, const RenameGate &)> m_executeOperation{
         executeOperation};
     quint64 m_operationGeneration{0};

@@ -40,6 +40,7 @@ pub mod library_tree;
 mod queue;
 mod queue_relay;
 mod queue_sync;
+mod queue_undo;
 mod queue_validation;
 mod search;
 mod search_query;
@@ -59,6 +60,7 @@ use events::{
     process_lastfm_state, process_metadata_event, process_playback_event, tick_lastfm_playback,
 };
 pub use queue_sync::{QueueEdit, QueueUpdate};
+pub use queue_undo::{QueueUndoKind, QueueUndoRestored, QueueUndoState};
 pub(crate) use search::is_main_album_disc_section;
 use search::{drain_search_results, process_search_results, SearchWorkerQuery};
 use workers::{spawn_apply_album_art_worker, spawn_lastfm_service, spawn_search_worker};
@@ -154,6 +156,9 @@ pub enum BridgeQueueCommand {
     },
     Select(Option<usize>),
     Clear,
+    /// Undo the destructive queue change the UI was offered under this ID;
+    /// see [`queue_undo`].
+    Undo(u64),
 }
 
 #[derive(Debug, Clone)]
@@ -408,6 +413,8 @@ pub struct BridgeSnapshot {
     pub(crate) queue_details: Arc<HashMap<PathBuf, IndexedTrack>>,
     pub library_artist_count: usize,
     pub library_album_count: usize,
+    /// The tracks of each library root.
+    pub library_root_track_counts: Arc<HashMap<PathBuf, usize>>,
     pub library_expanded_keys: Vec<String>,
     pub library_view_selection_key: String,
     pub library_view_anchor_key: String,
@@ -419,6 +426,9 @@ pub struct BridgeSnapshot {
     /// The queue's changes since the previous snapshot, if any.
     pub queue_update: Option<QueueUpdate>,
     pub selected_queue_index: Option<usize>,
+    /// The queue change the UI can undo, and the rows the latest undo
+    /// brought back.
+    pub queue_undo: QueueUndoState,
     pub settings: BridgeSettings,
     pub lastfm: LastFmRuntimeState,
 }
@@ -517,6 +527,7 @@ pub(super) struct BridgeState {
     queue_detail_fingerprints: HashMap<PathBuf, TrackFileFingerprint>,
     library_artist_count: usize,
     library_album_count: usize,
+    library_root_track_counts: Arc<HashMap<PathBuf, usize>>,
     pre_built_tree_bytes: Arc<Vec<u8>>,
     expanded_keys: HashSet<String>,
     library_view_selection_key: String,
@@ -525,6 +536,7 @@ pub(super) struct BridgeState {
     library_reveal_generation: u32,
     queue: Vec<PathBuf>,
     queue_sync: queue_sync::QueueSync,
+    queue_undo: queue_undo::QueueUndo,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
     lastfm: LastFmRuntimeState,
@@ -638,6 +650,7 @@ impl BridgeState {
             queue_details: self.queue_details.clone(),
             library_artist_count: self.library_artist_count,
             library_album_count: self.library_album_count,
+            library_root_track_counts: Arc::clone(&self.library_root_track_counts),
             library_expanded_keys,
             library_view_selection_key: self.library_view_selection_key.clone(),
             library_view_anchor_key: self.library_view_anchor_key.clone(),
@@ -652,6 +665,7 @@ impl BridgeState {
             queue_revision: self.queue_sync.revision(),
             queue_update: self.queue_sync.update(&self.queue),
             selected_queue_index: self.selected_queue_index,
+            queue_undo: self.queue_undo.state(),
             settings: self.settings.clone(),
             lastfm: self.lastfm.clone(),
         }
@@ -1639,6 +1653,7 @@ impl BridgeLoopRuntime {
             self.state.library_artist_count,
             self.state.library_album_count,
         ) = result.counts;
+        self.state.library_root_track_counts = result.root_track_counts;
         self.snapshot_plan.include_tree_in_next_snapshot = true;
         SnapshotUrgency::Immediate
     }
@@ -3806,6 +3821,252 @@ mod tests {
             errors,
             ["The track you chose to play is no longer in the queue."]
         );
+    }
+
+    fn replace_queue(
+        runtime: &mut BridgeLoopRuntime,
+        tracks: &[PathBuf],
+        event_tx: &Sender<BridgeEvent>,
+    ) {
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                tracks: tracks.to_vec(),
+                autoplay: false,
+            }),
+            event_tx,
+        );
+    }
+
+    /// The undo of the change the bridge offers, as the UI sends it.
+    fn ui_undo(id: u64) -> BridgeCommand {
+        let mut command = 68_u16.to_le_bytes().to_vec();
+        command.extend_from_slice(&8_u32.to_le_bytes());
+        command.extend_from_slice(&id.to_le_bytes());
+        ffi::parse_binary_command(&command)
+            .expect("a valid command")
+            .expect("a command")
+    }
+
+    fn restored_queues(engine_rx: &Receiver<PlaybackCommand>) -> Vec<(Vec<PathBuf>, usize)> {
+        engine_rx
+            .try_iter()
+            .filter_map(|command| match command {
+                PlaybackCommand::RestoreQueue { paths, current } => Some((paths, current)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_undo_brings_back_a_cleared_queue_with_its_selection_and_current_track() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let queue = vec![p("/music/a.flac"), p("/music/b.flac"), p("/music/c.flac")];
+        replace_queue(&mut runtime, &queue, &event_tx);
+        // Replacing an empty queue takes nothing, so nothing is offered.
+        assert_eq!(runtime.state.snapshot(false).queue_undo.offer_id, 0);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Select(Some(1))),
+            &event_tx,
+        );
+        runtime.state.playback.current_queue_index = Some(2);
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        let offer = runtime.state.snapshot(false).queue_undo;
+        assert_ne!(offer.offer_id, 0);
+        assert_eq!(offer.kind, Some(QueueUndoKind::Cleared));
+        assert_eq!(offer.track_count, 3);
+        // Clearing the empty queue again keeps what the first clear took.
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        assert_eq!(runtime.state.snapshot(false).queue_undo, offer);
+        // Clearing stopped playback.
+        runtime.state.playback.current_queue_index = None;
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(runtime.state.selected_queue_index, Some(1));
+        // The engine gets the queue with the track that was current.
+        assert_eq!(restored_queues(&engine_rx), vec![(queue.clone(), 2)]);
+        let snapshot = runtime.state.snapshot(false);
+        assert_eq!(snapshot.queue_update, Some(QueueUpdate::Full(queue)));
+        assert_eq!(snapshot.queue_undo.offer_id, 0, "an undo applies once");
+        let restored = snapshot.queue_undo.restored.expect("the restored rows");
+        assert_eq!(restored.id, offer.offer_id);
+        assert_eq!(restored.revision, snapshot.queue_revision);
+        assert_eq!(restored.ranges, vec![(1, 1)]);
+    }
+
+    #[test]
+    fn an_undo_of_a_clear_while_stopped_brings_back_the_stopped_track_not_the_selection() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let queue = vec![p("/music/a.flac"), p("/music/b.flac"), p("/music/c.flac")];
+        replace_queue(&mut runtime, &queue, &event_tx);
+        // B played and was stopped: the engine keeps B but reports no row,
+        // as the GStreamer backend does. Then C is selected, not played.
+        runtime.state.playback.state = PlaybackState::Stopped;
+        runtime.state.playback.current = Some(queue[1].clone());
+        runtime.state.playback.current_queue_index = None;
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Select(Some(2))),
+            &event_tx,
+        );
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        let offer = runtime.state.snapshot(false).queue_undo.offer_id;
+        // Clearing leaves the engine with no track.
+        runtime.state.playback.current = None;
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_undo(offer), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(runtime.state.selected_queue_index, Some(2));
+        // B comes back as the current track, so Play starts B.
+        assert_eq!(restored_queues(&engine_rx), vec![(queue, 1)]);
+    }
+
+    #[test]
+    fn an_undo_puts_removed_rows_back_where_they_were_around_the_playing_track() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, _event_tx, _album) = queue_order_runtime();
+        // Snapshots reach the UI, so edits travel as edits.
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(64);
+        let queue: Vec<PathBuf> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|name| p(&format!("/music/{name}.flac")))
+            .collect();
+        replace_queue(&mut runtime, &queue, &event_tx);
+        assert!(runtime.emit_snapshot(&event_tx));
+        let shown = runtime.state.queue_sync.revision();
+        runtime.handle_command(
+            BridgeCommand::QueueAt {
+                revision: shown,
+                command: BridgeQueueCommand::RemoveMany(vec![3, 0, 1]),
+            },
+            &event_tx,
+        );
+        assert_eq!(
+            runtime.state.queue,
+            vec![queue[2].clone(), queue[4].clone()]
+        );
+        let offer = runtime.state.snapshot(false).queue_undo;
+        assert_eq!(offer.kind, Some(QueueUndoKind::Removed));
+        assert_eq!(offer.track_count, 3);
+        // e, now row 1, plays.
+        runtime.state.playback.current_queue_index = Some(1);
+        assert!(runtime.emit_snapshot(&event_tx));
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(restored_queues(&engine_rx), vec![(queue.clone(), 4)]);
+        // The rows come back as edits, so the UI keeps its scroll position.
+        let snapshot = runtime.state.snapshot(false);
+        assert_eq!(
+            snapshot.queue_update,
+            Some(QueueUpdate::Edits {
+                base_revision: snapshot.queue_revision - 2,
+                edits: vec![
+                    QueueEdit::Insert {
+                        at: 0,
+                        paths: queue[..2].to_vec()
+                    },
+                    QueueEdit::Insert {
+                        at: 3,
+                        paths: vec![queue[3].clone()]
+                    },
+                ],
+            })
+        );
+        assert_eq!(
+            snapshot.queue_undo.restored.expect("restored").ranges,
+            vec![(0, 2), (3, 1)]
+        );
+        // A command the UI sent before the undo still finds its row.
+        runtime.handle_command(ui_remove(shown + 1, 1), &event_tx);
+        assert_eq!(runtime.state.queue.last(), Some(&queue[3]));
+    }
+
+    #[test]
+    fn an_undo_of_a_replacement_brings_back_the_queue_it_replaced() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, album) = queue_order_runtime();
+        let queue = vec![p("/music/a.flac"), p("/music/b.flac")];
+        replace_queue(&mut runtime, &queue, &event_tx);
+        runtime.state.playback.current_queue_index = Some(1);
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceAlbumByKey {
+                artist: "Artist".to_string(),
+                album: "Album".to_string(),
+            }),
+            &event_tx,
+        );
+        assert_eq!(runtime.state.queue, album);
+        let offer = runtime.state.snapshot(false).queue_undo;
+        assert_eq!(offer.kind, Some(QueueUndoKind::Replaced));
+        assert_eq!(offer.track_count, 2);
+        // The album plays from its first track.
+        runtime.state.playback.current_queue_index = Some(0);
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        // The engine's row is in the album, not in the restored queue, so
+        // the hint is the row that was current before; the engine stops
+        // there since the album track it plays is not in that queue.
+        assert_eq!(restored_queues(&engine_rx), vec![(queue, 1)]);
+    }
+
+    #[test]
+    fn a_stale_undo_is_refused_and_leaves_the_queue_alone() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, _event_tx, _album) = queue_order_runtime();
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        let errors = || -> Vec<String> {
+            event_rx
+                .try_iter()
+                .filter_map(|event| match event {
+                    // A refused undo changes nothing, so it is a warning
+                    // about the queue.
+                    BridgeEvent::Error(error)
+                        if error.category == ErrorCategory::Playback
+                            && error.severity == ErrorSeverity::Warning =>
+                    {
+                        Some(error.message)
+                    }
+                    BridgeEvent::Error(error) => Some(format!("unexpected: {error:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        replace_queue(&mut runtime, &[p("/music/a.flac")], &event_tx);
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        let cleared = runtime.state.snapshot(false).queue_undo.offer_id;
+        // Another change after the clear withdraws its undo.
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Append(vec![p("/music/new.flac")])),
+            &event_tx,
+        );
+        assert_eq!(runtime.state.snapshot(false).queue_undo.offer_id, 0);
+        let _ = errors();
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_undo(cleared), &event_tx);
+        assert_eq!(runtime.state.queue, vec![p("/music/new.flac")]);
+        assert!(restored_queues(&engine_rx).is_empty());
+        assert_eq!(errors(), [queue_undo::STALE_UNDO_MESSAGE]);
+
+        // So does a newer destructive change, which is offered instead.
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        let newer = runtime.state.snapshot(false).queue_undo.offer_id;
+        replace_queue(&mut runtime, &[p("/music/b.flac")], &event_tx);
+        assert_eq!(
+            runtime.state.snapshot(false).queue_undo.offer_id,
+            0,
+            "the queue was empty"
+        );
+        runtime.handle_command(ui_undo(newer), &event_tx);
+        assert_eq!(runtime.state.queue, vec![p("/music/b.flac")]);
+        assert_eq!(errors(), [queue_undo::STALE_UNDO_MESSAGE]);
     }
 
     #[test]

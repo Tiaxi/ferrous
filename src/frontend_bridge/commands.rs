@@ -1375,6 +1375,8 @@ fn apply_renamed_queue_paths(
         .enumerate()
         .filter_map(|(index, path)| remap_path(path, rename_map).then(|| (index, path.clone())))
         .collect();
+    // An undo brings back the renamed files under their new paths.
+    state.queue_undo.remap_paths(rename_map);
     let mut changed = !renamed.is_empty();
     if changed {
         let queue_len = state.queue.len();

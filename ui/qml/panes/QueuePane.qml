@@ -553,5 +553,12 @@ Rectangle {
                     && playlistDropArea.queueDropInsertIndex >= 0
             }
         }
+
+        Components.QueueUndoNotice {
+            objectName: "queueUndoNotice"
+            Layout.fillWidth: true
+            Layout.margins: 4
+            uiBridge: root.uiBridge
+        }
     }
 }

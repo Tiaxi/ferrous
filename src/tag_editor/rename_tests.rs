@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
 
-use super::{load_rows_for_paths, rename_rows, RenameRequest, RenameResponse};
+use super::{load_rows_for_paths, preview_rename_rows, rename_rows, RenameRequest, RenameResponse};
 use crate::library::index_tracks_for_test;
 use crate::tag_write::write_test_flac;
 
@@ -347,5 +347,64 @@ fn a_dangling_symlink_at_the_target_is_not_replaced() {
     );
     assert_eq!(fs::read(&paths[0]).expect("read"), bytes);
     assert!(fs::symlink_metadata(&target).expect("link").is_symlink());
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+fn a_rename_preview_lists_each_new_name_and_conflict_and_changes_nothing() {
+    let dir = fixture_dir("preview");
+    let paths = indexed_fixtures(
+        &dir,
+        &[
+            ("01 - Old.flac", "New", "1"),
+            ("02 - Same.flac", "Same", "2"),
+            // Both are named "03 - Twin.flac" by their tags.
+            ("x.flac", "Twin", "3"),
+            ("y.flac", "Twin", "3"),
+        ],
+    );
+    let taken = dir.join("04 - Taken.flac");
+    fs::write(&taken, b"not ours").expect("existing file");
+    let blocked = indexed_fixtures(&dir, &[("z.flac", "Taken", "4")]);
+    let before = file_names(&dir);
+    let rows_before = track_rows(&dir);
+
+    let mut all = paths.clone();
+    all.extend(blocked);
+    let loaded = load_rows_for_paths(&all);
+    assert!(loaded.failures.is_empty(), "{:?}", loaded.failures);
+    let preview = preview_rename_rows(&RenameRequest { rows: loaded.rows });
+
+    let text = |path: &Path| path.to_string_lossy().into_owned();
+    let summary: Vec<(String, Option<String>, bool)> = preview
+        .results
+        .iter()
+        .map(|row| (row.path.clone(), row.new_path.clone(), row.ok))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (text(&all[0]), Some(text(&dir.join("01 - New.flac"))), true),
+            (text(&all[1]), Some(text(&all[1])), true),
+            (text(&all[2]), Some(text(&dir.join("03 - Twin.flac"))), true),
+            (
+                text(&all[3]),
+                Some(text(&dir.join("03 - Twin.flac"))),
+                false
+            ),
+            (text(&all[4]), Some(text(&taken)), false),
+        ]
+    );
+    assert!(preview.results[3]
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("conflicts with another selected file")));
+    assert_eq!(
+        preview.results[4].error.as_deref(),
+        Some(format!("target already exists: {}", text(&taken)).as_str())
+    );
+    assert!(preview.successful_paths.is_empty());
+    assert_eq!(file_names(&dir), before, "nothing was renamed");
+    assert_eq!(track_rows(&dir), rows_before);
     fs::remove_dir_all(dir).expect("cleanup");
 }

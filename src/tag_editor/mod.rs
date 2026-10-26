@@ -978,23 +978,25 @@ pub(crate) fn rename_rows(request: RenameRequest) -> RenameResponse {
     rename_rows_with_refresh(request).0
 }
 
-/// [`rename_rows`], also returning what the library index holds for the
-/// renamed files once they are renamed.
-// Sequential file-rename pipeline — splitting would fragment the transactional logic.
-#[allow(clippy::too_many_lines)]
-pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameResponse, TrackRefresh) {
+/// What renaming `rows` would do: the rows refused or left as they are,
+/// with their results, and the renames to make.
+struct RenamePlan {
+    results: Vec<RenameResultRow>,
+    renames: Vec<(PathBuf, PathBuf)>,
+    renamed_pairs: Vec<(String, String)>,
+}
+
+fn plan_renames(rows: &[TagEditorRow]) -> RenamePlan {
     let mut results = Vec::new();
-    let mut successful_paths = Vec::new();
     let mut renames = Vec::new();
     let mut renamed_pairs = Vec::new();
-    let source_paths = request
-        .rows
+    let source_paths = rows
         .iter()
         .map(|row| PathBuf::from(&row.path))
         .collect::<HashSet<_>>();
     let mut claimed_targets = HashMap::<PathBuf, String>::new();
 
-    for row in &request.rows {
+    for row in rows {
         let current_path = PathBuf::from(&row.path);
         let target_path = match rename_target_path_for_row(row) {
             Ok(path) => path,
@@ -1053,6 +1055,53 @@ pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameRespons
         renames.push((current_path, target_path.clone()));
         renamed_pairs.push((row.path.clone(), target_path.to_string_lossy().into_owned()));
     }
+    RenamePlan {
+        results,
+        renames,
+        renamed_pairs,
+    }
+}
+
+/// What [`rename_rows`] would do, without changing any file: each row's
+/// new path, or why it would not be renamed, in the order of the request.
+pub(crate) fn preview_rename_rows(request: &RenameRequest) -> RenameResponse {
+    let plan = plan_renames(&request.rows);
+    let mut by_path: HashMap<String, RenameResultRow> = plan
+        .results
+        .into_iter()
+        .chain(
+            plan.renamed_pairs
+                .into_iter()
+                .map(|(path, new_path)| RenameResultRow {
+                    path,
+                    new_path: Some(new_path),
+                    ok: true,
+                    error: None,
+                }),
+        )
+        .map(|result| (result.path.clone(), result))
+        .collect();
+    let results = request
+        .rows
+        .iter()
+        .filter_map(|row| by_path.remove(&row.path))
+        .collect();
+    RenameResponse {
+        results,
+        successful_paths: Vec::new(),
+        error: None,
+    }
+}
+
+/// [`rename_rows`], also returning what the library index holds for the
+/// renamed files once they are renamed.
+pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameResponse, TrackRefresh) {
+    let RenamePlan {
+        mut results,
+        renames,
+        renamed_pairs,
+    } = plan_renames(&request.rows);
+    let mut successful_paths = Vec::new();
 
     let refresh = match rename_indexed_metadata_paths(&renames) {
         Ok(refresh) => refresh,

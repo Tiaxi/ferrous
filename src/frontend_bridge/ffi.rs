@@ -17,7 +17,7 @@ use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand,
     BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame,
     BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory, FrontendBridgeHandle,
-    LibrarySortMode, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
+    LibrarySortMode, QueueUndoState, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
@@ -66,6 +66,13 @@ const SECTION_LASTFM: u16 = 1 << 8;
 /// The answer to a save request: a u8, 1 if it succeeded, and a string with
 /// what to show the user otherwise.
 const SECTION_STATE_SAVED: u16 = 1 << 9;
+/// The queue change the UI can undo: the u64 ID to undo it with (0 for
+/// none), a u8 kind (1 cleared, 2 removed, 3 replaced; 0 for none) and the
+/// u32 count of tracks the change took. Then the latest undo: the u64 ID it
+/// undid (0 for none), the u64 queue revision it left, and a u32 count of
+/// (u32 start, u32 count) ranges of the rows it brought back, ascending.
+/// Every snapshot carries it.
+const SECTION_QUEUE_UNDO: u16 = 1 << 10;
 
 #[cfg(unix)]
 fn create_nonblocking_pipe() -> Option<(RawFd, RawFd)> {
@@ -1525,6 +1532,29 @@ pub unsafe extern "C" fn ferrous_ffi_tag_editor_rename(
     unsafe { tag_editor_call("ferrous_ffi_tag_editor_rename", len_out, request) }
 }
 
+#[no_mangle]
+/// What renaming the files of a rename request would do, without renaming
+/// any: the response of [`ferrous_ffi_tag_editor_rename`], with each row's
+/// planned new path or why it would not be renamed.
+///
+/// # Safety
+/// `data` must contain `len` readable bytes; `len_out` must be null or writable.
+pub unsafe extern "C" fn ferrous_ffi_tag_editor_preview_rename(
+    data: *const c_uchar,
+    len: usize,
+    len_out: *mut usize,
+) -> *mut c_uchar {
+    let request = || {
+        // SAFETY: The caller guarantees `len` readable bytes at `data`.
+        let blob = unsafe { input_bytes(data, len) }?;
+        let request = tag_editor::parse_rename_request(blob).ok()?;
+        let response = tag_editor::preview_rename_rows(&request);
+        tag_editor::serialize_rename_response(&response).ok()
+    };
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { tag_editor_call("ferrous_ffi_tag_editor_preview_rename", len_out, request) }
+}
+
 /// A reference to the bridge's import gate that a tag editor worker can own.
 ///
 /// File renames go through it so the bridge learns about them in order with
@@ -1912,6 +1942,12 @@ fn parse_queue_command(
         reader.expect_done()?;
         return Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Clear)));
     }
+    if cmd_id == 68 {
+        // The u64 ID of the change to undo, from the queue undo section.
+        let id = reader.read_u64()?;
+        reader.expect_done()?;
+        return Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Undo(id))));
+    }
     if !matches!(cmd_id, 8 | 9 | 10 | 11 | 63) {
         return Ok(None);
     }
@@ -2221,11 +2257,42 @@ fn snapshot_sections(
         (SECTION_METADATA, encode_metadata_section(snapshot)),
         (SECTION_SETTINGS, encode_settings_section(snapshot)),
         (SECTION_LASTFM, encode_lastfm_section(snapshot)),
+        (
+            SECTION_QUEUE_UNDO,
+            encode_queue_undo_section(&snapshot.queue_undo),
+        ),
     ];
     if let Some(section) = queue_section {
         sections.insert(1, (SECTION_QUEUE, section));
     }
     sections
+}
+
+fn encode_queue_undo_section(undo: &QueueUndoState) -> Vec<u8> {
+    let ranges = undo
+        .restored
+        .as_ref()
+        .map_or(&[][..], |restored| restored.ranges.as_slice());
+    let mut out = Vec::with_capacity(33 + 8 * ranges.len());
+    push_u64(&mut out, undo.offer_id);
+    push_u8(&mut out, undo.kind.map_or(0, |kind| kind as u8));
+    push_u32(&mut out, clamp_u32(undo.track_count));
+    push_u64(
+        &mut out,
+        undo.restored.as_ref().map_or(0, |restored| restored.id),
+    );
+    push_u64(
+        &mut out,
+        undo.restored
+            .as_ref()
+            .map_or(0, |restored| restored.revision),
+    );
+    push_u32(&mut out, clamp_u32(ranges.len()));
+    for (start, count) in ranges {
+        push_u32(&mut out, clamp_u32(*start));
+        push_u32(&mut out, clamp_u32(*count));
+    }
+    out
 }
 
 /// The error section: the category, the severity, the subject, and the
@@ -2504,6 +2571,17 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         push_string(
             &mut out,
             problem.map_or("", |problem| problem.problem.as_str()),
+        );
+        // The tracks that removing the root takes out of the library.
+        push_u32(
+            &mut out,
+            clamp_u32(
+                snapshot
+                    .library_root_track_counts
+                    .get(&root.path)
+                    .copied()
+                    .unwrap_or(0),
+            ),
         );
     }
     if snapshot.pre_built_tree_bytes.is_some() {
@@ -3072,6 +3150,10 @@ mod tests {
             queue_details: Arc::default(),
             library_artist_count: 1,
             library_album_count: 1,
+            library_root_track_counts: Arc::new(std::collections::HashMap::from([(
+                PathBuf::from("/music"),
+                1,
+            )])),
             library_expanded_keys: vec!["artist|/music|Sample Artist".to_string()],
             library_view_selection_key: "track|/music/a.flac".to_string(),
             library_view_anchor_key: "artist|/music|Sample Artist".to_string(),
@@ -3082,6 +3164,7 @@ mod tests {
             queue_revision: 1,
             queue_update: Some(QueueUpdate::Full(vec![PathBuf::from("/music/a.flac")])),
             selected_queue_index: Some(0),
+            queue_undo: QueueUndoState::default(),
             settings: super::super::BridgeSettings {
                 volume: 0.75,
                 fft_size: 2048,
@@ -4439,7 +4522,7 @@ mod tests {
     }
 
     #[test]
-    fn library_roots_carry_why_they_are_not_watched_and_their_scan_problems() {
+    fn library_roots_carry_why_they_are_not_watched_their_scan_problems_and_track_counts() {
         let mut snapshot = sample_snapshot();
         let mut library = (*snapshot.library).clone();
         library.roots = vec![
@@ -4462,26 +4545,27 @@ mod tests {
             problem: "could not read 1 folder".to_string(),
         }];
         snapshot.pre_built_tree_bytes = None;
+        snapshot.library_root_track_counts = Arc::new(std::collections::HashMap::from([(
+            PathBuf::from("/music"),
+            1234,
+        )]));
 
         let section = encode_library_meta_section(&snapshot);
 
         let mut tail = Vec::new();
         push_u16(&mut tail, 2);
-        for value in [
-            "/music",
-            "Music",
-            "",
-            "could not read 1 folder",
-            "/nas",
-            "",
-            "it is on nfs4",
-            "",
+        for (values, tracks) in [
+            (["/music", "Music", "", "could not read 1 folder"], 1234),
+            (["/nas", "", "it is on nfs4", ""], 0),
         ] {
-            push_string(&mut tail, value);
+            for value in values {
+                push_string(&mut tail, value);
+            }
+            push_u32(&mut tail, tracks);
         }
         assert!(
             section.ends_with(&tail),
-            "path, name, reason and problem per root"
+            "path, name, reason, problem and track count per root"
         );
     }
 
@@ -4967,7 +5051,8 @@ mod tests {
                 SECTION_LIBRARY_META,
                 SECTION_METADATA,
                 SECTION_SETTINGS,
-                SECTION_LASTFM
+                SECTION_LASTFM,
+                SECTION_QUEUE_UNDO
             ]
         );
     }
@@ -5550,6 +5635,183 @@ mod tests {
         let _ = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
         // SAFETY: `handle` came from `ferrous_ffi_bridge_create` and is not used again.
         unsafe { ferrous_ffi_bridge_destroy(handle) };
+    }
+
+    #[test]
+    fn queue_undo_section_layout_matches_the_qt_decoder() {
+        // Mirrored by BridgeClientTest::queueUndoSectionIsDecoded.
+        let state = QueueUndoState {
+            offer_id: 7,
+            kind: Some(super::super::QueueUndoKind::Removed),
+            track_count: 3,
+            restored: Some(super::super::QueueUndoRestored {
+                id: 5,
+                revision: 9,
+                ranges: vec![(1, 2), (6, 1)],
+            }),
+        };
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&7_u64.to_le_bytes());
+        expected.push(2);
+        expected.extend_from_slice(&3_u32.to_le_bytes());
+        expected.extend_from_slice(&5_u64.to_le_bytes());
+        expected.extend_from_slice(&9_u64.to_le_bytes());
+        expected.extend_from_slice(&2_u32.to_le_bytes());
+        for value in [1_u32, 2, 6, 1] {
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(encode_queue_undo_section(&state), expected);
+        assert_eq!(
+            encode_queue_undo_section(&QueueUndoState::default()),
+            [0_u8; 33].to_vec()
+        );
+        assert!(matches!(
+            parse_binary_command(&encode_command(68, &7_u64.to_le_bytes())),
+            Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Undo(7))))
+        ));
+        assert!(parse_binary_command(&encode_command(68, &[1, 2, 3])).is_err());
+    }
+
+    /// The UI's view of the queue undo section.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct TestQueueUndo {
+        offer_id: u64,
+        kind: u8,
+        track_count: u32,
+        restored_id: u64,
+        restored_revision: u64,
+        ranges: Vec<(u32, u32)>,
+    }
+
+    fn decode_queue_undo_section(section: &[u8]) -> TestQueueUndo {
+        let mut offset = 0;
+        let mut decoded = TestQueueUndo {
+            offer_id: read_u64(section, &mut offset),
+            ..TestQueueUndo::default()
+        };
+        decoded.kind = section[offset];
+        offset += 1;
+        decoded.track_count = read_u32(section, &mut offset);
+        decoded.restored_id = read_u64(section, &mut offset);
+        decoded.restored_revision = read_u64(section, &mut offset);
+        for _ in 0..read_u32(section, &mut offset) {
+            decoded.ranges.push((
+                read_u32(section, &mut offset),
+                read_u32(section, &mut offset),
+            ));
+        }
+        assert_eq!(offset, section.len(), "the whole section is read");
+        decoded
+    }
+
+    /// What the UI learns from the bridge's packets about the queue.
+    #[derive(Default)]
+    struct TestUiUndo {
+        queue: TestUiQueue,
+        undo: TestQueueUndo,
+        errors: Vec<String>,
+    }
+
+    impl TestUiUndo {
+        fn wait(
+            &mut self,
+            handle: *mut FerrousFfiBridge,
+            what: &str,
+            done: impl Fn(&Self) -> bool,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done(self) {
+                assert!(
+                    Instant::now() < deadline,
+                    "{what}: {:?} {:?}",
+                    self.queue.paths,
+                    self.undo
+                );
+                let Some(packet) = ffi_next_event(handle, Duration::from_millis(100)) else {
+                    continue;
+                };
+                if let Some(queue) = section(&packet, SECTION_QUEUE) {
+                    self.queue.apply(&queue);
+                }
+                if let Some(undo) = section(&packet, SECTION_QUEUE_UNDO) {
+                    self.undo = decode_queue_undo_section(&undo);
+                }
+                if let Some(error) = section(&packet, SECTION_ERROR) {
+                    // The category, the severity, the subject, the message.
+                    let mut offset = 2;
+                    let _subject = read_string(&error, &mut offset);
+                    let message = read_string(&error, &mut offset);
+                    self.errors
+                        .push(format!("{} {} {message}", error[0], error[1]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cleared_queue_comes_back_through_the_protocol_and_a_stale_undo_is_refused() {
+        let dir = std::env::temp_dir().join(format!("ferrous-ffi-undo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let tracks: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                let path = dir.join(format!("{name}.flac"));
+                std::fs::write(&path, b"stub").expect("fixture track");
+                std::fs::canonicalize(path)
+                    .expect("canonical track")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let handle = ffi_bridge_with(BridgeRuntimeOptions::default());
+        let mut ui = TestUiUndo::default();
+        let mut append = Vec::new();
+        append.extend_from_slice(&3_u32.to_le_bytes());
+        for track in &tracks {
+            append.extend_from_slice(&u32::try_from(track.len()).unwrap().to_le_bytes());
+            append.extend_from_slice(track.as_bytes());
+        }
+        assert!(ffi_send_binary(handle, &encode_command(16, &append)));
+        ui.wait(handle, "the appended queue", |ui| ui.queue.paths == tracks);
+
+        assert!(ffi_send_binary(handle, &encode_command(12, &[])));
+        ui.wait(handle, "the undo of the clear", |ui| {
+            ui.queue.paths.is_empty() && ui.undo.offer_id != 0
+        });
+        assert_eq!((ui.undo.kind, ui.undo.track_count), (1, 3));
+        let id = ui.undo.offer_id;
+        assert!(ffi_send_binary(
+            handle,
+            &encode_command(68, &id.to_le_bytes())
+        ));
+        ui.wait(handle, "the restored queue", |ui| {
+            ui.queue.paths == tracks && ui.undo.restored_id == id
+        });
+        assert_eq!(ui.undo.offer_id, 0);
+        // Later refreshes of the rows' details move the revision on, and
+        // leave the restored rows where they are.
+        assert!(ui.undo.restored_revision > 0);
+        assert!(ui.undo.restored_revision <= ui.queue.revision);
+
+        // The same undo again is stale: the queue changed since the clear.
+        assert!(ffi_send_binary(
+            handle,
+            &encode_command(68, &id.to_le_bytes())
+        ));
+        ui.wait(handle, "the refusal", |ui| !ui.errors.is_empty());
+        // A Playback (1) warning (0).
+        assert_eq!(
+            ui.errors,
+            [format!(
+                "1 0 {}",
+                super::super::queue_undo::STALE_UNDO_MESSAGE
+            )]
+        );
+        assert_eq!(ui.queue.paths, tracks);
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        unsafe { ferrous_ffi_bridge_destroy(handle) };
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Start a bridge with `options` behind the same handle the UI gets.

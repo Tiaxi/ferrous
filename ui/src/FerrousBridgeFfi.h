@@ -66,6 +66,8 @@ std::uint8_t *ferrous_ffi_tag_editor_save(
     std::size_t *len_out);
 std::uint8_t *ferrous_ffi_tag_editor_rename(
     const std::uint8_t *data, std::size_t size, std::size_t *len_out);
+std::uint8_t *ferrous_ffi_tag_editor_preview_rename(
+    const std::uint8_t *data, std::size_t size, std::size_t *len_out);
 void ferrous_ffi_tag_editor_free_buffer(std::uint8_t *ptr, std::size_t len);
 std::uint8_t *ferrous_ffi_waveform_window_cancellable(
     const std::uint8_t *path_ptr, std::size_t path_len,

@@ -5,6 +5,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import "../components" as Components
+import "../dialogs" as Dialogs
 
 ScrollView {
     id: root
@@ -17,6 +18,18 @@ ScrollView {
     required property var stepScrollView
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
+
+    // Removing a root takes its tracks out of the library, so it asks first.
+    function requestRemoveRoot(path, displayName, trackCount) {
+        removeRootConfirmDialog.rootPath = path
+        removeRootConfirmDialog.message = displayName === path
+            ? "Remove the library folder \u201c" + path + "\u201d?"
+            : "Remove the library folder \u201c" + displayName + "\u201d (" + path + ")?"
+        const tracks = trackCount === 1 ? "1 track" : trackCount + " tracks"
+        removeRootConfirmDialog.details = "This removes its " + tracks + " from the library. "
+            + "The files themselves stay on disk, and adding the folder again brings them back."
+        removeRootConfirmDialog.open()
+    }
 
     clip: true
     contentWidth: availableWidth
@@ -140,6 +153,7 @@ ScrollView {
                             readonly property string rootDisplayName: rootEntry.displayName || rootPath
                             readonly property string unwatchedReason: rootEntry.unwatchedReason || ""
                             readonly property string scanProblem: rootEntry.scanProblem || ""
+                            readonly property int trackCount: rootEntry.trackCount || 0
 
                             width: ListView.view.width
                             height: Math.max(52, rootRow.implicitHeight + 12)
@@ -214,14 +228,26 @@ ScrollView {
                                 }
 
                                 ToolButton {
-                                    text: "Remove"
-                                    onClicked: root.uiBridge.removeLibraryRoot(rootPath)
+                                    objectName: "libraryRootRemoveButton"
+                                    text: "Remove..."
+                                    onClicked: root.requestRemoveRoot(rootPath, rootDisplayName, trackCount)
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+
+        Dialogs.ConfirmDialog {
+            id: removeRootConfirmDialog
+            objectName: "removeLibraryRootConfirmDialog"
+            property string rootPath: ""
+            uiPalette: root.uiPalette
+            windowRoot: root.windowRoot
+            title: "Remove Library Folder"
+            confirmText: "Remove Folder"
+            onConfirmed: root.uiBridge.removeLibraryRoot(rootPath)
         }
     }
 }

@@ -12,6 +12,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkProxy>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickWindow>
@@ -224,6 +225,13 @@ private slots:
     void batchRemovalCodecPreservesIndices();
     void pathListsFarBeyond64KiBAreSentWholeInOneCommand();
     void thousandsOfAppendedPathsReachTheBackendInOrder();
+    void queueUndoSectionIsDecoded();
+    void undoSendsTheOfferedChangeAndSelectsTheRestoredRowsOnce();
+    void aClearedQueueComesBackThroughTheBackend();
+    void tagEditorPreviewsRenamesWithoutRenaming();
+    void aRenamePreviewOfRowsLoadedAgainIsOutOfDate();
+    void anUndoOfAClearWhileStoppedPlaysTheStoppedTrackNext();
+    void artworkGoesToTheTrackItWasSearchedForAfterPlaybackMovesOn();
     void commandsOverTheBoundAreRefusedVisibly();
     void stringsPastTheOldLengthLimitCrossWhole();
     void playAtDoesNotEmitImmediateSnapshotChanged();
@@ -940,6 +948,41 @@ void BridgeClientTest::tagEditorRenameKeepsRowsInPlace() {
     QVERIFY(!editor.statusIsError());
 }
 
+void BridgeClientTest::aRenamePreviewOfRowsLoadedAgainIsOutOfDate() {
+    BridgeClient bridge;
+    isolateBridgeClient(bridge);
+    TagEditorController editor(&bridge);
+    QVERIFY(loadTagEditorRows(
+        editor, tagEditorRows(2, 2),
+        {{TagEditorController::Operation::PreviewRename,
+          QByteArray(R"({"results":[{"path":"/fixture/Album 0/1.flac","ok":true,)"
+                     R"("newPath":"/fixture/Album 0/01 Song 1.flac"}]})")},
+         {TagEditorController::Operation::Rename, QByteArray(R"({"results":[]})")}}));
+    editor.setSelectedRows({0});
+    QSignalSpy previewed(&editor, &TagEditorController::renamePreviewReady);
+    QVERIFY(editor.previewRenameSelectedFiles());
+    QTRY_COMPARE(previewed.size(), 1);
+
+    // The files are read again: what the preview showed may be gone.
+    editor.reload();
+    QTRY_VERIFY(!editor.loading());
+    QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+    QVERIFY(!editor.renamePreviewedFiles());
+    QVERIFY(!editor.saving());
+    QVERIFY(editor.statusIsError());
+    QVERIFY2(editor.statusText().contains(QStringLiteral("out of date")),
+             qPrintable(editor.statusText()));
+    QCOMPARE(renamed.size(), 0);
+
+    // A fresh preview can be renamed, once.
+    editor.setSelectedRows({0});
+    QVERIFY(editor.previewRenameSelectedFiles());
+    QTRY_COMPARE(previewed.size(), 2);
+    QVERIFY(editor.renamePreviewedFiles());
+    QTRY_COMPARE(renamed.size(), 1);
+    QVERIFY(!editor.renamePreviewedFiles());
+}
+
 void BridgeClientTest::tagEditorExitDoesNotWaitForAStalledSave() {
     auto stalled = std::make_shared<QSemaphore>();
     auto finished = std::make_shared<QSemaphore>();
@@ -1597,6 +1640,362 @@ QByteArray queuePacket(const QByteArray &section) {
 }
 
 } // namespace
+
+void BridgeClientTest::queueUndoSectionIsDecoded() {
+    // Mirrored by queue_undo_section_layout_matches_the_qt_decoder in
+    // src/frontend_bridge/ffi.rs.
+    QByteArray section;
+    putLe<quint64>(section, 7);
+    putLe<quint8>(section, BinaryBridgeCodec::QueueUndoRemoved);
+    putLe<quint32>(section, 3);
+    putLe<quint64>(section, 5);
+    putLe<quint64>(section, 9);
+    putLe<quint32>(section, 2);
+    for (quint32 value : {1u, 2u, 6u, 1u}) {
+        putLe<quint32>(section, value);
+    }
+    const auto packet = [](const QByteArray &payload) {
+        QByteArray out;
+        putLe<quint32>(out, BinaryBridgeCodec::kSnapshotMagic);
+        putLe<quint32>(out, static_cast<quint32>(12 + 4 + payload.size()));
+        putLe<quint16>(out, BinaryBridgeCodec::SectionQueueUndo);
+        putLe<quint16>(out, 0);
+        putLe<quint32>(out, static_cast<quint32>(payload.size()));
+        out.append(payload);
+        return out;
+    };
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet(section), &decoded, &error),
+             qPrintable(error));
+    QVERIFY(decoded.queueUndo.present);
+    QCOMPARE(decoded.queueUndo.offerId, quint64(7));
+    QCOMPARE(decoded.queueUndo.kind, int(BinaryBridgeCodec::QueueUndoRemoved));
+    QCOMPARE(decoded.queueUndo.trackCount, 3);
+    QCOMPARE(decoded.queueUndo.restoredId, quint64(5));
+    QCOMPARE(decoded.queueUndo.restoredRevision, quint64(9));
+    QCOMPARE(decoded.queueUndo.restoredRanges,
+             (QVector<QPair<int, int>>{{1, 2}, {6, 1}}));
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(packet(QByteArray(33, '\0')), &decoded, &error));
+    QCOMPARE(decoded.queueUndo.offerId, quint64(0));
+
+    // An unknown kind, a range count past the payload, and trailing bytes
+    // are refused.
+    QByteArray unknownKind = section;
+    unknownKind[8] = 4;
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(unknownKind), &decoded, &error));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(section.left(section.size() - 4)),
+                                                     &decoded, &error));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(section + QByteArray(1, '\0')),
+                                                     &decoded, &error));
+}
+
+void BridgeClientTest::undoSendsTheOfferedChangeAndSelectsTheRestoredRowsOnce() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QSignalSpy changed(&client, &BridgeClient::queueUndoChanged);
+    QSignalSpy restored(&client, &BridgeClient::queueUndoRestored);
+
+    // Nothing is offered: nothing is sent.
+    client.undoQueueChange();
+    QVERIFY(sent.isEmpty());
+
+    auto snapshot = fullQueueSnapshot(4, numberedPaths(3));
+    snapshot.queueUndo.present = true;
+    snapshot.queueUndo.offerId = 11;
+    snapshot.queueUndo.kind = BinaryBridgeCodec::QueueUndoRemoved;
+    snapshot.queueUndo.trackCount = 2;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(changed.count(), 1);
+    QCOMPARE(client.queueUndoId(), 11.0);
+    QCOMPARE(client.queueUndoKind(), int(BinaryBridgeCodec::QueueUndoRemoved));
+    QCOMPARE(client.queueUndoTrackCount(), 2);
+    client.undoQueueChange();
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandU64(BinaryBridgeCodec::CmdUndoQueueChange, 11));
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()), quint16(68));
+
+    // The undo's rows arrive with the rows they name, and are selected once.
+    snapshot = fullQueueSnapshot(6, numberedPaths(5));
+    snapshot.queueUndo.present = true;
+    snapshot.queueUndo.restoredId = 11;
+    snapshot.queueUndo.restoredRevision = 6;
+    snapshot.queueUndo.restoredRanges = {{1, 1}, {3, 2}};
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.queueUndoId(), 0.0);
+    QCOMPARE(changed.count(), 2);
+    QCOMPARE(restored.count(), 1);
+    QCOMPARE(restored[0][0].toList(), (QVariantList{1, 3, 4}));
+    snapshot.queue = {};
+    client.processBinarySnapshot(snapshot);
+    QCOMPARE(restored.count(), 1);
+
+    // Rows the UI does not have yet are not selected.
+    snapshot = fullQueueSnapshot(7, numberedPaths(5));
+    snapshot.queueUndo.present = true;
+    snapshot.queueUndo.restoredId = 12;
+    snapshot.queueUndo.restoredRevision = 8;
+    snapshot.queueUndo.restoredRanges = {{0, 1}};
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(restored.count(), 1);
+}
+
+void BridgeClientTest::aClearedQueueComesBackThroughTheBackend() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (const char *name : {"a.flac", "b.flac", "c.flac"}) {
+        const QString path = base + QLatin1Char('/') + QLatin1String(name);
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("stub"), qint64(4));
+        paths.push_back(path);
+    }
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
+    // A queue an earlier test left behind is cleared first.
+    bridge.clearQueue();
+    bridge.appendPaths(paths);
+    // This queue, not one an earlier test left in the saved session.
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 3 && bridge.queuePathAt(0) == paths[0]
+                                 && bridge.queuePathAt(2) == paths[2],
+                             10000);
+    bridge.selectQueueIndex(1);
+
+    bridge.clearQueue();
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 0
+                                 && bridge.queueUndoKind() == BinaryBridgeCodec::QueueUndoCleared,
+                             10000);
+    QCOMPARE(bridge.queueUndoTrackCount(), 3);
+    const double cleared = bridge.queueUndoId();
+    QSignalSpy restored(&bridge, &BridgeClient::queueUndoRestored);
+    bridge.undoQueueChange();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 3, 10000);
+    for (int i = 0; i < paths.size(); ++i) {
+        QCOMPARE(bridge.queuePathAt(i), paths[i]);
+    }
+    QTRY_COMPARE(restored.count(), 1);
+    QCOMPARE(restored[0][0].toList(), QVariantList{1});
+    QCOMPARE(bridge.selectedQueueIndex(), 1);
+    QTRY_COMPARE(bridge.queueUndoId(), 0.0);
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
+
+    // Undoing the same change again is refused where the user sees it.
+    bridge.m_queueUndoId = static_cast<quint64>(cleared);
+    bridge.undoQueueChange();
+    QTRY_COMPARE_WITH_TIMEOUT(errors.count(), 1, 10000);
+    QVERIFY2(errors[0][0].toString().contains(QStringLiteral("Nothing was undone")),
+             qPrintable(errors[0][0].toString()));
+    // It changed nothing, so it is a warning about the queue.
+    QCOMPARE(errors[0][1].toInt(), int(BinaryBridgeCodec::ErrorCategoryPlayback));
+    QCOMPARE(errors[0][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityWarning));
+    QCOMPARE(bridge.queueLength(), 3);
+    // Leave no queue of removed fixtures to the tests after this one.
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    isolateBridgeClient(bridge);
+}
+
+void BridgeClientTest::tagEditorPreviewsRenamesWithoutRenaming() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (const char *name : {"first.ac3", "second.ac3"}) {
+        const QString path = base + QLatin1Char('/') + QLatin1String(name);
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(QByteArray(128, '\0')), qint64(128));
+        paths.push_back(path);
+    }
+    BridgeClient bridge;
+    isolateBridgeClient(bridge);
+    TagEditorController editor(&bridge);
+    QVERIFY(editor.openForPaths(paths));
+    QTRY_VERIFY(!editor.loading());
+    // Both are named after the same tags.
+    for (int row = 0; row < 2; ++row) {
+        editor.setCell(row, QStringLiteral("title"), QStringLiteral("Twin"));
+        editor.setCell(row, QStringLiteral("trackNo"), QStringLiteral("1"));
+    }
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QVERIFY(saved.first().first().toBool());
+    editor.selectAllRows();
+
+    QSignalSpy previewed(&editor, &TagEditorController::renamePreviewReady);
+    QVERIFY(editor.previewRenameSelectedFiles());
+    QVERIFY(!editor.saving());
+    QTRY_COMPARE(previewed.size(), 1);
+    QVERIFY(previewed[0][1].toString().isEmpty());
+    const QVariantList rows = previewed[0][0].toList();
+    QCOMPARE(rows.size(), 2);
+    const QVariantMap first = rows[0].toMap();
+    const QVariantMap second = rows[1].toMap();
+    QCOMPARE(first.value(QStringLiteral("oldName")).toString(), QStringLiteral("first.ac3"));
+    QVERIFY(first.value(QStringLiteral("ok")).toBool());
+    QVERIFY(!first.value(QStringLiteral("unchanged")).toBool());
+    QVERIFY2(first.value(QStringLiteral("newName")).toString().contains(QStringLiteral("Twin")),
+             qPrintable(first.value(QStringLiteral("newName")).toString()));
+    QCOMPARE(second.value(QStringLiteral("newName")), first.value(QStringLiteral("newName")));
+    QVERIFY(!second.value(QStringLiteral("ok")).toBool());
+    QVERIFY(second.value(QStringLiteral("error")).toString().contains(QStringLiteral("conflicts")));
+    // Nothing on disk or in the editor changed.
+    for (const QString &path : paths) {
+        QVERIFY(QFile::exists(path));
+    }
+    QCOMPARE(QDir(base).entryList(QDir::Files).size(), 2);
+    QCOMPARE(editor.loadedPaths(), paths);
+}
+
+namespace {
+
+// A 16-bit mono PCM WAV of `millis` milliseconds of a quiet tone at `path`.
+bool writeTestWav(const QString &path, int millis) {
+    constexpr quint32 rate = 8000;
+    const quint32 frames = rate * static_cast<quint32>(millis) / 1000;
+    QByteArray bytes;
+    const auto le32 = [&bytes](quint32 value) { putLe<quint32>(bytes, value); };
+    const auto le16 = [&bytes](quint16 value) { putLe<quint16>(bytes, value); };
+    bytes.append("RIFF");
+    le32(36 + frames * 2);
+    bytes.append("WAVEfmt ");
+    le32(16);
+    le16(1);
+    le16(1);
+    le32(rate);
+    le32(rate * 2);
+    le16(2);
+    le16(16);
+    bytes.append("data");
+    le32(frames * 2);
+    for (quint32 frame = 0; frame < frames; ++frame) {
+        putLe<qint16>(bytes, static_cast<qint16>((frame % 16) < 8 ? 800 : -800));
+    }
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+}
+
+} // namespace
+
+void BridgeClientTest::anUndoOfAClearWhileStoppedPlaysTheStoppedTrackNext() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (const char *name : {"a.wav", "b.wav", "c.wav"}) {
+        const QString path = base + QLatin1Char('/') + QLatin1String(name);
+        // Long enough not to end between Play and Pause.
+        QVERIFY(writeTestWav(path, 120000));
+        paths.push_back(path);
+    }
+    // The GStreamer backend, playing into the fake output CTest sets up.
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
+    bridge.clearQueue();
+    bridge.appendPaths(paths);
+    // This queue, not one an earlier test left in the saved session.
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 3 && bridge.queuePathAt(0) == paths[0]
+                                 && bridge.queuePathAt(2) == paths[2],
+                             10000);
+
+    // B plays and is stopped, then C is selected without playing it. The
+    // fake output plays faster than real time, so each step ends in a state
+    // that holds: B is paused before it can end, then stopped.
+    bridge.playAt(1);
+    bridge.pause();
+    QTRY_VERIFY2_WITH_TIMEOUT(bridge.playbackState() == QStringLiteral("Paused")
+                                  && bridge.currentTrackPath() == paths[1],
+                              qPrintable(bridge.playbackState() + QLatin1Char(' ')
+                                         + bridge.currentTrackPath()),
+                              10000);
+    bridge.stop();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.playbackState(), QStringLiteral("Stopped"), 10000);
+    QCOMPARE(bridge.currentTrackPath(), paths[1]);
+    bridge.selectQueueIndex(2);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.selectedQueueIndex(), 2, 10000);
+
+    bridge.clearQueue();
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 0
+                                 && bridge.queueUndoKind() == BinaryBridgeCodec::QueueUndoCleared,
+                             10000);
+    bridge.undoQueueChange();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 3, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.currentTrackPath(), paths[1], 10000);
+    QCOMPARE(bridge.playbackState(), QStringLiteral("Stopped"));
+    QCOMPARE(bridge.selectedQueueIndex(), 2);
+
+    // Play starts B, the track that was current, not the selected C.
+    bridge.play();
+    bridge.pause();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.playbackState(), QStringLiteral("Paused"), 10000);
+    QCOMPARE(bridge.currentTrackPath(), paths[1]);
+    QCOMPARE(bridge.playingQueueIndex(), 1);
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
+
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    isolateBridgeClient(bridge);
+}
+
+void BridgeClientTest::artworkGoesToTheTrackItWasSearchedForAfterPlaybackMovesOn() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    // The search must not reach the network: every request fails at once.
+    client.m_itunesArtworkNetwork.setProxy(
+        QNetworkProxy(QNetworkProxy::HttpProxy, QStringLiteral("127.0.0.1"), 9));
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    const auto playing = [](const QString &path, const QString &album) {
+        BinaryBridgeCodec::DecodedSnapshot snapshot;
+        snapshot.playback.present = true;
+        snapshot.playback.state = 1;
+        snapshot.playback.currentPath = path;
+        snapshot.metadata.present = true;
+        snapshot.metadata.sourcePath = path;
+        snapshot.metadata.title = QStringLiteral("Song");
+        snapshot.metadata.artist = QStringLiteral("Artist");
+        snapshot.metadata.album = album;
+        return snapshot;
+    };
+    const QString a = QStringLiteral("/fixture/Album A/01 Song.flac");
+    const QString b = QStringLiteral("/fixture/Album B/01 Song.flac");
+    QVERIFY(client.processBinarySnapshot(playing(a, QStringLiteral("Album A"))));
+    QCOMPARE(client.currentTrackPath(), a);
+
+    // The dialog opens on A and searches for A's album.
+    client.searchCurrentTrackArtworkSuggestions();
+    QTRY_VERIFY_WITH_TIMEOUT(!client.itunesArtworkLoading(), 10000);
+    QCOMPARE(client.itunesArtworkTarget().value(QStringLiteral("album")).toString(),
+             QStringLiteral("Album A"));
+    client.m_itunesArtworkResults = {
+        QVariantMap{{QStringLiteral("normalizedPath"), QStringLiteral("/fixture/cache/a.jpg")}}};
+
+    // Playback moves on to B while the user confirms.
+    QVERIFY(client.processBinarySnapshot(playing(b, QStringLiteral("Album B"))));
+    QCOMPARE(client.currentTrackPath(), b);
+    client.applyItunesArtworkSuggestion(0);
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandStringPair(
+                          BinaryBridgeCodec::CmdApplyAlbumArt, a,
+                          QStringLiteral("/fixture/cache/a.jpg")));
+
+    // Closing the dialog drops the target with the suggestions.
+    client.clearItunesArtworkSuggestions();
+    QVERIFY(client.itunesArtworkTarget().isEmpty());
+}
 
 void BridgeClientTest::queueDeltasChangeOnlyTheirRowsWithoutAReset() {
     BridgeClient client;
@@ -4170,7 +4569,7 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     };
 
     // The library meta section as Rust encodes it: path, name, the reason
-    // a root is not watched, and its scan problem, per root.
+    // a root is not watched, its scan problem, and its track count, per root.
     for (quint32 value : {2u, 0u, 0u, 0u}) append(value); // roots, tracks, artists, albums
     append(quint8(0));                                       // scan in progress
     append(qint32(0));                                       // sort mode
@@ -4180,10 +4579,15 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     append(float(-1.0f));
     append(quint16(2));
     for (const QString &value : {QStringLiteral("/music"), QStringLiteral("Music"), QString(),
-                                 QStringLiteral("could not read 1 folder"), QStringLiteral("/nas"),
-                                 QString(), QStringLiteral("it is on nfs4"), QString()}) {
+                                 QStringLiteral("could not read 1 folder")}) {
         text(value);
     }
+    append(quint32(1234));
+    for (const QString &value : {QStringLiteral("/nas"), QString(), QStringLiteral("it is on nfs4"),
+                                 QString()}) {
+        text(value);
+    }
+    append(quint32(0));
     BinaryBridgeCodec::DecodedSnapshot decoded;
     QString error;
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionLibraryMeta),
@@ -4196,6 +4600,8 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     QCOMPARE(decoded.library.rootEntries[1].unwatchedReason, QStringLiteral("it is on nfs4"));
     QCOMPARE(decoded.library.rootEntries[0].scanProblem, QStringLiteral("could not read 1 folder"));
     QVERIFY(decoded.library.rootEntries[1].scanProblem.isEmpty());
+    QCOMPARE(decoded.library.rootEntries[0].trackCount, 1234);
+    QCOMPARE(decoded.library.rootEntries[1].trackCount, 0);
 
     // The settings section ends with library watching, and older payloads
     // without it default on.
@@ -4260,6 +4666,7 @@ void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
     share.name = QStringLiteral("NAS");
     share.unwatchedReason = QStringLiteral("it is on nfs4");
     watched.scanProblem = QStringLiteral("could not read 1 folder");
+    share.trackCount = 42;
     snapshot.library.rootEntries = {watched, share};
     snapshot.library.rootPaths = {watched.path, share.path};
 
@@ -4272,6 +4679,7 @@ void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
              QStringLiteral("it is on nfs4"));
     QCOMPARE(entries[0].toMap().value(QStringLiteral("scanProblem")).toString(),
              QStringLiteral("could not read 1 folder"));
+    QCOMPARE(entries[1].toMap().value(QStringLiteral("trackCount")).toInt(), 42);
     QCOMPARE(errors.count(), 1);
     QCOMPARE(errors[0][0].toString(),
              QStringLiteral("Not watched for changes in library folder NAS: it is on nfs4"));

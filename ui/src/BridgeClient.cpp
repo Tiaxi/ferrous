@@ -1829,6 +1829,18 @@ int BridgeClient::queueLength() const {
     return m_queueLength;
 }
 
+double BridgeClient::queueUndoId() const {
+    return static_cast<double>(m_queueUndoId);
+}
+
+int BridgeClient::queueUndoKind() const {
+    return m_queueUndoKind;
+}
+
+int BridgeClient::queueUndoTrackCount() const {
+    return m_queueUndoTrackCount;
+}
+
 QString BridgeClient::queueDurationText() const {
     return m_queueDurationText;
 }
@@ -2155,6 +2167,10 @@ bool BridgeClient::globalSearchModelRetained() const {
 
 QObject *BridgeClient::globalSearchModel() const {
     return const_cast<GlobalSearchResultsModel *>(&m_globalSearchModel);
+}
+
+QVariantMap BridgeClient::itunesArtworkTarget() const {
+    return m_itunesArtworkTarget;
 }
 
 QVariantList BridgeClient::itunesArtworkResults() const {
@@ -2709,6 +2725,14 @@ void BridgeClient::clearQueue() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdClearQueue));
 }
 
+void BridgeClient::undoQueueChange() {
+    if (m_queueUndoId == 0) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU64(
+        BinaryBridgeCodec::CmdUndoQueueChange, m_queueUndoId));
+}
+
 void BridgeClient::replaceAlbumAt(int index) {
     if (index < 0 || index >= m_libraryAlbumTrackPaths.size()) {
         return;
@@ -3174,6 +3198,14 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
 void BridgeClient::searchCurrentTrackArtworkSuggestions() {
     const QString album = m_currentTrackAlbum.trimmed();
     const QString artist = m_currentTrackArtist.trimmed();
+    // The suggestions are for this track's album, so applying one changes
+    // it even after playback has moved on to another.
+    m_itunesArtworkTarget = QVariantMap{
+        {QStringLiteral("trackPath"), m_currentTrackPath},
+        {QStringLiteral("album"), album},
+        {QStringLiteral("artist"), artist},
+        {QStringLiteral("coverPath"), m_currentTrackCoverPath},
+    };
 
     cancelItunesArtworkRequests();
     m_itunesArtworkGeneration++;
@@ -3464,6 +3496,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
 void BridgeClient::clearItunesArtworkSuggestions() {
     cancelItunesArtworkRequests();
     m_itunesArtworkGeneration++;
+    m_itunesArtworkTarget.clear();
     m_itunesArtworkCandidates.clear();
     m_itunesArtworkResults.clear();
     m_itunesArtworkLoading = false;
@@ -3582,7 +3615,8 @@ void BridgeClient::applyItunesArtworkSuggestion(int index) {
     const QVariantMap row = m_itunesArtworkResults[index].toMap();
     const QString normalizedPath = normalizeLocalPathArg(
         row.value(QStringLiteral("normalizedPath")).toString());
-    const QString trackPath = normalizeLocalPathArg(m_currentTrackPath);
+    const QString trackPath = normalizeLocalPathArg(
+        m_itunesArtworkTarget.value(QStringLiteral("trackPath")).toString());
     if (normalizedPath.isEmpty() || trackPath.isEmpty()) {
         if (trackPath.isEmpty()) {
             return;
@@ -4755,7 +4789,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         && !snapshot.library.present
         && !snapshot.metadata.present
         && !snapshot.settings.present
-        && !snapshot.lastfm.present) {
+        && !snapshot.lastfm.present
+        && !snapshot.queueUndo.present) {
         return false;
     }
 
@@ -5543,6 +5578,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             entry.insert(QStringLiteral("searchLabel"), rootSearchLabel(root.path, trimmedName));
             entry.insert(QStringLiteral("unwatchedReason"), root.unwatchedReason);
             entry.insert(QStringLiteral("scanProblem"), root.scanProblem);
+            entry.insert(QStringLiteral("trackCount"), root.trackCount);
             rootEntries.push_back(entry);
             // Told once per root and reason; the preferences show it while it lasts.
             const QString reported = root.path + QLatin1Char('\n') + root.unwatchedReason;
@@ -5629,6 +5665,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     finishSnapshotSection(snapshotLibraryMs);
+    if (snapshot.queueUndo.present) {
+        applyQueueUndo(snapshot.queueUndo);
+    }
     if (libraryRevealChanged) {
         emit libraryRevealRequested(m_libraryExpandedKeys, m_libraryViewSelectionKey);
     }
@@ -5682,6 +5721,33 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     return changed;
+}
+
+void BridgeClient::applyQueueUndo(const BinaryBridgeCodec::DecodedQueueUndo &undo) {
+    if (m_queueUndoId != undo.offerId || m_queueUndoKind != undo.kind
+        || m_queueUndoTrackCount != undo.trackCount) {
+        m_queueUndoId = undo.offerId;
+        m_queueUndoKind = undo.kind;
+        m_queueUndoTrackCount = undo.trackCount;
+        emit queueUndoChanged();
+    }
+    // Each undo's rows are selected once, and only while the rows are the
+    // ones it left; later edits withdraw them in the backend.
+    if (undo.restoredId == 0 || undo.restoredId == m_queueUndoRestoredId
+        || m_queueRevision == 0 || undo.restoredRevision > m_queueRevision) {
+        return;
+    }
+    m_queueUndoRestoredId = undo.restoredId;
+    QVariantList rows;
+    for (const auto &[start, count] : undo.restoredRanges) {
+        const qint64 end = std::min<qint64>(qint64{start} + count, m_queueLength);
+        for (qint64 row = start; row < end; ++row) {
+            rows.push_back(static_cast<int>(row));
+        }
+    }
+    if (!rows.isEmpty()) {
+        emit queueUndoRestored(rows);
+    }
 }
 
 QString BridgeClient::formatSeconds(double seconds) {

@@ -87,6 +87,39 @@ QtObject {
         }
     }
 
+    // An undo brought rows back; they are highlighted again, as they were
+    // when they were removed.
+    property Connections _queueUndoConnections: Connections {
+        target: root.uiBridge
+        ignoreUnknownSignals: true
+
+        function onQueueUndoRestored(rows) {
+            root.selectRestoredRows(rows)
+        }
+    }
+
+    function selectRestoredRows(rows) {
+        const indices = []
+        for (let i = 0; i < rows.length; ++i) {
+            const index = rows[i]
+            if (index >= 0 && index < root.uiBridge.queueLength) {
+                indices.push(index)
+            }
+        }
+        if (indices.length === 0) {
+            return
+        }
+        indices.sort(function(a, b) { return a - b })
+        root.setSelectedIndices(indices)
+        const selected = root.uiBridge.selectedQueueIndex
+        const primary = root.isIndexSelected(selected) ? selected : indices[0]
+        root.selectionAnchorIndex = primary
+        if (primary !== selected) {
+            root.uiBridge.selectQueueIndex(primary)
+        }
+        root.ensureIndexVisible(primary)
+    }
+
     // Move each selected row, and the anchor, to where `map` says it is
     // now; -1 drops it.
     function _remapSelection(map) {
@@ -447,6 +480,14 @@ QtObject {
 
         if (ctrl && !shift && event.key === Qt.Key_A) {
             root.selectAllItems()
+            event.accepted = true
+            return
+        }
+
+        // Delete reaches the queue only while the queue view has focus, so
+        // it never removes tracks the user is not looking at.
+        if (!ctrl && !shift && event.key === Qt.Key_Delete) {
+            root.removeSelectedTrack()
             event.accepted = true
             return
         }

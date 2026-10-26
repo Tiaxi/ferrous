@@ -5,6 +5,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import "../logic/PathUtils.js" as PathUtils
+import "." as Dialogs
 
 Dialog {
     id: root
@@ -40,8 +41,19 @@ Dialog {
         root.pendingApplyIndex = -1
     }
 
+    // The art of the track the suggestions are for. Once playback has moved
+    // on to another track, the art that track had when they were searched.
+    function targetArtworkSource() {
+        const target = root.uiBridge.itunesArtworkTarget || ({})
+        const targetPath = target.trackPath || ""
+        if (targetPath.length > 0 && targetPath !== (root.uiBridge.currentTrackPath || "")) {
+            return target.coverPath || ""
+        }
+        return root.uiBridge.currentTrackCoverPath || ""
+    }
+
     function refreshCurrentArtworkInfo() {
-        root.currentArtworkSource = root.uiBridge.currentTrackCoverPath || ""
+        root.currentArtworkSource = root.targetArtworkSource()
         const infoSource = PathUtils.pathFromAnyUrl(root.currentArtworkSource)
         if (infoSource.length <= 0) {
             root.currentArtworkInfo = ({})
@@ -74,13 +86,31 @@ Dialog {
         root.uiBridge.prepareItunesArtworkSuggestion(index)
     }
 
+    // Applying overwrites the album's cover, which Ferrous keeps no copy
+    // of, so it asks first when the album has one. The suggestion goes to
+    // the album it was searched for, which the question names, also if
+    // playback moves on while it is asked.
+    function applySuggestion(index) {
+        const target = root.uiBridge.itunesArtworkTarget || ({})
+        if ((target.coverPath || "").length === 0) {
+            root.uiBridge.applyItunesArtworkSuggestion(index)
+            root.close()
+            return
+        }
+        replaceCoverConfirmDialog.suggestionIndex = index
+        replaceCoverConfirmDialog.message = (target.album || "").length > 0
+            ? "Replace the album art of \u201c" + target.album + "\u201d"
+                + ((target.artist || "").length > 0 ? " by " + target.artist : "") + "?"
+            : "Replace the current album art with this artwork?"
+        replaceCoverConfirmDialog.open()
+    }
+
     function requestSuggestionApply(index) {
         const row = root.suggestionRowAt(index)
         if (root.suggestionRowReady(row)) {
             root.pendingPreviewIndex = -1
             root.pendingApplyIndex = -1
-            root.uiBridge.applyItunesArtworkSuggestion(index)
-            root.close()
+            root.applySuggestion(index)
             return
         }
         root.pendingPreviewIndex = -1
@@ -99,8 +129,7 @@ Dialog {
             if (root.suggestionRowReady(applyRow)) {
                 const resolvedIndex = root.pendingApplyIndex
                 root.clearPendingActionState()
-                root.uiBridge.applyItunesArtworkSuggestion(resolvedIndex)
-                root.close()
+                root.applySuggestion(resolvedIndex)
                 return
             }
             if ((((applyRow && (applyRow.assetError || "")) || "").length > 0)
@@ -129,6 +158,8 @@ Dialog {
 
     onClosed: {
         root.clearPendingActionState()
+        // Its suggestion goes with the suggestions cleared here.
+        replaceCoverConfirmDialog.close()
         root.uiBridge.clearItunesArtworkSuggestions()
         root.parent = Overlay.overlay
     }
@@ -426,6 +457,25 @@ Dialog {
                     }
                 }
             }
+        }
+    }
+
+    Dialogs.ConfirmDialog {
+        id: replaceCoverConfirmDialog
+        objectName: "replaceCoverConfirmDialog"
+        property int suggestionIndex: -1
+        // Over the viewer that holds this dialog, when one does.
+        parent: root.parent
+        uiPalette: root.uiPalette
+        windowRoot: root.windowRoot
+        title: "Replace Album Art"
+        details: "Ferrous saves the new artwork as the album's cover image, replacing a cover "
+            + "image that is there, or embeds it in the album's tracks in place of their artwork. "
+            + "It keeps no copy of the current album art."
+        confirmText: "Replace"
+        onConfirmed: {
+            root.uiBridge.applyItunesArtworkSuggestion(suggestionIndex)
+            root.close()
         }
     }
 }

@@ -7,6 +7,7 @@ use crossbeam_channel::Sender;
 use crate::playback::{PlaybackCommand, PlaybackEngine, PlaybackState};
 
 use super::queue_sync::QueueEdit;
+use super::queue_undo::{Before, Change, QueueUndoKind, STALE_UNDO_MESSAGE};
 use super::{
     sync_queue_details, try_send_event, BridgeError, BridgeEvent, BridgeQueueCommand, BridgeState,
     ErrorCategory,
@@ -18,12 +19,19 @@ pub(super) fn handle_queue_command(
     playback: &PlaybackEngine,
     event_tx: &Sender<BridgeEvent>,
 ) -> bool {
+    if let BridgeQueueCommand::Undo(id) = cmd {
+        return undo_queue_change(id, state, playback, event_tx);
+    }
     let validate_details = !matches!(
         cmd,
         BridgeQueueCommand::Select(_)
             | BridgeQueueCommand::PlayAt(_)
             | BridgeQueueCommand::Move { .. }
     );
+    // Clearing an empty queue leaves the queue an earlier change left, so
+    // that change can still be undone.
+    let keeps_undo = matches!(cmd, BridgeQueueCommand::Clear) && state.queue.is_empty();
+    let undoable = undoable_change(&cmd, state);
     let outcome = apply_queue_command_state(
         cmd,
         &mut state.queue,
@@ -34,6 +42,9 @@ pub(super) fn handle_queue_command(
         Some(QueueRowChange::Edit(edit)) => state.queue_sync.record(edit, state.queue.len()),
         Some(QueueRowChange::Reset) => state.queue_sync.reset(),
         None => {}
+    }
+    if outcome.row_change.is_some() && !keeps_undo {
+        state.queue_undo.record(undoable);
     }
     if outcome.changed && validate_details {
         sync_queue_details(state);
@@ -66,6 +77,145 @@ pub(super) fn handle_queue_command(
         );
     }
     outcome.changed
+}
+
+/// What `cmd` would take from the queue, for its undo. A cleared or
+/// replaced queue moves here, since the command replaces it anyway.
+fn undoable_change(cmd: &BridgeQueueCommand, state: &mut BridgeState) -> Option<Change> {
+    // Before a cleared or replaced queue moves out of `state`.
+    let current = current_row(state);
+    let (kind, before) = match cmd {
+        BridgeQueueCommand::Clear => (
+            QueueUndoKind::Cleared,
+            Before::Queue(std::mem::take(&mut state.queue)),
+        ),
+        BridgeQueueCommand::Replace { .. } => (
+            QueueUndoKind::Replaced,
+            Before::Queue(std::mem::take(&mut state.queue)),
+        ),
+        BridgeQueueCommand::Remove(index) => (
+            QueueUndoKind::Removed,
+            removed_rows(&state.queue, std::slice::from_ref(index)),
+        ),
+        BridgeQueueCommand::RemoveMany(indices) => {
+            (QueueUndoKind::Removed, removed_rows(&state.queue, indices))
+        }
+        _ => return None,
+    };
+    Some(Change {
+        kind,
+        before,
+        selected: state.selected_queue_index,
+        current,
+    })
+}
+
+/// The row of the track the engine has open, playing, paused or stopped.
+/// A stopped engine reports the track but no row, so the first row with its
+/// path stands for it, the row the queue view marks as current.
+fn current_row(state: &BridgeState) -> Option<usize> {
+    let path = state.playback.current.as_ref();
+    state
+        .playback
+        .current_queue_index
+        .filter(|row| path.is_none_or(|path| state.queue.get(*row) == Some(path)))
+        .or_else(|| path.and_then(|path| state.queue.iter().position(|queued| queued == path)))
+}
+
+fn removed_rows(queue: &[PathBuf], indices: &[usize]) -> Before {
+    let mut rows: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|index| *index < queue.len())
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    Before::Rows(
+        rows.into_iter()
+            .map(|index| (index, queue[index].clone()))
+            .collect(),
+    )
+}
+
+/// Restore what the change offered under `id` took from the queue, if it
+/// is still offered; otherwise tell the user nothing was undone. The
+/// selection comes back, and the engine keeps the track it has open when
+/// that track is in the restored queue; see
+/// [`PlaybackCommand::RestoreQueue`].
+fn undo_queue_change(
+    id: u64,
+    state: &mut BridgeState,
+    playback: &PlaybackEngine,
+    event_tx: &Sender<BridgeEvent>,
+) -> bool {
+    let Some(change) = state.queue_undo.take(id) else {
+        // Nothing changed, but the user asked for something that did not happen.
+        let _ = try_send_event(
+            event_tx,
+            BridgeEvent::Error(BridgeError::warning(
+                ErrorCategory::Playback,
+                STALE_UNDO_MESSAGE,
+            )),
+        );
+        return false;
+    };
+    // The engine's row in the queue that the change left.
+    let engine_row = state.playback.current_queue_index;
+    let (restored_rows, engine_row) = match change.before {
+        Before::Queue(paths) => {
+            state.queue = paths;
+            state.queue_sync.reset();
+            (change.selected.into_iter().collect::<Vec<_>>(), None)
+        }
+        Before::Rows(rows) => {
+            // Each restored row before the engine's row moves it down.
+            let engine_row = engine_row.map(|engine_row| {
+                rows.iter().fold(
+                    engine_row,
+                    |row, (index, _)| {
+                        if *index <= row {
+                            row + 1
+                        } else {
+                            row
+                        }
+                    },
+                )
+            });
+            let restored: Vec<usize> = rows.iter().map(|(index, _)| *index).collect();
+            // Ascending, each run of rows goes back where it was.
+            let mut rows = rows.into_iter().peekable();
+            while let Some((at, path)) = rows.next() {
+                let mut paths = vec![path];
+                while let Some((_, path)) = rows.next_if(|(index, _)| *index == at + paths.len()) {
+                    paths.push(path);
+                }
+                let at = at.min(state.queue.len());
+                state.queue.splice(at..at, paths.iter().cloned());
+                state
+                    .queue_sync
+                    .record(QueueEdit::Insert { at, paths }, state.queue.len());
+            }
+            (restored, engine_row)
+        }
+    };
+    let Some(last) = state.queue.len().checked_sub(1) else {
+        return false;
+    };
+    state.selected_queue_index = change.selected.filter(|row| *row <= last);
+    let current = engine_row
+        .or(change.current)
+        .or(state.selected_queue_index)
+        .unwrap_or(0)
+        .min(last);
+    playback.command(PlaybackCommand::RestoreQueue {
+        paths: state.queue.clone(),
+        current,
+    });
+    sync_queue_details(state);
+    state
+        .queue_undo
+        .restored(id, state.queue_sync.revision(), &restored_rows);
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +443,8 @@ pub(super) fn apply_queue_command_state(
                 ..QueueCommandOutcome::default()
             }
         }
+        // `handle_queue_command` undoes changes; see `undo_queue_change`.
+        BridgeQueueCommand::Undo(_) => QueueCommandOutcome::default(),
         BridgeQueueCommand::Clear => {
             queue.clear();
             *selected_queue_index = None;

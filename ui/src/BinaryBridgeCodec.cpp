@@ -411,10 +411,14 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     rootEntries.reserve(rootPathCount);
     for (quint16 i = 0; i < rootPathCount; ++i) {
         DecodedLibraryRoot root;
+        quint32 rootTrackCount = 0;
         if (!reader.readUtf8(&root.path) || !reader.readUtf8(&root.name)
-            || !reader.readUtf8(&root.unwatchedReason) || !reader.readUtf8(&root.scanProblem)) {
+            || !reader.readUtf8(&root.unwatchedReason) || !reader.readUtf8(&root.scanProblem)
+            || !reader.readU32(&rootTrackCount)) {
             return false;
         }
+        root.trackCount = static_cast<int>(
+            std::min<quint32>(rootTrackCount, std::numeric_limits<int>::max()));
         rootPaths.push_back(root.path);
         rootEntries.push_back(std::move(root));
     }
@@ -632,6 +636,45 @@ bool decodeLastFmSection(const QByteArray &payload, DecodedLastFm *out) {
     return true;
 }
 
+bool decodeQueueUndoSection(const QByteArray &payload, DecodedQueueUndo *out) {
+    if (!out) {
+        return false;
+    }
+    Reader reader(payload);
+    quint8 kind = 0;
+    quint32 trackCount = 0;
+    quint32 rangeCount = 0;
+    if (!reader.readU64(&out->offerId)
+        || !reader.readU8(&kind)
+        || kind > QueueUndoReplaced
+        || !reader.readU32(&trackCount)
+        || !reader.readU64(&out->restoredId)
+        || !reader.readU64(&out->restoredRevision)
+        || !reader.readU32(&rangeCount)
+        || rangeCount > static_cast<quint32>(payload.size() / 8)) {
+        return false;
+    }
+    out->restoredRanges.reserve(static_cast<qsizetype>(rangeCount));
+    for (quint32 i = 0; i < rangeCount; ++i) {
+        quint32 start = 0;
+        quint32 count = 0;
+        if (!reader.readU32(&start) || !reader.readU32(&count)
+            || start > static_cast<quint32>(std::numeric_limits<int>::max())
+            || count > static_cast<quint32>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+        out->restoredRanges.push_back({static_cast<int>(start), static_cast<int>(count)});
+    }
+    if (!reader.atEnd()) {
+        return false;
+    }
+    out->present = true;
+    out->kind = kind;
+    out->trackCount = static_cast<int>(
+        std::min<quint32>(trackCount, std::numeric_limits<int>::max()));
+    return true;
+}
+
 } // namespace
 
 QByteArray encodeCommandNoPayload(quint16 cmdId) {
@@ -656,6 +699,13 @@ QByteArray encodeCommandU32(quint16 cmdId, quint32 value) {
     QByteArray payload;
     payload.reserve(4);
     appendLe<quint32>(payload, value);
+    return finalizeCommand(cmdId, payload);
+}
+
+QByteArray encodeCommandU64(quint16 cmdId, quint64 value) {
+    QByteArray payload;
+    payload.reserve(8);
+    appendLe<quint64>(payload, value);
     return finalizeCommand(cmdId, payload);
 }
 
@@ -875,6 +925,9 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             break;
         case SectionLastFm:
             ok = decodeLastFmSection(sectionPayload, &out->lastfm);
+            break;
+        case SectionQueueUndo:
+            ok = decodeQueueUndoSection(sectionPayload, &out->queueUndo);
             break;
         case SectionError: {
             Reader sectionReader(sectionPayload);

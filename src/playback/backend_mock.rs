@@ -101,6 +101,7 @@ impl MockPlaybackRuntime {
                 // The loop sends the remapped snapshot after this.
                 let _ = self.event_tx.send(PlaybackEvent::PathsRemapped);
             }
+            PlaybackCommand::RestoreQueue { paths, current } => self.restore_queue(paths, current),
             PlaybackCommand::RemoveMany(indices) => self.remove_many(&indices),
             PlaybackCommand::RemoveAt(idx) => self.remove_many(&[idx]),
             PlaybackCommand::MoveQueue { from, to } => {
@@ -215,6 +216,34 @@ impl MockPlaybackRuntime {
             let _ = self
                 .analysis_tx
                 .send(AnalysisCommand::SetSampleRate(48_000));
+        }
+    }
+    /// Like the `GStreamer` backend; see [`PlaybackCommand::RestoreQueue`].
+    fn restore_queue(&mut self, paths: Vec<PathBuf>, current: usize) {
+        let Some(last) = paths.len().checked_sub(1) else {
+            return;
+        };
+        let current = current.min(last);
+        let open_row = self.snapshot.current.as_ref().and_then(|open| {
+            if paths.get(current) == Some(open) {
+                Some(current)
+            } else {
+                paths.iter().position(|path| path == open)
+            }
+        });
+        let Some(row) = open_row else {
+            let _ = self.queue.set_queue(paths);
+            self.about_to_finish_fired = false;
+            self.snapshot.state = PlaybackState::Stopped;
+            if let Some(target) = self.queue.set_current(current) {
+                self.switch_manually(target.path, target.index);
+            }
+            return;
+        };
+        let cancelled = self.queue.restore(paths, row);
+        self.continue_after_cancelled_advance(cancelled);
+        if self.snapshot.state != PlaybackState::Stopped {
+            self.snapshot.current_queue_index = Some(row);
         }
     }
     fn remove_many(&mut self, indices: &[usize]) {

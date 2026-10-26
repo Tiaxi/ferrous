@@ -3,7 +3,8 @@
 use super::{library_tree::LibraryTreeCache, LibrarySortMode};
 use crate::library::LibrarySnapshot;
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -22,6 +23,7 @@ pub(super) struct TreeResult {
     pub(super) bytes: Arc<Vec<u8>>,
     pub(super) expanded: HashSet<String>,
     pub(super) counts: (usize, usize),
+    pub(super) root_track_counts: Arc<HashMap<PathBuf, usize>>,
     generation: u64,
 }
 
@@ -66,6 +68,7 @@ impl TreeWorker {
                             bytes: Arc::new(bytes),
                             expanded: request.expanded,
                             counts: cache.counts,
+                            root_track_counts: Arc::clone(&cache.root_track_counts),
                             generation: request.generation,
                         })
                         .is_err()

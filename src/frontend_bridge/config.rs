@@ -83,6 +83,7 @@ pub(super) fn apply_session_restore(
     };
     state.queue.clone_from(&session.queue);
     state.queue_sync.reset();
+    state.queue_undo.forget();
     let restored_current_index = resolve_session_current_index(
         &state.queue,
         session.current_queue_index,

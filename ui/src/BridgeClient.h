@@ -102,6 +102,12 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
+    // The queue change the user can undo: an ID that changes with each new
+    // change (0 for none), its kind (BinaryBridgeCodec::QueueUndoKind) and
+    // the tracks it took from the queue.
+    Q_PROPERTY(double queueUndoId READ queueUndoId NOTIFY queueUndoChanged)
+    Q_PROPERTY(int queueUndoKind READ queueUndoKind NOTIFY queueUndoChanged)
+    Q_PROPERTY(int queueUndoTrackCount READ queueUndoTrackCount NOTIFY queueUndoChanged)
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackIdentityChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackIdentityChanged)
     Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY trackMetadataChanged)
@@ -187,6 +193,10 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QVariantList itunesArtworkResults READ itunesArtworkResults NOTIFY itunesArtworkChanged)
     Q_PROPERTY(bool itunesArtworkLoading READ itunesArtworkLoading NOTIFY itunesArtworkChanged)
     Q_PROPERTY(QString itunesArtworkStatusText READ itunesArtworkStatusText NOTIFY itunesArtworkChanged)
+    // The track the suggestions were searched for, which applying one
+    // changes: its trackPath, album, artist and the coverPath it had then
+    // (empty without art). It stays that track while playback moves on.
+    Q_PROPERTY(QVariantMap itunesArtworkTarget READ itunesArtworkTarget NOTIFY itunesArtworkChanged)
     Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
@@ -209,6 +219,9 @@ public:
     double durationSeconds() const;
     double volume() const;
     int queueLength() const;
+    double queueUndoId() const;
+    int queueUndoKind() const;
+    int queueUndoTrackCount() const;
     QString queueDurationText() const;
     QObject *queueRows() const;
     int selectedQueueIndex() const;
@@ -294,6 +307,7 @@ public:
     QVariantList itunesArtworkResults() const;
     bool itunesArtworkLoading() const;
     QString itunesArtworkStatusText() const;
+    QVariantMap itunesArtworkTarget() const;
     QString diagnosticsText() const;
     QString diagnosticsLogPath() const;
     bool connected() const;
@@ -341,6 +355,9 @@ public:
     Q_INVOKABLE void removeIndices(const QVariantList &indices);
     Q_INVOKABLE void moveQueue(int from, int to);
     Q_INVOKABLE void clearQueue();
+    // Undo the change of queueUndoId. The backend refuses, with an error,
+    // one that a newer change has withdrawn.
+    Q_INVOKABLE void undoQueueChange();
     Q_INVOKABLE void replaceAlbumAt(int index);
     Q_INVOKABLE void appendAlbumAt(int index);
     Q_INVOKABLE void playTrack(const QString &path);
@@ -430,6 +447,10 @@ signals:
     // An error for the user: the message, its BinaryBridgeCodec::ErrorCategory
     // and ErrorSeverity, and the file or folder it is about, or empty.
     void bridgeError(const QString &message, int category, int severity, const QString &subject);
+    void queueUndoChanged();
+    // An undo brought back these rows, which the queue view selects; they
+    // are rows of the queue as it is when this is emitted.
+    void queueUndoRestored(const QVariantList &rows);
     // The answer to the saveStateBeforeQuit call that returned requestId:
     // whether the settings and the queue were saved, and what to show the
     // user if not.
@@ -566,6 +587,8 @@ private:
     // Apply the rows of a queue section that fits the client's rows.
     // Returns false if its operations did not fit them after all.
     bool applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue);
+    // After the snapshot's rows are in place.
+    void applyQueueUndo(const BinaryBridgeCodec::DecodedQueueUndo &undo);
     // Ask for the whole queue, once, after a section the rows cannot take.
     void requestQueueResync();
     void cancelItunesArtworkRequests();
@@ -652,6 +675,11 @@ private:
     quint64 m_queueRevision{0};
     // A whole queue was asked for and has not arrived yet.
     bool m_queueResyncRequested{false};
+    quint64 m_queueUndoId{0};
+    int m_queueUndoKind{0};
+    int m_queueUndoTrackCount{0};
+    // The undo whose restored rows were last selected.
+    quint64 m_queueUndoRestoredId{0};
     // The first row of each path, built when needed after the rows change.
     mutable QHash<QString, int> m_queuePathFirstIndex;
     mutable bool m_queuePathFirstIndexStale{true};
@@ -761,6 +789,8 @@ private:
     QVariantList m_itunesArtworkResults;
     bool m_itunesArtworkLoading{false};
     QString m_itunesArtworkStatusText;
+    // What itunesArtworkTarget describes.
+    QVariantMap m_itunesArtworkTarget;
     quint64 m_itunesArtworkGeneration{0};
     QNetworkAccessManager m_itunesArtworkNetwork;
     QSet<QNetworkReply *> m_itunesArtworkReplies;

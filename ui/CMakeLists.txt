@@ -103,6 +103,7 @@ qt_add_qml_module(ferrous
         qml/Main.qml
         qml/components/ActionShortcuts.qml
         qml/components/AlbumArtTile.qml
+        qml/components/QueueUndoNotice.qml
         qml/components/ColumnHeaderRow.qml
         qml/components/ErrorBanner.qml
         qml/components/SearchResultIcon.qml
@@ -121,12 +122,14 @@ qt_add_qml_module(ferrous
         qml/controllers/QueueController.qml
         qml/controllers/ViewerController.qml
         qml/dialogs/AboutDialog.qml
+        qml/dialogs/ConfirmDialog.qml
         qml/dialogs/DiagnosticsDialog.qml
         qml/dialogs/GlobalSearchDialog.qml
         qml/dialogs/ItunesArtworkDialog.qml
         qml/dialogs/LibraryRootNameDialog.qml
         qml/dialogs/PreferencesDialog.qml
         qml/dialogs/QuitSaveFailedDialog.qml
+        qml/dialogs/RenamePreviewDialog.qml
         qml/dialogs/AutoNumberDialog.qml
         qml/dialogs/TagEditorCloseConfirmDialog.qml
         qml/dialogs/TagEditorDialog.qml
