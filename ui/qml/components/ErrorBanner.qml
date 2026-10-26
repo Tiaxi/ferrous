@@ -113,6 +113,47 @@ Item {
                         bannerText.implicitHeight, bannerMetrics.lineSpacing * root.maximumLines)
                     contentWidth: availableWidth
                     clip: true
+                    // Tab reaches the text, and the arrow and page keys scroll
+                    // it. Other keys, such as a viewer's Escape, go on.
+                    activeFocusOnTab: true
+                    focusPolicy: Qt.StrongFocus
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: banner.text
+                    Accessible.description: "Scroll with the arrow and Page keys"
+                    Accessible.focusable: true
+
+                    background: Rectangle {
+                        color: "transparent"
+                        radius: Kirigami.Units.cornerRadius
+                        border.width: 2
+                        border.color: bannerBody.activeFocus
+                            ? Kirigami.Theme.focusColor
+                            : "transparent"
+                    }
+
+                    function scrollBy(pixels) {
+                        const flickable = bannerBody.contentItem
+                        const bottom = Math.max(0, flickable.contentHeight - flickable.height)
+                        flickable.contentY = Math.max(0, Math.min(bottom, flickable.contentY + pixels))
+                    }
+
+                    Keys.onPressed: function(event) {
+                        const line = bannerMetrics.lineSpacing
+                        const page = Math.max(line, bannerBody.height - line)
+                        const all = bannerBody.contentItem.contentHeight
+                        switch (event.key) {
+                        case Qt.Key_Up: bannerBody.scrollBy(-line); break
+                        case Qt.Key_Down: bannerBody.scrollBy(line); break
+                        case Qt.Key_PageUp: bannerBody.scrollBy(-page); break
+                        case Qt.Key_PageDown: bannerBody.scrollBy(page); break
+                        case Qt.Key_Home: bannerBody.scrollBy(-all); break
+                        case Qt.Key_End: bannerBody.scrollBy(all); break
+                        default:
+                            event.accepted = false
+                            return
+                        }
+                        event.accepted = true
+                    }
 
                     Label {
                         id: bannerText

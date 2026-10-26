@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <QAccessible>
 #include <QApplication>
 #include <QFont>
 #include "../src/GlobalSearchResultsModel.h"
@@ -624,6 +625,7 @@ private slots:
     void aLongErrorIsShownWhole();
     void aLongMultiLineErrorKeepsTheControlsInTheWindow();
     void escapeClosesFullscreenViewersWhileTheirErrorHasFocus();
+    void fullscreenErrorTextScrollsWithTheKeyboard();
     void quitTimeErrorClosesAFullscreenViewerFirst();
     void displaySleepFailureShowsInTheFullscreenViewer();
     void stoppedBackendShowsMessageAndDisablesControls();
@@ -13073,6 +13075,91 @@ void QmlSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
+}
+
+void QmlSmokeTest::fullscreenErrorTextScrollsWithTheKeyboard() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(16, 16, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && errors != nullptr);
+    bridge->setProperty("viewerFullscreenMode", 1);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    QStringList lines{QStringLiteral("Saved 0 file(s); 10 failed.")};
+    for (int file = 0; file < 10; ++file) {
+        lines.push_back(QStringLiteral("/music/Some Artist/Some Album/%1 A Track Title.flac: "
+                                       "Permission denied (os error 13)")
+                            .arg(file + 1, 2, 10, QLatin1Char('0')));
+    }
+
+    const QList<std::array<const char *, 4>> viewers{
+        {"openSpectrogramViewer", "spectrogramViewerOpen", "spectrogramFullscreenWindow",
+         "spectrogramFullscreenErrorBanner"},
+        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", "albumArtFullscreenWindow",
+         "albumArtFullscreenErrorBanner"},
+    };
+    for (const auto &[open, openProperty, windowName, bannerName] : viewers) {
+        auto *fullscreen = qobject_cast<QQuickWindow *>(
+            engine.rootObjects().constFirst()->findChild<QObject *>(QLatin1String(windowName)));
+        QVERIFY(fullscreen != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(viewer, open));
+        QTRY_VERIFY(viewer->property(openProperty).toBool());
+        QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+        QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
+        QVERIFY(sendBridgeError(bridge, lines.join(QLatin1Char('\n')), 4, 1));
+        auto *banner = fullscreen->findChild<QQuickItem *>(QLatin1String(bannerName));
+        QVERIFY(banner != nullptr);
+        QTRY_VERIFY(banner->isVisible());
+        QQuickItem *body = nullptr;
+        for (QQuickItem *item : banner->findChildren<QQuickItem *>()) {
+            if (item->objectName() == QStringLiteral("errorBannerBody")) {
+                body = item;
+            }
+        }
+        QVERIFY(body != nullptr);
+        auto *flickable = qvariant_cast<QQuickItem *>(body->property("contentItem"));
+        QVERIFY(flickable != nullptr);
+        QTRY_VERIFY(flickable->property("contentHeight").toReal() > body->height());
+
+        // Tab reaches the text, which says what it holds.
+        for (int press = 0; press < 8 && !body->hasActiveFocus(); ++press) {
+            QTest::keyClick(fullscreen, Qt::Key_Tab);
+        }
+        QVERIFY2(body->hasActiveFocus(), windowName);
+        QVERIFY(QAccessible::queryAccessibleInterface(body) != nullptr);
+        QCOMPARE(QAccessible::queryAccessibleInterface(body)->text(QAccessible::Name),
+                 QStringLiteral("Tags: ") + lines.join(QLatin1Char('\n')));
+
+        // Down scrolls it, and End and Home go to its ends.
+        QCOMPARE(flickable->property("contentY").toReal(), 0.0);
+        QTest::keyClick(fullscreen, Qt::Key_Down);
+        QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
+        QTest::keyClick(fullscreen, Qt::Key_End);
+        // Within a pixel: the view keeps to whole pixels.
+        QTRY_VERIFY(std::abs(flickable->property("contentY").toReal()
+                             - (flickable->property("contentHeight").toReal() - flickable->height()))
+                    <= 1.0);
+        QTest::keyClick(fullscreen, Qt::Key_Home);
+        QTRY_COMPARE(flickable->property("contentY").toReal(), 0.0);
+        QVERIFY(viewer->property(openProperty).toBool());
+
+        // Escape still closes the viewer.
+        QTest::keyClick(fullscreen, Qt::Key_Escape);
+        QTRY_VERIFY2(!viewer->property(openProperty).toBool(), windowName);
+        QTRY_VERIFY(!fullscreen->isVisible());
+    }
+    QVERIFY(finishIncubation(engine));
+    takeCapturedMessagesText();
 }
 
 int main(int argc, char **argv) {
