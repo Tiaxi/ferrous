@@ -220,12 +220,6 @@ Rectangle {
 
                     width: Math.max(0, ListView.view.width - (playlistView.reservedRightPadding || 0))
                     height: playlistView.rowHeight
-                    Drag.active: playlistRowMouseArea.drag.active
-                    Drag.source: playlistRow
-                    Drag.hotSpot.x: width * 0.5
-                    Drag.hotSpot.y: height * 0.5
-                    Drag.dragType: Drag.Automatic
-                    Drag.supportedActions: Qt.MoveAction
                     color: rowSelected
                         ? root.uiPalette.uiSelectionColor
                         : (index % 2 === 0 ? root.uiPalette.uiSurfaceRaisedColor
@@ -333,17 +327,44 @@ Rectangle {
                         drag.target: (pressedButtons & Qt.LeftButton) ? playlistDragProxy : null
                         drag.smoothed: false
 
-                        onReleased: {
+                        function endDrag() {
                             playlistDragProxy.x = 0
                             playlistDragProxy.y = 0
                         }
 
                         onPressed: function(mouse) {
                             playlistView.forceActiveFocus()
-                            root.controller.handleRowSelection(
+                            // The proxy starts under the pointer, so it is
+                            // where the drag drops.
+                            playlistDragProxy.x = mouse.x
+                            playlistDragProxy.y = mouse.y
+                            root.controller.pressRow(
                                 index,
                                 mouse.button,
                                 mouse.modifiers || Qt.NoModifier)
+                        }
+
+                        onPositionChanged: {
+                            if (drag.active && !playlistDragProxy.Drag.active) {
+                                playlistDragProxy.Drag.active = true
+                            }
+                        }
+
+                        onReleased: function(mouse) {
+                            const dragged = playlistDragProxy.Drag.active
+                            if (dragged) {
+                                playlistDragProxy.Drag.drop()
+                            }
+                            root.controller.releaseRow(index, dragged)
+                            endDrag()
+                        }
+
+                        onCanceled: {
+                            if (playlistDragProxy.Drag.active) {
+                                playlistDragProxy.Drag.cancel()
+                            }
+                            root.controller.cancelRowPress()
+                            endDrag()
                         }
 
                         onClicked: function(mouse) {
@@ -360,6 +381,9 @@ Rectangle {
                         }
                     }
 
+                    // Queue rows drop only on the queue, so they drag within
+                    // the window, where the drop area sees each move. The
+                    // pointer moves the proxy; the row is what is dropped.
                     Item {
                         id: playlistDragProxy
                         x: 0
@@ -367,6 +391,8 @@ Rectangle {
                         width: 1
                         height: 1
                         visible: false
+                        Drag.source: playlistRow
+                        Drag.supportedActions: Qt.MoveAction
                     }
                 }
 
@@ -505,17 +531,21 @@ Rectangle {
                     return !!(src.draggableQueueItem || src.draggableLibraryItem)
                 }
 
+                // Rows sit from the view's origin on, which edits above a
+                // scrolled view move, so a drop is placed in the rows'
+                // own coordinates.
                 function updateQueueDropIndicator(dropY) {
                     const rowHeight = playlistView.rowHeight
+                    const content = playlistView.contentItem
+                    const dropContentY = content.mapFromItem(playlistDropArea, 0, dropY).y
                     const insertIndex = root.controller.dropInsertIndex(
-                        dropY - playlistView.y + playlistView.contentY, rowHeight)
+                        dropContentY - playlistView.originY, rowHeight)
                     queueDropInsertIndex = insertIndex
 
-                    const contentLineY = insertIndex * rowHeight
-                    const viewLineY = playlistView.y + contentLineY - playlistView.contentY
-                    const minY = playlistView.y
-                    const maxY = playlistView.y + playlistView.height - 2
-                    queueDropIndicatorY = Math.max(minY, Math.min(maxY, viewLineY))
+                    const contentLineY = playlistView.originY + insertIndex * rowHeight
+                    const lineY = playlistDropArea.mapFromItem(content, 0, contentLineY).y
+                    const top = playlistDropArea.mapFromItem(playlistView, 0, 0).y
+                    queueDropIndicatorY = Math.max(top, Math.min(top + playlistView.height - 2, lineY))
                 }
 
                 function finishDrop() {

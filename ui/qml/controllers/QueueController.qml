@@ -326,6 +326,38 @@ QtObject {
         }
     }
 
+    // A press on one of several highlighted rows may start a drag of all
+    // of them, so the highlight stays until the press turns out to be a
+    // click, as in file managers.
+    property int _clickCollapseIndex: -1
+
+    function pressRow(index, button, modifiers) {
+        const plain = (modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) === 0
+        if (button === Qt.LeftButton && plain
+                && root.isIndexSelected(index) && root.selectedIndices.length > 1) {
+            root._clickCollapseIndex = index
+            root.selectionAnchorIndex = index
+            root.uiBridge.selectQueueIndex(index)
+            return
+        }
+        root._clickCollapseIndex = -1
+        root.handleRowSelection(index, button, modifiers)
+    }
+
+    // The press on row `index` ended: a click that was not a drag selects
+    // the row alone.
+    function releaseRow(index, dragged) {
+        const collapse = root._clickCollapseIndex
+        root._clickCollapseIndex = -1
+        if (!dragged && collapse >= 0 && collapse === index) {
+            root.setSingleSelection(index)
+        }
+    }
+
+    function cancelRowPress() {
+        root._clickCollapseIndex = -1
+    }
+
     function handleRowSelection(index, button, modifiers) {
         const shift = (modifiers & Qt.ShiftModifier) !== 0
         const ctrl = (modifiers & Qt.ControlModifier) !== 0
@@ -425,13 +457,13 @@ QtObject {
         }
     }
 
-    // Where rows dropped at `contentY`, in the view's content, go: before
-    // the row whose upper half it is in, after the last row past it.
-    function dropInsertIndex(contentY, rowHeight) {
+    // Where rows dropped `y` below the first row's top go: before the row
+    // whose upper half it is in, after the last row past it.
+    function dropInsertIndex(y, rowHeight) {
         if (rowHeight <= 0) {
             return root.uiBridge.queueLength
         }
-        const index = Math.floor((contentY + rowHeight * 0.5) / rowHeight)
+        const index = Math.floor((y + rowHeight * 0.5) / rowHeight)
         return Math.max(0, Math.min(root.uiBridge.queueLength, index))
     }
 

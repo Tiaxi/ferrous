@@ -804,6 +804,11 @@ QtObject {
     // says, now if the model has the row, otherwise once the backend sends
     // it. A later reveal replaces one still waiting.
     function revealRow(expandKeys, selectionKey, purpose) {
+        // The user's reveal wins over restoring the saved view, which ends
+        // there, so what the user does next is saved.
+        if (purpose !== "restore" && root.restoringViewState) {
+            root.cancelPendingRestoredViewState()
+        }
         root.pendingRevealKey = ""
         root.pendingRevealPurpose = ""
         const row = root.libraryModel.revealKey(expandKeys, selectionKey)
