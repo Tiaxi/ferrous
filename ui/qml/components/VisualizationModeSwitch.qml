@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
+import QtQuick.Shapes 1.15
 
 Row {
     id: root
@@ -50,6 +51,8 @@ Row {
             required property int index
             required property string modelData
             property bool hovered: false
+            readonly property color iconColor: root.selectedMode === index
+                ? "#eef1f3" : "#aeb6bc"
             objectName: "visualizationModeButton" + index
             width: 24
             height: 22
@@ -105,28 +108,28 @@ Row {
                             width: 1
                             height: modelData
                             anchors.verticalCenter: parent.verticalCenter
-                            color: root.selectedMode === button.index
-                                ? "#eef1f3" : "#aeb6bc"
+                            color: button.iconColor
                         }
                     }
                 }
 
-                Canvas {
+                // Drawn from its colour, so it follows the selected mode.
+                Shape {
                     anchors.fill: parent
                     visible: button.index === 1
-                    onPaint: {
-                        const context = getContext("2d")
-                        context.reset()
-                        context.strokeStyle = root.selectedMode === button.index
-                            ? "#eef1f3" : "#aeb6bc"
-                        context.lineWidth = 1
-                        context.beginPath()
-                        context.moveTo(0, 7)
-                        context.lineTo(3, 4)
-                        context.lineTo(6, 9)
-                        context.lineTo(9, 2)
-                        context.lineTo(13, 6)
-                        context.stroke()
+                    preferredRendererType: Shape.CurveRenderer
+
+                    ShapePath {
+                        objectName: "visualizationModeWaveformStroke"
+                        strokeColor: button.iconColor
+                        strokeWidth: 1
+                        fillColor: "transparent"
+                        startX: 0
+                        startY: 7
+                        PathLine { x: 3; y: 4 }
+                        PathLine { x: 6; y: 9 }
+                        PathLine { x: 9; y: 2 }
+                        PathLine { x: 13; y: 6 }
                     }
                 }
             }

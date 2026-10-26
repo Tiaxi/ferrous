@@ -51,6 +51,11 @@ QtObject {
     property var view: null
     readonly property bool viewHasActiveFocus: !!root.view && root.view.activeFocus
 
+    // The height of the view's rows, which the view gets from the font.
+    function rowHeight() {
+        return root.view ? root.view.rowHeight : 0
+    }
+
     property Timer typeAheadTimer: Timer {
         interval: 900
         repeat: false
@@ -498,10 +503,9 @@ QtObject {
                 fallbackY: root.view ? root.view.contentY : 0
             }
         }
-        const rowHeight = 24
         let topIndex = root.view.indexAt(1, root.view.contentY + 1)
         if (topIndex < 0) {
-            topIndex = Math.floor(root.view.contentY / rowHeight)
+            topIndex = Math.floor(root.view.contentY / root.rowHeight())
         }
         topIndex = Math.max(0, Math.min(root.libraryModel.count - 1, topIndex))
         const rowTop = root.rowContentY(topIndex)
@@ -523,7 +527,7 @@ QtObject {
             }
         }
         const origin = isFinite(root.view.originY) ? root.view.originY : 0
-        return origin + (index * 24)
+        return origin + (index * root.rowHeight())
     }
 
     function restoreViewAnchor(anchor) {
@@ -584,7 +588,7 @@ QtObject {
             return
         }
 
-        const rowHeight = 24
+        const rowHeight = root.rowHeight()
         const baseDepth = rowMap.depth !== undefined ? rowMap.depth : 0
         let lastDescendantIndex = rowIndex
         for (let i = rowIndex + 1; i < root.libraryModel.count; ++i) {
@@ -766,9 +770,11 @@ QtObject {
 
     // Rows that PageUp and PageDown move by: a viewful, less one row.
     function pageStep() {
-        const rowHeight = 24
-        const viewportHeight = root.view ? root.view.height : 240
-        return Math.max(1, Math.floor(viewportHeight / rowHeight) - 1)
+        const rowHeight = root.rowHeight()
+        if (rowHeight <= 0) {
+            return 1
+        }
+        return Math.max(1, Math.floor(root.view.height / rowHeight) - 1)
     }
 
     function selectRelative(delta, extendSelection) {
@@ -1048,7 +1054,7 @@ QtObject {
                 root.restoreViewAnchor({
                     key: root.pendingRestoredAnchorKey,
                     offset: root.pendingRestoredAnchorOffset,
-                    fallbackY: anchorIndex * 24
+                    fallbackY: anchorIndex * root.rowHeight()
                 })
                 anchorReady = true
             }
@@ -1082,7 +1088,7 @@ QtObject {
                 root.restoreViewAnchor({
                     key: root.pendingRestoredAnchorKey,
                     offset: root.pendingRestoredAnchorOffset,
-                    fallbackY: anchorIndex * 24
+                    fallbackY: anchorIndex * root.rowHeight()
                 })
             }
         }

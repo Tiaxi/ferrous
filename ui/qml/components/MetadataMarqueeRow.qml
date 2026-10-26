@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import org.kde.kirigami 2.20 as Kirigami
 
 RowLayout {
     id: root
@@ -10,10 +11,10 @@ RowLayout {
     required property string labelText
     required property string valueText
     property string resetKey: ""
-    property color labelColor: "white"
-    property color textColor: "white"
-    property int labelWidth: 44
-    property int fontPixelSize: 12
+    property color labelColor: Kirigami.Theme.disabledTextColor
+    property color textColor: Kirigami.Theme.textColor
+    property real labelWidth: implicitLabelWidth
+    readonly property real implicitLabelWidth: labelItem.implicitWidth
     property int pauseDuration: 1400
     property bool emphasized: false
 
@@ -21,17 +22,17 @@ RowLayout {
     spacing: 8
 
     Label {
+        id: labelItem
         text: root.labelText
         Layout.preferredWidth: root.labelWidth
         horizontalAlignment: Text.AlignRight
         color: root.labelColor
-        font.pixelSize: root.fontPixelSize
     }
 
     Item {
         id: marqueeHost
         Layout.fillWidth: true
-        Layout.preferredHeight: 18
+        Layout.preferredHeight: valueLabel.implicitHeight
         clip: true
         property real overflowPx: Math.max(0, valueLabel.implicitWidth - width)
         property real offsetPx: 0
@@ -60,14 +61,13 @@ RowLayout {
             }
         }
 
-        Text {
+        Label {
             id: valueLabel
             anchors.verticalCenter: parent.verticalCenter
             x: -marqueeHost.offsetPx
             text: root.valueText
             color: root.textColor
             textFormat: Text.PlainText
-            font.pixelSize: root.fontPixelSize
             font.weight: root.emphasized ? Font.DemiBold : Font.Normal
         }
 

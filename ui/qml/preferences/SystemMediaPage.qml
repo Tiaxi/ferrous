@@ -32,16 +32,15 @@ ScrollView {
                 anchors.margins: 18
                 spacing: 14
 
-                Label {
+                Kirigami.Heading {
                     Layout.fillWidth: true
+                    level: 2
                     text: "System Media"
-                    font.pixelSize: 16
                     font.weight: Font.DemiBold
                 }
 
                 CheckBox {
                     text: "Enable KDE media controls and media buttons"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.systemMediaControlsEnabled
                     onToggled: root.uiBridge.setSystemMediaControlsEnabled(checked)
                 }

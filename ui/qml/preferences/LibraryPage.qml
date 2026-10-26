@@ -51,10 +51,10 @@ ScrollView {
                 anchors.margins: 18
                 spacing: 14
 
-                Label {
+                Kirigami.Heading {
                     Layout.fillWidth: true
+                    level: 2
                     text: "Library"
-                    font.pixelSize: 16
                     font.weight: Font.DemiBold
                 }
 
@@ -77,7 +77,6 @@ ScrollView {
                 CheckBox {
                     objectName: "libraryWatchCheckBox"
                     text: "Watch library folders for changes"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.libraryWatchEnabled
                     onToggled: root.uiBridge.setLibraryWatchEnabled(checked)
                 }
@@ -95,11 +94,11 @@ ScrollView {
 
                     Label {
                         text: "Album Sort"
-                        Layout.preferredWidth: 120
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
-                        Layout.preferredWidth: 180
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 7.5
                         model: ["Year", "Title"]
                         currentIndex: Math.max(0, Math.min(1, root.uiBridge.librarySortMode))
                         onActivated: root.uiBridge.setLibrarySortMode(currentIndex)
@@ -159,7 +158,7 @@ ScrollView {
                             height: Math.max(52, rootRow.implicitHeight + 12)
                             radius: 6
                             color: root.uiPalette.uiPaneColor
-                            border.color: Qt.rgba(0, 0, 0, 0.06)
+                            border.color: root.uiPalette.uiBorderColor
 
                             RowLayout {
                                 id: rootRow
@@ -184,7 +183,7 @@ ScrollView {
                                         text: rootPath
                                         elide: Text.ElideMiddle
                                         color: root.uiPalette.uiMutedTextColor
-                                        font.pixelSize: Math.max(11, root.windowRoot.font.pixelSize - 1)
+                                        font: Kirigami.Theme.smallFont
                                     }
 
                                     Label {
@@ -194,7 +193,7 @@ ScrollView {
                                         text: "Not watched for changes: " + unwatchedReason
                                         wrapMode: Text.Wrap
                                         color: Kirigami.Theme.neutralTextColor
-                                        font.pixelSize: Math.max(11, root.windowRoot.font.pixelSize - 1)
+                                        font: Kirigami.Theme.smallFont
                                     }
 
                                     // Stays until a rescan of the whole folder finds nothing wrong.
@@ -205,7 +204,7 @@ ScrollView {
                                         text: "Last scan: " + scanProblem
                                         wrapMode: Text.Wrap
                                         color: Kirigami.Theme.negativeTextColor
-                                        font.pixelSize: Math.max(11, root.windowRoot.font.pixelSize - 1)
+                                        font: Kirigami.Theme.smallFont
                                         Accessible.role: Accessible.AlertMessage
                                         Accessible.name: "Problem with library folder "
                                             + rootDisplayName + ": " + scanProblem

@@ -109,7 +109,7 @@ Dialog {
                     wrapMode: Text.Wrap
                     text: modelData.error || ""
                     color: Kirigami.Theme.negativeTextColor
-                    font.pixelSize: Math.max(11, root.windowRoot.font.pixelSize - 1)
+                    font: Kirigami.Theme.smallFont
                 }
             }
         }

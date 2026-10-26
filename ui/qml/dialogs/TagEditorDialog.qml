@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "." as Dialogs
 
@@ -30,7 +31,7 @@ Dialog {
     // How long quitting waits for a save or rename before it offers to quit
     // without it, as quitting does for the settings and queue.
     readonly property int quitWaitBoundMs: 5000
-    readonly property int tableRowHeight: 24
+    readonly property real tableRowHeight: root.uiPalette.rowHeight
     readonly property string keepText: "<keep>"
     readonly property color uiSurfaceColor: root.uiPalette.uiSurfaceColor
     readonly property color uiSurfaceRaisedColor: root.uiPalette.uiPaneColor
@@ -512,30 +513,30 @@ Dialog {
         contentItem: RowLayout {
             spacing: 8
 
-            Label {
+            Kirigami.Heading {
                 text: "Unified Tag Editor"
-                font.pixelSize: 17
+                level: 1
                 font.weight: Font.DemiBold
             }
 
             Rectangle {
                 visible: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
                     || tagEditorStatusFlash.visible || root.tagEditorApi.statusText.length > 0
+                objectName: "tagEditorStatusChip"
+                readonly property color toneColor: root.operationInFlight
+                        || root.tagEditorApi.loading || root.tagEditorApi.saving
+                    ? root.uiPalette.uiAccentColor
+                    : (root.statusHasFailure
+                        ? Kirigami.Theme.negativeTextColor
+                        : Kirigami.Theme.positiveTextColor)
                 radius: 4
-                color: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
-                    ? Qt.rgba(0.12, 0.44, 0.72, 0.16)
-                    : (root.statusHasFailure
-                        ? Qt.rgba(0.78, 0.20, 0.20, 0.14)
-                        : Qt.rgba(0.20, 0.55, 0.24, 0.14))
-                border.color: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
-                    ? Qt.rgba(0.12, 0.44, 0.72, 0.42)
-                    : (root.statusHasFailure
-                        ? Qt.rgba(0.78, 0.20, 0.20, 0.42)
-                        : Qt.rgba(0.20, 0.55, 0.24, 0.42))
+                color: ColorUtils.withAlpha(toneColor, 0.15)
+                border.color: ColorUtils.withAlpha(toneColor, 0.42)
                 Layout.fillWidth: true
-                implicitHeight: 28
+                implicitHeight: Math.max(root.tableRowHeight + 4, statusChipRow.implicitHeight + 4)
 
                 RowLayout {
+                    id: statusChipRow
                     anchors.fill: parent
                     anchors.leftMargin: 8
                     anchors.rightMargin: 8
@@ -544,8 +545,8 @@ Dialog {
                     BusyIndicator {
                         running: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
                         visible: running
-                        implicitWidth: 16
-                        implicitHeight: 16
+                        implicitWidth: root.tableRowHeight * 2 / 3
+                        implicitHeight: implicitWidth
                     }
 
                     Label {
@@ -566,7 +567,7 @@ Dialog {
                             && root.tagEditorApi.statusDetails.length > 0
                         text: "Details"
                         padding: 3
-                        implicitHeight: 22
+                        implicitHeight: root.tableRowHeight - 2
                         onClicked: tagEditorStatusDetailsDialog.open()
                     }
                 }
@@ -594,8 +595,12 @@ Dialog {
                 text: "\u00d7"
                 enabled: !root.tagEditorApi.saving
                 padding: 2
-                implicitWidth: 26
-                implicitHeight: 24
+                implicitWidth: root.tableRowHeight + 2
+                implicitHeight: root.tableRowHeight
+                Accessible.name: "Close"
+                ToolTip.visible: hovered || visualFocus
+                ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
+                ToolTip.text: "Close"
                 onClicked: root.requestClose()
             }
         }
@@ -693,20 +698,22 @@ Dialog {
             }
 
             contentItem: ScrollView {
+                id: tagEditorFieldsScroll
                 clip: true
                 padding: 0
                 contentWidth: availableWidth
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                 Column {
-                    width: tagEditorEditorPane.availableWidth
+                    // Beside the scroll bar, so it does not cover the case buttons.
+                    width: tagEditorFieldsScroll.availableWidth
                     spacing: 4
 
                     Repeater {
                         model: root.editorFields
                         delegate: Column {
                             required property var modelData
-                            width: tagEditorEditorPane.availableWidth
+                            width: tagEditorFieldsScroll.availableWidth
                             spacing: 1
 
                             Row {
@@ -715,7 +722,7 @@ Dialog {
 
                                 Label {
                                     text: modelData.label
-                                    font.pixelSize: 11
+                                    font: Kirigami.Theme.smallFont
                                     color: root.uiMutedTextColor
                                     width: parent.width - (caseButton.visible ? caseButton.width + parent.spacing : 0)
                                     verticalAlignment: Text.AlignVCenter
@@ -723,11 +730,14 @@ Dialog {
 
                                 Button {
                                     id: caseButton
+                                    objectName: "tagEditorCaseButton_" + modelData.key
                                     visible: modelData.allowTitleCase || modelData.allowCapitalize
                                     text: "Aa"
+                                    font: Kirigami.Theme.smallFont
                                     padding: 1
-                                    implicitWidth: 22
-                                    implicitHeight: 18
+                                    implicitWidth: Math.ceil(root.tableRowHeight * 0.9)
+                                    implicitHeight: Math.ceil(root.tableRowHeight * 0.75)
+                                    Accessible.name: "Change case of " + modelData.label
                                     onClicked: {
                                         const popupPosition = mapToItem(
                                             root.contentItem,
@@ -806,7 +816,7 @@ Dialog {
                                 width: parent.width
                                 visible: text.length > 0
                                 wrapMode: Text.WordWrap
-                                font.pixelSize: 11
+                                font: Kirigami.Theme.smallFont
                                 color: Kirigami.Theme.neutralTextColor
                             }
 
@@ -895,7 +905,7 @@ Dialog {
                 header: Rectangle {
                     z: 2
                     width: root.tableContentWidth
-                    height: 26
+                    height: root.tableRowHeight + 2
                     color: root.uiColumnsColor
 
                     Row {
@@ -911,7 +921,7 @@ Dialog {
                                 width: modelData.width
                                 height: parent.height
                                 text: modelData.label
-                                font.pixelSize: 11
+                                font.pointSize: Kirigami.Theme.smallFont.pointSize
                                 font.weight: Font.DemiBold
                                 verticalAlignment: Text.AlignVCenter
                                 horizontalAlignment: Text.AlignLeft
@@ -944,16 +954,16 @@ Dialog {
                     width: root.tableContentWidth
                     height: root.tableRowHeight
                     color: tableRow.selected
-                        ? Qt.rgba(0.12, 0.44, 0.72, 0.14)
+                        ? root.uiPalette.uiSelectionColor
                         : (tableRow.index % 2 === 0
-                            ? Qt.rgba(1, 1, 1, 0.02)
-                            : "transparent")
+                            ? root.uiPalette.uiSurfaceRaisedColor
+                            : root.uiPalette.uiSurfaceAltColor)
                     border.color: tableRow.errorText.length > 0
                         ? Kirigami.Theme.negativeTextColor
                         : (tableRow.current
                             ? Kirigami.Theme.focusColor
                             : (tableRow.selected
-                                ? Qt.rgba(0.12, 0.44, 0.72, 0.34)
+                                ? root.uiPalette.uiAccentColor
                                 : root.uiBorderColor))
                     border.width: tableRow.errorText.length > 0 || tableRow.selected || tableRow.current ? 1 : 0
                     Accessible.role: Accessible.Row
@@ -983,7 +993,9 @@ Dialog {
                                 text: root.cellText(modelData.key, tableRow)
                                 color: modelData.key === "status" && tableRow.errorText.length > 0
                                     ? Kirigami.Theme.negativeTextColor
-                                    : Kirigami.Theme.textColor
+                                    : (tableRow.selected
+                                        ? root.uiPalette.uiSelectionTextColor
+                                        : root.uiPalette.uiTextColor)
                                 verticalAlignment: Text.AlignVCenter
                                 horizontalAlignment: Text.AlignLeft
                                 elide: Text.ElideRight

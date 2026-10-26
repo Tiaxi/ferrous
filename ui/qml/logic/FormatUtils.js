@@ -37,6 +37,11 @@ function metadataTrackNumberText(trackNumber) {
     return Math.floor(value).toString().padStart(2, "0")
 }
 
+// `text` as shown, without the "&" that marks its mnemonic.
+function withoutMnemonic(text) {
+    return String(text || "").replace(/&(.)/g, "$1")
+}
+
 function playlistOrderText(index) {
     if (index === undefined || index === null || index < 0) {
         return "--"

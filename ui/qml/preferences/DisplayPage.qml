@@ -32,10 +32,10 @@ ScrollView {
                 anchors.margins: 18
                 spacing: 14
 
-                Label {
+                Kirigami.Heading {
                     Layout.fillWidth: true
+                    level: 2
                     text: "Display"
-                    font.pixelSize: 16
                     font.weight: Font.DemiBold
                 }
 
@@ -52,11 +52,11 @@ ScrollView {
 
                     Label {
                         text: "Viewer Fullscreen"
-                        Layout.preferredWidth: 120
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
-                        Layout.preferredWidth: 220
+                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
                         model: ["Within app window", "Whole screen"]
                         currentIndex: Math.max(0, Math.min(1, root.uiBridge.viewerFullscreenMode))
                         onActivated: root.uiBridge.setViewerFullscreenMode(currentIndex)
@@ -68,7 +68,6 @@ ScrollView {
                 CheckBox {
                     objectName: "showLevelMeterCheckBox"
                     text: "Show level meter below the main visualization"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.showLevelMeter
                     onToggled: root.uiBridge.setShowLevelMeter(checked)
                 }
@@ -76,7 +75,6 @@ ScrollView {
                 CheckBox {
                     objectName: "preventDisplaySleepInFullscreenCheckBox"
                     text: "Prevent display sleep and dimming while playing in fullscreen viewer"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.preventDisplaySleepInFullscreen
                     onToggled: root.uiBridge.setPreventDisplaySleepInFullscreen(checked)
                 }

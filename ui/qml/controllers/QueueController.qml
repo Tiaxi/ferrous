@@ -23,8 +23,6 @@ QtObject {
     property int _pendingScrollIndex: -1
     property var _pendingScrollView: null
 
-    readonly property int _rowHeight: 24
-
     // The backend changes the rows one edit at a time, so the selection
     // follows its rows through edits elsewhere in the queue. A whole new
     // queue starts from the backend's selection.
@@ -149,9 +147,10 @@ QtObject {
         }
     }
 
+    // The view's rows are `view.rowHeight` high, which it gets from the font.
     function _containIndex(view, index) {
-        const rowTop = index * root._rowHeight
-        const rowBottom = rowTop + root._rowHeight
+        const rowTop = index * view.rowHeight
+        const rowBottom = rowTop + view.rowHeight
         const viewTop = view.contentY
         const viewBottom = viewTop + view.height
         if (rowTop >= viewTop && rowBottom <= viewBottom) {
@@ -434,9 +433,10 @@ QtObject {
     }
 
     function pageStep() {
-        const rowHeight = 24
-        const viewportHeight = root.view ? root.view.height : 240
-        return Math.max(1, Math.floor(viewportHeight / rowHeight) - 1)
+        if (!root.view || root.view.rowHeight <= 0) {
+            return 1
+        }
+        return Math.max(1, Math.floor(root.view.height / root.view.rowHeight) - 1)
     }
 
     function ensureIndexVisible(index) {

@@ -13,6 +13,11 @@ function mixColor(colorA, colorB, amount) {
         (colorA.a * (1 - t)) + (colorB.a * t))
 }
 
+// `colorValue` with its alpha replaced by `alpha`.
+function withAlpha(colorValue, alpha) {
+    return Qt.rgba(colorValue.r, colorValue.g, colorValue.b, clamp01(alpha))
+}
+
 function colorLuma(colorValue) {
     return (0.2126 * colorValue.r) + (0.7152 * colorValue.g) + (0.0722 * colorValue.b)
 }

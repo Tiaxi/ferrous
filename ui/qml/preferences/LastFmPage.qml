@@ -32,16 +32,15 @@ ScrollView {
                 anchors.margins: 18
                 spacing: 14
 
-                Label {
+                Kirigami.Heading {
                     Layout.fillWidth: true
+                    level: 2
                     text: "Last.fm"
-                    font.pixelSize: 16
                     font.weight: Font.DemiBold
                 }
 
                 CheckBox {
                     text: "Enable Last.fm scrobbling"
-                    focusPolicy: Qt.NoFocus
                     checked: root.uiBridge.lastFmScrobblingEnabled
                     onToggled: root.uiBridge.setLastFmScrobblingEnabled(checked)
                 }
