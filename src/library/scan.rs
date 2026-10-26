@@ -2830,6 +2830,16 @@ fn file_identity(path: &Path, _metadata: &fs::Metadata) -> FileIdentity {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The size of the shortest file that can hold audio in a supported format:
+/// an ADTS AAC frame, a 7-byte header and at least one byte of data. Every
+/// other format needs more: an MPEG audio frame has a 4-byte header and
+/// side information, an MP4 file a 16-byte `ftyp` box and more boxes, an Ogg
+/// page a 27-byte header, FLAC a 42-byte signature and `STREAMINFO`, WAV a
+/// 44-byte header, and an AC-3 or DTS frame at least 96 bytes.
+///
+/// A shorter file holds no audio, so it does not show that a root is mounted.
+const MIN_AUDIO_FILE_BYTES: u64 = 8;
+
 /// A supported audio file found by [`LibraryWalk`].
 struct ScanCandidate {
     path: PathBuf,
@@ -2876,7 +2886,8 @@ struct LibraryWalk {
     ancestors: Vec<WalkAncestor>,
     claimed: HashSet<FileIdentity>,
     linked: VecDeque<(ScanCandidate, FileIdentity)>,
-    /// Supported audio files encountered, including unreadable and duplicate ones.
+    /// Supported audio files encountered that may hold audio (see
+    /// [`MIN_AUDIO_FILE_BYTES`]), including unreadable and duplicate ones.
     found: usize,
     /// The `AppleDouble` sidecars encountered, which are not tracks.
     sidecars: HashSet<PathBuf>,
@@ -3063,19 +3074,29 @@ impl LibraryWalk {
         if !entry.file_type().is_file() || !is_supported_audio(path) {
             return WalkStep::Continue;
         }
-        match apple_double_check(path) {
+        let may_be_sidecar = match apple_double_check(path) {
             Some(true) => {
                 self.sidecars.insert(path.to_path_buf());
                 return WalkStep::Continue;
             }
-            Some(false) => self.found = self.found.saturating_add(1),
+            Some(false) => false,
             // A `._` file that cannot be read, or that is too short for the
             // header, may be a sidecar, as on the mount point of an unmounted
             // share: it does not show that the root holds audio. It is still
             // indexed, as it is not known to be a sidecar.
-            None => {}
+            None => true,
+        };
+        let metadata = fs::metadata(path);
+        // Nor does a file too short to hold audio, such as one an interrupted
+        // copy left empty on such a mount point; it is still indexed too.
+        let may_hold_audio = metadata
+            .as_ref()
+            .ok()
+            .is_none_or(|metadata| metadata.len() >= MIN_AUDIO_FILE_BYTES);
+        if !may_be_sidecar && may_hold_audio {
+            self.found = self.found.saturating_add(1);
         }
-        let metadata = match fs::metadata(path) {
+        let metadata = match metadata {
             Ok(metadata) => metadata,
             Err(err) => {
                 self.record_unreadable(path.to_path_buf(), &err);
@@ -3902,6 +3923,14 @@ pub(crate) fn write_test_apple_double(path: &Path) {
     bytes.extend_from_slice(b"Mac OS X        ");
     bytes.extend_from_slice(&[0, 0]);
     fs::write(path, bytes).expect("write AppleDouble file");
+}
+
+/// Writes a track for tests: the MP3 [`crate::tag_write::TEST_MP3`],
+/// followed by `id`. Its `Info` header sets the duration, so tracks with
+/// different `id`s differ in size but read the same.
+#[cfg(test)]
+pub(crate) fn write_test_track(path: &Path, id: &[u8]) {
+    fs::write(path, [crate::tag_write::TEST_MP3, id].concat()).expect("write track");
 }
 
 /// Whether `path` has a supported audio extension. It reads nothing, so the
@@ -4985,6 +5014,76 @@ mod tests {
     }
 
     #[test]
+    fn an_audio_file_too_short_to_hold_audio_does_not_show_the_root_is_mounted() {
+        let mut conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let (root, tracks) = unmounted_library(&mut conn, "too-short-audio");
+        // Files left empty or partly written by an interrupted copy.
+        let leftovers = [root.join("01.mp3"), root.join("Other/02.aac")];
+        write_stub(&leftovers[0], b"");
+        // The header of an 8-byte ADTS frame, without its data.
+        write_stub(&leftovers[1], &[0xFF, 0xF1, 0x50, 0x80, 0x01, 0x1F, 0xFC]);
+
+        let outcome = scan(&conn, &root);
+
+        // They are still indexed, as before.
+        let indexed = indexed_paths(&conn);
+        assert!(
+            leftovers.iter().all(|leftover| indexed.contains(leftover)),
+            "{indexed:?}"
+        );
+        assert_kept_as_offline(&conn, outcome, &tracks);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// Scans the library of [`unmounted_library`] holding an empty
+    /// `01.mp3` and the track `name` with `bytes`, which shows that the root
+    /// is mounted: the missing tracks are removed.
+    fn assert_mounted_beside_empty_audio(test: &str, name: &str, bytes: &[u8]) {
+        let mut conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let (root, tracks) = unmounted_library(&mut conn, test);
+        let empty = root.join("01.mp3");
+        write_stub(&empty, b"");
+        let track = root.join(name);
+        write_stub(&track, bytes);
+
+        let outcome = scan(&conn, &root);
+
+        assert_eq!(indexed_paths(&conn), [empty, track]);
+        let mut removed = outcome.removed;
+        removed.sort();
+        assert_eq!(
+            removed,
+            tracks
+                .iter()
+                .map(|track| track.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(outcome.problem, None);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn a_track_beside_an_empty_audio_file_shows_the_root_is_mounted() {
+        assert_mounted_beside_empty_audio(
+            "track-beside-empty-audio",
+            "Other/02.mp3",
+            crate::tag_write::TEST_MP3,
+        );
+    }
+
+    #[test]
+    fn the_shortest_adts_frame_shows_the_root_is_mounted() {
+        // A 7-byte ADTS header for an 8-byte frame, and one byte of data.
+        assert_mounted_beside_empty_audio(
+            "adts-frame-beside-empty-audio",
+            "Other/02.aac",
+            &[0xFF, 0xF1, 0x50, 0x80, 0x01, 0x1F, 0xFC, 0x00],
+        );
+    }
+
+    #[test]
     fn only_a_dot_underscore_file_with_the_apple_double_header_is_a_sidecar() {
         let root = test_dir("apple-double-name");
         fs::create_dir_all(&root).expect("mkdir");
@@ -5614,7 +5713,7 @@ mod tests {
         let base = test_dir("exact-prefix");
         for name in ["a_b", "aXb", "A_B"] {
             fs::create_dir_all(base.join(name)).expect("mkdir root");
-            write_stub(&base.join(name).join("song.mp3"), name.as_bytes());
+            write_test_track(&base.join(name).join("song.mp3"), name.as_bytes());
         }
         let base = base.canonicalize().expect("canonical base");
         for name in ["a_b", "aXb", "A_B"] {
@@ -5768,8 +5867,8 @@ mod tests {
         fs::create_dir_all(&external).expect("mkdir external");
         let root = root.canonicalize().expect("canonical root");
         let local_song = root.join("local/song.mp3");
-        write_stub(&local_song, b"local");
-        write_stub(&external.join("song.mp3"), b"external");
+        write_test_track(&local_song, b"local");
+        write_test_track(&external.join("song.mp3"), b"external");
         symlink(&external, root.join("linked")).expect("link folder");
         let linked_song = root.join("linked/song.mp3");
         scan(&conn, &root);
@@ -5782,7 +5881,7 @@ mod tests {
         // mounted, and the local track is deleted.
         fs::remove_dir_all(&external).expect("remove link target");
         fs::remove_file(&local_song).expect("remove local song");
-        write_stub(&root.join("local/other.mp3"), b"other");
+        write_test_track(&root.join("local/other.mp3"), b"other");
         let outcome = scan(&conn, &root);
 
         assert_eq!(outcome.removed, [local_song.to_string_lossy().to_string()]);
@@ -5945,8 +6044,8 @@ mod tests {
         fs::create_dir_all(base.join("b/Album")).expect("mkdir b");
         let base = base.canonicalize().expect("canonical base");
         let (a, b) = (base.join("a"), base.join("b"));
-        write_stub(&a.join("Own/01.mp3"), b"own");
-        write_stub(&b.join("Album/02.mp3"), b"linked");
+        write_test_track(&a.join("Own/01.mp3"), b"own");
+        write_test_track(&b.join("Album/02.mp3"), b"linked");
         std::os::unix::fs::symlink(b.join("Album"), a.join("Linked")).expect("link");
         // Before `b` was a root, `a` indexed its files through the link.
         scan(&conn, &a);
@@ -6441,9 +6540,9 @@ mod tests {
         let outer = outer.canonicalize().expect("canonical outer");
         let inner = outer.join("inner");
         let deepest = inner.join("deepest");
-        write_stub(&outer.join("outer.mp3"), b"outer");
-        write_stub(&inner.join("inner.mp3"), b"inner");
-        write_stub(&deepest.join("deep.mp3"), b"deep");
+        write_test_track(&outer.join("outer.mp3"), b"outer");
+        write_test_track(&inner.join("inner.mp3"), b"inner");
+        write_test_track(&deepest.join("deep.mp3"), b"deep");
         // Before nested roots were rejected, the outer root claimed every
         // track, and the inner roots were added without being rescanned.
         scan(&conn, &outer);
@@ -6584,11 +6683,11 @@ mod tests {
         let root = test_dir("stale-delete-fails");
         fs::create_dir_all(&root).expect("mkdir root");
         let root = root.canonicalize().expect("canonical root");
-        write_stub(&root.join("kept.mp3"), b"kept");
-        write_stub(&root.join("deleted.mp3"), b"deleted");
+        write_test_track(&root.join("kept.mp3"), b"kept");
+        write_test_track(&root.join("deleted.mp3"), b"deleted");
         scan(&conn, &root);
         fs::remove_file(root.join("deleted.mp3")).expect("delete track");
-        write_stub(&root.join("added.mp3"), b"added");
+        write_test_track(&root.join("added.mp3"), b"added");
         conn.execute_batch(
             "CREATE TEMP TRIGGER reject_delete BEFORE DELETE ON tracks \
              BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END",

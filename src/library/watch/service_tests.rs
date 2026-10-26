@@ -13,6 +13,7 @@ use super::watch_test_hooks::{
 };
 use super::*;
 use crate::library::scan::scan_test_hooks::{hold_walk, scans_of};
+use crate::library::scan::write_test_track;
 use crate::library::scan::ScanTuning;
 use crate::library::{LibraryEvent, LibraryMirror, LibraryService};
 use crate::raw_audio::write_test_apev2_file;
@@ -62,7 +63,7 @@ impl Fixture {
     fn write(&self, name: &str) {
         let path = self.path(name);
         fs::create_dir_all(path.parent().expect("parent")).expect("folder");
-        fs::write(&path, name.as_bytes()).expect("track");
+        write_test_track(&path, name.as_bytes());
     }
 
     /// The service, with its first event read.
@@ -629,7 +630,7 @@ fn other_roots_are_rescanned_while_an_added_root_waits_for_its_watches() {
     let other = fixture.folder.join("other");
     fs::create_dir_all(&other).expect("other root");
     let other = other.canonicalize().expect("canonical other root");
-    fs::write(other.join("x.mp3"), b"x").expect("track");
+    write_test_track(&other.join("x.mp3"), b"x");
     let mut running = fixture.start(tuning(Duration::from_secs(3600)));
     running.service.command(LibraryCommand::AddRoot {
         path: other.clone(),
@@ -641,7 +642,7 @@ fn other_roots_are_rescanned_while_an_added_root_waits_for_its_watches() {
     let held = add_root_while_watching_is_held(&fixture, &mut running);
 
     // The held watcher sees nothing; only the rescan finds this.
-    fs::write(other.join("y.mp3"), b"y").expect("track");
+    write_test_track(&other.join("y.mp3"), b"y");
     running
         .service
         .command(LibraryCommand::RescanRoot(other.clone()));
@@ -708,7 +709,7 @@ fn turning_watching_off_and_on_while_an_added_root_waits_watches_and_walks_it_on
     let other = fixture.folder.join("other");
     fs::create_dir_all(&other).expect("other root");
     let other = other.canonicalize().expect("canonical other root");
-    fs::write(other.join("x.mp3"), b"x").expect("track");
+    write_test_track(&other.join("x.mp3"), b"x");
     let watched = observe_watched(&fixture.root);
     let mut running = fixture.start(tuning(Duration::from_secs(3600)));
     running.service.set_watching(true);
@@ -795,7 +796,7 @@ fn links_to_folders_made_and_removed_while_watching_are_followed() {
     let fixture = Fixture::new("links");
     let elsewhere = fixture.folder.join("elsewhere/Album");
     fs::create_dir_all(&elsewhere).expect("linked folder");
-    fs::write(elsewhere.join("1.mp3"), b"1").expect("track");
+    write_test_track(&elsewhere.join("1.mp3"), b"1");
     // A root left empty would look unmounted, and keep its tracks.
     fixture.write("a.mp3");
     let mut running = fixture.start_watching(tuning(Duration::from_secs(3600)));
@@ -805,7 +806,7 @@ fn links_to_folders_made_and_removed_while_watching_are_followed() {
         mirror.paths() == vec![fixture.path("Album/1.mp3"), fixture.path("a.mp3")]
     });
     // The folder it links to is watched.
-    fs::write(elsewhere.join("2.mp3"), b"2").expect("track");
+    write_test_track(&elsewhere.join("2.mp3"), b"2");
     running.wait_for("a track added to the linked folder", |mirror| {
         mirror.paths()
             == vec![
