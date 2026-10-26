@@ -19,27 +19,8 @@ jobs:
     container:
       image: fedora:${{ matrix.fedora }}
     steps:
-      - name: Install build dependencies
-        run: |
-          dnf -y install \
-            git \
-            cmake \
-            ninja-build \
-            gcc-c++ \
-            zsh \
-            curl \
-            rpm-build \
-            desktop-file-validate \
-            pkgconf-pkg-config \
-            glib2-devel \
-            gstreamer1-devel \
-            gstreamer1-plugins-base-devel \
-            qt6-qtbase-devel \
-            qt6-qtdeclarative-devel \
-            qt6-qtquickcontrols2-devel \
-            kf6-kirigami-devel
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.94.1
-          echo 'source "$HOME/.cargo/env"' >> "$HOME/.bashrc"
+      - name: Install packaging tools
+        run: dnf -y install git rpm-build appstream desktop-file-utils
 
       - name: Checkout
         uses: actions/checkout@v5
@@ -49,12 +30,16 @@ jobs:
       - name: Mark repo safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # rpmbuild checks the spec's BuildRequires, including Fedora's Rust
+      # toolchain, which builds the package.
+      - name: Install build dependencies
+        run: dnf -y builddep packaging/rpm/ferrous.spec
+
       - name: Build RPM
         env:
           FERROUS_LASTFM_API_KEY: ${{ secrets.FERROUS_LASTFM_API_KEY }}
           FERROUS_LASTFM_SHARED_SECRET: ${{ secrets.FERROUS_LASTFM_SHARED_SECRET }}
         run: |
-          . "$HOME/.cargo/env"
           version="${GITHUB_REF_NAME#v}"
           ./scripts/build-rpm.sh \
             --release "1%{?dist}" \

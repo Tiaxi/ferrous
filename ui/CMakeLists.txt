@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(FERROUS_ENABLE_PROFILE_LOGS "Compile UI instrumentation and profiling log output into binaries" OFF)
 option(FERROUS_WARNINGS_AS_ERRORS "Fail UI builds on compiler warnings" ON)
+set(FERROUS_CARGO_ARGS "" CACHE STRING "Extra arguments for the Cargo build of the Rust library, such as --frozen")
 
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)
 find_package(KF6Kirigami 6.0 REQUIRED)
@@ -53,7 +54,7 @@ if(FERROUS_ENABLE_PROFILE_LOGS)
 endif()
 
 add_custom_target(ferrous_rust_bridge ALL
-    COMMAND /bin/zsh -lc "if [ -f \"$HOME/.cargo/env\" ]; then source \"$HOME/.cargo/env\"; fi; cargo build --release --features ${FERROUS_RUST_FEATURES} --lib"
+    COMMAND /bin/zsh -lc "if [ -f \"$HOME/.cargo/env\" ]; then source \"$HOME/.cargo/env\"; fi; cargo build --release --features ${FERROUS_RUST_FEATURES} --lib ${FERROUS_CARGO_ARGS}"
     WORKING_DIRECTORY "${FERROUS_ROOT_DIR}"
     BYPRODUCTS "${FERROUS_RUST_STATIC_LIB}"
     COMMENT "Building Rust static library for in-process bridge"
@@ -207,9 +208,30 @@ endif()
 install(TARGETS ferrous RUNTIME DESTINATION bin)
 install(FILES ferrous.desktop DESTINATION share/applications)
 install(FILES assets/ferrous.svg DESTINATION share/icons/hicolor/scalable/apps RENAME ferrous.svg)
+install(FILES io.github.tiaxi.ferrous.metainfo.xml DESTINATION share/metainfo)
 
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
+
+    add_test(NAME ferrous_metainfo_release_version
+        COMMAND "${CMAKE_COMMAND}"
+            -DMETAINFO_FILE=${CMAKE_CURRENT_SOURCE_DIR}/io.github.tiaxi.ferrous.metainfo.xml
+            -DEXPECTED_VERSION=${FERROUS_APP_VERSION}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_metainfo_release.cmake"
+    )
+    find_program(FERROUS_APPSTREAMCLI appstreamcli)
+    if(FERROUS_APPSTREAMCLI)
+        add_test(NAME ferrous_metainfo_validate
+            COMMAND "${FERROUS_APPSTREAMCLI}" validate --no-net
+                "${CMAKE_CURRENT_SOURCE_DIR}/io.github.tiaxi.ferrous.metainfo.xml"
+        )
+    endif()
+    find_program(FERROUS_DESKTOP_FILE_VALIDATE desktop-file-validate)
+    if(FERROUS_DESKTOP_FILE_VALIDATE)
+        add_test(NAME ferrous_desktop_file_validate
+            COMMAND "${FERROUS_DESKTOP_FILE_VALIDATE}" "${CMAKE_CURRENT_SOURCE_DIR}/ferrous.desktop"
+        )
+    endif()
 
     qt_add_executable(ferrous_playback_clock_tests
         tests/tst_playback_clock.cpp

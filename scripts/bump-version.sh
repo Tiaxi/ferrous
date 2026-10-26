@@ -31,10 +31,18 @@ sed -i "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" "${REPO_ROOT}/Cargo.t
 sed -i "s/%{!?ferrous_version:%global ferrous_version .*}/%{!?ferrous_version:%global ferrous_version ${NEW_VERSION}}/" \
     "${REPO_ROOT}/packaging/rpm/ferrous.spec"
 
+# AppStream release history, newest first
+METAINFO="${REPO_ROOT}/ui/io.github.tiaxi.ferrous.metainfo.xml"
+if ! grep -qF "<release version=\"${NEW_VERSION}\"" "${METAINFO}"; then
+    sed -i "s|^\( *\)<releases>\$|&\n\1  <release version=\"${NEW_VERSION}\" date=\"$(date -u +%F)\"/>|" \
+        "${METAINFO}"
+fi
+
 echo "Bumped version to ${NEW_VERSION} in:"
 echo "  Cargo.toml"
 echo "  Cargo.lock"
 echo "  packaging/rpm/ferrous.spec"
+echo "  ui/io.github.tiaxi.ferrous.metainfo.xml"
 echo ""
 echo "Next steps:"
 echo "  git add -p && git commit -m 'chore: bump version to ${NEW_VERSION}'"

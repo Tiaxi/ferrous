@@ -63,15 +63,17 @@ Manual CMake and Cargo commands do not load `build.env`; export any build creden
 
 ## Local package builds
 
-On Fedora, install the build dependencies above plus `rpm-build` and `desktop-file-utils`, then run:
+On Fedora, install the packaging tools and the spec's build dependencies, then run:
 
 ```bash
+sudo dnf install rpm-build appstream desktop-file-utils
+sudo dnf builddep packaging/rpm/ferrous.spec
 ./scripts/build-rpm.sh
 # Or build and install:
 ./scripts/build-rpm.sh --install
 ```
 
-The helper packages the current working tree, runs package checks, and writes RPMs under `dist/rpm/RPMS/`.
+The helper packages the current working tree, vendors the crates that `Cargo.lock` lists into a second source tarball, validates the desktop entry and AppStream metadata, runs package checks, and writes RPMs under `dist/rpm/RPMS/`. Vendoring needs network access unless Cargo has already downloaded the crates; the package build itself runs offline. rpmbuild checks the build dependencies, so the package build uses Fedora's `rust` and `cargo` packages, not a rustup toolchain. Package builds do not treat compiler warnings as errors.
 
 ## Formats
 

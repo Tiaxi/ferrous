@@ -146,3 +146,5 @@ Other useful runtime controls:
 ## Packaging
 
 See [local package builds](INSTALL.md#local-package-builds) for RPM instructions. `./scripts/install-rpm.sh` installs the newest local RPM without rebuilding it.
+
+`./scripts/bump-version.sh <version>` updates the version in `Cargo.toml`, `Cargo.lock`, the RPM spec, and the AppStream metadata in `ui/io.github.tiaxi.ferrous.metainfo.xml`, where it adds a release dated today. The UI tests fail when the newest AppStream release is not the `Cargo.toml` version, and they validate the metadata and desktop entry when `appstreamcli` and `desktop-file-validate` are installed. The RPM changelog has one entry, generated from the version and the packaged commit's date.
