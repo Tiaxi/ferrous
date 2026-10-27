@@ -1921,11 +1921,11 @@ fn parse_playback_command(
             BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(parse_f32(value)?))
         }
         7 => {
-            let value = reader.read_f64()?;
-            if !value.is_finite() || value < 0.0 {
-                return Err("seek value must be finite and >= 0".to_string());
-            }
-            BridgeCommand::Playback(BridgePlaybackCommand::Seek(Duration::from_secs_f64(value)))
+            // Rejects negative, infinite and NaN values, and ones too large
+            // for a `Duration`, which no track reaches.
+            let position = Duration::try_from_secs_f64(reader.read_f64()?)
+                .map_err(|_| "seek value must be finite, >= 0 and in range".to_string())?;
+            BridgeCommand::Playback(BridgePlaybackCommand::Seek(position))
         }
         25 => {
             let mode = match reader.read_u8()? {
@@ -4323,10 +4323,44 @@ mod tests {
 
     #[test]
     fn parse_binary_command_rejects_invalid_seek() {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&(-1.0f64).to_le_bytes());
-        let err = parse_binary_command(&encode_command(7, &payload)).unwrap_err();
-        assert!(err.contains("seek value must be finite and >= 0"));
+        // 2^64 s is the first value too large for a `Duration`.
+        for seconds in [
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            18_446_744_073_709_551_616.0,
+            1e30,
+            f64::MAX,
+        ] {
+            let err = parse_binary_command(&encode_command(7, &seconds.to_le_bytes()))
+                .expect_err("seek accepted");
+            assert!(
+                err.contains("seek value must be finite, >= 0 and in range"),
+                "{seconds}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_binary_command_takes_seeks_up_to_the_largest_duration() {
+        // 2^64 - 2048 s is the largest f64 below 2^64.
+        for (seconds, expected) in [
+            (0.0_f64, Duration::ZERO),
+            (-0.0, Duration::ZERO),
+            (12.5, Duration::from_millis(12_500)),
+            (
+                18_446_744_073_709_549_568.0,
+                Duration::from_secs(u64::MAX - 2_047),
+            ),
+        ] {
+            match parse_binary_command(&encode_command(7, &seconds.to_le_bytes())) {
+                Ok(Some(BridgeCommand::Playback(BridgePlaybackCommand::Seek(position)))) => {
+                    assert_eq!(position, expected, "{seconds}");
+                }
+                other => panic!("seek to {seconds} parsed as {other:?}"),
+            }
+        }
     }
 
     /// The section a relay that has no queue yet sends for `snapshot`.
@@ -6132,13 +6166,17 @@ mod tests {
         let handle = ferrous_ffi_bridge_create();
         assert!(!handle.is_null());
 
-        let mut bad_seek = Vec::new();
-        bad_seek.extend_from_slice(&(-1.0f64).to_le_bytes());
-        assert!(!ffi_send_binary(handle, &encode_command(7, &bad_seek)));
-        let error_evt =
-            ffi_wait_for_mask(handle, SECTION_ERROR, Duration::from_secs(3)).expect("error event");
-        let (_, _, mask) = parse_packet_header(&error_evt);
-        assert_ne!(mask & SECTION_ERROR, 0);
+        // Each rejected seek is answered with an error, not a panic.
+        for seconds in [-1.0, f64::NAN, f64::INFINITY, 1e30, f64::MAX] {
+            assert!(!ffi_send_binary(
+                handle,
+                &encode_command(7, &seconds.to_le_bytes())
+            ));
+            let error_evt = ffi_wait_for_mask(handle, SECTION_ERROR, Duration::from_secs(3))
+                .unwrap_or_else(|| panic!("no error event for a seek to {seconds}"));
+            let (_, _, mask) = parse_packet_header(&error_evt);
+            assert_ne!(mask & SECTION_ERROR, 0);
+        }
 
         assert!(ffi_send_binary(handle, &encode_command(33, &[])));
         let _ = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));

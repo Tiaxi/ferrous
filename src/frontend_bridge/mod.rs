@@ -6704,6 +6704,71 @@ mod tests {
         bridge.command(BridgeCommand::Shutdown);
     }
 
+    /// Seeks the decoder rejects never reach playback, and the largest it
+    /// takes goes to the end of the track, as a seek past its end does.
+    #[cfg(not(feature = "gst"))]
+    #[test]
+    fn bridge_survives_seeks_beyond_any_track() {
+        let _guard = test_guard();
+        let bridge = FrontendBridgeHandle::spawn().expect("spawn bridge");
+        let first = p("/music/seek_range_a.flac");
+        let second = p("/music/seek_range_b.flac");
+        let poll_for = |predicate: &dyn Fn(&BridgeSnapshot) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                bridge.command(BridgeCommand::RequestSnapshot);
+                if let Some(snapshot) =
+                    wait_for_snapshot_matching(&bridge, Duration::from_millis(200), predicate)
+                {
+                    return snapshot;
+                }
+            }
+            panic!("no matching snapshot");
+        };
+        let decode_seek = |seconds: f64| {
+            let mut command = 7_u16.to_le_bytes().to_vec();
+            command.extend_from_slice(&8_u32.to_le_bytes());
+            command.extend_from_slice(&seconds.to_le_bytes());
+            ffi::parse_binary_command(&command)
+        };
+        let playing = |track: &PathBuf| {
+            let track = track.clone();
+            move |s: &BridgeSnapshot| {
+                s.playback.current.as_ref() == Some(&track)
+                    && s.playback.state == crate::playback::PlaybackState::Playing
+            }
+        };
+
+        bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
+            tracks: vec![first.clone(), second.clone()],
+            autoplay: true,
+        }));
+        poll_for(&playing(&first));
+
+        for seconds in [
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e30,
+            f64::MAX,
+        ] {
+            assert!(decode_seek(seconds).is_err(), "seek to {seconds} decoded");
+        }
+        // Nothing was sent, so the first track plays on from its start.
+        let unchanged = poll_for(&playing(&first));
+        assert!(unchanged.playback.position < Duration::from_secs(60));
+
+        let Ok(Some(seek)) = decode_seek(18_446_744_073_709_549_568.0) else {
+            panic!("the largest seek was not decoded");
+        };
+        bridge.command(seek);
+        let handed_off = poll_for(&playing(&second));
+        assert_eq!(handed_off.playback.current_queue_index, Some(1));
+
+        bridge.command(BridgeCommand::Shutdown);
+    }
+
     #[cfg(not(feature = "gst"))]
     #[test]
     fn bridge_reports_each_play_of_a_repeated_or_duplicated_file() {

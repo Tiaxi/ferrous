@@ -2101,9 +2101,11 @@ fn throttle_wait(
     let columns = session.columns_produced.saturating_sub(origin_column);
     #[allow(clippy::cast_precision_loss)]
     let expected_elapsed = columns as f64 / max_cols_per_wall_sec;
-    Some(Duration::from_secs_f64(
-        (expected_elapsed - elapsed).max(0.0),
-    ))
+    // A tiny rate limit makes the wait too long for a `Duration`; the caller
+    // caps each wait anyway.
+    Some(
+        Duration::try_from_secs_f64((expected_elapsed - elapsed).max(0.0)).unwrap_or(Duration::MAX),
+    )
     .filter(|wait| !wait.is_zero())
 }
 
@@ -2618,6 +2620,22 @@ mod tests {
             throttle_wait(&mut session, start + Duration::from_millis(1_010)),
             None
         );
+    }
+
+    #[test]
+    fn a_tiny_rate_limit_waits_as_long_as_possible() {
+        // FERROUS_SPECTROGRAM_DECODE_RATE=1e-300 makes the wait infinite,
+        // and 1e-30 too long for a `Duration`.
+        for rate in [1e-300, 1e-30] {
+            let mut session = make_test_session();
+            session.post_reset_unthrottled_columns = 0;
+            session.columns_produced = session.session_start_column;
+            session.decode_rate_limit = rate;
+            let start = std::time::Instant::now();
+            assert_eq!(throttle_wait(&mut session, start), None);
+            session.columns_produced += 1;
+            assert_eq!(throttle_wait(&mut session, start), Some(Duration::MAX));
+        }
     }
 
     #[test]
