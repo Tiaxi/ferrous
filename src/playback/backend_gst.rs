@@ -9386,6 +9386,24 @@ mod engine_tests {
         file: &Path,
         count: usize,
     ) -> Arc<AtomicUsize> {
+        /// Increment `counter` unless it has reached `bound`; returns
+        /// whether it did.
+        fn count_below(counter: &AtomicUsize, bound: usize) -> bool {
+            let mut counted = counter.load(Ordering::SeqCst);
+            while counted < bound {
+                match counter.compare_exchange_weak(
+                    counted,
+                    counted + 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => return true,
+                    Err(current) => counted = current,
+                }
+            }
+            false
+        }
+
         let blocked = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&blocked);
         let file = file.to_path_buf();
@@ -9397,11 +9415,7 @@ mod engine_tests {
             let (counted, file) = (Arc::clone(&counted), file.clone());
             parsebin.connect_pad_added(move |parsebin, pad| {
                 if input_file(Some(parsebin.upcast_ref())).as_ref() != Some(&file)
-                    || counted
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |blocked| {
-                            (blocked < count).then_some(blocked + 1)
-                        })
-                        .is_err()
+                    || !count_below(&counted, count)
                 {
                     return;
                 }

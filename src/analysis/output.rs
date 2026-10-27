@@ -81,11 +81,54 @@ pub(super) fn resets_spectral_stream(command: &AnalysisCommand) -> bool {
 impl AnalysisOutputs {
     pub fn begin_command(&self, command: &AnalysisCommand) {
         if resets_spectral_stream(command) {
-            let _ =
-                self.pending_resets
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                        Some(count.saturating_sub(1))
-                    });
+            saturating_decrement(&self.pending_resets);
         }
+    }
+}
+
+/// Decrement `counter` unless it is already zero.
+fn saturating_decrement(counter: &AtomicUsize) {
+    let mut count = counter.load(Ordering::Relaxed);
+    while count > 0 {
+        match counter.compare_exchange_weak(count, count - 1, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return,
+            Err(current) => count = current,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outputs(pending_resets: usize) -> AnalysisOutputs {
+        let (snapshots, _) = crossbeam_channel::unbounded();
+        let (spectra, _) = crossbeam_channel::unbounded();
+        AnalysisOutputs {
+            snapshots,
+            spectra,
+            generation: Arc::new(AtomicU64::new(0)),
+            pending_resets: Arc::new(AtomicUsize::new(pending_resets)),
+            closed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn a_reset_command_takes_one_pending_reset_and_never_goes_below_zero() {
+        let outputs = outputs(2);
+        outputs.begin_command(&AnalysisCommand::SetFftSize(512));
+        assert_eq!(outputs.pending_resets.load(Ordering::Relaxed), 1);
+        outputs.begin_command(&AnalysisCommand::SetFftSize(512));
+        assert_eq!(outputs.pending_resets.load(Ordering::Relaxed), 0);
+        outputs.begin_command(&AnalysisCommand::SetFftSize(512));
+        assert_eq!(outputs.pending_resets.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_command_that_keeps_the_stream_leaves_pending_resets_alone() {
+        let outputs = outputs(1);
+        outputs.begin_command(&AnalysisCommand::SetSpectrogramActive(true));
+        assert_eq!(outputs.pending_resets.load(Ordering::Relaxed), 1);
     }
 }

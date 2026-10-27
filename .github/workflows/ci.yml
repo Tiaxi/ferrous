@@ -23,6 +23,8 @@ jobs:
         # fedora: Fedora's rust and cargo packages, which build the release RPMs.
         # The next Fedora release tests the pinned toolchain against its
         # system libraries, without blocking merges.
+        # deny_warnings: fail the build on compiler warnings. Clippy already
+        # denies them on the lint entry.
         include:
           - fedora: '44'
             toolchain: pinned
@@ -30,10 +32,12 @@ jobs:
             timeout: 30
           - fedora: '44'
             toolchain: fedora
+            deny_warnings: true
             timeout: 30
           - fedora: '45'
             toolchain: pinned
             experimental: true
+            deny_warnings: true
             timeout: 40
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.experimental == true }}
@@ -107,6 +111,15 @@ jobs:
             # toolchain; rpm fails for files that no package owns.
             rpm -qf "$(realpath "$(command -v rustc)")" "$(realpath "$(command -v cargo)")"
           fi
+
+      # Before the cache step, so that the cache key includes RUSTFLAGS and
+      # no cache built with other flags is restored only to be rebuilt.
+      # Without a --target, RUSTFLAGS applies to build scripts and
+      # dependencies too; Cargo caps lints in dependencies outside the
+      # workspace.
+      - name: Deny compiler warnings
+        if: matrix.deny_warnings
+        run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
