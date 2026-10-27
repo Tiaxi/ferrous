@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
+import FerrousUi 1.0
 import "../logic/PathUtils.js" as PathUtils
 
 QtObject {
@@ -89,22 +90,22 @@ QtObject {
         const lines = []
 
         if ((info.fileName || "").length > 0) {
-            lines.push("File: " + info.fileName)
+            lines.push(I18n.i18nc("@info album art file name", "File: %1", info.fileName))
         }
         if ((info.resolutionText || "").length > 0) {
-            lines.push("Resolution: " + info.resolutionText)
+            lines.push(I18n.i18nc("@info album art image size", "Resolution: %1", info.resolutionText))
         }
         if ((info.fileSizeText || "").length > 0) {
-            lines.push("Size: " + info.fileSizeText)
+            lines.push(I18n.i18nc("@info album art file size", "Size: %1", info.fileSizeText))
         }
         if ((info.fileType || "").length > 0) {
-            lines.push("Type: " + info.fileType)
+            lines.push(I18n.i18nc("@info album art file type", "Type: %1", info.fileType))
         }
         if ((info.mimeType || "").length > 0) {
-            lines.push("MIME: " + info.mimeType)
+            lines.push(I18n.i18nc("@info album art MIME type", "MIME: %1", info.mimeType))
         }
         if ((info.path || "").length > 0) {
-            lines.push("Path: " + info.path)
+            lines.push(I18n.i18nc("@info album art file path", "Path: %1", info.path))
         }
 
         return lines.join("\n")
@@ -138,7 +139,7 @@ QtObject {
         root.comparisonCandidateSource = ""
         root.comparisonCandidateInfoSource = ""
         root.comparisonModeAvailable = false
-        root.comparisonLabel = "Current Album Art"
+        root.comparisonLabel = I18n.i18nc("@label", "Current Album Art")
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1
         root.refreshAlbumArtFileInfo()
@@ -161,7 +162,7 @@ QtObject {
         root.comparisonCurrentSource = currentSource
         root.comparisonCurrentInfoSource = PathUtils.pathFromAnyUrl(currentSource)
         root.comparisonModeAvailable = currentSource.length > 0
-        root.comparisonLabel = "iTunes Candidate"
+        root.comparisonLabel = I18n.i18nc("@label artwork found on iTunes", "iTunes Candidate")
 
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1
@@ -177,12 +178,12 @@ QtObject {
             root.albumArtViewerSource = root.comparisonCandidateSource
             root.albumArtViewerInfoSource = root.comparisonCandidateInfoSource
             root.albumArtViewerShowsCurrentTrack = false
-            root.comparisonLabel = "iTunes Candidate"
+            root.comparisonLabel = I18n.i18nc("@label artwork found on iTunes", "iTunes Candidate")
         } else {
             root.albumArtViewerSource = root.comparisonCurrentSource
             root.albumArtViewerInfoSource = root.comparisonCurrentInfoSource
             root.albumArtViewerShowsCurrentTrack = true
-            root.comparisonLabel = "Current Album Art"
+            root.comparisonLabel = I18n.i18nc("@label", "Current Album Art")
         }
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1
@@ -204,13 +205,13 @@ QtObject {
 
     function currentTrackItunesArtworkDisabledReason() {
         if ((root.uiBridge.currentTrackPath || "").trim().length === 0) {
-            return "No active track."
+            return I18n.i18nc("@info why iTunes artwork cannot be searched", "No active track.")
         }
         if ((root.uiBridge.currentTrackAlbum || "").trim().length === 0) {
-            return "Album metadata is missing."
+            return I18n.i18nc("@info why iTunes artwork cannot be searched", "Album metadata is missing.")
         }
         if ((root.uiBridge.currentTrackArtist || "").trim().length === 0) {
-            return "Artist metadata is missing."
+            return I18n.i18nc("@info why iTunes artwork cannot be searched", "Artist metadata is missing.")
         }
         return ""
     }

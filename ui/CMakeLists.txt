@@ -15,6 +15,8 @@ set(FERROUS_CARGO_ARGS "" CACHE STRING "Extra arguments for the Cargo build of t
 
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)
 find_package(KF6Kirigami 6.0 REQUIRED)
+# KLocalizedQmlContext is new in 6.8.
+find_package(KF6I18n 6.8 REQUIRED)
 find_package(PkgConfig REQUIRED)
 # The system libraries that the Rust static library needs, which a static
 # archive cannot bring along; dbus-1 is the Secret Service keyring's.
@@ -28,6 +30,8 @@ pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
 )
 
 qt_standard_project_setup(REQUIRES 6.6)
+# The gettext domain of every i18n() call; see src/Localization.h.
+add_compile_definitions(TRANSLATION_DOMAIN="ferrous")
 qt_policy(SET QTP0004 NEW)
 
 function(ferrous_enable_strict_warnings target_name)
@@ -100,6 +104,7 @@ qt_add_executable(ferrous
     src/main.cpp
     src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
+    src/Localization.cpp
     src/DisplaySleepInhibitor.cpp
     src/BinaryBridgeCodec.cpp
     src/BridgeClient.cpp
@@ -227,6 +232,8 @@ target_link_libraries(ferrous PRIVATE
     Qt6::Network
     Qt6::Widgets
     KF6::Kirigami
+    KF6::I18n
+    KF6::I18nQml
     dl
     m
     pthread
@@ -236,6 +243,15 @@ if(FERROUS_ENABLE_PROFILE_LOGS)
     target_sources(ferrous PRIVATE src/SpectrogramSeekTrace.cpp)
     target_compile_definitions(ferrous PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
 endif()
+
+# Writes the translation template to <build>/po/ferrous.pot; see
+# docs/DEVELOPMENT.md. scripts/extract-messages.sh writes po/ferrous.pot.
+add_custom_target(extract-messages
+    COMMAND "${FERROUS_ROOT_DIR}/scripts/extract-messages.sh" "${CMAKE_CURRENT_BINARY_DIR}/po"
+    WORKING_DIRECTORY "${FERROUS_ROOT_DIR}"
+    COMMENT "Extracting translatable strings into po/ferrous.pot"
+    VERBATIM
+)
 
 install(TARGETS ferrous RUNTIME DESTINATION bin)
 install(FILES ferrous.desktop DESTINATION share/applications)
@@ -368,6 +384,7 @@ if(BUILD_TESTING)
         src/BridgeClient.cpp
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
+        src/Localization.cpp
         src/DisplaySleepInhibitor.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
@@ -401,6 +418,8 @@ if(BUILD_TESTING)
         Qt6::Widgets
         Qt6::Test
         KF6::Kirigami
+        KF6::I18n
+        KF6::I18nQml
         "${FERROUS_RUST_STATIC_LIB}"
         PkgConfig::FERROUS_GSTREAMER
         dl
@@ -459,6 +478,7 @@ if(BUILD_TESTING)
         src/BridgeClient.cpp
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
+        src/Localization.cpp
         src/DisplaySleepInhibitor.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
@@ -492,6 +512,8 @@ if(BUILD_TESTING)
         Qt6::Widgets
         Qt6::Test
         KF6::Kirigami
+        KF6::I18n
+        KF6::I18nQml
         "${FERROUS_RUST_STATIC_LIB}"
         PkgConfig::FERROUS_GSTREAMER
         dl
@@ -544,6 +566,7 @@ if(BUILD_TESTING)
         Qt6::Core
         Qt6::DBus
         Qt6::Test
+        KF6::I18n
     )
     ferrous_enable_strict_warnings(ferrous_display_sleep_inhibitor_tests)
     add_test(
@@ -558,6 +581,7 @@ if(BUILD_TESTING)
         src/BridgeClient.cpp
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
+        src/Localization.cpp
         src/GlobalSearchResultsModel.cpp
         src/LibraryTreeModel.cpp
         src/MprisController.cpp
@@ -586,6 +610,8 @@ if(BUILD_TESTING)
         Qt6::Widgets
         Qt6::Test
         KF6::Kirigami
+        KF6::I18n
+        KF6::I18nQml
         "${FERROUS_RUST_STATIC_LIB}"
         PkgConfig::FERROUS_GSTREAMER
         dl
@@ -618,6 +644,7 @@ if(BUILD_TESTING)
         src/CoverRevisionLinks.cpp
         src/LevelMeterItem.cpp
         src/LibraryTreeModel.cpp
+        src/Localization.cpp
         src/PlaybackClock.cpp
         src/QmlTypes.cpp
         src/SpectrogramItem.cpp
@@ -642,6 +669,8 @@ if(BUILD_TESTING)
         Qt6::Widgets
         Qt6::Test
         KF6::Kirigami
+        KF6::I18n
+        KF6::I18nQml
         "${FERROUS_RUST_STATIC_LIB}"
         PkgConfig::FERROUS_GSTREAMER
         dl
@@ -662,6 +691,117 @@ if(BUILD_TESTING)
         TIMEOUT 120
     )
     ferrous_add_default_platform_test(ferrous_qml_module_tests drawsOffscreenUnlessAPlatformIsChosen)
+
+    # The translation template, and the x-test pseudo-translation made from it,
+    # which wraps every message in ⟦ and ⟧ for the i18n tests.
+    find_program(FERROUS_I18N_BASH bash REQUIRED)
+    find_program(FERROUS_XGETTEXT xgettext REQUIRED)
+    find_program(FERROUS_MSGEN msgen REQUIRED)
+    find_program(FERROUS_MSGFILTER msgfilter REQUIRED)
+    find_program(FERROUS_MSGFMT msgfmt REQUIRED)
+    find_program(FERROUS_SED sed REQUIRED)
+    add_test(NAME ferrous_translation_template
+        COMMAND "${CMAKE_COMMAND}"
+            -DBASH=${FERROUS_I18N_BASH}
+            -DEXTRACT_SCRIPT=${FERROUS_ROOT_DIR}/scripts/extract-messages.sh
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/translation-template-check
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_translation_template.cmake"
+    )
+    set_tests_properties(ferrous_translation_template PROPERTIES TIMEOUT 60)
+    file(GLOB_RECURSE FERROUS_TRANSLATED_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/qml/*.qml"
+        "${CMAKE_CURRENT_SOURCE_DIR}/qml/*.js"
+    )
+    set(FERROUS_PSEUDO_LOCALE_DIR "${CMAKE_CURRENT_BINARY_DIR}/pseudo-locale")
+    set(FERROUS_PSEUDO_CATALOG "${FERROUS_PSEUDO_LOCALE_DIR}/x-test/LC_MESSAGES/ferrous.mo")
+    add_custom_command(
+        OUTPUT "${FERROUS_PSEUDO_CATALOG}"
+        COMMAND "${CMAKE_COMMAND}"
+            -DBASH=${FERROUS_I18N_BASH}
+            -DEXTRACT_SCRIPT=${FERROUS_ROOT_DIR}/scripts/extract-messages.sh
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/pseudo-locale-work
+            -DOUT_DIR=${FERROUS_PSEUDO_LOCALE_DIR}
+            -DMSGEN=${FERROUS_MSGEN}
+            -DMSGFILTER=${FERROUS_MSGFILTER}
+            -DMSGFMT=${FERROUS_MSGFMT}
+            -DSED=${FERROUS_SED}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/make_pseudo_catalog.cmake"
+        DEPENDS
+            ${FERROUS_TRANSLATED_SOURCES}
+            "${CMAKE_CURRENT_SOURCE_DIR}/Messages.sh"
+            "${FERROUS_ROOT_DIR}/scripts/extract-messages.sh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/make_pseudo_catalog.cmake"
+        COMMENT "Making the x-test pseudo-translation"
+        VERBATIM
+    )
+    add_custom_target(ferrous_pseudo_catalog DEPENDS "${FERROUS_PSEUDO_CATALOG}")
+
+    qt_add_executable(ferrous_i18n_tests
+        tests/tst_i18n.cpp
+        src/QmlTypes.cpp
+        src/BinaryBridgeCodec.cpp
+        src/BridgeClient.cpp
+        src/CoverImageProvider.cpp
+        src/DiagnosticsLog.cpp
+        src/Localization.cpp
+        src/DisplaySleepInhibitor.cpp
+        src/GlobalSearchResultsModel.cpp
+        src/LibraryTreeModel.cpp
+        src/MprisController.cpp
+        src/CoverRevisionLinks.cpp
+        src/PlaybackClock.cpp
+        src/TagEditorController.cpp
+        src/TagEditorTableModel.cpp
+        src/SpectrogramItem.cpp
+        src/WindowActivation.cpp
+        src/WaveformItem.cpp
+        src/WaveformSceneGraph.cpp
+        src/WaveformSceneGraph.h
+        src/WaveformEditorItem.cpp
+        src/LevelMeterItem.cpp
+    )
+    target_include_directories(ferrous_i18n_tests PRIVATE src)
+    add_dependencies(ferrous_i18n_tests ferrous_rust_bridge ferrous_pseudo_catalog)
+    target_compile_definitions(ferrous_i18n_tests PRIVATE
+        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        FERROUS_PSEUDO_LOCALE_DIR="${FERROUS_PSEUDO_LOCALE_DIR}"
+    )
+    target_link_libraries(ferrous_i18n_tests PRIVATE
+        Qt6::Core
+        Qt6::DBus
+        Qt6::Gui
+        Qt6::Qml
+        Qt6::Quick
+        Qt6::QuickControls2
+        Qt6::Concurrent
+        Qt6::Network
+        Qt6::Widgets
+        Qt6::Test
+        KF6::Kirigami
+        KF6::I18n
+        KF6::I18nQml
+        "${FERROUS_RUST_STATIC_LIB}"
+        PkgConfig::FERROUS_GSTREAMER
+        dl
+        m
+        pthread
+    )
+    ferrous_enable_strict_warnings(ferrous_i18n_tests)
+    if(FERROUS_ENABLE_PROFILE_LOGS)
+        target_sources(ferrous_i18n_tests PRIVATE src/SpectrogramSeekTrace.cpp)
+        target_compile_definitions(ferrous_i18n_tests PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
+    endif()
+    set_target_properties(ferrous_i18n_tests PROPERTIES
+        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
+    )
+    add_test(NAME ferrous_i18n_tests COMMAND ferrous_i18n_tests)
+    set_tests_properties(ferrous_i18n_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 120
+    )
+    ferrous_add_default_platform_test(ferrous_i18n_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The app and the module test have the module's compiled QML.
     if(CMAKE_NM)

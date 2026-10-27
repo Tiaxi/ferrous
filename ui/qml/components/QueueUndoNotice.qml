@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 
 // Offers to undo the latest change that removed tracks from the queue:
 // Clear, removing rows, or replacing the queue. It shows while the backend
@@ -25,14 +26,14 @@ Rectangle {
 
     // BinaryBridgeCodec::QueueUndoKind.
     function describe(kind, count) {
-        const tracks = count === 1 ? "1 track" : count + " tracks"
         switch (kind) {
         case 1:
-            return "Queue cleared (" + tracks + ")."
+            return I18n.i18ncp("@info", "Queue cleared (%1 track).", "Queue cleared (%1 tracks).", count)
         case 2:
-            return "Removed " + tracks + " from the queue."
+            return I18n.i18ncp("@info", "Removed %1 track from the queue.", "Removed %1 tracks from the queue.", count)
         case 3:
-            return "Queue replaced; the previous queue had " + tracks + "."
+            return I18n.i18ncp("@info", "Queue replaced; the previous queue had %1 track.",
+                "Queue replaced; the previous queue had %1 tracks.", count)
         default:
             return ""
         }
@@ -83,7 +84,7 @@ Rectangle {
 
         Button {
             objectName: "queueUndoButton"
-            text: "Undo"
+            text: I18n.i18nc("@action:button", "Undo")
             icon.name: "edit-undo"
             onClicked: root.undo()
         }
@@ -91,7 +92,7 @@ Rectangle {
         ToolButton {
             objectName: "queueUndoDismissButton"
             icon.name: "dialog-close"
-            text: "Dismiss"
+            text: I18n.i18nc("@action:button", "Dismiss")
             display: AbstractButton.IconOnly
             ToolTip.visible: hovered
             ToolTip.text: text

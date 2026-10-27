@@ -151,6 +151,25 @@ Other useful runtime controls:
 | `FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS` | Paused heartbeat, 333 ms |
 | `FERROUS_BRIDGE_ANALYSIS_SNAPSHOT_MS` | Analysis snapshot interval, 16 ms |
 
+## Translations
+
+Ferrous translates its interface with [KI18n](https://invent.kde.org/frameworks/ki18n), from the `ferrous` gettext domain. There are no translations yet; the template and the code paths are in place.
+
+- QML marks a string with the `I18n` singleton of `FerrousUi 1.0`, with one of KI18n's semantic context markers: `I18n.i18nc("@action:button", "Save")`. Counts use the plural forms, `I18n.i18ncp("@info:status", "%1 track", "%1 tracks", count)`, never a hand-built plural. JavaScript libraries import the module: `.import FerrousUi 1.0 as FerrousUi`.
+- C++ uses `i18nc()` and `i18ncp()` from `<KLocalizedString>`; CMake sets `TRANSLATION_DOMAIN` for every target.
+- Logic never compares or parses shown text. Pass codes, enums, or properties, and turn them into text only for display.
+- Messages from the Rust backend, such as playback, scan, and tag errors, are still English. Translating them is a follow-up: the backend would send a code and its arguments, for the UI to translate.
+
+To write the translation template, `po/ferrous.pot`, which is not committed:
+
+```bash
+./scripts/extract-messages.sh
+# Or into ui/build/po/ferrous.pot:
+cmake --build ui/build --target extract-messages
+```
+
+The script runs `ui/Messages.sh`, the extraction script that KDE's translation tooling looks for, with `xgettext` and KI18n's keywords. The `ferrous_translation_template` test checks the template, and `ferrous_i18n_tests` runs the interface under `x-test`, a pseudo-translation made at build time that wraps every message in `⟦` and `⟧`. Gettext translates nothing under the C locale, so that test runs in `en_US.UTF-8` (`glibc-langpack-en` on Fedora).
+
 ## Packaging
 
 See [local package builds](INSTALL.md#local-package-builds) for RPM instructions. `./scripts/install-rpm.sh` installs the newest local RPM without rebuilding it. `./scripts/smoke-test-rpm.sh [rpm-path]` installs the newest local RPM, or the given one, in a fresh Fedora container with podman and network access, then validates the installed files and checks that Ferrous starts.

@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../logic/PathUtils.js" as PathUtils
 import "." as Dialogs
 
@@ -33,7 +34,7 @@ Dialog {
     height: Math.min(Math.max(320, hostHeight - 48), 680)
     x: (hostWidth - width) / 2
     y: (hostHeight - height) / 2
-    title: "Replace From iTunes"
+    title: I18n.i18nc("@title:window", "Replace From iTunes")
     standardButtons: Dialog.Close
 
     function clearPendingActionState() {
@@ -99,9 +100,11 @@ Dialog {
         }
         replaceCoverConfirmDialog.suggestionIndex = index
         replaceCoverConfirmDialog.message = (target.album || "").length > 0
-            ? "Replace the album art of \u201c" + target.album + "\u201d"
-                + ((target.artist || "").length > 0 ? " by " + target.artist : "") + "?"
-            : "Replace the current album art with this artwork?"
+            ? ((target.artist || "").length > 0
+                ? I18n.i18nc("@info album, artist", "Replace the album art of \u201c%1\u201d by %2?",
+                    target.album, target.artist)
+                : I18n.i18nc("@info", "Replace the album art of \u201c%1\u201d?", target.album))
+            : I18n.i18nc("@info", "Replace the current album art with this artwork?")
         replaceCoverConfirmDialog.open()
     }
 
@@ -251,7 +254,7 @@ Dialog {
 
                         Text {
                             anchors.centerIn: parent
-                            text: "No art"
+                            text: I18n.i18nc("@label", "No art")
                             color: root.uiPalette.uiMutedTextColor
                         }
                     }
@@ -263,7 +266,7 @@ Dialog {
 
                     Text {
                         Layout.fillWidth: true
-                        text: "Current album art"
+                        text: I18n.i18nc("@label", "Current album art")
                         color: root.uiPalette.uiTextColor
                         font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2
                         font.weight: Font.DemiBold
@@ -285,7 +288,7 @@ Dialog {
                     Text {
                         Layout.fillWidth: true
                         visible: (root.currentArtworkInfo.mimeType || "").length > 0
-                        text: "MIME: " + (root.currentArtworkInfo.mimeType || "")
+                        text: I18n.i18nc("@info", "MIME: %1", root.currentArtworkInfo.mimeType || "")
                         color: root.uiPalette.uiMutedTextColor
                         elide: Text.ElideRight
                     }
@@ -293,7 +296,7 @@ Dialog {
                     Text {
                         Layout.fillWidth: true
                         visible: (root.currentArtworkSource || "").length === 0
-                        text: "No current album art is available for this track."
+                        text: I18n.i18nc("@label", "No current album art is available for this track.")
                         color: root.uiPalette.uiMutedTextColor
                         wrapMode: Text.Wrap
                     }
@@ -302,14 +305,14 @@ Dialog {
                         Layout.fillWidth: true
                         visible: (root.currentArtworkSource || "").length > 0
                             && Object.keys(root.currentArtworkInfo || {}).length === 0
-                        text: "Current artwork metadata is not available."
+                        text: I18n.i18nc("@label", "Current artwork metadata is not available.")
                         color: root.uiPalette.uiMutedTextColor
                         wrapMode: Text.Wrap
                     }
                 }
 
                 Button {
-                    text: "Preview"
+                    text: I18n.i18nc("@action:button", "Preview")
                     enabled: (root.currentArtworkSource || "").length > 0
                     onClicked: root.openAlbumArtViewerForCurrentArt()
                 }
@@ -392,7 +395,7 @@ Dialog {
                         Text {
                             Layout.fillWidth: true
                             visible: ((modelData && (modelData.mimeType || "")) || "").length > 0
-                            text: "MIME: " + (((modelData && (modelData.mimeType || "")) || ""))
+                            text: I18n.i18nc("@info", "MIME: %1", (modelData && (modelData.mimeType || "")) || "")
                             color: root.uiPalette.uiMutedTextColor
                             elide: Text.ElideRight
                         }
@@ -410,7 +413,7 @@ Dialog {
 
                             Text {
                                 Layout.fillWidth: true
-                                text: "Loading high-resolution artwork..."
+                                text: I18n.i18nc("@label", "Loading high-resolution artwork...")
                                 color: root.uiPalette.uiMutedTextColor
                                 wrapMode: Text.Wrap
                             }
@@ -440,8 +443,8 @@ Dialog {
                         Button {
                             text: ((modelData && (modelData.assetLoading || false)) || false)
                                 && root.pendingPreviewIndex === index
-                                ? "Loading..."
-                                : "Preview"
+                                ? I18n.i18nc("@action:button", "Loading...")
+                                : I18n.i18nc("@action:button", "Preview")
                             enabled: !((modelData && (modelData.assetLoading || false)) || false)
                             onClicked: root.requestSuggestionPreview(index)
                         }
@@ -449,8 +452,8 @@ Dialog {
                         Button {
                             text: ((modelData && (modelData.assetLoading || false)) || false)
                                 && root.pendingApplyIndex === index
-                                ? "Loading..."
-                                : "Apply"
+                                ? I18n.i18nc("@action:button", "Loading...")
+                                : I18n.i18nc("@action:button", "Apply")
                             enabled: !((modelData && (modelData.assetLoading || false)) || false)
                             onClicked: root.requestSuggestionApply(index)
                         }
@@ -468,11 +471,11 @@ Dialog {
         parent: root.parent
         uiPalette: root.uiPalette
         windowRoot: root.windowRoot
-        title: "Replace Album Art"
-        details: "Ferrous saves the new artwork as the album's cover image, replacing a cover "
+        title: I18n.i18nc("@title:window", "Replace Album Art")
+        details: I18n.i18nc("@info", "Ferrous saves the new artwork as the album's cover image, replacing a cover "
             + "image that is there, or embeds it in the album's tracks in place of their artwork. "
-            + "It keeps no copy of the current album art."
-        confirmText: "Replace"
+            + "It keeps no copy of the current album art.")
+        confirmText: I18n.i18nc("@action:button", "Replace")
         onConfirmed: {
             root.uiBridge.applyItunesArtworkSuggestion(suggestionIndex)
             root.close()

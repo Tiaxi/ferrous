@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../components" as Components
 
 Rectangle {
@@ -43,17 +44,24 @@ Rectangle {
                 readonly property int scanBacklog: Math.max(
                     0,
                     root.uiBridge.libraryScanDiscovered - root.uiBridge.libraryScanProcessed)
-                text: "Artists: " + root.uiBridge.libraryArtistCount
-                      + " | albums: " + root.uiBridge.libraryAlbumCount
-                      + " | tracks: " + root.uiBridge.libraryTrackCount
+                text: I18n.i18nc("@info:status library totals", "Artists: %1 | albums: %2 | tracks: %3",
+                          root.uiBridge.libraryArtistCount,
+                          root.uiBridge.libraryAlbumCount,
+                          root.uiBridge.libraryTrackCount)
                       + (root.uiBridge.libraryScanInProgress
-                          ? (" | scanning " + root.uiBridge.libraryScanProcessed
-                             + (scanBacklog > 0 ? (" (+" + scanBacklog + " queued)") : "")
+                          ? (I18n.i18nc("@info:status files the library scan has read", " | scanning %1",
+                                  root.uiBridge.libraryScanProcessed)
+                             + (scanBacklog > 0
+                                 ? I18n.i18nc("@info:status files waiting for the library scan", " (+%1 queued)",
+                                     scanBacklog)
+                                 : "")
                              + (root.uiBridge.libraryScanFilesPerSecond > 0
-                                 ? (" @ " + root.uiBridge.libraryScanFilesPerSecond.toFixed(1) + "/s")
+                                 ? I18n.i18nc("@info:status library scan rate", " @ %1/s",
+                                     root.uiBridge.libraryScanFilesPerSecond.toFixed(1))
                                  : "")
                              + (root.uiBridge.libraryScanEtaSeconds >= 0
-                                 ? (" ETA " + Math.ceil(root.uiBridge.libraryScanEtaSeconds) + "s")
+                                 ? I18n.i18nc("@info:status library scan time left, in seconds", " ETA %1s",
+                                     Math.ceil(root.uiBridge.libraryScanEtaSeconds))
                                  : ""))
                           : "")
                 color: Kirigami.Theme.disabledTextColor
@@ -61,7 +69,7 @@ Rectangle {
             }
 
             ToolButton {
-                text: "Collapse all"
+                text: I18n.i18nc("@action:button", "Collapse all")
                 enabled: root.libraryModel.count > 0
                 onClicked: root.controller.collapseAll()
             }
@@ -86,7 +94,7 @@ Rectangle {
             maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
             pixelAligned: true
             Accessible.role: Accessible.Tree
-            Accessible.name: "Library"
+            Accessible.name: I18n.i18nc("@label", "Library")
 
             Component.onCompleted: root.controller.registerView(libraryAlbumView)
             onContentYChanged: root.controller.scheduleLibraryViewStatePersist()
@@ -164,12 +172,14 @@ Rectangle {
                 // number of rows selected.
                 readonly property bool rowSelected: !!model.selected
                 readonly property string rowKindText: isTrackRow
-                    ? "Track"
+                    ? I18n.i18nc("@info library row kind", "Track")
                     : (isAlbumRow
-                        ? "Album"
+                        ? I18n.i18nc("@info library row kind", "Album")
                         : (rowTypeResolved === "artist"
-                            ? "Artist"
-                            : (rowTypeResolved === "root" ? "Library folder" : "")))
+                            ? I18n.i18nc("@info library row kind", "Artist")
+                            : (rowTypeResolved === "root"
+                                ? I18n.i18nc("@info library row kind", "Library folder")
+                                : "")))
 
                 function actionRowMap() {
                     return {
@@ -203,7 +213,9 @@ Rectangle {
                 // QML cannot set the expanded state, so the description
                 // tells it.
                 Accessible.description: hasChildren
-                    ? rowKindText + (expanded ? ", expanded" : ", collapsed")
+                    ? (expanded
+                        ? I18n.i18nc("@info %1 is a library row kind", "%1, expanded", rowKindText)
+                        : I18n.i18nc("@info %1 is a library row kind", "%1, collapsed", rowKindText))
                     : rowKindText
                 Accessible.selectable: true
                 Accessible.selected: rowSelected
@@ -330,19 +342,19 @@ Rectangle {
                     exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
                     MenuItem {
-                        text: "Play"
+                        text: I18n.i18nc("@action:inmenu", "Play")
                         enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
                         onTriggered: root.controller.playRowItems(libraryContextMenu.rowMap)
                     }
 
                     MenuItem {
-                        text: "Queue"
+                        text: I18n.i18nc("@action:inmenu", "Queue")
                         enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
                         onTriggered: root.controller.appendRowItems(libraryContextMenu.rowMap)
                     }
 
                     MenuItem {
-                        text: "Edit Tags"
+                        text: I18n.i18nc("@action:inmenu", "Edit Tags")
                         visible: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
                         enabled: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
                         onTriggered: root.controller.openTagEditorForRow(libraryContextMenu.rowMap)
@@ -354,7 +366,7 @@ Rectangle {
                     MenuSeparator {}
 
                     MenuItem {
-                        text: "Open in " + root.uiBridge.fileBrowserName
+                        text: I18n.i18nc("@action:inmenu %1 is an application", "Open in %1", root.uiBridge.fileBrowserName)
                         visible: libraryContextMenu.rowMap.rowType !== "track"
                         enabled: (libraryContextMenu.rowMap.openPath || "").length > 0
                         onTriggered: root.uiBridge.openInFileBrowser(
@@ -362,7 +374,7 @@ Rectangle {
                     }
 
                     MenuItem {
-                        text: "Open containing folder"
+                        text: I18n.i18nc("@action:inmenu", "Open containing folder")
                         visible: libraryContextMenu.rowMap.rowType === "track"
                         enabled: (libraryContextMenu.rowMap.trackPath || "").length > 0
                         onTriggered: root.uiBridge.openContainingFolder(
@@ -383,10 +395,10 @@ Rectangle {
             Label {
                 objectName: "libraryEmptyStateLabel"
                 text: libraryEmptyState.loading
-                    ? "Loading library..."
+                    ? I18n.i18nc("@info", "Loading library...")
                     : (root.uiBridge.libraryRootCount > 0
-                        ? "No music found in the library folders"
-                        : "Add a folder with your music to the library")
+                        ? I18n.i18nc("@info", "No music found in the library folders")
+                        : I18n.i18nc("@info", "Add a folder with your music to the library"))
                 color: root.uiPalette.uiMutedTextColor
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true

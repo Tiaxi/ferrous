@@ -3,6 +3,7 @@
 #include "DisplaySleepInhibitor.h"
 
 #if defined(Q_OS_LINUX)
+#include <KLocalizedString>
 #include <QDBusConnection>
 #include <QDBusPendingCallWatcher>
 #include <QDebug>
@@ -80,7 +81,9 @@ void ScreenSaverInhibitorBackend::setInhibited(bool inhibited) {
     }
 
     QDBusMessage message = screenSaverCall(QStringLiteral("Inhibit"));
-    message << QStringLiteral("Ferrous") << QStringLiteral("Fullscreen visualization is playing");
+    // The desktop shows the reason, for example in its power settings.
+    message << QStringLiteral("Ferrous")
+            << i18nc("@info why the screen is kept awake", "Fullscreen visualization is playing");
     auto *watcher = new QDBusPendingCallWatcher(m_call(message), this);
     m_acquireWatcher = watcher;
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *finished) {
@@ -97,7 +100,7 @@ void ScreenSaverInhibitorBackend::finishAcquire(QDBusPendingCallWatcher *watcher
         if (m_inhibited) {
             const QString reason = reply.type() == QDBusMessage::ErrorMessage
                 ? reply.errorMessage()
-                : QStringLiteral("unexpected reply");
+                : i18nc("@info reason the screen could not be kept awake", "unexpected reply");
             qWarning() << "Unable to inhibit display sleep:" << reason;
             reportFailure(reason);
         }
@@ -130,8 +133,8 @@ DisplaySleepInhibitor::DisplaySleepInhibitor(
         // Only a request still standing failed; a released one no longer matters.
         if (m_inhibited) {
             emit inhibitionFailed(
-                QStringLiteral("Couldn't keep the screen awake during fullscreen playback: %1")
-                    .arg(reason));
+                i18nc("@info", "Couldn't keep the screen awake during fullscreen playback: %1",
+                      reason));
         }
     });
 }

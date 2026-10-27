@@ -119,7 +119,7 @@ ToolBar {
                     ToolTip.visible: hovered || visualFocus
                     ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
                     ToolTip.text: shortcutText.length > 0
-                        ? label + " (" + shortcutText + ")"
+                        ? I18n.i18nc("@info:tooltip action, shortcut", "%1 (%2)", label, shortcutText)
                         : label
                     // Space presses the focused button rather than playing
                     // or pausing; keys with modifiers stay the shortcuts'.
@@ -163,11 +163,12 @@ ToolBar {
             stepSize: root.keyboardSeekStepSeconds
             snapMode: Slider.NoSnap
 
-            Accessible.name: "Seek"
+            Accessible.name: I18n.i18nc("@label", "Seek")
             Accessible.description: seekAllowed
-                ? FormatUtils.formatSeekTime(value) + " of "
-                    + FormatUtils.formatSeekTime(root.uiBridge.durationSeconds)
-                : "No track playing"
+                ? I18n.i18nc("@info position of duration", "%1 of %2",
+                    FormatUtils.formatSeekTime(value),
+                    FormatUtils.formatSeekTime(root.uiBridge.durationSeconds))
+                : I18n.i18nc("@info", "No track playing")
 
             // Where the current gesture moved the slider, or NaN. The
             // position's Binding may write the value first when it ends.
@@ -325,7 +326,9 @@ ToolBar {
             Layout.alignment: Qt.AlignVCenter
             display: AbstractButton.IconOnly
             flat: true
-            text: root.volumeMuted ? "Unmute" : "Mute"
+            text: root.volumeMuted
+                ? I18n.i18nc("@action:button", "Unmute")
+                : I18n.i18nc("@action:button", "Mute")
             icon.name: root.volumeSilent ? "audio-volume-muted" : "audio-volume-high"
             icon.color: root.uiPalette.uiTextColor
             ToolTip.visible: hovered || visualFocus
@@ -346,7 +349,7 @@ ToolBar {
             from: 0
             to: 1
             stepSize: 0
-            Accessible.name: "Volume"
+            Accessible.name: I18n.i18nc("@label", "Volume")
             Accessible.description: Math.round(value * 100) + "%"
             // Every move, including a release's, sends its value, so the
             // volume follows a drag or a held key.

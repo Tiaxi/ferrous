@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../logic/WheelUtils.js" as WheelUtils
 
 Item {
@@ -281,7 +282,7 @@ Item {
 
             ToolButton {
                 anchors.fill: parent
-                Accessible.name: "Album art information"
+                Accessible.name: I18n.i18nc("@action:button", "Album art information")
                 ToolTip.visible: hovered || visualFocus
                 ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
                 ToolTip.text: Accessible.name

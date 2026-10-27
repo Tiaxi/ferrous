@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import FerrousUi 1.0
 
 // Shown when the settings, the queue, or Last.fm's scrobbles could not be
 // saved before quitting.
@@ -22,7 +23,7 @@ Dialog {
     x: Math.round((root.windowRoot.width - width) / 2)
     y: Math.round((root.windowRoot.height - height) / 2)
     width: 440
-    title: "Couldn't Save Before Quitting"
+    title: I18n.i18nc("@title:window", "Couldn't Save Before Quitting")
     standardButtons: Dialog.NoButton
     // Escape keeps Ferrous open.
     closePolicy: Popup.CloseOnEscape
@@ -47,9 +48,9 @@ Dialog {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             color: root.uiPalette.uiMutedTextColor
-            text: "Retry saves again, for example after freeing disk space. Quit Anyway "
+            text: I18n.i18nc("@info", "Retry saves again, for example after freeing disk space. Quit Anyway "
                 + "closes Ferrous, and the settings, queue changes, and Last.fm scrobbles "
-                + "that could not be saved are lost."
+                + "that could not be saved are lost.")
         }
 
         RowLayout {
@@ -60,7 +61,7 @@ Dialog {
 
             Button {
                 objectName: "quitSaveFailedQuitButton"
-                text: "Quit Anyway"
+                text: I18n.i18nc("@action:button", "Quit Anyway")
                 onClicked: {
                     root.close()
                     root.quitRequested()
@@ -68,7 +69,7 @@ Dialog {
             }
             Button {
                 objectName: "quitSaveFailedRetryButton"
-                text: "Retry"
+                text: I18n.i18nc("@action:button", "Retry")
                 highlighted: true
                 onClicked: {
                     root.close()

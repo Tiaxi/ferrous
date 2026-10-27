@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../logic/ErrorUtils.js" as ErrorUtils
 
 // The newest error in full, until the user dismisses it, and the history
@@ -87,7 +88,9 @@ Item {
                 : Kirigami.Theme.negativeBackgroundColor
             border.color: banner.accentColor
             Accessible.role: Accessible.AlertMessage
-            Accessible.name: (banner.warning ? "Warning: " : "Error: ") + banner.text
+            Accessible.name: banner.warning
+                ? I18n.i18nc("@info accessible name of a warning banner", "Warning: %1", banner.text)
+                : I18n.i18nc("@info accessible name of an error banner", "Error: %1", banner.text)
 
             RowLayout {
                 id: bannerRow
@@ -119,7 +122,7 @@ Item {
                     focusPolicy: Qt.StrongFocus
                     Accessible.role: Accessible.StaticText
                     Accessible.name: banner.text
-                    Accessible.description: "Scroll with the arrow and Page keys"
+                    Accessible.description: I18n.i18nc("@info", "Scroll with the arrow and Page keys")
                     Accessible.focusable: true
 
                     background: Rectangle {
@@ -176,15 +179,15 @@ Item {
                         visible: root.historyAvailable
                         icon.name: "view-list-details"
                         text: root.historyShown
-                            ? "Hide Recent Errors"
-                            : "Recent Errors (" + root.errorCount + ")"
+                            ? I18n.i18nc("@action:button", "Hide Recent Errors")
+                            : I18n.i18nc("@action:button", "Recent Errors (%1)", root.errorCount)
                         onClicked: root.errorController.toggleHistory()
                     }
                     Button {
                         objectName: "errorBannerDismissButton"
                         icon.name: "dialog-close"
-                        text: "Dismiss"
-                        Accessible.name: "Dismiss this error"
+                        text: I18n.i18nc("@action:button", "Dismiss")
+                        Accessible.name: I18n.i18nc("@action:button", "Dismiss this error")
                         onClicked: root.errorController.dismissLatest()
                     }
                 }
@@ -220,17 +223,17 @@ Item {
                     Kirigami.Heading {
                         Layout.fillWidth: true
                         level: 4
-                        text: "Recent Errors"
+                        text: I18n.i18nc("@title", "Recent Errors")
                         color: root.paletteTextColor
                     }
                     Button {
                         objectName: "errorHistoryClearButton"
-                        text: "Clear All"
+                        text: I18n.i18nc("@action:button", "Clear All")
                         onClicked: root.errorController.clear()
                     }
                     ToolButton {
                         icon.name: "window-close"
-                        text: "Hide Recent Errors"
+                        text: I18n.i18nc("@action:button", "Hide Recent Errors")
                         display: AbstractButton.IconOnly
                         Accessible.name: text
                         ToolTip.visible: hovered
@@ -250,7 +253,7 @@ Item {
                 model: root.historyShown ? root.errorController.entries : null
                     boundsBehavior: Flickable.StopAtBounds
                     Accessible.role: Accessible.List
-                    Accessible.name: "Recent errors"
+                    Accessible.name: I18n.i18nc("@label", "Recent errors")
                     ScrollBar.vertical: ScrollBar {}
 
                     delegate: Rectangle {
@@ -271,8 +274,8 @@ Item {
                             ? "transparent"
                             : root.paletteSurfaceAltColor
                         Accessible.role: Accessible.ListItem
-                        Accessible.name: historyRow.heading + ", "
-                            + ErrorUtils.timeText(historyRow.lastSeenMs) + ": " + historyRow.message
+                        Accessible.name: I18n.i18nc("@info error heading, time, message", "%1, %2: %3",
+                            historyRow.heading, ErrorUtils.timeText(historyRow.lastSeenMs), historyRow.message)
 
                         RowLayout {
                             id: historyRowLayout
@@ -328,11 +331,11 @@ Item {
                             ToolButton {
                                 Layout.alignment: Qt.AlignTop
                                 icon.name: "edit-delete-remove"
-                                text: "Remove"
+                                text: I18n.i18nc("@action:button", "Remove")
                                 display: AbstractButton.IconOnly
-                                Accessible.name: "Remove this error"
+                                Accessible.name: I18n.i18nc("@action:button", "Remove this error")
                                 ToolTip.visible: hovered
-                                ToolTip.text: "Remove"
+                                ToolTip.text: I18n.i18nc("@info:tooltip", "Remove")
                                 onClicked: root.errorController.remove(historyRow.index)
                             }
                         }

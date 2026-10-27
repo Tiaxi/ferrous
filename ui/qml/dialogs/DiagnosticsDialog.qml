@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../components" as Components
 import "." as Dialogs
 
@@ -18,7 +19,7 @@ Dialog {
     property string diagnosticsText: ""
 
     modal: true
-    title: "Diagnostics"
+    title: I18n.i18nc("@title:window", "Diagnostics")
     standardButtons: Dialog.Close
     width: Math.min(980, root.windowRoot.width - 80)
     height: Math.min(680, root.windowRoot.height - 80)
@@ -51,7 +52,7 @@ Dialog {
             Layout.fillWidth: true
 
             Label {
-                text: "Log file:"
+                text: I18n.i18nc("@label", "Log file:")
                 color: Kirigami.Theme.disabledTextColor
             }
 
@@ -63,7 +64,7 @@ Dialog {
             }
 
             Button {
-                text: "Open Folder"
+                text: I18n.i18nc("@action:button", "Open Folder")
                 enabled: (root.uiBridge.diagnosticsLogPath || "").length > 0
                 onClicked: root.uiBridge.openContainingFolder(root.uiBridge.diagnosticsLogPath || "")
             }
@@ -73,7 +74,7 @@ Dialog {
             Layout.fillWidth: true
 
             Button {
-                text: "Reload"
+                text: I18n.i18nc("@action:button", "Reload")
                 onClicked: {
                     root.uiBridge.reloadDiagnosticsFromDisk()
                     root.syncDiagnosticsText()
@@ -82,7 +83,7 @@ Dialog {
 
             Button {
                 objectName: "diagnosticsClearButton"
-                text: "Clear..."
+                text: I18n.i18nc("@action:button", "Clear...")
                 enabled: (root.diagnosticsText || "").length > 0
                 onClicked: clearDiagnosticsConfirmDialog.open()
             }
@@ -90,7 +91,7 @@ Dialog {
             Item { Layout.fillWidth: true }
 
             Button {
-                text: "Copy All"
+                text: I18n.i18nc("@action:button", "Copy All")
                 onClicked: {
                     if ((diagnosticsTextArea.text || "").length > 0) {
                         diagnosticsTextArea.selectAll()
@@ -142,19 +143,19 @@ Dialog {
                     exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
                     MenuItem {
-                        text: "Copy"
+                        text: I18n.i18nc("@action:inmenu", "Copy")
                         enabled: (diagnosticsTextArea.selectedText || "").length > 0
                         onTriggered: diagnosticsTextArea.copy()
                     }
 
                     MenuItem {
-                        text: "Select All"
+                        text: I18n.i18nc("@action:inmenu", "Select All")
                         enabled: (diagnosticsTextArea.text || "").length > 0
                         onTriggered: diagnosticsTextArea.selectAll()
                     }
 
                     MenuItem {
-                        text: "Copy All"
+                        text: I18n.i18nc("@action:inmenu", "Copy All")
                         enabled: (diagnosticsTextArea.text || "").length > 0
                         onTriggered: {
                             diagnosticsTextArea.selectAll()
@@ -172,11 +173,11 @@ Dialog {
         objectName: "clearDiagnosticsConfirmDialog"
         uiPalette: root.uiPalette
         windowRoot: root.windowRoot
-        title: "Clear Diagnostics"
-        message: "Delete the diagnostics log?"
-        details: "Ferrous deletes the log file and starts a new one. Use Copy All first to keep "
-            + "what it holds, for example for a bug report."
-        confirmText: "Delete Log"
+        title: I18n.i18nc("@title:window", "Clear Diagnostics")
+        message: I18n.i18nc("@info", "Delete the diagnostics log?")
+        details: I18n.i18nc("@info", "Ferrous deletes the log file and starts a new one. Use Copy All first to keep "
+            + "what it holds, for example for a bug report.")
+        confirmText: I18n.i18nc("@action:button", "Delete Log")
         onConfirmed: {
             root.uiBridge.clearDiagnostics()
             root.syncDiagnosticsText()

@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "." as Dialogs
@@ -32,7 +33,8 @@ Dialog {
     // without it, as quitting does for the settings and queue.
     readonly property int quitWaitBoundMs: 5000
     readonly property real tableRowHeight: root.uiPalette.rowHeight
-    readonly property string keepText: "<keep>"
+    // Shown in a field whose rows hold different values, which saving keeps.
+    readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "<keep>")
     readonly property color uiSurfaceColor: root.uiPalette.uiSurfaceColor
     readonly property color uiSurfaceRaisedColor: root.uiPalette.uiPaneColor
     readonly property color uiHeaderColor: root.uiPalette.uiHeaderColor
@@ -41,30 +43,30 @@ Dialog {
     readonly property color uiMutedTextColor: root.uiPalette.uiMutedTextColor
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property var editorFields: [
-        { key: "title", label: "Title", allowTitleCase: true, allowCapitalize: true },
-        { key: "artist", label: "Artist", allowTitleCase: true, allowCapitalize: true },
-        { key: "album", label: "Album", allowTitleCase: true, allowCapitalize: true },
-        { key: "genre", label: "Genre", allowTitleCase: false, allowCapitalize: true },
-        { key: "year", label: "Year", allowTitleCase: false, allowCapitalize: false },
-        { key: "albumArtist", label: "Album Artist", allowTitleCase: true, allowCapitalize: true },
-        { key: "trackNo", label: "Track", allowTitleCase: false, allowCapitalize: false },
-        { key: "discNo", label: "Disc", allowTitleCase: false, allowCapitalize: false },
-        { key: "totalTracks", label: "Tracks", allowTitleCase: false, allowCapitalize: false },
-        { key: "totalDiscs", label: "Discs", allowTitleCase: false, allowCapitalize: false },
-        { key: "comment", label: "Comment", allowTitleCase: false, allowCapitalize: false }
+        { key: "title", label: I18n.i18nc("@label tag field", "Title"), allowTitleCase: true, allowCapitalize: true },
+        { key: "artist", label: I18n.i18nc("@label tag field", "Artist"), allowTitleCase: true, allowCapitalize: true },
+        { key: "album", label: I18n.i18nc("@label tag field", "Album"), allowTitleCase: true, allowCapitalize: true },
+        { key: "genre", label: I18n.i18nc("@label tag field", "Genre"), allowTitleCase: false, allowCapitalize: true },
+        { key: "year", label: I18n.i18nc("@label tag field", "Year"), allowTitleCase: false, allowCapitalize: false },
+        { key: "albumArtist", label: I18n.i18nc("@label tag field", "Album Artist"), allowTitleCase: true, allowCapitalize: true },
+        { key: "trackNo", label: I18n.i18nc("@label tag field", "Track"), allowTitleCase: false, allowCapitalize: false },
+        { key: "discNo", label: I18n.i18nc("@label tag field", "Disc"), allowTitleCase: false, allowCapitalize: false },
+        { key: "totalTracks", label: I18n.i18nc("@label tag field", "Tracks"), allowTitleCase: false, allowCapitalize: false },
+        { key: "totalDiscs", label: I18n.i18nc("@label tag field", "Discs"), allowTitleCase: false, allowCapitalize: false },
+        { key: "comment", label: I18n.i18nc("@label tag field", "Comment"), allowTitleCase: false, allowCapitalize: false }
     ]
     readonly property var tableColumns: [
-        { key: "fileName", label: "File", width: 168 },
-        { key: "title", label: "Title", width: 210 },
-        { key: "artist", label: "Artist", width: 136 },
-        { key: "album", label: "Album", width: 182 },
-        { key: "trackNo", label: "#", width: 42 },
-        { key: "genre", label: "Genre", width: 96 },
-        { key: "year", label: "Year", width: 52 },
-        { key: "discNo", label: "Disc", width: 46 },
-        { key: "formatKind", label: "Fmt", width: 52 },
-        { key: "directory", label: "Folder", width: 156 },
-        { key: "status", label: "Status", width: 120 }
+        { key: "fileName", label: I18n.i18nc("@title:column", "File"), width: 168 },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 210 },
+        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 136 },
+        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 182 },
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 42 },
+        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 96 },
+        { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 52 },
+        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 46 },
+        { key: "formatKind", label: I18n.i18nc("@title:column abbreviation of file format", "Fmt"), width: 52 },
+        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156 },
+        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120 }
     ]
     readonly property int tableContentWidth: root.tableColumns.reduce(
         function(sum, column) { return sum + column.width + 6 }, 20)
@@ -74,7 +76,7 @@ Dialog {
     y: Math.round((root.windowRoot.height - height) / 2)
     width: Math.min(root.windowRoot.width - 28, 1440)
     height: Math.min(root.windowRoot.height - 24, 820)
-    title: "Edit Tags"
+    title: I18n.i18nc("@title:window", "Edit Tags")
     standardButtons: Dialog.NoButton
     closePolicy: Popup.NoAutoClose
 
@@ -106,7 +108,7 @@ Dialog {
         }
         root.commitPendingEditorEdits()
         root.operationInFlight = true
-        root.operationText = "Saving tags..."
+        root.operationText = I18n.i18nc("@info:status", "Saving tags...")
         root.closeAfterSave = closeAfterSuccess
         if (!root.tagEditorApi.save()) {
             root.operationInFlight = false
@@ -123,7 +125,7 @@ Dialog {
         if (root.tagEditorApi.loading || root.tagEditorApi.saving || root.selectedCount === 0) return
         root.commitPendingEditorEdits()
         root.operationInFlight = true
-        root.operationText = "Checking new file names..."
+        root.operationText = I18n.i18nc("@info:status", "Checking new file names...")
         root.renamePreviewPending = root.tagEditorApi.previewRenameSelectedFiles()
         if (!root.renamePreviewPending) {
             root.operationInFlight = false
@@ -135,7 +137,7 @@ Dialog {
     function renameNow() {
         if (root.tagEditorApi.loading || root.tagEditorApi.saving) return
         root.operationInFlight = true
-        root.operationText = "Renaming files..."
+        root.operationText = I18n.i18nc("@info:status", "Renaming files...")
         if (!root.tagEditorApi.renamePreviewedFiles()) {
             root.operationInFlight = false
             root.operationText = ""
@@ -339,7 +341,7 @@ Dialog {
             return extra && extra.length > 0 ? [value].concat(extra).join("; ") : value
         }
         case "status":
-            return row.errorText.length > 0 ? row.errorText : (row.dirty ? "Modified" : "")
+            return row.errorText.length > 0 ? row.errorText : (row.dirty ? I18n.i18nc("@item tag editor row status", "Modified") : "")
         default:
             return row[columnKey] || ""
         }
@@ -514,7 +516,7 @@ Dialog {
             spacing: 8
 
             Kirigami.Heading {
-                text: "Unified Tag Editor"
+                text: I18n.i18nc("@title", "Unified Tag Editor")
                 level: 1
                 font.weight: Font.DemiBold
             }
@@ -551,7 +553,7 @@ Dialog {
 
                     Label {
                         text: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
-                            ? (root.tagEditorApi.loading ? "Loading tags..." : root.operationText)
+                            ? (root.tagEditorApi.loading ? I18n.i18nc("@info:status", "Loading tags...") : root.operationText)
                             : root.tagEditorApi.statusText
                         color: root.statusHasFailure
                             ? Kirigami.Theme.negativeTextColor
@@ -565,7 +567,7 @@ Dialog {
                             && !root.tagEditorApi.loading
                             && !root.tagEditorApi.saving
                             && root.tagEditorApi.statusDetails.length > 0
-                        text: "Details"
+                        text: I18n.i18nc("@action:button", "Details")
                         padding: 3
                         implicitHeight: root.tableRowHeight - 2
                         onClicked: tagEditorStatusDetailsDialog.open()
@@ -584,8 +586,8 @@ Dialog {
 
             Label {
                 text: root.selectedCount > 0
-                    ? root.selectedCount + " selected"
-                    : root.totalRows + " loaded"
+                    ? I18n.i18ncp("@info:status", "%1 selected", "%1 selected", root.selectedCount)
+                    : I18n.i18ncp("@info:status", "%1 loaded", "%1 loaded", root.totalRows)
                 color: root.tagEditorApi.dirty ? Kirigami.Theme.negativeTextColor : root.uiMutedTextColor
                 font.weight: Font.DemiBold
             }
@@ -597,10 +599,10 @@ Dialog {
                 padding: 2
                 implicitWidth: root.tableRowHeight + 2
                 implicitHeight: root.tableRowHeight
-                Accessible.name: "Close"
+                Accessible.name: I18n.i18nc("@action:button", "Close")
                 ToolTip.visible: hovered || visualFocus
                 ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
-                ToolTip.text: "Close"
+                ToolTip.text: I18n.i18nc("@info:tooltip", "Close")
                 onClicked: root.requestClose()
             }
         }
@@ -618,7 +620,7 @@ Dialog {
             spacing: 8
 
             Button {
-                text: "Clear Selection"
+                text: I18n.i18nc("@action:button", "Clear Selection")
                 enabled: root.selectedCount > 0
                 onClicked: root.clearSelection()
             }
@@ -627,31 +629,33 @@ Dialog {
 
             Button {
                 objectName: "tagEditorReloadButton"
-                text: "Reload"
+                text: I18n.i18nc("@action:button", "Reload")
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
                 onClicked: root.requestReload()
             }
             Button {
                 objectName: "tagEditorAutoNumberButton"
-                text: "Auto Number"
+                text: I18n.i18nc("@action:button", "Auto Number")
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
                 onClicked: autoNumberDialog.open()
             }
             Button {
                 objectName: "tagEditorRenameButton"
-                text: "Rename Files..."
+                text: I18n.i18nc("@action:button", "Rename Files...")
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.selectedCount > 0
                 onClicked: root.triggerRename()
             }
             Button {
                 objectName: "tagEditorCancelButton"
-                text: "Cancel"
+                text: I18n.i18nc("@action:button", "Cancel")
                 enabled: !root.tagEditorApi.saving
                 onClicked: root.requestClose()
             }
             Button {
                 objectName: "tagEditorSaveButton"
-                text: root.tagEditorApi.saving ? "Saving..." : "Save"
+                text: root.tagEditorApi.saving
+                    ? I18n.i18nc("@action:button", "Saving...")
+                    : I18n.i18nc("@action:button", "Save")
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
                 highlighted: true
                 onClicked: root.triggerSave(false)
@@ -737,7 +741,7 @@ Dialog {
                                     padding: 1
                                     implicitWidth: Math.ceil(root.tableRowHeight * 0.9)
                                     implicitHeight: Math.ceil(root.tableRowHeight * 0.75)
-                                    Accessible.name: "Change case of " + modelData.label
+                                    Accessible.name: I18n.i18nc("@action:button %1 is a tag field", "Change case of %1", modelData.label)
                                     onClicked: {
                                         const popupPosition = mapToItem(
                                             root.contentItem,
@@ -766,7 +770,7 @@ Dialog {
                                 function syncFromController() {
                                     extraValuesNote.text = root.tagEditorApi.extraValuesNote(modelData.key)
                                     const value = root.tagEditorApi.bulkValue(modelData.key)
-                                    const mixed = value === root.keepText
+                                    const mixed = root.tagEditorApi.bulkValueMixed(modelData.key)
                                     if (activeFocus && touched) {
                                         return
                                     }
@@ -838,7 +842,7 @@ Dialog {
 
                                     Button {
                                         visible: modelData.allowTitleCase
-                                        text: "Title Case"
+                                        text: I18n.i18nc("@action:button", "Title Case")
                                         Layout.fillWidth: true
                                         onClicked: {
                                             root.tagEditorApi.applyEnglishTitleCase(modelData.key)
@@ -849,7 +853,7 @@ Dialog {
 
                                     Button {
                                         visible: modelData.allowCapitalize
-                                        text: "Capital Case"
+                                        text: I18n.i18nc("@action:button", "Capital Case")
                                         Layout.fillWidth: true
                                         onClicked: {
                                             if (modelData.key === "genre") {
@@ -898,7 +902,7 @@ Dialog {
                 ScrollBar.vertical: ScrollBar {}
                 ScrollBar.horizontal: ScrollBar {}
                 Accessible.role: Accessible.Table
-                Accessible.name: "Files"
+                Accessible.name: I18n.i18nc("@label", "Files")
 
                 Keys.onPressed: function(event) { root.handleTableKey(event) }
 

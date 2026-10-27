@@ -35,6 +35,7 @@
 
 struct FerrousFfiBridge;
 struct FerrousFfiRenameGate;
+class KLocalizedString;
 class QNetworkReply;
 class QSocketNotifier;
 class QTemporaryDir;
@@ -710,7 +711,8 @@ private:
                      const QString &subject = {},
                      BinaryBridgeCodec::ErrorSeverity severity =
                          BinaryBridgeCodec::ErrorSeverityError);
-    void sendPathListCommand(quint16 cmdId, const QStringList &paths, const QString &tooLargeMessage);
+    void sendPathListCommand(quint16 cmdId, const QStringList &paths,
+                             const KLocalizedString &tooLargeMessage);
     void sendLibraryItems(
         BinaryBridgeCodec::QueuePlacement placement,
         BinaryBridgeCodec::LibraryQueueItems items,

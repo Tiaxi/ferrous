@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import QtQuick.Shapes 1.15
+import FerrousUi 1.0
 import "../logic/KeyUtils.js" as KeyUtils
 
 Row {
@@ -45,7 +46,10 @@ Row {
     }
 
     Repeater {
-        model: ["Spectrogram", "Waveform"]
+        model: [
+            I18n.i18nc("@option:radio visualization mode", "Spectrogram"),
+            I18n.i18nc("@option:radio visualization mode", "Waveform")
+        ]
 
         delegate: Rectangle {
             id: button

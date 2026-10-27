@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import FerrousUi 1.0
 import "." as Components
 import "../logic/FormatUtils.js" as FormatUtils
 
@@ -32,7 +33,7 @@ Components.SurfaceCard {
     }
     readonly property string resolvedTitle: {
         if (!hasTrackContext) {
-            return "No track loaded"
+            return I18n.i18nc("@info", "No track loaded")
         }
         const explicitTitle = (root.uiBridge.currentTrackTitle || "").trim()
         if (explicitTitle.length > 0) {
@@ -42,28 +43,28 @@ Components.SurfaceCard {
         if (pathValue.length > 0) {
             return FormatUtils.basenameFromPath(pathValue)
         }
-        return "Nothing playing"
+        return I18n.i18nc("@info", "Nothing playing")
     }
     readonly property string resolvedArtist: {
         if (!hasTrackContext) {
             return "—"
         }
         const artistValue = (root.uiBridge.currentTrackArtist || "").trim()
-        return artistValue.length > 0 ? artistValue : "Unknown artist"
+        return artistValue.length > 0 ? artistValue : I18n.i18nc("@info", "Unknown artist")
     }
     readonly property string resolvedAlbum: {
         if (!hasTrackContext) {
             return "—"
         }
         const albumValue = (root.uiBridge.currentTrackAlbum || "").trim()
-        return albumValue.length > 0 ? albumValue : "Unknown album"
+        return albumValue.length > 0 ? albumValue : I18n.i18nc("@info", "Unknown album")
     }
     readonly property string resolvedGenre: {
         if (!hasTrackContext) {
             return "—"
         }
         const genreValue = (root.uiBridge.currentTrackGenre || "").trim()
-        return genreValue.length > 0 ? genreValue : "Unknown genre"
+        return genreValue.length > 0 ? genreValue : I18n.i18nc("@info", "Unknown genre")
     }
     readonly property string resolvedTrackNumber: {
         if (!hasTrackContext) {
@@ -107,7 +108,7 @@ Components.SurfaceCard {
 
         Components.MetadataMarqueeRow {
             id: titleRow
-            labelText: "Title:"
+            labelText: I18n.i18nc("@label", "Title:")
             valueText: root.resolvedTitle
             resetKey: root.marqueeResetKey
             labelWidth: root.labelColumnWidth
@@ -118,7 +119,7 @@ Components.SurfaceCard {
 
         Components.MetadataMarqueeRow {
             id: artistRow
-            labelText: "Artist:"
+            labelText: I18n.i18nc("@label", "Artist:")
             valueText: root.resolvedArtist
             resetKey: root.marqueeResetKey
             labelWidth: root.labelColumnWidth
@@ -128,7 +129,7 @@ Components.SurfaceCard {
 
         Components.MetadataMarqueeRow {
             id: albumRow
-            labelText: "Album:"
+            labelText: I18n.i18nc("@label", "Album:")
             valueText: root.resolvedAlbum
             resetKey: root.marqueeResetKey
             labelWidth: root.labelColumnWidth
@@ -142,7 +143,7 @@ Components.SurfaceCard {
 
             Label {
                 id: trackLabel
-                text: "Track:"
+                text: I18n.i18nc("@label", "Track:")
                 Layout.preferredWidth: root.labelColumnWidth
                 horizontalAlignment: Text.AlignRight
                 color: root.uiPalette.uiMutedTextColor
@@ -162,7 +163,7 @@ Components.SurfaceCard {
 
             Label {
                 id: yearLabel
-                text: "Year:"
+                text: I18n.i18nc("@label", "Year:")
                 Layout.preferredWidth: root.labelColumnWidth
                 horizontalAlignment: Text.AlignRight
                 color: root.uiPalette.uiMutedTextColor
@@ -178,7 +179,7 @@ Components.SurfaceCard {
 
         Components.MetadataMarqueeRow {
             id: genreRow
-            labelText: "Genre:"
+            labelText: I18n.i18nc("@label", "Genre:")
             valueText: root.resolvedGenre
             resetKey: root.marqueeResetKey
             labelWidth: root.labelColumnWidth

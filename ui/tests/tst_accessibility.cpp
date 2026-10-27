@@ -33,6 +33,7 @@
 #include "../src/BridgeClient.h"
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
+#include "../src/Localization.h"
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
@@ -304,6 +305,8 @@ private slots:
 
 void AccessibilityTest::initTestCase() {
     previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
+    FerrousLocalization::setUpApplicationDomain();
+    FerrousLocalization::registerQmlTypes();
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
@@ -1902,6 +1905,7 @@ ApplicationWindow {
         function selectAllRows() {}
         function loadedPaths() { return [] }
         function bulkValue(field) { return "" }
+        function bulkValueMixed(field) { return false }
         function extraValuesNote(field) { return "" }
         function applyBulkFieldToRows(rows, field, value) {}
         function applyEnglishTitleCase(field) {}

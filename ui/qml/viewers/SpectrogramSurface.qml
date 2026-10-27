@@ -400,7 +400,7 @@ Item {
                         Text {
                             id: muteText
                             anchors.centerIn: parent
-                            text: "M"
+                            text: I18n.i18nc("@action:button one-letter abbreviation of mute", "M")
                             color: parent.active
                                 ? Qt.rgba(1.0, 0.78, 0.78, 0.95)
                                 : Qt.rgba(0.71, 0.71, 0.78, 0.8)
@@ -439,7 +439,7 @@ Item {
                         Text {
                             id: soloText
                             anchors.centerIn: parent
-                            text: "S"
+                            text: I18n.i18nc("@action:button one-letter abbreviation of solo", "S")
                             color: parent.active
                                 ? Qt.rgba(1.0, 0.94, 0.55, 0.95)
                                 : Qt.rgba(0.71, 0.71, 0.78, 0.8)

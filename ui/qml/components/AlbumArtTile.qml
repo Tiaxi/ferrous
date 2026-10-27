@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 
 Rectangle {
     id: root
@@ -21,8 +22,8 @@ Rectangle {
     color: Kirigami.Theme.alternateBackgroundColor
     Accessible.role: Accessible.Graphic
     Accessible.name: root.uiBridge.currentTrackCoverPath.length > 0
-        ? "Album art"
-        : "No album art"
+        ? I18n.i18nc("@info", "Album art")
+        : I18n.i18nc("@info", "No album art")
 
     Image {
         anchors.fill: parent
@@ -38,7 +39,7 @@ Rectangle {
 
     Label {
         anchors.centerIn: parent
-        text: "Album Art"
+        text: I18n.i18nc("@label", "Album Art")
         color: Kirigami.Theme.disabledTextColor
         visible: root.uiBridge.currentTrackCoverPath.length === 0
     }

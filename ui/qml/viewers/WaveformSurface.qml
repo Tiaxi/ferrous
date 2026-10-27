@@ -17,8 +17,8 @@ Item {
     readonly property alias waveformItem: waveform
 
     Accessible.role: Accessible.Graphic
-    Accessible.name: "Waveform"
-    Accessible.description: "Amplitude of the playing track over time"
+    Accessible.name: I18n.i18nc("@label", "Waveform")
+    Accessible.description: I18n.i18nc("@info", "Amplitude of the playing track over time")
 
     function channelLabel(index) {
         return ChannelLabels.label(waveform.channelCount, index,
@@ -121,14 +121,14 @@ Item {
                     color: active ? "#7d3434" : Qt.rgba(0, 0, 0, 0.5)
                     border.color: Qt.rgba(1, 1, 1, 0.16)
                     Accessible.role: Accessible.CheckBox
-                    Accessible.name: "Mute " + root.channelLabel(index)
+                    Accessible.name: I18n.i18nc("@action:button %1 is a channel", "Mute %1", root.channelLabel(index))
                     Accessible.checkable: true
                     Accessible.checked: active
                     Accessible.onPressAction: root.uiBridge.toggleChannelMute(index)
                     Text {
                         id: muteText
                         anchors.centerIn: parent
-                        text: "M"
+                        text: I18n.i18nc("@action:button one-letter abbreviation of mute", "M")
                         color: "#e2e5e3"
                         font: Kirigami.Theme.smallFont
                     }
@@ -151,14 +151,14 @@ Item {
                     color: active ? "#706522" : Qt.rgba(0, 0, 0, 0.5)
                     border.color: Qt.rgba(1, 1, 1, 0.16)
                     Accessible.role: Accessible.CheckBox
-                    Accessible.name: "Solo " + root.channelLabel(index)
+                    Accessible.name: I18n.i18nc("@action:button %1 is a channel", "Solo %1", root.channelLabel(index))
                     Accessible.checkable: true
                     Accessible.checked: active
                     Accessible.onPressAction: root.uiBridge.soloChannel(index)
                     Text {
                         id: soloText
                         anchors.centerIn: parent
-                        text: "S"
+                        text: I18n.i18nc("@action:button one-letter abbreviation of solo", "S")
                         color: "#e2e5e3"
                         font: Kirigami.Theme.smallFont
                     }

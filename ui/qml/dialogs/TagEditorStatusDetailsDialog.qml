@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import FerrousUi 1.0
 
 Dialog {
     id: root
@@ -17,7 +18,7 @@ Dialog {
     y: Math.round((root.windowRoot.height - height) / 2)
     width: Math.min(root.windowRoot.width - 80, 640)
     height: Math.min(root.windowRoot.height - 120, 520)
-    title: "Tag Editor Details"
+    title: I18n.i18nc("@title:window", "Tag Editor Details")
     standardButtons: Dialog.NoButton
     closePolicy: Popup.CloseOnEscape
 
@@ -48,7 +49,7 @@ Dialog {
             Layout.fillWidth: true
             Item { Layout.fillWidth: true }
             Button {
-                text: "Close"
+                text: I18n.i18nc("@action:button", "Close")
                 onClicked: root.close()
             }
         }
