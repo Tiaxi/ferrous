@@ -1576,11 +1576,14 @@ pub(crate) mod test_support {
         }
     }
 
+    /// The parameters of one request.
+    type RequestParams = Vec<(String, String)>;
+
     /// Answers requests with scripted replies, in order, and records them.
     #[derive(Clone, Default)]
     pub(crate) struct ScriptedTransport {
         replies: Arc<Mutex<VecDeque<Result<HttpReply, String>>>>,
-        requests: Arc<Mutex<Vec<Vec<(String, String)>>>>,
+        requests: Arc<Mutex<Vec<RequestParams>>>,
     }
 
     impl ScriptedTransport {

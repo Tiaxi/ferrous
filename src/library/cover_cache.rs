@@ -406,7 +406,7 @@ mod tests {
 
         run_scans(
             &conn,
-            &[root.clone()],
+            std::slice::from_ref(&root),
             Some(cache),
             &mut WorkerLibrary::default(),
             &event_tx,

@@ -211,7 +211,7 @@ impl WaveformSession {
             anyhow::ensure!(!cancelled(), "waveform decode cancelled");
             let eof_frame = self.caches().eof_frame;
             #[cfg(test)]
-            if !eof_frame.is_some_and(|eof| index.saturating_mul(TILE_FRAMES) >= eof) {
+            if eof_frame.is_none_or(|eof| index.saturating_mul(TILE_FRAMES) < eof) {
                 self.decoded_tiles.fetch_add(1, Ordering::Relaxed);
             }
             let (tile, eof_frame) =

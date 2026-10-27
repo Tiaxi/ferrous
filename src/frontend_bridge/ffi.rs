@@ -5448,7 +5448,7 @@ mod tests {
                 format!("error {index}"),
             )
             .about(format!("/music/{index}.flac"));
-            if index % 2 == 0 {
+            if index.is_multiple_of(2) {
                 error
             } else {
                 BridgeError {

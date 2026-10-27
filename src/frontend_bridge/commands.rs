@@ -1533,8 +1533,10 @@ mod tests {
 
     #[test]
     fn queue_sync_schedules_validation_without_file_or_database_work() {
-        let mut state = BridgeState::default();
-        state.queue = vec![p("/unavailable/queue-track.flac")];
+        let mut state = BridgeState {
+            queue: vec![p("/unavailable/queue-track.flac")],
+            ..BridgeState::default()
+        };
         sync_queue_details(&mut state);
         assert!(state.queue_detail_validation_requested);
         assert_eq!(state.queue_detail_generation, 1);
@@ -1589,7 +1591,7 @@ mod tests {
 
     fn library_track(
         path: &str,
-        root: &PathBuf,
+        root: &Path,
         artist: &str,
         album: &str,
         year: Option<i32>,
@@ -1598,7 +1600,7 @@ mod tests {
         LibraryTrack {
             search_tags: crate::library::SearchTags::default(),
             path: p(path),
-            root_path: root.clone(),
+            root_path: root.to_path_buf(),
             title: String::new(),
             artist: artist.to_string(),
             album: album.to_string(),
@@ -1612,9 +1614,9 @@ mod tests {
         }
     }
 
-    fn library_root(path: &PathBuf) -> LibraryRoot {
+    fn library_root(path: &Path) -> LibraryRoot {
         LibraryRoot {
-            path: path.clone(),
+            path: path.to_path_buf(),
             name: String::new(),
         }
     }
@@ -1867,8 +1869,10 @@ mod tests {
         let track = root.join("song.flac");
         write_stub(&track, b"not-real-audio");
 
-        let mut state = BridgeState::default();
-        state.queue = vec![track.clone()];
+        let mut state = BridgeState {
+            queue: vec![track.clone()],
+            ..BridgeState::default()
+        };
         let reads = validate_now(&mut state);
         assert_eq!(
             reads.iter().map(|(path, _)| path).collect::<Vec<_>>(),
@@ -1906,16 +1910,18 @@ mod tests {
     #[test]
     fn validation_skips_library_tracks_in_queue() {
         let track = p("/library/song.flac");
-        let mut state = BridgeState::default();
-        state.library = Arc::new(LibrarySnapshot {
-            tracks: crate::library::shared_tracks(vec![LibraryTrack {
-                search_tags: crate::library::SearchTags::default(),
-                path: track.clone(),
-                ..LibraryTrack::default()
-            }]),
-            ..LibrarySnapshot::default()
-        });
-        state.queue = vec![track.clone()];
+        let mut state = BridgeState {
+            library: Arc::new(LibrarySnapshot {
+                tracks: crate::library::shared_tracks(vec![LibraryTrack {
+                    search_tags: crate::library::SearchTags::default(),
+                    path: track.clone(),
+                    ..LibraryTrack::default()
+                }]),
+                ..LibrarySnapshot::default()
+            }),
+            queue: vec![track.clone()],
+            ..BridgeState::default()
+        };
 
         assert!(validate_now(&mut state).is_empty());
         assert!(!state.queue_details.contains_key(&track));
@@ -1959,8 +1965,10 @@ mod tests {
         let track = root.join("song.flac");
         write_stub(&track, b"not-real-audio");
 
-        let mut state = BridgeState::default();
-        state.queue = vec![track.clone()];
+        let mut state = BridgeState {
+            queue: vec![track.clone()],
+            ..BridgeState::default()
+        };
 
         let library = LibrarySnapshot {
             tracks: crate::library::shared_tracks(vec![LibraryTrack {
@@ -1987,8 +1995,10 @@ mod tests {
         let old_fingerprint = track_file_fingerprint(&track).expect("initial fingerprint");
         write_stub(&track, b"version-b-with-new-size");
 
-        let mut state = BridgeState::default();
-        state.queue = vec![track.clone()];
+        let mut state = BridgeState {
+            queue: vec![track.clone()],
+            ..BridgeState::default()
+        };
         Arc::make_mut(&mut state.queue_details).insert(
             track.clone(),
             IndexedTrack {
@@ -3009,7 +3019,7 @@ mod tests {
         );
         // The library worker reads the edited row again, in case a newer
         // change reached the bridge first.
-        assert_eq!(state.library_rows_to_read, [inside.clone()]);
+        assert_eq!(state.library_rows_to_read, std::slice::from_ref(&inside));
 
         state.library_rows_to_read.clear();
         let renamed = p("/music/Artist/Album/renamed.flac");
@@ -3025,15 +3035,17 @@ mod tests {
     #[test]
     fn metadata_only_tag_edits_invalidate_search_snapshot() {
         let path = p("/music/Artist/Album/song.flac");
-        let mut state = BridgeState::default();
-        state.library = Arc::new(crate::library::LibrarySnapshot {
-            tracks: crate::library::shared_tracks(vec![LibraryTrack {
-                path: path.clone(),
-                root_path: p("/music"),
-                ..LibraryTrack::default()
-            }]),
-            ..crate::library::LibrarySnapshot::default()
-        });
+        let mut state = BridgeState {
+            library: Arc::new(crate::library::LibrarySnapshot {
+                tracks: crate::library::shared_tracks(vec![LibraryTrack {
+                    path: path.clone(),
+                    root_path: p("/music"),
+                    ..LibraryTrack::default()
+                }]),
+                ..crate::library::LibrarySnapshot::default()
+            }),
+            ..BridgeState::default()
+        };
         let tags =
             crate::library::SearchTags::from([("comment".into(), vec!["Remastered".into()])]);
         let indexed = IndexedTrack {
