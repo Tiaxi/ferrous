@@ -606,7 +606,9 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
         return false;
     }
     out->hasQueueColumnWidths = !reader.atEnd();
-    if (out->hasQueueColumnWidths && !readQueueColumnWidths(reader, &out->queueColumnWidths)) {
+    if (out->hasQueueColumnWidths
+        && (!readQueueColumnWidths(reader, &out->queueColumnWidths)
+            || !reader.readU32(&out->queueColumnWidthsGeneration))) {
         return false;
     }
     if (!reader.atEnd()) {
@@ -825,12 +827,13 @@ QByteArray encodeCommandWindowLayout(const WindowLayout &layout) {
     return finalizeCommand(CmdSetWindowLayout, payload);
 }
 
-QByteArray encodeCommandQueueColumnWidths(const QueueColumnWidths &widths) {
+QByteArray encodeCommandQueueColumnWidths(const QueueColumnWidths &widths, quint32 generation) {
     QByteArray payload;
-    payload.reserve(6);
+    payload.reserve(10);
     appendLe<quint16>(payload, widths.artist);
     appendLe<quint16>(payload, widths.album);
     appendLe<quint16>(payload, widths.length);
+    appendLe<quint32>(payload, generation);
     return finalizeCommand(CmdSetQueueColumnWidths, payload);
 }
 

@@ -78,7 +78,9 @@ const SECTION_STATE_SAVED: u16 = 1 << 9;
 const SECTION_QUEUE_UNDO: u16 = 1 << 10;
 /// The window layout saved in the settings, sent once at startup: the
 /// fields of the command that sets it, see [`read_window_layout`], then the
-/// queue's column widths as [`read_queue_column_widths`] reads them.
+/// queue's column widths as [`read_queue_column_widths`] reads them. The
+/// settings section ends with the widths too, then the u32 generation of the
+/// latest widths the UI sent.
 const SECTION_WINDOW_LAYOUT: u16 = 1 << 11;
 
 #[cfg(unix)]
@@ -2199,7 +2201,11 @@ fn parse_settings_command(
         59 => BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(reader.read_u8()? != 0),
         67 => BridgeSettingsCommand::SetLibraryWatchEnabled(reader.read_u8()? != 0),
         71 => BridgeSettingsCommand::SetWindowLayout(read_window_layout(reader)?),
-        72 => BridgeSettingsCommand::SetQueueColumnWidths(read_queue_column_widths(reader)?),
+        // The widths, then the u32 generation of the request.
+        72 => BridgeSettingsCommand::SetQueueColumnWidths {
+            widths: read_queue_column_widths(reader)?,
+            generation: reader.read_u32()?,
+        },
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -2853,7 +2859,9 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         u8::from(snapshot.settings.display.show_level_meter),
     );
     push_u8(&mut out, u8::from(snapshot.settings.library_watch_enabled));
+    // The widths, then the generation of the latest request the bridge took.
     push_queue_column_widths(&mut out, &snapshot.settings.queue_columns.widths);
+    push_u32(&mut out, snapshot.queue_column_widths_generation);
     out
 }
 
@@ -3345,6 +3353,7 @@ mod tests {
                 queue_columns: super::super::QueueColumnSettings::default(),
                 unknown_lines: Vec::new(),
             },
+            queue_column_widths_generation: 0,
             lastfm: crate::lastfm::RuntimeState {
                 enabled: true,
                 build_configured: true,
@@ -4924,7 +4933,7 @@ mod tests {
             let settings = encode_settings_section(&snapshot);
             // Followed by library watching and the queue's column widths.
             assert_eq!(
-                settings[settings.len() - 2 - QUEUE_COLUMN_WIDTHS_BYTES],
+                settings[settings.len() - 2 - SETTINGS_QUEUE_COLUMNS_BYTES],
                 u8::from(enabled)
             );
         }
@@ -4946,31 +4955,40 @@ mod tests {
             let settings = encode_settings_section(&snapshot);
             // Followed by the queue's column widths.
             assert_eq!(
-                settings[settings.len() - 1 - QUEUE_COLUMN_WIDTHS_BYTES],
+                settings[settings.len() - 1 - SETTINGS_QUEUE_COLUMNS_BYTES],
                 u8::from(enabled)
             );
         }
         assert!(parse_binary_command(&encode_command(67, &[])).is_err());
     }
 
-    /// The bytes of the queue's column widths that end the settings
-    /// section and the window layout section.
-    const QUEUE_COLUMN_WIDTHS_BYTES: usize = 6;
+    /// The bytes that end the settings section: the queue's column widths
+    /// and the generation of the latest ones the UI sent.
+    const SETTINGS_QUEUE_COLUMNS_BYTES: usize = 10;
 
-    fn queue_column_widths_payload(artist: u16, album: u16, length: u16) -> Vec<u8> {
+    /// The widths, then the generation: command 72's payload, and the end
+    /// of the settings section.
+    fn queue_column_widths_payload(
+        artist: u16,
+        album: u16,
+        length: u16,
+        generation: u32,
+    ) -> Vec<u8> {
         let mut payload = Vec::new();
         for width in [artist, album, length] {
             payload.extend_from_slice(&width.to_le_bytes());
         }
+        payload.extend_from_slice(&generation.to_le_bytes());
         payload
     }
 
     #[test]
     fn queue_column_widths_command_and_snapshot_share_protocol() {
         let parsed = |payload: &[u8]| match parse_binary_command(&encode_command(72, payload)) {
-            Ok(Some(BridgeCommand::Settings(BridgeSettingsCommand::SetQueueColumnWidths(
+            Ok(Some(BridgeCommand::Settings(BridgeSettingsCommand::SetQueueColumnWidths {
                 widths,
-            )))) => Ok(widths),
+                generation,
+            }))) => Ok((widths, generation)),
             other => Err(format!("{other:?}")),
         };
         let widths = QueueColumnWidths {
@@ -4979,32 +4997,37 @@ mod tests {
             length: Some(76),
         };
         assert_eq!(
-            parsed(&queue_column_widths_payload(170, 0, 76)).expect("parse"),
-            widths
+            parsed(&queue_column_widths_payload(170, 0, 76, 7)).expect("parse"),
+            (widths, 7)
         );
         // Widths out of range are the defaults.
         assert_eq!(
-            parsed(&queue_column_widths_payload(15, 4097, u16::MAX)).expect("parse"),
-            QueueColumnWidths::default()
+            parsed(&queue_column_widths_payload(15, 4097, u16::MAX, u32::MAX)).expect("parse"),
+            (QueueColumnWidths::default(), u32::MAX)
         );
-        assert!(parsed(&queue_column_widths_payload(1, 2, 3)[..5]).is_err());
-        let mut long = queue_column_widths_payload(170, 190, 76);
+        let short = queue_column_widths_payload(1, 2, 3, 4);
+        assert!(parsed(&short[..short.len() - 1]).is_err());
+        assert!(parsed(&short[..6]).is_err(), "without the generation");
+        let mut long = queue_column_widths_payload(170, 190, 76, 1);
         long.push(0);
         assert!(parsed(&long).is_err());
 
-        // The settings section ends with them, as the command lays them out.
+        // The settings section ends with them, as the command lays them out,
+        // with the generation of the latest request the bridge took.
         let mut snapshot = sample_snapshot();
         snapshot.settings.queue_columns.widths = widths;
+        snapshot.queue_column_widths_generation = 9;
         snapshot
             .settings
             .queue_columns
             .other_entries
             .push("genre:90".to_string());
         let settings = encode_settings_section(&snapshot);
-        let tail = &settings[settings.len() - QUEUE_COLUMN_WIDTHS_BYTES..];
-        assert_eq!(tail, queue_column_widths_payload(170, 0, 76).as_slice());
+        let tail = &settings[settings.len() - SETTINGS_QUEUE_COLUMNS_BYTES..];
+        assert_eq!(tail, queue_column_widths_payload(170, 0, 76, 9).as_slice());
         let mut reader = BinaryReader::new(tail);
         assert_eq!(read_queue_column_widths(&mut reader).expect("read"), widths);
+        assert_eq!(reader.read_u32().expect("the generation"), 9);
         reader.expect_done().expect("the whole tail");
     }
 
@@ -5080,7 +5103,7 @@ mod tests {
         // Settings tail: system media controls, fullscreen mode, display mode,
         // crosshair, scale, channel buttons, zoom, display sleep, level meter,
         // library watching, then the queue's column widths.
-        let flags = &settings[..settings.len() - QUEUE_COLUMN_WIDTHS_BYTES];
+        let flags = &settings[..settings.len() - SETTINGS_QUEUE_COLUMNS_BYTES];
         assert_eq!(&flags[flags.len() - 10..], &[0, 1, 0, 0, 0, 1, 1, 0, 1, 1]);
     }
 
@@ -5103,7 +5126,7 @@ mod tests {
         let settings = &packet[offset..offset + settings_len];
         // Crosshair, scale, channel buttons, zoom, display sleep, level meter,
         // library watching, then the queue's column widths.
-        let flags = &settings[..settings.len() - QUEUE_COLUMN_WIDTHS_BYTES];
+        let flags = &settings[..settings.len() - SETTINGS_QUEUE_COLUMNS_BYTES];
         assert_eq!(&flags[flags.len() - 7..], &[1, 1, 1, 1, 1, 1, 1]);
     }
 

@@ -321,8 +321,13 @@ pub enum BridgeSettingsCommand {
     SetLibraryWatchEnabled(bool),
     SetWindowLayout(WindowLayout),
     /// The widths of the queue's columns the user resized; the others keep
-    /// the UI's defaults.
-    SetQueueColumnWidths(QueueColumnWidths),
+    /// the UI's defaults. `generation` numbers the UI's requests, and the
+    /// snapshots echo the latest one taken, so the UI can tell the widths
+    /// it is still waiting for from older ones.
+    SetQueueColumnWidths {
+        widths: QueueColumnWidths,
+        generation: u32,
+    },
     BeginLastFmAuth,
     CompleteLastFmAuth,
     DisconnectLastFm,
@@ -507,6 +512,9 @@ pub struct BridgeSnapshot {
     /// brought back.
     pub queue_undo: QueueUndoState,
     pub settings: BridgeSettings,
+    /// The generation of the latest queue column widths the UI sent; see
+    /// [`BridgeSettingsCommand::SetQueueColumnWidths`].
+    pub queue_column_widths_generation: u32,
     pub lastfm: LastFmRuntimeState,
 }
 
@@ -627,6 +635,8 @@ pub(super) struct BridgeState {
     last_current_row: Option<(u64, usize)>,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
+    /// See [`BridgeSnapshot::queue_column_widths_generation`].
+    queue_column_widths_generation: u32,
     lastfm: LastFmRuntimeState,
     pending_search_results: Option<BridgeSearchResultsFrame>,
     pending_waveform_track: Option<PendingWaveformTrack>,
@@ -759,6 +769,7 @@ impl BridgeState {
             selected_queue_index: self.selected_queue_index,
             queue_undo: self.queue_undo.state(),
             settings: self.settings.clone(),
+            queue_column_widths_generation: self.queue_column_widths_generation,
             lastfm: self.lastfm.clone(),
         }
     }
@@ -3451,18 +3462,27 @@ mod tests {
             artist: Some(220),
             ..QueueColumnWidths::default()
         };
-        for (sent, dirty) in [
+        for (generation, (sent, dirty)) in (1..).zip([
             (widths, true),
             (widths, false),
             (QueueColumnWidths::default(), true),
-        ] {
+        ]) {
             runtime.flags.settings_dirty = false;
             runtime.handle_command(
-                BridgeCommand::Settings(BridgeSettingsCommand::SetQueueColumnWidths(sent)),
+                BridgeCommand::Settings(BridgeSettingsCommand::SetQueueColumnWidths {
+                    widths: sent,
+                    generation,
+                }),
                 &event_tx,
             );
             assert_eq!(runtime.state.settings.queue_columns.widths, sent);
             assert_eq!(runtime.flags.settings_dirty, dirty);
+            // The snapshot tells the UI which request it reflects, also when
+            // the widths did not change.
+            assert_eq!(
+                runtime.state.snapshot(false).queue_column_widths_generation,
+                generation
+            );
             assert_eq!(
                 runtime.state.settings.queue_columns.other_entries,
                 vec!["genre:90".to_string()]

@@ -25,8 +25,9 @@ Rectangle {
     required property real snappyScrollMaxFlickVelocity
     required property var droppedExternalPaths
 
-    // The columns, which the header and the rows share. The title takes the
-    // width the others leave. Artist, Album and Length have the widths the
+    // The columns, which the header and the rows share; text that does not
+    // fit its column is elided, so it never runs into the next. The title
+    // takes the width the others leave. Artist, Album and Length have the widths the
     // user dragged their handles to, which the settings keep, or defaults
     // that follow the font size.
     readonly property real columnMargin: 8
@@ -39,20 +40,33 @@ Rectangle {
     readonly property real artistColumnWidth: root.columnWidths.artist
     readonly property real albumColumnWidth: root.columnWidths.album
     readonly property real lengthColumnWidth: root.columnWidths.length
-    // The narrowest a column can be dragged: a few characters, and no
-    // narrower than the backend keeps.
+    readonly property var resizableColumns: ["artist", "album", "length"]
+    // The narrowest Artist and Album can be dragged: a few characters, and
+    // no narrower than the backend keeps. Length keeps room for its
+    // heading and the longest length it shows.
     readonly property real minimumResizedColumnWidth: Math.max(
         16, Math.ceil(columnFontMetrics.averageCharacterWidth * 4))
+    readonly property real minimumLengthColumnWidth: Math.max(16, Math.ceil(Math.max(
+        lengthHeaderMetrics.advanceWidth,
+        lengthValueMetrics.advanceWidth)))
+    // The widest a column is kept, as wide as the backend saves:
+    // BinaryBridgeCodec::kMaxQueueColumnWidth.
+    readonly property real maximumResizedColumnWidth: 4096
     // The width Artist, Album and Length share, which leaves the title its
     // minimum.
     readonly property real resizableColumnsRoom: Math.max(0, queueHeaderRow.width
         - root.playlistIndicatorColumnWidth - root.playlistOrderColumnWidth
         - root.minimumTitleColumnWidth - 5 * root.columnSpacing)
-    // The column whose handle is being dragged, or moved with the keys, and
-    // its width until the drag ends and the width is kept.
+    // The column whose handle is being dragged, or moved with the keys; its
+    // preferred width until the drag ends and the width is kept; and, from
+    // when the drag started, its preferred and shown widths, how far the
+    // drag has moved its edge, and whether the columns were giving way.
     property string resizingColumn: ""
     property real resizingWidth: 0
     property real resizeStartWidth: 0
+    property real resizeStartShownWidth: 0
+    property real resizeDelta: 0
+    property bool resizeStartedCompressed: false
 
     function defaultColumnWidth(column) {
         if (column === "artist") {
@@ -64,38 +78,52 @@ Rectangle {
         return root.defaultLengthColumnWidth
     }
 
-    // The width the column would have with room enough.
-    function preferredColumnWidth(column) {
-        if (root.resizingColumn === column) {
-            return root.resizingWidth
-        }
+    function minimumColumnWidth(column) {
+        return column === "length" ? root.minimumLengthColumnWidth : root.minimumResizedColumnWidth
+    }
+
+    function clampColumnWidth(column, width) {
+        return Math.max(root.minimumColumnWidth(column),
+                        Math.min(root.maximumResizedColumnWidth, width))
+    }
+
+    // The width the column would have with room enough: the one the user
+    // gave it, or its default.
+    function savedColumnWidth(column) {
         const saved = root.uiBridge.queueColumnWidths
             ? Number(root.uiBridge.queueColumnWidths[column])
             : 0
-        return saved > 0
-            ? Math.max(root.minimumResizedColumnWidth, saved)
-            : root.defaultColumnWidth(column)
+        return saved > 0 ? root.clampColumnWidth(column, saved) : root.defaultColumnWidth(column)
     }
 
-    // The widths of Artist, Album and Length. When the queue is too narrow
-    // for their preferred widths with the title at its minimum, as in a
+    function preferredColumnWidth(column) {
+        return root.resizingColumn === column
+            ? root.resizingWidth
+            : root.savedColumnWidth(column)
+    }
+
+    // The widths the columns are shown at for `preferred` widths. When the
+    // queue is too narrow for them with the title at its minimum, as in a
     // window made smaller after a column was widened, each gives up a share
     // of what it has beyond its minimum.
-    readonly property var columnWidths: {
-        const names = ["artist", "album", "length"]
-        const preferred = names.map(root.preferredColumnWidth)
-        const minimum = root.minimumResizedColumnWidth
+    function fittedColumnWidths(preferred) {
+        const minimum = root.resizableColumns.map(root.minimumColumnWidth)
         const room = root.resizableColumnsRoom
         const total = preferred.reduce((sum, width) => sum + width, 0)
-        let widths = preferred
-        if (room > 0 && total > room) {
-            const slack = preferred.map(width => Math.max(0, width - minimum))
-            const totalSlack = slack.reduce((sum, width) => sum + width, 0)
-            const overflow = Math.min(total - room, totalSlack)
-            if (totalSlack > 0) {
-                widths = preferred.map((width, i) => width - overflow * slack[i] / totalSlack)
-            }
+        if (room <= 0 || total <= room) {
+            return preferred
         }
+        const slack = preferred.map((width, i) => Math.max(0, width - minimum[i]))
+        const totalSlack = slack.reduce((sum, width) => sum + width, 0)
+        if (totalSlack <= 0) {
+            return preferred
+        }
+        const overflow = Math.min(total - room, totalSlack)
+        return preferred.map((width, i) => width - overflow * slack[i] / totalSlack)
+    }
+
+    readonly property var columnWidths: {
+        const widths = root.fittedColumnWidths(root.resizableColumns.map(root.preferredColumnWidth))
         return {
             "artist": Math.round(widths[0]),
             "album": Math.round(widths[1]),
@@ -103,33 +131,76 @@ Rectangle {
         }
     }
 
-    // The widest `column` can be: as wide as leaves the title its minimum.
-    function maximumColumnWidth(column) {
+    // The preferred width at which `column` is shown `shown` wide, the
+    // others keeping theirs: fittedColumnWidths the other way round. Where
+    // the columns give way, the shown width is m + A u / (u + S), for the
+    // column's minimum m and preferred width m + u, the others' S beyond
+    // their minimums, and the room A beyond all the minimums.
+    function preferredWidthShowing(column, shown) {
         let others = 0
-        for (const name of ["artist", "album", "length"]) {
+        let othersSlack = 0
+        let minimums = 0
+        for (const name of root.resizableColumns) {
+            const minimum = root.minimumColumnWidth(name)
+            minimums += minimum
             if (name !== column) {
-                others += root.columnWidths[name]
+                const width = root.savedColumnWidth(name)
+                others += width
+                othersSlack += Math.max(0, width - minimum)
             }
         }
-        return Math.max(root.minimumResizedColumnWidth, root.resizableColumnsRoom - others)
+        const room = root.resizableColumnsRoom
+        if (room <= 0 || shown + others <= room || othersSlack <= 0) {
+            return shown
+        }
+        const beyond = shown - root.minimumColumnWidth(column)
+        const roomBeyond = room - minimums
+        if (beyond >= roomBeyond) {
+            return root.maximumResizedColumnWidth
+        }
+        return root.minimumColumnWidth(column) + othersSlack * beyond / (roomBeyond - beyond)
     }
 
     function beginColumnResize(column) {
         if (root.resizingColumn !== column) {
             root.finishColumnResize()
-            // The width it has now, before the column follows resizingWidth.
-            const width = root.columnWidths[column]
-            root.resizeStartWidth = width
-            root.resizingWidth = width
+            // Read before the column follows resizingWidth.
+            const preferred = root.savedColumnWidth(column)
+            root.resizeStartShownWidth = root.columnWidths[column]
+            root.resizeStartedCompressed = root.resizableColumns
+                .map(root.savedColumnWidth)
+                .reduce((sum, width) => sum + width, 0) > root.resizableColumnsRoom
+            root.resizeStartWidth = preferred
+            root.resizingWidth = preferred
+            root.resizeDelta = 0
             root.resizingColumn = column
         }
     }
 
-    function resizeColumnTo(column, width) {
+    // Move the column's edge `delta` from where the drag started, as it is
+    // shown: the preferred width changes so the shown one follows. A drag
+    // that started with room enough stops where the title reaches its
+    // minimum; one where the columns gave way takes from the others.
+    function resizeColumnBy(column, delta) {
         root.beginColumnResize(column)
-        root.resizingWidth = Math.round(Math.max(
-            root.minimumResizedColumnWidth,
-            Math.min(root.maximumColumnWidth(column), width)))
+        root.resizeDelta = delta
+        if (delta === 0) {
+            root.resizingWidth = root.resizeStartWidth
+            return
+        }
+        let shown = Math.max(root.minimumColumnWidth(column), root.resizeStartShownWidth + delta)
+        if (!root.resizeStartedCompressed) {
+            let others = 0
+            for (const name of root.resizableColumns) {
+                if (name !== column) {
+                    others += root.savedColumnWidth(name)
+                }
+            }
+            shown = Math.min(shown, Math.max(root.minimumColumnWidth(column),
+                                             root.resizableColumnsRoom - others))
+        }
+        root.resizingWidth = Math.round(root.clampColumnWidth(
+            column, root.preferredWidthShowing(column, shown)))
     }
 
     // Keep the width the drag ended at, once per drag, if it changed.
@@ -219,6 +290,7 @@ Rectangle {
 
                 Label {
                     objectName: "queueHeader_indicator"
+                    elide: Text.ElideRight
                     text: "▶"
                     Layout.preferredWidth: root.playlistIndicatorColumnWidth
                     horizontalAlignment: Text.AlignHCenter
@@ -228,6 +300,7 @@ Rectangle {
 
                 Label {
                     objectName: "queueHeader_order"
+                    elide: Text.ElideRight
                     text: "#"
                     Layout.preferredWidth: root.playlistOrderColumnWidth
                     horizontalAlignment: Text.AlignRight
@@ -237,6 +310,7 @@ Rectangle {
 
                 Label {
                     objectName: "queueHeader_title"
+                    elide: Text.ElideRight
                     text: "Title"
                     Layout.fillWidth: true
                     color: root.uiPalette.uiMutedTextColor
@@ -260,6 +334,7 @@ Rectangle {
                 Label {
                     id: lengthHeader
                     objectName: "queueHeader_length"
+                    elide: Text.ElideRight
                     text: "Length"
                     Layout.preferredWidth: root.lengthColumnWidth
                     horizontalAlignment: Text.AlignRight
@@ -324,8 +399,7 @@ Rectangle {
                         onPositionChanged: function(mouse) {
                             if (pressed && root.resizingColumn === resizeHandle.column) {
                                 const x = mapToItem(root, mouse.x, 0).x
-                                root.resizeColumnTo(resizeHandle.column,
-                                    root.resizeStartWidth + resizeHandle.pressX - x)
+                                root.resizeColumnBy(resizeHandle.column, resizeHandle.pressX - x)
                             }
                         }
                         onReleased: root.finishColumnResize()
@@ -352,9 +426,9 @@ Rectangle {
                             return
                         }
                         const step = Math.max(1, Math.round(columnFontMetrics.averageCharacterWidth))
-                        root.resizeColumnTo(resizeHandle.column,
-                            root.columnWidths[resizeHandle.column]
-                                + (event.key === Qt.Key_Left ? step : -step))
+                        root.beginColumnResize(resizeHandle.column)
+                        root.resizeColumnBy(resizeHandle.column,
+                            root.resizeDelta + (event.key === Qt.Key_Left ? step : -step))
                     }
                     // A held key moves the handle until it is let go, when
                     // the width is kept.
@@ -498,6 +572,7 @@ Rectangle {
 
                         Label {
                             objectName: "queueCell_indicator"
+                            elide: Text.ElideRight
                             text: {
                                 if (!playlistRow.isCurrentQueueRow) {
                                     return ""
@@ -524,6 +599,7 @@ Rectangle {
 
                         Label {
                             objectName: "queueCell_order"
+                            elide: Text.ElideRight
                             text: root.playlistOrderText(index)
                             Layout.preferredWidth: root.playlistOrderColumnWidth
                             horizontalAlignment: Text.AlignRight
@@ -564,6 +640,7 @@ Rectangle {
 
                         Label {
                             objectName: "queueCell_length"
+                            elide: Text.ElideRight
                             text: lengthTextValue
                             Layout.preferredWidth: root.lengthColumnWidth
                             horizontalAlignment: Text.AlignRight

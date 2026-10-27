@@ -647,7 +647,8 @@ private:
     bool applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue);
     // After the snapshot's rows are in place.
     void applyQueueUndo(const BinaryBridgeCodec::DecodedQueueUndo &undo);
-    void applyBackendQueueColumnWidths(const BinaryBridgeCodec::QueueColumnWidths &widths);
+    void applyBackendQueueColumnWidths(
+        const BinaryBridgeCodec::QueueColumnWidths &widths, quint32 generation);
     // Read the size and modification time of the artwork target's track,
     // for the search of `generation`, into its "identity": empty if the file
     // is not there.
@@ -882,10 +883,10 @@ private:
     // The window layout the backend sent at startup.
     bool m_hasSavedWindowLayout{false};
     QVariantMap m_savedWindowLayout;
-    // The queue's column widths, and the ones the backend sent last; see
-    // applyBackendQueueColumnWidths.
+    // The queue's column widths, and the generation of the latest ones sent
+    // to the backend; see applyBackendQueueColumnWidths.
     BinaryBridgeCodec::QueueColumnWidths m_queueColumnWidths;
-    BinaryBridgeCodec::QueueColumnWidths m_backendQueueColumnWidths;
+    quint32 m_queueColumnWidthsGeneration{0};
     // Set once the UI has asked the backend to stop, after which its stop is expected.
     bool m_bridgeShutdownRequested{false};
     bool m_loggedStartupQueueMissing{false};

@@ -212,6 +212,7 @@ private slots:
     void savedWindowLayoutIsDecodedAndFittedToTheScreens();
     void queueColumnWidthsAreSentAsTheBackendReadsThem();
     void queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout();
+    void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
@@ -1231,8 +1232,9 @@ QByteArray packetWithSection(quint16 section, const QByteArray &payload) {
 }
 
 // The settings section as the backend lays it out, with the queue's column
-// widths at its end unless `widths` is empty, as older backends send it.
-QByteArray settingsSectionPayload(const QList<quint16> &widths) {
+// widths and their generation at its end unless `widths` is empty, as older
+// backends send it.
+QByteArray settingsSectionPayload(const QList<quint16> &widths, quint32 generation = 0) {
     QByteArray payload;
     QDataStream out(&payload, QIODevice::WriteOnly);
     out.setByteOrder(QDataStream::LittleEndian);
@@ -1245,7 +1247,35 @@ QByteArray settingsSectionPayload(const QList<quint16> &widths) {
     for (const quint16 width : widths) {
         out << width;
     }
+    if (!widths.isEmpty()) {
+        out << generation;
+    }
     return payload;
+}
+
+// A settings snapshot with the queue's column widths at `generation`, as
+// decodeSettingsSection gives it.
+BinaryBridgeCodec::DecodedSnapshot columnWidthsSnapshot(
+    const BinaryBridgeCodec::QueueColumnWidths &widths, quint32 generation) {
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.hasQueueColumnWidths = true;
+    snapshot.settings.queueColumnWidths = widths;
+    snapshot.settings.queueColumnWidthsGeneration = generation;
+    return snapshot;
+}
+
+// The widths and generation command 72 carries.
+struct SentColumnWidths {
+    QList<quint16> widths;
+    quint32 generation{0};
+};
+
+SentColumnWidths sentColumnWidths(const QByteArray &command) {
+    const char *payload = command.constData() + BinaryBridgeCodec::kCommandHeaderBytes;
+    return {{qFromLittleEndian<quint16>(payload), qFromLittleEndian<quint16>(payload + 2),
+             qFromLittleEndian<quint16>(payload + 4)},
+            qFromLittleEndian<quint32>(payload + 6)};
 }
 
 } // namespace
@@ -1275,21 +1305,19 @@ void BridgeClientTest::queueColumnWidthsAreSentAsTheBackendReadsThem() {
     QCOMPARE(changed.count(), 3);
     QCOMPARE(client.queueColumnWidths(), (QVariantMap{{QStringLiteral("length"), 80}}));
 
-    const auto widthsIn = [](const QByteArray &command) {
-        const char *payload = command.constData() + BinaryBridgeCodec::kCommandHeaderBytes;
-        return QList<quint16>{qFromLittleEndian<quint16>(payload),
-                              qFromLittleEndian<quint16>(payload + 2),
-                              qFromLittleEndian<quint16>(payload + 4)};
-    };
     for (const QByteArray &command : sent) {
-        QCOMPARE(command.size(), BinaryBridgeCodec::kCommandHeaderBytes + 6);
+        QCOMPARE(command.size(), BinaryBridgeCodec::kCommandHeaderBytes + 10);
         QCOMPARE(qFromLittleEndian<quint16>(command.constData()),
                  quint16(BinaryBridgeCodec::CmdSetQueueColumnWidths));
-        QCOMPARE(qFromLittleEndian<quint32>(command.constData() + 2), quint32(6));
+        QCOMPARE(qFromLittleEndian<quint32>(command.constData() + 2), quint32(10));
     }
-    QCOMPARE(widthsIn(sent[0]), (QList<quint16>{0, 240, 0}));
-    QCOMPARE(widthsIn(sent[1]), (QList<quint16>{0, 240, 80}));
-    QCOMPARE(widthsIn(sent[2]), (QList<quint16>{0, 0, 80}));
+    // Every column, with a new generation each time.
+    QCOMPARE(sentColumnWidths(sent[0]).widths, (QList<quint16>{0, 240, 0}));
+    QCOMPARE(sentColumnWidths(sent[1]).widths, (QList<quint16>{0, 240, 80}));
+    QCOMPARE(sentColumnWidths(sent[2]).widths, (QList<quint16>{0, 0, 80}));
+    QCOMPARE(sentColumnWidths(sent[0]).generation, quint32(1));
+    QCOMPARE(sentColumnWidths(sent[1]).generation, quint32(2));
+    QCOMPARE(sentColumnWidths(sent[2]).generation, quint32(3));
 }
 
 void BridgeClientTest::queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout() {
@@ -1312,9 +1340,10 @@ void BridgeClientTest::queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLay
     QVERIFY(decoded.hasWindowLayout);
     QCOMPARE(decoded.windowLayoutQueueColumns, BinaryBridgeCodec::QueueColumnWidths{});
 
-    // Newer ones add the widths, laid out as the command that sets them.
-    const QByteArray widths = BinaryBridgeCodec::encodeCommandQueueColumnWidths({170, 0, 76}).mid(
-        BinaryBridgeCodec::kCommandHeaderBytes);
+    // Newer ones add the widths, laid out as the command that sets them;
+    // the settings add the generation too.
+    const QByteArray widths = BinaryBridgeCodec::encodeCommandQueueColumnWidths({170, 0, 76}, 0)
+                                  .mid(BinaryBridgeCodec::kCommandHeaderBytes, 6);
     decoded = {};
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
                  packetWithSection(BinaryBridgeCodec::SectionWindowLayout, layout + widths),
@@ -1324,11 +1353,12 @@ void BridgeClientTest::queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLay
     decoded = {};
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
                  packetWithSection(BinaryBridgeCodec::SectionSettings,
-                                   settingsSectionPayload({300, 190, 0})),
+                                   settingsSectionPayload({300, 190, 0}, 12)),
                  &decoded, &error),
              qPrintable(error));
     QVERIFY(decoded.settings.hasQueueColumnWidths);
     QCOMPARE(decoded.settings.queueColumnWidths, (BinaryBridgeCodec::QueueColumnWidths{300, 190, 0}));
+    QCOMPARE(decoded.settings.queueColumnWidthsGeneration, quint32(12));
     // Cut short, they are refused.
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
         packetWithSection(BinaryBridgeCodec::SectionWindowLayout, layout + widths.left(4)),
@@ -1336,6 +1366,10 @@ void BridgeClientTest::queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLay
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
         packetWithSection(BinaryBridgeCodec::SectionSettings,
                           settingsSectionPayload({300, 190, 0}).chopped(1)),
+        &decoded, &error));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionSettings,
+                          settingsSectionPayload({300, 190, 0}).chopped(4)),
         &decoded, &error));
 
     // The window layout brings them before the window is shown.
@@ -1354,27 +1388,52 @@ void BridgeClientTest::queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLay
     QCOMPARE(atLayout, saved);
     QCOMPARE(client.queueColumnWidths(), saved);
 
-    // A snapshot the backend built before it took a new width keeps the
-    // earlier widths, which do not put the column back; its next one has it.
-    BinaryBridgeCodec::DecodedSnapshot settings;
-    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
-        packetWithSection(BinaryBridgeCodec::SectionSettings, settingsSectionPayload({170, 0, 76})),
-        &settings, &error));
-    QVERIFY(settings.settings.hasQueueColumnWidths);
-    client.setQueueColumnWidth(QStringLiteral("album"), 250);
-    QSignalSpy changed(&client, &BridgeClient::queueColumnWidthsChanged);
-    client.processBinarySnapshot(settings);
-    QCOMPARE(client.queueColumnWidths().value(QStringLiteral("album")).toInt(), 250);
-    settings.settings.queueColumnWidths = {170, 250, 76};
-    client.processBinarySnapshot(settings);
-    QCOMPARE(client.queueColumnWidths().value(QStringLiteral("album")).toInt(), 250);
-    QCOMPARE(changed.count(), 0);
     // Widths the backend changed itself, as when it reads the settings
-    // again, are taken.
-    settings.settings.queueColumnWidths = {0, 0, 0};
-    client.processBinarySnapshot(settings);
+    // again, are taken while nothing the UI sent is waiting.
+    QSignalSpy changed(&client, &BridgeClient::queueColumnWidthsChanged);
+    client.processBinarySnapshot(columnWidthsSnapshot({0, 0, 0}, 0));
     QVERIFY(client.queueColumnWidths().isEmpty());
     QCOMPARE(changed.count(), 1);
+}
+
+void BridgeClientTest::queueColumnWidthsKeepTheNewestWhileAcksAreLate() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    const auto album = [&client]() {
+        return client.queueColumnWidths().value(QStringLiteral("album")).toInt();
+    };
+
+    // Two drags before the backend has taken the first.
+    client.setQueueColumnWidth(QStringLiteral("album"), 200);
+    client.setQueueColumnWidth(QStringLiteral("album"), 250);
+    QSignalSpy changed(&client, &BridgeClient::queueColumnWidthsChanged);
+    // Snapshots from before either, and with the first only, leave 250.
+    client.processBinarySnapshot(columnWidthsSnapshot({0, 0, 0}, 0));
+    QCOMPARE(album(), 250);
+    client.processBinarySnapshot(columnWidthsSnapshot({0, 200, 0}, 1));
+    QCOMPARE(album(), 250);
+    QCOMPARE(changed.count(), 0);
+
+    // A third column's edit still carries 250, and so do later snapshots.
+    client.setQueueColumnWidth(QStringLiteral("artist"), 180);
+    QCOMPARE(sentColumnWidths(sent.last()).widths, (QList<quint16>{180, 250, 0}));
+    client.processBinarySnapshot(columnWidthsSnapshot({0, 250, 0}, 2));
+    QCOMPARE(album(), 250);
+    QCOMPARE(client.queueColumnWidths().value(QStringLiteral("artist")).toInt(), 180);
+    client.processBinarySnapshot(columnWidthsSnapshot({180, 250, 0}, 3));
+    QCOMPARE(client.queueColumnWidths(),
+             (QVariantMap{{QStringLiteral("artist"), 180}, {QStringLiteral("album"), 250}}));
+    QCOMPARE(changed.count(), 1);
+
+    // Once the backend has taken them, a change of its own is taken.
+    client.processBinarySnapshot(columnWidthsSnapshot({0, 0, 90}, 3));
+    QCOMPARE(client.queueColumnWidths(), (QVariantMap{{QStringLiteral("length"), 90}}));
+    QCOMPARE(changed.count(), 2);
 }
 
 void BridgeClientTest::libraryViewStateKeepsOffsetsIntoTallRows() {
