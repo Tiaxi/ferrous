@@ -8,7 +8,6 @@
 #include <QQuickStyle>
 #include <QStandardPaths>
 #include <QWindow>
-#include <qqml.h>
 
 #include <atomic>
 #include <array>
@@ -29,12 +28,9 @@
 #include "DisplaySleepInhibitor.h"
 #include "LibraryTreeModel.h"
 #include "MprisController.h"
-#include "SpectrogramItem.h"
+#include "QmlTypes.h"
 #include "TagEditorController.h"
-#include "WaveformItem.h"
 #include "WindowActivation.h"
-#include "WaveformEditorItem.h"
-#include "LevelMeterItem.h"
 
 namespace {
 
@@ -280,12 +276,7 @@ int main(int argc, char *argv[]) {
     TagEditorController tagEditor(&bridge);
     QQmlApplicationEngine engine;
     engine.addImageProvider(QStringLiteral("covers"), new CoverImageProvider);
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-    qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
-    qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
-    qmlRegisterUncreatableType<PlaybackClock>(
-        "FerrousUi", 1, 0, "PlaybackClock", QStringLiteral("The bridge owns the playback clock"));
+    registerFerrousQmlTypes();
     engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &tagEditor);

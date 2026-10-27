@@ -367,6 +367,9 @@ void PlaybackClockTest::framesTickOnlyWhileAdvancing() {
 
 void PlaybackClockTest::framesStopWhileNoWindowShowsThem() {
     PlaybackClock clock;
+    // Real time, which the test moves on instead of waiting for it.
+    qint64 skippedNs = 0;
+    clock.setTimeSource([&skippedNs]() { return monotonicNowNs() + skippedNs; });
     QSignalSpy position(&clock, &PlaybackClock::positionChanged);
     QSignalSpy enabled(&clock, &PlaybackClock::frameUpdatesEnabledChanged);
     clock.applySample(sample(10.0, monotonicNowNs(), true), true);
@@ -387,7 +390,7 @@ void PlaybackClockTest::framesStopWhileNoWindowShowsThem() {
     QVERIFY(clock.positionSeconds() < 20.05);
 
     // Shown again: it catches up at once, then goes on frame by frame.
-    QTest::qWait(100);
+    skippedNs += 100'000'000;
     position.clear();
     clock.setFrameUpdatesEnabled(true);
     QCOMPARE(enabled.count(), 2);

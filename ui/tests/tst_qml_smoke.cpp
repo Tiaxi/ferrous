@@ -5,6 +5,7 @@
 #include <QFont>
 #include "../src/GlobalSearchResultsModel.h"
 #include <QDateTime>
+#include <QDeadlineTimer>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QFile>
@@ -49,6 +50,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -60,9 +62,11 @@
 #include "../src/DisplaySleepInhibitor.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/MprisController.h"
+#include "../src/QmlTypes.h"
 #include "../src/SpectrogramSeekTrace.h"
 #include "../src/WaveformSceneGraph.h"
 #include "../src/WindowActivation.h"
+#include "TestPlatform.h"
 #include "TestUserDirectories.h"
 #define protected public
 #define private public
@@ -1052,6 +1056,8 @@ private:
     QMutex *m_mutex;
 };
 
+// What the tests of every area share. Each area is a test class of its own,
+// which CTest runs in a process of its own; see main().
 class QmlSmokeTest : public QObject {
     Q_OBJECT
 
@@ -1061,99 +1067,29 @@ public:
         : m_userDirectoriesParent(std::move(userDirectoriesParent)) {}
 
 private slots:
-    void hiddenSpectrogramDefersPaintingAndRetainsIncomingData();
     void initTestCase();
     void init();
     void cleanup();
     void cleanupTestCase();
-    void globalSearchKeyboardAndResponsiveResults();
-    void searchResultIconsFollowForeground();
-    void loadsMainQmlWithFallbackBridge();
-    void loadsExtractedQmlSlicesWithFallbackProps();
+
+private:
+    QString m_userDirectoriesParent;
+    // The current test's own user directories; see init().
+    std::optional<TestUserDirectories> m_userDirectories;
+};
+
+// Spectrogram rendering, zoom, seeking and track transitions.
+class SpectrogramSmokeTest : public QmlSmokeTest {
+    Q_OBJECT
+
+public:
+    using QmlSmokeTest::QmlSmokeTest;
+
+private slots:
+    void hiddenSpectrogramDefersPaintingAndRetainsIncomingData();
     void spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints();
-    void fullscreenVisualizationInhibitsDisplaySleepOnlyWhileActive();
     void spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers();
     void spectrogramHoverChannelButtonsRemainClickable();
-    void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
-    void waveformSurfaceMuteButtonsFollowTheMutedChannels();
-    void mainWindowContentStartsBelowMenuBar();
-    void draggedSplitSizesSurviveAWindowResize();
-    void theSmallestWindowFitsALaptopScreenAndShowsEveryControl();
-    void windowLayoutSurvivesARestart();
-    void aWindowSavedOffTheScreensOpensOnOne();
-    void queueColumnWidthsSurviveARestart();
-    void theWindowOpensWithoutASavedLayoutThatDoesNotCome();
-    void quittingWhileMinimizedKeepsTheWindowMaximized();
-    void consecutiveErrorsAreBothVisible();
-    void repeatedErrorsAreCounted();
-    void errorHistoryKeepsTheLatestErrors();
-    void aLongErrorIsShownWhole();
-    void aLongMultiLineErrorKeepsTheControlsInTheWindow();
-    void escapeClosesFullscreenViewersWhileTheirErrorHasFocus();
-    void fullscreenErrorTextScrollsWithTheKeyboard();
-    void quitTimeErrorClosesAFullscreenViewerFirst();
-    void displaySleepFailureShowsInTheFullscreenViewer();
-    void stoppedBackendShowsMessageAndDisablesControls();
-    void quitActionClosesTheWindowThroughItsCloseHandler();
-    void failedSaveBeforeQuitShowsTheErrorAndRetrySaves();
-    void quitAnywayClosesAfterAFailedSave();
-    void saveAnsweredAfterItsTimeoutStillClosesTheWindow();
-    void answerToAnEarlierSaveAttemptDoesNotSettleARetry();
-    void escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLate();
-    void mprisQuitSavesBeforeClosingTheWindow();
-    void failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow();
-    void tagEditorOpensALargeSelectionWithoutBuildingEveryRow();
-    void tagEditorCancelAsksBeforeDroppingEdits();
-    void closingTheTagEditorKeepsTheFieldBeingTyped();
-    void tagEditorStaysOpenWhileSavingAndShowsTheResult();
-    void closingTheWindowWithTagEditsAsksAndCancelKeepsThem();
-    void closingTheWindowWithTagEditsCanDiscardThem();
-    void closingTheWindowWithTagEditsCanSaveThemFirst();
-    void tagSaveFailureWhileQuittingKeepsTheWindowOpen();
-    void closingTheWindowWhileTagsSaveWaitsForTheSave();
-    void mprisQuitWithTagEditsAsksFirst();
-    void quittingDuringAStalledTagSaveOffersToQuitAnyway();
-    void savingTagEditsChosenWhenQuittingWaitsWithinTheBound();
-    void keepWaitingForAStalledTagSaveQuitsWhenItFinishes();
-    void repeatedQuitsDuringATagSaveShowOneWait();
-    void tagEditorReloadAsksBeforeDroppingEdits();
-    void autoNumberRejectsStartsThatAreNotNumbers();
-    void tagEditorRowsFollowTheKeyboard();
-    void tagEditorShowsEveryValueOfMultiValueFields();
-    void levelMeterKeepsVisualizationHeightAndFollowsModes();
-    void albumArtTileKeepsHeightInsideColumnLayout();
-    void libraryPreferencesToggleWatchingAndShowUnwatchedRoots();
-    void albumArtViewerInfoUsesImageProviderLocalPath();
-    void tagEditorLibrarySupportGateMatchesSupportedRows();
-    void libraryTreeStartsCollapsedByDefault();
-    void libraryTreeRowsCarryTheirCoverStamp();
-    void rootRowsStartExpandedByDefault();
-    void artistExpansionPopulatesInBatches();
-    void lazyArtistRowRequestsBackendExpansion();
-    void libraryTreeSeedsExpandedKeysBeforeFirstFrame();
-    void libraryTreeCollapsesAllExpandedBranches();
-    void artistPrefixSearchUsesModelLookup();
-    void libraryTreeAppliesALargeUpdateWithoutAReset();
-    void libraryTreeMovesRowsWithoutAReset();
-    void libraryTreeFollowsRootChanges();
-    void libraryControllerExtendsSelectionWithShiftArrows();
-    void libraryControllerRestoresExpandedSelectionAndViewport();
-    void libraryControllerUsesDelegateCoordinatesForViewportAnchor();
-    void libraryControllerForwardsShowTrackRequest();
-    void libraryControllerCentersBridgeRevealAfterExpansion();
-    void shiftSelectingTenThousandLibraryRowsStaysFast();
-    void librarySelectionFollowsItsRowsThroughTreeUpdates();
-    void playingALibrarySelectionSendsOneBatch();
-    void revealKeyExpandsADeepKeyInOneCall();
-    void revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers();
-    void queueMovesAndDropsActOnEveryHighlightedRow();
-    void queueSelectionFollowsRowRangeMoves();
-    void emptyLibraryAndFileMenuAddALibraryFolder();
-    void draggingAHighlightedQueueRowMovesEveryHighlightedRow();
-    void queueDropsFollowTheRowsAfterRowsAboveAreRemoved();
-    void aRevealDuringTheSavedViewRestoreKeepsSavingTheView();
-    void escapeCancelsAQueueRowDrag();
-    void aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore();
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
@@ -1170,12 +1106,146 @@ private slots:
     void spectrogramManualTrackResetClearsRollingHistory();
     void spectrogramRollingZoomResetAnchorsEpochToResetStart();
     void spectrogramSeekResetAnchorsPlaybackClockToChunkStart();
-    void diagnosticsLogUsesLowercaseAppDir();
-    void playbackControllerReadsTheBridgeClock();
     void spectrogramSeekProfileFlagsStalledPostSeekWindow();
     void spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling();
     void spectrogramSmoothnessProfileFlagsGapHeavyWindow();
     void spectrogramSmoothnessProfileTracksAdvanceFallbackSignals();
+    void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
+    void spectrogramStaleTokenChunksAreDropped();
+    void spectrogramGaplessTokenChunksPassFilter();
+    void spectrogramEvictingOldTokenKeepsActiveTokenIteratorValid();
+    void spectrogramFreshWidgetAcceptsDataWithImplicitReset();
+    void spectrogramCenteredModeSeekPreservesRing();
+    void spectrogramCenteredGaplessPreStagedFill();
+    void spectrogramCenteredGaplessFollowsTheClock();
+    void spectrogramCenteredSeekRestartRebuildsEarlierWindow();
+    void spectrogramFullscreenRefillAfterSeekCoversLeftEdge();
+    void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
+    void spectrogramEndSeekReleasesCanvasOnFinalize();
+    void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
+    void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
+    void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
+    void spectrogramCenteredEofDetachmentDisablesSubpixelScrolling();
+    void spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof();
+    void spectrogramStoppedZoomResetRefillsCanvas();
+    void spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail();
+    void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
+    void spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChunk();
+    void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
+    void spectrogramRollingGaplessTrackChangePreservesZoom();
+    void spectrogramCenteredGaplessTrackChangeResetsZoom();
+    void spectrogramRollingResetTrackChangeResetsZoom();
+    void spectrogramTrackChangeMetadataResetClearsOldCenteredFrame();
+    void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
+    void spectrogramFreshInstanceSeekRestartDoesNotResetZoom();
+    void spectrogramTrackChangeCancelsPendingZoomDebounce();
+    void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
+    void spectrogramRenderLoopStopsWhenNotPlaying();
+    void spectrogramFpsOverlayToggleKeepsSceneNode();
+    void spectrogramStillFramesLeaveTextureNodesAlone();
+    void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data();
+    void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel();
+    void spectrogramLateFrameCallbackDrawsAtOnce();
+    void spectrogramMovingViewsRequestEveryFrame();
+    void spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce();
+    void spectrogramIdleViewDrawsOnlyFramesThatDiffer();
+    void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
+    void spectrogramPixelToFrequency();
+    void spectrogramDynamicRangePreservesSilence();
+    void spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans();
+    void spectrogramProjectionWritesPreserveSharedCanvasImages();
+    void spectrogramRebuildBenchmark();
+    void spectrogramOverlayBenchmark();
+    void spectrogramPlaybackBenchmark();
+    void spectrogramSampleRateSyncsFromPrecomputedChunks();
+    void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
+    void spectrogramCrosshairOverlayGeneratesOnHover();
+    void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
+    void spectrogramGridOverlayGeneratesWhenEnabled();
+    void spectrogramOverlayDisabledProducesNullImage();
+    void spectrogramOverlayDirtiedByGeometryChange();
+    void spectrogramOverlayDirtiedByLogScaleChange();
+    void spectrogramOverlayStalenessDetectsBinChange();
+    void spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput();
+    void spectrogramOverlayStalenessDetectsDisplayRangeChange();
+    void spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled();
+    void spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale();
+    void spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode();
+    void spectrogramSignalsWithoutItsStateLocked();
+    void spectrogramClickToSeekMatchesTheHeldView_data();
+    void spectrogramClickToSeekMatchesTheHeldView();
+    void spectrogramCenteredViewMatchesTheDecodersModel();
+    void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
+    void spectrogramLeftClickDoesNotSeek();
+    void spectrogramClickToSeekDisabledInRollingMode();
+    void spectrogramZoomProperty();
+    void spectrogramZoomLimitsWithTrackData();
+    void spectrogramZoomOutBlockedWhenSongFits();
+    void spectrogramEffectiveZoomMatchesBackendHop();
+    void spectrogramAdvanceWorksWhenBackendMatchesZoom();
+    void spectrogramEffectiveZoomDuringTransition();
+    void spectrogramDeferredZoomAppliesOnBackendData();
+    void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
+    void spectrogramResizeShowsTheScaledCanvasUntilItsRasterArrives();
+    void spectrogramRollingResizeKeepsTheHistoryAtTheRightEdge();
+    void spectrogramStaleRasterIsDiscarded();
+    void spectrogramDrawsAtDevicePixels_data();
+    void spectrogramDrawsAtDevicePixels();
+    void spectrogramWideCanvasDrawsEveryTile();
+    void spectrogramClickToSeekMatchesCrosshairAtDevicePixels();
+    void spectrogramOverlaysDrawNoPaneSizedImages();
+    void spectrogramScaleChangeKeepsAnUnalignedCanvasCovering_data();
+    void spectrogramScaleChangeKeepsAnUnalignedCanvasCovering();
+    void spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters_data();
+    void spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters();
+    void spectrogramDevicePixelCanvasAdvancesAsItsRasterization_data();
+    void spectrogramDevicePixelCanvasAdvancesAsItsRasterization();
+    void spectrogramCachedBackwardSeekKeepsTheCanvasOnScreen();
+    void spectrogramCachedForwardSeekRasterizesOffTheRenderSync();
+    void spectrogramResumedForwardSeekRasterizesOffTheRenderSync();
+    void spectrogramPlaybackTravelCountsOnlyContinuousPlayback();
+    void spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data();
+    void spectrogramHighRatePlaybackAdvancesWithoutRebuilds();
+    void spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback();
+    void spectrogramZoomDataKeepsThePreviewUntilItsRasterArrives();
+    void spectrogramColumnsArrivingDuringARasterAreDrawnIn();
+    void spectrogramItemDestroyedDuringRasterIsSafe();
+    void spectrogramDestroyedInItsWindowRunsNoHandlersOfItsOwn();
+    void spectrogramSurfaceCoalescesWidthReports();
+    void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
+    void spectrogramZoomOutProducesDistinctHop();
+    void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
+    void spectrogramMinZoomAdaptsToWidthChange();
+    void spectrogramCenteredModeUsesWindowedCapacity();
+    void spectrogramHighRateRetentionPreservesViewportWithinBudget();
+    void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
+    void spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill();
+    void spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally();
+    void spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom();
+    void spectrogramCenteredLateFillUsesCircularCanvasOffset();
+    void spectrogramPeakHoldRebuildUsesMaxNotNearest();
+    void spectrogramZoomFillClearsWhenDecoderReachesTail();
+    void spectrogramSyntheticClearPreservesCanvasDuringSeek();
+    void spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent();
+    void spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll();
+    void spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData();
+    void spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData();
+    void spectrogramZoomWithinTheBackendToleranceNeedsNoNewData();
+    void spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview();
+    void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
+};
+
+// The waveform, the waveform editor and the level meter.
+class WaveformSmokeTest : public QmlSmokeTest {
+    Q_OBJECT
+
+public:
+    using QmlSmokeTest::QmlSmokeTest;
+
+private slots:
+    void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
+    void waveformSurfaceMuteButtonsFollowTheMutedChannels();
+    void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
     void waveformEditorParsesSignedSampleWindow();
@@ -1256,46 +1326,50 @@ private slots:
     void waveformEditorIdleViewWaitsForThePlayheadsNextPixel();
     void waveformEditorLateFrameCallbackDrawsAtOnce();
     void waveformEditorIdleViewDrawsOnlyFramesThatDiffer();
-    void stoppedTrackSwitchRequiresSpectrogramResetOnResume();
-    void spectrogramStaleTokenChunksAreDropped();
-    void spectrogramGaplessTokenChunksPassFilter();
-    void spectrogramEvictingOldTokenKeepsActiveTokenIteratorValid();
-    void spectrogramFreshWidgetAcceptsDataWithImplicitReset();
-    void spectrogramCenteredModeSeekPreservesRing();
-    void spectrogramCenteredGaplessPreStagedFill();
-    void spectrogramCenteredGaplessFollowsTheClock();
-    void spectrogramCenteredSeekRestartRebuildsEarlierWindow();
-    void spectrogramFullscreenRefillAfterSeekCoversLeftEdge();
-    void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
-    void spectrogramEndSeekReleasesCanvasOnFinalize();
-    void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
-    void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
-    void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
-    void spectrogramCenteredEofDetachmentDisablesSubpixelScrolling();
-    void spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof();
-    void spectrogramStoppedZoomResetRefillsCanvas();
-    void spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail();
-    void spectrogramRingCapacityPersistsAcrossFullscreenShrink();
-    void spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChunk();
-    void spectrogramMaxWidgetWidthSurvivesInstanceReplacement();
-    void spectrogramRollingGaplessTrackChangePreservesZoom();
-    void spectrogramCenteredGaplessTrackChangeResetsZoom();
-    void spectrogramRollingResetTrackChangeResetsZoom();
-    void spectrogramTrackChangeMetadataResetClearsOldCenteredFrame();
-    void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
-    void spectrogramFreshInstanceSeekRestartDoesNotResetZoom();
-    void spectrogramTrackChangeCancelsPendingZoomDebounce();
-    void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
-    void spectrogramRenderLoopStopsWhenNotPlaying();
-    void spectrogramFpsOverlayToggleKeepsSceneNode();
-    void spectrogramStillFramesLeaveTextureNodesAlone();
-    void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data();
-    void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel();
-    void spectrogramLateFrameCallbackDrawsAtOnce();
-    void spectrogramMovingViewsRequestEveryFrame();
-    void spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce();
-    void spectrogramIdleViewDrawsOnlyFramesThatDiffer();
-    void mainWindowStopsPositionFramesWhileHidden();
+    void waveformEditorCachesAtDevicePixels();
+    void waveformEditorScaleChangeRedrawsItsCacheOnce();
+    void waveformItemCachesAtDevicePixels();
+};
+
+// The library tree, the queue and global search.
+class LibraryQueueSmokeTest : public QmlSmokeTest {
+    Q_OBJECT
+
+public:
+    using QmlSmokeTest::QmlSmokeTest;
+
+private slots:
+    void globalSearchKeyboardAndResponsiveResults();
+    void searchResultIconsFollowForeground();
+    void libraryTreeStartsCollapsedByDefault();
+    void libraryTreeRowsCarryTheirCoverStamp();
+    void rootRowsStartExpandedByDefault();
+    void artistExpansionPopulatesInBatches();
+    void lazyArtistRowRequestsBackendExpansion();
+    void libraryTreeSeedsExpandedKeysBeforeFirstFrame();
+    void libraryTreeCollapsesAllExpandedBranches();
+    void artistPrefixSearchUsesModelLookup();
+    void libraryTreeAppliesALargeUpdateWithoutAReset();
+    void libraryTreeMovesRowsWithoutAReset();
+    void libraryTreeFollowsRootChanges();
+    void libraryControllerExtendsSelectionWithShiftArrows();
+    void libraryControllerRestoresExpandedSelectionAndViewport();
+    void libraryControllerUsesDelegateCoordinatesForViewportAnchor();
+    void libraryControllerForwardsShowTrackRequest();
+    void libraryControllerCentersBridgeRevealAfterExpansion();
+    void shiftSelectingTenThousandLibraryRowsStaysFast();
+    void librarySelectionFollowsItsRowsThroughTreeUpdates();
+    void playingALibrarySelectionSendsOneBatch();
+    void revealKeyExpandsADeepKeyInOneCall();
+    void revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers();
+    void queueMovesAndDropsActOnEveryHighlightedRow();
+    void queueSelectionFollowsRowRangeMoves();
+    void emptyLibraryAndFileMenuAddALibraryFolder();
+    void draggingAHighlightedQueueRowMovesEveryHighlightedRow();
+    void queueDropsFollowTheRowsAfterRowsAboveAreRemoved();
+    void aRevealDuringTheSavedViewRestoreKeepsSavingTheView();
+    void escapeCancelsAQueueRowDrag();
+    void aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore();
     void trackIdentityChangedSignalTriggersQmlHandler();
     void queueAutoCenterIsDeferredOffHandlerStack();
     void queueRemovalSendsOneBatch();
@@ -1304,121 +1378,135 @@ private slots:
     void queueContainIndexSkipsScrollWhenVisible();
     void queueContainIndexScrollsUpWhenAboveViewport();
     void queueContainIndexClampsAtListEnd();
-    void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
-    void spectrogramPixelToFrequency();
-    void spectrogramDynamicRangePreservesSilence();
-    void spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans();
-    void spectrogramProjectionWritesPreserveSharedCanvasImages();
-    void spectrogramRebuildBenchmark();
-    void spectrogramOverlayBenchmark();
-    void spectrogramPlaybackBenchmark();
-    void spectrogramSampleRateSyncsFromPrecomputedChunks();
-    void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
-    void spectrogramCrosshairOverlayGeneratesOnHover();
-    void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
-    void spectrogramGridOverlayGeneratesWhenEnabled();
-    void spectrogramOverlayDisabledProducesNullImage();
-    void spectrogramOverlayDirtiedByGeometryChange();
-    void spectrogramOverlayDirtiedByLogScaleChange();
-    void spectrogramOverlayStalenessDetectsBinChange();
-    void spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput();
-    void spectrogramOverlayStalenessDetectsDisplayRangeChange();
-    void spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled();
-    void spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale();
-    void spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode();
-    void spectrogramSignalsWithoutItsStateLocked();
-    void spectrogramClickToSeekMatchesTheHeldView_data();
-    void spectrogramClickToSeekMatchesTheHeldView();
-    void spectrogramCenteredViewMatchesTheDecodersModel();
-    void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
-    void spectrogramLeftClickDoesNotSeek();
-    void spectrogramClickToSeekDisabledInRollingMode();
-    void spectrogramZoomProperty();
-    void spectrogramZoomLimitsWithTrackData();
-    void spectrogramZoomOutBlockedWhenSongFits();
-    void spectrogramEffectiveZoomMatchesBackendHop();
-    void spectrogramAdvanceWorksWhenBackendMatchesZoom();
-    void spectrogramEffectiveZoomDuringTransition();
-    void spectrogramDeferredZoomAppliesOnBackendData();
-    void spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack();
-    void spectrogramResizeShowsTheScaledCanvasUntilItsRasterArrives();
-    void spectrogramRollingResizeKeepsTheHistoryAtTheRightEdge();
-    void spectrogramStaleRasterIsDiscarded();
-    void spectrogramDrawsAtDevicePixels_data();
-    void spectrogramDrawsAtDevicePixels();
-    void spectrogramWideCanvasDrawsEveryTile();
-    void spectrogramClickToSeekMatchesCrosshairAtDevicePixels();
-    void spectrogramOverlaysDrawNoPaneSizedImages();
-    void spectrogramScaleChangeKeepsAnUnalignedCanvasCovering_data();
-    void spectrogramScaleChangeKeepsAnUnalignedCanvasCovering();
-    void spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters_data();
-    void spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters();
-    void spectrogramDevicePixelCanvasAdvancesAsItsRasterization_data();
-    void spectrogramDevicePixelCanvasAdvancesAsItsRasterization();
-    void waveformEditorCachesAtDevicePixels();
-    void waveformEditorScaleChangeRedrawsItsCacheOnce();
-    void waveformItemCachesAtDevicePixels();
-    void spectrogramCachedBackwardSeekKeepsTheCanvasOnScreen();
-    void spectrogramCachedForwardSeekRasterizesOffTheRenderSync();
-    void spectrogramResumedForwardSeekRasterizesOffTheRenderSync();
-    void spectrogramPlaybackTravelCountsOnlyContinuousPlayback();
-    void spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data();
-    void spectrogramHighRatePlaybackAdvancesWithoutRebuilds();
-    void spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback();
-    void spectrogramZoomDataKeepsThePreviewUntilItsRasterArrives();
-    void spectrogramColumnsArrivingDuringARasterAreDrawnIn();
-    void spectrogramItemDestroyedDuringRasterIsSafe();
-    void spectrogramDestroyedInItsWindowRunsNoHandlersOfItsOwn();
-    void spectrogramSurfaceCoalescesWidthReports();
-    void spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights();
-    void spectrogramZoomOutProducesDistinctHop();
-    void spectrogramCenteredZoomOutDropsOlderSameTrackGeneration();
-    void spectrogramMinZoomAdaptsToWidthChange();
-    void spectrogramCenteredModeUsesWindowedCapacity();
-    void spectrogramHighRateRetentionPreservesViewportWithinBudget();
-    void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
-    void spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill();
-    void spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally();
-    void spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom();
-    void spectrogramCenteredLateFillUsesCircularCanvasOffset();
-    void spectrogramPeakHoldRebuildUsesMaxNotNearest();
-    void spectrogramZoomFillClearsWhenDecoderReachesTail();
-    void spectrogramSyntheticClearPreservesCanvasDuringSeek();
-    void spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent();
     void wheelScrollsListsByTheWheelDelta();
     void queueKeysReachBothEndsAndOpenTheContextMenu();
     void deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus();
     void queueRemovalOffersAnUndoThatSelectsTheRestoredRows();
     void removingALibraryRootAsksFirstAndNamesIt();
-    void replacingAlbumArtAsksFirstWhenTheTrackHasArt();
-    void renameFilesShowsTheNewNamesAndCancelRenamesNothing();
-    void renameRenamesThePreviewedFilesAfterTheSelectionChanged();
-    void clearingDiagnosticsAsksFirst();
-    void albumArtZoomFollowsTheWheelDelta();
-    void spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll();
-    void spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData();
-    void spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData();
-    void spaceTogglesPlaybackWhenTheLibraryHasFocus();
     void libraryKeysReachBothEndsAndOpenTheContextMenu();
+};
+
+// Playback controls, keyboard and wheel input, and fullscreen viewers.
+class TransportInputSmokeTest : public QmlSmokeTest {
+    Q_OBJECT
+
+public:
+    using QmlSmokeTest::QmlSmokeTest;
+
+private slots:
+    void fullscreenVisualizationInhibitsDisplaySleepOnlyWhileActive();
+    void playbackControllerReadsTheBridgeClock();
+    void mainWindowStopsPositionFramesWhileHidden();
+    void albumArtZoomFollowsTheWheelDelta();
+    void spaceTogglesPlaybackWhenTheLibraryHasFocus();
     void spaceTypesIntoTextFields();
     void playbackShortcutsWorkInTheViewers();
     void viewerShortcutsOpenAndCloseTheViewers();
     void visualizationModeSwitchTakesKeyboardFocus();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
-    void spectrogramZoomWithinTheBackendToleranceNeedsNoNewData();
-    void spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview();
-    void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
+};
 
-private:
-    QString m_userDirectoriesParent;
-    // The current test's own user directories; see init().
-    std::optional<TestUserDirectories> m_userDirectories;
+// The main window, its layout, and what survives a restart.
+class WindowSmokeTest : public QmlSmokeTest {
+    Q_OBJECT
+
+public:
+    using QmlSmokeTest::QmlSmokeTest;
+
+private slots:
+    void loadsMainQmlWithFallbackBridge();
+    void loadsExtractedQmlSlicesWithFallbackProps();
+    void mainWindowContentStartsBelowMenuBar();
+    void draggedSplitSizesSurviveAWindowResize();
+    void theSmallestWindowFitsALaptopScreenAndShowsEveryControl();
+    void windowLayoutSurvivesARestart();
+    void aWindowSavedOffTheScreensOpensOnOne();
+    void queueColumnWidthsSurviveARestart();
+    void theWindowOpensWithoutASavedLayoutThatDoesNotCome();
+    void quittingWhileMinimizedKeepsTheWindowMaximized();
+    void drawsOffscreenUnlessAPlatformIsChosen();
+    void drawingWritesNoShaderCache();
+};
+
+// Preferences, diagnostics and album art.
+class PreferencesSmokeTest : public QmlSmokeTest {
+    Q_OBJECT
+
+public:
+    using QmlSmokeTest::QmlSmokeTest;
+
+private slots:
+    void albumArtTileKeepsHeightInsideColumnLayout();
+    void libraryPreferencesToggleWatchingAndShowUnwatchedRoots();
+    void albumArtViewerInfoUsesImageProviderLocalPath();
+    void diagnosticsLogUsesLowercaseAppDir();
+    void replacingAlbumArtAsksFirstWhenTheTrackHasArt();
+    void clearingDiagnosticsAsksFirst();
+};
+
+// Error reporting, and saving before quitting.
+class ErrorsSmokeTest : public QmlSmokeTest {
+    Q_OBJECT
+
+public:
+    using QmlSmokeTest::QmlSmokeTest;
+
+private slots:
+    void consecutiveErrorsAreBothVisible();
+    void repeatedErrorsAreCounted();
+    void errorHistoryKeepsTheLatestErrors();
+    void aLongErrorIsShownWhole();
+    void aLongMultiLineErrorKeepsTheControlsInTheWindow();
+    void escapeClosesFullscreenViewersWhileTheirErrorHasFocus();
+    void fullscreenErrorTextScrollsWithTheKeyboard();
+    void quitTimeErrorClosesAFullscreenViewerFirst();
+    void displaySleepFailureShowsInTheFullscreenViewer();
+    void stoppedBackendShowsMessageAndDisablesControls();
+    void quitActionClosesTheWindowThroughItsCloseHandler();
+    void failedSaveBeforeQuitShowsTheErrorAndRetrySaves();
+    void quitAnywayClosesAfterAFailedSave();
+    void saveAnsweredAfterItsTimeoutStillClosesTheWindow();
+    void answerToAnEarlierSaveAttemptDoesNotSettleARetry();
+    void escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLate();
+    void mprisQuitSavesBeforeClosingTheWindow();
+    void failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow();
+};
+
+// The tag editor, renaming, and quitting with tag edits.
+class TagEditorSmokeTest : public QmlSmokeTest {
+    Q_OBJECT
+
+public:
+    using QmlSmokeTest::QmlSmokeTest;
+
+private slots:
+    void tagEditorOpensALargeSelectionWithoutBuildingEveryRow();
+    void tagEditorCancelAsksBeforeDroppingEdits();
+    void closingTheTagEditorKeepsTheFieldBeingTyped();
+    void tagEditorStaysOpenWhileSavingAndShowsTheResult();
+    void closingTheWindowWithTagEditsAsksAndCancelKeepsThem();
+    void closingTheWindowWithTagEditsCanDiscardThem();
+    void closingTheWindowWithTagEditsCanSaveThemFirst();
+    void tagSaveFailureWhileQuittingKeepsTheWindowOpen();
+    void closingTheWindowWhileTagsSaveWaitsForTheSave();
+    void mprisQuitWithTagEditsAsksFirst();
+    void quittingDuringAStalledTagSaveOffersToQuitAnyway();
+    void savingTagEditsChosenWhenQuittingWaitsWithinTheBound();
+    void keepWaitingForAStalledTagSaveQuitsWhenItFinishes();
+    void repeatedQuitsDuringATagSaveShowOneWait();
+    void tagEditorReloadAsksBeforeDroppingEdits();
+    void autoNumberRejectsStartsThatAreNotNumbers();
+    void tagEditorRowsFollowTheKeyboard();
+    void tagEditorShowsEveryValueOfMultiValueFields();
+    void tagEditorLibrarySupportGateMatchesSupportedRows();
+    void renameFilesShowsTheNewNamesAndCancelRenamesNothing();
+    void renameRenamesThePreviewedFilesAfterTheSelectionChanged();
 };
 
 void QmlSmokeTest::initTestCase() {
     previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
-    qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
-    qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
+    // Every area runs alone, so none may rely on another's registrations.
+    registerFerrousQmlTypes();
 }
 
 void QmlSmokeTest::init() {
@@ -1441,7 +1529,7 @@ void QmlSmokeTest::cleanupTestCase() {
     previousMessageHandler() = nullptr;
 }
 
-void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
+void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
 
@@ -1509,7 +1597,7 @@ void QmlSmokeTest::loadsMainQmlWithFallbackBridge() {
     QTRY_VERIFY(itunesDialog->property("visible").toBool());
 }
 
-void QmlSmokeTest::loadsExtractedQmlSlicesWithFallbackProps() {
+void WindowSmokeTest::loadsExtractedQmlSlicesWithFallbackProps() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
 
@@ -1956,7 +2044,7 @@ Item {
     QVERIFY2(root != nullptr, qPrintable(errorText));
 }
 
-void QmlSmokeTest::spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints() {
+void SpectrogramSmokeTest::spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -2027,7 +2115,7 @@ ApplicationWindow {
     QVERIFY(autoHide->property("controlsVisible").toBool());
 }
 
-void QmlSmokeTest::fullscreenVisualizationInhibitsDisplaySleepOnlyWhileActive() {
+void TransportInputSmokeTest::fullscreenVisualizationInhibitsDisplaySleepOnlyWhileActive() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -2124,7 +2212,7 @@ ApplicationWindow {
     QCOMPARE(sleepInhibitor->property("updateCount").toInt(), 8);
 }
 
-void QmlSmokeTest::spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers() {
+void SpectrogramSmokeTest::spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
 
     QQmlApplicationEngine engine;
@@ -2242,7 +2330,7 @@ Item {
     QCOMPARE(pointerArea->property("cursorShape").toInt(), static_cast<int>(Qt::ArrowCursor));
 }
 
-void QmlSmokeTest::spectrogramHoverChannelButtonsRemainClickable() {
+void SpectrogramSmokeTest::spectrogramHoverChannelButtonsRemainClickable() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
 
     QQmlApplicationEngine engine;
@@ -2354,7 +2442,7 @@ Window {
     QTRY_COMPARE(bridge->property("soloCalls").toInt(), 1);
 }
 
-void QmlSmokeTest::waveformSurfaceFollowsSharedChannelAndOverlaySettings() {
+void WaveformSmokeTest::waveformSurfaceFollowsSharedChannelAndOverlaySettings() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -2485,7 +2573,7 @@ Item {
     QTRY_VERIFY(!waveform->crosshairEnabled());
 }
 
-void QmlSmokeTest::waveformSurfaceMuteButtonsFollowTheMutedChannels() {
+void WaveformSmokeTest::waveformSurfaceMuteButtonsFollowTheMutedChannels() {
     QQmlApplicationEngine engine;
     WaveformSurfaceTestBridge bridge;
     engine.rootContext()->setContextProperty(QStringLiteral("testBridge"), &bridge);
@@ -2550,7 +2638,7 @@ Item {
     }
 }
 
-void QmlSmokeTest::mainWindowContentStartsBelowMenuBar() {
+void WindowSmokeTest::mainWindowContentStartsBelowMenuBar() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
 
@@ -2691,7 +2779,7 @@ bool onlyErrorReports(const QString &log) {
 
 } // namespace
 
-void QmlSmokeTest::consecutiveErrorsAreBothVisible() {
+void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
@@ -2758,7 +2846,7 @@ void QmlSmokeTest::consecutiveErrorsAreBothVisible() {
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
-void QmlSmokeTest::repeatedErrorsAreCounted() {
+void ErrorsSmokeTest::repeatedErrorsAreCounted() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
@@ -2794,7 +2882,7 @@ void QmlSmokeTest::repeatedErrorsAreCounted() {
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
-void QmlSmokeTest::errorHistoryKeepsTheLatestErrors() {
+void ErrorsSmokeTest::errorHistoryKeepsTheLatestErrors() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
@@ -2819,7 +2907,7 @@ void QmlSmokeTest::errorHistoryKeepsTheLatestErrors() {
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
-void QmlSmokeTest::aLongErrorIsShownWhole() {
+void ErrorsSmokeTest::aLongErrorIsShownWhole() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
@@ -2860,7 +2948,7 @@ void QmlSmokeTest::aLongErrorIsShownWhole() {
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
-void QmlSmokeTest::draggedSplitSizesSurviveAWindowResize() {
+void WindowSmokeTest::draggedSplitSizesSurviveAWindowResize() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
@@ -2916,7 +3004,7 @@ void QmlSmokeTest::draggedSplitSizesSurviveAWindowResize() {
     QVERIFY(finishIncubation(engine));
 }
 
-void QmlSmokeTest::aLongMultiLineErrorKeepsTheControlsInTheWindow() {
+void ErrorsSmokeTest::aLongMultiLineErrorKeepsTheControlsInTheWindow() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
@@ -2968,7 +3056,7 @@ void QmlSmokeTest::aLongMultiLineErrorKeepsTheControlsInTheWindow() {
     QCOMPARE(takeCapturedMessagesText().count(QStringLiteral("error [Tags]:")), 1);
 }
 
-void QmlSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
+void ErrorsSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     // Stands in for a desktop without org.freedesktop.ScreenSaver.
     class FailingBackend final : public DisplaySleepInhibitorBackend {
     public:
@@ -3025,7 +3113,7 @@ void QmlSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
-void QmlSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
+void ErrorsSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
 
@@ -3189,7 +3277,7 @@ QString savedSettingsPath() {
 
 } // namespace
 
-void QmlSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
+void WindowSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
@@ -3264,7 +3352,7 @@ void QmlSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
     QVERIFY(finishIncubation(engine));
 }
 
-void QmlSmokeTest::windowLayoutSurvivesARestart() {
+void WindowSmokeTest::windowLayoutSurvivesARestart() {
     // The bridge runs with the test's own config directory; see main().
     QFile::remove(savedSettingsPath());
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -3389,7 +3477,7 @@ void QmlSmokeTest::windowLayoutSurvivesARestart() {
     QFile::remove(savedSettingsPath());
 }
 
-void QmlSmokeTest::aWindowSavedOffTheScreensOpensOnOne() {
+void WindowSmokeTest::aWindowSavedOffTheScreensOpensOnOne() {
     // As if it was saved on a monitor that has been disconnected since.
     QFile::remove(savedSettingsPath());
     QVERIFY(QDir().mkpath(QFileInfo(savedSettingsPath()).path()));
@@ -3418,7 +3506,7 @@ void QmlSmokeTest::aWindowSavedOffTheScreensOpensOnOne() {
     QFile::remove(savedSettingsPath());
 }
 
-void QmlSmokeTest::queueColumnWidthsSurviveARestart() {
+void WindowSmokeTest::queueColumnWidthsSurviveARestart() {
     // Saved by a build that also had a Genre column, which this one keeps,
     // on one of the large test screens, which has room for the columns.
     QFile::remove(savedSettingsPath());
@@ -3572,7 +3660,7 @@ QQuickWindow *createWindowLayoutHarness(QQmlEngine &engine, QString *errorText) 
 
 } // namespace
 
-void QmlSmokeTest::theWindowOpensWithoutASavedLayoutThatDoesNotCome() {
+void WindowSmokeTest::theWindowOpensWithoutASavedLayoutThatDoesNotCome() {
     QQmlEngine engine;
     QString errorText;
     QScopedPointer<QQuickWindow> window(createWindowLayoutHarness(engine, &errorText));
@@ -3605,7 +3693,7 @@ void QmlSmokeTest::theWindowOpensWithoutASavedLayoutThatDoesNotCome() {
     QCOMPARE(second->size(), QSize(900, 600));
 }
 
-void QmlSmokeTest::quittingWhileMinimizedKeepsTheWindowMaximized() {
+void WindowSmokeTest::quittingWhileMinimizedKeepsTheWindowMaximized() {
     QQmlEngine engine;
     QString errorText;
     QScopedPointer<QQuickWindow> window(createWindowLayoutHarness(engine, &errorText));
@@ -3645,7 +3733,7 @@ void QmlSmokeTest::quittingWhileMinimizedKeepsTheWindowMaximized() {
     QCOMPARE(savedLayout().value(QStringLiteral("maximized")).toBool(), false);
 }
 
-void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
+void ErrorsSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -3672,7 +3760,7 @@ void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
     QCOMPARE(quit.count(), 0);
 }
 
-void QmlSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
+void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -3703,7 +3791,7 @@ void QmlSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     QVERIFY(!dialog->property("visible").toBool());
 }
 
-void QmlSmokeTest::quitAnywayClosesAfterAFailedSave() {
+void ErrorsSmokeTest::quitAnywayClosesAfterAFailedSave() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -3722,7 +3810,7 @@ void QmlSmokeTest::quitAnywayClosesAfterAFailedSave() {
     QTRY_VERIFY(!window->isVisible());
 }
 
-void QmlSmokeTest::saveAnsweredAfterItsTimeoutStillClosesTheWindow() {
+void ErrorsSmokeTest::saveAnsweredAfterItsTimeoutStillClosesTheWindow() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -3751,7 +3839,7 @@ void QmlSmokeTest::saveAnsweredAfterItsTimeoutStillClosesTheWindow() {
     QTRY_VERIFY(!dialog->property("visible").toBool());
 }
 
-void QmlSmokeTest::answerToAnEarlierSaveAttemptDoesNotSettleARetry() {
+void ErrorsSmokeTest::answerToAnEarlierSaveAttemptDoesNotSettleARetry() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -3795,7 +3883,7 @@ void QmlSmokeTest::answerToAnEarlierSaveAttemptDoesNotSettleARetry() {
     QTRY_VERIFY(!window->isVisible());
 }
 
-void QmlSmokeTest::escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLate() {
+void ErrorsSmokeTest::escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLate() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -3825,7 +3913,7 @@ void QmlSmokeTest::escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLa
     QTRY_VERIFY(!window->isVisible());
 }
 
-void QmlSmokeTest::mprisQuitSavesBeforeClosingTheWindow() {
+void ErrorsSmokeTest::mprisQuitSavesBeforeClosingTheWindow() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -3848,7 +3936,7 @@ void QmlSmokeTest::mprisQuitSavesBeforeClosingTheWindow() {
     QCOMPARE(quit.count(), 0);
 }
 
-void QmlSmokeTest::failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow() {
+void ErrorsSmokeTest::failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -4101,7 +4189,7 @@ struct TagEditorWindow {
 
 } // namespace
 
-void QmlSmokeTest::quitTimeErrorClosesAFullscreenViewerFirst() {
+void ErrorsSmokeTest::quitTimeErrorClosesAFullscreenViewerFirst() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -4134,7 +4222,7 @@ void QmlSmokeTest::quitTimeErrorClosesAFullscreenViewerFirst() {
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
-void QmlSmokeTest::tagEditorOpensALargeSelectionWithoutBuildingEveryRow() {
+void TagEditorSmokeTest::tagEditorOpensALargeSelectionWithoutBuildingEveryRow() {
     constexpr int kRows = 2000;
     TagEditorWindow fixture;
     useTagBackend(fixture.editor, tagEditorLoadResponse(kRows), fixture.saves);
@@ -4174,7 +4262,7 @@ void QmlSmokeTest::tagEditorOpensALargeSelectionWithoutBuildingEveryRow() {
     QVERIFY(tagEditorRowItemCount(window) < 100);
 }
 
-void QmlSmokeTest::tagEditorCancelAsksBeforeDroppingEdits() {
+void TagEditorSmokeTest::tagEditorCancelAsksBeforeDroppingEdits() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
 
@@ -4206,7 +4294,7 @@ void QmlSmokeTest::tagEditorCancelAsksBeforeDroppingEdits() {
     QVERIFY(!fixture.confirmShown());
 }
 
-void QmlSmokeTest::closingTheTagEditorKeepsTheFieldBeingTyped() {
+void TagEditorSmokeTest::closingTheTagEditorKeepsTheFieldBeingTyped() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, false));
     auto *title = qobject_cast<QQuickItem *>(findQuickItemByObjectName(
@@ -4224,7 +4312,7 @@ void QmlSmokeTest::closingTheTagEditorKeepsTheFieldBeingTyped() {
     QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Song 0x"));
 }
 
-void QmlSmokeTest::tagEditorStaysOpenWhileSavingAndShowsTheResult() {
+void TagEditorSmokeTest::tagEditorStaysOpenWhileSavingAndShowsTheResult() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     fixture.saves->setHold(true);
@@ -4270,7 +4358,7 @@ void QmlSmokeTest::tagEditorStaysOpenWhileSavingAndShowsTheResult() {
              QStringLiteral("error [Tags]: Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied"));
 }
 
-void QmlSmokeTest::closingTheWindowWithTagEditsAsksAndCancelKeepsThem() {
+void TagEditorSmokeTest::closingTheWindowWithTagEditsAsksAndCancelKeepsThem() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4303,7 +4391,7 @@ void QmlSmokeTest::closingTheWindowWithTagEditsAsksAndCancelKeepsThem() {
     QCOMPARE(fixture.stateSaves(), 0);
 }
 
-void QmlSmokeTest::closingTheWindowWithTagEditsCanDiscardThem() {
+void TagEditorSmokeTest::closingTheWindowWithTagEditsCanDiscardThem() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4318,7 +4406,7 @@ void QmlSmokeTest::closingTheWindowWithTagEditsCanDiscardThem() {
     QVERIFY(!fixture.editor.isOpen());
 }
 
-void QmlSmokeTest::closingTheWindowWithTagEditsCanSaveThemFirst() {
+void TagEditorSmokeTest::closingTheWindowWithTagEditsCanSaveThemFirst() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4343,7 +4431,7 @@ void QmlSmokeTest::closingTheWindowWithTagEditsCanSaveThemFirst() {
     QCOMPARE(rows.first().toObject().value(QStringLiteral("title")).toString(), QStringLiteral("Edited"));
 }
 
-void QmlSmokeTest::tagSaveFailureWhileQuittingKeepsTheWindowOpen() {
+void TagEditorSmokeTest::tagSaveFailureWhileQuittingKeepsTheWindowOpen() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4374,7 +4462,7 @@ void QmlSmokeTest::tagSaveFailureWhileQuittingKeepsTheWindowOpen() {
     QTRY_VERIFY(!fixture.window->isVisible());
 }
 
-void QmlSmokeTest::closingTheWindowWhileTagsSaveWaitsForTheSave() {
+void TagEditorSmokeTest::closingTheWindowWhileTagsSaveWaitsForTheSave() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4395,7 +4483,7 @@ void QmlSmokeTest::closingTheWindowWhileTagsSaveWaitsForTheSave() {
     QVERIFY(!fixture.editor.dirty());
 }
 
-void QmlSmokeTest::mprisQuitWithTagEditsAsksFirst() {
+void TagEditorSmokeTest::mprisQuitWithTagEditsAsksFirst() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4416,7 +4504,7 @@ void QmlSmokeTest::mprisQuitWithTagEditsAsksFirst() {
     QCOMPARE(fixture.stateSaves(), 1);
 }
 
-void QmlSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
+void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4449,7 +4537,7 @@ void QmlSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     fixture.saves->release.release();
 }
 
-void QmlSmokeTest::savingTagEditsChosenWhenQuittingWaitsWithinTheBound() {
+void TagEditorSmokeTest::savingTagEditsChosenWhenQuittingWaitsWithinTheBound() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4479,7 +4567,7 @@ void QmlSmokeTest::savingTagEditsChosenWhenQuittingWaitsWithinTheBound() {
     fixture.saves->release.release();
 }
 
-void QmlSmokeTest::keepWaitingForAStalledTagSaveQuitsWhenItFinishes() {
+void TagEditorSmokeTest::keepWaitingForAStalledTagSaveQuitsWhenItFinishes() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4509,7 +4597,7 @@ void QmlSmokeTest::keepWaitingForAStalledTagSaveQuitsWhenItFinishes() {
     QVERIFY(!fixture.editor.dirty());
 }
 
-void QmlSmokeTest::repeatedQuitsDuringATagSaveShowOneWait() {
+void TagEditorSmokeTest::repeatedQuitsDuringATagSaveShowOneWait() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -4542,7 +4630,7 @@ void QmlSmokeTest::repeatedQuitsDuringATagSaveShowOneWait() {
     fixture.saves->release.release();
 }
 
-void QmlSmokeTest::tagEditorReloadAsksBeforeDroppingEdits() {
+void TagEditorSmokeTest::tagEditorReloadAsksBeforeDroppingEdits() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, true));
     QObject *save = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorCloseConfirmSaveButton"));
@@ -4578,7 +4666,7 @@ void QmlSmokeTest::tagEditorReloadAsksBeforeDroppingEdits() {
     QTRY_VERIFY(!fixture.editor.loading());
 }
 
-void QmlSmokeTest::autoNumberRejectsStartsThatAreNotNumbers() {
+void TagEditorSmokeTest::autoNumberRejectsStartsThatAreNotNumbers() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(3, false));
     fixture.editor.selectAllRows();
@@ -4620,7 +4708,7 @@ void QmlSmokeTest::autoNumberRejectsStartsThatAreNotNumbers() {
     QCOMPARE(fixture.editor.m_tableModel.fieldValue(2, QStringLiteral("trackNo")), QStringLiteral("5"));
 }
 
-void QmlSmokeTest::tagEditorRowsFollowTheKeyboard() {
+void TagEditorSmokeTest::tagEditorRowsFollowTheKeyboard() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(5, false));
     QObject *table = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorTable"));
@@ -4650,7 +4738,7 @@ void QmlSmokeTest::tagEditorRowsFollowTheKeyboard() {
     QVERIFY(second->property("selected").toBool());
 }
 
-void QmlSmokeTest::tagEditorShowsEveryValueOfMultiValueFields() {
+void TagEditorSmokeTest::tagEditorShowsEveryValueOfMultiValueFields() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, false, {QStringLiteral("B"), QStringLiteral("C")}));
     // The field editors are delegates, which only the item tree holds.
@@ -4671,7 +4759,7 @@ void QmlSmokeTest::tagEditorShowsEveryValueOfMultiValueFields() {
     QVERIFY(tagEditorCellTexts(first).contains(QStringLiteral("D")));
 }
 
-void QmlSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
+void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
@@ -4806,7 +4894,7 @@ void QmlSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     }
 }
 
-void QmlSmokeTest::libraryPreferencesToggleWatchingAndShowUnwatchedRoots() {
+void PreferencesSmokeTest::libraryPreferencesToggleWatchingAndShowUnwatchedRoots() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -4901,7 +4989,7 @@ ApplicationWindow {
     QCOMPARE(shown, QStringList{QStringLiteral("Not watched for changes: it is on nfs4")});
 }
 
-void QmlSmokeTest::albumArtTileKeepsHeightInsideColumnLayout() {
+void PreferencesSmokeTest::albumArtTileKeepsHeightInsideColumnLayout() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -4951,7 +5039,7 @@ Item {
     QVERIFY2(tile->property("height").toReal() > 0.0, "AlbumArtTile collapsed to zero height");
 }
 
-void QmlSmokeTest::albumArtViewerInfoUsesImageProviderLocalPath() {
+void PreferencesSmokeTest::albumArtViewerInfoUsesImageProviderLocalPath() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -5030,7 +5118,7 @@ Item {
         qPrintable(overlayText.toString()));
 }
 
-void QmlSmokeTest::tagEditorLibrarySupportGateMatchesSupportedRows() {
+void TagEditorSmokeTest::tagEditorLibrarySupportGateMatchesSupportedRows() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
 
@@ -5073,7 +5161,7 @@ void QmlSmokeTest::tagEditorLibrarySupportGateMatchesSupportedRows() {
     QCOMPARE(unsupported.toBool(), false);
 }
 
-void QmlSmokeTest::libraryTreeRowsCarryTheirCoverStamp() {
+void LibraryQueueSmokeTest::libraryTreeRowsCarryTheirCoverStamp() {
     LibraryTreeModel model;
     model.setExpandedKeys(QStringList{QStringLiteral("artist|Artist A")});
     // Above 2^53, which a QML number could not hold exactly.
@@ -5101,7 +5189,7 @@ void QmlSmokeTest::libraryTreeRowsCarryTheirCoverStamp() {
              QStringLiteral("/music/Artist A/Album A/cover.jpg"));
 }
 
-void QmlSmokeTest::libraryTreeStartsCollapsedByDefault() {
+void LibraryQueueSmokeTest::libraryTreeStartsCollapsedByDefault() {
     LibraryTreeModel model;
     model.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary());
 
@@ -5109,7 +5197,7 @@ void QmlSmokeTest::libraryTreeStartsCollapsedByDefault() {
     QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("artist"));
 }
 
-void QmlSmokeTest::rootRowsStartExpandedByDefault() {
+void LibraryQueueSmokeTest::rootRowsStartExpandedByDefault() {
     LibraryTreeModel model;
     model.setLibraryTreeFromBinary(multiRootBinary());
 
@@ -5120,7 +5208,7 @@ void QmlSmokeTest::rootRowsStartExpandedByDefault() {
     QCOMPARE(model.data(model.index(3, 0), LibraryTreeModel::RowTypeRole).toString(), QStringLiteral("artist"));
 }
 
-void QmlSmokeTest::artistExpansionPopulatesInBatches() {
+void LibraryQueueSmokeTest::artistExpansionPopulatesInBatches() {
     LibraryTreeModel model;
 
     model.setLibraryTreeFromBinary(artistWithManyAlbumsBinary(80));
@@ -5131,7 +5219,7 @@ void QmlSmokeTest::artistExpansionPopulatesInBatches() {
     QTRY_COMPARE(model.rowCount(), 81);
 }
 
-void QmlSmokeTest::lazyArtistRowRequestsBackendExpansion() {
+void LibraryQueueSmokeTest::lazyArtistRowRequestsBackendExpansion() {
     LibraryTreeModel model;
     QSignalSpy spy(&model, SIGNAL(nodeExpansionRequested(QString,bool)));
 
@@ -5147,7 +5235,7 @@ void QmlSmokeTest::lazyArtistRowRequestsBackendExpansion() {
     QCOMPARE(model.data(model.index(0, 0), LibraryTreeModel::ExpandedRole).toBool(), true);
 }
 
-void QmlSmokeTest::libraryTreeSeedsExpandedKeysBeforeFirstFrame() {
+void LibraryQueueSmokeTest::libraryTreeSeedsExpandedKeysBeforeFirstFrame() {
     LibraryTreeModel model;
     QSignalSpy expansionSpy(&model, SIGNAL(nodeExpansionRequested(QString,bool)));
 
@@ -5163,7 +5251,7 @@ void QmlSmokeTest::libraryTreeSeedsExpandedKeysBeforeFirstFrame() {
     QCOMPARE(expansionSpy.count(), 0);
 }
 
-void QmlSmokeTest::libraryTreeCollapsesAllExpandedBranches() {
+void LibraryQueueSmokeTest::libraryTreeCollapsesAllExpandedBranches() {
     LibraryTreeModel model;
     model.setExpandedKeys(QStringList{
         QStringLiteral("artist|Artist A"),
@@ -5188,7 +5276,7 @@ void QmlSmokeTest::libraryTreeCollapsesAllExpandedBranches() {
     QCOMPARE(rootedModel.rowCount(), 2);
 }
 
-void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
+void LibraryQueueSmokeTest::artistPrefixSearchUsesModelLookup() {
     LibraryTreeModel model;
     model.setLibraryTreeFromBinary(multiRootBinary());
 
@@ -5198,7 +5286,7 @@ void QmlSmokeTest::artistPrefixSearchUsesModelLookup() {
     QCOMPARE(model.findArtistRowByPrefix(QStringLiteral("missing"), 0), -1);
 }
 
-void QmlSmokeTest::libraryTreeAppliesALargeUpdateWithoutAReset() {
+void LibraryQueueSmokeTest::libraryTreeAppliesALargeUpdateWithoutAReset() {
     const QString root = QStringLiteral("/music");
     // 500 expanded artists of 38 tracks: 20,000 rows.
     const QVector<int> before = artistRange(200, 699);
@@ -5299,7 +5387,7 @@ Window {
     QVERIFY(modelRows(model) == modelRows(fresh));
 }
 
-void QmlSmokeTest::libraryTreeMovesRowsWithoutAReset() {
+void LibraryQueueSmokeTest::libraryTreeMovesRowsWithoutAReset() {
     const QString root = QStringLiteral("/music");
     const QVector<int> artists = artistRange(0, 199);
     LibraryTreeModel model;
@@ -5331,7 +5419,7 @@ void QmlSmokeTest::libraryTreeMovesRowsWithoutAReset() {
     QVERIFY(modelRows(model) == modelRows(fresh));
 }
 
-void QmlSmokeTest::libraryTreeFollowsRootChanges() {
+void LibraryQueueSmokeTest::libraryTreeFollowsRootChanges() {
     const QVector<int> artists = artistRange(0, 9);
     QStringList expanded = expandedArtistAlbumKeys(QStringLiteral("/music"), artists);
     expanded += expandedArtistAlbumKeys(QStringLiteral("/more"), artists);
@@ -5361,7 +5449,7 @@ void QmlSmokeTest::libraryTreeFollowsRootChanges() {
     QCOMPARE(artist.data(LibraryTreeModel::DepthRole).toInt(), 1);
 }
 
-void QmlSmokeTest::libraryControllerExtendsSelectionWithShiftArrows() {
+void LibraryQueueSmokeTest::libraryControllerExtendsSelectionWithShiftArrows() {
     LibraryTreeModel model;
     model.setExpandedKeys(QStringList{
         QStringLiteral("artist|Artist A"),
@@ -5444,7 +5532,7 @@ Item {
     QCOMPARE(model.anchorRow(), 0);
 }
 
-void QmlSmokeTest::libraryControllerRestoresExpandedSelectionAndViewport() {
+void LibraryQueueSmokeTest::libraryControllerRestoresExpandedSelectionAndViewport() {
     LibraryTreeModel model;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
@@ -5537,7 +5625,7 @@ Item {
     QTRY_COMPARE(root->property("saveCount").toInt(), 1);
 }
 
-void QmlSmokeTest::libraryControllerUsesDelegateCoordinatesForViewportAnchor() {
+void LibraryQueueSmokeTest::libraryControllerUsesDelegateCoordinatesForViewportAnchor() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -5605,7 +5693,7 @@ Item {
     QTRY_COMPARE(root->property("contentY").toDouble(), 350.0);
 }
 
-void QmlSmokeTest::libraryControllerForwardsShowTrackRequest() {
+void LibraryQueueSmokeTest::libraryControllerForwardsShowTrackRequest() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -5651,7 +5739,7 @@ Item {
     QCOMPARE(root->property("shownPath").toString(), QStringLiteral("/music/song.flac"));
 }
 
-void QmlSmokeTest::libraryControllerCentersBridgeRevealAfterExpansion() {
+void LibraryQueueSmokeTest::libraryControllerCentersBridgeRevealAfterExpansion() {
     LibraryTreeModel model;
     model.setLibraryTreeFromBinary(artistWithManyAlbumsBinary(20));
     QTRY_COMPARE(model.rowCount(), 1);
@@ -5720,7 +5808,7 @@ Item {
     QVERIFY(view->property("contentY").toDouble() > 300.0);
 }
 
-void QmlSmokeTest::playbackControllerReadsTheBridgeClock() {
+void TransportInputSmokeTest::playbackControllerReadsTheBridgeClock() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -5782,7 +5870,7 @@ Item {
     QCOMPARE(bridge->property("seekCalls").toList().size(), 1);
 }
 
-void QmlSmokeTest::spectrogramMetadataOnlyResetWaitsForDataChunk() {
+void SpectrogramSmokeTest::spectrogramMetadataOnlyResetWaitsForDataChunk() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -5855,7 +5943,7 @@ void QmlSmokeTest::spectrogramMetadataOnlyResetWaitsForDataChunk() {
     QCOMPARE(item.m_ringSequenceId[2], static_cast<qint64>(-1));
 }
 
-void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
+void SpectrogramSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -5928,7 +6016,7 @@ void QmlSmokeTest::spectrogramRollingSeekKeepsHistoryContinuous() {
     QCOMPARE(item.m_ringSequenceId[11], static_cast<qint64>(-1));
 }
 
-void QmlSmokeTest::spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch() {
+void SpectrogramSmokeTest::spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch() {
     SpectrogramItem item;
     item.setWidth(1200);
     item.setHeight(180);
@@ -5996,7 +6084,7 @@ void QmlSmokeTest::spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch() {
     QVERIFY(displaySeq < item.m_ringWriteSeq);
 }
 
-void QmlSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {
+void SpectrogramSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -6059,7 +6147,7 @@ void QmlSmokeTest::spectrogramLargePositionJumpWaitsForResetHandoff() {
     QVERIFY(item.m_positionSeconds < expectedSeconds + 0.5);
 }
 
-void QmlSmokeTest::spectrogramCenteredSmallSeekMovesAtOnce() {
+void SpectrogramSmokeTest::spectrogramCenteredSmallSeekMovesAtOnce() {
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
 
@@ -6075,7 +6163,7 @@ void QmlSmokeTest::spectrogramCenteredSmallSeekMovesAtOnce() {
             .arg(item.m_positionSeconds, 0, 'f', 4)));
 }
 
-void QmlSmokeTest::spectrogramCenteredSeekFollowsLocalVisualClock() {
+void SpectrogramSmokeTest::spectrogramCenteredSeekFollowsLocalVisualClock() {
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
 
@@ -6097,7 +6185,7 @@ void QmlSmokeTest::spectrogramCenteredSeekFollowsLocalVisualClock() {
             .arg(displayed, 0, 'f', 3)));
 }
 
-void QmlSmokeTest::spectrogramEarlyCenteredSeekFollowsLocalVisualClockBeforePrecomputedReady() {
+void SpectrogramSmokeTest::spectrogramEarlyCenteredSeekFollowsLocalVisualClockBeforePrecomputedReady() {
     SpectrogramItem item;
     item.setDisplayMode(1); // Centered
 
@@ -6118,7 +6206,7 @@ void QmlSmokeTest::spectrogramEarlyCenteredSeekFollowsLocalVisualClockBeforePrec
             .arg(displayed, 0, 'f', 3)));
 }
 
-void QmlSmokeTest::visualizationsDrawTheSharedPlaybackClock() {
+void SpectrogramSmokeTest::visualizationsDrawTheSharedPlaybackClock() {
     // Rolling and centered spectrograms and the waveform read one clock,
     // each at its own frame time, instead of extrapolating on their own.
     PlaybackClock clock;
@@ -6165,13 +6253,13 @@ void QmlSmokeTest::visualizationsDrawTheSharedPlaybackClock() {
     QCOMPARE(waveform.positionSeconds(), 300.0);
 }
 
-void QmlSmokeTest::spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds_data() {
+void SpectrogramSmokeTest::spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds_data() {
     QTest::addColumn<bool>("clockFirst");
     QTest::newRow("clock-first") << true;
     QTest::newRow("data-first") << false;
 }
 
-void QmlSmokeTest::spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds() {
+void SpectrogramSmokeTest::spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds() {
     // A gapless successor's columns follow the previous track's in the
     // rolling history. The engine reports the successor before the end of
     // the previous track has played, stamped with the time that track
@@ -6231,7 +6319,7 @@ void QmlSmokeTest::spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds()
     QVERIFY(std::abs(item.currentRenderPositionSecondsLocked(at(now + 300'000'000)) - 4.1) < 1e-6);
 }
 
-void QmlSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {
+void SpectrogramSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -6298,7 +6386,7 @@ void QmlSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {
     QCOMPARE(item.m_ringTrackToken[5], 12ULL);
 }
 
-void QmlSmokeTest::spectrogramNaturalTrackResetPreservesRollingHistory() {
+void SpectrogramSmokeTest::spectrogramNaturalTrackResetPreservesRollingHistory() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -6367,7 +6455,7 @@ void QmlSmokeTest::spectrogramNaturalTrackResetPreservesRollingHistory() {
     QCOMPARE(item.m_ringSequenceId[3], static_cast<qint64>(-1));
 }
 
-void QmlSmokeTest::spectrogramManualTrackResetClearsRollingHistory() {
+void SpectrogramSmokeTest::spectrogramManualTrackResetClearsRollingHistory() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -6436,7 +6524,7 @@ void QmlSmokeTest::spectrogramManualTrackResetClearsRollingHistory() {
     QCOMPARE(item.m_ringTrackToken[1], 12ULL);
 }
 
-void QmlSmokeTest::spectrogramRollingZoomResetAnchorsEpochToResetStart() {
+void SpectrogramSmokeTest::spectrogramRollingZoomResetAnchorsEpochToResetStart() {
     SpectrogramItem item;
     item.setWidth(1200);
     item.setHeight(180);
@@ -6509,7 +6597,7 @@ void QmlSmokeTest::spectrogramRollingZoomResetAnchorsEpochToResetStart() {
     QCOMPARE(item.m_rollingEpoch + anchoredCol, static_cast<qint64>(0));
 }
 
-void QmlSmokeTest::spectrogramSeekResetAnchorsPlaybackClockToChunkStart() {
+void SpectrogramSmokeTest::spectrogramSeekResetAnchorsPlaybackClockToChunkStart() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -6568,7 +6656,7 @@ void QmlSmokeTest::spectrogramSeekResetAnchorsPlaybackClockToChunkStart() {
     QVERIFY(!item.m_positionJumpHoldActive);
 }
 
-void QmlSmokeTest::diagnosticsLogUsesLowercaseAppDir() {
+void PreferencesSmokeTest::diagnosticsLogUsesLowercaseAppDir() {
     const QString logPath = DiagnosticsLog::defaultLogPath();
     QVERIFY(!logPath.isEmpty());
 
@@ -6586,7 +6674,7 @@ void QmlSmokeTest::diagnosticsLogUsesLowercaseAppDir() {
     QVERIFY(!logPath.contains(QStringLiteral("\\Ferrous\\")));
 }
 
-void QmlSmokeTest::spectrogramSeekProfileFlagsStalledPostSeekWindow() {
+void SpectrogramSmokeTest::spectrogramSeekProfileFlagsStalledPostSeekWindow() {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     qputenv("FERROUS_PROFILE_UI", "1");
     SpectrogramSeekTrace::noteSeekIssued(12.5);
@@ -6624,7 +6712,7 @@ void QmlSmokeTest::spectrogramSeekProfileFlagsStalledPostSeekWindow() {
 #endif
 }
 
-void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() {
+void SpectrogramSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     qputenv("FERROUS_PROFILE_UI", "1");
     SpectrogramSeekTrace::noteSeekIssued(42.0);
@@ -6673,7 +6761,7 @@ void QmlSmokeTest::spectrogramSeekProfileDoesNotRestartSameTraceAfterSettling() 
 #endif
 }
 
-void QmlSmokeTest::spectrogramSmoothnessProfileFlagsGapHeavyWindow() {
+void SpectrogramSmokeTest::spectrogramSmoothnessProfileFlagsGapHeavyWindow() {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     qputenv("FERROUS_PROFILE_UI", "1");
 
@@ -6711,7 +6799,7 @@ void QmlSmokeTest::spectrogramSmoothnessProfileFlagsGapHeavyWindow() {
 #endif
 }
 
-void QmlSmokeTest::spectrogramSmoothnessProfileTracksAdvanceFallbackSignals() {
+void SpectrogramSmokeTest::spectrogramSmoothnessProfileTracksAdvanceFallbackSignals() {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     qputenv("FERROUS_PROFILE_UI", "1");
 
@@ -6755,7 +6843,7 @@ void QmlSmokeTest::spectrogramSmoothnessProfileTracksAdvanceFallbackSignals() {
 #endif
 }
 
-void QmlSmokeTest::waveformProgressInvalidatesOnlyTailSpan() {
+void WaveformSmokeTest::waveformProgressInvalidatesOnlyTailSpan() {
     WaveformItem item;
     item.setWidth(200);
     item.setHeight(24);
@@ -6779,7 +6867,7 @@ void QmlSmokeTest::waveformProgressInvalidatesOnlyTailSpan() {
     QVERIFY(item.m_cacheDirty);
 }
 
-void QmlSmokeTest::waveformPeakUpdatesInvalidateChangedSuffix() {
+void WaveformSmokeTest::waveformPeakUpdatesInvalidateChangedSuffix() {
     WaveformItem item;
     item.setWidth(200);
     item.setHeight(24);
@@ -6808,7 +6896,7 @@ void QmlSmokeTest::waveformPeakUpdatesInvalidateChangedSuffix() {
     QCOMPARE(item.m_dirtyRect.height(), 24);
 }
 
-void QmlSmokeTest::waveformEditorCancelsAndBoundsObsoleteDecodes() {
+void WaveformSmokeTest::waveformEditorCancelsAndBoundsObsoleteDecodes() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setDurationSeconds(10.0);
@@ -6844,7 +6932,7 @@ void QmlSmokeTest::waveformEditorCancelsAndBoundsObsoleteDecodes() {
     QCOMPARE(started->load(), 2);
 }
 
-void QmlSmokeTest::waveformEditorDetailArrivesWhileScrolling() {
+void WaveformSmokeTest::waveformEditorDetailArrivesWhileScrolling() {
     // A detail window for [start, end] at 48 kHz, as the decoder sends one.
     const auto window = [](double start, double end, int maxPoints) {
         const quint32 frames = static_cast<quint32>(std::ceil((end - start) * 48'000.0));
@@ -6911,7 +6999,7 @@ void QmlSmokeTest::waveformEditorDetailArrivesWhileScrolling() {
     QTRY_VERIFY(!item.m_decodeActive);
 }
 
-void QmlSmokeTest::waveformEditorSignalsWithoutItsStateLocked() {
+void WaveformSmokeTest::waveformEditorSignalsWithoutItsStateLocked() {
     WaveformEditorItem item;
     StateMutexProbe probe(&item, &item.m_stateMutex);
     item.m_decodeWindow = [](const QString &, double start, double end, int,
@@ -6969,7 +7057,7 @@ void QmlSmokeTest::waveformEditorSignalsWithoutItsStateLocked() {
     QVERIFY2(probe.heldSignals.isEmpty(), qPrintable(probe.heldSignals.join(QLatin1String(", "))));
 }
 
-void QmlSmokeTest::waveformEditorFrameReadsTheClockOnce() {
+void WaveformSmokeTest::waveformEditorFrameReadsTheClockOnce() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(120);
@@ -7010,7 +7098,7 @@ void QmlSmokeTest::waveformEditorFrameReadsTheClockOnce() {
     }
 }
 
-void QmlSmokeTest::waveformEditorSeeksWhereTheCrosshairShows_data() {
+void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows_data() {
     QTest::addColumn<double>("scale");
     QTest::addColumn<double>("zoom");
     QTest::addColumn<double>("position");
@@ -7023,7 +7111,7 @@ void QmlSmokeTest::waveformEditorSeeksWhereTheCrosshairShows_data() {
     }
 }
 
-void QmlSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
+void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
     QFETCH(double, scale);
     QFETCH(double, zoom);
     QFETCH(double, position);
@@ -7114,7 +7202,7 @@ void QmlSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
     }
 }
 
-void QmlSmokeTest::waveformEditorCachedDecoderPreservesOverlappingSamples() {
+void WaveformSmokeTest::waveformEditorCachedDecoderPreservesOverlappingSamples() {
     QByteArray wav("RIFF", 4);
     constexpr quint32 frames = 30'000;
     appendLe<quint32>(wav, 36 + frames * 4);
@@ -7176,7 +7264,7 @@ void QmlSmokeTest::waveformEditorCachedDecoderPreservesOverlappingSamples() {
         file.fileName(), 0.25, 0.5, 12'000, cancelled).isEmpty());
 }
 
-void QmlSmokeTest::waveformEditorParsesSignedSampleWindow() {
+void WaveformSmokeTest::waveformEditorParsesSignedSampleWindow() {
     const auto appendF64 = [](QByteArray &out, double value) {
         quint64 bits = 0;
         std::memcpy(&bits, &value, sizeof(bits));
@@ -7222,7 +7310,7 @@ void QmlSmokeTest::waveformEditorParsesSignedSampleWindow() {
     QVERIFY(!WaveformEditorItem::parseWindow(frame.chopped(4), &window));
 }
 
-void QmlSmokeTest::waveformEditorDownmixUsesMixedExtremaAtEveryZoom() {
+void WaveformSmokeTest::waveformEditorDownmixUsesMixedExtremaAtEveryZoom() {
     WaveformEditorItem item;
     item.m_detail.channelCount = 2;
     item.m_detail.pointCount = 4;
@@ -7253,7 +7341,7 @@ void QmlSmokeTest::waveformEditorDownmixUsesMixedExtremaAtEveryZoom() {
     }
 }
 
-void QmlSmokeTest::waveformEditorSampleMarkersRequireSampleResolution() {
+void WaveformSmokeTest::waveformEditorSampleMarkersRequireSampleResolution() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setHeight(180);
@@ -7273,7 +7361,7 @@ void QmlSmokeTest::waveformEditorSampleMarkersRequireSampleResolution() {
     QVERIFY(!item.samplePointsVisible());
 }
 
-void QmlSmokeTest::waveformEditorFormatsViewportDuration() {
+void WaveformSmokeTest::waveformEditorFormatsViewportDuration() {
     WaveformEditorItem item;
     QCOMPARE(item.formatViewportDuration(245.2), QStringLiteral("04:05"));
     QCOMPARE(item.formatViewportDuration(1.0), QStringLiteral("00:01"));
@@ -7282,7 +7370,7 @@ void QmlSmokeTest::waveformEditorFormatsViewportDuration() {
     QCOMPARE(item.formatViewportDuration(0.0), QStringLiteral("0 ms"));
 }
 
-void QmlSmokeTest::waveformEditorConnectsSamplesBeforeMarkers() {
+void WaveformSmokeTest::waveformEditorConnectsSamplesBeforeMarkers() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setHeight(180);
@@ -7368,7 +7456,7 @@ void QmlSmokeTest::waveformEditorConnectsSamplesBeforeMarkers() {
     QVERIFY(item.renderDetailDirectlyLocked(directStart, directEnd));
 }
 
-void QmlSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
+void WaveformSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setHeight(180);
@@ -7396,7 +7484,7 @@ void QmlSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
     QVERIFY(!item.m_cacheDirty);
 }
 
-void QmlSmokeTest::waveformEditorUsesChannelHintBeforeDetailArrives() {
+void WaveformSmokeTest::waveformEditorUsesChannelHintBeforeDetailArrives() {
     WaveformEditorItem item;
     item.setViewMode(1);
     item.setChannelCountHint(2);
@@ -7407,20 +7495,21 @@ void QmlSmokeTest::waveformEditorUsesChannelHintBeforeDetailArrives() {
     QCOMPARE(item.channelCount(), 6);
 }
 
-void QmlSmokeTest::waveformEditorCoalescesPlaybackRequestsWithoutStarvingTimer() {
+void WaveformSmokeTest::waveformEditorCoalescesPlaybackRequestsWithoutStarvingTimer() {
     WaveformEditorItem item;
     item.scheduleDetailRequest();
     QVERIFY(item.m_requestTimer.isActive());
     const int initialRemaining = item.m_requestTimer.remainingTime();
 
-    QTest::qWait(25);
+    // Time passes without the event loop, so the timer cannot fire meanwhile.
+    QTest::qSleep(25);
     item.scheduleDetailRequest();
 
     QVERIFY(item.m_requestTimer.isActive());
     QVERIFY(item.m_requestTimer.remainingTime() < initialRemaining - 10);
 }
 
-void QmlSmokeTest::waveformEditorPendingWindowSuppressesDuplicateRequest() {
+void WaveformSmokeTest::waveformEditorPendingWindowSuppressesDuplicateRequest() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setDurationSeconds(10.0);
@@ -7436,7 +7525,7 @@ void QmlSmokeTest::waveformEditorPendingWindowSuppressesDuplicateRequest() {
     QVERIFY(!item.m_requestTimer.isActive());
 }
 
-void QmlSmokeTest::waveformEditorZoomSupersedesCoarsePendingRequest() {
+void WaveformSmokeTest::waveformEditorZoomSupersedesCoarsePendingRequest() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setDurationSeconds(10.0);
@@ -7454,7 +7543,7 @@ void QmlSmokeTest::waveformEditorZoomSupersedesCoarsePendingRequest() {
     QCOMPARE(item.zoomLevel(), 4.0);
 }
 
-void QmlSmokeTest::waveformEditorResizeRaisesDetailRequestDensity() {
+void WaveformSmokeTest::waveformEditorResizeRaisesDetailRequestDensity() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setDurationSeconds(100.0);
@@ -7476,7 +7565,7 @@ void QmlSmokeTest::waveformEditorResizeRaisesDetailRequestDensity() {
     QVERIFY(!item.detailResolutionCoversLocked(37.5, 62.5));
 }
 
-void QmlSmokeTest::waveformEditorDeepZoomRequestPreservesViewportDensity() {
+void WaveformSmokeTest::waveformEditorDeepZoomRequestPreservesViewportDensity() {
     WaveformEditorItem item;
     item.setWidth(3'440);
     item.setDurationSeconds(240.0);
@@ -7494,7 +7583,7 @@ void QmlSmokeTest::waveformEditorDeepZoomRequestPreservesViewportDensity() {
     QVERIFY(requestSpan > visibleSpan);
 }
 
-void QmlSmokeTest::waveformEditorQuantizesRequestForRequiredBinDensity() {
+void WaveformSmokeTest::waveformEditorQuantizesRequestForRequiredBinDensity() {
     WaveformEditorItem item;
     item.setWidth(1'183);
     item.setDurationSeconds(257.133333);
@@ -7519,7 +7608,7 @@ void QmlSmokeTest::waveformEditorQuantizesRequestForRequiredBinDensity() {
         visibleEnd - visibleStart) * 0.9);
 }
 
-void QmlSmokeTest::waveformEditorFullscreenRequestStaysInTargetBin() {
+void WaveformSmokeTest::waveformEditorFullscreenRequestStaysInTargetBin() {
     WaveformEditorItem item;
     item.setWidth(3'440);
     item.setDurationSeconds(257.133333);
@@ -7545,7 +7634,7 @@ void QmlSmokeTest::waveformEditorFullscreenRequestStaysInTargetBin() {
         visibleEnd - visibleStart) * 0.9);
 }
 
-void QmlSmokeTest::waveformEditorFullscreenSampleCurveRequestsRawFramesEarly() {
+void WaveformSmokeTest::waveformEditorFullscreenSampleCurveRequestsRawFramesEarly() {
     WaveformEditorItem item;
     item.setWidth(3'440);
     item.setDurationSeconds(257.133333);
@@ -7586,7 +7675,7 @@ void QmlSmokeTest::waveformEditorFullscreenSampleCurveRequestsRawFramesEarly() {
     QVERIFY(item.detailResolutionCoversLocked(visibleStart, visibleEnd));
 }
 
-void QmlSmokeTest::waveformEditorSampleViewPrefetchesUsefulSpan() {
+void WaveformSmokeTest::waveformEditorSampleViewPrefetchesUsefulSpan() {
     WaveformEditorItem item;
     item.setWidth(1'183);
     item.setDurationSeconds(257.133333);
@@ -7605,7 +7694,7 @@ void QmlSmokeTest::waveformEditorSampleViewPrefetchesUsefulSpan() {
     QVERIFY(requestedPoints <= 65'536);
 }
 
-void QmlSmokeTest::waveformEditorPrefetchesBeforeDetailBoundary() {
+void WaveformSmokeTest::waveformEditorPrefetchesBeforeDetailBoundary() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setDurationSeconds(10.0);
@@ -7626,7 +7715,7 @@ void QmlSmokeTest::waveformEditorPrefetchesBeforeDetailBoundary() {
     QVERIFY(item.m_requestTimer.isActive());
 }
 
-void QmlSmokeTest::waveformEditorFullscreenPrefetchDoesNotWaitPastCoverage() {
+void WaveformSmokeTest::waveformEditorFullscreenPrefetchDoesNotWaitPastCoverage() {
     WaveformEditorItem item;
     item.setWidth(3440);
     item.setHeight(1440);
@@ -7655,7 +7744,7 @@ void QmlSmokeTest::waveformEditorFullscreenPrefetchDoesNotWaitPastCoverage() {
     QCOMPARE(item.m_requestTimer.remainingTime(), 0);
 }
 
-void QmlSmokeTest::waveformEditorKeepsOverlappingDetailDuringHandoff() {
+void WaveformSmokeTest::waveformEditorKeepsOverlappingDetailDuringHandoff() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -7689,7 +7778,7 @@ void QmlSmokeTest::waveformEditorKeepsOverlappingDetailDuringHandoff() {
     QCOMPARE(canvas.pixelColor(150, 20), QColor(5, 9, 7));
 }
 
-void QmlSmokeTest::waveformEditorWideDetailCacheKeepsViewportDensity() {
+void WaveformSmokeTest::waveformEditorWideDetailCacheKeepsViewportDensity() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -7715,7 +7804,7 @@ void QmlSmokeTest::waveformEditorWideDetailCacheKeepsViewportDensity() {
     QVERIFY(item.m_cacheEndSeconds - item.m_cacheStartSeconds < 7.51);
 }
 
-void QmlSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
+void WaveformSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -7746,7 +7835,7 @@ void QmlSmokeTest::waveformEditorWholeTrackAcceptsDecodedEndpointTolerance() {
     QVERIFY(waveformPixels > 200);
 }
 
-void QmlSmokeTest::waveformEditorFullscreenWholeTrackRetainsCache() {
+void WaveformSmokeTest::waveformEditorFullscreenWholeTrackRetainsCache() {
     for (bool detailReady : {false, true}) {
         WaveformEditorItem item;
         item.setWidth(1183);
@@ -7807,7 +7896,7 @@ void QmlSmokeTest::waveformEditorFullscreenWholeTrackRetainsCache() {
     }
 }
 
-void QmlSmokeTest::waveformEditorZoomOutDefersOverviewUntilDetailReady() {
+void WaveformSmokeTest::waveformEditorZoomOutDefersOverviewUntilDetailReady() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -7846,7 +7935,7 @@ void QmlSmokeTest::waveformEditorZoomOutDefersOverviewUntilDetailReady() {
     item.m_requestTimer.stop();
 }
 
-void QmlSmokeTest::waveformEditorDeferredZoomOutCommitsCompletedDetailCache() {
+void WaveformSmokeTest::waveformEditorDeferredZoomOutCommitsCompletedDetailCache() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -7892,7 +7981,7 @@ void QmlSmokeTest::waveformEditorDeferredZoomOutCommitsCompletedDetailCache() {
     QCOMPARE(item.m_cacheEndSeconds, 10.0);
 }
 
-void QmlSmokeTest::waveformEditorZoomOutKeepsReadyDetail() {
+void WaveformSmokeTest::waveformEditorZoomOutKeepsReadyDetail() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -7914,7 +8003,7 @@ void QmlSmokeTest::waveformEditorZoomOutKeepsReadyDetail() {
     QVERIFY(!item.m_zoomFallbackToOverview);
 }
 
-void QmlSmokeTest::waveformEditorZoomInRetainsCoveredCacheWhileRefining() {
+void WaveformSmokeTest::waveformEditorZoomInRetainsCoveredCacheWhileRefining() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -7936,7 +8025,7 @@ void QmlSmokeTest::waveformEditorZoomInRetainsCoveredCacheWhileRefining() {
     item.m_requestTimer.stop();
 }
 
-void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoundaries() {
+void WaveformSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoundaries() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setHeight(180);
@@ -7988,7 +8077,7 @@ void QmlSmokeTest::waveformEditorPausedZoomRebuildsCacheAtSamplePresentationBoun
     item.m_requestTimer.stop();
 }
 
-void QmlSmokeTest::waveformEditorSparseZoomDetailFallsBackUntilReady() {
+void WaveformSmokeTest::waveformEditorSparseZoomDetailFallsBackUntilReady() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setHeight(180);
@@ -8019,7 +8108,7 @@ void QmlSmokeTest::waveformEditorSparseZoomDetailFallsBackUntilReady() {
     QVERIFY(canvas.pixelColor(370, 20).green() > 180);
 }
 
-void QmlSmokeTest::waveformEditorSeparatesChannelPanes() {
+void WaveformSmokeTest::waveformEditorSeparatesChannelPanes() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8049,7 +8138,7 @@ void QmlSmokeTest::waveformEditorSeparatesChannelPanes() {
     QVERIFY(canvas.pixelColor(160, 91).green() > 180);
 }
 
-void QmlSmokeTest::waveformEditorRestrictsDetailWorkToVisiblePoints() {
+void WaveformSmokeTest::waveformEditorRestrictsDetailWorkToVisiblePoints() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setDurationSeconds(10.0);
@@ -8068,7 +8157,7 @@ void QmlSmokeTest::waveformEditorRestrictsDetailWorkToVisiblePoints() {
     QVERIFY(last - first < 110);
 }
 
-void QmlSmokeTest::waveformEditorDetailPointsUseAbsoluteSampleTimes() {
+void WaveformSmokeTest::waveformEditorDetailPointsUseAbsoluteSampleTimes() {
     WaveformEditorItem item;
     item.m_detail.sampleRateHz = 100;
     item.m_detail.framesPerPoint = 4;
@@ -8084,7 +8173,7 @@ void QmlSmokeTest::waveformEditorDetailPointsUseAbsoluteSampleTimes() {
     QVERIFY(std::abs(item.detailPointTimeLocked(0) - sharedBinTime) < 0.000'001);
 }
 
-void QmlSmokeTest::waveformEditorReusesSameSizedCache() {
+void WaveformSmokeTest::waveformEditorReusesSameSizedCache() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8106,7 +8195,7 @@ void QmlSmokeTest::waveformEditorReusesSameSizedCache() {
     QCOMPARE(item.m_cache.constBits(), firstBuffer);
 }
 
-void QmlSmokeTest::waveformEditorCacheHandoffsKeepAbsolutePixelGrid() {
+void WaveformSmokeTest::waveformEditorCacheHandoffsKeepAbsolutePixelGrid() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(100);
@@ -8206,7 +8295,7 @@ void QmlSmokeTest::waveformEditorCacheHandoffsKeepAbsolutePixelGrid() {
     }
 }
 
-void QmlSmokeTest::waveformEditorReplacementCacheDoesNotReuseOldRaster() {
+void WaveformSmokeTest::waveformEditorReplacementCacheDoesNotReuseOldRaster() {
     WaveformEditorItem item;
     item.setWidth(1'000);
     item.setHeight(1'440);
@@ -8230,7 +8319,7 @@ void QmlSmokeTest::waveformEditorReplacementCacheDoesNotReuseOldRaster() {
     QVERIFY(item.m_stagedCache.constBits() != oldCache.constBits());
 }
 
-void QmlSmokeTest::waveformEditorBuildsPlaybackTilesWithinFrameBudget() {
+void WaveformSmokeTest::waveformEditorBuildsPlaybackTilesWithinFrameBudget() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8292,7 +8381,7 @@ void QmlSmokeTest::waveformEditorBuildsPlaybackTilesWithinFrameBudget() {
     QVERIFY(item.playbackTilesCoverLocked(shiftedStart, shiftedEnd));
 }
 
-void QmlSmokeTest::waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs() {
+void WaveformSmokeTest::waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8344,7 +8433,7 @@ void QmlSmokeTest::waveformEditorKeepsPlaybackTilesAcrossDetailHandoffs() {
     QVERIFY(!item.m_playbackTiles.empty());
 }
 
-void QmlSmokeTest::waveformEditorLateDetailPreservesPartialPlaybackTiles() {
+void WaveformSmokeTest::waveformEditorLateDetailPreservesPartialPlaybackTiles() {
     for (int viewMode : {0, 1}) {
         WaveformEditorItem item;
         item.setWidth(3440);
@@ -8402,7 +8491,7 @@ void QmlSmokeTest::waveformEditorLateDetailPreservesPartialPlaybackTiles() {
     }
 }
 
-void QmlSmokeTest::waveformEditorBuildsReplacementCacheIncrementally() {
+void WaveformSmokeTest::waveformEditorBuildsReplacementCacheIncrementally() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8447,7 +8536,7 @@ void QmlSmokeTest::waveformEditorBuildsReplacementCacheIncrementally() {
     QVERIFY(!item.m_cacheDirty);
 }
 
-void QmlSmokeTest::waveformEditorPaintDefersGuiContinuation() {
+void WaveformSmokeTest::waveformEditorPaintDefersGuiContinuation() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8488,7 +8577,7 @@ void QmlSmokeTest::waveformEditorPaintDefersGuiContinuation() {
     QVERIFY(!item.m_guiRepaintPending.load(std::memory_order_acquire));
 }
 
-void QmlSmokeTest::waveformEditorZoomedPlaybackUsesScrollingCache() {
+void WaveformSmokeTest::waveformEditorZoomedPlaybackUsesScrollingCache() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setHeight(180);
@@ -8516,7 +8605,7 @@ void QmlSmokeTest::waveformEditorZoomedPlaybackUsesScrollingCache() {
     QVERIFY(!item.m_cache.isNull());
 }
 
-void QmlSmokeTest::waveformEditorPlaybackOverviewCacheHasForwardHeadroom() {
+void WaveformSmokeTest::waveformEditorPlaybackOverviewCacheHasForwardHeadroom() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setHeight(180);
@@ -8540,7 +8629,7 @@ void QmlSmokeTest::waveformEditorPlaybackOverviewCacheHasForwardHeadroom() {
     QVERIFY(!item.m_cacheDirty);
 }
 
-void QmlSmokeTest::waveformEditorCachedPaintClearsUncoveredPixels() {
+void WaveformSmokeTest::waveformEditorCachedPaintClearsUncoveredPixels() {
     WaveformEditorItem item;
     item.setWidth(100);
     item.setHeight(100);
@@ -8565,7 +8654,7 @@ void QmlSmokeTest::waveformEditorCachedPaintClearsUncoveredPixels() {
     QCOMPARE(canvas.pixelColor(75, 20), QColor(54, 225, 161));
 }
 
-void QmlSmokeTest::waveformEditorPausedDetailReplacesOverviewCache() {
+void WaveformSmokeTest::waveformEditorPausedDetailReplacesOverviewCache() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8592,7 +8681,7 @@ void QmlSmokeTest::waveformEditorPausedDetailReplacesOverviewCache() {
         false, false, false, false, 4, true));
 }
 
-void QmlSmokeTest::waveformEditorFollowsThePlaybackClock() {
+void WaveformSmokeTest::waveformEditorFollowsThePlaybackClock() {
     WaveformEditorItem item;
     item.setDurationSeconds(30.0);
     item.m_requestTimer.stop();
@@ -8613,7 +8702,7 @@ void QmlSmokeTest::waveformEditorFollowsThePlaybackClock() {
     QCOMPARE(item.positionSeconds() >= displayed, true);
 }
 
-void QmlSmokeTest::waveformEditorSeeksMoveAtOnce() {
+void WaveformSmokeTest::waveformEditorSeeksMoveAtOnce() {
     WaveformEditorItem item;
     item.setDurationSeconds(30.0);
     setTestPosition(item, 10.0);
@@ -8629,7 +8718,7 @@ void QmlSmokeTest::waveformEditorSeeksMoveAtOnce() {
     QVERIFY(!item.playing());
 }
 
-void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
+void WaveformSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8658,7 +8747,7 @@ void QmlSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
     QVERIFY(changedPixels > 250);
 }
 
-void QmlSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
+void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
     QCOMPARE(
         WaveformEditorItem::formatCrosshairTime(28.98),
         QStringLiteral("0:28.980"));
@@ -8686,7 +8775,7 @@ void QmlSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
     QCOMPARE(timeRect.size(), QSize(timeWidth + 6, textHeight + 6));
 }
 
-void QmlSmokeTest::waveformEditorSampleViewRepaintsCrosshairCleanly() {
+void WaveformSmokeTest::waveformEditorSampleViewRepaintsCrosshairCleanly() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setHeight(180);
@@ -8726,7 +8815,7 @@ void QmlSmokeTest::waveformEditorSampleViewRepaintsCrosshairCleanly() {
     }
 }
 
-void QmlSmokeTest::waveformEditorSampleViewUsesSmoothInterpolation() {
+void WaveformSmokeTest::waveformEditorSampleViewUsesSmoothInterpolation() {
     const QPolygonF samples{
         QPointF(0.0, 90.0),
         QPointF(10.0, 20.0),
@@ -8742,7 +8831,7 @@ void QmlSmokeTest::waveformEditorSampleViewUsesSmoothInterpolation() {
     QCOMPARE(path.currentPosition(), samples.constLast());
 }
 
-void QmlSmokeTest::waveformEditorSampleViewDoesNotFillLaterChannels() {
+void WaveformSmokeTest::waveformEditorSampleViewDoesNotFillLaterChannels() {
     WaveformEditorItem item;
     item.setWidth(400);
     item.setHeight(180);
@@ -8771,7 +8860,7 @@ void QmlSmokeTest::waveformEditorSampleViewDoesNotFillLaterChannels() {
     QCOMPARE(canvas.pixelColor(200, 120), QColor(5, 9, 7));
 }
 
-void QmlSmokeTest::waveformEditorReclampsZoomForDecodedSampleRate() {
+void WaveformSmokeTest::waveformEditorReclampsZoomForDecodedSampleRate() {
     WaveformEditorItem item;
     item.setWidth(100);
     item.setDurationSeconds(100.0);
@@ -8785,7 +8874,7 @@ void QmlSmokeTest::waveformEditorReclampsZoomForDecodedSampleRate() {
     QVERIFY(item.m_cacheDirty);
 }
 
-void QmlSmokeTest::waveformEditorRulersFollowGridSetting() {
+void WaveformSmokeTest::waveformEditorRulersFollowGridSetting() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8819,7 +8908,7 @@ void QmlSmokeTest::waveformEditorRulersFollowGridSetting() {
     QVERIFY(visibleRulerPixels > hiddenRulerPixels + 20);
 }
 
-void QmlSmokeTest::waveformEditorRulersRemainVisibleWhenZoomed() {
+void WaveformSmokeTest::waveformEditorRulersRemainVisibleWhenZoomed() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8853,7 +8942,7 @@ void QmlSmokeTest::waveformEditorRulersRemainVisibleWhenZoomed() {
     QVERIFY(rulerPixels > 30);
 }
 
-void QmlSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
+void WaveformSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8874,7 +8963,7 @@ void QmlSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
     QCOMPARE(left, right);
 }
 
-void QmlSmokeTest::waveformEditorOverviewRespectsCoverageAndChannelIdentity() {
+void WaveformSmokeTest::waveformEditorOverviewRespectsCoverageAndChannelIdentity() {
     WaveformEditorItem item;
     item.setDurationSeconds(10.0);
     item.setOverviewCoverageSeconds(2.5);
@@ -8908,7 +8997,7 @@ void QmlSmokeTest::waveformEditorOverviewRespectsCoverageAndChannelIdentity() {
     QCOMPARE(render(0.0, 10.0, 1).pixelColor(12, 50), QColor(Qt::black));
 }
 
-void QmlSmokeTest::waveformEditorReferenceLineContrastsWaveform() {
+void WaveformSmokeTest::waveformEditorReferenceLineContrastsWaveform() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8941,7 +9030,7 @@ void QmlSmokeTest::waveformEditorReferenceLineContrastsWaveform() {
     QVERIFY(lineOnWaveform != waveform);
 }
 
-void QmlSmokeTest::waveformEditorContrastLinesUseFboSafeCompositionModes() {
+void WaveformSmokeTest::waveformEditorContrastLinesUseFboSafeCompositionModes() {
     CompositionRecordingPaintDevice device;
     QPainter painter(&device);
     painter.setCompositionMode(QPainter::CompositionMode_Source);
@@ -8962,7 +9051,7 @@ void QmlSmokeTest::waveformEditorContrastLinesUseFboSafeCompositionModes() {
     }
 }
 
-void QmlSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
+void WaveformSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -8994,7 +9083,7 @@ void QmlSmokeTest::waveformEditorFpsOverlayTracksPaintRate() {
     QVERIFY(rightmostOverlayPixel >= canvas.width() - 12);
 }
 
-void QmlSmokeTest::waveformSceneGraphReusesTextures() {
+void WaveformSmokeTest::waveformSceneGraphReusesTextures() {
     QQuickWindow window;
     window.resize(64, 64);
     window.show();
@@ -9058,7 +9147,7 @@ void QmlSmokeTest::waveformSceneGraphReusesTextures() {
     delete node;
 }
 
-void QmlSmokeTest::waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn() {
+void WaveformSmokeTest::waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn() {
     // ~QQuickItem takes an item out of its window once the item's own
     // members are destroyed, and emits windowChanged. The item's handler
     // for it once ran then, on its destroyed window connections and state.
@@ -9114,7 +9203,7 @@ void playFollowingThePlayhead(WaveformEditorItem &item) {
 }
 } // namespace
 
-void QmlSmokeTest::waveformEditorMadeInAWindowSchedulesPlaybackFrames() {
+void WaveformSmokeTest::waveformEditorMadeInAWindowSchedulesPlaybackFrames() {
     // windowChanged fires inside QQuickItem's constructor, before the
     // editor's handler for it is connected.
     ListenerCountingWindow window;
@@ -9145,7 +9234,7 @@ void QmlSmokeTest::waveformEditorMadeInAWindowSchedulesPlaybackFrames() {
     QCOMPARE(window.visibleChangedListeners(), visibilityListeners);
 }
 
-void QmlSmokeTest::waveformEditorParentedByQmlBindsItsWindowOnce() {
+void WaveformSmokeTest::waveformEditorParentedByQmlBindsItsWindowOnce() {
     ListenerCountingWindow window;
     window.resize(400, 100);
     window.show();
@@ -9178,7 +9267,7 @@ void QmlSmokeTest::waveformEditorParentedByQmlBindsItsWindowOnce() {
     QCOMPARE(window.visibleChangedListeners(), visibilityListeners);
 }
 
-void QmlSmokeTest::waveformSceneGraphMatchesRaster_data() {
+void WaveformSmokeTest::waveformSceneGraphMatchesRaster_data() {
     QTest::addColumn<bool>("samples");
     QTest::addColumn<bool>("splitChannels");
     QTest::addColumn<QSize>("size");
@@ -9190,7 +9279,7 @@ void QmlSmokeTest::waveformSceneGraphMatchesRaster_data() {
     QTest::newRow("wide-samples") << true << true << QSize(3440, 360);
 }
 
-void QmlSmokeTest::waveformSceneGraphMatchesRaster() {
+void WaveformSmokeTest::waveformSceneGraphMatchesRaster() {
     QFETCH(bool, samples);
     QFETCH(bool, splitChannels);
     QFETCH(QSize, size);
@@ -9267,7 +9356,7 @@ void QmlSmokeTest::waveformSceneGraphMatchesRaster() {
         qPrintable(QStringLiteral("mean=%1 differing_pixels=%2").arg(mean).arg(different)));
 }
 
-void QmlSmokeTest::waveformSceneGraphBenchmark() {
+void WaveformSmokeTest::waveformSceneGraphBenchmark() {
     if (!qEnvironmentVariableIsSet("FERROUS_BENCHMARK_WAVEFORM")) QSKIP("optional render benchmark");
     QQuickWindow window;
     window.resize(64, 64); window.show();
@@ -9329,7 +9418,7 @@ void QmlSmokeTest::waveformSceneGraphBenchmark() {
     }
 }
 
-void QmlSmokeTest::waveformSceneGraphLaysOutEachLabelOnce() {
+void WaveformSmokeTest::waveformSceneGraphLaysOutEachLabelOnce() {
     QQuickWindow window;
     window.resize(64, 64);
     window.show();
@@ -9360,7 +9449,7 @@ void QmlSmokeTest::waveformSceneGraphLaysOutEachLabelOnce() {
     delete node;
 }
 
-void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
+void WaveformSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     // 100 s over 1000 pixels: the playhead moves a pixel every 0.1 s.
     WaveformEditorItem item;
     item.setWidth(1000);
@@ -9424,7 +9513,7 @@ void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     QVERIFY(!item.m_playbackFrameTimer.isActive());
 }
 
-void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
+void WaveformSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
     // 100 s over 100 pixels: a pixel a second. The frame painted at 10.4 s
     // shows pixel 10 until 11 s. Its frame-swapped callback arrives late,
     // after playback has passed that: the next frame is due at once, not
@@ -9468,7 +9557,7 @@ void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
     QCOMPARE(item.m_playbackFrameRequests, corrected + 1);
 }
 
-void QmlSmokeTest::waveformEditorIdleViewDrawsOnlyFramesThatDiffer() {
+void WaveformSmokeTest::waveformEditorIdleViewDrawsOnlyFramesThatDiffer() {
     QQuickWindow window;
     window.resize(1001, 100);
     window.show();
@@ -9499,7 +9588,7 @@ void QmlSmokeTest::waveformEditorIdleViewDrawsOnlyFramesThatDiffer() {
     QVERIFY2(frames >= 4 * std::max(idleFrames, 5), qPrintable(QString::number(frames)));
 }
 
-void QmlSmokeTest::waveformEditorPlaybackBenchmark() {
+void WaveformSmokeTest::waveformEditorPlaybackBenchmark() {
     if (!qEnvironmentVariableIsSet("FERROUS_BENCHMARK_WAVEFORM")) QSKIP("optional render benchmark");
     // The frames a window draws in two seconds of playback of a four-minute
     // track, with the grid, over the whole track and zoomed in.
@@ -9537,7 +9626,7 @@ void QmlSmokeTest::waveformEditorPlaybackBenchmark() {
     }
 }
 
-void QmlSmokeTest::waveformEditorUsesSceneGraphAndNativeFrameInterpolation() {
+void WaveformSmokeTest::waveformEditorUsesSceneGraphAndNativeFrameInterpolation() {
     WaveformEditorItem item;
     item.setWidth(320);
     item.setDurationSeconds(10.0);
@@ -9554,7 +9643,7 @@ void QmlSmokeTest::waveformEditorUsesSceneGraphAndNativeFrameInterpolation() {
     QVERIFY(after > before + 0.04);
 }
 
-void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {
+void SpectrogramSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
 
@@ -9605,7 +9694,7 @@ void QmlSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {
     QCOMPARE(result.toBool(), false);
 }
 
-void QmlSmokeTest::spectrogramStaleTokenChunksAreDropped() {
+void SpectrogramSmokeTest::spectrogramStaleTokenChunksAreDropped() {
     // After a buffer_reset with token N, chunks from token < N are stale
     // and must be dropped to prevent ring corruption.
     SpectrogramItem item;
@@ -9639,7 +9728,7 @@ void QmlSmokeTest::spectrogramStaleTokenChunksAreDropped() {
     QCOMPARE(item.m_ringWriteSeq, before);
 }
 
-void QmlSmokeTest::spectrogramGaplessTokenChunksPassFilter() {
+void SpectrogramSmokeTest::spectrogramGaplessTokenChunksPassFilter() {
     // In a gapless rolling transition, the token advances (3→4) without
     // a buffer_reset.  Committed stays at 3.  Token 4 chunks must NOT
     // be dropped.
@@ -9667,7 +9756,7 @@ void QmlSmokeTest::spectrogramGaplessTokenChunksPassFilter() {
     QCOMPARE(item.m_precomputedTrackToken, 4ULL);
 }
 
-void QmlSmokeTest::spectrogramEvictingOldTokenKeepsActiveTokenIteratorValid() {
+void SpectrogramSmokeTest::spectrogramEvictingOldTokenKeepsActiveTokenIteratorValid() {
     // Reproduce the bucket compaction from the crash: the old and active
     // track tokens share an initial bucket, so erasing the old token moves
     // the active token's bucket. Any cached active-token iterator must be
@@ -9730,7 +9819,7 @@ void QmlSmokeTest::spectrogramEvictingOldTokenKeepsActiveTokenIteratorValid() {
         static_cast<qint64>(capacity) * 2 - 1);
 }
 
-void QmlSmokeTest::spectrogramFreshWidgetAcceptsDataWithImplicitReset() {
+void SpectrogramSmokeTest::spectrogramFreshWidgetAcceptsDataWithImplicitReset() {
     // A fresh/recycled widget (ringCapacity==0, no pending reset)
     // receiving data should apply an implicit reset and accept the data.
     SpectrogramItem item;
@@ -9752,7 +9841,7 @@ void QmlSmokeTest::spectrogramFreshWidgetAcceptsDataWithImplicitReset() {
     QCOMPARE(item.m_precomputedTrackToken, 7ULL);
 }
 
-void QmlSmokeTest::spectrogramCenteredModeSeekPreservesRing() {
+void SpectrogramSmokeTest::spectrogramCenteredModeSeekPreservesRing() {
     // In centered mode, seeking should NOT clear the ring.
     // The position just moves the display window.
     SpectrogramItem item;
@@ -9779,7 +9868,7 @@ void QmlSmokeTest::spectrogramCenteredModeSeekPreservesRing() {
     QVERIFY(item.m_ringCapacity > 0);
 }
 
-void QmlSmokeTest::spectrogramCenteredGaplessPreStagedFill() {
+void SpectrogramSmokeTest::spectrogramCenteredGaplessPreStagedFill() {
     // Verify that pre-staged chunks in centered mode provide instant
     // fill: after a buffer_reset+data batch, m_precomputedMaxColumnIndex
     // reflects the full pre-staged extent rather than growing from zero.
@@ -9821,7 +9910,7 @@ void QmlSmokeTest::spectrogramCenteredGaplessPreStagedFill() {
     QVERIFY(item.m_ringCapacity > 0);
 }
 
-void QmlSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
+void SpectrogramSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
     // Regression: repeated small backward seeks at max zoom can force a
     // same-track centered restart once the earlier left-margin columns
     // have been evicted from the ring. After the synthetic clear and the
@@ -9883,7 +9972,7 @@ void QmlSmokeTest::spectrogramCenteredSeekRestartRebuildsEarlierWindow() {
     QVERIFY(tokenMap.contains(static_cast<qint32>(item.m_precomputedCanvasDisplayRight)));
 }
 
-void QmlSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() {
+void SpectrogramSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() {
     SpectrogramItem item;
     item.setWidth(1200);
     item.setHeight(100);
@@ -9934,7 +10023,7 @@ void QmlSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() {
     }
 }
 
-void QmlSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
+void SpectrogramSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -9980,7 +10069,7 @@ void QmlSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramCenteredFinalizeChunkShrinksTotalEstimate() {
+void SpectrogramSmokeTest::spectrogramCenteredFinalizeChunkShrinksTotalEstimate() {
     // Regression for zoom-dependent playhead detachment at track end.
     // The backend emits a finalize chunk (columns=0, complete=true)
     // carrying the actual decoded-column count; the widget must shrink
@@ -10026,7 +10115,7 @@ void QmlSmokeTest::spectrogramCenteredFinalizeChunkShrinksTotalEstimate() {
     QVERIFY(item.m_ringWriteSeq > 0);
 }
 
-void QmlSmokeTest::spectrogramCenteredFinalizeChunkIgnoredForStaleToken() {
+void SpectrogramSmokeTest::spectrogramCenteredFinalizeChunkIgnoredForStaleToken() {
     // A finalize chunk for a track that has already been superseded by
     // a buffer_reset for a newer token must not clobber the new track's
     // total_columns_estimate.  Otherwise a late-arriving finalize from
@@ -10071,7 +10160,7 @@ void QmlSmokeTest::spectrogramCenteredFinalizeChunkIgnoredForStaleToken() {
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, newEstimate);
 }
 
-void QmlSmokeTest::spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit() {
+void SpectrogramSmokeTest::spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit() {
     // Regression for 6ch AC3 max-zoom-out: the worker can start with a
     // fallback/header estimate, then raise it on the same hop once a
     // duration re-query succeeds.  Qt must accept that larger estimate
@@ -10104,7 +10193,7 @@ void QmlSmokeTest::spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit() {
     QVERIFY(std::abs(item.minimumZoomLevel() - expectedMinZoom) < 0.0001);
 }
 
-void QmlSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
+void SpectrogramSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
     // Regression: at high zoom the file-metadata total_columns_estimate
     // overshoots the actual decoded extent by ~1 s worth of cols.  When
     // the decoder has produced all it's going to and playback is within
@@ -10168,7 +10257,7 @@ void QmlSmokeTest::spectrogramCenteredClampsRightEdgeToMaxColNearEof() {
              static_cast<qint64>(maxColIndex) - 1199);
 }
 
-void QmlSmokeTest::spectrogramCenteredEofDetachmentDisablesSubpixelScrolling() {
+void SpectrogramSmokeTest::spectrogramCenteredEofDetachmentDisablesSubpixelScrolling() {
     // Regression: in centered mode near EOF at a zoomed-out level, the
     // display range clamps to real decoded content and the playhead
     // detaches toward the right edge. The canvas must stop sub-pixel
@@ -10215,7 +10304,7 @@ void QmlSmokeTest::spectrogramCenteredEofDetachmentDisablesSubpixelScrolling() {
             .arg(item.m_precomputedCanvasDisplayRight)));
 }
 
-void QmlSmokeTest::spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof() {
+void SpectrogramSmokeTest::spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBeforeEof() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -10249,7 +10338,7 @@ void QmlSmokeTest::spectrogramCenteredDisplayRangeIgnoresLaggingDecodedTailBefor
     QVERIFY(item.m_precomputedCanvasDisplayLeft > decodedColumns);
 }
 
-void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
+void SpectrogramSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     // Contract for the stopped zoom-reset flow: with playback stopped at
     // position 0, a middle-click zoom reset (deep zoom-out hop -> reference
     // hop) restarts the decode session from the track start.  The widget
@@ -10359,7 +10448,7 @@ void QmlSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail() {
+void SpectrogramSmokeTest::spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail() {
     // Regression for viewport racing on zoom-out near the end of a track.
     // During the post-zoom refill the decoded tail lags far behind the
     // playhead, which makes the EOF-detach precondition trivially true;
@@ -10408,7 +10497,7 @@ void QmlSmokeTest::spectrogramZoomOutFillDoesNotClampToLaggingDecodedTail() {
              static_cast<qint64>(1162 - 1));
 }
 
-void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
+void SpectrogramSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
     // Regression: the centered ring resets on every session restart
     // (e.g. zoom change on fullscreen toggle) and recomputes its cap
     // from the CURRENT widget width.  The Rust decoder's lookahead is
@@ -10469,7 +10558,7 @@ void QmlSmokeTest::spectrogramRingCapacityPersistsAcrossFullscreenShrink() {
     QCOMPARE(SpectrogramItem::s_maxWidgetWidthSeen, 3840);
 }
 
-void QmlSmokeTest::spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChunk() {
+void SpectrogramSmokeTest::spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChunk() {
     // Regression: the Rust worker records a larger widget width as soon as
     // QML reports it, but Qt used to record the same maximum only while
     // ingesting a data chunk. If fullscreen was closed before the parked
@@ -10499,7 +10588,7 @@ void QmlSmokeTest::spectrogramRingCapacityRemembersFullscreenWidthBeforeNextChun
                             .arg(item.m_ringCapacity)));
 }
 
-void QmlSmokeTest::spectrogramMaxWidgetWidthSurvivesInstanceReplacement() {
+void SpectrogramSmokeTest::spectrogramMaxWidgetWidthSurvivesInstanceReplacement() {
     // Regression: when the channel count changes (e.g. 6ch PerChannel
     // → 2ch PerChannel), the old SpectrogramItems are destroyed and
     // fresh ones are created.  The Rust-side lookahead tracker is a
@@ -10554,7 +10643,7 @@ void QmlSmokeTest::spectrogramMaxWidgetWidthSurvivesInstanceReplacement() {
                             .arg(fresh.m_ringCapacity)));
 }
 
-void QmlSmokeTest::spectrogramRollingGaplessTrackChangePreservesZoom() {
+void SpectrogramSmokeTest::spectrogramRollingGaplessTrackChangePreservesZoom() {
     SpectrogramItem item;
     item.setWidth(1200);
     item.setHeight(200);
@@ -10594,7 +10683,7 @@ void QmlSmokeTest::spectrogramRollingGaplessTrackChangePreservesZoom() {
     QCOMPARE(item.m_renderZoomLevel, 4.0);
 }
 
-void QmlSmokeTest::spectrogramCenteredGaplessTrackChangeResetsZoom() {
+void SpectrogramSmokeTest::spectrogramCenteredGaplessTrackChangeResetsZoom() {
     SpectrogramItem item;
     item.setWidth(1200);
     item.setHeight(200);
@@ -10635,7 +10724,7 @@ void QmlSmokeTest::spectrogramCenteredGaplessTrackChangeResetsZoom() {
     QCOMPARE(item.m_renderZoomLevel, 1.0);
 }
 
-void QmlSmokeTest::spectrogramRollingResetTrackChangeResetsZoom() {
+void SpectrogramSmokeTest::spectrogramRollingResetTrackChangeResetsZoom() {
     SpectrogramItem item;
     item.setWidth(1200);
     item.setHeight(200);
@@ -10679,7 +10768,7 @@ void QmlSmokeTest::spectrogramRollingResetTrackChangeResetsZoom() {
     QCOMPARE(item.m_renderZoomLevel, 1.0);
 }
 
-void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
+void SpectrogramSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -10727,7 +10816,7 @@ void QmlSmokeTest::spectrogramTrackChangeMetadataResetClearsOldCenteredFrame() {
     QVERIFY(item.m_positionSeconds < 0.01);
 }
 
-void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {
+void SpectrogramSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {
     // Regression: the Rust-side zoom_level persists across tracks
     // (track changes don't reset it).  When a channel-count change
     // destroys the SpectrogramItem instances and creates fresh ones,
@@ -10793,7 +10882,7 @@ void QmlSmokeTest::spectrogramFreshInstanceResyncsBackendZoomOnTrackChange() {
     QCOMPARE(item.m_renderZoomLevel, 1.0);
 }
 
-void QmlSmokeTest::spectrogramFreshInstanceSeekRestartDoesNotResetZoom() {
+void SpectrogramSmokeTest::spectrogramFreshInstanceSeekRestartDoesNotResetZoom() {
     // Regression: centered same-track seeks outside the current
     // window restart decoding with the same track token but a non-zero
     // startIndex. Fresh SpectrogramItem instances can see that restart
@@ -10833,7 +10922,7 @@ void QmlSmokeTest::spectrogramFreshInstanceSeekRestartDoesNotResetZoom() {
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, total);
 }
 
-void QmlSmokeTest::spectrogramTrackChangeCancelsPendingZoomDebounce() {
+void SpectrogramSmokeTest::spectrogramTrackChangeCancelsPendingZoomDebounce() {
     // Regression: a SpectrogramItem is instantiated with
     // m_zoomLevel defaulting to 1.0, then the QML zoomLevel
     // property binding pushes the SpectrogramSurface's existing
@@ -10894,7 +10983,7 @@ void QmlSmokeTest::spectrogramTrackChangeCancelsPendingZoomDebounce() {
     QCOMPARE(backendZoomSpy.count(), 0);
 }
 
-void QmlSmokeTest::spectrogramCenteredGaplessFollowsTheClock() {
+void SpectrogramSmokeTest::spectrogramCenteredGaplessFollowsTheClock() {
     // In centered mode, the playhead moves to the start of a gapless
     // successor as soon as the clock reports it, and stays with the clock
     // when the successor's data arrives.
@@ -10933,7 +11022,7 @@ void QmlSmokeTest::spectrogramCenteredGaplessFollowsTheClock() {
     QVERIFY(item.m_positionSeconds < 1.0);
 }
 
-void QmlSmokeTest::spectrogramForceFpsOverlayDoesNotOverrideQmlBinding() {
+void SpectrogramSmokeTest::spectrogramForceFpsOverlayDoesNotOverrideQmlBinding() {
     // forceFpsOverlay is a CONSTANT property set at construction time from
     // the FERROUS_PROFILE_UI env var.  The setter for showFpsOverlay must
     // NOT OR in the force flag — QML's index===0 gate must be respected.
@@ -10948,7 +11037,7 @@ void QmlSmokeTest::spectrogramForceFpsOverlayDoesNotOverrideQmlBinding() {
     QCOMPARE(item.showFpsOverlay(), false);
 }
 
-void QmlSmokeTest::spectrogramRenderLoopStopsWhenNotPlaying() {
+void SpectrogramSmokeTest::spectrogramRenderLoopStopsWhenNotPlaying() {
     // The spectrogram's self-sustaining render loop (frameSwapped →
     // handleWindowAfterAnimating → update) must only re-trigger when
     // m_playing is true.  Without this guard the render loop runs at
@@ -11036,7 +11125,7 @@ constexpr double kWholeTrackColumnsPerSecond = 48'000.0 / 20'480.0;
 
 } // namespace
 
-void QmlSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
+void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
     QQuickWindow window;
     window.resize(400, 100);
     window.show();
@@ -11063,7 +11152,7 @@ void QmlSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramStillFramesLeaveTextureNodesAlone() {
+void SpectrogramSmokeTest::spectrogramStillFramesLeaveTextureNodesAlone() {
     // The scene graph redoes each node it is told has changed: its geometry,
     // its material, and the batches it is in. A frame that shows what the
     // last one did, or moves only the playhead, changes no texture node.
@@ -11101,13 +11190,13 @@ void QmlSmokeTest::spectrogramStillFramesLeaveTextureNodesAlone() {
     }
 }
 
-void QmlSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data() {
+void SpectrogramSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data() {
     QTest::addColumn<double>("scale");
     QTest::newRow("1x") << 1.0;
     QTest::newRow("2x") << 2.0;
 }
 
-void QmlSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel() {
+void SpectrogramSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel() {
     QFETCH(double, scale);
     QQuickWindow window;
     window.resize(400, 100);
@@ -11160,7 +11249,7 @@ void QmlSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramLateFrameCallbackDrawsAtOnce() {
+void SpectrogramSmokeTest::spectrogramLateFrameCallbackDrawsAtOnce() {
     // The frame painted at 50 s shows column 117 until column 118 at
     // 50.35 s. Its frame-swapped callback arrives after that: the next
     // frame is due at once.
@@ -11178,7 +11267,7 @@ void QmlSmokeTest::spectrogramLateFrameCallbackDrawsAtOnce() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramMovingViewsRequestEveryFrame() {
+void SpectrogramSmokeTest::spectrogramMovingViewsRequestEveryFrame() {
     // Rolling views, and centered ones while they scroll, move every frame.
     for (const bool rolling : {false, true}) {
         SpectrogramItem item;
@@ -11208,7 +11297,7 @@ void QmlSmokeTest::spectrogramMovingViewsRequestEveryFrame() {
     }
 }
 
-void QmlSmokeTest::spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce() {
+void SpectrogramSmokeTest::spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce() {
     SpectrogramItem item;
     prepareWholeTrackPlayback(item, 50.0);
     QSGNode *node = paintSettled(item, nullptr);
@@ -11249,7 +11338,7 @@ void QmlSmokeTest::spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramIdleViewDrawsOnlyFramesThatDiffer() {
+void SpectrogramSmokeTest::spectrogramIdleViewDrawsOnlyFramesThatDiffer() {
     // In a window: the whole track in view moves its playhead a pixel
     // 2.34 times a second, and the window draws about that often. A view
     // that scrolls draws every frame.
@@ -11285,7 +11374,7 @@ void QmlSmokeTest::spectrogramIdleViewDrawsOnlyFramesThatDiffer() {
     QVERIFY2(frames >= 4 * std::max(idleFrames, 5), qPrintable(QString::number(frames)));
 }
 
-void QmlSmokeTest::mainWindowStopsPositionFramesWhileHidden() {
+void TransportInputSmokeTest::mainWindowStopsPositionFramesWhileHidden() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     LibraryTreeModel libraryModel;
@@ -11345,7 +11434,7 @@ void QmlSmokeTest::mainWindowStopsPositionFramesWhileHidden() {
     QVERIFY(bridge->setProperty("playbackClock", QVariant()));
 }
 
-void QmlSmokeTest::trackIdentityChangedSignalTriggersQmlHandler() {
+void LibraryQueueSmokeTest::trackIdentityChangedSignalTriggersQmlHandler() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -11387,7 +11476,7 @@ Item {
     QCOMPARE(root->property("trackIdentityChangedCount").toInt(), 1);
 }
 
-void QmlSmokeTest::queueRemovalSendsOneBatch() {
+void LibraryQueueSmokeTest::queueRemovalSendsOneBatch() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -11423,7 +11512,7 @@ Item {
     QCOMPARE(root->property("removed").toString(), QStringLiteral("9999,200,1"));
 }
 
-void QmlSmokeTest::queueEditsKeepSelectionAndViewport() {
+void LibraryQueueSmokeTest::queueEditsKeepSelectionAndViewport() {
     QueueRowsModel rows;
     const auto row = [](int number) {
         QueueRowData data;
@@ -11585,7 +11674,7 @@ Window {
     QCOMPARE(selection(), (QList<int>{50}));
 }
 
-void QmlSmokeTest::queueRemovalsKeepActionsOnHighlightedRows() {
+void LibraryQueueSmokeTest::queueRemovalsKeepActionsOnHighlightedRows() {
     QueueRowsModel rows;
     const auto row = [](int number) {
         QueueRowData data;
@@ -11818,7 +11907,7 @@ Item {
     QCOMPARE(takeCommands(), QString{});
 }
 
-void QmlSmokeTest::queueAutoCenterIsDeferredOffHandlerStack() {
+void LibraryQueueSmokeTest::queueAutoCenterIsDeferredOffHandlerStack() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR)
@@ -11961,7 +12050,7 @@ Item {
     return view->property("contentY").toDouble();
 }
 
-void QmlSmokeTest::queueContainIndexSkipsScrollWhenVisible() {
+void LibraryQueueSmokeTest::queueContainIndexSkipsScrollWhenVisible() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR)
@@ -11976,7 +12065,7 @@ void QmlSmokeTest::queueContainIndexSkipsScrollWhenVisible() {
     QCOMPARE(result, 100.0);
 }
 
-void QmlSmokeTest::queueContainIndexScrollsUpWhenAboveViewport() {
+void LibraryQueueSmokeTest::queueContainIndexScrollsUpWhenAboveViewport() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR)
@@ -11991,7 +12080,7 @@ void QmlSmokeTest::queueContainIndexScrollsUpWhenAboveViewport() {
     QCOMPARE(result, 48.0);
 }
 
-void QmlSmokeTest::queueContainIndexClampsAtListEnd() {
+void LibraryQueueSmokeTest::queueContainIndexClampsAtListEnd() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR)
@@ -12008,7 +12097,7 @@ void QmlSmokeTest::queueContainIndexClampsAtListEnd() {
     QCOMPARE(result, 23600.0);
 }
 
-void QmlSmokeTest::spectrogramCrosshairAndGridPropertiesAndHoverTracking() {
+void SpectrogramSmokeTest::spectrogramCrosshairAndGridPropertiesAndHoverTracking() {
     // Verify crosshairEnabled/gridEnabled properties default to false,
     // emit change signals, and that hover events update internal state.
     SpectrogramItem item;
@@ -12084,7 +12173,7 @@ void QmlSmokeTest::spectrogramCrosshairAndGridPropertiesAndHoverTracking() {
     QCOMPARE(item.m_crosshairDirty, false); // but NOT dirty
 }
 
-void QmlSmokeTest::spectrogramPixelToFrequency() {
+void SpectrogramSmokeTest::spectrogramPixelToFrequency() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     // Feed data to set binsPerColumn = 4097 (FFT size 8192).
@@ -12104,7 +12193,7 @@ void QmlSmokeTest::spectrogramPixelToFrequency() {
     QVERIFY(midFreq > 10000.0 && midFreq < 14000.0);
 }
 
-void QmlSmokeTest::spectrogramRebuildBenchmark() {
+void SpectrogramSmokeTest::spectrogramRebuildBenchmark() {
     if (qEnvironmentVariableIntValue("FERROUS_BENCHMARK_SPECTROGRAM") != 1) {
         QSKIP("Set FERROUS_BENCHMARK_SPECTROGRAM=1 to measure CPU projection");
     }
@@ -12295,7 +12384,7 @@ void QmlSmokeTest::spectrogramRebuildBenchmark() {
     }
 }
 
-void QmlSmokeTest::spectrogramOverlayBenchmark() {
+void SpectrogramSmokeTest::spectrogramOverlayBenchmark() {
     if (qEnvironmentVariableIntValue("FERROUS_BENCHMARK_SPECTROGRAM") != 1) {
         QSKIP("Set FERROUS_BENCHMARK_SPECTROGRAM=1 to measure overlay refreshes");
     }
@@ -12384,7 +12473,7 @@ void QmlSmokeTest::spectrogramOverlayBenchmark() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramPlaybackBenchmark() {
+void SpectrogramSmokeTest::spectrogramPlaybackBenchmark() {
     if (qEnvironmentVariableIntValue("FERROUS_BENCHMARK_SPECTROGRAM") != 1) {
         QSKIP("Set FERROUS_BENCHMARK_SPECTROGRAM=1 to measure playback frames");
     }
@@ -12523,7 +12612,7 @@ void QmlSmokeTest::spectrogramPlaybackBenchmark() {
     }
 }
 
-void QmlSmokeTest::spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans() {
+void SpectrogramSmokeTest::spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans() {
     SpectrogramItem first;
     SpectrogramItem second;
     const auto prepare = [](SpectrogramItem &item, int height) {
@@ -12563,7 +12652,7 @@ void QmlSmokeTest::spectrogramProjectionSharesImmutableSettingsAndReleasesUnused
     QVERIFY(released.expired());
 }
 
-void QmlSmokeTest::spectrogramProjectionWritesPreserveSharedCanvasImages() {
+void SpectrogramSmokeTest::spectrogramProjectionWritesPreserveSharedCanvasImages() {
     for (bool rolling : {false, true}) {
         SpectrogramItem item;
         item.setWidth(2);
@@ -12585,7 +12674,7 @@ void QmlSmokeTest::spectrogramProjectionWritesPreserveSharedCanvasImages() {
     }
 }
 
-void QmlSmokeTest::spectrogramDynamicRangePreservesSilence() {
+void SpectrogramSmokeTest::spectrogramDynamicRangePreservesSilence() {
     SpectrogramItem item;
     for (int mode : {0, 1}) {
         item.setDisplayMode(mode);
@@ -12605,7 +12694,7 @@ void QmlSmokeTest::spectrogramDynamicRangePreservesSilence() {
     }
 }
 
-void QmlSmokeTest::spectrogramSampleRateSyncsFromPrecomputedChunks() {
+void SpectrogramSmokeTest::spectrogramSampleRateSyncsFromPrecomputedChunks() {
     SpectrogramItem item;
     // Start with default 48 kHz property — simulates QML binding.
     item.setSampleRateHz(48000);
@@ -12626,7 +12715,7 @@ void QmlSmokeTest::spectrogramSampleRateSyncsFromPrecomputedChunks() {
              qPrintable(QStringLiteral("Expected Nyquist ~22050 but got %1").arg(topFreq)));
 }
 
-void QmlSmokeTest::spectrogramPreservesNativeRateAcrossModesAndTrackTransitions() {
+void SpectrogramSmokeTest::spectrogramPreservesNativeRateAcrossModesAndTrackTransitions() {
     for (int mode : {0, 1}) {
         SpectrogramItem item;
         item.setWidth(200);
@@ -12650,7 +12739,7 @@ void QmlSmokeTest::spectrogramPreservesNativeRateAcrossModesAndTrackTransitions(
     }
 }
 
-void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
+void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     item.setCrosshairEnabled(true);
@@ -12688,7 +12777,7 @@ void QmlSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
     QVERIFY(item.m_crosshair.images[2].text.endsWith(QStringLiteral("Hz")));
 }
 
-void QmlSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {
+void SpectrogramSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     item.setCrosshairEnabled(true);
@@ -12723,7 +12812,7 @@ void QmlSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {
     }
 }
 
-void QmlSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
+void SpectrogramSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     item.setGridEnabled(true);
@@ -12756,7 +12845,7 @@ void QmlSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
     QVERIFY(!item.m_timeGrid.lines.isEmpty());
 }
 
-void QmlSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
+void SpectrogramSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     // Both overlays default to disabled.
@@ -12789,7 +12878,7 @@ void QmlSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
     QVERIFY(!item.m_timeGrid.valid);
 }
 
-void QmlSmokeTest::spectrogramOverlayDirtiedByGeometryChange() {
+void SpectrogramSmokeTest::spectrogramOverlayDirtiedByGeometryChange() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     item.setCrosshairEnabled(true);
@@ -12821,7 +12910,7 @@ void QmlSmokeTest::spectrogramOverlayDirtiedByGeometryChange() {
     QVERIFY(item.m_freqGridDirty || item.m_timeGridDirty);
 }
 
-void QmlSmokeTest::spectrogramOverlayDirtiedByLogScaleChange() {
+void SpectrogramSmokeTest::spectrogramOverlayDirtiedByLogScaleChange() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     item.setCrosshairEnabled(true);
@@ -12853,7 +12942,7 @@ void QmlSmokeTest::spectrogramOverlayDirtiedByLogScaleChange() {
     QVERIFY(item.m_freqGridDirty || item.m_timeGridDirty);
 }
 
-void QmlSmokeTest::spectrogramOverlayStalenessDetectsBinChange() {
+void SpectrogramSmokeTest::spectrogramOverlayStalenessDetectsBinChange() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     item.setCrosshairEnabled(true);
@@ -12885,7 +12974,7 @@ void QmlSmokeTest::spectrogramOverlayStalenessDetectsBinChange() {
     QVERIFY(item.m_binsPerColumn != item.m_freqGridCachedBinsPerColumn);
 }
 
-void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
+void SpectrogramSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
     SpectrogramItem item;
     item.setWidth(200);
     item.setHeight(100);
@@ -12944,7 +13033,7 @@ void QmlSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
     delete node2;
 }
 
-void QmlSmokeTest::spectrogramOverlayStalenessDetectsDisplayRangeChange() {
+void SpectrogramSmokeTest::spectrogramOverlayStalenessDetectsDisplayRangeChange() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
     item.setGridEnabled(true);
@@ -12971,7 +13060,7 @@ void QmlSmokeTest::spectrogramOverlayStalenessDetectsDisplayRangeChange() {
     QCOMPARE(item.m_timeGridRenderDisplayLeft, static_cast<qint64>(0));
 }
 
-void QmlSmokeTest::testMutedChannelRendersGrayscale()
+void SpectrogramSmokeTest::testMutedChannelRendersGrayscale()
 {
     SpectrogramItem item;
     item.setWidth(320);
@@ -13008,7 +13097,7 @@ void QmlSmokeTest::testMutedChannelRendersGrayscale()
     QCOMPARE(spy.count(), 1);
 }
 
-void QmlSmokeTest::spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled() {
+void SpectrogramSmokeTest::spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -13056,7 +13145,7 @@ void QmlSmokeTest::spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled() {
     QVERIFY(seekSeconds < 5.0);  // Left of center → earlier than playhead
 }
 
-void QmlSmokeTest::spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale() {
+void SpectrogramSmokeTest::spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -13110,7 +13199,7 @@ void QmlSmokeTest::spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIs
             .arg(seekSeconds, 0, 'f', 3)));
 }
 
-void QmlSmokeTest::spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode() {
+void SpectrogramSmokeTest::spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -13156,7 +13245,7 @@ void QmlSmokeTest::spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode
             .arg(seekSeconds, 0, 'f', 3)));
 }
 
-void QmlSmokeTest::spectrogramSignalsWithoutItsStateLocked() {
+void SpectrogramSmokeTest::spectrogramSignalsWithoutItsStateLocked() {
     SpectrogramItem item;
     StateMutexProbe probe(&item, &item.m_stateMutex);
     item.setWidth(320);
@@ -13205,7 +13294,7 @@ void QmlSmokeTest::spectrogramSignalsWithoutItsStateLocked() {
     QVERIFY2(probe.heldSignals.isEmpty(), qPrintable(probe.heldSignals.join(QLatin1String(", "))));
 }
 
-void QmlSmokeTest::spectrogramClickToSeekMatchesTheHeldView_data() {
+void SpectrogramSmokeTest::spectrogramClickToSeekMatchesTheHeldView_data() {
     QTest::addColumn<double>("scale");
     QTest::addColumn<bool>("steppedBack");
     for (const double scale : {1.0, 2.0}) {
@@ -13214,7 +13303,7 @@ void QmlSmokeTest::spectrogramClickToSeekMatchesTheHeldView_data() {
     }
 }
 
-void QmlSmokeTest::spectrogramClickToSeekMatchesTheHeldView() {
+void SpectrogramSmokeTest::spectrogramClickToSeekMatchesTheHeldView() {
     QFETCH(double, scale);
     QFETCH(bool, steppedBack);
     QQuickWindow window;
@@ -13292,7 +13381,7 @@ void QmlSmokeTest::spectrogramClickToSeekMatchesTheHeldView() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramCenteredViewMatchesTheDecodersModel() {
+void SpectrogramSmokeTest::spectrogramCenteredViewMatchesTheDecodersModel() {
     // The cases the decoder's model of the view is tested against too.
     QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/../src/analysis/fixtures/centered-view.txt"));
     QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
@@ -13319,7 +13408,7 @@ void QmlSmokeTest::spectrogramCenteredViewMatchesTheDecodersModel() {
     QVERIFY(checked >= 9);
 }
 
-void QmlSmokeTest::spectrogramClickToSeekSuppressedWhenCrosshairDisabled() {
+void SpectrogramSmokeTest::spectrogramClickToSeekSuppressedWhenCrosshairDisabled() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -13346,7 +13435,7 @@ void QmlSmokeTest::spectrogramClickToSeekSuppressedWhenCrosshairDisabled() {
     QCOMPARE(seekSpy.count(), 0);
 }
 
-void QmlSmokeTest::spectrogramLeftClickDoesNotSeek() {
+void SpectrogramSmokeTest::spectrogramLeftClickDoesNotSeek() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -13374,7 +13463,7 @@ void QmlSmokeTest::spectrogramLeftClickDoesNotSeek() {
     QCOMPARE(seekSpy.count(), 0);
 }
 
-void QmlSmokeTest::spectrogramClickToSeekDisabledInRollingMode() {
+void SpectrogramSmokeTest::spectrogramClickToSeekDisabledInRollingMode() {
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -13410,7 +13499,7 @@ void QmlSmokeTest::spectrogramClickToSeekDisabledInRollingMode() {
     QCOMPARE(seekSpy.count(), 0);
 }
 
-void QmlSmokeTest::spectrogramZoomProperty() {
+void SpectrogramSmokeTest::spectrogramZoomProperty() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
@@ -13450,7 +13539,7 @@ void QmlSmokeTest::spectrogramZoomProperty() {
     QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
 }
 
-void QmlSmokeTest::spectrogramZoomLimitsWithTrackData() {
+void SpectrogramSmokeTest::spectrogramZoomLimitsWithTrackData() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
@@ -13472,7 +13561,7 @@ void QmlSmokeTest::spectrogramZoomLimitsWithTrackData() {
     QVERIFY(std::abs(minZoom - 0.2) < 0.01);
 }
 
-void QmlSmokeTest::spectrogramZoomOutBlockedWhenSongFits() {
+void SpectrogramSmokeTest::spectrogramZoomOutBlockedWhenSongFits() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
@@ -13498,7 +13587,7 @@ void QmlSmokeTest::spectrogramZoomOutBlockedWhenSongFits() {
     QVERIFY(std::abs(item.zoomLevel() - 2.0) < 0.0001);
 }
 
-void QmlSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {
+void SpectrogramSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
@@ -13527,7 +13616,7 @@ void QmlSmokeTest::spectrogramEffectiveZoomMatchesBackendHop() {
     QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
 }
 
-void QmlSmokeTest::spectrogramAdvanceWorksWhenBackendMatchesZoom() {
+void SpectrogramSmokeTest::spectrogramAdvanceWorksWhenBackendMatchesZoom() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
@@ -13555,7 +13644,7 @@ void QmlSmokeTest::spectrogramAdvanceWorksWhenBackendMatchesZoom() {
     QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
 }
 
-void QmlSmokeTest::spectrogramEffectiveZoomDuringTransition() {
+void SpectrogramSmokeTest::spectrogramEffectiveZoomDuringTransition() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
@@ -13591,7 +13680,7 @@ void QmlSmokeTest::spectrogramEffectiveZoomDuringTransition() {
     QVERIFY(std::abs(item.zoomLevel() - 4.0) < 0.0001);
 }
 
-void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
+void SpectrogramSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
@@ -13652,7 +13741,7 @@ void QmlSmokeTest::spectrogramDeferredZoomAppliesOnBackendData() {
     QVERIFY(std::abs(item.zoomLevel() - 1.0) < 0.0001);
 }
 
-void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack() {
+void SpectrogramSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack() {
     SpectrogramItem item;
     item.setWidth(200);
     item.setHeight(100);
@@ -13705,7 +13794,7 @@ void QmlSmokeTest::spectrogramCenteredZoomOutBackendRestartReanchorsToFullTrack(
     delete updatedNode;
 }
 
-void QmlSmokeTest::spectrogramResizeShowsTheScaledCanvasUntilItsRasterArrives() {
+void SpectrogramSmokeTest::spectrogramResizeShowsTheScaledCanvasUntilItsRasterArrives() {
     QQuickWindow window;
     window.resize(340, 160);
     window.show();
@@ -13780,7 +13869,7 @@ void QmlSmokeTest::spectrogramResizeShowsTheScaledCanvasUntilItsRasterArrives() 
     delete node;
 }
 
-void QmlSmokeTest::spectrogramRollingResizeKeepsTheHistoryAtTheRightEdge() {
+void SpectrogramSmokeTest::spectrogramRollingResizeKeepsTheHistoryAtTheRightEdge() {
     QQuickWindow window;
     window.resize(300, 100);
     window.show();
@@ -13819,7 +13908,7 @@ void QmlSmokeTest::spectrogramRollingResizeKeepsTheHistoryAtTheRightEdge() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramStaleRasterIsDiscarded() {
+void SpectrogramSmokeTest::spectrogramStaleRasterIsDiscarded() {
     SpectrogramItem item;
     item.setWidth(200);
     item.setHeight(100);
@@ -13869,7 +13958,7 @@ void QmlSmokeTest::spectrogramStaleRasterIsDiscarded() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramCachedBackwardSeekKeepsTheCanvasOnScreen() {
+void SpectrogramSmokeTest::spectrogramCachedBackwardSeekKeepsTheCanvasOnScreen() {
     QQuickWindow window;
     window.resize(240, 160);
     window.show();
@@ -13908,7 +13997,7 @@ void QmlSmokeTest::spectrogramCachedBackwardSeekKeepsTheCanvasOnScreen() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramCachedForwardSeekRasterizesOffTheRenderSync() {
+void SpectrogramSmokeTest::spectrogramCachedForwardSeekRasterizesOffTheRenderSync() {
     QQuickWindow window;
     window.resize(240, 160);
     window.show();
@@ -13937,7 +14026,7 @@ void QmlSmokeTest::spectrogramCachedForwardSeekRasterizesOffTheRenderSync() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramResumedForwardSeekRasterizesOffTheRenderSync() {
+void SpectrogramSmokeTest::spectrogramResumedForwardSeekRasterizesOffTheRenderSync() {
     QQuickWindow window;
     window.resize(240, 160);
     window.show();
@@ -13988,7 +14077,7 @@ void QmlSmokeTest::spectrogramResumedForwardSeekRasterizesOffTheRenderSync() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramPlaybackTravelCountsOnlyContinuousPlayback() {
+void SpectrogramSmokeTest::spectrogramPlaybackTravelCountsOnlyContinuousPlayback() {
     TestTime time;
     SpectrogramItem item;
     time.drive(item);
@@ -14033,7 +14122,7 @@ void QmlSmokeTest::spectrogramPlaybackTravelCountsOnlyContinuousPlayback() {
     QVERIFY2(std::abs(resumed - 1.0) < 1e-6, qPrintable(QString::number(resumed)));
 }
 
-void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data() {
+void SpectrogramSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data() {
     QTest::addColumn<bool>("rolling");
     // Device pixels to a logical pixel.
     QTest::addColumn<double>("scale");
@@ -14044,7 +14133,7 @@ void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data() {
     }
 }
 
-void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds() {
+void SpectrogramSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds() {
     QFETCH(bool, rolling);
     QFETCH(double, scale);
     constexpr int logicalWidth = 1000;
@@ -14086,7 +14175,7 @@ void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback() {
+void SpectrogramSmokeTest::spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback() {
     constexpr int width = 2000;
     TestTime time;
     SpectrogramItem item;
@@ -14123,7 +14212,7 @@ void QmlSmokeTest::spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramZoomDataKeepsThePreviewUntilItsRasterArrives() {
+void SpectrogramSmokeTest::spectrogramZoomDataKeepsThePreviewUntilItsRasterArrives() {
     // Rolling zooms, and centered zoom-outs, wait for their data without a
     // zoom fill: the data's reset must not leave a frame without a canvas.
     for (const bool rolling : {true, false}) {
@@ -14169,7 +14258,7 @@ void QmlSmokeTest::spectrogramZoomDataKeepsThePreviewUntilItsRasterArrives() {
     }
 }
 
-void QmlSmokeTest::spectrogramColumnsArrivingDuringARasterAreDrawnIn() {
+void SpectrogramSmokeTest::spectrogramColumnsArrivingDuringARasterAreDrawnIn() {
     SpectrogramItem item;
     item.setWidth(200);
     item.setHeight(100);
@@ -14197,7 +14286,7 @@ void QmlSmokeTest::spectrogramColumnsArrivingDuringARasterAreDrawnIn() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramItemDestroyedDuringRasterIsSafe() {
+void SpectrogramSmokeTest::spectrogramItemDestroyedDuringRasterIsSafe() {
     std::shared_ptr<SpectrogramRasterMailbox> mailbox;
     {
         auto *item = new SpectrogramItem();
@@ -14220,10 +14309,10 @@ void QmlSmokeTest::spectrogramItemDestroyedDuringRasterIsSafe() {
     // The rasterization ends and lets go of everything without reaching
     // the item; nothing it posted is delivered.
     QTRY_COMPARE_WITH_TIMEOUT(mailbox.use_count(), 1L, 5000);
-    QTest::qWait(20);
+    QCoreApplication::sendPostedEvents();
 }
 
-void QmlSmokeTest::spectrogramDestroyedInItsWindowRunsNoHandlersOfItsOwn() {
+void SpectrogramSmokeTest::spectrogramDestroyedInItsWindowRunsNoHandlersOfItsOwn() {
     // ~QQuickItem takes an item out of its window once the item's own
     // members are destroyed, and emits windowChanged. The item's handler
     // for it once ran then and wrote to its freed canvas tiles.
@@ -14259,7 +14348,7 @@ void QmlSmokeTest::spectrogramDestroyedInItsWindowRunsNoHandlersOfItsOwn() {
     QVERIFY(!ownHandlersStillConnected);
 }
 
-void QmlSmokeTest::spectrogramSurfaceCoalescesWidthReports() {
+void SpectrogramSmokeTest::spectrogramSurfaceCoalescesWidthReports() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
 
     QQmlApplicationEngine engine;
@@ -14360,7 +14449,7 @@ Window {
     QVERIFY(restart.indexOf(QVariant(1000)) < restart.indexOf(QVariant(QStringLiteral("zoom"))));
 }
 
-void QmlSmokeTest::spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights() {
+void SpectrogramSmokeTest::spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights() {
     SpectrogramItem item;
     item.setWidth(240);
     item.setHeight(159);
@@ -14411,7 +14500,7 @@ void QmlSmokeTest::spectrogramLinearScaleKeepsTopBinVisibleAtTallHeights() {
     delete updatedNode;
 }
 
-void QmlSmokeTest::spectrogramZoomOutProducesDistinctHop() {
+void SpectrogramSmokeTest::spectrogramZoomOutProducesDistinctHop() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
@@ -14447,7 +14536,7 @@ void QmlSmokeTest::spectrogramZoomOutProducesDistinctHop() {
     QVERIFY(std::abs(ez - 1.0) < 0.01);
 }
 
-void QmlSmokeTest::spectrogramCenteredZoomOutDropsOlderSameTrackGeneration() {
+void SpectrogramSmokeTest::spectrogramCenteredZoomOutDropsOlderSameTrackGeneration() {
     SpectrogramItem item;
     item.setWidth(1183);
     item.setHeight(100);
@@ -14504,7 +14593,7 @@ void QmlSmokeTest::spectrogramCenteredZoomOutDropsOlderSameTrackGeneration() {
     QCOMPARE(item.m_ringWriteSeq, ringWriteSeq);
 }
 
-void QmlSmokeTest::spectrogramMinZoomAdaptsToWidthChange() {
+void SpectrogramSmokeTest::spectrogramMinZoomAdaptsToWidthChange() {
     // Simulates the widget→fullscreen transition: when width increases,
     // minimumZoomLevel should increase (allow less zoom-out), and a zoom
     // level valid at the old width should be clamped to the new minimum.
@@ -14540,7 +14629,7 @@ void QmlSmokeTest::spectrogramMinZoomAdaptsToWidthChange() {
     QVERIFY(std::abs(item.zoomLevel() - wideMinZoom) < 0.01);
 }
 
-void QmlSmokeTest::spectrogramHighRateRetentionPreservesViewportWithinBudget() {
+void SpectrogramSmokeTest::spectrogramHighRateRetentionPreservesViewportWithinBudget() {
     for (int mode : {0, 1}) {
         SpectrogramItem item;
         item.setWidth(1920);
@@ -14566,7 +14655,7 @@ void QmlSmokeTest::spectrogramHighRateRetentionPreservesViewportWithinBudget() {
     }
 }
 
-void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
+void SpectrogramSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
     SpectrogramItem item;
     item.setWidth(1920);
     item.setHeight(400);
@@ -14586,7 +14675,7 @@ void QmlSmokeTest::spectrogramCenteredModeUsesWindowedCapacity() {
     QVERIFY(item.m_ringCapacity < 20000);
 }
 
-void QmlSmokeTest::spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead() {
+void SpectrogramSmokeTest::spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead() {
     SpectrogramItem item;
     item.setWidth(3440);
     item.setHeight(80);
@@ -14613,7 +14702,7 @@ void QmlSmokeTest::spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead() 
         "rolling mode should reserve at least one extra viewport width of ring headroom beyond the decode lookahead");
 }
 
-void QmlSmokeTest::spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill() {
+void SpectrogramSmokeTest::spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill() {
     SpectrogramItem item;
     item.setWidth(12);
     item.setHeight(6);
@@ -14671,7 +14760,7 @@ void QmlSmokeTest::spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill()
     }
 }
 
-void QmlSmokeTest::spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally() {
+void SpectrogramSmokeTest::spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally() {
     SpectrogramItem item;
     item.setWidth(12);
     item.setHeight(6);
@@ -14736,7 +14825,7 @@ void QmlSmokeTest::spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally()
     }
 }
 
-void QmlSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom() {
+void SpectrogramSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom() {
     SpectrogramItem item;
     item.setWidth(7);
     item.setHeight(6);
@@ -14799,7 +14888,7 @@ void QmlSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom
     }
 }
 
-void QmlSmokeTest::hiddenSpectrogramDefersPaintingAndRetainsIncomingData() {
+void SpectrogramSmokeTest::hiddenSpectrogramDefersPaintingAndRetainsIncomingData() {
     for (const int mode : {0, 1}) {
         SpectrogramItem item;
         item.setWidth(100);
@@ -14835,7 +14924,7 @@ void QmlSmokeTest::hiddenSpectrogramDefersPaintingAndRetainsIncomingData() {
     }
 }
 
-void QmlSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset() {
+void SpectrogramSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset() {
     // A centered canvas becomes circular once its display window starts
     // scrolling. Columns that arrive later for a previously blank right-edge
     // region must be written through that circular offset, not to their
@@ -14875,7 +14964,7 @@ void QmlSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset() {
     QVERIFY(item.m_canvas.pixel(1, 5) != qRgb(0, 0, 0));
 }
 
-void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
+void SpectrogramSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
     SpectrogramItem item;
     item.setWidth(100);
     item.setHeight(10);
@@ -14926,7 +15015,7 @@ void QmlSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
             > qRed(darkPixel) + qGreen(darkPixel) + qBlue(darkPixel));
 }
 
-void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
+void SpectrogramSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
     // Regression: at max zoom-out in a wide fullscreen canvas the
     // STFT windowing leaves the decoder a few columns short of the
     // scaled totalEstimate.  The old readiness check required
@@ -14981,7 +15070,7 @@ void QmlSmokeTest::spectrogramZoomFillClearsWhenDecoderReachesTail() {
     QVERIFY(item.m_precomputedCanvasDirty);
 }
 
-void QmlSmokeTest::spectrogramSyntheticClearPreservesCanvasDuringSeek() {
+void SpectrogramSmokeTest::spectrogramSyntheticClearPreservesCanvasDuringSeek() {
     // Regression: a seek outside the decoded window emits a synthetic
     // clear chunk (cols=0, bins=0, clear_history=true) that wipes the
     // ring and invalidates the canvas.  Without canvas preservation,
@@ -15038,7 +15127,7 @@ void QmlSmokeTest::spectrogramSyntheticClearPreservesCanvasDuringSeek() {
     QCOMPARE(item.m_zoomFillActive, true);
 }
 
-void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() {
+void SpectrogramSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() {
     // When there's no canvas to preserve (first track load, rolling
     // mode, or the display range was already invalid), the synthetic
     // clear must still wipe everything and invalidate — the freeze
@@ -15070,7 +15159,7 @@ void QmlSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent() 
              item.m_precomputedCanvasDisplayLeft - 1);
 }
 
-void QmlSmokeTest::searchResultIconsFollowForeground() {
+void LibraryQueueSmokeTest::searchResultIconsFollowForeground() {
     QQmlEngine engine;
     QString errorText;
     QScopedPointer<QObject> object(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
@@ -15123,7 +15212,7 @@ Window {
     QTRY_VERIFY(allIconsUseColor(QColor("#222222")));
 }
 
-void QmlSmokeTest::globalSearchKeyboardAndResponsiveResults() {
+void LibraryQueueSmokeTest::globalSearchKeyboardAndResponsiveResults() {
     GlobalSearchResultsModel model;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> rows;
     for (int i = 0; i < 80; ++i) {
@@ -15322,8 +15411,8 @@ ApplicationWindow {
         QCoreApplication::sendEvent(view->window(), &wheel);
         QTest::qWait(30);
     }
-    QTest::qWait(250);
-    QVERIFY(view->property("contentY").toReal() > view->height());
+    QTRY_VERIFY(view->property("contentY").toReal() > view->height());
+    QTRY_VERIFY(!view->property("moving").toBool());
     QVERIFY(view->property("resultRowHeight").toReal() <= 34);
     QVERIFY(view->height() / view->property("resultRowHeight").toReal() >= 11);
     QTest::keyClick(window, Qt::Key_Down);
@@ -15339,7 +15428,8 @@ ApplicationWindow {
     QTest::qWait(30);
     QTest::keyClick(window, Qt::Key_Up);
     QTRY_VERIFY(selectionFullyVisible());
-    QTest::qWait(200);
+    // The flick ends where the selection stays in view.
+    QTRY_VERIFY(!view->property("moving").toBool());
     QVERIFY(selectionFullyVisible());
     QTest::keyClick(window, Qt::Key_PageDown);
     QTRY_VERIFY(selectionFullyVisible());
@@ -15474,7 +15564,7 @@ int callIntFunction(QObject *object, const char *function) {
 
 } // namespace
 
-void QmlSmokeTest::wheelScrollsListsByTheWheelDelta() {
+void LibraryQueueSmokeTest::wheelScrollsListsByTheWheelDelta() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
@@ -15523,7 +15613,7 @@ void QmlSmokeTest::wheelScrollsListsByTheWheelDelta() {
     QCOMPARE(contentY(), before);
 }
 
-void QmlSmokeTest::queueKeysReachBothEndsAndOpenTheContextMenu() {
+void LibraryQueueSmokeTest::queueKeysReachBothEndsAndOpenTheContextMenu() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -15556,7 +15646,7 @@ void QmlSmokeTest::queueKeysReachBothEndsAndOpenTheContextMenu() {
     QTRY_VERIFY(!anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
 }
 
-void QmlSmokeTest::albumArtZoomFollowsTheWheelDelta() {
+void TransportInputSmokeTest::albumArtZoomFollowsTheWheelDelta() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -15631,7 +15721,7 @@ Window {
     QCOMPARE(zoom(), 1.0);
 }
 
-void QmlSmokeTest::spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll() {
+void SpectrogramSmokeTest::spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll() {
     SpectrogramItem item;
     item.setWidth(200);
     item.setHeight(100);
@@ -15665,7 +15755,7 @@ void QmlSmokeTest::spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll(
     QVERIFY(std::abs(requested.takeFirst().at(0).toDouble() - std::pow(1.25, 0.5)) < 1e-9);
 }
 
-void QmlSmokeTest::spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData() {
+void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData() {
     // Textures, and so drawn spans, need a window.
     QQuickWindow window;
     window.resize(240, 160);
@@ -15731,7 +15821,7 @@ void QmlSmokeTest::spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData
     delete node;
 }
 
-void QmlSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData() {
+void SpectrogramSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData() {
     // Textures, and so drawn spans, need a window.
     QQuickWindow window;
     window.resize(240, 160);
@@ -15788,7 +15878,7 @@ void QmlSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData(
     delete node;
 }
 
-void QmlSmokeTest::spaceTogglesPlaybackWhenTheLibraryHasFocus() {
+void TransportInputSmokeTest::spaceTogglesPlaybackWhenTheLibraryHasFocus() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -15819,7 +15909,7 @@ void QmlSmokeTest::spaceTogglesPlaybackWhenTheLibraryHasFocus() {
     QCOMPARE(toggled.count(), 2);
 }
 
-void QmlSmokeTest::libraryKeysReachBothEndsAndOpenTheContextMenu() {
+void LibraryQueueSmokeTest::libraryKeysReachBothEndsAndOpenTheContextMenu() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -15884,7 +15974,7 @@ void QmlSmokeTest::libraryKeysReachBothEndsAndOpenTheContextMenu() {
     QTRY_VERIFY(!rowMenuVisible());
 }
 
-void QmlSmokeTest::spaceTypesIntoTextFields() {
+void TransportInputSmokeTest::spaceTypesIntoTextFields() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -15922,7 +16012,7 @@ void QmlSmokeTest::spaceTypesIntoTextFields() {
     QTest::keyClick(window, Qt::Key_Escape);
 }
 
-void QmlSmokeTest::playbackShortcutsWorkInTheViewers() {
+void TransportInputSmokeTest::playbackShortcutsWorkInTheViewers() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -15985,7 +16075,7 @@ void QmlSmokeTest::playbackShortcutsWorkInTheViewers() {
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
 
-void QmlSmokeTest::viewerShortcutsOpenAndCloseTheViewers() {
+void TransportInputSmokeTest::viewerShortcutsOpenAndCloseTheViewers() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
@@ -16047,7 +16137,7 @@ void QmlSmokeTest::viewerShortcutsOpenAndCloseTheViewers() {
     QTRY_VERIFY(!fullscreen->isVisible());
 }
 
-void QmlSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {
+void TransportInputSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -16089,7 +16179,7 @@ void QmlSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
 }
 
-void QmlSmokeTest::menuMnemonicsOpenTheMenusAndShowShortcuts() {
+void TransportInputSmokeTest::menuMnemonicsOpenTheMenusAndShowShortcuts() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -16122,7 +16212,7 @@ void QmlSmokeTest::menuMnemonicsOpenTheMenusAndShowShortcuts() {
     QTRY_VERIFY(!playback->property("visible").toBool());
 }
 
-void QmlSmokeTest::spectrogramZoomWithinTheBackendToleranceNeedsNoNewData() {
+void SpectrogramSmokeTest::spectrogramZoomWithinTheBackendToleranceNeedsNoNewData() {
     QQuickWindow window;
     window.resize(240, 160);
     window.show();
@@ -16161,7 +16251,7 @@ void QmlSmokeTest::spectrogramZoomWithinTheBackendToleranceNeedsNoNewData() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview() {
+void SpectrogramSmokeTest::spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview() {
     QQuickWindow window;
     window.resize(240, 160);
     window.show();
@@ -16224,7 +16314,7 @@ void QmlSmokeTest::spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview() 
     delete node;
 }
 
-void QmlSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview() {
+void SpectrogramSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview() {
     QQuickWindow window;
     window.resize(240, 160);
     window.show();
@@ -16282,7 +16372,7 @@ void QmlSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview() {
     delete node;
 }
 
-void QmlSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
+void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
@@ -16358,7 +16448,7 @@ void QmlSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
-void QmlSmokeTest::fullscreenErrorTextScrollsWithTheKeyboard() {
+void ErrorsSmokeTest::fullscreenErrorTextScrollsWithTheKeyboard() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
@@ -16462,7 +16552,7 @@ bool clickVisibleButton(QQuickWindow *window, const QString &objectName) {
 
 } // namespace
 
-void QmlSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() {
+void LibraryQueueSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -16525,7 +16615,7 @@ void QmlSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() {
     QCOMPARE(remove->property("shortcut").value<QKeySequence>(), QKeySequence());
 }
 
-void QmlSmokeTest::queueRemovalOffersAnUndoThatSelectsTheRestoredRows() {
+void LibraryQueueSmokeTest::queueRemovalOffersAnUndoThatSelectsTheRestoredRows() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -16604,7 +16694,7 @@ void QmlSmokeTest::queueRemovalOffersAnUndoThatSelectsTheRestoredRows() {
     QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 10"));
 }
 
-void QmlSmokeTest::removingALibraryRootAsksFirstAndNamesIt() {
+void LibraryQueueSmokeTest::removingALibraryRootAsksFirstAndNamesIt() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -16677,7 +16767,7 @@ ApplicationWindow {
                  QStringList{QStringLiteral("/fixture/Music/Jazz")});
 }
 
-void QmlSmokeTest::replacingAlbumArtAsksFirstWhenTheTrackHasArt() {
+void PreferencesSmokeTest::replacingAlbumArtAsksFirstWhenTheTrackHasArt() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -16790,7 +16880,7 @@ ApplicationWindow {
     QVERIFY(!confirm->property("visible").toBool());
 }
 
-void QmlSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
+void TagEditorSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, false));
     std::atomic<int> renames{0};
@@ -16847,7 +16937,7 @@ void QmlSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
     QTRY_VERIFY(!previewDialog->property("visible").toBool());
 }
 
-void QmlSmokeTest::renameRenamesThePreviewedFilesAfterTheSelectionChanged() {
+void TagEditorSmokeTest::renameRenamesThePreviewedFilesAfterTheSelectionChanged() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, false));
     // Renames need a bridge, whose rename gate the fake backend ignores.
@@ -16904,7 +16994,7 @@ void QmlSmokeTest::renameRenamesThePreviewedFilesAfterTheSelectionChanged() {
     fixture.editor.m_bridge = nullptr;
 }
 
-void QmlSmokeTest::clearingDiagnosticsAsksFirst() {
+void PreferencesSmokeTest::clearingDiagnosticsAsksFirst() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -17000,14 +17090,14 @@ bool hasDetailFinerThan(const QImage &image, const QRect &area, int scale) {
 
 } // namespace
 
-void QmlSmokeTest::spectrogramDrawsAtDevicePixels_data() {
+void SpectrogramSmokeTest::spectrogramDrawsAtDevicePixels_data() {
     QTest::addColumn<double>("scale");
     QTest::newRow("2x") << 2.0;
     QTest::newRow("1.5x") << 1.5;
     QTest::newRow("1.25x") << 1.25;
 }
 
-void QmlSmokeTest::spectrogramDrawsAtDevicePixels() {
+void SpectrogramSmokeTest::spectrogramDrawsAtDevicePixels() {
     QFETCH(double, scale);
     QQuickWindow window;
     if (!showOnScreen(window, scale)) {
@@ -17151,7 +17241,7 @@ void QmlSmokeTest::spectrogramDrawsAtDevicePixels() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramWideCanvasDrawsEveryTile() {
+void SpectrogramSmokeTest::spectrogramWideCanvasDrawsEveryTile() {
     // The widest pane seen sizes every later pane's ring: leave it as it was.
     const int widestSeen = SpectrogramItem::s_maxWidgetWidthSeen;
     const auto restoreWidest = qScopeGuard(
@@ -17172,7 +17262,9 @@ void QmlSmokeTest::spectrogramWideCanvasDrawsEveryTile() {
         0, columns, 48000, 1024, true, true, 1, false, 1);
     QSGNode *node = paintSettled(item, nullptr);
     // The window draws them too.
-    QTest::qWait(50);
+    QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+    item.update();
+    QTRY_VERIFY(!frames.isEmpty());
     QVERIFY(drawnCanvasFragments(node) >= 110);
     const QPair<double, double> extent = drawnCanvasExtent(node);
     QCOMPARE(extent.first, 0.0);
@@ -17180,7 +17272,7 @@ void QmlSmokeTest::spectrogramWideCanvasDrawsEveryTile() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {
+void SpectrogramSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {
     // The grids and the crosshair of a 3440 x 719 pane at a scale of 2,
     // refreshed as playback, the pointer and a resize refresh them. No
     // overlay image may approach the pane's 6880 x 1438 device pixels, which
@@ -17267,13 +17359,13 @@ void QmlSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramScaleChangeKeepsAnUnalignedCanvasCovering_data() {
+void SpectrogramSmokeTest::spectrogramScaleChangeKeepsAnUnalignedCanvasCovering_data() {
     QTest::addColumn<bool>("seek");
     QTest::newRow("cached seek") << true;
     QTest::newRow("another track") << false;
 }
 
-void QmlSmokeTest::spectrogramScaleChangeKeepsAnUnalignedCanvasCovering() {
+void SpectrogramSmokeTest::spectrogramScaleChangeKeepsAnUnalignedCanvasCovering() {
     QFETCH(bool, seek);
     QScreen *screen = hiDpiTestScreen(2.0);
     if (screen == nullptr) {
@@ -17327,7 +17419,7 @@ void QmlSmokeTest::spectrogramScaleChangeKeepsAnUnalignedCanvasCovering() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramClickToSeekMatchesCrosshairAtDevicePixels() {
+void SpectrogramSmokeTest::spectrogramClickToSeekMatchesCrosshairAtDevicePixels() {
     QQuickWindow window;
     if (!showOnScreen(window, 2.0)) {
         QSKIP("Needs the offscreen platform's HiDPI test screens");
@@ -17378,13 +17470,13 @@ void QmlSmokeTest::spectrogramClickToSeekMatchesCrosshairAtDevicePixels() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters_data() {
+void SpectrogramSmokeTest::spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters_data() {
     QTest::addColumn<bool>("rolling");
     QTest::newRow("rolling") << true;
     QTest::newRow("centered") << false;
 }
 
-void QmlSmokeTest::spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters() {
+void SpectrogramSmokeTest::spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters() {
     QFETCH(bool, rolling);
     QScreen *screen = hiDpiTestScreen(2.0);
     if (screen == nullptr) {
@@ -17440,7 +17532,8 @@ void QmlSmokeTest::spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters() {
     // Playback goes on. The frames ask for one canvas at the new scale and
     // show the old one, scaled to it, until it arrives.
     bool rebuilt = false;
-    for (int frame = 0; frame < 60 && !rebuilt; ++frame) {
+    const QDeadlineTimer rebuildDeadline(10000);
+    for (int frame = 0; !rebuilt && !rebuildDeadline.hasExpired(); ++frame) {
         {
             // The window paints the item too, uploading its tiles to its
             // own nodes: this node needs them as well.
@@ -17477,7 +17570,7 @@ void QmlSmokeTest::spectrogramScaleChangeRebuildsOnceAndDropsStaleRasters() {
     delete node;
 }
 
-void QmlSmokeTest::spectrogramDevicePixelCanvasAdvancesAsItsRasterization_data() {
+void SpectrogramSmokeTest::spectrogramDevicePixelCanvasAdvancesAsItsRasterization_data() {
     // Canvas pixels to a display column, from the device pixel ratio or,
     // at a ratio of 1, from the zoom.
     QTest::addColumn<double>("scale");
@@ -17496,7 +17589,7 @@ void QmlSmokeTest::spectrogramDevicePixelCanvasAdvancesAsItsRasterization_data()
     }
 }
 
-void QmlSmokeTest::spectrogramDevicePixelCanvasAdvancesAsItsRasterization() {
+void SpectrogramSmokeTest::spectrogramDevicePixelCanvasAdvancesAsItsRasterization() {
     QFETCH(double, scale);
     QFETCH(bool, viaZoom);
     QFETCH(bool, rolling);
@@ -17553,7 +17646,7 @@ void QmlSmokeTest::spectrogramDevicePixelCanvasAdvancesAsItsRasterization() {
     }
 }
 
-void QmlSmokeTest::waveformEditorCachesAtDevicePixels() {
+void WaveformSmokeTest::waveformEditorCachesAtDevicePixels() {
     QQuickWindow window;
     if (!showOnScreen(window, 2.0)) {
         QSKIP("Needs the offscreen platform's HiDPI test screens");
@@ -17614,7 +17707,7 @@ void QmlSmokeTest::waveformEditorCachesAtDevicePixels() {
     }
 }
 
-void QmlSmokeTest::waveformEditorScaleChangeRedrawsItsCacheOnce() {
+void WaveformSmokeTest::waveformEditorScaleChangeRedrawsItsCacheOnce() {
     QScreen *screen = hiDpiTestScreen(2.0);
     if (screen == nullptr) {
         QSKIP("Needs the offscreen platform's HiDPI test screens");
@@ -17682,7 +17775,7 @@ void QmlSmokeTest::waveformEditorScaleChangeRedrawsItsCacheOnce() {
     QVERIFY(item.m_cachedViewportWidth != item.renderPixelWidthLocked());
 }
 
-void QmlSmokeTest::waveformItemCachesAtDevicePixels() {
+void WaveformSmokeTest::waveformItemCachesAtDevicePixels() {
     WaveformItem item;
     item.setWidth(200);
     item.setHeight(40);
@@ -17877,7 +17970,7 @@ BinaryBridgeCodec::LibraryQueueItem pathsItem(const QStringList &paths) {
 
 } // namespace
 
-void QmlSmokeTest::shiftSelectingTenThousandLibraryRowsStaysFast() {
+void LibraryQueueSmokeTest::shiftSelectingTenThousandLibraryRowsStaysFast() {
     const QString root = QStringLiteral("/music");
     // 260 expanded artists of 38 tracks: 10,400 rows.
     const QVector<int> artists = artistRange(0, 259);
@@ -17947,7 +18040,7 @@ void QmlSmokeTest::shiftSelectingTenThousandLibraryRowsStaysFast() {
                             .arg(withOne)));
 }
 
-void QmlSmokeTest::librarySelectionFollowsItsRowsThroughTreeUpdates() {
+void LibraryQueueSmokeTest::librarySelectionFollowsItsRowsThroughTreeUpdates() {
     const QString root = QStringLiteral("/music");
     LibraryTreeModel model;
     model.setExpandedKeys(expandedArtistAlbumKeys(root, artistRange(0, 20)));
@@ -17997,7 +18090,7 @@ void QmlSmokeTest::librarySelectionFollowsItsRowsThroughTreeUpdates() {
     QCOMPARE(model.anchorRow(), -1);
 }
 
-void QmlSmokeTest::playingALibrarySelectionSendsOneBatch() {
+void LibraryQueueSmokeTest::playingALibrarySelectionSendsOneBatch() {
     const QString a = QStringLiteral("/music/Artist/Album/01.flac");
     const QString b = QStringLiteral("/music/Artist/Album/02.flac");
     QVector<BinaryTreeRow> rows;
@@ -18047,7 +18140,7 @@ void QmlSmokeTest::playingALibrarySelectionSendsOneBatch() {
     QCOMPARE(harness->property("insertedRows").toList(), (QVariantList{7}));
 }
 
-void QmlSmokeTest::revealKeyExpandsADeepKeyInOneCall() {
+void LibraryQueueSmokeTest::revealKeyExpandsADeepKeyInOneCall() {
     // root > artist > album > disc section > track, all collapsed below
     // the root.
     const QString track = QStringLiteral("/music/Artist/Album/CD 2/01.flac");
@@ -18091,7 +18184,7 @@ void QmlSmokeTest::revealKeyExpandsADeepKeyInOneCall() {
     QVERIFY(!model.revealPending());
 }
 
-void QmlSmokeTest::revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers() {
+void LibraryQueueSmokeTest::revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers() {
     // The artist's rows come once the backend knows it is expanded.
     const QString lazyArtist = QStringLiteral("artist|/music|Artist A");
     const QString trackKey = QStringLiteral("track|/music/Artist A/Album/02.flac");
@@ -18146,7 +18239,7 @@ void QmlSmokeTest::revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers() {
     QCOMPARE(lazyFinished.count(), 0);
 }
 
-void QmlSmokeTest::queueMovesAndDropsActOnEveryHighlightedRow() {
+void LibraryQueueSmokeTest::queueMovesAndDropsActOnEveryHighlightedRow() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -18266,7 +18359,7 @@ Item {
     QCOMPARE(insertIndex(-40.0), 0);
 }
 
-void QmlSmokeTest::queueSelectionFollowsRowRangeMoves() {
+void LibraryQueueSmokeTest::queueSelectionFollowsRowRangeMoves() {
     QueueRowsModel rows;
     QVector<QueueRowData> initial;
     for (int number = 0; number < 8; ++number) {
@@ -18332,7 +18425,7 @@ Item {
     QCOMPARE(selection(), (QList<int>{0, 1, 2}));
 }
 
-void QmlSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
+void LibraryQueueSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
     // The bridge runs with the test's own data directories; see main().
     QTemporaryDir music;
     QVERIFY(music.isValid());
@@ -18514,6 +18607,8 @@ QPoint queueRowPoint(QQuickItem *view, int row, double fraction) {
 
 // Presses at `from`, moves in small steps to `to`, and releases there, as a
 // drag with the mouse does.
+// QTest dates each release past the double-click interval, so the next press
+// does not make a double click.
 void dragWithMouse(QQuickWindow *window, QPoint from, QPoint to) {
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from);
     const int steps = std::max(4, std::abs(to.y() - from.y()) / 4);
@@ -18533,7 +18628,7 @@ QList<int> queueSelection(QObject *controller) {
 
 } // namespace
 
-void QmlSmokeTest::draggingAHighlightedQueueRowMovesEveryHighlightedRow() {
+void LibraryQueueSmokeTest::draggingAHighlightedQueueRowMovesEveryHighlightedRow() {
     QueueRowsModel rows;
     loadQueueRows(rows, 10);
     QQmlApplicationEngine engine;
@@ -18567,12 +18662,10 @@ void QmlSmokeTest::draggingAHighlightedQueueRowMovesEveryHighlightedRow() {
     QCOMPARE(queueSelection(controller), (QList<int>{3}));
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(QVariantList{2, 3, 6}))));
-    QTest::qWait(QGuiApplication::styleHints()->mouseDoubleClickInterval() + 50);
 
     dragWithMouse(window, queueRowPoint(view, 3, 0.5), queueRowPoint(view, 8, 0.25));
     QCOMPARE(takeCommands(), QStringLiteral("move 2,3,6 before 8"));
     QCOMPARE(queueSelection(controller), (QList<int>{2, 3, 6}));
-    QTest::qWait(QGuiApplication::styleHints()->mouseDoubleClickInterval() + 50);
 
     // A row that is not highlighted is dragged alone.
     dragWithMouse(window, queueRowPoint(view, 0, 0.5), queueRowPoint(view, 5, 0.75));
@@ -18580,7 +18673,7 @@ void QmlSmokeTest::draggingAHighlightedQueueRowMovesEveryHighlightedRow() {
     QCOMPARE(queueSelection(controller), (QList<int>{0}));
 }
 
-void QmlSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
+void LibraryQueueSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
     QueueRowsModel rows;
     loadQueueRows(rows, 60);
     QQmlApplicationEngine engine;
@@ -18714,7 +18807,7 @@ QVector<BinaryTreeRow> restoreHarnessRows() {
 
 } // namespace
 
-void QmlSmokeTest::aRevealDuringTheSavedViewRestoreKeepsSavingTheView() {
+void LibraryQueueSmokeTest::aRevealDuringTheSavedViewRestoreKeepsSavingTheView() {
     const QString trackB = QStringLiteral("/music/Artist B/01.flac");
     const QVector<BinaryTreeRow> rows = restoreHarnessRows();
     LibraryTreeModel model;
@@ -18751,7 +18844,7 @@ void QmlSmokeTest::aRevealDuringTheSavedViewRestoreKeepsSavingTheView() {
 }
 
 
-void QmlSmokeTest::escapeCancelsAQueueRowDrag() {
+void LibraryQueueSmokeTest::escapeCancelsAQueueRowDrag() {
     QueueRowsModel rows;
     loadQueueRows(rows, 10);
     QQmlApplicationEngine engine;
@@ -18795,14 +18888,13 @@ void QmlSmokeTest::escapeCancelsAQueueRowDrag() {
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, over + QPoint(0, 4));
     QCOMPARE(takeCommands(), QString());
     QCOMPARE(queueSelection(controller), (QList<int>{2, 3, 6}));
-    QTest::qWait(QGuiApplication::styleHints()->mouseDoubleClickInterval() + 50);
 
     // The next drag works as before.
     dragWithMouse(window, queueRowPoint(view, 3, 0.5), queueRowPoint(view, 8, 0.25));
     QCOMPARE(takeCommands(), QStringLiteral("move 2,3,6 before 8"));
 }
 
-void QmlSmokeTest::aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore() {
+void LibraryQueueSmokeTest::aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore() {
     const QString trackB = QStringLiteral("/music/Artist B/01.flac");
     LibraryTreeModel model;
     QQmlApplicationEngine engine;
@@ -18839,7 +18931,155 @@ void QmlSmokeTest::aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore() {
     QTRY_COMPARE(root->property("savedKeys").toStringList().last(), QStringLiteral("track|") + trackB);
 }
 
+void WindowSmokeTest::drawsOffscreenUnlessAPlatformIsChosen() {
+    verifyOffscreenPlatformByDefault();
+}
+
+void WindowSmokeTest::drawingWritesNoShaderCache() {
+    // Mesa's thread wrote one into the directories of the first test that
+    // drew while they were removed, and that test failed.
+    QCOMPARE(qgetenv("MESA_SHADER_CACHE_DISABLE"), QByteArray("true"));
+    QCOMPARE(qgetenv("AMD_COMGR_CACHE"), QByteArray("0"));
+}
+
+namespace {
+
+struct SmokeTestArea {
+    const char *name;
+    std::unique_ptr<QmlSmokeTest> (*make)(const QString &userDirectoriesParent);
+};
+
+template <typename Test>
+std::unique_ptr<QmlSmokeTest> makeSmokeTest(const QString &userDirectoriesParent) {
+    return std::make_unique<Test>(userDirectoriesParent);
+}
+
+// Every test class, by the area name that the CTest entries use.
+const std::array<SmokeTestArea, 8> kSmokeTestAreas{{
+    {"spectrogram", &makeSmokeTest<SpectrogramSmokeTest>},
+    {"waveform", &makeSmokeTest<WaveformSmokeTest>},
+    {"library_queue", &makeSmokeTest<LibraryQueueSmokeTest>},
+    {"transport_input", &makeSmokeTest<TransportInputSmokeTest>},
+    {"window", &makeSmokeTest<WindowSmokeTest>},
+    {"preferences", &makeSmokeTest<PreferencesSmokeTest>},
+    {"errors", &makeSmokeTest<ErrorsSmokeTest>},
+    {"tag_editor", &makeSmokeTest<TagEditorSmokeTest>},
+}};
+
+// QTest's options that take a value.
+const QStringList kQTestValueOptions{
+    QStringLiteral("-o"), QStringLiteral("-maxwarnings"), QStringLiteral("-eventdelay"),
+    QStringLiteral("-keydelay"), QStringLiteral("-mousedelay"), QStringLiteral("-repeat"),
+    QStringLiteral("-iterations"), QStringLiteral("-median"), QStringLiteral("-minimumvalue"),
+    QStringLiteral("-minimumtotal"), QStringLiteral("-perfcounter"), QStringLiteral("-seed"),
+};
+
+// Whether `test` has the test function `name`, which may have a data tag.
+bool hasTestFunction(const QObject &test, const QString &name) {
+    const QByteArray signature = name.section(QLatin1Char(':'), 0, 0).toLatin1() + "()";
+    const int index = test.metaObject()->indexOfMethod(signature.constData());
+    return index >= 0 && test.metaObject()->method(index).access() == QMetaMethod::Private;
+}
+
+// Runs the tests of one area, `-area <name>`, or of every area in turn.
+// Test functions named without an area run in the area that has them, so
+// `ferrous_qml_smoke_tests waveformSceneGraphMatchesRaster` works as with
+// one test class. `-check-areas <names>` checks that CTest runs every area.
+int runSmokeTests(const QString &userDirectoriesParent, const QStringList &arguments) {
+    QString onlyArea;
+    QStringList checkedAreas;
+    bool checkAreas = false;
+    QStringList options;
+    QStringList functions;
+    for (qsizetype i = 1; i < arguments.size(); ++i) {
+        const QString &argument = arguments.at(i);
+        if (argument == QStringLiteral("-area") && i + 1 < arguments.size()) {
+            onlyArea = arguments.at(++i);
+        } else if (argument == QStringLiteral("-check-areas")) {
+            checkAreas = true;
+            checkedAreas = arguments.mid(i + 1);
+            break;
+        } else if (kQTestValueOptions.contains(argument) && i + 1 < arguments.size()) {
+            options << argument << arguments.at(++i);
+        } else if (argument.startsWith(QLatin1Char('-'))) {
+            options << argument;
+        } else {
+            functions << argument;
+        }
+    }
+
+    QStringList areaNames;
+    for (const SmokeTestArea &area : kSmokeTestAreas) {
+        areaNames << QString::fromLatin1(area.name);
+    }
+    if (checkAreas) {
+        QStringList expected = areaNames;
+        expected.sort();
+        checkedAreas.sort();
+        if (checkedAreas != expected) {
+            qCritical("CTest runs the areas %s, but the smoke tests have %s",
+                qPrintable(checkedAreas.join(QLatin1Char(' '))), qPrintable(expected.join(QLatin1Char(' '))));
+            return 1;
+        }
+        return 0;
+    }
+    if (!onlyArea.isEmpty() && !areaNames.contains(onlyArea)) {
+        qCritical("No smoke test area %s; the areas are %s", qPrintable(onlyArea),
+            qPrintable(areaNames.join(QLatin1Char(' '))));
+        return 1;
+    }
+
+    // QTest exits after listing one class's functions: list every area's.
+    if (onlyArea.isEmpty() && options.contains(QStringLiteral("-functions"))) {
+        const QStringList fixtures{QStringLiteral("initTestCase"), QStringLiteral("init"),
+            QStringLiteral("cleanup"), QStringLiteral("cleanupTestCase")};
+        for (const SmokeTestArea &area : kSmokeTestAreas) {
+            const std::unique_ptr<QmlSmokeTest> test = area.make(userDirectoriesParent);
+            const QMetaObject *meta = test->metaObject();
+            for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
+                const QMetaMethod method = meta->method(i);
+                const QString name = QString::fromLatin1(method.name());
+                if (method.methodType() == QMetaMethod::Slot && method.access() == QMetaMethod::Private
+                    && method.parameterCount() == 0 && !fixtures.contains(name)
+                    && !name.endsWith(QStringLiteral("_data"))) {
+                    std::printf("%s()\n", qPrintable(name));
+                }
+            }
+        }
+        return 0;
+    }
+
+    int failures = 0;
+    QStringList unknownFunctions = functions;
+    for (const SmokeTestArea &area : kSmokeTestAreas) {
+        if (!onlyArea.isEmpty() && onlyArea != QLatin1String(area.name)) {
+            continue;
+        }
+        const std::unique_ptr<QmlSmokeTest> test = area.make(userDirectoriesParent);
+        QStringList areaFunctions;
+        for (const QString &function : std::as_const(functions)) {
+            if (hasTestFunction(*test, function)) {
+                areaFunctions << function;
+                unknownFunctions.removeAll(function);
+            }
+        }
+        if (!functions.isEmpty() && areaFunctions.isEmpty()) {
+            continue;
+        }
+        failures += std::max(QTest::qExec(test.get(), QStringList{arguments.first()} + options + areaFunctions), 0);
+    }
+    if (!unknownFunctions.isEmpty()) {
+        qCritical("Unknown test functions: %s", qPrintable(unknownFunctions.join(QLatin1Char(' '))));
+        return 1;
+    }
+    return std::min(failures, 127);
+}
+
+} // namespace
+
 int main(int argc, char **argv) {
+    useOffscreenPlatformByDefault(argc, argv);
+    disableGpuShaderCaches();
     // Bridge construction starts library workers; keep scans and tag operations
     // independent of saved application data and concurrent test processes.
     // Each test also gets user directories of its own; see init().
@@ -18855,8 +19095,11 @@ int main(int argc, char **argv) {
     addHiDpiTestScreens(testStorage);
 
     QApplication app(argc, argv);
-    QmlSmokeTest test(testStorage.path());
-    return QTest::qExec(&test, argc, argv);
+    QStringList arguments;
+    for (int i = 0; i < argc; ++i) {
+        arguments << QString::fromLocal8Bit(argv[i]);
+    }
+    return runSmokeTests(testStorage.path(), arguments);
 }
 
 #include "tst_qml_smoke.moc"

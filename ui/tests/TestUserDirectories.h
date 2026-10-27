@@ -21,8 +21,9 @@
 // is destroyed: changing the environment while the bridge's threads read it
 // is not safe. Its directories are made in `parent`, a directory of the
 // whole test process: what outlives a test there, such as the GStreamer
-// registry and the GPU drivers' shader caches written into the first test's
-// cache directory, goes when the process removes `parent`.
+// registry written into the first test's cache directory, goes when the
+// process removes `parent`. Test binaries write no GPU shader cache; see
+// disableGpuShaderCaches() in TestPlatform.h.
 class TestUserDirectories {
 public:
     explicit TestUserDirectories(const QString &parent)
