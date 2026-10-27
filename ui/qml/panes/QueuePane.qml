@@ -49,6 +49,9 @@ Rectangle {
     readonly property real minimumLengthColumnWidth: Math.max(16, Math.ceil(Math.max(
         lengthHeaderMetrics.advanceWidth,
         lengthValueMetrics.advanceWidth)))
+    // How far Left or Right moves a focused handle.
+    readonly property real keyboardResizeStep: Math.max(
+        1, Math.round(columnFontMetrics.averageCharacterWidth))
     // The widest a column is kept, as wide as the backend saves:
     // BinaryBridgeCodec::kMaxQueueColumnWidth.
     readonly property real maximumResizedColumnWidth: 4096
@@ -59,12 +62,13 @@ Rectangle {
         - root.minimumTitleColumnWidth - 5 * root.columnSpacing)
     // The column whose handle is being dragged, or moved with the keys; its
     // preferred width until the drag ends and the width is kept; and, from
-    // when the drag started, its preferred and shown widths, how far the
-    // drag has moved its edge, and whether the columns were giving way.
+    // when the drag started, its preferred width, its edge's distance from
+    // the columns' right end (see columnEdgeOffset), how far the drag has
+    // moved the edge, and whether the columns were giving way.
     property string resizingColumn: ""
     property real resizingWidth: 0
     property real resizeStartWidth: 0
-    property real resizeStartShownWidth: 0
+    property real resizeStartEdge: 0
     property real resizeDelta: 0
     property bool resizeStartedCompressed: false
 
@@ -131,34 +135,44 @@ Rectangle {
         }
     }
 
-    // The preferred width at which `column` is shown `shown` wide, the
-    // others keeping theirs: fittedColumnWidths the other way round. Where
-    // the columns give way, the shown width is m + A u / (u + S), for the
-    // column's minimum m and preferred width m + u, the others' S beyond
-    // their minimums, and the room A beyond all the minimums.
-    function preferredWidthShowing(column, shown) {
-        let others = 0
-        let othersSlack = 0
-        let minimums = 0
-        for (const name of root.resizableColumns) {
-            const minimum = root.minimumColumnWidth(name)
-            minimums += minimum
-            if (name !== column) {
-                const width = root.savedColumnWidth(name)
-                others += width
-                othersSlack += Math.max(0, width - minimum)
+    // How far the left edge of `column`, where its handle is, is from the
+    // right end of the columns when it has the preferred width `width` and
+    // the others theirs: the shown widths of it and the columns after it.
+    function columnEdgeOffset(column, width) {
+        const preferred = root.resizableColumns.map(
+            name => name === column ? width : root.savedColumnWidth(name))
+        return root.fittedColumnWidths(preferred)
+            .slice(root.resizableColumns.indexOf(column))
+            .reduce((sum, shown) => sum + shown, 0)
+    }
+
+    // The preferred width of `column`, from `from` towards `to`, that puts
+    // its edge `offset` from the right end, or as near as `to` lets it. The
+    // offset never shrinks as the width grows, so halving the range finds
+    // the width nearest `from`. Where the edge cannot move, as at the title's
+    // minimum, that is `from`, so a drag past it changes nothing.
+    function preferredWidthAtEdge(column, offset, from, to) {
+        const widening = to > from
+        const reachable = root.columnEdgeOffset(column, to)
+        const goal = widening ? Math.min(offset, reachable) : Math.max(offset, reachable)
+        const reaches = function(width) {
+            const edge = root.columnEdgeOffset(column, width)
+            return widening ? edge >= goal - 0.25 : edge <= goal + 0.25
+        }
+        if (reaches(from)) {
+            return from
+        }
+        let near = from
+        let far = to
+        for (let step = 0; step < 40 && Math.abs(far - near) > 0.25; ++step) {
+            const middle = (near + far) / 2
+            if (reaches(middle)) {
+                far = middle
+            } else {
+                near = middle
             }
         }
-        const room = root.resizableColumnsRoom
-        if (room <= 0 || shown + others <= room || othersSlack <= 0) {
-            return shown
-        }
-        const beyond = shown - root.minimumColumnWidth(column)
-        const roomBeyond = room - minimums
-        if (beyond >= roomBeyond) {
-            return root.maximumResizedColumnWidth
-        }
-        return root.minimumColumnWidth(column) + othersSlack * beyond / (roomBeyond - beyond)
+        return far
     }
 
     function beginColumnResize(column) {
@@ -166,7 +180,7 @@ Rectangle {
             root.finishColumnResize()
             // Read before the column follows resizingWidth.
             const preferred = root.savedColumnWidth(column)
-            root.resizeStartShownWidth = root.columnWidths[column]
+            root.resizeStartEdge = root.columnEdgeOffset(column, preferred)
             root.resizeStartedCompressed = root.resizableColumns
                 .map(root.savedColumnWidth)
                 .reduce((sum, width) => sum + width, 0) > root.resizableColumnsRoom
@@ -177,30 +191,31 @@ Rectangle {
         }
     }
 
-    // Move the column's edge `delta` from where the drag started, as it is
-    // shown: the preferred width changes so the shown one follows. A drag
-    // that started with room enough stops where the title reaches its
-    // minimum; one where the columns gave way takes from the others.
+    // Move the column's edge, its handle, `delta` to the left of where the
+    // drag started, or as far as the columns let it: the preferred width
+    // changes so the edge follows the pointer. A drag that started with room
+    // enough stops where the title reaches its minimum; one where the columns
+    // gave way takes from the columns after the edge, down to their minimums.
     function resizeColumnBy(column, delta) {
         root.beginColumnResize(column)
         root.resizeDelta = delta
+        const start = root.resizeStartWidth
         if (delta === 0) {
-            root.resizingWidth = root.resizeStartWidth
+            root.resizingWidth = start
             return
         }
-        let shown = Math.max(root.minimumColumnWidth(column), root.resizeStartShownWidth + delta)
-        if (!root.resizeStartedCompressed) {
+        let limit = delta > 0 ? root.maximumResizedColumnWidth : root.minimumColumnWidth(column)
+        if (delta > 0 && !root.resizeStartedCompressed) {
             let others = 0
             for (const name of root.resizableColumns) {
                 if (name !== column) {
                     others += root.savedColumnWidth(name)
                 }
             }
-            shown = Math.min(shown, Math.max(root.minimumColumnWidth(column),
-                                             root.resizableColumnsRoom - others))
+            limit = Math.max(start, Math.min(limit, root.resizableColumnsRoom - others))
         }
-        root.resizingWidth = Math.round(root.clampColumnWidth(
-            column, root.preferredWidthShowing(column, shown)))
+        root.resizingWidth = Math.round(root.clampColumnWidth(column,
+            root.preferredWidthAtEdge(column, root.resizeStartEdge + delta, start, limit)))
     }
 
     // Keep the width the drag ended at, once per drag, if it changed.
@@ -425,10 +440,9 @@ Rectangle {
                             root.restoreDefaultColumnWidth(resizeHandle.column)
                             return
                         }
-                        const step = Math.max(1, Math.round(columnFontMetrics.averageCharacterWidth))
                         root.beginColumnResize(resizeHandle.column)
-                        root.resizeColumnBy(resizeHandle.column,
-                            root.resizeDelta + (event.key === Qt.Key_Left ? step : -step))
+                        root.resizeColumnBy(resizeHandle.column, root.resizeDelta
+                            + (event.key === Qt.Key_Left ? root.keyboardResizeStep : -root.keyboardResizeStep))
                     }
                     // A held key moves the handle until it is let go, when
                     // the width is kept.

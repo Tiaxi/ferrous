@@ -1605,27 +1605,47 @@ void AccessibilityTest::aCompressedQueueColumnResizesFromItsPreferredWidth() {
             visibleItemNamed(window, QStringLiteral("queueHeader_") + QLatin1String(column));
         return header != nullptr ? header->width() : -1.0;
     };
-    const auto saved = [&]() { return bridge->property("queueColumnWidths").toMap(); };
-    const qreal minimumTitle = pane->property("minimumTitleColumnWidth").toReal();
-
-    // Wider than the queue has room for: the columns give way.
-    QVERIFY(QMetaObject::invokeMethod(bridge, "setQueueColumnWidth",
-                                      Q_ARG(QVariant, QStringLiteral("artist")),
-                                      Q_ARG(QVariant, 2000)));
-    QTRY_VERIFY(shown("artist") > 0 && shown("artist") < 2000);
-    QTRY_VERIFY(std::abs(shown("title") - minimumTitle) <= 1);
-    const qreal artist = shown("artist");
-    const qreal album = shown("album");
-    QSignalSpy kept(bridge, SIGNAL(queueColumnWidthsChanged()));
-    QVERIFY(kept.isValid());
-
-    // A press and release on the handle changes nothing.
-    QQuickItem *handle = visibleItemNamed(window, QStringLiteral("queueColumnHandle_artist"));
-    QVERIFY(handle != nullptr);
-    QPoint at = centerOf(handle);
-    QTest::mouseMove(window, at);
+    const auto handle = [&](const char *column) {
+        return visibleItemNamed(window, QStringLiteral("queueColumnHandle_") + QLatin1String(column));
+    };
+    // Where the handle, the column's left edge, is.
+    const auto edge = [&](const char *column) {
+        QQuickItem *item = handle(column);
+        return item != nullptr ? item->mapToScene(QPointF(item->width() / 2, 0)).x() : -1.0;
+    };
     // The pane's widths, which the header's layout follows.
     const auto paneWidth = [&](const char *property) { return pane->property(property).toReal(); };
+    const auto saved = [&]() { return bridge->property("queueColumnWidths").toMap(); };
+    const auto setWidth = [&](const char *column, int width) {
+        return QMetaObject::invokeMethod(bridge, "setQueueColumnWidth",
+                                         Q_ARG(QVariant, QString::fromLatin1(column)),
+                                         Q_ARG(QVariant, width));
+    };
+    const qreal minimumTitle = pane->property("minimumTitleColumnWidth").toReal();
+    const auto titleAtItsMinimum = [&]() { return std::abs(shown("title") - minimumTitle) <= 1; };
+    QSignalSpy kept(bridge, SIGNAL(queueColumnWidthsChanged()));
+    QVERIFY(kept.isValid());
+    // Whether the header has been laid out with the pane's widths.
+    const auto settled = [&]() {
+        return shown("artist") == paneWidth("artistColumnWidth")
+            && shown("album") == paneWidth("albumColumnWidth")
+            && shown("length") == paneWidth("lengthColumnWidth");
+    };
+    // Artist wider than the queue has room for: the columns give way.
+    const auto compress = [&]() {
+        return setWidth("artist", 2000) && setWidth("album", 0) && setWidth("length", 0);
+    };
+
+    QVERIFY(compress());
+    QTRY_VERIFY(shown("artist") > 0 && shown("artist") < 2000);
+    QTRY_VERIFY(titleAtItsMinimum());
+    kept.clear();
+
+    // A press and release on a handle changes nothing.
+    const qreal artist = paneWidth("artistColumnWidth");
+    const qreal album = paneWidth("albumColumnWidth");
+    QPoint at = centerOf(handle("artist"));
+    QTest::mouseMove(window, at);
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, at);
     QCOMPARE(paneWidth("artistColumnWidth"), artist);
     QCOMPARE(paneWidth("albumColumnWidth"), album);
@@ -1635,36 +1655,73 @@ void AccessibilityTest::aCompressedQueueColumnResizesFromItsPreferredWidth() {
     QCOMPARE(kept.count(), 0);
     QCOMPARE(saved().value(QStringLiteral("artist")).toInt(), 2000);
 
-    // A drag to the left widens it as far as the pointer moves, taking
-    // from the others, and keeps a wider preferred width.
-    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, at);
-    for (int step = 1; step <= 3; ++step) {
-        QTest::mouseMove(window, at - QPoint(10 * step, 0));
-        QTRY_VERIFY2(std::abs(shown("artist") - (artist + 10 * step)) <= 1,
-                     qPrintable(QStringLiteral("%1 after %2").arg(shown("artist")).arg(10 * step)));
-    }
-    QVERIFY(shown("album") < album);
-    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, at - QPoint(30, 0));
-    QTRY_COMPARE(kept.count(), 1);
-    QVERIFY(saved().value(QStringLiteral("artist")).toInt() > 2000);
-    QVERIFY(std::abs(shown("title") - minimumTitle) <= 1);
+    // Drags `column`'s handle `dx` and checks that it moved `moved` with the
+    // pointer, while dragging and once the width is kept.
+    const auto drag = [&](const char *column, int dx, int moved) {
+        QVERIFY(compress());
+        QTRY_VERIFY(settled() && titleAtItsMinimum());
+        const qreal from = edge(column);
+        QPoint pointer = centerOf(handle(column));
+        QTest::mouseMove(window, pointer);
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, pointer);
+        for (int step = 1; step <= 5; ++step) {
+            QTest::mouseMove(window, pointer + QPoint(dx * step / 5, 0));
+        }
+        QTRY_VERIFY2(std::abs(edge(column) - (from + moved)) <= 1,
+                     qPrintable(QStringLiteral("%1's handle %2 from %3 after %4")
+                                    .arg(QLatin1String(column))
+                                    .arg(edge(column) - from)
+                                    .arg(from)
+                                    .arg(dx)));
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, pointer + QPoint(dx, 0));
+        QTRY_VERIFY2(std::abs(edge(column) - (from + moved)) <= 1,
+                     qPrintable(QStringLiteral("%1's kept handle %2 from %3")
+                                    .arg(QLatin1String(column))
+                                    .arg(edge(column) - from)
+                                    .arg(from)));
+    };
 
-    // So does Left from the keyboard.
-    const qreal dragged = shown("artist");
-    handle->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_VERIFY(handle->hasActiveFocus());
+    // Album's edge follows the pointer both ways: to the left it takes from
+    // Artist, which is giving way, and to the right it gives Artist room.
+    drag("album", -30, -30);
+    QVERIFY(saved().value(QStringLiteral("album")).toInt() > 0);
+    drag("album", 20, 20);
+    // Artist's edge moves right, which gives the title room...
+    drag("artist", 20, 20);
+    QVERIFY(saved().value(QStringLiteral("artist")).toInt() < 2000);
+    QVERIFY(shown("title") > minimumTitle + 10);
+    // ...but not left, where the title is at its minimum: nothing changes.
+    kept.clear();
+    drag("artist", -30, 0);
+    QCOMPARE(saved().value(QStringLiteral("artist")).toInt(), 2000);
+    QCOMPARE(kept.count(), 3);
+    QVERIFY(titleAtItsMinimum());
+
+    // Left moves a focused handle by one step, and Right back.
+    QVERIFY(compress());
+    QTRY_VERIFY(settled() && titleAtItsMinimum());
+    const qreal step = pane->property("keyboardResizeStep").toReal();
+    QVERIFY(step >= 1);
+    QQuickItem *albumHandle = handle("album");
+    albumHandle->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(albumHandle->hasActiveFocus());
+    const qreal from = edge("album");
     QTest::keyClick(window, Qt::Key_Left);
-    QTRY_VERIFY(shown("artist") > dragged);
-    QCOMPARE(kept.count(), 2);
+    QTRY_VERIFY2(std::abs(edge("album") - (from - step)) <= 1,
+                 qPrintable(QString::number(edge("album") - from)));
+    QTest::keyClick(window, Qt::Key_Right);
+    QTRY_VERIFY2(std::abs(edge("album") - from) <= 1,
+                 qPrintable(QString::number(edge("album") - from)));
 
-    // Its preferred width stays within what the settings keep.
-    for (int press = 0; press < 60; ++press) {
+    // However far it goes, the preferred width stays within what the
+    // settings keep, and the columns after the title keep their minimums.
+    for (int press = 0; press < 80; ++press) {
         QTest::keyClick(window, Qt::Key_Left);
     }
-    const int widest = saved().value(QStringLiteral("artist")).toInt();
-    QVERIFY2(widest > 2000 && widest <= 4096, qPrintable(QString::number(widest)));
-    QVERIFY(shown("album") >= pane->property("minimumResizedColumnWidth").toReal() - 1);
-    QVERIFY(std::abs(shown("title") - minimumTitle) <= 1);
+    const int widest = saved().value(QStringLiteral("album")).toInt();
+    QVERIFY2(widest > 0 && widest <= 4096, qPrintable(QString::number(widest)));
+    QVERIFY(shown("artist") >= pane->property("minimumResizedColumnWidth").toReal() - 1);
+    QVERIFY(titleAtItsMinimum());
 }
 
 void AccessibilityTest::queueColumnTextStaysInsideItsColumnAtTheMinimum() {
