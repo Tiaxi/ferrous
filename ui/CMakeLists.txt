@@ -308,6 +308,10 @@ if(BUILD_TESTING)
             ferrous_metainfo_release_version
             ferrous_release_version_check
             ferrous_release_version_consistent
+            ferrous_cargo_package_version
+            ferrous_script_bump-version
+            ferrous_script_install-rpm
+            ferrous_script_run-ui-cleanup
             ferrous_metainfo_validate
             ferrous_desktop_file_validate)
         if(TEST ${metadata_test})

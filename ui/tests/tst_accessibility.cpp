@@ -2068,6 +2068,7 @@ void AccessibilityTest::drawsOffscreenUnlessAPlatformIsChosen() {
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault();
+    disableGpuShaderCaches();
     QTemporaryDir testStorage;
     if (!testStorage.isValid()) return 1;
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));

@@ -1425,6 +1425,7 @@ private slots:
     void theWindowOpensWithoutASavedLayoutThatDoesNotCome();
     void quittingWhileMinimizedKeepsTheWindowMaximized();
     void drawsOffscreenUnlessAPlatformIsChosen();
+    void drawingWritesNoShaderCache();
 };
 
 // Preferences, diagnostics and album art.
@@ -18934,6 +18935,13 @@ void WindowSmokeTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
+void WindowSmokeTest::drawingWritesNoShaderCache() {
+    // Mesa's thread wrote one into the directories of the first test that
+    // drew while they were removed, and that test failed.
+    QCOMPARE(qgetenv("MESA_SHADER_CACHE_DISABLE"), QByteArray("true"));
+    QCOMPARE(qgetenv("AMD_COMGR_CACHE"), QByteArray("0"));
+}
+
 namespace {
 
 struct SmokeTestArea {
@@ -19071,6 +19079,7 @@ int runSmokeTests(const QString &userDirectoriesParent, const QStringList &argum
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault();
+    disableGpuShaderCaches();
     // Bridge construction starts library workers; keep scans and tag operations
     // independent of saved application data and concurrent test processes.
     // Each test also gets user directories of its own; see init().

@@ -24,6 +24,15 @@ inline void useOffscreenPlatformByDefault() {
     }
 }
 
+// GPU drivers write shader caches into the cache directory from threads of
+// their own, and at exit: Mesa while a test removes its directories, which
+// fails the test, and AMD's compiler after main() has removed the process's.
+// Call this in main() so that tests write none.
+inline void disableGpuShaderCaches() {
+    qputenv("MESA_SHADER_CACHE_DISABLE", "true");
+    qputenv("AMD_COMGR_CACHE", "0");
+}
+
 // The test of the default, for a test slot of each binary that shows windows.
 inline void verifyOffscreenPlatformByDefault() {
     if (!offscreenPlatformChosenByDefault()) {

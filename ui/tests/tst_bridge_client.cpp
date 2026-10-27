@@ -6041,6 +6041,7 @@ void BridgeClientTest::drawsOffscreenUnlessAPlatformIsChosen() {
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault();
+    disableGpuShaderCaches();
     // Bridge construction starts library workers; keep scans and tag operations
     // independent of saved application data and concurrent test processes.
     // Each test also gets user directories of its own; see init().
