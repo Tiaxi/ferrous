@@ -2054,6 +2054,19 @@ bool BridgeClient::libraryWatchEnabled() const {
     return m_libraryWatchEnabled;
 }
 
+QVariantMap BridgeClient::queueColumnWidths() const {
+    QVariantMap widths;
+    const auto insert = [&widths](const QString &column, quint16 width) {
+        if (width > 0) {
+            widths.insert(column, int(width));
+        }
+    };
+    insert(QStringLiteral("artist"), m_queueColumnWidths.artist);
+    insert(QStringLiteral("album"), m_queueColumnWidths.album);
+    insert(QStringLiteral("length"), m_queueColumnWidths.length);
+    return widths;
+}
+
 bool BridgeClient::lastFmScrobblingEnabled() const {
     return m_lastFmScrobblingEnabled;
 }
@@ -2651,6 +2664,56 @@ void BridgeClient::setLibraryWatchEnabled(bool value) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetLibraryWatchEnabled,
         static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::setQueueColumnWidth(const QString &column, int width) {
+    if (width != 0
+        && (width < BinaryBridgeCodec::kMinQueueColumnWidth
+            || width > BinaryBridgeCodec::kMaxQueueColumnWidth)) {
+        return;
+    }
+    BinaryBridgeCodec::QueueColumnWidths widths = m_queueColumnWidths;
+    quint16 *target = nullptr;
+    if (column == QStringLiteral("artist")) {
+        target = &widths.artist;
+    } else if (column == QStringLiteral("album")) {
+        target = &widths.album;
+    } else if (column == QStringLiteral("length")) {
+        target = &widths.length;
+    }
+    if (target == nullptr || *target == static_cast<quint16>(width)) {
+        return;
+    }
+    *target = static_cast<quint16>(width);
+    m_queueColumnWidths = widths;
+    emit queueColumnWidthsChanged();
+    // Every column, so a request that overtakes an earlier one keeps it.
+    sendBinaryCommand(
+        BinaryBridgeCodec::encodeCommandQueueColumnWidths(widths, ++m_queueColumnWidthsGeneration));
+}
+
+// Take the column widths the backend sent once it has taken the latest ones
+// sent to it: a snapshot it built before then has earlier widths, which
+// must not replace newer ones the UI is still waiting for. Once it has, it
+// sends what it keeps, which may also be a change of its own, as when it
+// reads the settings again.
+void BridgeClient::applyBackendQueueColumnWidths(
+    const BinaryBridgeCodec::QueueColumnWidths &sent, quint32 generation) {
+    if (generation != m_queueColumnWidthsGeneration) {
+        return;
+    }
+    const auto checked = [](quint16 width) -> quint16 {
+        return width >= BinaryBridgeCodec::kMinQueueColumnWidth
+                && width <= BinaryBridgeCodec::kMaxQueueColumnWidth
+            ? width
+            : 0;
+    };
+    const BinaryBridgeCodec::QueueColumnWidths widths{
+        checked(sent.artist), checked(sent.album), checked(sent.length)};
+    if (m_queueColumnWidths != widths) {
+        m_queueColumnWidths = widths;
+        emit queueColumnWidthsChanged();
+    }
 }
 
 QRect BridgeClient::fitWindowToScreens(
@@ -5075,6 +5138,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         }
         m_savedWindowLayout = windowLayoutMap(snapshot.windowLayout, screens);
         m_hasSavedWindowLayout = true;
+        // Before the window is shown, so the queue opens with its widths;
+        // they are what the settings had before any the UI sends.
+        applyBackendQueueColumnWidths(snapshot.windowLayoutQueueColumns, 0);
         emit savedWindowLayoutRead();
         return false;
     }
@@ -5658,6 +5724,10 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_libraryWatchEnabled = libraryWatchEnabled;
         changed = true;
         snapshotSignalChanged = true;
+    }
+    if (snapshot.settings.present && snapshot.settings.hasQueueColumnWidths) {
+        applyBackendQueueColumnWidths(
+            snapshot.settings.queueColumnWidths, snapshot.settings.queueColumnWidthsGeneration);
     }
     const bool showFps = snapshot.settings.present ? snapshot.settings.showFps : m_showFps;
     if (m_showFps != showFps) {

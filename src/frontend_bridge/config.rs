@@ -597,6 +597,7 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
             }
             "library_watch_enabled" => parse_flag(value, &mut settings.library_watch_enabled),
             _ if super::window_layout::parse_setting(&mut settings.window, key, value) => {}
+            _ if super::queue_columns::parse_setting(&mut settings.queue_columns, key, value) => {}
             // Kept for the build that wrote it.
             _ => settings.unknown_lines.push(line.to_string()),
         }
@@ -687,6 +688,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         i32::from(settings.library_watch_enabled),
     );
     super::window_layout::format_settings(&settings.window, &mut text);
+    super::queue_columns::format_settings(&settings.queue_columns, &mut text);
     for line in &settings.unknown_lines {
         text.push_str(line);
         text.push('\n');
@@ -696,7 +698,10 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BridgeDisplaySettings, BridgeIntegrationSettings, WindowLayout};
+    use super::super::{
+        BridgeDisplaySettings, BridgeIntegrationSettings, QueueColumnSettings, QueueColumnWidths,
+        WindowLayout,
+    };
     use super::*;
     use std::path::PathBuf;
 
@@ -744,6 +749,7 @@ mod tests {
                 lastfm_username: "tester".to_string(),
             },
             window: WindowLayout::default(),
+            queue_columns: QueueColumnSettings::default(),
             unknown_lines: Vec::new(),
         };
         let text = format_settings_text(&settings);
@@ -834,6 +840,49 @@ mod tests {
         let mut parsed = BridgeSettings::default();
         parse_settings_text(&mut parsed, &text);
         assert_eq!(parsed.window, settings.window);
+        assert_eq!(parsed.unknown_lines, vec!["future_key=1".to_string()]);
+        assert_eq!(format_settings_text(&parsed), text);
+    }
+
+    #[test]
+    fn queue_column_widths_are_saved_with_the_settings_and_keep_unknown_lines() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume_cubic=0.5\nfuture_key=1\n");
+        assert_eq!(
+            settings.queue_columns,
+            QueueColumnSettings::default(),
+            "older files"
+        );
+        assert!(
+            !format_settings_text(&settings).contains("queue_column_widths"),
+            "no line until a column is resized"
+        );
+
+        // Bad entries are dropped; a newer build's column is kept.
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(
+            &mut settings,
+            "volume_cubic=0.5\n\
+             queue_column_widths=artist:170,album:99999,length:76,title:abc,genre:120\n\
+             future_key=1\n",
+        );
+        assert_eq!(
+            settings.queue_columns.widths,
+            QueueColumnWidths {
+                artist: Some(170),
+                album: None,
+                length: Some(76),
+            }
+        );
+        let text = format_settings_text(&settings);
+        assert!(
+            text.contains("\nqueue_column_widths=artist:170,length:76,genre:120\n"),
+            "{text}"
+        );
+        assert!(text.contains("\nfuture_key=1\n"), "{text}");
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(&mut parsed, &text);
+        assert_eq!(parsed.queue_columns, settings.queue_columns);
         assert_eq!(parsed.unknown_lines, vec!["future_key=1".to_string()]);
         assert_eq!(format_settings_text(&parsed), text);
     }

@@ -157,6 +157,10 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool spectrogramZoomEnabled READ spectrogramZoomEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool systemMediaControlsEnabled READ systemMediaControlsEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool libraryWatchEnabled READ libraryWatchEnabled NOTIFY snapshotChanged)
+    // The widths of the queue's columns the user resized, in logical pixels,
+    // under "artist", "album" and "length"; a column that is not there has
+    // its default width.
+    Q_PROPERTY(QVariantMap queueColumnWidths READ queueColumnWidths NOTIFY queueColumnWidthsChanged)
     Q_PROPERTY(bool lastFmScrobblingEnabled READ lastFmScrobblingEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool lastFmBuildConfigured READ lastFmBuildConfigured NOTIFY snapshotChanged)
     Q_PROPERTY(QString lastFmUsername READ lastFmUsername NOTIFY snapshotChanged)
@@ -275,6 +279,7 @@ public:
     bool spectrogramZoomEnabled() const;
     bool systemMediaControlsEnabled() const;
     bool libraryWatchEnabled() const;
+    QVariantMap queueColumnWidths() const;
     bool lastFmScrobblingEnabled() const;
     bool lastFmBuildConfigured() const;
     QString lastFmUsername() const;
@@ -354,6 +359,10 @@ public:
     Q_INVOKABLE void unregisterSpectrogramItem(QObject *item);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
     Q_INVOKABLE void setLibraryWatchEnabled(bool value);
+    // Keep `width` for the queue's "artist", "album" or "length" column, to
+    // save it with the settings; 0 restores its default. A width out of the
+    // range the backend keeps is ignored.
+    Q_INVOKABLE void setQueueColumnWidth(const QString &column, int width);
     // Whether the backend has sent the window layout saved in the settings,
     // which it does once at startup; savedWindowLayoutRead tells when.
     Q_INVOKABLE bool hasSavedWindowLayout() const;
@@ -503,6 +512,7 @@ signals:
     void stateSaveFinished(quint32 requestId, bool saved, const QString &message);
     // The backend sent the window layout saved in the settings.
     void savedWindowLayoutRead();
+    void queueColumnWidthsChanged();
 
 private:
     struct SearchWorkerInputFrame {
@@ -637,6 +647,8 @@ private:
     bool applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue);
     // After the snapshot's rows are in place.
     void applyQueueUndo(const BinaryBridgeCodec::DecodedQueueUndo &undo);
+    void applyBackendQueueColumnWidths(
+        const BinaryBridgeCodec::QueueColumnWidths &widths, quint32 generation);
     // Read the size and modification time of the artwork target's track,
     // for the search of `generation`, into its "identity": empty if the file
     // is not there.
@@ -871,6 +883,10 @@ private:
     // The window layout the backend sent at startup.
     bool m_hasSavedWindowLayout{false};
     QVariantMap m_savedWindowLayout;
+    // The queue's column widths, and the generation of the latest ones sent
+    // to the backend; see applyBackendQueueColumnWidths.
+    BinaryBridgeCodec::QueueColumnWidths m_queueColumnWidths;
+    quint32 m_queueColumnWidthsGeneration{0};
     // Set once the UI has asked the backend to stop, after which its stop is expected.
     bool m_bridgeShutdownRequested{false};
     bool m_loggedStartupQueueMissing{false};

@@ -39,6 +39,7 @@ mod library_index;
 pub mod library_tree;
 mod persist;
 mod queue;
+mod queue_columns;
 mod queue_relay;
 mod queue_sync;
 mod queue_undo;
@@ -61,6 +62,7 @@ use events::{
     note_precomputed_spectrogram_chunk, process_analysis_event, process_apply_album_art_event,
     process_lastfm_state, process_metadata_event, process_playback_event, tick_lastfm_playback,
 };
+pub use queue_columns::{QueueColumnSettings, QueueColumnWidths};
 pub use queue_sync::{QueueEdit, QueueUpdate};
 pub use queue_undo::{QueueUndoKind, QueueUndoRestored, QueueUndoState};
 pub(crate) use search::is_main_album_disc_section;
@@ -318,6 +320,14 @@ pub enum BridgeSettingsCommand {
     SetSpectrogramZoomEnabled(bool),
     SetLibraryWatchEnabled(bool),
     SetWindowLayout(WindowLayout),
+    /// The widths of the queue's columns the user resized; the others keep
+    /// the UI's defaults. `generation` numbers the UI's requests, and the
+    /// snapshots echo the latest one taken, so the UI can tell the widths
+    /// it is still waiting for from older ones.
+    SetQueueColumnWidths {
+        widths: QueueColumnWidths,
+        generation: u32,
+    },
     BeginLastFmAuth,
     CompleteLastFmAuth,
     DisconnectLastFm,
@@ -429,8 +439,12 @@ pub enum BridgeEvent {
         result: Result<(), String>,
     },
     /// The window layout saved in the settings, sent once at startup, for
-    /// the UI to show the window with.
-    WindowLayout(WindowLayout),
+    /// the UI to show the window with, and the widths of the queue's
+    /// columns, so that the queue opens with them.
+    WindowLayout {
+        layout: WindowLayout,
+        queue_columns: QueueColumnWidths,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -498,6 +512,9 @@ pub struct BridgeSnapshot {
     /// brought back.
     pub queue_undo: QueueUndoState,
     pub settings: BridgeSettings,
+    /// The generation of the latest queue column widths the UI sent; see
+    /// [`BridgeSettingsCommand::SetQueueColumnWidths`].
+    pub queue_column_widths_generation: u32,
     pub lastfm: LastFmRuntimeState,
 }
 
@@ -539,6 +556,9 @@ pub struct BridgeSettings {
     pub integrations: BridgeIntegrationSettings,
     /// The main window's layout, which only the UI uses.
     pub window: WindowLayout,
+    /// The widths of the queue's columns the user resized, which only the
+    /// UI uses.
+    pub queue_columns: QueueColumnSettings,
     /// Lines of the settings file with keys this build does not know, such
     /// as a newer build's, kept as they were.
     pub unknown_lines: Vec<String>,
@@ -574,6 +594,7 @@ impl Default for BridgeSettings {
                 lastfm_username: String::new(),
             },
             window: WindowLayout::default(),
+            queue_columns: QueueColumnSettings::default(),
             unknown_lines: Vec::new(),
         }
     }
@@ -614,6 +635,8 @@ pub(super) struct BridgeState {
     last_current_row: Option<(u64, usize)>,
     selected_queue_index: Option<usize>,
     settings: BridgeSettings,
+    /// See [`BridgeSnapshot::queue_column_widths_generation`].
+    queue_column_widths_generation: u32,
     lastfm: LastFmRuntimeState,
     pending_search_results: Option<BridgeSearchResultsFrame>,
     pending_waveform_track: Option<PendingWaveformTrack>,
@@ -746,6 +769,7 @@ impl BridgeState {
             selected_queue_index: self.selected_queue_index,
             queue_undo: self.queue_undo.state(),
             settings: self.settings.clone(),
+            queue_column_widths_generation: self.queue_column_widths_generation,
             lastfm: self.lastfm.clone(),
         }
     }
@@ -2684,13 +2708,20 @@ fn run_bridge_loop(
 }
 
 /// Read the settings, before the workers start, and send the UI the window
-/// layout in them, which it waits for to show the window.
+/// layout and the queue's column widths in them, which it waits for to show
+/// the window.
 fn send_window_layout(options: &mut BridgeRuntimeOptions, event_tx: &Sender<BridgeEvent>) {
     let mut settings = BridgeSettings::default();
     if options.persisted_state_enabled {
         load_settings_into(&mut settings);
     }
-    let _ = try_send_event(event_tx, BridgeEvent::WindowLayout(settings.window));
+    let _ = try_send_event(
+        event_tx,
+        BridgeEvent::WindowLayout {
+            layout: settings.window,
+            queue_columns: settings.queue_columns.widths,
+        },
+    );
     options.settings = Some(settings);
 }
 
@@ -3412,6 +3443,50 @@ mod tests {
             );
             assert_eq!(runtime.state.settings.window, layout);
             assert_eq!(runtime.flags.settings_dirty, dirty);
+        }
+    }
+
+    #[test]
+    fn new_queue_column_widths_are_kept_and_saved_and_unchanged_ones_are_not() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(32);
+        // A newer build's column, which this one keeps.
+        runtime
+            .state
+            .settings
+            .queue_columns
+            .other_entries
+            .push("genre:90".to_string());
+        let widths = QueueColumnWidths {
+            artist: Some(220),
+            ..QueueColumnWidths::default()
+        };
+        for (generation, (sent, dirty)) in (1..).zip([
+            (widths, true),
+            (widths, false),
+            (QueueColumnWidths::default(), true),
+        ]) {
+            runtime.flags.settings_dirty = false;
+            runtime.handle_command(
+                BridgeCommand::Settings(BridgeSettingsCommand::SetQueueColumnWidths {
+                    widths: sent,
+                    generation,
+                }),
+                &event_tx,
+            );
+            assert_eq!(runtime.state.settings.queue_columns.widths, sent);
+            assert_eq!(runtime.flags.settings_dirty, dirty);
+            // The snapshot tells the UI which request it reflects, also when
+            // the widths did not change.
+            assert_eq!(
+                runtime.state.snapshot(false).queue_column_widths_generation,
+                generation
+            );
+            assert_eq!(
+                runtime.state.settings.queue_columns.other_entries,
+                vec!["genre:90".to_string()]
+            );
         }
     }
 

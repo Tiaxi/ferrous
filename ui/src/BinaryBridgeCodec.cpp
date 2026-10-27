@@ -540,6 +540,12 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     return true;
 }
 
+// The queue's column widths as CmdSetQueueColumnWidths lays them out.
+bool readQueueColumnWidths(Reader &reader, QueueColumnWidths *out) {
+    return reader.readU16(&out->artist) && reader.readU16(&out->album)
+        && reader.readU16(&out->length);
+}
+
 bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!out) {
         return false;
@@ -597,6 +603,12 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     }
     quint8 libraryWatchEnabled = 1;
     if (!reader.atEnd() && !reader.readU8(&libraryWatchEnabled)) {
+        return false;
+    }
+    out->hasQueueColumnWidths = !reader.atEnd();
+    if (out->hasQueueColumnWidths
+        && (!readQueueColumnWidths(reader, &out->queueColumnWidths)
+            || !reader.readU32(&out->queueColumnWidthsGeneration))) {
         return false;
     }
     if (!reader.atEnd()) {
@@ -813,6 +825,16 @@ QByteArray encodeCommandWindowLayout(const WindowLayout &layout) {
     appendLe<quint8>(payload, layout.visualizationMode);
     appendLe<quint8>(payload, layout.followCurrentTrack ? 1 : 0);
     return finalizeCommand(CmdSetWindowLayout, payload);
+}
+
+QByteArray encodeCommandQueueColumnWidths(const QueueColumnWidths &widths, quint32 generation) {
+    QByteArray payload;
+    payload.reserve(10);
+    appendLe<quint16>(payload, widths.artist);
+    appendLe<quint16>(payload, widths.album);
+    appendLe<quint16>(payload, widths.length);
+    appendLe<quint32>(payload, generation);
+    return finalizeCommand(CmdSetQueueColumnWidths, payload);
 }
 
 QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query, quint32 limit) {
@@ -1054,13 +1076,18 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
                 && sectionReader.readF32(&layout.sidebarWidthRatio)
                 && sectionReader.readF32(&layout.queueHeightRatio)
                 && sectionReader.readU8(&layout.visualizationMode)
-                && sectionReader.readU8(&follow) && sectionReader.atEnd();
+                && sectionReader.readU8(&follow);
+            // Older backends end the section with the layout.
+            QueueColumnWidths queueColumns;
+            ok = ok && (sectionReader.atEnd() || readQueueColumnWidths(sectionReader, &queueColumns))
+                && sectionReader.atEnd();
             if (ok) {
                 layout.hasGeometry = hasGeometry != 0;
                 layout.maximized = maximized != 0;
                 layout.followCurrentTrack = follow != 0;
                 out->hasWindowLayout = true;
                 out->windowLayout = layout;
+                out->windowLayoutQueueColumns = queueColumns;
             }
             break;
         }

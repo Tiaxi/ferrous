@@ -44,7 +44,8 @@ enum SnapshotSection : quint16 {
     // SECTION_QUEUE_UNDO in src/frontend_bridge/ffi.rs.
     SectionQueueUndo = 1u << 10,
     // The window layout saved in the settings, sent once at startup, laid
-    // out as CmdSetWindowLayout's payload.
+    // out as CmdSetWindowLayout's payload, then the queue's column widths
+    // as CmdSetQueueColumnWidths lays them out.
     SectionWindowLayout = 1u << 11,
 };
 
@@ -149,6 +150,24 @@ enum CommandId : quint16 {
     CmdMoveQueueRows = 70,
     // The main window's layout; see encodeCommandWindowLayout.
     CmdSetWindowLayout = 71,
+    // The queue's resized column widths and the generation of the request,
+    // which SectionSettings echoes; see encodeCommandQueueColumnWidths.
+    CmdSetQueueColumnWidths = 72,
+};
+
+// The narrowest and widest queue column the backend keeps, in logical
+// pixels. Mirrors MIN_WIDTH and MAX_WIDTH in
+// src/frontend_bridge/queue_columns.rs.
+constexpr quint16 kMinQueueColumnWidth = 16;
+constexpr quint16 kMaxQueueColumnWidth = 4096;
+
+// The widths of the queue's resizable columns in logical pixels, 0 for the
+// default.
+struct QueueColumnWidths {
+    quint16 artist{0};
+    quint16 album{0};
+    quint16 length{0};
+    friend bool operator==(const QueueColumnWidths &, const QueueColumnWidths &) = default;
 };
 
 // Where CmdQueueLibraryItems puts its tracks.
@@ -355,6 +374,12 @@ struct DecodedSettings {
     int channelButtonsVisibility{1};
     bool spectrogramZoomEnabled{true};
     bool libraryWatchEnabled{true};
+    // Whether the section ended with the queue's column widths, which
+    // older backends do not send, and the generation of the latest widths
+    // the UI sent that the backend had taken.
+    bool hasQueueColumnWidths{false};
+    QueueColumnWidths queueColumnWidths;
+    quint32 queueColumnWidthsGeneration{0};
 };
 
 struct DecodedLastFm {
@@ -417,6 +442,8 @@ struct DecodedSnapshot {
     QString stateSaveError;
     bool hasWindowLayout{false};
     WindowLayout windowLayout;
+    // The queue's column widths, sent with the window layout.
+    QueueColumnWidths windowLayoutQueueColumns;
     DecodedPlayback playback;
     DecodedQueue queue;
     DecodedLibraryMeta library;
@@ -485,6 +512,9 @@ QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &q
 // maximized (u8), the sidebar and queue ratios (f32), visualizationMode (u8),
 // and followCurrentTrack (u8).
 QByteArray encodeCommandWindowLayout(const WindowLayout &layout);
+// CmdSetQueueColumnWidths: the artist, album and length widths (u16), 0 for
+// the default, then the request's u32 generation.
+QByteArray encodeCommandQueueColumnWidths(const QueueColumnWidths &widths, quint32 generation);
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
 // Queue commands for rows of the queue at `revision`.
 QByteArray encodeCommandQueueRow(quint16 cmdId, quint64 revision, quint32 index);
