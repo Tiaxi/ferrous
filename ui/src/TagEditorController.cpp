@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <utility>
+#include <KLocalizedString>
 #include <QFutureWatcher>
 #include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
@@ -28,12 +29,18 @@ QString displayNameForPath(const QString &path) {
     return QFileInfo(path).fileName();
 }
 
+// "<done>; <failed>.", as in "Saved 2 files; 1 failed."
+QString partialResultText(const QString &done, qsizetype failed) {
+    return i18nc("@info:status files done; files that failed", "%1; %2.",
+                 done, i18ncp("@info:status", "%1 failed", "%1 failed", failed));
+}
+
 QString buildActionDetails(const QStringList &successLines, const QStringList &failureLines) {
     QStringList sections;
     if (!successLines.isEmpty()) {
         QStringList lines;
         lines.reserve(successLines.size() + 1);
-        lines.push_back(QStringLiteral("Succeeded:"));
+        lines.push_back(i18nc("@title list of files", "Succeeded:"));
         for (const QString &line : successLines) {
             lines.push_back(QStringLiteral("  ") + line);
         }
@@ -42,7 +49,7 @@ QString buildActionDetails(const QStringList &successLines, const QStringList &f
     if (!failureLines.isEmpty()) {
         QStringList lines;
         lines.reserve(failureLines.size() + 1);
-        lines.push_back(QStringLiteral("Failed:"));
+        lines.push_back(i18nc("@title list of files", "Failed:"));
         for (const QString &line : failureLines) {
             lines.push_back(QStringLiteral("  ") + line);
         }
@@ -494,7 +501,7 @@ bool TagEditorController::openSelection(const QVariantList &selections) {
     m_open = true;
     m_tableModel.clear();
     m_loadedPaths.clear();
-    setStatusText(QStringLiteral("Loading tags..."));
+    setStatusText(i18nc("@info:status", "Loading tags..."));
     emit openChanged();
     runLoad(buildSelectionBlob(selections));
     return true;
@@ -545,12 +552,12 @@ TagEditorController::LoadResult TagEditorController::parseLoadResponse(const QBy
                 readString(failure, "error")));
         }
     } else {
-        errorText = QStringLiteral("failed to parse tag editor load response");
+        errorText = i18nc("@info:status", "failed to parse tag editor load response");
     }
     if (errorText.isEmpty() && !failureLines.isEmpty()) {
-        errorText = QStringLiteral("Loaded %1 file(s); %2 failed.")
-                        .arg(rows.size())
-                        .arg(failureLines.size());
+        errorText = partialResultText(
+            i18ncp("@info:status", "Loaded %1 file", "Loaded %1 files", rows.size()),
+            failureLines.size());
     }
     failureLines.sort();
     return result;
@@ -662,7 +669,7 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
             }
         }
     } else {
-        status = QStringLiteral("failed to parse tag editor save response");
+        status = i18nc("@info:status", "failed to parse tag editor save response");
     }
 
     const bool success = document.isObject() && status.isEmpty()
@@ -675,11 +682,11 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
     }
     if (status.isEmpty()) {
         if (errorsByPath.isEmpty()) {
-            status = QStringLiteral("Saved %1 file(s).").arg(successPaths.size());
+            status = i18ncp("@info:status", "Saved %1 file.", "Saved %1 files.", successPaths.size());
         } else {
-            status = QStringLiteral("Saved %1 file(s); %2 failed.")
-                         .arg(successPaths.size())
-                         .arg(errorsByPath.size());
+            status = partialResultText(
+                i18ncp("@info:status", "Saved %1 file", "Saved %1 files", successPaths.size()),
+                errorsByPath.size());
         }
     }
     successLines.sort();
@@ -740,8 +747,9 @@ bool TagEditorController::renamePreviewedFiles() {
     }
     RenameRequest request = std::exchange(m_renamePreview, {});
     if (request.payload.isEmpty()) {
-        setStatusText(QStringLiteral("The rename preview is out of date, so nothing was renamed. "
-                                     "Use Rename Files again."),
+        setStatusText(i18nc("@info:status",
+                            "The rename preview is out of date, so nothing was renamed. "
+                            "Use Rename Files again."),
                       QString(), true);
         return false;
     }
@@ -788,7 +796,7 @@ void TagEditorController::applyRenamePreview(const QByteArray &response,
     m_renamePreview = {};
     const QJsonDocument document = QJsonDocument::fromJson(response);
     if (!document.isObject()) {
-        emit renamePreviewReady({}, QStringLiteral("failed to parse the file rename preview"));
+        emit renamePreviewReady({}, i18nc("@info", "failed to parse the file rename preview"));
         return;
     }
     const QJsonObject object = document.object();
@@ -885,7 +893,7 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
             }
         }
     } else {
-        status = QStringLiteral("failed to parse file rename response");
+        status = i18nc("@info:status", "failed to parse file rename response");
     }
 
     const bool failed = !status.isEmpty() || !errorsByPath.isEmpty();
@@ -894,11 +902,11 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
 
     if (status.isEmpty()) {
         if (errorsByPath.isEmpty()) {
-            status = QStringLiteral("Renamed %1 file(s).").arg(renamedPaths.size());
+            status = i18ncp("@info:status", "Renamed %1 file.", "Renamed %1 files.", renamedPaths.size());
         } else {
-            status = QStringLiteral("Renamed %1 file(s); %2 failed.")
-                         .arg(renamedPaths.size())
-                         .arg(errorsByPath.size());
+            status = partialResultText(
+                i18ncp("@info:status", "Renamed %1 file", "Renamed %1 files", renamedPaths.size()),
+                errorsByPath.size());
         }
     }
     renamedLines.sort();
@@ -976,16 +984,24 @@ QVariantList TagEditorController::selectedRows() const {
 
 QString TagEditorController::bulkValue(const QString &field) const {
     const QVector<int> rows = targetRows();
-    if (rows.isEmpty()) {
+    if (rows.isEmpty() || bulkValueMixed(field)) {
         return {};
+    }
+    return m_tableModel.fieldValue(rows[0], field);
+}
+
+bool TagEditorController::bulkValueMixed(const QString &field) const {
+    const QVector<int> rows = targetRows();
+    if (rows.isEmpty()) {
+        return false;
     }
     const QString first = m_tableModel.fieldValue(rows[0], field);
     for (int i = 1; i < rows.size(); ++i) {
         if (m_tableModel.fieldValue(rows[i], field) != first) {
-            return QStringLiteral("<keep>");
+            return true;
         }
     }
-    return first;
+    return false;
 }
 
 QString TagEditorController::extraValuesNote(const QString &field) const {
@@ -1009,12 +1025,16 @@ QString TagEditorController::extraValuesNote(const QString &field) const {
         return {};
     }
     if (rows.size() == 1) {
-        return QStringLiteral("Also: %1. Editing replaces every value with the one above.")
-            .arg(firstExtras.join(QStringLiteral("; ")));
+        return i18nc("@info the file's other values of a tag",
+                     "Also: %1. Editing replaces every value with the one above.",
+                     firstExtras.join(QStringLiteral("; ")));
     }
-    return QStringLiteral("%1 of these files have more than one value. Editing replaces "
-                          "them all with the one above.")
-        .arg(rowsWithExtras);
+    return i18ncp("@info",
+                  "%1 of these files has more than one value. Editing replaces "
+                  "them all with the one above.",
+                  "%1 of these files have more than one value. Editing replaces "
+                  "them all with the one above.",
+                  rowsWithExtras);
 }
 
 void TagEditorController::applyBulkField(const QString &field, const QString &value) {
@@ -1162,15 +1182,16 @@ void TagEditorController::autoNumber(
         if (row == nullptr) {
             continue;
         }
-        QString line = displayNameForPath(row->path) + QStringLiteral(": track ") + row->trackNo;
-        if (writeDiscNumbers && !row->discNo.isEmpty()) {
-            line += QStringLiteral(", disc ") + row->discNo;
-        }
-        successLines.push_back(line);
+        successLines.push_back(
+            writeDiscNumbers && !row->discNo.isEmpty()
+                ? i18nc("@item file name, track number, disc number", "%1: track %2, disc %3",
+                        displayNameForPath(row->path), row->trackNo, row->discNo)
+                : i18nc("@item file name, track number", "%1: track %2",
+                        displayNameForPath(row->path), row->trackNo));
     }
     successLines.sort();
     setStatusText(
-        QStringLiteral("Auto-numbered %1 file(s).").arg(successLines.size()),
+        i18ncp("@info:status", "Auto-numbered %1 file.", "Auto-numbered %1 files.", successLines.size()),
         buildActionDetails(successLines, {}));
     notifyRowMutation();
 }
@@ -1205,8 +1226,9 @@ void TagEditorController::reportFailures(const QString &status, const QStringLis
     QStringList lines{status};
     lines.append(failureLines.mid(0, kShownFailures));
     if (failureLines.size() > kShownFailures) {
-        lines.push_back(QStringLiteral("…and %1 more; the tag editor lists them all.")
-                            .arg(failureLines.size() - kShownFailures));
+        lines.push_back(i18ncp("@info", "…and %1 more; the tag editor lists them all.",
+                               "…and %1 more; the tag editor lists them all.",
+                               failureLines.size() - kShownFailures));
     }
     emit errorReported(lines.join(QLatin1Char('\n')));
 }

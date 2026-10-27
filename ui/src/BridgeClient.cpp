@@ -19,6 +19,7 @@
 #include <limits>
 #include <utility>
 
+#include <KLocalizedString>
 #include <QDateTime>
 #include <QQmlEngine>
 #include <QDesktopServices>
@@ -458,11 +459,11 @@ BridgeClient::ItunesArtworkAssetJobResult BridgeClient::processItunesArtworkAsse
     result.usedFallback = assetUrlIndex > 0;
 
     if (payload.isEmpty()) {
-        result.errorMessage = QStringLiteral("Failed to load high-resolution artwork.");
+        result.errorMessage = i18nc("@info", "Failed to load high-resolution artwork.");
         return result;
     }
     if (tempDirPath.trimmed().isEmpty()) {
-        result.errorMessage = QStringLiteral("Failed to prepare temporary artwork cache.");
+        result.errorMessage = i18nc("@info", "Failed to prepare temporary artwork cache.");
         return result;
     }
 
@@ -477,13 +478,13 @@ BridgeClient::ItunesArtworkAssetJobResult BridgeClient::processItunesArtworkAsse
     if (sourceExtension != QStringLiteral("png")
         && sourceExtension != QStringLiteral("jpg")
         && sourceExtension != QStringLiteral("tif")) {
-        result.errorMessage = QStringLiteral("Unsupported artwork format returned by iTunes.");
+        result.errorMessage = i18nc("@info", "Unsupported artwork format returned by iTunes.");
         return result;
     }
 
     const QImage image = reader.read();
     if (image.isNull()) {
-        result.errorMessage = QStringLiteral("Failed to decode downloaded artwork.");
+        result.errorMessage = i18nc("@info", "Failed to decode downloaded artwork.");
         return result;
     }
 
@@ -495,7 +496,7 @@ BridgeClient::ItunesArtworkAssetJobResult BridgeClient::processItunesArtworkAsse
     QFile originalFile(originalPath);
     if (!originalFile.open(QIODevice::WriteOnly | QIODevice::Truncate)
         || originalFile.write(payload) != payload.size()) {
-        result.errorMessage = QStringLiteral("Failed to cache downloaded artwork.");
+        result.errorMessage = i18nc("@info", "Failed to cache downloaded artwork.");
         return result;
     }
     originalFile.close();
@@ -524,7 +525,7 @@ BridgeClient::ItunesArtworkAssetJobResult BridgeClient::processItunesArtworkAsse
             ? normalized.save(normalizedPath, "JPG", 95)
             : normalized.save(normalizedPath, "PNG");
         if (!saved) {
-            result.errorMessage = QStringLiteral("Failed to normalize downloaded artwork.");
+            result.errorMessage = i18nc("@info", "Failed to normalize downloaded artwork.");
             return result;
         }
     }
@@ -575,10 +576,10 @@ QString knownChannelLayout(const QStringList &labels) {
     }
 }
 
-QString channelLayoutText(int channels, const QStringList &labels) {
+// The layout as a code, such as "stereo" or "5.1"; empty when it has no name.
+QString channelLayoutCode(int channels, const QStringList &labels) {
     if (!labels.isEmpty() && labels.size() == channels) {
-        const QString known = knownChannelLayout(labels);
-        return known.isEmpty() ? QStringLiteral("%1 ch").arg(channels) : known;
+        return knownChannelLayout(labels);
     }
     switch (channels) {
     case 1:
@@ -586,18 +587,27 @@ QString channelLayoutText(int channels, const QStringList &labels) {
     case 2:
         return QStringLiteral("stereo");
     default:
-        return channels > 0 ? QStringLiteral("%1 ch").arg(channels) : QString{};
+        return {};
     }
 }
 
-QString channelLayoutIconKey(int channels, const QStringList &labels) {
-    QString layout = channelLayoutText(channels, labels);
-    if (layout == QStringLiteral("mono") || layout == QStringLiteral("stereo")) return layout;
-    if (layout == QStringLiteral("4.0") || layout == QStringLiteral("5.0")
-        || layout == QStringLiteral("5.1") || layout == QStringLiteral("7.1")) {
-        return layout;
+QString channelLayoutText(int channels, const QStringList &labels) {
+    const QString code = channelLayoutCode(channels, labels);
+    if (code == QStringLiteral("mono")) {
+        return i18nc("@info:status channel layout", "mono");
     }
-    return {};
+    if (code == QStringLiteral("stereo")) {
+        return i18nc("@info:status channel layout", "stereo");
+    }
+    if (!code.isEmpty()) {
+        return code;
+    }
+    return channels > 0 ? i18nc("@info:status number of audio channels", "%1 ch", channels) : QString{};
+}
+
+// The icon follows the layout, not its text, which is translated.
+QString channelLayoutIconKey(int channels, const QStringList &labels) {
+    return channelLayoutCode(channels, labels);
 }
 
 QString formatLabelFromPath(const QString &path) {
@@ -995,7 +1005,7 @@ bool BridgeClient::startInProcessBridge() {
     if (m_ffiBridge == nullptr) {
         logDiagnostic(QStringLiteral("bridge"), QStringLiteral("failed to create in-process bridge"));
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    QStringLiteral("failed to create in-process Rust bridge"));
+                    i18nc("@info", "failed to create in-process Rust bridge"));
         return false;
     }
 
@@ -1111,10 +1121,10 @@ void BridgeClient::startItunesArtworkAssetDownload(
         row.insert(QStringLiteral("assetReady"), false);
         row.insert(
             QStringLiteral("assetError"),
-            QStringLiteral("No high-resolution artwork URL was available."));
+            i18nc("@info", "No high-resolution artwork URL was available."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            QStringLiteral("High-resolution artwork could not be loaded."));
+            i18nc("@info", "High-resolution artwork could not be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -1123,10 +1133,10 @@ void BridgeClient::startItunesArtworkAssetDownload(
         row.insert(QStringLiteral("assetReady"), false);
         row.insert(
             QStringLiteral("assetError"),
-            QStringLiteral("Failed to prepare temporary artwork cache."));
+            i18nc("@info", "Failed to prepare temporary artwork cache."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            QStringLiteral("High-resolution artwork could not be loaded."));
+            i18nc("@info", "High-resolution artwork could not be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -1167,15 +1177,15 @@ void BridgeClient::startItunesArtworkAssetDownload(
             row.insert(QStringLiteral("assetError"), message);
             row.insert(
                 QStringLiteral("detailStatusText"),
-                QStringLiteral("High-resolution artwork could not be loaded."));
+                i18nc("@info", "High-resolution artwork could not be loaded."));
             updateItunesArtworkResult(candidateIndex, row);
         };
 
         if (error != QNetworkReply::NoError || payload.isEmpty()) {
             failCandidate(
                 errorText.trimmed().isEmpty()
-                    ? QStringLiteral("Failed to load high-resolution artwork.")
-                    : QStringLiteral("Failed to load high-resolution artwork: %1").arg(errorText));
+                    ? i18nc("@info", "Failed to load high-resolution artwork.")
+                    : i18nc("@info", "Failed to load high-resolution artwork: %1", errorText));
             return;
         }
 
@@ -1226,7 +1236,7 @@ void BridgeClient::applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult 
         row.insert(QStringLiteral("assetError"), result.errorMessage);
         row.insert(
             QStringLiteral("detailStatusText"),
-            QStringLiteral("High-resolution artwork could not be loaded."));
+            i18nc("@info", "High-resolution artwork could not be loaded."));
         updateItunesArtworkResult(result.candidateIndex, row);
         return;
     }
@@ -1243,7 +1253,7 @@ void BridgeClient::applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult 
     row.insert(
         QStringLiteral("detailStatusText"),
         result.usedFallback
-            ? QStringLiteral("Loaded the high-resolution fallback artwork.")
+            ? i18nc("@info", "Loaded the high-resolution fallback artwork.")
             : QString());
     for (auto it = result.imageDetails.constBegin(); it != result.imageDetails.constEnd(); ++it) {
         row.insert(it.key(), it.value());
@@ -1517,7 +1527,7 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
                 QStringLiteral("bridge"),
                 QStringLiteral("snapshot decode error: %1").arg(decodeError));
             reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                        QStringLiteral("invalid bridge packet: %1").arg(decodeError));
+                        i18nc("@info", "invalid bridge packet: %1", decodeError));
             continue;
         }
         processBinarySnapshot(decoded);
@@ -3086,16 +3096,22 @@ void BridgeClient::replaceWithPaths(const QStringList &paths) {
     sendPathListCommand(
         BinaryBridgeCodec::CmdReplaceAlbum,
         paths,
-        QStringLiteral("Couldn't open %1 files at once: the list is over the %2 MiB the "
-                       "backend takes in one command. The queue was not changed."));
+        ki18ncp("@info",
+                "Couldn't open %1 file at once: the list is over the %2 MiB the "
+                "backend takes in one command. The queue was not changed.",
+                "Couldn't open %1 files at once: the list is over the %2 MiB the "
+                "backend takes in one command. The queue was not changed."));
 }
 
 void BridgeClient::appendPaths(const QStringList &paths) {
     sendPathListCommand(
         BinaryBridgeCodec::CmdAppendAlbum,
         paths,
-        QStringLiteral("Couldn't add %1 files at once: the list is over the %2 MiB the "
-                       "backend takes in one command. The queue was not changed."));
+        ki18ncp("@info",
+                "Couldn't add %1 file at once: the list is over the %2 MiB the "
+                "backend takes in one command. The queue was not changed.",
+                "Couldn't add %1 files at once: the list is over the %2 MiB the "
+                "backend takes in one command. The queue was not changed."));
 }
 
 void BridgeClient::insertPaths(const QStringList &paths, int row) {
@@ -3159,11 +3175,15 @@ void BridgeClient::sendLibraryItems(
                 .arg(items.size())
                 .arg(trackCount));
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    QStringLiteral("Couldn't queue %1 library rows at once: they are over the %2 "
-                                   "MiB the backend takes in one command. The queue was not "
-                                   "changed.")
-                        .arg(items.size())
-                        .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
+                    i18ncp("@info",
+                           "Couldn't queue %1 library row at once: it is over the %2 "
+                           "MiB the backend takes in one command. The queue was not "
+                           "changed.",
+                           "Couldn't queue %1 library rows at once: they are over the %2 "
+                           "MiB the backend takes in one command. The queue was not "
+                           "changed.",
+                           items.size(),
+                           BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
         return;
     }
     sendBinaryCommand(command);
@@ -3172,7 +3192,7 @@ void BridgeClient::sendLibraryItems(
 void BridgeClient::sendPathListCommand(
     quint16 cmdId,
     const QStringList &paths,
-    const QString &tooLargeMessage) {
+    const KLocalizedString &tooLargeMessage) {
     QStringList sanitized;
     sanitized.reserve(paths.size());
     for (const QString &path : paths) {
@@ -3194,8 +3214,9 @@ void BridgeClient::sendPathListCommand(
                 .arg(cmdId)
                 .arg(sanitized.size()));
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    tooLargeMessage.arg(sanitized.size())
-                        .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
+                    tooLargeMessage.subs(sanitized.size())
+                        .subs(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024))
+                        .toString());
         return;
     }
     sendBinaryCommand(command);
@@ -3526,13 +3547,13 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
 
     if (album.isEmpty() || artist.isEmpty()) {
         m_itunesArtworkLoading = false;
-        m_itunesArtworkStatusText = QStringLiteral("Album and artist metadata are required.");
+        m_itunesArtworkStatusText = i18nc("@info:status", "Album and artist metadata are required.");
         emit itunesArtworkChanged();
         return;
     }
 
     m_itunesArtworkLoading = true;
-    m_itunesArtworkStatusText = QStringLiteral("Searching iTunes...");
+    m_itunesArtworkStatusText = i18nc("@info:status", "Searching iTunes...");
     emit itunesArtworkChanged();
 
     const quint64 generation = m_itunesArtworkGeneration;
@@ -3658,7 +3679,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             if (aggregation->successfulRequests <= 0 && !aggregation->firstError.isEmpty()) {
                 m_itunesArtworkStatusText = aggregation->firstError;
             } else {
-                m_itunesArtworkStatusText = QStringLiteral("No iTunes artwork suggestions found.");
+                m_itunesArtworkStatusText = i18nc("@info:status", "No iTunes artwork suggestions found.");
             }
             emit itunesArtworkChanged();
             return;
@@ -3683,15 +3704,17 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             row.insert(QStringLiteral("assetError"), QString());
             row.insert(
                 QStringLiteral("detailStatusText"),
-                QStringLiteral("High-resolution file info loads on preview or apply."));
+                i18nc("@info:status", "High-resolution file info loads on preview or apply."));
             rows.push_back(row);
         }
 
         m_itunesArtworkResults = rows;
         m_itunesArtworkLoading = false;
         m_itunesArtworkStatusText =
-            QStringLiteral("Found %1 suggestion(s). High-resolution artwork loads on preview/apply.")
-                .arg(rows.size());
+            i18ncp("@info:status",
+                   "Found %1 suggestion. High-resolution artwork loads on preview/apply.",
+                   "Found %1 suggestions. High-resolution artwork loads on preview/apply.",
+                   rows.size());
         emit itunesArtworkChanged();
     };
 
@@ -3774,7 +3797,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             if (error != QNetworkReply::NoError) {
                 if (aggregation->firstError.isEmpty()) {
                     aggregation->firstError =
-                        QStringLiteral("iTunes search failed: %1").arg(errorText);
+                        i18nc("@info:status", "iTunes search failed: %1", errorText);
                 }
             } else {
                 aggregation->successfulRequests += 1;
@@ -3915,7 +3938,7 @@ void BridgeClient::prepareItunesArtworkSuggestion(int index) {
 
     row.insert(QStringLiteral("assetLoading"), true);
     row.insert(QStringLiteral("assetError"), QString());
-    row.insert(QStringLiteral("detailStatusText"), QStringLiteral("Loading high-resolution artwork..."));
+    row.insert(QStringLiteral("detailStatusText"), i18nc("@info:status", "Loading high-resolution artwork..."));
     updateItunesArtworkResult(index, row);
     startItunesArtworkAssetDownload(index);
 }
@@ -3994,7 +4017,7 @@ void BridgeClient::openInFileBrowser(const QString &path) {
     const bool ok = openUrlInFileBrowser(path, false);
     if (!ok) {
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    QStringLiteral("failed to open in %1: %2").arg(m_fileBrowserName, path),
+                    i18nc("@info %1 is an application", "failed to open in %1: %2", m_fileBrowserName, path),
                     path);
     }
 }
@@ -4006,8 +4029,8 @@ void BridgeClient::openContainingFolder(const QString &path) {
     const bool ok = openUrlInFileBrowser(path, true);
     if (!ok) {
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    QStringLiteral("failed to open containing folder in %1: %2")
-                        .arg(m_fileBrowserName, path),
+                    i18nc("@info %1 is an application", "failed to open containing folder in %1: %2",
+                          m_fileBrowserName, path),
                     path);
     }
 }
@@ -4016,9 +4039,13 @@ void BridgeClient::refreshEditedPaths(const QStringList &paths) {
     sendPathListCommand(
         BinaryBridgeCodec::CmdRefreshEditedPaths,
         paths,
-        QStringLiteral("The edits to %1 files were saved, but the list is over the %2 MiB "
-                       "the backend takes in one command, so the library does not show "
-                       "them yet. Rescan the library to update it."));
+        ki18ncp("@info",
+                "The edits to %1 file were saved, but the list is over the %2 MiB "
+                "the backend takes in one command, so the library does not show "
+                "them yet. Rescan the library to update it.",
+                "The edits to %1 files were saved, but the list is over the %2 MiB "
+                "the backend takes in one command, so the library does not show "
+                "them yet. Rescan the library to update it."));
 }
 
 std::shared_ptr<FerrousFfiRenameGate> BridgeClient::renameGate() const {
@@ -4066,7 +4093,7 @@ quint32 BridgeClient::saveStateBeforeQuit() {
             emit stateSaveFinished(
                 requestId,
                 false,
-                QStringLiteral("Settings and the queue could not be saved: the backend has stopped."));
+                i18nc("@info", "Settings and the queue could not be saved: the backend has stopped."));
         },
         Qt::QueuedConnection);
     return requestId;
@@ -4344,7 +4371,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
                     .arg(frame.decodeError));
         }
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    QStringLiteral("invalid search frame: %1").arg(frame.decodeError));
+                    i18nc("@info", "invalid search frame: %1", frame.decodeError));
         return false;
     }
     if (m_globalSearchDebounceTimer.isActive()) return false;
@@ -4530,7 +4557,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         const quint32 frameBytes = qFromLittleEndian<quint32>(lenPtr);
         if (frameBytes == 0 || frameBytes > kMaxAnalysisFrameBytes) {
             reportError(BinaryBridgeCodec::ErrorCategoryAnalysis,
-                        QStringLiteral("invalid analysis frame size: %1").arg(frameBytes));
+                        i18nc("@info", "invalid analysis frame size: %1", frameBytes));
             m_analysisBuffer.clear();
             m_analysisBufferReadOffset = 0;
             break;
@@ -4962,7 +4989,7 @@ QString BridgeClient::detectFileBrowserNameHeuristic() {
     if (desktop.contains(QStringLiteral("lxqt")) || desktop.contains(QStringLiteral("lxde"))) {
         return QStringLiteral("PCManFM");
     }
-    return QStringLiteral("File Manager");
+    return i18nc("@label generic application name", "File Manager");
 }
 
 QString BridgeClient::detectFileBrowserName() {
@@ -5057,9 +5084,10 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
         // Encoders return nothing for a command over the bound.
         logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command over the bound"));
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    QStringLiteral("Command not sent: it is over the %1 MiB the backend "
-                                   "takes in one command.")
-                        .arg(BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
+                    i18nc("@info",
+                          "Command not sent: it is over the %1 MiB the backend "
+                          "takes in one command.",
+                          BinaryBridgeCodec::kMaxCommandPayloadBytes / (1024 * 1024)));
         return false;
     }
     if (m_sendCommandOverride) {
@@ -5068,7 +5096,7 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
     if (m_ffiBridge == nullptr) {
         logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command: bridge not initialized"));
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    QStringLiteral("bridge is not initialized"));
+                    i18nc("@info", "bridge is not initialized"));
         return false;
     }
     const auto *ptr = reinterpret_cast<const std::uint8_t *>(payload.constData());
@@ -5078,8 +5106,8 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
             QStringLiteral("failed to send command bytes=%1").arg(payload.size()));
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
                     m_backendFailure.isEmpty()
-                        ? QStringLiteral("failed to send command to in-process bridge")
-                        : QStringLiteral("command not sent: the backend has stopped"));
+                        ? i18nc("@info", "failed to send command to in-process bridge")
+                        : i18nc("@info", "command not sent: the backend has stopped"));
         return false;
     }
     return true;
@@ -5957,9 +5985,10 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             if (!root.unwatchedReason.isEmpty() && !m_reportedUnwatchedRoots.contains(reported)) {
                 m_reportedUnwatchedRoots.insert(reported);
                 reportError(BinaryBridgeCodec::ErrorCategoryLibrary,
-                            QStringLiteral("Not watched for changes in library folder %1: %2")
-                                .arg(trimmedName.isEmpty() ? root.path : trimmedName,
-                                     root.unwatchedReason),
+                            i18nc("@info folder name, reason",
+                                  "Not watched for changes in library folder %1: %2",
+                                  trimmedName.isEmpty() ? root.path : trimmedName,
+                                  root.unwatchedReason),
                             root.path, BinaryBridgeCodec::ErrorSeverityWarning);
             }
         }

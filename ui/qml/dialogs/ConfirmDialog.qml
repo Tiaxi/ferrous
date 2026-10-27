@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import FerrousUi 1.0
 
 // Asks before an action that cannot be undone. Escape and Cancel keep
 // things as they are; only the confirm button sends `confirmed`.
@@ -13,7 +14,7 @@ Dialog {
     required property var windowRoot
     property string message: ""
     property string details: ""
-    property string confirmText: "OK"
+    property string confirmText: I18n.i18nc("@action:button", "OK")
 
     signal confirmed()
 
@@ -58,7 +59,7 @@ Dialog {
 
             Button {
                 objectName: "confirmDialogCancelButton"
-                text: "Cancel"
+                text: I18n.i18nc("@action:button", "Cancel")
                 onClicked: root.reject()
             }
             Button {

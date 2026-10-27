@@ -12,6 +12,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocale>
 #include <QNetworkProxy>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -237,6 +238,7 @@ private slots:
     void tagEditorKeepsExtraValuesUntilTheirFieldIsSaved();
     void tagEditorSelectionIsAModelRole();
     void tagEditorEditsOfManyRowsAnnounceOnce();
+    void tagEditorTellsMixedValuesApartFromText();
     void tagEditorRenameKeepsRowsInPlace();
     void tagEditorExitDoesNotWaitForAStalledSave();
     void batchRemovalCodecPreservesIndices();
@@ -676,7 +678,7 @@ void BridgeClientTest::tagEditorShowsRefusedEditsAndKeepsTheFile() {
         "or Side A, is stored as typed");
     QCOMPARE(editor.m_tableModel.rowAt(0)->errorText, error);
     QVERIFY(editor.dirty());
-    QCOMPARE(editor.statusText(), QStringLiteral("Saved 0 file(s); 1 failed."));
+    QCOMPARE(editor.statusText(), QStringLiteral("Saved 0 files; 1 failed."));
     QCOMPARE(editor.statusDetails(), QStringLiteral("Failed:\n  song.flac: ") + error);
     QVERIFY(file.open(QIODevice::ReadOnly));
     QCOMPARE(file.readAll(), flac);
@@ -722,7 +724,7 @@ void BridgeClientTest::tagEditorLoadReportsUnreadableFiles() {
     QVERIFY(editor.isOpen());
     QCOMPARE(editor.m_tableModel.rowCount(), 1);
     QCOMPARE(editor.m_tableModel.rowAt(0)->path, good);
-    QCOMPARE(editor.statusText(), QStringLiteral("Loaded 1 file(s); 1 failed."));
+    QCOMPARE(editor.statusText(), QStringLiteral("Loaded 1 file; 1 failed."));
     QVERIFY(editor.statusIsError());
     QVERIFY2(editor.statusDetails().startsWith(QStringLiteral("Failed:\n  garbage.flac: ")),
              qPrintable(editor.statusDetails()));
@@ -823,7 +825,7 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
     // The app's error list hears of it, with the file that failed.
     QCOMPARE(reported.size(), 1);
     QCOMPARE(reported.at(0).at(0).toString(),
-             QStringLiteral("Saved 0 file(s); 1 failed.\n0.flac: Fehler"));
+             QStringLiteral("Saved 0 files; 1 failed.\n0.flac: Fehler"));
 
     editor.setSelectedRows({0});
     QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
@@ -833,7 +835,7 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
     QCOMPARE(editor.m_tableModel.rowAt(0)->errorText, QStringLiteral("busy"));
     QCOMPARE(reported.size(), 2);
     QCOMPARE(reported.at(1).at(0).toString(),
-             QStringLiteral("Renamed 0 file(s); 1 failed.\n0.flac: busy"));
+             QStringLiteral("Renamed 0 files; 1 failed.\n0.flac: busy"));
 
     // A success whose wording mentions errors is not a failure.
     TagEditorController succeeding(nullptr);
@@ -876,7 +878,7 @@ void BridgeClientTest::tagEditorKeepsExtraValuesUntilTheirFieldIsSaved() {
 
     // Both rows are edited when none is selected; one of them has more artists.
     QCOMPARE(editor.extraValuesNote(QStringLiteral("artist")),
-             QStringLiteral("1 of these files have more than one value. Editing replaces them all "
+             QStringLiteral("1 of these files has more than one value. Editing replaces them all "
                             "with the one above."));
     QVERIFY(editor.extraValuesNote(QStringLiteral("title")).isEmpty());
     editor.setSelectedRows({0});
@@ -963,6 +965,32 @@ void BridgeClientTest::tagEditorEditsOfManyRowsAnnounceOnce() {
     QCOMPARE(dirty.size(), 1);
     QVERIFY(editor.dirty());
     QCOMPARE(editor.bulkValue(QStringLiteral("album")), QStringLiteral("One"));
+}
+
+void BridgeClientTest::tagEditorTellsMixedValuesApartFromText() {
+    QJsonArray rows = tagEditorRows(3, 3);
+    // Every row's album is the text the dialog shows for mixed values.
+    for (qsizetype i = 0; i < rows.size(); ++i) {
+        QJsonObject row = rows[i].toObject();
+        row.insert(QStringLiteral("album"), QStringLiteral("<keep>"));
+        rows[i] = row;
+    }
+    TagEditorController editor(nullptr);
+    QVERIFY(loadTagEditorRows(editor, rows));
+    editor.selectAllRows();
+
+    // The rows share their artist and album, the album being that text.
+    QVERIFY(!editor.bulkValueMixed(QStringLiteral("artist")));
+    QCOMPARE(editor.bulkValue(QStringLiteral("artist")), QStringLiteral("A"));
+    QVERIFY(!editor.bulkValueMixed(QStringLiteral("album")));
+    QCOMPARE(editor.bulkValue(QStringLiteral("album")), QStringLiteral("<keep>"));
+    // Their titles differ, which the flag tells, not a text in any language.
+    QVERIFY(editor.bulkValueMixed(QStringLiteral("title")));
+    QCOMPARE(editor.bulkValue(QStringLiteral("title")), QString());
+
+    editor.setSelectedRows({1});
+    QVERIFY(!editor.bulkValueMixed(QStringLiteral("title")));
+    QCOMPARE(editor.bulkValue(QStringLiteral("title")), QStringLiteral("Song 1"));
 }
 
 void BridgeClientTest::tagEditorRenameKeepsRowsInPlace() {
@@ -1586,7 +1614,8 @@ void BridgeClientTest::commandsOverTheBoundAreRefusedVisibly() {
     client.replaceWithPaths(paths);
     QCOMPARE(errors.size(), 1);
     QString message = errors.takeFirst().first().toString();
-    QVERIFY2(message.contains(QStringLiteral("2500 files")), qPrintable(message));
+    // Counts are written as the locale writes numbers.
+    QVERIFY2(message.contains(QLocale().toString(2500) + QStringLiteral(" files")), qPrintable(message));
     QVERIFY2(message.contains(QStringLiteral("8 MiB")), qPrintable(message));
     QVERIFY2(message.contains(QStringLiteral("queue was not changed")), qPrintable(message));
     client.appendPaths(paths);

@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import FerrousUi 1.0
 
 Rectangle {
     id: root
@@ -20,7 +21,7 @@ Rectangle {
     ToolButton {
         objectName: "viewerCloseButton"
         anchors.fill: parent
-        text: "Close"
+        text: I18n.i18nc("@action:button", "Close")
         display: AbstractButton.IconOnly
         ToolTip.visible: hovered || visualFocus
         ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval

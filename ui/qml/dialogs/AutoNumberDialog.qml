@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 
 Dialog {
     id: root
@@ -42,7 +43,7 @@ Dialog {
     x: Math.round((root.windowRoot.width - width) / 2)
     y: Math.round((root.windowRoot.height - height) / 2)
     width: 420
-    title: "Auto Number"
+    title: I18n.i18nc("@title:window", "Auto Number")
     standardButtons: Dialog.NoButton
 
     background: Rectangle {
@@ -58,7 +59,7 @@ Dialog {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             color: root.uiPalette.uiMutedTextColor
-            text: "Number the selected rows, or all rows if none are selected, using the current table order."
+            text: I18n.i18nc("@label", "Number the selected rows, or all rows if none are selected, using the current table order.")
         }
 
         GridLayout {
@@ -67,7 +68,7 @@ Dialog {
             rowSpacing: 8
             Layout.fillWidth: true
 
-            Label { text: "Starting Track" }
+            Label { text: I18n.i18nc("@label", "Starting Track") }
             TextField {
                 id: startingTrackField
                 objectName: "autoNumberStartingTrackField"
@@ -83,10 +84,10 @@ Dialog {
                 visible: !root.startingTrackValid
                 wrapMode: Text.WordWrap
                 color: Kirigami.Theme.negativeTextColor
-                text: "Enter a starting track from 1 to " + root.maximumNumber + "."
+                text: I18n.i18nc("@info", "Enter a starting track from 1 to %1.", root.maximumNumber)
             }
 
-            Label { text: "Starting Disc" }
+            Label { text: I18n.i18nc("@label", "Starting Disc") }
             TextField {
                 id: startingDiscField
                 objectName: "autoNumberStartingDiscField"
@@ -103,7 +104,7 @@ Dialog {
                 visible: !root.startingDiscValid
                 wrapMode: Text.WordWrap
                 color: Kirigami.Theme.negativeTextColor
-                text: "Enter a starting disc from 1 to " + root.maximumNumber + "."
+                text: I18n.i18nc("@info", "Enter a starting disc from 1 to %1.", root.maximumNumber)
             }
         }
 
@@ -111,23 +112,23 @@ Dialog {
             id: writeDiscCheck
             objectName: "autoNumberWriteDiscCheck"
             checked: false
-            text: "Write disc numbers"
+            text: I18n.i18nc("@option:check", "Write disc numbers")
         }
         CheckBox {
             id: writeTotalsCheck
             checked: false
-            text: "Write totals"
+            text: I18n.i18nc("@option:check", "Write totals")
         }
         CheckBox {
             id: resetOnFolderCheck
             checked: false
-            text: "Reset track numbers on folder or section change"
+            text: I18n.i18nc("@option:check", "Reset track numbers on folder or section change")
         }
         CheckBox {
             id: resetOnDiscCheck
             checked: false
             enabled: writeDiscCheck.checked
-            text: "Reset track numbers when disc changes in current values"
+            text: I18n.i18nc("@option:check", "Reset track numbers when disc changes in current values")
         }
 
         RowLayout {
@@ -136,12 +137,12 @@ Dialog {
             Item { Layout.fillWidth: true }
 
             Button {
-                text: "Cancel"
+                text: I18n.i18nc("@action:button", "Cancel")
                 onClicked: root.close()
             }
             Button {
                 objectName: "autoNumberApplyButton"
-                text: "Apply"
+                text: I18n.i18nc("@action:button", "Apply")
                 enabled: root.inputValid
                 onClicked: root.apply()
             }

@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import FerrousUi 1.0
 
 Dialog {
     id: root
@@ -28,7 +29,7 @@ Dialog {
     x: Math.round((root.windowRoot.width - width) / 2)
     y: Math.round((root.windowRoot.height - height) / 2)
     width: 400
-    title: "Unsaved Changes"
+    title: I18n.i18nc("@title:window", "Unsaved Changes")
     standardButtons: Dialog.NoButton
     // Escape keeps editing, except while a save is running.
     closePolicy: root.tagEditorApi.saving ? Popup.NoAutoClose : Popup.CloseOnEscape
@@ -49,10 +50,10 @@ Dialog {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             text: root.forQuit
-                ? "Save tag changes before quitting Ferrous?"
+                ? I18n.i18nc("@info", "Save tag changes before quitting Ferrous?")
                 : (root.forReload
-                    ? "Discard unsaved changes and reload the tags from the files?"
-                    : "Save changes before closing the tag editor?")
+                    ? I18n.i18nc("@info", "Discard unsaved changes and reload the tags from the files?")
+                    : I18n.i18nc("@info", "Save changes before closing the tag editor?"))
         }
 
         Label {
@@ -60,10 +61,12 @@ Dialog {
             wrapMode: Text.WordWrap
             color: root.uiPalette.uiMutedTextColor
             text: root.forQuit
-                ? "Save writes the current edits and quits. Discard drops every unsaved change and quits. Cancel keeps Ferrous open."
+                ? I18n.i18nc("@info", "Save writes the current edits and quits. "
+                    + "Discard drops every unsaved change and quits. Cancel keeps Ferrous open.")
                 : (root.forReload
-                    ? "Reloading drops every unsaved change. Cancel keeps editing."
-                    : "Save writes the current edits. Discard closes the dialog and drops every unsaved change.")
+                    ? I18n.i18nc("@info", "Reloading drops every unsaved change. Cancel keeps editing.")
+                    : I18n.i18nc("@info",
+                        "Save writes the current edits. Discard closes the dialog and drops every unsaved change."))
         }
 
         RowLayout {
@@ -74,13 +77,17 @@ Dialog {
 
             Button {
                 objectName: "tagEditorCloseConfirmKeepEditingButton"
-                text: root.forQuit || root.forReload ? "Cancel" : "Keep Editing"
+                text: root.forQuit || root.forReload
+                    ? I18n.i18nc("@action:button", "Cancel")
+                    : I18n.i18nc("@action:button", "Keep Editing")
                 enabled: !root.tagEditorApi.saving
                 onClicked: root.reject()
             }
             Button {
                 objectName: "tagEditorCloseConfirmDiscardButton"
-                text: root.forReload ? "Discard and Reload" : "Discard"
+                text: root.forReload
+                    ? I18n.i18nc("@action:button", "Discard and Reload")
+                    : I18n.i18nc("@action:button", "Discard")
                 enabled: !root.tagEditorApi.saving
                 onClicked: {
                     root.close()
@@ -90,7 +97,9 @@ Dialog {
             Button {
                 objectName: "tagEditorCloseConfirmSaveButton"
                 visible: !root.forReload
-                text: root.tagEditorApi.saving ? "Saving..." : "Save"
+                text: root.tagEditorApi.saving
+                    ? I18n.i18nc("@action:button", "Saving...")
+                    : I18n.i18nc("@action:button", "Save")
                 enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
                 highlighted: true
                 onClicked: root.saveRequested()

@@ -27,6 +27,7 @@
 #include "DiagnosticsLog.h"
 #include "DisplaySleepInhibitor.h"
 #include "LibraryTreeModel.h"
+#include "Localization.h"
 #include "MprisController.h"
 #include "QmlTypes.h"
 #include "TagEditorController.h"
@@ -243,6 +244,7 @@ private:
 int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
     QApplication app(argc, argv);
+    FerrousLocalization::setUpApplicationDomain();
     QApplication::setApplicationName(QStringLiteral("Ferrous"));
     QApplication::setApplicationDisplayName(QStringLiteral("Ferrous"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/assets/ferrous.svg")));

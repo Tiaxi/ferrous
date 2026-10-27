@@ -5,3 +5,4 @@
 .worktrees/
 .codex
 CMakeFiles/
+/po/*.pot

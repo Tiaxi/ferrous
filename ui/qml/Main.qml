@@ -30,7 +30,7 @@ ApplicationWindow {
     title: {
         const context = playbackController.windowTitleContext()
         return context.length > 0
-            ? context + " \u2014 " + root.appDisplayName
+            ? I18n.i18nc("@title:window now playing, application name", "%1 \u2014 %2", context, root.appDisplayName)
             : root.appDisplayName
     }
     readonly property int albumArtViewerDecodeWidth: Math.max(
@@ -280,7 +280,7 @@ ApplicationWindow {
         property var libraryRoots: []
         property var libraryRootEntries: []
         property int librarySortMode: 0
-        property string fileBrowserName: "File Manager"
+        property string fileBrowserName: I18n.i18nc("@label generic application name", "File Manager")
         property int libraryScanRootsCompleted: 0
         property int libraryScanRootsTotal: 0
         property int libraryScanDiscovered: 0
@@ -482,6 +482,7 @@ ApplicationWindow {
         function selectAllRows() {}
         function loadedPaths() { return [] }
         function bulkValue(field) { return "" }
+        function bulkValueMixed(field) { return false }
         function extraValuesNote(field) { return "" }
         function applyBulkField(field, value) {}
         function applyBulkFieldToRows(rows, field, value) {}
@@ -643,33 +644,33 @@ ApplicationWindow {
 
     Action {
         id: openFilesAction
-        text: "&Open File(s)..."
+        text: I18n.i18nc("@action:inmenu", "&Open File(s)...")
         shortcut: StandardKey.Open
         enabled: !root.viewerOpen
         onTriggered: root.openExternalFiles()
     }
     Action {
         id: addFilesAction
-        text: "&Add File(s)..."
+        text: I18n.i18nc("@action:inmenu", "&Add File(s)...")
         onTriggered: root.addExternalFiles()
     }
     // The folder dialog picks one folder.
     Action {
         id: addFolderAction
-        text: "Add &Folder to Queue..."
+        text: I18n.i18nc("@action:inmenu", "Add &Folder to Queue...")
         onTriggered: root.addExternalFolder()
     }
     // As Preferences > Library adds one.
     Action {
         id: addLibraryFolderAction
         objectName: "addLibraryFolderAction"
-        text: "Add Library Fol&der..."
+        text: I18n.i18nc("@action:inmenu", "Add Library Fol&der...")
         onTriggered: root.promptAddLibraryRoot("add-library-root")
     }
     Action {
         id: quitAction
         objectName: "quitAction"
-        text: "&Quit"
+        text: I18n.i18nc("@action:inmenu", "&Quit")
         shortcut: StandardKey.Quit
         // Closing the window, not quitting, runs onClosing, which saves the
         // settings and the queue and stops the backend.
@@ -677,37 +678,37 @@ ApplicationWindow {
     }
     Action {
         id: playLibrarySelectionAction
-        text: "&Play Library Selection"
+        text: I18n.i18nc("@action:inmenu", "&Play Library Selection")
         enabled: libraryController.canPlaySelection()
         onTriggered: libraryController.playSelection()
     }
     Action {
         id: appendLibrarySelectionAction
-        text: "Q&ueue Library Selection"
+        text: I18n.i18nc("@action:inmenu", "Q&ueue Library Selection")
         enabled: libraryController.canPlaySelection()
         onTriggered: libraryController.appendSelection()
     }
     Action {
         id: playAllLibraryTracksAction
-        text: "Play A&ll Library Tracks"
+        text: I18n.i18nc("@action:inmenu", "Play A&ll Library Tracks")
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.playAllTracks()
     }
     Action {
         id: appendAllLibraryTracksAction
-        text: "Queue All Library &Tracks"
+        text: I18n.i18nc("@action:inmenu", "Queue All Library &Tracks")
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.appendAllTracks()
     }
     Action {
         id: replaceFromItunesAction
-        text: "Replace From iTunes..."
+        text: I18n.i18nc("@action:inmenu", "Replace From iTunes...")
         enabled: viewerController.currentTrackItunesArtworkDisabledReason().length === 0
         onTriggered: root.openItunesArtworkDialog()
     }
     Action {
         id: preferencesAction
-        text: "P&references..."
+        text: I18n.i18nc("@action:inmenu", "P&references...")
         shortcut: StandardKey.Preferences
         enabled: !root.viewerOpen
         onTriggered: preferencesDialog.open()
@@ -716,7 +717,7 @@ ApplicationWindow {
     // queue view handles it, so it is not a window-wide shortcut.
     Action {
         id: removeSelectedTrackAction
-        text: "&Remove Selected Track"
+        text: I18n.i18nc("@action:inmenu", "&Remove Selected Track")
         enabled: queueController.selectionCount() > 0 && !root.viewerOpen
         onTriggered: queueController.removeSelectedTrack()
     }
@@ -726,15 +727,15 @@ ApplicationWindow {
         text: {
             switch (uiBridge.queueUndoKind) {
             case 1:
-                return "&Undo Clear Playlist"
+                return I18n.i18nc("@action:inmenu", "&Undo Clear Playlist")
             case 2:
-                return "&Undo Remove Tracks"
+                return I18n.i18nc("@action:inmenu", "&Undo Remove Tracks")
             case 3:
-                return "&Undo Replace Queue"
+                return I18n.i18nc("@action:inmenu", "&Undo Replace Queue")
             case 4:
-                return "&Undo Move Tracks"
+                return I18n.i18nc("@action:inmenu", "&Undo Move Tracks")
             default:
-                return "&Undo"
+                return I18n.i18nc("@action:inmenu", "&Undo")
             }
         }
         // Text fields keep Ctrl+Z for their own text.
@@ -744,40 +745,40 @@ ApplicationWindow {
     }
     Action {
         id: selectPreviousTrackAction
-        text: "Select Pre&vious Track"
+        text: I18n.i18nc("@action:inmenu", "Select Pre&vious Track")
         shortcut: "Ctrl+Up"
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: queueController.selectRelative(-1)
     }
     Action {
         id: selectNextTrackAction
-        text: "Select &Next Track"
+        text: I18n.i18nc("@action:inmenu", "Select &Next Track")
         shortcut: "Ctrl+Down"
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: queueController.selectRelative(1)
     }
     Action {
         id: globalSearchAction
-        text: "&Global Search..."
+        text: I18n.i18nc("@action:inmenu", "&Global Search...")
         shortcut: StandardKey.Find
         enabled: !root.viewerOpen
         onTriggered: globalSearchController.openDialog()
     }
     Action {
         id: diagnosticsAction
-        text: "&Diagnostics..."
+        text: I18n.i18nc("@action:inmenu", "&Diagnostics...")
         onTriggered: root.openDiagnostics()
     }
     Action {
         id: autoCenterSelectionAction
-        text: "&Follow Current Track in Playlist"
+        text: I18n.i18nc("@action:inmenu", "&Follow Current Track in Playlist")
         checkable: true
         checked: queueController.autoCenterSelection
         onTriggered: queueController.autoCenterSelection = checked
     }
     Action {
         id: resetSpectrogramAction
-        text: "&Reset Visualization View"
+        text: I18n.i18nc("@action:inmenu", "&Reset Visualization View")
         onTriggered: {
             if (viewerController.visualizationMode === 0) {
                 spectrogramSurface.resetForCurrentMode()
@@ -788,67 +789,67 @@ ApplicationWindow {
     }
     Action {
         id: showFpsOverlayAction
-        text: "Show Visualization FP&S"
+        text: I18n.i18nc("@action:inmenu", "Show Visualization FP&S")
         checkable: true
         checked: uiBridge.showFps
         onTriggered: uiBridge.setShowFps(checked)
     }
     Action {
         id: shuffleAction
-        text: "S&huffle"
+        text: I18n.i18nc("@action:inmenu", "S&huffle")
         checkable: true
         checked: uiBridge.shuffleEnabled
         onTriggered: uiBridge.setShuffleEnabled(checked)
     }
     Action {
         id: repeatOffAction
-        text: "Repeat O&ff"
+        text: I18n.i18nc("@action:inmenu", "Repeat O&ff")
         checkable: true
         checked: uiBridge.repeatMode === 0
         onTriggered: uiBridge.setRepeatMode(0)
     }
     Action {
         id: repeatOneAction
-        text: "Repeat &One"
+        text: I18n.i18nc("@action:inmenu", "Repeat &One")
         checkable: true
         checked: uiBridge.repeatMode === 1
         onTriggered: uiBridge.setRepeatMode(1)
     }
     Action {
         id: repeatAllAction
-        text: "Repeat &All"
+        text: I18n.i18nc("@action:inmenu", "Repeat &All")
         checkable: true
         checked: uiBridge.repeatMode === 2
         onTriggered: uiBridge.setRepeatMode(2)
     }
     Action {
         id: aboutAction
-        text: "&About Ferrous"
+        text: I18n.i18nc("@action:inmenu", "&About Ferrous")
         onTriggered: aboutDialog.open()
     }
     Action {
         id: previousAction
-        text: "P&revious"
+        text: I18n.i18nc("@action:inmenu", "P&revious")
         icon.name: "media-skip-backward"
         shortcut: "Ctrl+Left"
         onTriggered: uiBridge.previous()
     }
     Action {
         id: playAction
-        text: "Play"
+        text: I18n.i18nc("@action:inmenu", "Play")
         icon.name: "media-playback-start"
         onTriggered: uiBridge.play()
     }
     Action {
         id: pauseAction
-        text: "Pause"
+        text: I18n.i18nc("@action:inmenu", "Pause")
         icon.name: "media-playback-pause"
         onTriggered: uiBridge.pause()
     }
     Action {
         id: stopAction
         objectName: "stopAction"
-        text: "&Stop"
+        text: I18n.i18nc("@action:inmenu", "&Stop")
         icon.name: "media-playback-stop"
         // Not Ctrl+Space, which switches input methods in Fcitx and IBus,
         // nor Shift+Space, which toggles full-width input in Fcitx.
@@ -857,26 +858,26 @@ ApplicationWindow {
     }
     Action {
         id: nextAction
-        text: "&Next"
+        text: I18n.i18nc("@action:inmenu", "&Next")
         icon.name: "media-skip-forward"
         shortcut: "Ctrl+Right"
         onTriggered: uiBridge.next()
     }
     Action {
         id: clearPlaylistAction
-        text: "&Clear Playlist"
+        text: I18n.i18nc("@action:inmenu", "&Clear Playlist")
         onTriggered: uiBridge.clearQueue()
     }
     Action {
         id: moveTrackUpAction
-        text: "Move Track &Up"
+        text: I18n.i18nc("@action:inmenu", "Move Track &Up")
         shortcut: "Ctrl+Shift+Up"
         enabled: !root.viewerOpen
         onTriggered: queueController.moveSelected(-1)
     }
     Action {
         id: moveTrackDownAction
-        text: "Move Track &Down"
+        text: I18n.i18nc("@action:inmenu", "Move Track &Down")
         shortcut: "Ctrl+Shift+Down"
         enabled: !root.viewerOpen
         onTriggered: queueController.moveSelected(1)
@@ -885,7 +886,7 @@ ApplicationWindow {
     Action {
         id: playPauseAction
         objectName: "playPauseAction"
-        text: "&Play/Pause"
+        text: I18n.i18nc("@action:inmenu", "&Play/Pause")
         // Text fields take Space for typing before shortcuts see it.
         shortcut: "Space"
         onTriggered: playbackController.togglePlayPause()
@@ -893,7 +894,7 @@ ApplicationWindow {
     Action {
         id: seekBackwardAction
         objectName: "seekBackwardAction"
-        text: "Seek &Backward"
+        text: I18n.i18nc("@action:inmenu", "Seek &Backward")
         shortcut: "Shift+Left"
         enabled: playbackController.canSeek
         onTriggered: playbackController.seekBy(-root.keyboardSeekStepSeconds)
@@ -901,7 +902,7 @@ ApplicationWindow {
     Action {
         id: seekForwardAction
         objectName: "seekForwardAction"
-        text: "Seek &Forward"
+        text: I18n.i18nc("@action:inmenu", "Seek &Forward")
         shortcut: "Shift+Right"
         enabled: playbackController.canSeek
         onTriggered: playbackController.seekBy(root.keyboardSeekStepSeconds)
@@ -909,21 +910,21 @@ ApplicationWindow {
     Action {
         id: volumeUpAction
         objectName: "volumeUpAction"
-        text: "Volume &Up"
+        text: I18n.i18nc("@action:inmenu", "Volume &Up")
         shortcut: "Alt+Up"
         onTriggered: playbackController.changeVolumeBy(root.keyboardVolumeStep)
     }
     Action {
         id: volumeDownAction
         objectName: "volumeDownAction"
-        text: "Volume &Down"
+        text: I18n.i18nc("@action:inmenu", "Volume &Down")
         shortcut: "Alt+Down"
         onTriggered: playbackController.changeVolumeBy(-root.keyboardVolumeStep)
     }
     Action {
         id: muteAction
         objectName: "muteAction"
-        text: "&Mute"
+        text: I18n.i18nc("@action:inmenu", "&Mute")
         // Not Ctrl+M, which KDE applications use to show the menu bar.
         shortcut: "Ctrl+Shift+M"
         checkable: true
@@ -933,7 +934,7 @@ ApplicationWindow {
     Action {
         id: visualizationViewerAction
         objectName: "visualizationViewerAction"
-        text: "&Visualization Viewer"
+        text: I18n.i18nc("@action:inmenu", "&Visualization Viewer")
         shortcut: "F11"
         checkable: true
         checked: viewerController.spectrogramViewerOpen
@@ -942,7 +943,7 @@ ApplicationWindow {
     Action {
         id: albumArtViewerAction
         objectName: "albumArtViewerAction"
-        text: "&Album Art Viewer"
+        text: I18n.i18nc("@action:inmenu", "&Album Art Viewer")
         shortcut: "Shift+F11"
         checkable: true
         checked: viewerController.albumArtViewerOpen
@@ -965,7 +966,7 @@ ApplicationWindow {
     ]
     menuBar: MenuBar {
         Menu {
-            title: "&File"
+            title: I18n.i18nc("@title:menu", "&File")
             width: root.menuPopupWidth([
                 { label: openFilesAction.text, shortcut: String(openFilesAction.shortcut || "") },
                 { label: addFilesAction.text, shortcut: String(addFilesAction.shortcut || "") },
@@ -996,7 +997,7 @@ ApplicationWindow {
             MenuItem { action: quitAction }
         }
         Menu {
-            title: "&Edit"
+            title: I18n.i18nc("@title:menu", "&Edit")
             width: root.menuPopupWidth([
                 { label: undoQueueChangeAction.text, shortcut: String(undoQueueChangeAction.shortcut || "") },
                 { label: removeSelectedTrackAction.text, shortcut: String(removeSelectedTrackAction.shortcut || "") },
@@ -1027,7 +1028,7 @@ ApplicationWindow {
             MenuItem { action: preferencesAction }
         }
         Menu {
-            title: "&View"
+            title: I18n.i18nc("@title:menu", "&View")
             width: root.menuPopupWidth([
                 { label: globalSearchAction.text, shortcut: String(globalSearchAction.shortcut || "") },
                 { label: visualizationViewerAction.text, shortcut: String(visualizationViewerAction.shortcut || "") },
@@ -1052,7 +1053,7 @@ ApplicationWindow {
             MenuItem { action: showFpsOverlayAction }
         }
         Menu {
-            title: "&Playback"
+            title: I18n.i18nc("@title:menu", "&Playback")
             width: root.menuPopupWidth([
                 { label: playPauseAction.text, shortcut: String(playPauseAction.shortcut || "") },
                 { label: stopAction.text, shortcut: String(stopAction.shortcut || "") },
@@ -1095,7 +1096,7 @@ ApplicationWindow {
             MenuItem { action: clearPlaylistAction }
         }
         Menu {
-            title: "&Help"
+            title: I18n.i18nc("@title:menu", "&Help")
             width: root.menuPopupWidth([
                 { label: diagnosticsAction.text, shortcut: String(diagnosticsAction.shortcut || "") },
                 { label: aboutAction.text, shortcut: String(aboutAction.shortcut || "") }
@@ -1165,13 +1166,19 @@ ApplicationWindow {
 
     Platform.FileDialog {
         id: externalFileDialog
-        title: pendingFileDialogContext === "open" ? "Open Files" : "Add Files"
+        title: pendingFileDialogContext === "open"
+            ? I18n.i18nc("@title:window", "Open Files")
+            : I18n.i18nc("@title:window", "Add Files")
         fileMode: Platform.FileDialog.OpenFiles
         nameFilters: [
-            "Audio and Playlist Files (*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav *.ac3 *.dts *.m3u *.m3u8)",
-            "Audio Files (*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav *.ac3 *.dts)",
-            "Playlist Files (*.m3u *.m3u8)",
-            "All Files (*)"
+            I18n.i18nc("@item:inlistbox file type filter; keep the patterns in parentheses",
+                "Audio and Playlist Files (%1)", "*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav *.ac3 *.dts *.m3u *.m3u8"),
+            I18n.i18nc("@item:inlistbox file type filter; keep the patterns in parentheses",
+                "Audio Files (%1)", "*.mp3 *.flac *.m4a *.aac *.ogg *.opus *.wav *.ac3 *.dts"),
+            I18n.i18nc("@item:inlistbox file type filter; keep the patterns in parentheses",
+                "Playlist Files (%1)", "*.m3u *.m3u8"),
+            I18n.i18nc("@item:inlistbox file type filter; keep the patterns in parentheses",
+                "All Files (%1)", "*")
         ]
         onAccepted: {
             const localPaths = PathUtils.fileDialogPaths(externalFileDialog)
@@ -1185,8 +1192,8 @@ ApplicationWindow {
         id: scanFolderDialog
         objectName: "scanFolderDialog"
         title: pendingFolderDialogContext === "append-external-folder"
-            ? "Add Folder to Queue"
-            : "Add Library Folder"
+            ? I18n.i18nc("@title:window", "Add Folder to Queue")
+            : I18n.i18nc("@title:window", "Add Library Folder")
         onAccepted: root.takeChosenFolder(PathUtils.folderDialogPath(scanFolderDialog))
         onRejected: pendingFolderDialogContext = ""
     }
@@ -1346,8 +1353,8 @@ ApplicationWindow {
             id: spectrogramSurface
             objectName: "mainSpectrogramSurface"
             Accessible.role: Accessible.Graphic
-            Accessible.name: "Spectrogram"
-            Accessible.description: "Frequencies of the playing track over time"
+            Accessible.name: I18n.i18nc("@label", "Spectrogram")
+            Accessible.description: I18n.i18nc("@info", "Frequencies of the playing track over time")
             anchors.fill: parent
             anchors.bottomMargin: levelMeter.height
             visible: viewerController.visualizationMode === 0
@@ -1376,7 +1383,7 @@ ApplicationWindow {
             id: levelMeter
             objectName: "levelMeter"
             Accessible.role: Accessible.Graphic
-            Accessible.name: "Level meter"
+            Accessible.name: I18n.i18nc("@label", "Level meter")
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
@@ -1576,7 +1583,7 @@ ApplicationWindow {
         // window still closes if the answer is a success that comes later.
         interval: 5000
         onTriggered: root.showQuitSaveFailedDialog(
-            "The backend did not answer in time; settings and the queue may not have been saved.")
+            I18n.i18nc("@info", "The backend did not answer in time; settings and the queue may not have been saved."))
     }
 
     Dialogs.QuitSaveFailedDialog {

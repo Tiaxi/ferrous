@@ -1,4 +1,5 @@
 .pragma library
+.import FerrousUi 1.0 as FerrousUi
 
 function basenameFromPath(pathValue) {
     const normalized = (pathValue || "").trim().replace(/\\/g, "/")
@@ -55,16 +56,17 @@ function formatSampleRateText(sampleRateHz) {
         return ""
     }
     if (value >= 1000) {
-        return (value / 1000).toFixed(value % 1000 === 0 ? 0 : 1) + " kHz"
+        return FerrousUi.I18n.i18nc("@info sample rate", "%1 kHz",
+            (value / 1000).toFixed(value % 1000 === 0 ? 0 : 1))
     }
-    return Math.round(value).toString() + " Hz"
+    return FerrousUi.I18n.i18nc("@info sample rate", "%1 Hz", Math.round(value).toString())
 }
 
 function formatBitDepthSampleRateText(bitDepth, sampleRateHz) {
     const parts = []
     const bitDepthValue = Number(bitDepth)
     if (isFinite(bitDepthValue) && bitDepthValue > 0) {
-        parts.push(Math.round(bitDepthValue).toString() + "-bit")
+        parts.push(FerrousUi.I18n.i18nc("@info bit depth", "%1-bit", Math.round(bitDepthValue).toString()))
     }
     const sampleRateText = formatSampleRateText(sampleRateHz)
     if (sampleRateText.length > 0) {
@@ -76,10 +78,10 @@ function formatBitDepthSampleRateText(bitDepth, sampleRateHz) {
 function repeatModeText(mode) {
     switch (Number(mode)) {
     case 1:
-        return "Repeat one"
+        return FerrousUi.I18n.i18nc("@info:status", "Repeat one")
     case 2:
-        return "Repeat all"
+        return FerrousUi.I18n.i18nc("@info:status", "Repeat all")
     default:
-        return "Repeat off"
+        return FerrousUi.I18n.i18nc("@info:status", "Repeat off")
     }
 }

@@ -32,6 +32,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocale>
 #include <QMetaMethod>
 #include <QRegularExpression>
 #include <QMutex>
@@ -1828,6 +1829,7 @@ Item {
         function selectAllRows() {}
         function loadedPaths() { return [] }
         function bulkValue(field) { return "" }
+        function bulkValueMixed(field) { return false }
         function extraValuesNote(field) { return "" }
         function applyBulkFieldToRows(rows, field, value) {}
         function applyEnglishTitleCase(field) {}
@@ -3025,7 +3027,7 @@ void ErrorsSmokeTest::aLongMultiLineErrorKeepsTheControlsInTheWindow() {
 
     // A batch tag save that failed for ten files with long paths, as the tag
     // editor reports it.
-    QStringList lines{QStringLiteral("Saved 0 file(s); 10 failed.")};
+    QStringList lines{QStringLiteral("Saved 0 files; 10 failed.")};
     for (int file = 0; file < 10; ++file) {
         lines.push_back(QStringLiteral(
             "/music/Some Artist With A Long Name/Some Album With An Even Longer Name (Deluxe "
@@ -4344,7 +4346,7 @@ void TagEditorSmokeTest::tagEditorStaysOpenWhileSavingAndShowsTheResult() {
     QVERIFY(fixture.editorShown());
     QVERIFY(fixture.editor.isOpen());
     QVERIFY(fixture.editor.statusIsError());
-    QCOMPARE(fixture.editor.statusText(), QStringLiteral("Saved 0 file(s); 1 failed."));
+    QCOMPARE(fixture.editor.statusText(), QStringLiteral("Saved 0 files; 1 failed."));
     QVERIFY(fixture.dialog->property("statusHasFailure").toBool());
     QVERIFY(fixture.editor.dirty());
     QVERIFY(cancel->property("enabled").toBool());
@@ -4352,10 +4354,10 @@ void TagEditorSmokeTest::tagEditorStaysOpenWhileSavingAndShowsTheResult() {
     QObject *errors = fixture.window->findChild<QObject *>(QStringLiteral("errorController"));
     QVERIFY(errors != nullptr);
     QCOMPARE(errorHistoryMessages(errors),
-             QStringList{QStringLiteral("Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied")});
+             QStringList{QStringLiteral("Saved 0 files; 1 failed.\n01 Song.flac: permission denied")});
     QVERIFY(finishIncubation(fixture.engine));
     QCOMPARE(takeCapturedMessagesText(),
-             QStringLiteral("error [Tags]: Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied"));
+             QStringLiteral("error [Tags]: Saved 0 files; 1 failed.\n01 Song.flac: permission denied"));
 }
 
 void TagEditorSmokeTest::closingTheWindowWithTagEditsAsksAndCancelKeepsThem() {
@@ -4453,7 +4455,7 @@ void TagEditorSmokeTest::tagSaveFailureWhileQuittingKeepsTheWindowOpen() {
     QCOMPARE(fixture.stateSaves(), 0);
     QVERIFY(finishIncubation(fixture.engine));
     QCOMPARE(takeCapturedMessagesText(),
-             QStringLiteral("error [Tags]: Saved 0 file(s); 1 failed.\n01 Song.flac: permission denied"));
+             QStringLiteral("error [Tags]: Saved 0 files; 1 failed.\n01 Song.flac: permission denied"));
 
     // Quitting again asks again.
     fixture.window->close();
@@ -16466,7 +16468,7 @@ void ErrorsSmokeTest::fullscreenErrorTextScrollsWithTheKeyboard() {
     QVERIFY(bridge != nullptr && viewer != nullptr && errors != nullptr);
     bridge->setProperty("viewerFullscreenMode", 1);
     bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
-    QStringList lines{QStringLiteral("Saved 0 file(s); 10 failed.")};
+    QStringList lines{QStringLiteral("Saved 0 files; 10 failed.")};
     for (int file = 0; file < 10; ++file) {
         lines.push_back(QStringLiteral("/music/Some Artist/Some Album/%1 A Track Title.flac: "
                                        "Permission denied (os error 13)")
@@ -16752,7 +16754,8 @@ ApplicationWindow {
                  && message.contains(QStringLiteral("/fixture/Music/Jazz")),
              qPrintable(message));
     const QString details = confirm->property("details").toString();
-    QVERIFY2(details.contains(QStringLiteral("1234 tracks"))
+    // Counts are written as the locale writes numbers.
+    QVERIFY2(details.contains(QLocale().toString(1234) + QStringLiteral(" tracks"))
                  && details.contains(QStringLiteral("stay on disk")),
              qPrintable(details));
 

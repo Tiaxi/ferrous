@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import FerrousUi 1.0
 import "../components" as Components
 
 Dialog {
@@ -18,7 +19,9 @@ Dialog {
     signal dismissed()
 
     modal: true
-    title: root.dialogMode === "rename" ? "Rename Library Root" : "Add Library Root"
+    title: root.dialogMode === "rename"
+        ? I18n.i18nc("@title:window", "Rename Library Root")
+        : I18n.i18nc("@title:window", "Add Library Root")
     standardButtons: Dialog.Ok | Dialog.Cancel
     width: Math.min(560, root.windowRoot.width - 80)
     enter: Components.PopupTransition { duration: root.popupTransitionMs }
@@ -49,7 +52,7 @@ Dialog {
 
         Label {
             Layout.fillWidth: true
-            text: "Path"
+            text: I18n.i18nc("@label", "Path")
             color: root.uiPalette.uiMutedTextColor
         }
 
@@ -62,7 +65,7 @@ Dialog {
 
         Label {
             Layout.fillWidth: true
-            text: "Custom Name (optional)"
+            text: I18n.i18nc("@label", "Custom Name (optional)")
             color: root.uiPalette.uiMutedTextColor
         }
 
@@ -70,7 +73,7 @@ Dialog {
             id: libraryRootNameField
             Layout.fillWidth: true
             text: root.nameValue || ""
-            placeholderText: "Leave blank to use the path"
+            placeholderText: I18n.i18nc("@info:placeholder", "Leave blank to use the path")
             selectByMouse: true
             onAccepted: root.accept()
         }

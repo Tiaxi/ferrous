@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 
@@ -53,8 +54,21 @@ ToolBar {
     }
     readonly property string playlistSummary: {
         const count = Math.max(0, Number(root.uiBridge.queueLength) || 0)
-        const noun = count === 1 ? "track" : "tracks"
-        return count.toString() + " " + noun + " (" + (root.uiBridge.queueDurationText || "00:00") + ")"
+        return I18n.i18ncp("@info:status queue length and total duration",
+            "%1 track (%2)", "%1 tracks (%2)",
+            count, root.uiBridge.queueDurationText || "00:00")
+    }
+
+    // The bridge's playback state is a code, not text to show.
+    function playbackStateText(state) {
+        switch (state) {
+        case "Playing":
+            return I18n.i18nc("@info:status playback state", "Playing")
+        case "Paused":
+            return I18n.i18nc("@info:status playback state", "Paused")
+        default:
+            return I18n.i18nc("@info:status playback state", "Stopped")
+        }
     }
 
     contentItem: RowLayout {
@@ -63,7 +77,7 @@ ToolBar {
         Label {
             objectName: "statusBarBackendStoppedLabel"
             visible: root.backendStopped
-            text: "Backend stopped"
+            text: I18n.i18nc("@info:status", "Backend stopped")
             color: ColorUtils.mixColor(
                 Kirigami.Theme.negativeTextColor,
                 root.uiPalette.uiTextColor,
@@ -73,13 +87,14 @@ ToolBar {
 
         Label {
             visible: root.isDisconnected
-            text: "Bridge disconnected"
+            text: I18n.i18nc("@info:status", "Bridge disconnected")
             color: root.uiPalette.uiTextColor
         }
 
         Label {
             visible: root.showTrackSections
-            text: root.uiBridge.playbackState || "Stopped"
+            objectName: "statusBarPlaybackStateLabel"
+            text: root.playbackStateText(root.uiBridge.playbackState)
             color: root.uiPalette.uiTextColor
         }
 
@@ -90,7 +105,8 @@ ToolBar {
         }
         Label {
             visible: root.showTrackSections
-            text: root.positionText + "/" + (root.uiBridge.durationText || "00:00")
+            text: I18n.i18nc("@info:status playback position of duration", "%1/%2",
+                root.positionText, root.uiBridge.durationText || "00:00")
             color: root.uiPalette.uiTextColor
         }
 
@@ -151,7 +167,7 @@ ToolBar {
         }
         Label {
             visible: root.showTrackSections && root.bitrateKbps > 0
-            text: root.bitrateKbps + " kbps"
+            text: I18n.i18nc("@info:status bitrate", "%1 kbps", root.bitrateKbps)
             color: root.uiPalette.uiTextColor
         }
 
@@ -163,6 +179,7 @@ ToolBar {
         Label {
             visible: root.showTrackSections
             Layout.fillWidth: true
+            objectName: "statusBarQueueSummaryLabel"
             text: root.playlistSummary
             elide: Text.ElideRight
             color: root.uiPalette.uiTextColor
@@ -182,15 +199,16 @@ ToolBar {
             icon.name: "dialog-warning"
             icon.width: 16
             icon.height: 16
-            text: root.errorCount === 1 ? "1 error" : root.errorCount + " errors"
+            text: I18n.i18ncp("@action:button", "%1 error", "%1 errors", root.errorCount)
             display: AbstractButton.TextBesideIcon
             palette.buttonText: ColorUtils.mixColor(
                 Kirigami.Theme.negativeTextColor,
                 root.uiPalette.uiTextColor,
                 root.themeIsDark ? 0.18 : 0.08)
-            Accessible.name: text + ": show recent errors"
+            Accessible.name: I18n.i18ncp("@action:button",
+                "%1 error: show recent errors", "%1 errors: show recent errors", root.errorCount)
             ToolTip.visible: hovered
-            ToolTip.text: "Show recent errors"
+            ToolTip.text: I18n.i18nc("@info:tooltip", "Show recent errors")
             onClicked: root.errorController.toggleHistory()
         }
     }

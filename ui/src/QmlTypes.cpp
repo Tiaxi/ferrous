@@ -6,12 +6,14 @@
 #include <qqml.h>
 
 #include "LevelMeterItem.h"
+#include "Localization.h"
 #include "PlaybackClock.h"
 #include "SpectrogramItem.h"
 #include "WaveformEditorItem.h"
 #include "WaveformItem.h"
 
 void registerFerrousQmlTypes() {
+    FerrousLocalization::registerQmlTypes();
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");

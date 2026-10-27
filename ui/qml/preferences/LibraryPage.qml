@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../components" as Components
 import "../dialogs" as Dialogs
 
@@ -23,11 +24,14 @@ ScrollView {
     function requestRemoveRoot(path, displayName, trackCount) {
         removeRootConfirmDialog.rootPath = path
         removeRootConfirmDialog.message = displayName === path
-            ? "Remove the library folder \u201c" + path + "\u201d?"
-            : "Remove the library folder \u201c" + displayName + "\u201d (" + path + ")?"
-        const tracks = trackCount === 1 ? "1 track" : trackCount + " tracks"
-        removeRootConfirmDialog.details = "This removes its " + tracks + " from the library. "
-            + "The files themselves stay on disk, and adding the folder again brings them back."
+            ? I18n.i18nc("@info", "Remove the library folder \u201c%1\u201d?", path)
+            : I18n.i18nc("@info folder name, path", "Remove the library folder \u201c%1\u201d (%2)?", displayName, path)
+        removeRootConfirmDialog.details = I18n.i18ncp("@info",
+            "This removes its %1 track from the library. "
+                + "The files themselves stay on disk, and adding the folder again brings them back.",
+            "This removes its %1 tracks from the library. "
+                + "The files themselves stay on disk, and adding the folder again brings them back.",
+            trackCount)
         removeRootConfirmDialog.open()
     }
 
@@ -54,7 +58,7 @@ ScrollView {
                 Kirigami.Heading {
                     Layout.fillWidth: true
                     level: 2
-                    text: "Library"
+                    text: I18n.i18nc("@title", "Library")
                     font.weight: Font.DemiBold
                 }
 
@@ -62,12 +66,12 @@ ScrollView {
                     Layout.fillWidth: true
 
                     Button {
-                        text: "Add Root..."
+                        text: I18n.i18nc("@action:button", "Add Root...")
                         onClicked: root.promptAddLibraryRoot("preferences")
                     }
 
                     Button {
-                        text: "Rescan All"
+                        text: I18n.i18nc("@action:button", "Rescan All")
                         onClicked: root.uiBridge.rescanAllLibraryRoots()
                     }
 
@@ -76,7 +80,7 @@ ScrollView {
 
                 CheckBox {
                     objectName: "libraryWatchCheckBox"
-                    text: "Watch library folders for changes"
+                    text: I18n.i18nc("@option:check", "Watch library folders for changes")
                     checked: root.uiBridge.libraryWatchEnabled
                     onToggled: root.uiBridge.setLibraryWatchEnabled(checked)
                 }
@@ -85,7 +89,7 @@ ScrollView {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     color: Kirigami.Theme.disabledTextColor
-                    text: "When enabled, files added, changed, or removed in the library folders appear in the library without a rescan, and the folders are rescanned at startup. Folders that cannot be watched, such as network shares, are rescanned periodically instead and are marked below."
+                    text: I18n.i18nc("@label", "When enabled, files added, changed, or removed in the library folders appear in the library without a rescan, and the folders are rescanned at startup. Folders that cannot be watched, such as network shares, are rescanned periodically instead and are marked below.")
                 }
 
                 RowLayout {
@@ -93,13 +97,16 @@ ScrollView {
                     spacing: 12
 
                     Label {
-                        text: "Album Sort"
+                        text: I18n.i18nc("@label", "Album Sort")
                         Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
                         Layout.preferredWidth: root.uiPalette.rowHeight * 7.5
-                        model: ["Year", "Title"]
+                        model: [
+                            I18n.i18nc("@item:inlistbox album sort", "Year"),
+                            I18n.i18nc("@item:inlistbox album sort", "Title")
+                        ]
                         currentIndex: Math.max(0, Math.min(1, root.uiBridge.librarySortMode))
                         onActivated: root.uiBridge.setLibrarySortMode(currentIndex)
                     }
@@ -110,8 +117,8 @@ ScrollView {
                 Label {
                     Layout.fillWidth: true
                     text: root.uiBridge.libraryRootEntries.length === 0
-                        ? "No library roots configured."
-                        : "Configured roots"
+                        ? I18n.i18nc("@info", "No library roots configured.")
+                        : I18n.i18nc("@label", "Configured roots")
                     color: Kirigami.Theme.disabledTextColor
                 }
 
@@ -190,7 +197,7 @@ ScrollView {
                                         objectName: "libraryRootUnwatchedLabel"
                                         Layout.fillWidth: true
                                         visible: unwatchedReason.length > 0
-                                        text: "Not watched for changes: " + unwatchedReason
+                                        text: I18n.i18nc("@info:status", "Not watched for changes: %1", unwatchedReason)
                                         wrapMode: Text.Wrap
                                         color: Kirigami.Theme.neutralTextColor
                                         font: Kirigami.Theme.smallFont
@@ -201,34 +208,34 @@ ScrollView {
                                         objectName: "libraryRootScanProblemLabel"
                                         Layout.fillWidth: true
                                         visible: scanProblem.length > 0
-                                        text: "Last scan: " + scanProblem
+                                        text: I18n.i18nc("@info:status problem the last library scan found", "Last scan: %1", scanProblem)
                                         wrapMode: Text.Wrap
                                         color: Kirigami.Theme.negativeTextColor
                                         font: Kirigami.Theme.smallFont
                                         Accessible.role: Accessible.AlertMessage
-                                        Accessible.name: "Problem with library folder "
-                                            + rootDisplayName + ": " + scanProblem
+                                        Accessible.name: I18n.i18nc("@info folder name, problem",
+                                            "Problem with library folder %1: %2", rootDisplayName, scanProblem)
                                     }
                                 }
 
                                 ToolButton {
-                                    text: "Open"
+                                    text: I18n.i18nc("@action:button", "Open")
                                     onClicked: root.uiBridge.openInFileBrowser(rootPath)
                                 }
 
                                 ToolButton {
-                                    text: "Rename"
+                                    text: I18n.i18nc("@action:button", "Rename")
                                     onClicked: root.openLibraryRootNameDialog("rename", rootPath, rootName)
                                 }
 
                                 ToolButton {
-                                    text: "Rescan"
+                                    text: I18n.i18nc("@action:button", "Rescan")
                                     onClicked: root.uiBridge.rescanLibraryRoot(rootPath)
                                 }
 
                                 ToolButton {
                                     objectName: "libraryRootRemoveButton"
-                                    text: "Remove..."
+                                    text: I18n.i18nc("@action:button", "Remove...")
                                     onClicked: root.requestRemoveRoot(rootPath, rootDisplayName, trackCount)
                                 }
                             }
@@ -244,8 +251,8 @@ ScrollView {
             property string rootPath: ""
             uiPalette: root.uiPalette
             windowRoot: root.windowRoot
-            title: "Remove Library Folder"
-            confirmText: "Remove Folder"
+            title: I18n.i18nc("@title:window", "Remove Library Folder")
+            confirmText: I18n.i18nc("@action:button", "Remove Folder")
             onConfirmed: root.uiBridge.removeLibraryRoot(rootPath)
         }
     }

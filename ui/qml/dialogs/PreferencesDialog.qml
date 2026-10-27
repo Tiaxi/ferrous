@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import FerrousUi 1.0
 import "../components" as Components
 import "../preferences" as Preferences
 
@@ -22,11 +23,11 @@ Dialog {
 
     property int pageIndex: 0
     readonly property var pageTitles: [
-        "Library",
-        "Spectrogram",
-        "Display",
-        "Last.fm",
-        "System Media"
+        I18n.i18nc("@title:tab", "Library"),
+        I18n.i18nc("@title:tab", "Spectrogram"),
+        I18n.i18nc("@title:tab", "Display"),
+        I18n.i18nc("@title:tab", "Last.fm"),
+        I18n.i18nc("@title:tab", "System Media")
     ]
 
     // Moves `step` pages on, wrapping around, and focuses the page's tab.
@@ -42,7 +43,7 @@ Dialog {
     modal: true
     // Keyboard users start in the dialog, on its tabs.
     focus: true
-    title: "Preferences"
+    title: I18n.i18nc("@title:window", "Preferences")
     standardButtons: Dialog.Close
     width: Math.min(760, root.windowRoot.width - 80)
     height: Math.min(620, root.windowRoot.height - 80)

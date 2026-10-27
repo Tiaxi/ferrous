@@ -24,6 +24,10 @@ BuildRequires:  qt6-qtbase-devel
 BuildRequires:  qt6-qtdeclarative-devel
 BuildRequires:  rust
 BuildRequires:  kf6-kirigami-devel
+# KI18n translates the interface; the tests extract the translation template
+# and make a pseudo-translation with GNU gettext.
+BuildRequires:  kf6-ki18n-devel
+BuildRequires:  gettext
 # The Secret Service keyring links the system libdbus.
 BuildRequires:  pkgconfig(dbus-1)
 BuildRequires:  pkgconfig(gio-2.0)
@@ -38,6 +42,7 @@ Requires:       qt6-qtbase
 Requires:       qt6-qtdeclarative
 Requires:       qt6-qtquickcontrols2
 Requires:       kf6-kirigami
+Requires:       kf6-ki18n
 # The org.kde.desktop controls style, which Ferrous selects at startup; without
 # it, for example outside Plasma, the main window fails to load.
 Requires:       kf6-qqc2-desktop-style

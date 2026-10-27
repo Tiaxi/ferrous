@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../components" as Components
 
 ScrollView {
@@ -36,7 +37,7 @@ ScrollView {
                 Kirigami.Heading {
                     Layout.fillWidth: true
                     level: 2
-                    text: "Spectrogram"
+                    text: I18n.i18nc("@title", "Spectrogram")
                     font.weight: Font.DemiBold
                 }
 
@@ -44,7 +45,7 @@ ScrollView {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     color: Kirigami.Theme.disabledTextColor
-                    text: "Spectrogram-specific rendering and analysis options."
+                    text: I18n.i18nc("@label", "Spectrogram-specific rendering and analysis options.")
                 }
 
                 RowLayout {
@@ -52,13 +53,16 @@ ScrollView {
                     spacing: 12
 
                     Label {
-                        text: "View"
+                        text: I18n.i18nc("@label", "View")
                         Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
                         Layout.preferredWidth: root.uiPalette.rowHeight * 9
-                        model: ["Downmix", "Per-channel"]
+                        model: [
+                            I18n.i18nc("@item:inlistbox spectrogram view", "Downmix"),
+                            I18n.i18nc("@item:inlistbox spectrogram view", "Per-channel")
+                        ]
                         currentIndex: Math.max(0, Math.min(1, root.uiBridge.spectrogramViewMode))
                         onActivated: root.uiBridge.setSpectrogramViewMode(currentIndex)
                     }
@@ -71,13 +75,16 @@ ScrollView {
                     spacing: 12
 
                     Label {
-                        text: "Display"
+                        text: I18n.i18nc("@label", "Display")
                         Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
                         Layout.preferredWidth: root.uiPalette.rowHeight * 9
-                        model: ["Rolling", "Centered"]
+                        model: [
+                            I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
+                            I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
+                        ]
                         currentIndex: Math.max(0, Math.min(1, root.uiBridge.spectrogramDisplayMode))
                         onActivated: root.uiBridge.setSpectrogramDisplayMode(currentIndex)
                     }
@@ -90,7 +97,7 @@ ScrollView {
                     spacing: 12
 
                     Label {
-                        text: "FFT Window"
+                        text: I18n.i18nc("@label", "FFT Window")
                         Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
@@ -113,7 +120,7 @@ ScrollView {
                     spacing: 12
 
                     Label {
-                        text: "dB Range"
+                        text: I18n.i18nc("@label", "dB Range")
                         Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
@@ -140,19 +147,19 @@ ScrollView {
                 }
 
                 CheckBox {
-                    text: "Log Scale Spectrogram"
+                    text: I18n.i18nc("@option:check", "Log Scale Spectrogram")
                     checked: root.uiBridge.logScale
                     onToggled: root.uiBridge.setLogScale(checked)
                 }
 
                 CheckBox {
-                    text: "Show Visualization FPS Overlay"
+                    text: I18n.i18nc("@option:check", "Show Visualization FPS Overlay")
                     checked: root.uiBridge.showFps
                     onToggled: root.uiBridge.setShowFps(checked)
                 }
 
                 CheckBox {
-                    text: "Show Crosshair on Hover"
+                    text: I18n.i18nc("@option:check", "Show Crosshair on Hover")
                     checked: root.uiBridge.showSpectrogramCrosshair
                     onToggled: root.uiBridge.setShowSpectrogramCrosshair(checked)
                 }
@@ -163,17 +170,17 @@ ScrollView {
                     wrapMode: Text.Wrap
                     color: Kirigami.Theme.disabledTextColor
                     font: Kirigami.Theme.smallFont
-                    text: "When enabled, right-clicking the spectrogram in centered mode seeks to that position in the track."
+                    text: I18n.i18nc("@label", "When enabled, right-clicking the spectrogram in centered mode seeks to that position in the track.")
                 }
 
                 CheckBox {
-                    text: "Show Frequency/Time Scale"
+                    text: I18n.i18nc("@option:check", "Show Frequency/Time Scale")
                     checked: root.uiBridge.showSpectrogramScale
                     onToggled: root.uiBridge.setShowSpectrogramScale(checked)
                 }
 
                 CheckBox {
-                    text: "Allow Spectrogram Zoom"
+                    text: I18n.i18nc("@option:check", "Allow Spectrogram Zoom")
                     checked: root.uiBridge.spectrogramZoomEnabled
                     onToggled: root.uiBridge.setSpectrogramZoomEnabled(checked)
                 }
@@ -184,7 +191,7 @@ ScrollView {
                     wrapMode: Text.Wrap
                     color: Kirigami.Theme.disabledTextColor
                     font: Kirigami.Theme.smallFont
-                    text: "Scroll to zoom in/out. Middle-click to reset."
+                    text: I18n.i18nc("@label", "Scroll to zoom in/out. Middle-click to reset.")
                 }
 
                 RowLayout {
@@ -192,13 +199,17 @@ ScrollView {
                     spacing: 12
 
                     Label {
-                        text: "Channel Buttons"
+                        text: I18n.i18nc("@label", "Channel Buttons")
                         Layout.preferredWidth: root.uiPalette.rowHeight * 5
                     }
 
                     ComboBox {
                         Layout.preferredWidth: root.uiPalette.rowHeight * 9
-                        model: ["Disabled", "On Hover", "Always"]
+                        model: [
+                            I18n.i18nc("@item:inlistbox channel buttons", "Disabled"),
+                            I18n.i18nc("@item:inlistbox channel buttons", "On Hover"),
+                            I18n.i18nc("@item:inlistbox channel buttons", "Always")
+                        ]
                         currentIndex: Math.max(0, Math.min(2, root.uiBridge.channelButtonsVisibility))
                         onActivated: root.uiBridge.setChannelButtonsVisibility(currentIndex)
                     }

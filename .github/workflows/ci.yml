@@ -212,6 +212,8 @@ jobs:
             qt6-qtdeclarative-devel \
             qt6-qtquickcontrols2-devel \
             kf6-kirigami-devel \
+            kf6-ki18n-devel \
+            gettext \
             xorg-x11-server-Xvfb \
             mesa-dri-drivers
 

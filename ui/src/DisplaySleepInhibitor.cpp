@@ -3,6 +3,7 @@
 #include "DisplaySleepInhibitor.h"
 
 #if defined(Q_OS_LINUX)
+#include <KLocalizedString>
 #include <QDBusConnection>
 #include <QDBusPendingCallWatcher>
 #include <QDebug>
@@ -97,7 +98,7 @@ void ScreenSaverInhibitorBackend::finishAcquire(QDBusPendingCallWatcher *watcher
         if (m_inhibited) {
             const QString reason = reply.type() == QDBusMessage::ErrorMessage
                 ? reply.errorMessage()
-                : QStringLiteral("unexpected reply");
+                : i18nc("@info reason the screen could not be kept awake", "unexpected reply");
             qWarning() << "Unable to inhibit display sleep:" << reason;
             reportFailure(reason);
         }
@@ -130,8 +131,8 @@ DisplaySleepInhibitor::DisplaySleepInhibitor(
         // Only a request still standing failed; a released one no longer matters.
         if (m_inhibited) {
             emit inhibitionFailed(
-                QStringLiteral("Couldn't keep the screen awake during fullscreen playback: %1")
-                    .arg(reason));
+                i18nc("@info", "Couldn't keep the screen awake during fullscreen playback: %1",
+                      reason));
         }
     });
 }

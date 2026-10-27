@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../components" as Components
 import "../logic/KeyUtils.js" as KeyUtils
 
@@ -264,7 +265,7 @@ Rectangle {
     TextMetrics {
         id: lengthHeaderMetrics
         font: root.uiPalette.baseFont
-        text: "Length"
+        text: I18n.i18nc("@title:column", "Length")
     }
 
     TextMetrics {
@@ -310,7 +311,7 @@ Rectangle {
                     Layout.preferredWidth: root.playlistIndicatorColumnWidth
                     horizontalAlignment: Text.AlignHCenter
                     color: root.uiPalette.uiMutedTextColor
-                    Accessible.name: "Playing"
+                    Accessible.name: I18n.i18nc("@title:column", "Playing")
                 }
 
                 Label {
@@ -320,20 +321,20 @@ Rectangle {
                     Layout.preferredWidth: root.playlistOrderColumnWidth
                     horizontalAlignment: Text.AlignRight
                     color: root.uiPalette.uiMutedTextColor
-                    Accessible.name: "Number"
+                    Accessible.name: I18n.i18nc("@title:column", "Number")
                 }
 
                 Label {
                     objectName: "queueHeader_title"
                     elide: Text.ElideRight
-                    text: "Title"
+                    text: I18n.i18nc("@title:column", "Title")
                     Layout.fillWidth: true
                     color: root.uiPalette.uiMutedTextColor
                 }
                 Label {
                     id: artistHeader
                     objectName: "queueHeader_artist"
-                    text: "Artist"
+                    text: I18n.i18nc("@title:column", "Artist")
                     Layout.preferredWidth: root.artistColumnWidth
                     elide: Text.ElideRight
                     color: root.uiPalette.uiMutedTextColor
@@ -341,7 +342,7 @@ Rectangle {
                 Label {
                     id: albumHeader
                     objectName: "queueHeader_album"
-                    text: "Album"
+                    text: I18n.i18nc("@title:column", "Album")
                     Layout.preferredWidth: root.albumColumnWidth
                     elide: Text.ElideRight
                     color: root.uiPalette.uiMutedTextColor
@@ -350,7 +351,7 @@ Rectangle {
                     id: lengthHeader
                     objectName: "queueHeader_length"
                     elide: Text.ElideRight
-                    text: "Length"
+                    text: I18n.i18nc("@title:column", "Length")
                     Layout.preferredWidth: root.lengthColumnWidth
                     horizontalAlignment: Text.AlignRight
                     color: root.uiPalette.uiMutedTextColor
@@ -364,9 +365,9 @@ Rectangle {
             // keyboard.
             Repeater {
                 model: [
-                    { "column": "artist", "label": "Artist", "header": artistHeader },
-                    { "column": "album", "label": "Album", "header": albumHeader },
-                    { "column": "length", "label": "Length", "header": lengthHeader }
+                    { "column": "artist", "label": I18n.i18nc("@title:column", "Artist"), "header": artistHeader },
+                    { "column": "album", "label": I18n.i18nc("@title:column", "Album"), "header": albumHeader },
+                    { "column": "length", "label": I18n.i18nc("@title:column", "Length"), "header": lengthHeader }
                 ]
 
                 delegate: Item {
@@ -386,8 +387,8 @@ Rectangle {
                     activeFocusOnTab: true
 
                     Accessible.role: Accessible.Separator
-                    Accessible.name: "Resize the " + modelData.label + " column"
-                    Accessible.description: "Left or Right to resize, Home for the default width"
+                    Accessible.name: I18n.i18nc("@action %1 is a column title", "Resize the %1 column", modelData.label)
+                    Accessible.description: I18n.i18nc("@info", "Left or Right to resize, Home for the default width")
                     Accessible.focusable: true
 
                     Rectangle {
@@ -481,7 +482,7 @@ Rectangle {
                 pixelAligned: true
                 cacheBuffer: 480
                 Accessible.role: Accessible.List
-                Accessible.name: "Queue"
+                Accessible.name: I18n.i18nc("@label", "Queue")
                 property real reservedRightPadding: playlistVerticalScrollBar.visible
                     ? (playlistVerticalScrollBar.width + 6)
                     : 0
@@ -556,8 +557,10 @@ Rectangle {
                     readonly property string playbackStateText: !isCurrentQueueRow
                         ? ""
                         : (root.uiBridge.playbackState === "Paused"
-                            ? "paused"
-                            : (root.uiBridge.playbackState === "Stopped" ? "stopped" : "playing"))
+                            ? I18n.i18nc("@info accessible state of the current queue row", "paused")
+                            : (root.uiBridge.playbackState === "Stopped"
+                                ? I18n.i18nc("@info accessible state of the current queue row", "stopped")
+                                : I18n.i18nc("@info accessible state of the current queue row", "playing")))
 
                     width: Math.max(0, ListView.view.width - (playlistView.reservedRightPadding || 0))
                     height: playlistView.rowHeight
@@ -771,7 +774,7 @@ Rectangle {
                     exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
                     MenuItem {
-                        text: "Play Track"
+                        text: I18n.i18nc("@action:inmenu", "Play Track")
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             if (playlistContextMenu.rowIndex >= 0) {
@@ -781,7 +784,7 @@ Rectangle {
                     }
 
                     MenuItem {
-                        text: "Open containing folder"
+                        text: I18n.i18nc("@action:inmenu", "Open containing folder")
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             const path = root.uiBridge.queuePathAt(playlistContextMenu.rowIndex)
@@ -792,7 +795,7 @@ Rectangle {
                     }
 
                     MenuItem {
-                        text: "Show in library"
+                        text: I18n.i18nc("@action:inmenu", "Show in library")
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             const path = root.uiBridge.queuePathAt(playlistContextMenu.rowIndex)
@@ -801,13 +804,13 @@ Rectangle {
                     }
 
                     MenuItem {
-                        text: "Edit Tags"
+                        text: I18n.i18nc("@action:inmenu", "Edit Tags")
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: root.controller.openTagEditorForRow(playlistContextMenu.rowIndex)
                     }
 
                     MenuItem {
-                        text: "Remove Track"
+                        text: I18n.i18nc("@action:inmenu", "Remove Track")
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             if (playlistContextMenu.rowIndex < 0) {
@@ -825,13 +828,13 @@ Rectangle {
                     MenuSeparator {}
 
                     MenuItem {
-                        text: "Move Up"
+                        text: I18n.i18nc("@action:inmenu", "Move Up")
                         enabled: playlistContextMenu.rowIndex > 0
                         onTriggered: root.controller.moveRowsOf(playlistContextMenu.rowIndex, -1)
                     }
 
                     MenuItem {
-                        text: "Move Down"
+                        text: I18n.i18nc("@action:inmenu", "Move Down")
                         enabled: playlistContextMenu.rowIndex >= 0
                             && playlistContextMenu.rowIndex < root.uiBridge.queueLength - 1
                         onTriggered: root.controller.moveRowsOf(playlistContextMenu.rowIndex, 1)
@@ -844,7 +847,7 @@ Rectangle {
 
             Label {
                 visible: root.uiBridge.queueLength === 0
-                text: "Playlist is empty"
+                text: I18n.i18nc("@label", "Playlist is empty")
                 color: Kirigami.Theme.disabledTextColor
                 horizontalAlignment: Text.AlignHCenter
                 anchors.horizontalCenter: parent.horizontalCenter

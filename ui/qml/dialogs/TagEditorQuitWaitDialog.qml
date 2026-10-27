@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import FerrousUi 1.0
 
 // Shown while quitting waits for a tag save or rename to finish.
 Dialog {
@@ -27,7 +28,7 @@ Dialog {
     x: Math.round((root.windowRoot.width - width) / 2)
     y: Math.round((root.windowRoot.height - height) / 2)
     width: 460
-    title: "Finishing Tag Changes"
+    title: I18n.i18nc("@title:window", "Finishing Tag Changes")
     standardButtons: Dialog.NoButton
     closePolicy: Popup.CloseOnEscape
 
@@ -56,8 +57,8 @@ Dialog {
                 objectName: "tagEditorQuitWaitStatus"
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "Ferrous quits once the tag editor has written "
-                    + (root.files.length === 1 ? "1 file" : root.files.length + " files") + "."
+                text: I18n.i18ncp("@info:status", "Ferrous quits once the tag editor has written %1 file.",
+                    "Ferrous quits once the tag editor has written %1 files.", root.files.length)
             }
         }
 
@@ -69,7 +70,8 @@ Dialog {
             color: root.uiPalette.uiMutedTextColor
             text: root.files.slice(0, root.shownFileCount).join("\n")
                 + (root.files.length > root.shownFileCount
-                    ? "\nand " + (root.files.length - root.shownFileCount) + " more"
+                    ? "\n" + I18n.i18ncp("@info more files than the list shows", "and %1 more", "and %1 more",
+                        root.files.length - root.shownFileCount)
                     : "")
         }
 
@@ -78,10 +80,10 @@ Dialog {
             Layout.fillWidth: true
             visible: root.offerChoice
             wrapMode: Text.WordWrap
-            text: "This is taking longer than it should, for example on an unresponsive "
+            text: I18n.i18nc("@info", "This is taking longer than it should, for example on an unresponsive "
                 + "network share. Quit Anyway stops waiting, and the tag changes not yet "
                 + "written may be lost. Each file keeps its old tags or gets its new ones; "
-                + "none is left half-written."
+                + "none is left half-written.")
         }
 
         RowLayout {
@@ -93,12 +95,12 @@ Dialog {
 
             Button {
                 objectName: "tagEditorQuitWaitQuitButton"
-                text: "Quit Anyway"
+                text: I18n.i18nc("@action:button", "Quit Anyway")
                 onClicked: root.quitAnywayRequested()
             }
             Button {
                 objectName: "tagEditorQuitWaitKeepWaitingButton"
-                text: "Keep Waiting"
+                text: I18n.i18nc("@action:button", "Keep Waiting")
                 highlighted: true
                 onClicked: root.keepWaitingRequested()
             }

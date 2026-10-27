@@ -66,7 +66,10 @@ public:
     Q_INVOKABLE void selectRange(int first, int last);
     Q_INVOKABLE void toggleRowSelected(int row);
     Q_INVOKABLE void selectAllRows();
+    // The value of `field` that the edited rows share; empty when they hold
+    // different values, which bulkValueMixed() tells apart from an empty one.
     Q_INVOKABLE QString bulkValue(const QString &field) const;
+    Q_INVOKABLE bool bulkValueMixed(const QString &field) const;
     // Says which of the edited rows hold more than one value of `field`,
     // which an edit replaces; empty when none do.
     Q_INVOKABLE QString extraValuesNote(const QString &field) const;

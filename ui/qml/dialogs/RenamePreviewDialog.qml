@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 
 // The new name of each selected file, and why any cannot be renamed, before
 // anything is renamed. Cancel and Escape rename nothing.
@@ -34,15 +35,12 @@ Dialog {
 
     function summaryText() {
         if (root.errorText.length > 0) {
-            return "The new names could not be worked out: " + root.errorText
+            return I18n.i18nc("@info", "The new names could not be worked out: %1", root.errorText)
         }
-        let text = root.renameCount === 1
-            ? "1 file will be renamed."
-            : root.renameCount + " files will be renamed."
+        let text = I18n.i18ncp("@info", "%1 file will be renamed.", "%1 files will be renamed.", root.renameCount)
         if (root.refusedCount > 0) {
-            text += root.refusedCount === 1
-                ? " 1 file can't be renamed and keeps its name."
-                : " " + root.refusedCount + " files can't be renamed and keep their names."
+            text += " " + I18n.i18ncp("@info", "%1 file can't be renamed and keeps its name.",
+                "%1 files can't be renamed and keep their names.", root.refusedCount)
         }
         return text
     }
@@ -54,7 +52,7 @@ Dialog {
     y: Math.round((root.windowRoot.height - height) / 2)
     width: Math.min(root.windowRoot.width - 80, 760)
     height: Math.min(root.windowRoot.height - 80, 520)
-    title: "Rename Files"
+    title: I18n.i18nc("@title:window", "Rename Files")
     standardButtons: Dialog.NoButton
     closePolicy: Popup.CloseOnEscape
 
@@ -95,8 +93,9 @@ Dialog {
                     Layout.fillWidth: true
                     elide: Text.ElideMiddle
                     text: modelData.unchanged
-                        ? modelData.oldName + " (keeps its name)"
-                        : modelData.oldName + " → " + (modelData.newName || "?")
+                        ? I18n.i18nc("@item file name", "%1 (keeps its name)", modelData.oldName)
+                        : I18n.i18nc("@item old file name, new file name", "%1 → %2",
+                            modelData.oldName, modelData.newName || "?")
                     color: modelData.ok
                         ? (modelData.unchanged ? root.uiPalette.uiMutedTextColor : Kirigami.Theme.textColor)
                         : Kirigami.Theme.negativeTextColor
@@ -122,12 +121,12 @@ Dialog {
 
             Button {
                 objectName: "renamePreviewCancelButton"
-                text: "Cancel"
+                text: I18n.i18nc("@action:button", "Cancel")
                 onClicked: root.reject()
             }
             Button {
                 objectName: "renamePreviewRenameButton"
-                text: root.renameCount === 1 ? "Rename 1 File" : "Rename " + root.renameCount + " Files"
+                text: I18n.i18ncp("@action:button", "Rename %1 File", "Rename %1 Files", root.renameCount)
                 enabled: root.renameCount > 0 && root.errorText.length === 0
                 highlighted: true
                 onClicked: {

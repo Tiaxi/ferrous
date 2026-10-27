@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../components" as Components
 
 ScrollView {
@@ -35,12 +36,12 @@ ScrollView {
                 Kirigami.Heading {
                     Layout.fillWidth: true
                     level: 2
-                    text: "System Media"
+                    text: I18n.i18nc("@title", "System Media")
                     font.weight: Font.DemiBold
                 }
 
                 CheckBox {
-                    text: "Enable KDE media controls and media buttons"
+                    text: I18n.i18nc("@option:check", "Enable KDE media controls and media buttons")
                     checked: root.uiBridge.systemMediaControlsEnabled
                     onToggled: root.uiBridge.setSystemMediaControlsEnabled(checked)
                 }
@@ -49,7 +50,7 @@ ScrollView {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     color: Kirigami.Theme.disabledTextColor
-                    text: "When enabled, Ferrous appears in Plasma's media controls and responds to Play/Pause, Previous, Next, and Stop media buttons. Keyboard volume buttons always control system volume, not Ferrous volume."
+                    text: I18n.i18nc("@label", "When enabled, Ferrous appears in Plasma's media controls and responds to Play/Pause, Previous, Next, and Stop media buttons. Keyboard volume buttons always control system volume, not Ferrous volume.")
                 }
             }
         }
