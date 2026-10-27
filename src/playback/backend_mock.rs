@@ -25,6 +25,60 @@ pub fn spawn_engine(
     _failure: &Arc<OnceLock<String>>,
     exit_tx: Sender<EngineExit>,
 ) -> Sender<PlaybackCommand> {
+    spawn_with_clock(analysis_tx, event_tx, exit_tx, Instant::now)
+}
+
+/// Spawn the simulation with time that passes only when the test advances
+/// `clock`, so a test decides when playback reaches a track boundary.
+#[cfg(test)]
+pub(super) fn spawn_engine_with_clock(
+    analysis_tx: Sender<AnalysisCommand>,
+    event_tx: Sender<PlaybackEvent>,
+    exit_tx: Sender<EngineExit>,
+    clock: &ManualClock,
+) -> Sender<PlaybackCommand> {
+    let clock = clock.clone();
+    spawn_with_clock(analysis_tx, event_tx, exit_tx, move || clock.now())
+}
+
+/// Simulated time for tests: it starts when created and advances only by
+/// [`ManualClock::advance`].
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct ManualClock {
+    start: Instant,
+    elapsed_nanos: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(test)]
+impl ManualClock {
+    pub(super) fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            elapsed_nanos: Arc::default(),
+        }
+    }
+
+    pub(super) fn advance(&self, by: Duration) {
+        let nanos = u64::try_from(by.as_nanos()).expect("a test advances by less than 584 years");
+        self.elapsed_nanos
+            .fetch_add(nanos, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn now(&self) -> Instant {
+        self.start
+            + Duration::from_nanos(self.elapsed_nanos.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
+/// Run the simulation, reading the time that passes while it plays from
+/// `now`.
+fn spawn_with_clock(
+    analysis_tx: Sender<AnalysisCommand>,
+    event_tx: Sender<PlaybackEvent>,
+    exit_tx: Sender<EngineExit>,
+    now: impl Fn() -> Instant + Send + 'static,
+) -> Sender<PlaybackCommand> {
     let (cmd_tx, cmd_rx) = unbounded();
     crate::worker_thread::spawn_worker("ferrous-playback-sim", move || {
         let mut runtime = MockPlaybackRuntime {
@@ -40,15 +94,16 @@ pub fn spawn_engine(
             event_tx,
             analysis_tx,
         };
-        let mut last_tick = Instant::now();
+        let mut last_tick = now();
         while let Ok(cmd) = cmd_rx.recv() {
+            let tick = now();
             if runtime.snapshot.state == PlaybackState::Playing {
                 runtime.snapshot.position = runtime
                     .snapshot
                     .position
-                    .saturating_add(last_tick.elapsed());
+                    .saturating_add(tick.saturating_duration_since(last_tick));
             }
-            last_tick = Instant::now();
+            last_tick = tick;
             runtime.handle_command(cmd);
             // The simulated position is where playback is now, and
             // advances while it plays.

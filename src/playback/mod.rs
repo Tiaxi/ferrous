@@ -669,6 +669,7 @@ mod tests {
 
     use crossbeam_channel::unbounded;
 
+    use super::backend::ManualClock;
     use super::{PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackState, TrackChangeKind};
 
     fn recv_snapshot(
@@ -706,6 +707,21 @@ mod tests {
         let (analysis_tx, _) = unbounded();
 
         PlaybackEngine::new(analysis_tx)
+    }
+
+    /// An engine whose simulated time passes only when the test advances
+    /// the returned clock.
+    fn make_clocked_engine() -> (
+        PlaybackEngine,
+        crossbeam_channel::Receiver<PlaybackEvent>,
+        ManualClock,
+    ) {
+        let (analysis_tx, _) = unbounded();
+        let clock = ManualClock::new();
+        let (engine, rx) = PlaybackEngine::spawn(|event_tx, _failure, exit_tx| {
+            super::backend::spawn_engine_with_clock(analysis_tx, event_tx, exit_tx, &clock)
+        });
+        (engine, rx, clock)
     }
 
     #[test]
@@ -959,11 +975,14 @@ mod tests {
     #[test]
     fn stopped_seek_is_refused_but_acknowledged() {
         let (engine, rx) = make_test_engine();
-        engine.command(PlaybackCommand::LoadQueue(vec![PathBuf::from(
-            "/tmp/a.flac",
-        )]));
-        engine.command(PlaybackCommand::Seek(Duration::from_secs(42)));
-        let events = recv_events(&rx, Duration::from_millis(50));
+        let events = handle(
+            &engine,
+            &rx,
+            [
+                PlaybackCommand::LoadQueue(vec![PathBuf::from("/tmp/a.flac")]),
+                PlaybackCommand::Seek(Duration::from_secs(42)),
+            ],
+        );
         assert!(!events
             .iter()
             .any(|event| matches!(event, PlaybackEvent::Seeked { .. })));
@@ -971,9 +990,14 @@ mod tests {
         assert_eq!(snap.position, Duration::ZERO);
         assert_eq!((snap.seek_serial, snap.seek_landed_serial), (1, 0));
 
-        engine.command(PlaybackCommand::Play);
-        engine.command(PlaybackCommand::Seek(Duration::from_secs(42)));
-        let events = recv_events(&rx, Duration::from_millis(50));
+        let events = handle(
+            &engine,
+            &rx,
+            [
+                PlaybackCommand::Play,
+                PlaybackCommand::Seek(Duration::from_secs(42)),
+            ],
+        );
         assert!(events.iter().any(|event| matches!(
             event,
             PlaybackEvent::Seeked { position } if *position == Duration::from_secs(42)
@@ -1151,13 +1175,28 @@ mod tests {
         assert_eq!(snap.position, Duration::ZERO);
     }
 
-    /// Collect events until `timeout` passes without one.
-    fn recv_events(
+    /// Send `commands` and collect the events they cause. The engine
+    /// answers every command with a snapshot, after the command's other
+    /// events, so this waits for the commands to be handled rather than for
+    /// a quiet period that a busy machine can outlast.
+    fn handle(
+        engine: &PlaybackEngine,
         rx: &crossbeam_channel::Receiver<PlaybackEvent>,
-        timeout: Duration,
+        commands: impl IntoIterator<Item = PlaybackCommand>,
     ) -> Vec<PlaybackEvent> {
+        let mut unanswered = 0;
+        for command in commands {
+            engine.command(command);
+            unanswered += 1;
+        }
         let mut events = Vec::new();
-        while let Ok(event) = rx.recv_timeout(timeout) {
+        while unanswered > 0 {
+            let event = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the engine answers every command");
+            if matches!(event, PlaybackEvent::Snapshot(_)) {
+                unanswered -= 1;
+            }
             events.push(event);
         }
         events
@@ -1199,20 +1238,30 @@ mod tests {
     }
 
     /// Start playing `paths` and enter the about-to-finish window of the
-    /// first track: the successor is staged but not audible yet.
+    /// first track: the successor is staged but not audible yet. The first
+    /// track ends once the returned clock advances by 100 ms.
     fn play_into_window(
         paths: &[PathBuf],
-    ) -> (PlaybackEngine, crossbeam_channel::Receiver<PlaybackEvent>) {
-        let (engine, rx) = make_test_engine();
-        engine.command(PlaybackCommand::LoadQueue(paths.to_vec()));
-        engine.command(PlaybackCommand::Play);
-        engine.command(PlaybackCommand::Seek(Duration::from_millis(179_900)));
-        engine.command(PlaybackCommand::Poll);
-        let events = recv_events(&rx, Duration::from_millis(50));
+    ) -> (
+        PlaybackEngine,
+        crossbeam_channel::Receiver<PlaybackEvent>,
+        ManualClock,
+    ) {
+        let (engine, rx, clock) = make_clocked_engine();
+        let events = handle(
+            &engine,
+            &rx,
+            [
+                PlaybackCommand::LoadQueue(paths.to_vec()),
+                PlaybackCommand::Play,
+                PlaybackCommand::Seek(Duration::from_millis(179_900)),
+                PlaybackCommand::Poll,
+            ],
+        );
         let snapshot = last_snapshot(&events);
         assert_eq!(snapshot.current.as_ref(), Some(&paths[0]));
         assert_eq!(snapshot.current_queue_index, Some(0));
-        (engine, rx)
+        (engine, rx, clock)
     }
 
     #[test]
@@ -1221,19 +1270,23 @@ mod tests {
             .iter()
             .map(|name| PathBuf::from(format!("/fixture/{name}.flac")))
             .collect();
-        let (engine, rx) = play_into_window(&paths);
-        engine.command(PlaybackCommand::Next);
-        let events = recv_events(&rx, Duration::from_millis(50));
+        let (engine, rx, _clock) = play_into_window(&paths);
+        let events = handle(&engine, &rx, [PlaybackCommand::Next]);
         assert_eq!(
             track_changes(&events),
             vec![(paths[1].clone(), 1, "manual", 2)]
         );
 
-        let (engine, rx) = play_into_window(&paths);
-        engine.command(PlaybackCommand::Stop);
-        engine.command(PlaybackCommand::Play);
-        engine.command(PlaybackCommand::Poll);
-        let events = recv_events(&rx, Duration::from_millis(50));
+        let (engine, rx, _clock) = play_into_window(&paths);
+        let events = handle(
+            &engine,
+            &rx,
+            [
+                PlaybackCommand::Stop,
+                PlaybackCommand::Play,
+                PlaybackCommand::Poll,
+            ],
+        );
         assert!(track_changes(&events).is_empty());
         let snapshot = last_snapshot(&events);
         assert_eq!(snapshot.current.as_ref(), Some(&paths[0]));
@@ -1247,13 +1300,19 @@ mod tests {
             .iter()
             .map(|name| PathBuf::from(format!("/fixture/{name}.flac")))
             .collect();
-        let (engine, rx) = play_into_window(&paths);
-        engine.command(PlaybackCommand::RemoveAt(2));
-        engine.command(PlaybackCommand::Poll);
-        let events = recv_events(&rx, Duration::from_millis(150));
+        let (engine, rx, clock) = play_into_window(&paths);
+        let events = handle(
+            &engine,
+            &rx,
+            [PlaybackCommand::RemoveAt(2), PlaybackCommand::Poll],
+        );
         assert!(track_changes(&events).is_empty(), "{events:?}");
-        engine.command(PlaybackCommand::Poll);
-        let events = recv_events(&rx, Duration::from_millis(50));
+        // Just before the boundary, the first track is still audible.
+        clock.advance(Duration::from_millis(99));
+        let events = handle(&engine, &rx, [PlaybackCommand::Poll]);
+        assert!(track_changes(&events).is_empty(), "{events:?}");
+        clock.advance(Duration::from_millis(1));
+        let events = handle(&engine, &rx, [PlaybackCommand::Poll]);
         assert_eq!(
             track_changes(&events),
             vec![(paths[1].clone(), 1, "gapless", 2)]
@@ -1266,18 +1325,23 @@ mod tests {
     #[test]
     fn repeat_one_and_duplicate_rows_report_every_play() {
         let a = PathBuf::from("/fixture/a.flac");
-        let (engine, rx) = make_test_engine();
-        engine.command(PlaybackCommand::SetRepeatMode(super::RepeatMode::One));
-        engine.command(PlaybackCommand::LoadQueue(vec![a.clone(), a.clone()]));
-        engine.command(PlaybackCommand::Play);
-        for _ in 0..2 {
-            engine.command(PlaybackCommand::Seek(Duration::from_secs(180)));
-            engine.command(PlaybackCommand::Poll);
-        }
-        engine.command(PlaybackCommand::SetRepeatMode(super::RepeatMode::Off));
-        engine.command(PlaybackCommand::Seek(Duration::from_secs(180)));
-        engine.command(PlaybackCommand::Poll);
-        let events = recv_events(&rx, Duration::from_millis(50));
+        let (engine, rx, _clock) = make_clocked_engine();
+        let to_the_end = || {
+            [
+                PlaybackCommand::Seek(Duration::from_secs(180)),
+                PlaybackCommand::Poll,
+            ]
+        };
+        let mut commands = vec![
+            PlaybackCommand::SetRepeatMode(super::RepeatMode::One),
+            PlaybackCommand::LoadQueue(vec![a.clone(), a.clone()]),
+            PlaybackCommand::Play,
+        ];
+        commands.extend(to_the_end());
+        commands.extend(to_the_end());
+        commands.push(PlaybackCommand::SetRepeatMode(super::RepeatMode::Off));
+        commands.extend(to_the_end());
+        let events = handle(&engine, &rx, commands);
         assert_eq!(
             track_changes(&events),
             vec![
@@ -1295,20 +1359,26 @@ mod tests {
         let a = PathBuf::from("/fixture/a.flac");
         let b = PathBuf::from("/fixture/b.mp3");
         let c = PathBuf::from("/fixture/c.flac");
-        let (engine, rx) = play_into_window(&[a, b.clone()]);
-        engine.command(PlaybackCommand::AddToQueue(vec![c.clone()]));
-        std::thread::sleep(Duration::from_millis(150));
-        engine.command(PlaybackCommand::Poll);
-        let events = recv_events(&rx, Duration::from_millis(50));
+        let (engine, rx, clock) = play_into_window(&[a, b.clone()]);
+        let events = handle(&engine, &rx, [PlaybackCommand::AddToQueue(vec![c.clone()])]);
+        assert!(track_changes(&events).is_empty(), "{events:?}");
+        clock.advance(Duration::from_millis(100));
+        let events = handle(&engine, &rx, [PlaybackCommand::Poll]);
         assert_eq!(track_changes(&events), vec![(b, 1, "natural", 2)]);
 
-        engine.command(PlaybackCommand::Seek(Duration::from_millis(179_900)));
-        engine.command(PlaybackCommand::Poll);
-        engine.command(PlaybackCommand::RemoveAt(2));
-        engine.command(PlaybackCommand::AddToQueue(vec![c.clone()]));
-        std::thread::sleep(Duration::from_millis(150));
-        engine.command(PlaybackCommand::Poll);
-        let events = recv_events(&rx, Duration::from_millis(50));
+        let events = handle(
+            &engine,
+            &rx,
+            [
+                PlaybackCommand::Seek(Duration::from_millis(179_900)),
+                PlaybackCommand::Poll,
+                PlaybackCommand::RemoveAt(2),
+                PlaybackCommand::AddToQueue(vec![c.clone()]),
+            ],
+        );
+        assert!(track_changes(&events).is_empty(), "{events:?}");
+        clock.advance(Duration::from_millis(100));
+        let events = handle(&engine, &rx, [PlaybackCommand::Poll]);
         assert_eq!(track_changes(&events), vec![(c, 2, "natural", 3)]);
     }
 
