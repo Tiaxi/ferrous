@@ -10,6 +10,12 @@ Check [GitHub Releases](https://github.com/Tiaxi/ferrous/releases) for Fedora RP
 sudo dnf install ./ferrous-*.rpm
 ```
 
+Each release also has a `SHA256SUMS` file. To check the packages you downloaded, run this in the directory that holds them and `SHA256SUMS`:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
 ## Build dependencies
 
 Install these tools and development libraries:

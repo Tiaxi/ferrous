@@ -3,9 +3,11 @@ name: CI
 on:
   push:
     branches: [main, master]
+    # The release workflow runs these checks on the tagged commit itself.
     tags-ignore:
       - '**'
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
