@@ -27,13 +27,13 @@
 #define private public
 #include "../src/BridgeClient.h"
 #include "../src/TagEditorController.h"
+#include "../src/WaveformEditorItem.h"
 #undef private
 #include "../src/FerrousBridgeFfi.h"
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
 #include "../src/SpectrogramItem.h"
-#include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
 
 namespace {
@@ -182,6 +182,9 @@ private slots:
     void pluralsFollowTheCount();
     void javaScriptLibrariesTranslate();
     void channelLayoutIconFollowsTheLayoutNotItsText();
+    void albumArtRefusalsAreTranslated();
+    void backendStopWithoutAReasonIsTranslated();
+    void drawnUnitsAreTranslated();
     void mainWindowShowsTranslatedText();
     void tagEditorTellsMixedValuesByAFlag();
 };
@@ -303,6 +306,48 @@ void I18nTest::channelLayoutIconFollowsTheLayoutNotItsText() {
     client.m_currentTrackChannels = 6;
     QCOMPARE(client.currentTrackChannelLayoutText(), pseudo(QStringLiteral("6 ch")));
     QVERIFY(client.currentTrackChannelLayoutIconKey().isEmpty());
+}
+
+void I18nTest::albumArtRefusalsAreTranslated() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    client.m_itunesArtworkResults = {
+        QVariantMap{{QStringLiteral("normalizedPath"), QStringLiteral("/fixture/cache/a.jpg")}}};
+
+    // The search has not yet found the track's file.
+    client.m_itunesArtworkTarget = {{QStringLiteral("trackPath"), QStringLiteral("/fixture/a.flac")}};
+    client.applyItunesArtworkSuggestion(0);
+    QCOMPARE(errors.size(), 1);
+    QCOMPARE(errors.takeFirst().first().toString(),
+             pseudo(QStringLiteral("The album art was not applied: the track is still being "
+                                   "checked. Try again in a moment.")));
+
+    // The search did not find it.
+    client.m_itunesArtworkTarget.insert(QStringLiteral("identity"), QVariantMap());
+    client.applyItunesArtworkSuggestion(0);
+    QCOMPARE(errors.size(), 1);
+    QCOMPARE(errors.takeFirst().first().toString(),
+             pseudo(QStringLiteral("The album art was not applied: the track was not found when "
+                                   "the artwork search started.")));
+}
+
+void I18nTest::backendStopWithoutAReasonIsTranslated() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_bridgeShutdownRequested = false;
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    decoded.hasStopped = true;
+    QVERIFY(!client.processBinarySnapshot(decoded));
+    QCOMPARE(client.backendFailure(),
+             pseudo(QStringLiteral("The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.")));
+}
+
+void I18nTest::drawnUnitsAreTranslated() {
+    WaveformEditorItem item;
+    QCOMPARE(item.formatViewportDuration(0.834), pseudo(QStringLiteral("834 ms")));
+    // Durations of a second and more have no unit to translate.
+    QCOMPARE(item.formatViewportDuration(245.2), QStringLiteral("04:05"));
 }
 
 void I18nTest::mainWindowShowsTranslatedText() {

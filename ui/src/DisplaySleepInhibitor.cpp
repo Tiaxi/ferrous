@@ -81,7 +81,9 @@ void ScreenSaverInhibitorBackend::setInhibited(bool inhibited) {
     }
 
     QDBusMessage message = screenSaverCall(QStringLiteral("Inhibit"));
-    message << QStringLiteral("Ferrous") << QStringLiteral("Fullscreen visualization is playing");
+    // The desktop shows the reason, for example in its power settings.
+    message << QStringLiteral("Ferrous")
+            << i18nc("@info why the screen is kept awake", "Fullscreen visualization is playing");
     auto *watcher = new QDBusPendingCallWatcher(m_call(message), this);
     m_acquireWatcher = watcher;
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *finished) {

@@ -6,6 +6,7 @@
 #include "SpectrogramSeekTrace.h"
 #include "SpectrogramTraceLogging.h"
 
+#include <KLocalizedString>
 #include <QFont>
 #include <QFontMetrics>
 #include <QDateTime>
@@ -498,6 +499,17 @@ bool configurePreviewTextureNode(
         clippedSource,
         placeholderTexture);
 }
+// The unit labels, translated once: they are drawn on every repaint.
+const QString &hertzFormat() {
+    static const QString format = i18nc("@item:intext frequency in hertz", "%1 Hz");
+    return format;
+}
+
+const QString &kilohertzFormat() {
+    static const QString format = i18nc("@item:intext frequency in kilohertz", "%1 kHz");
+    return format;
+}
+
 QString formatFrequencyLabel(double hz) {
     if (hz < 0.0) {
         return {};
@@ -505,11 +517,11 @@ QString formatFrequencyLabel(double hz) {
     if (hz >= 1000.0) {
         const double kHz = hz / 1000.0;
         if (kHz >= 10.0) {
-            return QStringLiteral("%1 kHz").arg(qRound(kHz));
+            return kilohertzFormat().arg(qRound(kHz));
         }
-        return QStringLiteral("%1 kHz").arg(kHz, 0, 'f', 1);
+        return kilohertzFormat().arg(kHz, 0, 'f', 1);
     }
-    return QStringLiteral("%1 Hz").arg(qRound(hz));
+    return hertzFormat().arg(qRound(hz));
 }
 
 QString formatTimeLabel(double seconds) {
@@ -536,10 +548,7 @@ QString formatFrequencyLabelPrecise(double hz) {
     if (hz < 0.0) {
         return {};
     }
-    if (hz >= 1000.0) {
-        return QStringLiteral("%1 Hz").arg(qRound(hz));
-    }
-    return QStringLiteral("%1 Hz").arg(qRound(hz));
+    return hertzFormat().arg(qRound(hz));
 }
 
 // Precise time label for crosshair: (HH:)MM:SS.mmm with milliseconds.
@@ -5630,7 +5639,8 @@ void SpectrogramItem::updateOverlayImageLocked() {
 
     QFont font;
     font.setPixelSize(10);
-    const QString text = QStringLiteral("%1 fps").arg(m_fpsValue);
+    static const QString fpsFormat = i18nc("@item:intext frames per second", "%1 fps");
+    const QString text = fpsFormat.arg(m_fpsValue);
     const QFontMetrics metrics(font);
     const int imageWidth = std::max(1, metrics.horizontalAdvance(text));
     const int imageHeight = std::max(1, metrics.height());

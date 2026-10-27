@@ -196,14 +196,14 @@ QString formatBinaryFileSize(qint64 sizeBytes) {
 
     const QLocale locale = QLocale::system();
     if (unitIndex == 0) {
-        return QStringLiteral("%1 B").arg(locale.toString(sizeBytes));
+        return i18nc("@info file size in bytes", "%1 B", locale.toString(sizeBytes));
     }
 
     const int precision = scaled >= 10.0 ? 0 : 1;
-    return QStringLiteral("%1 %2 (%3 bytes)")
-        .arg(locale.toString(scaled, 'f', precision),
-             QString::fromLatin1(kUnits[unitIndex]),
-             locale.toString(sizeBytes));
+    return i18nc("@info file size: size, unit such as MiB, size in bytes", "%1 %2 (%3 bytes)",
+                 locale.toString(scaled, 'f', precision),
+                 QString::fromLatin1(kUnits[unitIndex]),
+                 locale.toString(sizeBytes));
 }
 
 QString canonicalizeSearchQuery(const QString &query) {
@@ -431,9 +431,9 @@ QVariantMap readImageFileDetails(const QString &path) {
 
     if (fileType.isEmpty()) {
         if (!format.isEmpty()) {
-            fileType = QStringLiteral("%1 image").arg(format);
+            fileType = i18nc("@info image file type, such as PNG image", "%1 image", format);
         } else if (!suffix.isEmpty()) {
-            fileType = QStringLiteral("%1 image").arg(suffix);
+            fileType = i18nc("@info image file type, such as PNG image", "%1 image", suffix);
         }
     }
     if (!fileType.isEmpty()) {
@@ -3964,9 +3964,9 @@ void BridgeClient::applyItunesArtworkSuggestion(int index) {
     const QVariant identity = m_itunesArtworkTarget.value(QStringLiteral("identity"));
     if (!identity.isValid() || identity.toMap().isEmpty()) {
         emit bridgeError(identity.isValid()
-                             ? QStringLiteral("The album art was not applied: the track was not "
+                             ? i18nc("@info", "The album art was not applied: the track was not "
                                               "found when the artwork search started.")
-                             : QStringLiteral("The album art was not applied: the track is still "
+                             : i18nc("@info", "The album art was not applied: the track is still "
                                               "being checked. Try again in a moment."),
                          BinaryBridgeCodec::ErrorCategoryLibrary,
                          BinaryBridgeCodec::ErrorSeverityError, trackPath);
@@ -5146,7 +5146,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (!m_bridgeShutdownRequested) {
             const QString reason = snapshot.errorMessage.trimmed();
             setBackendFailure(reason.isEmpty()
-                    ? QStringLiteral("The Ferrous backend stopped unexpectedly. "
+                    ? i18nc("@info", "The Ferrous backend stopped unexpectedly. "
                                      "Restart Ferrous to continue.")
                     : reason);
         }

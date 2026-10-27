@@ -5,6 +5,7 @@
 
 #include "FerrousBridgeFfi.h"
 
+#include <KLocalizedString>
 #include <QFontMetrics>
 #include <QFutureWatcher>
 #include <QHoverEvent>
@@ -486,13 +487,15 @@ void WaveformEditorItem::resetZoom() { setZoomLevel(1.0); }
 double WaveformEditorItem::maximumZoomLevel() const { QMutexLocker lock(&m_stateMutex); return maximumZoomLevelLocked(); }
 
 QString WaveformEditorItem::formatViewportDuration(double seconds) const {
+    // Translated once: the viewport is labelled on every repaint.
+    static const QString millisecondsFormat = i18nc("@item:intext duration in milliseconds", "%1 ms");
     if (!std::isfinite(seconds) || seconds <= 0.0) {
-        return QStringLiteral("0 ms");
+        return millisecondsFormat.arg(0);
     }
     if (seconds < 1.0) {
         const int milliseconds = std::clamp(
             static_cast<int>(std::lround(seconds * 1000.0)), 1, 999);
-        return QStringLiteral("%1 ms").arg(milliseconds);
+        return millisecondsFormat.arg(milliseconds);
     }
     const qint64 totalSeconds = std::max<qint64>(
         1, static_cast<qint64>(std::llround(seconds)));
@@ -2567,7 +2570,10 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     const double channelHeight = static_cast<double>(height) / channels;
     const double localY = std::fmod(static_cast<double>(y), channelHeight);
     const double amplitude = std::clamp(std::abs((channelHeight * 0.5 - localY) / (channelHeight * 0.5)), 0.0, 1.0);
-    const QString dbText = amplitude <= 0.00001 ? QStringLiteral("-∞ dB") : QStringLiteral("%1 dB").arg(20.0 * std::log10(amplitude), 0, 'f', 1);
+    static const QString decibelFormat = i18nc("@item:intext level in decibels", "%1 dB");
+    const QString dbText = amplitude <= 0.00001
+        ? decibelFormat.arg(QStringLiteral("-∞"))
+        : decibelFormat.arg(20.0 * std::log10(amplitude), 0, 'f', 1);
     const QString timeText = formatCrosshairTime(time);
     QFont font;
     font.setPixelSize(10);
@@ -2598,7 +2604,8 @@ void WaveformEditorItem::drawFpsOverlay(QPainter &painter, int width, int fpsVal
     QFont font;
     font.setPixelSize(10);
     painter.setFont(font);
-    const QString text = QStringLiteral("%1 fps").arg(fpsValue);
+    static const QString fpsFormat = i18nc("@item:intext frames per second", "%1 fps");
+    const QString text = fpsFormat.arg(fpsValue);
     const QFontMetrics metrics(font);
     painter.setPen(kOverlay);
     painter.drawText(
