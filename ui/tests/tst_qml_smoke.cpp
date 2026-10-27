@@ -927,6 +927,72 @@ QVector<double> verticalLinesIn(const LineAndTextRecordingPaintEngine &engine, Q
     return xs;
 }
 
+// The bridge a waveform surface reads, with the real one's types: its mute
+// mask has 64 bits, and isChannelMuted() is no binding dependency.
+class WaveformSurfaceTestBridge final : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(QString playbackState MEMBER m_playbackState CONSTANT)
+    Q_PROPERTY(QString currentTrackPath MEMBER m_currentTrackPath CONSTANT)
+    Q_PROPERTY(QByteArray waveformPeaksPacked MEMBER m_waveformPeaksPacked CONSTANT)
+    Q_PROPERTY(double waveformCoverageSeconds MEMBER m_waveformCoverageSeconds CONSTANT)
+    Q_PROPERTY(bool waveformComplete MEMBER m_waveformComplete CONSTANT)
+    Q_PROPERTY(double durationSeconds MEMBER m_durationSeconds CONSTANT)
+    Q_PROPERTY(int spectrogramViewMode MEMBER m_spectrogramViewMode CONSTANT)
+    Q_PROPERTY(bool spectrogramZoomEnabled MEMBER m_flag CONSTANT)
+    Q_PROPERTY(bool showSpectrogramScale MEMBER m_unset CONSTANT)
+    Q_PROPERTY(bool showSpectrogramCrosshair MEMBER m_unset CONSTANT)
+    Q_PROPERTY(bool showFps MEMBER m_unset CONSTANT)
+    Q_PROPERTY(int currentTrackChannels MEMBER m_currentTrackChannels NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QStringList currentTrackChannelLabels MEMBER m_currentTrackChannelLabels CONSTANT)
+    Q_PROPERTY(quint64 mutedChannelsMask MEMBER m_mutedChannelsMask NOTIFY playbackChanged)
+    Q_PROPERTY(QList<bool> mutedChannels READ mutedChannels NOTIFY playbackChanged)
+    Q_PROPERTY(int soloedChannel MEMBER m_soloedChannel NOTIFY playbackChanged)
+    Q_PROPERTY(int channelButtonsVisibility MEMBER m_channelButtonsVisibility CONSTANT)
+
+public:
+    QList<bool> mutedChannels() const {
+        QList<bool> muted(64);
+        for (int channel = 0; channel < 64; ++channel) {
+            muted[channel] = isChannelMuted(channel);
+        }
+        return muted;
+    }
+    Q_INVOKABLE bool isChannelMuted(int channel) const {
+        return channel >= 0 && channel < 64 && (m_mutedChannelsMask & (1ULL << channel)) != 0;
+    }
+    Q_INVOKABLE void toggleChannelMute(int) {}
+    Q_INVOKABLE void soloChannel(int) {}
+    void setChannels(int channels) {
+        m_currentTrackChannels = channels;
+        emit trackMetadataChanged();
+    }
+    void setMutes(quint64 mask, int soloed) {
+        m_mutedChannelsMask = mask;
+        m_soloedChannel = soloed;
+        emit playbackChanged();
+    }
+
+signals:
+    void trackMetadataChanged();
+    void playbackChanged();
+
+private:
+    QString m_playbackState{QStringLiteral("Stopped")};
+    QString m_currentTrackPath;
+    QByteArray m_waveformPeaksPacked;
+    double m_waveformCoverageSeconds{0.0};
+    bool m_waveformComplete{false};
+    double m_durationSeconds{10.0};
+    int m_spectrogramViewMode{1};
+    bool m_flag{true};
+    bool m_unset{false};
+    int m_currentTrackChannels{2};
+    QStringList m_currentTrackChannelLabels;
+    quint64 m_mutedChannelsMask{0};
+    int m_soloedChannel{-1};
+    int m_channelButtonsVisibility{2};
+};
+
 // Records each signal of an item that reaches its slots while the item's
 // state mutex is held. A slot that reads the item, as a QML binding does,
 // would take the mutex again and deadlock.
@@ -2372,11 +2438,11 @@ Item {
 
 void QmlSmokeTest::waveformSurfaceMuteButtonsFollowTheMutedChannels() {
     QQmlApplicationEngine engine;
+    WaveformSurfaceTestBridge bridge;
+    engine.rootContext()->setContextProperty(QStringLiteral("testBridge"), &bridge);
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    // Like the bridge's, its isChannelMuted() is no binding dependency:
-    // only mutedChannelsMask notifies.
     QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "viewers" as Viewers
@@ -2385,46 +2451,17 @@ Item {
     width: 640
     height: 320
 
-    QtObject {
-        id: bridge
-        objectName: "waveformBridge"
-        property string playbackState: "Stopped"
-        property string currentTrackPath: ""
-        property var waveformPeaksPacked: ""
-        property real waveformCoverageSeconds: 0
-        property bool waveformComplete: false
-        property real durationSeconds: 10
-        property int spectrogramViewMode: 1
-        property bool spectrogramZoomEnabled: true
-        property bool showSpectrogramScale: false
-        property bool showSpectrogramCrosshair: false
-        property bool showFps: false
-        property int currentTrackChannels: 3
-        property var currentTrackChannelLabels: []
-        property var mutedChannelsMask: 0
-        property int soloedChannel: -1
-        property int channelButtonsVisibility: 2
-        property var engineMutes: ({ mask: 0 })
-        function isChannelMuted(channelIndex) {
-            return Math.floor(engineMutes.mask / Math.pow(2, channelIndex)) % 2 === 1
-        }
-        function setMutedChannels(mask) {
-            engineMutes.mask = mask
-            mutedChannelsMask = mask
-        }
-        function toggleChannelMute(channelIndex) {}
-        function soloChannel(channelIndex) {}
-    }
-
     Viewers.WaveformSurface {
         anchors.fill: parent
-        uiBridge: bridge
+        uiBridge: testBridge
     }
 }
 )QML"), baseUrl, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
-    QObject *bridge = root->findChild<QObject *>(QStringLiteral("waveformBridge"));
-    QVERIFY(bridge != nullptr);
+    auto *rootItem = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY(rootItem != nullptr);
+    auto *waveform = root->findChild<WaveformEditorItem *>(QStringLiteral("waveformEditorItem"));
+    QVERIFY(waveform != nullptr);
     // Whether a channel's mute button shows it muted, or -1 without one.
     // A Repeater's delegates are only its parent's child items.
     const std::function<int(QQuickItem *, int)> muteShownIn = [&muteShownIn](
@@ -2439,17 +2476,27 @@ Item {
         }
         return -1;
     };
-    auto *rootItem = qobject_cast<QQuickItem *>(root.data());
-    QVERIFY(rootItem != nullptr);
-    const auto muteShown = [&muteShownIn, rootItem](int channel) {
-        return muteShownIn(rootItem, channel);
-    };
-    QTRY_COMPARE(muteShown(2), 0);
-    for (const quint64 mask : {quint64{0b010}, quint64{0b101}, quint64{0}}) {
-        QVERIFY(QMetaObject::invokeMethod(bridge, "setMutedChannels",
-            Q_ARG(QVariant, QVariant::fromValue(static_cast<double>(mask)))));
-        for (int channel = 0; channel < 3; ++channel) {
-            QTRY_COMPARE(muteShown(channel), (mask >> channel) & 1U ? 1 : 0);
+
+    for (const int channels : {2, 6}) {
+        bridge.setChannels(channels);
+        QTRY_COMPARE(waveform->channelCount(), channels);
+        // Muting some channels, then soloing each one, which mutes all the
+        // others: the engine's mask then has its high bits set too.
+        QList<QPair<quint64, int>> states{{0b10, -1}, {0, -1}};
+        for (int soloed = 0; soloed < channels; ++soloed) {
+            states.push_back({~(quint64{1} << soloed), soloed});
+        }
+        for (const auto &[mask, soloed] : states) {
+            bridge.setMutes(mask, soloed);
+            for (int channel = 0; channel < channels; ++channel) {
+                const int muted = (mask >> channel) & 1U ? 1 : 0;
+                QVERIFY2(muteShownIn(rootItem, channel) == muted,
+                    qPrintable(QStringLiteral("%1 channels, mask %2: channel %3 shows %4")
+                        .arg(channels).arg(mask, 16, 16, QLatin1Char('0')).arg(channel)
+                        .arg(muteShownIn(rootItem, channel))));
+            }
+            // The waveform greys out the same channels.
+            QCOMPARE(waveform->mutedChannelsMask(), mask);
         }
     }
 }

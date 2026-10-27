@@ -2008,6 +2008,14 @@ quint64 BridgeClient::mutedChannelsMask() const {
     return m_mutedChannelsMask;
 }
 
+QList<bool> BridgeClient::mutedChannels() const {
+    QList<bool> muted(64);
+    for (int channel = 0; channel < 64; ++channel) {
+        muted[channel] = (m_mutedChannelsMask & (1ULL << channel)) != 0;
+    }
+    return muted;
+}
+
 int BridgeClient::soloedChannel() const {
     return m_soloedChannel;
 }

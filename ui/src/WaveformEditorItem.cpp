@@ -442,7 +442,24 @@ void WaveformEditorItem::setShowFpsOverlay(bool value) {
     update();
 }
 void WaveformEditorItem::setViewMode(int value) { value = std::clamp(value, 0, 1); { QMutexLocker lock(&m_stateMutex); if (m_viewMode == value) return; m_viewMode = value; invalidateCacheLocked(); } emit viewModeChanged(); emit channelCountChanged(); update(); }
-void WaveformEditorItem::setMutedChannelsMask(qulonglong value) { { QMutexLocker lock(&m_stateMutex); if (m_mutedChannelsMask == value) return; m_mutedChannelsMask = value; invalidateCacheLocked(); } emit mutedChannelsMaskChanged(); update(); }
+void WaveformEditorItem::setMutedChannelsMask(qulonglong value) { { QMutexLocker lock(&m_stateMutex); if (m_mutedChannelsMask == value) return; m_mutedChannelsMask = value; invalidateCacheLocked(); } emit mutedChannelsChanged(); update(); }
+
+QList<bool> WaveformEditorItem::mutedChannels() const {
+    const qulonglong mask = mutedChannelsMask();
+    QList<bool> muted(64);
+    for (int channel = 0; channel < 64; ++channel) {
+        muted[channel] = (mask & (qulonglong{1} << channel)) != 0;
+    }
+    return muted;
+}
+
+void WaveformEditorItem::setMutedChannels(const QList<bool> &value) {
+    qulonglong mask = 0;
+    for (qsizetype channel = 0; channel < std::min<qsizetype>(value.size(), 64); ++channel) {
+        if (value[channel]) mask |= qulonglong{1} << channel;
+    }
+    setMutedChannelsMask(mask);
+}
 void WaveformEditorItem::setSoloedChannel(int value) { { QMutexLocker lock(&m_stateMutex); if (m_soloedChannel == value) return; m_soloedChannel = value; invalidateCacheLocked(); } emit soloedChannelChanged(); update(); }
 void WaveformEditorItem::setChannelCountHint(int value) {
     value = std::clamp(value, 1, 64);

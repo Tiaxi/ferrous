@@ -51,7 +51,9 @@ class WaveformEditorItem : public QQuickItem {
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     Q_PROPERTY(int viewMode READ viewMode WRITE setViewMode NOTIFY viewModeChanged)
-    Q_PROPERTY(qulonglong mutedChannelsMask READ mutedChannelsMask WRITE setMutedChannelsMask NOTIFY mutedChannelsMaskChanged)
+    // Whether each channel, 0 to 63, is muted: a 64-bit mask would lose its
+    // low bits as a QML number.
+    Q_PROPERTY(QList<bool> mutedChannels READ mutedChannels WRITE setMutedChannels NOTIFY mutedChannelsChanged)
     Q_PROPERTY(int soloedChannel READ soloedChannel WRITE setSoloedChannel NOTIFY soloedChannelChanged)
     Q_PROPERTY(int channelCountHint READ channelCountHint WRITE setChannelCountHint NOTIFY channelCountHintChanged)
     Q_PROPERTY(int channelCount READ channelCount NOTIFY channelCountChanged)
@@ -91,6 +93,8 @@ public:
     void setViewMode(int value);
     qulonglong mutedChannelsMask() const;
     void setMutedChannelsMask(qulonglong value);
+    QList<bool> mutedChannels() const;
+    void setMutedChannels(const QList<bool> &value);
     int soloedChannel() const;
     void setSoloedChannel(int value);
     int channelCountHint() const;
@@ -121,7 +125,7 @@ signals:
     void crosshairEnabledChanged();
     void showFpsOverlayChanged();
     void viewModeChanged();
-    void mutedChannelsMaskChanged();
+    void mutedChannelsChanged();
     void soloedChannelChanged();
     void channelCountHintChanged();
     void channelCountChanged();
