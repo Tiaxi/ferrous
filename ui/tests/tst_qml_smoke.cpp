@@ -52,6 +52,8 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <optional>
+#include <utility>
 
 #include "../src/BridgeClient.h"
 #include "../src/DiagnosticsLog.h"
@@ -61,6 +63,7 @@
 #include "../src/SpectrogramSeekTrace.h"
 #include "../src/WaveformSceneGraph.h"
 #include "../src/WindowActivation.h"
+#include "TestUserDirectories.h"
 #define protected public
 #define private public
 #include "../src/SpectrogramItem.h"
@@ -1052,6 +1055,11 @@ private:
 class QmlSmokeTest : public QObject {
     Q_OBJECT
 
+public:
+    // Each test's user directories are made in `userDirectoriesParent`.
+    explicit QmlSmokeTest(QString userDirectoriesParent)
+        : m_userDirectoriesParent(std::move(userDirectoriesParent)) {}
+
 private slots:
     void hiddenSpectrogramDefersPaintingAndRetainsIncomingData();
     void initTestCase();
@@ -1400,6 +1408,11 @@ private slots:
     void spectrogramZoomWithinTheBackendToleranceNeedsNoNewData();
     void spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview();
     void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
+
+private:
+    QString m_userDirectoriesParent;
+    // The current test's own user directories; see init().
+    std::optional<TestUserDirectories> m_userDirectories;
 };
 
 void QmlSmokeTest::initTestCase() {
@@ -1410,9 +1423,15 @@ void QmlSmokeTest::initTestCase() {
 
 void QmlSmokeTest::init() {
     clearCapturedMessages();
+    // Each test starts its bridges with empty user directories, so none
+    // restores the session, settings or library an earlier test saved.
+    m_userDirectories.emplace(m_userDirectoriesParent);
+    QVERIFY(m_userDirectories->isValid());
 }
 
 void QmlSmokeTest::cleanup() {
+    // The test's bridges are destroyed by now.
+    m_userDirectories.reset();
     const QString warnings = takeCapturedMessagesText();
     QVERIFY2(warnings.isEmpty(), qPrintable(warnings));
 }
@@ -18823,6 +18842,7 @@ void QmlSmokeTest::aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore() {
 int main(int argc, char **argv) {
     // Bridge construction starts library workers; keep scans and tag operations
     // independent of saved application data and concurrent test processes.
+    // Each test also gets user directories of its own; see init().
     QTemporaryDir testStorage;
     if (!testStorage.isValid()) return 1;
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
@@ -18835,7 +18855,7 @@ int main(int argc, char **argv) {
     addHiDpiTestScreens(testStorage);
 
     QApplication app(argc, argv);
-    QmlSmokeTest test;
+    QmlSmokeTest test(testStorage.path());
     return QTest::qExec(&test, argc, argv);
 }
 

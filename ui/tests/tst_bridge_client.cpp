@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -46,6 +47,7 @@
 #include "../src/BinaryBridgeCodec.h"
 #include <QtEndian>
 #include "../src/SpectrogramTraceLogging.h"
+#include "TestUserDirectories.h"
 
 namespace {
 
@@ -205,7 +207,14 @@ void feedTrackData(SpectrogramItem &item, quint64 token) {
 class BridgeClientTest : public QObject {
     Q_OBJECT
 
+public:
+    // Each test's user directories are made in `userDirectoriesParent`.
+    explicit BridgeClientTest(QString userDirectoriesParent)
+        : m_userDirectoriesParent(std::move(userDirectoriesParent)) {}
+
 private slots:
+    void init();
+    void cleanup();
     void libraryViewStateKeepsOffsetsIntoTallRows();
     void savedWindowGeometryIsFittedToTheScreens();
     void windowLayoutIsSentAsTheBackendReadsIt();
@@ -315,6 +324,8 @@ private slots:
     void backendFailurePacketShowsStoppedState();
     void requestedStopIsNotABackendFailure();
     void commandsToAStoppedBackendFailVisibly();
+    void eachTestStartsWithEmptyUserDirectories_data();
+    void eachTestStartsWithEmptyUserDirectories();
     void destroyingTheClientWaitsForTheBackendsFinalSave();
     void saveBeforeQuitReportsAFailedSaveAndSavesOnRetry();
     void saveBeforeQuitFailsWhenTheBackendHasStopped();
@@ -349,7 +360,24 @@ private slots:
     void coverImageProviderUrlForPathFormat();
     void coverImageProviderReadsTheFileOfAStampedId();
     void replacedCoverReloadsForANewStampButNotFromTheCache();
+
+private:
+    QString m_userDirectoriesParent;
+    // The current test's own user directories; see init().
+    std::optional<TestUserDirectories> m_userDirectories;
 };
+
+// Each test starts its bridges with empty user directories, so none restores
+// the session, settings or library that an earlier test's bridge saved.
+void BridgeClientTest::init() {
+    m_userDirectories.emplace(m_userDirectoriesParent);
+    QVERIFY(m_userDirectories->isValid());
+}
+
+// The test's bridges are destroyed by now.
+void BridgeClientTest::cleanup() {
+    m_userDirectories.reset();
+}
 
 void BridgeClientTest::spectrogramActivityFollowsVisibleItemsAndWindows() {
     BridgeClient client;
@@ -4628,6 +4656,40 @@ void BridgeClientTest::commandsToAStoppedBackendFailVisibly() {
         QStringLiteral("command not sent: the backend has stopped"));
 }
 
+void BridgeClientTest::eachTestStartsWithEmptyUserDirectories_data() {
+    QTest::addColumn<double>("dbRange");
+    // Each row runs as a test of its own: the second must not see the first's save.
+    QTest::newRow("first") << 111.0;
+    QTest::newRow("second") << 117.0;
+}
+
+void BridgeClientTest::eachTestStartsWithEmptyUserDirectories() {
+    QFETCH(double, dbRange);
+    for (const char *variable : {"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"}) {
+        const QDir dir(QDir(qEnvironmentVariable(variable)).filePath(QStringLiteral("ferrous")));
+        const QStringList left =
+            dir.entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot);
+        QVERIFY2(left.isEmpty(), qPrintable(QStringLiteral("%1 holds an earlier test's %2")
+                                                .arg(QLatin1String(variable),
+                                                     left.join(QStringLiteral(", ")))));
+    }
+
+    auto client = std::make_unique<BridgeClient>();
+    QVERIFY(client->m_ffiBridge != nullptr);
+    QSignalSpy snapshots(client.get(), &BridgeClient::snapshotChanged);
+    QVERIFY(snapshots.wait(5000));
+    QCOMPARE(client->dbRange(), 132.0);
+    client->setDbRange(dbRange);
+    client.reset();
+
+    QFile settings(QDir(qEnvironmentVariable("XDG_CONFIG_HOME"))
+                       .filePath(QStringLiteral("ferrous/settings.txt")));
+    QVERIFY(settings.open(QIODevice::ReadOnly));
+    const QByteArray saved = settings.readAll();
+    QVERIFY2(saved.contains(QStringLiteral("db_range=%1\n").arg(dbRange, 0, 'f', 2).toUtf8()),
+        saved.constData());
+}
+
 void BridgeClientTest::destroyingTheClientWaitsForTheBackendsFinalSave() {
     const QDir configDir(QDir(qEnvironmentVariable("XDG_CONFIG_HOME")).filePath(QStringLiteral("ferrous")));
     // Back to back, as consecutive tests and app runs save the same file.
@@ -5971,13 +6033,14 @@ void BridgeClientTest::coverRevisionLinksKeepThePublishedLinkThroughABurst() {
 int main(int argc, char **argv) {
     // Bridge construction starts library workers; keep scans and tag operations
     // independent of saved application data and concurrent test processes.
+    // Each test also gets user directories of its own; see init().
     QTemporaryDir testStorage;
     if (!testStorage.isValid()) return 1;
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
     qputenv("XDG_CONFIG_HOME", QFile::encodeName(testStorage.filePath("config")));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(testStorage.filePath("cache")));
     QApplication app(argc, argv);
-    BridgeClientTest test;
+    BridgeClientTest test(testStorage.path());
     return QTest::qExec(&test, argc, argv);
 }
 
