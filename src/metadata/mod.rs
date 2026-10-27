@@ -37,7 +37,7 @@ use crate::raw_audio::{
 
 #[cfg(test)]
 pub(crate) use cover_cache::tests::{encoded_picture, test_cache, write_wav_with_picture};
-pub(crate) use cover_cache::EmbeddedCoverCache;
+pub(crate) use cover_cache::{CoverCacheBinding, EmbeddedCoverCache};
 
 #[derive(Debug, Clone, Default)]
 pub struct TrackMetadata {
@@ -86,11 +86,26 @@ impl MetadataService {
 
     #[must_use]
     pub(crate) fn new_with_delay(delay: std::time::Duration) -> (Self, Receiver<MetadataEvent>) {
+        Self::spawn(delay, |_| {})
+    }
+
+    /// A service that runs `before_read` on each path before reading it.
+    #[cfg(test)]
+    fn with_read_hook(
+        before_read: impl Fn(&Path) + Send + 'static,
+    ) -> (Self, Receiver<MetadataEvent>) {
+        Self::spawn(std::time::Duration::ZERO, before_read)
+    }
+
+    fn spawn(
+        delay: std::time::Duration,
+        before_read: impl Fn(&Path) + Send + 'static,
+    ) -> (Self, Receiver<MetadataEvent>) {
         let (req_tx, req_rx) = unbounded::<PathBuf>();
         let (event_tx, event_rx) = unbounded::<MetadataEvent>();
 
         crate::worker_thread::spawn_worker("ferrous-metadata", move || {
-            run_metadata_worker(&req_rx, &event_tx, delay);
+            run_metadata_worker(&req_rx, &event_tx, delay, before_read);
         });
 
         (Self { tx: req_tx }, event_rx)
@@ -120,6 +135,7 @@ fn run_metadata_worker(
     req_rx: &Receiver<PathBuf>,
     event_tx: &Sender<MetadataEvent>,
     delay: std::time::Duration,
+    before_read: impl Fn(&Path),
 ) {
     while let Ok(mut path) = req_rx.recv() {
         while let Ok(newer_path) = req_rx.try_recv() {
@@ -129,6 +145,7 @@ fn run_metadata_worker(
         if !delay.is_zero() {
             std::thread::sleep(delay);
         }
+        before_read(&path);
         let mut metadata = load_metadata_for_path(&path);
         let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
         metadata.channel_labels = crate::analysis::probe_source_channel_labels(&path);
@@ -572,8 +589,8 @@ fn codec_label(codec: CodecType) -> Option<&'static str> {
 mod tests {
     use super::{
         bytes_to_kbps, encoded_picture, format_label_from_extension, load_metadata_for_path,
-        needs_stream_details_probe, run_metadata_worker, write_wav_with_picture,
-        EmbeddedCoverCache, MetadataEvent, MetadataService, TrackMetadata,
+        needs_stream_details_probe, run_metadata_worker, test_cache, write_wav_with_picture,
+        CoverCacheBinding, EmbeddedCoverCache, MetadataEvent, MetadataService, TrackMetadata,
     };
     use crate::raw_audio::write_test_apev2_file;
     use std::path::PathBuf;
@@ -799,6 +816,57 @@ mod tests {
     }
 
     #[test]
+    fn a_late_read_stores_its_cover_in_the_cache_of_the_bridge_that_asked() {
+        let dir = metadata_test_path("late-read", "d");
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let track = dir.join("01.wav");
+        let picture = encoded_picture(50, image::ImageFormat::Png);
+        write_wav_with_picture(&track, &picture);
+        let first: &'static EmbeddedCoverCache = Box::leak(Box::new(test_cache("late-first")));
+        let second: &'static EmbeddedCoverCache = Box::leak(Box::new(test_cache("late-second")));
+
+        // The first bridge's read of the track stalls.
+        let (reading_tx, reading) = crossbeam_channel::bounded::<()>(1);
+        let (release, release_rx) = crossbeam_channel::bounded::<()>(1);
+        let (service, events) = {
+            let _covers = CoverCacheBinding::bound_to(first).enter();
+            MetadataService::with_read_hook(move |_| {
+                let _ = reading_tx.send(());
+                let _ = release_rx.recv();
+            })
+        };
+        service.request(track.clone());
+        reading
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the read starts");
+
+        // That bridge shuts down, and another starts with a cache of its own
+        // before the read goes on.
+        drop(service);
+        let _covers = CoverCacheBinding::bound_to(second).enter();
+        let (_newer_service, _newer_events) = MetadataService::new();
+        release.send(()).expect("release the read");
+
+        let mut cover = None;
+        while let Ok(MetadataEvent::Loaded(metadata)) = events.recv_timeout(Duration::from_secs(10))
+        {
+            cover = metadata.cover_art_path;
+        }
+        let entry = first
+            .dir()
+            .join(format!("{:x}.png", md5::compute(&picture)));
+        assert_eq!(cover.as_deref(), entry.to_str());
+        assert!(entry.is_file());
+        assert!(
+            !second.dir().exists(),
+            "the newer bridge's cache holds the earlier bridge's cover"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(first.dir().parent().expect("cache root"));
+    }
+
+    #[test]
     fn track_change_finds_covers_without_decoding_them() {
         // A flat picture this size compresses to a few kilobytes but decodes
         // to 16 MiB of RGBA, far more than the rest of a track change asks for.
@@ -838,7 +906,7 @@ mod tests {
 
             // Run the worker loop on this thread so the allocator counts it.
             let before = crate::test_alloc::allocated_bytes();
-            run_metadata_worker(&request_rx, &event_tx, Duration::ZERO);
+            run_metadata_worker(&request_rx, &event_tx, Duration::ZERO, |_| {});
             let allocated = crate::test_alloc::allocated_bytes() - before;
 
             let MetadataEvent::Loaded(metadata) =

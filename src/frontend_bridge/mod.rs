@@ -900,6 +900,10 @@ impl FrontendBridgeHandle {
             generation: Arc::clone(&spectral_generation),
         };
 
+        // Cover art goes to the cache directory of the user this bridge
+        // starts for, like its settings, session, and library. The threads
+        // started here and by the bridge thread keep to it.
+        let _covers = crate::metadata::EmbeddedCoverCache::rebind_shared();
         let imports = imports::ImportWorker::new();
         let import_gate = imports.gate();
         let saved = Arc::new(AtomicBool::new(false));

@@ -8,12 +8,12 @@
 //! evicted by size or age; the library removes entries that no track row
 //! references instead.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
 use lofty::file::{TaggedFile, TaggedFileExt};
 use parking_lot::Mutex;
@@ -33,12 +33,25 @@ pub(crate) struct EmbeddedCoverCache {
 }
 
 impl EmbeddedCoverCache {
-    /// The cache under the user's cache directory, if one can be resolved.
+    /// The cache of this thread's bridge, or else the one under the user's
+    /// cache directory as [`Self::rebind_shared`] last resolved it.
     pub(crate) fn shared() -> Option<&'static Self> {
-        static SHARED: OnceLock<Option<EmbeddedCoverCache>> = OnceLock::new();
-        SHARED
-            .get_or_init(|| crate::paths::cache_dir().map(|dir| Self::new(dir.join(DIR_NAME))))
-            .as_ref()
+        CoverCacheBinding::current()
+            .0
+            .or_else(|| SHARED.get(shared_dir))
+    }
+
+    /// Resolves the user's cache directory again for [`Self::shared`], and
+    /// binds this thread to the cache there until the returned scope ends.
+    /// Each bridge does this when it starts, and the threads it starts take
+    /// the binding with them (see [`CoverCacheBinding`]). So a bridge started
+    /// with another `$XDG_CACHE_HOME`, as each UI test's is, caches covers
+    /// there, and the late work of an earlier bridge keeps to its own
+    /// directory. The app starts one bridge, so it resolves the directory
+    /// once.
+    #[must_use]
+    pub(crate) fn rebind_shared() -> CoverCacheScope {
+        CoverCacheBinding(SHARED.rebind(shared_dir())).enter()
     }
 
     pub(crate) fn new(dir: PathBuf) -> Self {
@@ -177,6 +190,90 @@ impl EmbeddedCoverCache {
         }
         first_error.map_or(Ok(removed), Err)
     }
+}
+
+static SHARED: SharedCache = SharedCache::new();
+
+thread_local! {
+    /// The cache [`EmbeddedCoverCache::shared`] returns on this thread, if
+    /// the thread is bound to one.
+    static THREAD_CACHE: Cell<CoverCacheBinding> = const { Cell::new(CoverCacheBinding(None)) };
+}
+
+/// The cover cache a thread is bound to, if any. A worker started with
+/// [`crate::worker_thread::spawn_joinable`] takes the binding of the thread
+/// that starts it, so it stores covers where its bridge does even after a
+/// newer bridge has bound another cache.
+#[derive(Clone, Copy)]
+pub(crate) struct CoverCacheBinding(Option<&'static EmbeddedCoverCache>);
+
+impl CoverCacheBinding {
+    /// This thread's binding.
+    pub(crate) fn current() -> Self {
+        THREAD_CACHE.with(Cell::get)
+    }
+
+    /// Binds this thread as `self` until the returned scope ends.
+    pub(crate) fn enter(self) -> CoverCacheScope {
+        CoverCacheScope {
+            previous: THREAD_CACHE.with(|binding| binding.replace(self)),
+        }
+    }
+
+    /// A binding to `cache`, which [`EmbeddedCoverCache::rebind_shared`]
+    /// makes for the user's cache directory.
+    #[cfg(test)]
+    pub(crate) fn bound_to(cache: &'static EmbeddedCoverCache) -> Self {
+        Self(Some(cache))
+    }
+}
+
+/// Restores the thread's earlier binding when dropped.
+pub(crate) struct CoverCacheScope {
+    previous: CoverCacheBinding,
+}
+
+impl Drop for CoverCacheScope {
+    fn drop(&mut self) {
+        THREAD_CACHE.with(|binding| binding.set(self.previous));
+    }
+}
+
+fn shared_dir() -> Option<PathBuf> {
+    crate::paths::cache_dir().map(|dir| dir.join(DIR_NAME))
+}
+
+/// The cache of one directory at a time, kept for the rest of the process:
+/// a scan may still hold the cache of the directory it started with.
+struct SharedCache(Mutex<Option<&'static EmbeddedCoverCache>>);
+
+impl SharedCache {
+    const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// The current cache, or one in `dir()` if there is none yet.
+    fn get(&self, dir: impl FnOnce() -> Option<PathBuf>) -> Option<&'static EmbeddedCoverCache> {
+        let mut current = self.0.lock();
+        if current.is_none() {
+            *current = dir().map(leak_cache);
+        }
+        *current
+    }
+
+    /// Makes the cache in `dir` current, unless it already is, and returns it.
+    fn rebind(&self, dir: Option<PathBuf>) -> Option<&'static EmbeddedCoverCache> {
+        let mut current = self.0.lock();
+        if current.map(EmbeddedCoverCache::dir) != dir.as_deref() {
+            *current = dir.map(leak_cache);
+        }
+        *current
+    }
+}
+
+/// One cache per directory the process uses, which is one outside tests.
+fn leak_cache(dir: PathBuf) -> &'static EmbeddedCoverCache {
+    Box::leak(Box::new(EmbeddedCoverCache::new(dir)))
 }
 
 /// Only PNG and JPEG pictures are cached. Their headers are parsed so that a
@@ -497,5 +594,35 @@ pub(crate) mod tests {
         assert_eq!(cache.entry_name(&cache.dir().join("cover.png")), None);
         assert_eq!(cache.entry_name(&Path::new("/music").join(legacy)), None);
         assert!(!cache.is_legacy_entry(&Path::new("/music").join(legacy)));
+    }
+
+    #[test]
+    fn a_rebound_shared_cache_follows_the_new_directory() {
+        let shared = SharedCache::new();
+        let first = PathBuf::from("/cache-a/embedded_covers");
+        let second = PathBuf::from("/cache-b/embedded_covers");
+
+        let initial = shared.get(|| Some(first.clone())).expect("first cache");
+        assert_eq!(initial.dir(), first);
+        // A later lookup keeps the cache it has.
+        let kept = shared.get(|| Some(second.clone())).expect("kept cache");
+        assert!(std::ptr::eq(kept, initial));
+
+        // A new bridge in the same directory keeps it too, so the entries
+        // it has handed out stay protected.
+        shared.rebind(Some(first.clone()));
+        assert!(std::ptr::eq(
+            shared.get(|| None).expect("same cache"),
+            initial
+        ));
+
+        // A new bridge with another cache directory caches covers there,
+        // while the old cache stays usable for a scan that still holds it.
+        shared.rebind(Some(second.clone()));
+        assert_eq!(shared.get(|| None).expect("rebound cache").dir(), second);
+        assert_eq!(initial.dir(), first);
+
+        shared.rebind(None);
+        assert!(shared.get(|| None).is_none());
     }
 }

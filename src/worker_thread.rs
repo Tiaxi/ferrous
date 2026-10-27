@@ -56,12 +56,15 @@ pub(crate) fn spawn_joinable(
     work: impl FnOnce() + Send + 'static,
 ) -> std::io::Result<JoinableThread> {
     let (finished_tx, finished) = bounded::<()>(0);
+    // The worker stores cover art where the bridge that starts it does.
+    let covers = crate::metadata::CoverCacheBinding::current();
     let handle = std::thread::Builder::new()
         .name(name.to_string())
         .spawn(move || {
             // Declared first, so it is dropped last, after `work` and all it
             // owns, even when `work` panics.
             let _finished = finished_tx;
+            let _covers = covers.enter();
             work();
         })?;
     Ok(JoinableThread { handle, finished })
