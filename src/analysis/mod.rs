@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 mod cache;
+mod centered_view;
 mod channel_layout;
 pub(crate) use channel_layout::probe_source_channel_labels;
 mod decoders;
@@ -1655,11 +1656,13 @@ impl AnalysisRuntimeState {
     ///
     /// - Full-track lock: when the visible window covers >= 90% of the
     ///   track estimate, Qt pins the display to the full track extent
-    ///   (left edge at 0).  Mirrors the `visibleWindowCols * 100 /
-    ///   estTotalCols >= 90` check in `SpectrogramItem::updatePaintNode`.
+    ///   (left edge at 0).
     /// - EOF detach: once the remaining tail is shorter than half a
     ///   window, the right edge clamps to the decoded end and the left
     ///   edge sits a full window behind the track end.
+    ///
+    /// See [`centered_view::visible_left_edge_seconds`], which is tested
+    /// against the same cases as the Qt display.
     ///
     /// Decode windows must cover this edge or the zoomed-out view shows
     /// black to the left of the decoded content near the track end.
@@ -1668,16 +1671,11 @@ impl AnalysisRuntimeState {
         full_margin: f64,
         ctx: &AnalysisContext<'_>,
     ) -> f64 {
-        let full_screen = (full_margin - 2.0).max(0.0);
-        let centered_left = (position_seconds - full_screen * 0.5).max(0.0);
-        let duration = Self::centered_track_duration_seconds(ctx);
-        if duration <= 0.0 || full_screen <= 0.0 {
-            return centered_left;
-        }
-        if full_screen >= duration * 0.9 {
-            return 0.0;
-        }
-        centered_left.min((duration - full_screen).max(0.0))
+        centered_view::visible_left_edge_seconds(
+            position_seconds,
+            (full_margin - 2.0).max(0.0),
+            Self::centered_track_duration_seconds(ctx),
+        )
     }
 
     /// Start position (seconds) for a centered-mode spectrogram session

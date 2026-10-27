@@ -139,59 +139,9 @@ bool centeredDecodedTailLooksFinal(
     return decodedColumnCount + eofSlackColumns >= estimatedColumnCount;
 }
 
-// The track columns that centered mode shows: the playhead in the middle,
-// unless that would show past either end of the track, or the whole track
-// when it nearly fits.
-struct CenteredDisplayRange {
-    qint64 left{0};
-    qint64 right{-1};
-    bool decodedTailLooksFinal{false};
-};
-
-CenteredDisplayRange centeredDisplayRange(
-    qint64 nowCol,
-    int visibleWindowCols,
-    qint64 maxColCount,
-    qint64 estimateCount,
-    double columnsPerSecond) {
-    CenteredDisplayRange range;
-    const qint64 windowCols = static_cast<qint64>(visibleWindowCols);
-    const qint64 halfWindowCols = windowCols / 2;
-    // Use the estimate for the range so it stays stable while the data
-    // fills (no race-in, no sliding).
-    const qint64 estTotalCols = std::max(maxColCount, estimateCount);
-    // When the visible window covers most of the track, lock the display
-    // to the full extent.  The 90% threshold accounts for decimation
-    // rounding that can leave a few extra columns beyond the widget width
-    // at max zoom-out.  Without the lock, centering on the playhead causes
-    // the spectrogram to shift on seek and jitter during playback.
-    if (estTotalCols <= 0 || windowCols * 100 / estTotalCols >= 90) {
-        range.left = 0;
-        range.right = estTotalCols - 1;
-    } else {
-        range.left = std::max<qint64>(0, nowCol - halfWindowCols);
-        range.right = std::min(estTotalCols - 1, range.left + windowCols - 1);
-        range.left = std::max<qint64>(0, range.right - windowCols + 1);
-    }
-
-    // The file-metadata estimate can overshoot the actual audible/decoded
-    // extent by seconds (e.g. trailing silence counted by container
-    // duration but trimmed during playback).  A fixed 128-column tolerance
-    // fails at high zoom where 128 cols is ~0.2 s and the gap is typically
-    // ~1 s. Use maxCol as the hard right edge only when the decoded tail is
-    // plausibly at EOF. During rapid far seeks the decoded tail can lag far
-    // behind the optimistic playhead; clamping in that state makes the
-    // viewport race forward as decode catches up and can map right-edge
-    // clicks backward. The EOF clamp still drives playhead detachment and
-    // keeps the time axis bounded by audible content.
-    range.decodedTailLooksFinal =
-        centeredDecodedTailLooksFinal(maxColCount, estimateCount, columnsPerSecond);
-    if (range.decodedTailLooksFinal && maxColCount - 1 < nowCol + halfWindowCols) {
-        range.right = std::min(range.right, maxColCount - 1);
-        range.left = std::max<qint64>(0, range.right - windowCols + 1);
-    }
-    return range;
-}
+// Centered mode shows the whole track once its window covers this many
+// percent of it: see SpectrogramItem::centeredDisplayRange.
+constexpr qint64 kCenteredWholeTrackPercent = 90;
 
 // Whether a centered range scrolls smoothly under the playhead.  Near the
 // whole track, at its ends, and once clamped to the decoded end it stays
@@ -205,7 +155,8 @@ bool centeredRangeScrolls(
     bool decodedTailLooksFinal) {
     const qint64 totalCols = std::max(maxColCount, std::max<qint64>(estimateCount, 1));
     const qint64 span = right - left + 1;
-    const bool nearFullTrack = totalCols > 0 && span * 100 / totalCols >= 90;
+    const bool nearFullTrack =
+        totalCols > 0 && span * 100 / totalCols >= kCenteredWholeTrackPercent;
     const bool eofClampedToDecodedContent =
         decodedTailLooksFinal && maxColCount > 0 && right >= maxColCount - 1;
     return !nearFullTrack
@@ -1131,6 +1082,115 @@ QImage renderOverlayImage(const SpectrogramOverlayImage &image, double scale) {
 // survives instance tear-downs (channel-count changes destroy and
 // recreate the widgets).  Matches the singleton tracker on the Rust
 // side in AnalysisRuntimeState.
+SpectrogramItem::CenteredDisplayRange SpectrogramItem::centeredDisplayRange(
+    qint64 nowCol,
+    int visibleWindowCols,
+    qint64 maxColCount,
+    qint64 estimateCount,
+    double columnsPerSecond) {
+    CenteredDisplayRange range;
+    const qint64 windowCols = static_cast<qint64>(visibleWindowCols);
+    const qint64 halfWindowCols = windowCols / 2;
+    // Use the estimate for the range so it stays stable while the data
+    // fills (no race-in, no sliding).
+    const qint64 estTotalCols = std::max(maxColCount, estimateCount);
+    // When the visible window covers most of the track, lock the display
+    // to the full extent.  The 90% threshold accounts for decimation
+    // rounding that can leave a few extra columns beyond the widget width
+    // at max zoom-out.  Without the lock, centering on the playhead causes
+    // the spectrogram to shift on seek and jitter during playback.
+    if (estTotalCols <= 0 || windowCols * 100 / estTotalCols >= kCenteredWholeTrackPercent) {
+        range.left = 0;
+        range.right = estTotalCols - 1;
+    } else {
+        range.left = std::max<qint64>(0, nowCol - halfWindowCols);
+        range.right = std::min(estTotalCols - 1, range.left + windowCols - 1);
+        range.left = std::max<qint64>(0, range.right - windowCols + 1);
+    }
+
+    // The file-metadata estimate can overshoot the actual audible/decoded
+    // extent by seconds (e.g. trailing silence counted by container
+    // duration but trimmed during playback).  A fixed 128-column tolerance
+    // fails at high zoom where 128 cols is ~0.2 s and the gap is typically
+    // ~1 s. Use maxCol as the hard right edge only when the decoded tail is
+    // plausibly at EOF. During rapid far seeks the decoded tail can lag far
+    // behind the optimistic playhead; clamping in that state makes the
+    // viewport race forward as decode catches up and can map right-edge
+    // clicks backward. The EOF clamp still drives playhead detachment and
+    // keeps the time axis bounded by audible content.
+    range.decodedTailLooksFinal =
+        centeredDecodedTailLooksFinal(maxColCount, estimateCount, columnsPerSecond);
+    if (range.decodedTailLooksFinal && maxColCount - 1 < nowCol + halfWindowCols) {
+        range.right = std::min(range.right, maxColCount - 1);
+        range.left = std::max<qint64>(0, range.right - windowCols + 1);
+    }
+    return range;
+}
+
+SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
+    double positionSeconds,
+    int canvasWidth,
+    int canvasHeight,
+    double canvasZoom,
+    double columnsPerSecond) const {
+    const double columnF = std::max(0.0, positionSeconds) * columnsPerSecond;
+    const qint64 nowCol = static_cast<qint64>(std::floor(columnF));
+    const double columnPhase = std::clamp(columnF - std::floor(columnF), 0.0, 0.999);
+    const int visibleWindowCols = static_cast<int>(
+        std::ceil(static_cast<double>(canvasWidth) / canvasZoom));
+    // Use maxColumnIndex (actual decoded extent) only as a right-edge clamp
+    // at EOF: this makes the playhead detach from center at track end
+    // without affecting the display during fill.
+    const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
+        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+        : static_cast<qint64>(0);
+    const qint64 estimateCount = std::max(
+        static_cast<qint64>(m_precomputedTotalColumnsEstimate),
+        static_cast<qint64>(1));
+    const CenteredDisplayRange range = centeredDisplayRange(
+        nowCol, visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
+    CenteredView view;
+    view.left = range.left;
+    view.right = range.right;
+    view.decodedTailLooksFinal = range.decodedTailLooksFinal;
+
+    // Jitter prevention: only apply when zoom hasn't changed, against the
+    // canvas being rasterized if there is one.
+    qint64 referenceLeft = m_precomputedCanvasDisplayLeft;
+    qint64 referenceRight = m_precomputedCanvasDisplayRight;
+    double referenceZoom = m_precomputedCanvasZoomLevel;
+    bool referenceComparable = !m_precomputedCanvasRolling
+        && m_canvas.width() == canvasWidth
+        && m_canvas.height() == canvasHeight;
+    if (m_rasterPending) {
+        referenceLeft = m_rasterTarget.displayLeft;
+        referenceZoom = m_rasterTarget.effectiveZoom;
+        referenceRight = rasterDisplayRight(
+            referenceLeft,
+            rasterDrawPixels(m_rasterTarget.width, referenceLeft,
+                m_rasterTarget.displayRight, referenceZoom, m_rasterTarget.scale),
+            referenceZoom);
+        referenceComparable = !m_rasterTarget.rollingMode
+            && m_rasterTarget.width == canvasWidth
+            && m_rasterTarget.height == canvasHeight;
+    }
+    const bool isSeekJump =
+        referenceRight >= referenceLeft
+        && view.left < referenceLeft - 2;
+    if (!isSeekJump
+        && referenceComparable
+        && referenceRight >= referenceLeft
+        && std::abs(canvasZoom - referenceZoom) < 0.001) {
+        view.left = std::max(view.left, referenceLeft);
+        view.right = std::max(view.right, referenceRight);
+    }
+
+    view.scrolls = centeredRangeScrolls(
+        view.left, view.right, maxColCount, estimateCount, view.decodedTailLooksFinal);
+    view.drawX = view.scrolls ? -columnPhase * canvasZoom : 0.0;
+    return view;
+}
+
 int SpectrogramItem::s_maxWidgetWidthSeen = 0;
 
 void SpectrogramRingStorage::clear() {
@@ -1261,14 +1321,16 @@ double SpectrogramItem::dbRange() const {
 }
 
 void SpectrogramItem::setDbRange(double value) {
-    QMutexLocker lock(&m_stateMutex);
-    const double clamped = std::clamp(value, 50.0, 150.0);
-    if (std::abs(m_dbRange - clamped) < 0.001) {
-        return;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        const double clamped = std::clamp(value, 50.0, 150.0);
+        if (std::abs(m_dbRange - clamped) < 0.001) {
+            return;
+        }
+        m_dbRange = clamped;
+        markCanvasStaleLocked();
     }
-    m_dbRange = clamped;
     emit dbRangeChanged();
-    markCanvasStaleLocked();
     update();
 }
 
@@ -1277,17 +1339,19 @@ bool SpectrogramItem::logScale() const {
 }
 
 void SpectrogramItem::setLogScale(bool value) {
-    QMutexLocker lock(&m_stateMutex);
-    if (m_logScale == value) {
-        return;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_logScale == value) {
+            return;
+        }
+        m_logScale = value;
+        invalidateMapping();
+        markCanvasStaleLocked();
+        m_freqGridDirty = true;
+        m_timeGridDirty = true;
+        m_crosshairDirty = true;
     }
-    m_logScale = value;
     emit logScaleChanged();
-    invalidateMapping();
-    markCanvasStaleLocked();
-    m_freqGridDirty = true;
-    m_timeGridDirty = true;
-    m_crosshairDirty = true;
     update();
 }
 
@@ -1319,18 +1383,20 @@ int SpectrogramItem::sampleRateHz() const {
 }
 
 void SpectrogramItem::setSampleRateHz(int value) {
-    QMutexLocker lock(&m_stateMutex);
-    const int clamped = std::max(1000, value);
-    if (m_sampleRateHz == clamped) {
-        return;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        const int clamped = std::max(1000, value);
+        if (m_sampleRateHz == clamped) {
+            return;
+        }
+        m_sampleRateHz = clamped;
+        invalidateMapping();
+        markCanvasStaleLocked();
+        m_freqGridDirty = true;
+        m_timeGridDirty = true;
+        m_crosshairDirty = true;
     }
-    m_sampleRateHz = clamped;
     emit sampleRateHzChanged();
-    invalidateMapping();
-    markCanvasStaleLocked();
-    m_freqGridDirty = true;
-    m_timeGridDirty = true;
-    m_crosshairDirty = true;
     update();
 }
 
@@ -1339,17 +1405,19 @@ int SpectrogramItem::maxColumns() const {
 }
 
 void SpectrogramItem::setMaxColumns(int value) {
-    QMutexLocker lock(&m_stateMutex);
-    const int clamped = std::clamp(value, 128, 8192);
-    if (m_maxColumns == clamped) {
-        return;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        const int clamped = std::clamp(value, 128, 8192);
+        if (m_maxColumns == clamped) {
+            return;
+        }
+        m_maxColumns = clamped;
+        while (static_cast<int>(m_columns.size()) > m_maxColumns) {
+            m_columns.pop_front();
+        }
+        markCanvasStaleLocked();
     }
-    m_maxColumns = clamped;
     emit maxColumnsChanged();
-    while (static_cast<int>(m_columns.size()) > m_maxColumns) {
-        m_columns.pop_front();
-    }
-    markCanvasStaleLocked();
     update();
 }
 
@@ -2920,6 +2988,7 @@ void SpectrogramItem::clearPrecomputed() {
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
     invalidateCanvas();
+    lock.unlock();
     if (wasReady) {
         emit precomputedReadyChanged();
     }
@@ -3348,7 +3417,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             int playheadPixel;
             bool rollingMode;
             qint64 writeHeadSeq = -1;
-            bool centeredDecodedTailLooksFinalForFrame = false;
+            CenteredView centeredView;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
             qint64 unclampedDisplaySeq = 0;
             qint64 writeHeadHeadroom = 0;
@@ -3357,54 +3426,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             if (m_displayMode == 1) {
                 rollingMode = false;
-                const int visibleWindowCols = static_cast<int>(
-                    std::ceil(static_cast<double>(cw) / canvasZoom));
-                // Use maxColumnIndex (actual decoded extent) only as a
-                // right-edge clamp at EOF: this makes the playhead detach
-                // from center at track end without affecting the display
-                // during fill.
-                const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
-                    ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                    : static_cast<qint64>(0);
-                const qint64 estimateCount = std::max(
-                    static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                    static_cast<qint64>(1));
-                const CenteredDisplayRange range = centeredDisplayRange(
-                    nowCol, visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
-                displayLeft = range.left;
-                displayRight = range.right;
-                centeredDecodedTailLooksFinalForFrame = range.decodedTailLooksFinal;
-
-                // Jitter prevention: only apply when zoom hasn't changed,
-                // against the canvas being rasterized if there is one.
-                qint64 referenceLeft = m_precomputedCanvasDisplayLeft;
-                qint64 referenceRight = m_precomputedCanvasDisplayRight;
-                double referenceZoom = m_precomputedCanvasZoomLevel;
-                bool referenceComparable = !m_precomputedCanvasRolling
-                    && m_canvas.width() == cw
-                    && m_canvas.height() == ch;
-                if (m_rasterPending) {
-                    referenceLeft = m_rasterTarget.displayLeft;
-                    referenceZoom = m_rasterTarget.effectiveZoom;
-                    referenceRight = rasterDisplayRight(
-                        referenceLeft,
-                        rasterDrawPixels(m_rasterTarget.width, referenceLeft,
-                            m_rasterTarget.displayRight, referenceZoom, m_rasterTarget.scale),
-                        referenceZoom);
-                    referenceComparable = !m_rasterTarget.rollingMode
-                        && m_rasterTarget.width == cw
-                        && m_rasterTarget.height == ch;
-                }
-                const bool isSeekJump =
-                    referenceRight >= referenceLeft
-                    && displayLeft < referenceLeft - 2;
-                if (!isSeekJump
-                    && referenceComparable
-                    && referenceRight >= referenceLeft
-                    && std::abs(canvasZoom - referenceZoom) < 0.001) {
-                    displayLeft = std::max(displayLeft, referenceLeft);
-                    displayRight = std::max(displayRight, referenceRight);
-                }
+                centeredView = centeredViewLocked(
+                    clampedPositionSeconds, cw, ch, canvasZoom, columnsPerSecond);
+                displayLeft = centeredView.left;
+                displayRight = centeredView.right;
 
                 playheadPixel = static_cast<int>(std::round(
                     static_cast<double>(nowCol - displayLeft) * canvasZoom));
@@ -3520,14 +3545,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
             // Where this view starts: the canvas's position when it is the
             // view's, and where a rasterization of the view will put it.
-            const bool centeredScrolling = !rollingMode && centeredRangeScrolls(
-                displayLeft,
-                displayRight,
-                m_precomputedMaxColumnIndex >= 0
-                    ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                    : static_cast<qint64>(0),
-                static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-                centeredDecodedTailLooksFinalForFrame);
+            const bool centeredScrolling = !rollingMode && centeredView.scrolls;
             const bool canvasIsView = !m_rasterPending
                 && !m_canvas.isNull()
                 && m_canvas.width() == cw
@@ -3549,7 +3567,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 drawX = static_cast<double>(cw - viewPixels)
                     - columnPhase * canvasZoom;
             } else {
-                drawX = centeredScrolling ? -columnPhase * canvasZoom : 0.0;
+                drawX = centeredView.drawX;
             }
 
             const bool zoomPreviewWanted = zoomPreviewWantedLocked()
@@ -4210,28 +4228,15 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
     if (m_displayMode == 1
         && width() > 0.0
         && m_precomputedTotalColumnsEstimate > 0) {
-        // The view the paint draws.
-        const double effectiveZoom = effectiveZoomLocked();
-        const int visibleWindowCols = static_cast<int>(
-            std::ceil(static_cast<double>(canvasWidthLocked()) / canvasZoomLocked()));
-        const auto now = std::chrono::steady_clock::now();
-        const double renderPositionSeconds = currentRenderPositionSecondsLocked(now);
-        const qint64 nowCol = static_cast<qint64>(std::floor(
-            std::max(0.0, renderPositionSeconds) * columnsPerSecond));
-        const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
-            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-            : static_cast<qint64>(0);
-        const qint64 estimateCount = std::max(
-            static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-            static_cast<qint64>(1));
-        const CenteredDisplayRange range = centeredDisplayRange(
-            nowCol, visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
-        displayLeft = range.left;
-        const double columnF = std::max(0.0, renderPositionSeconds) * columnsPerSecond;
-        const double columnPhase = std::clamp(columnF - std::floor(columnF), 0.0, 0.999);
-        const bool centeredScrolling = centeredRangeScrolls(
-            range.left, range.right, maxColCount, estimateCount, range.decodedTailLooksFinal);
-        drawX = centeredScrolling ? -columnPhase * effectiveZoom : 0.0;
+        // The view the paint draws, held as it holds it.
+        const CenteredView view = centeredViewLocked(
+            currentRenderPositionSecondsLocked(std::chrono::steady_clock::now()),
+            canvasWidthLocked(),
+            canvasHeightLocked(),
+            canvasZoomLocked(),
+            columnsPerSecond);
+        displayLeft = view.left;
+        drawX = view.drawX / m_canvasScale;
         rollingMode = false;
     }
 

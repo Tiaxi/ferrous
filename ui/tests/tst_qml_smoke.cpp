@@ -31,6 +31,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMetaMethod>
+#include <QRegularExpression>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QScopedPointer>
@@ -221,6 +223,21 @@ bool moveWindowToScreen(QQuickWindow &window, QScreen *screen) {
     }, 5000);
 }
 
+// A window on the HiDPI test screen at `scale`, shown.
+bool showOnScreen(QQuickWindow &window, double scale) {
+    QScreen *screen = hiDpiTestScreen(scale);
+    if (screen == nullptr) {
+        return false;
+    }
+    window.resize(240, 160);
+    if (!moveWindowToScreen(window, screen)) {
+        return false;
+    }
+    window.show();
+    return QTest::qWaitForWindowExposed(&window, 5000)
+        && std::abs(window.effectiveDevicePixelRatio() - scale) < 1e-9;
+}
+
 // What an overlay layer of a spectrogram's scene node shows: its lines,
 // and its images with their textures' sizes.
 struct OverlayOnScreen {
@@ -347,6 +364,7 @@ public:
     }
 
     void drawLines(const QLine *, int) override {}
+    void drawLines(const QLineF *, int) override {}
     void drawPixmap(const QRectF &, const QPixmap &, const QRectF &) override {}
     Type type() const override { return QPaintEngine::User; }
 
@@ -815,6 +833,204 @@ QObject *createQmlObjectFromSource(
 
 } // namespace
 
+// What a paint draws: its straight lines with their pens, and its text.
+class LineAndTextRecordingPaintEngine final : public QPaintEngine {
+public:
+    LineAndTextRecordingPaintEngine() : QPaintEngine(QPaintEngine::AllFeatures) {}
+
+    bool begin(QPaintDevice *device) override {
+        setPaintDevice(device);
+        setActive(true);
+        return true;
+    }
+    bool end() override {
+        setActive(false);
+        return true;
+    }
+    void updateState(const QPaintEngineState &) override {}
+    void drawLines(const QLineF *drawn, int count) override {
+        for (int i = 0; i < count; ++i) {
+            lines.push_back({drawn[i], painter()->pen()});
+        }
+    }
+    void drawLines(const QLine *drawn, int count) override {
+        for (int i = 0; i < count; ++i) {
+            lines.push_back({QLineF(drawn[i]), painter()->pen()});
+        }
+    }
+    void drawTextItem(const QPointF &, const QTextItem &item) override {
+        texts.push_back(item.text());
+    }
+    void drawPath(const QPainterPath &) override {}
+    void drawPolygon(const QPointF *, int, PolygonDrawMode) override {}
+    void drawPolygon(const QPoint *, int, PolygonDrawMode) override {}
+    void drawRects(const QRectF *, int) override {}
+    void drawRects(const QRect *, int) override {}
+    void drawImage(const QRectF &, const QImage &, const QRectF &, Qt::ImageConversionFlags) override {}
+    void drawPixmap(const QRectF &, const QPixmap &, const QRectF &) override {}
+    Type type() const override { return QPaintEngine::User; }
+
+    QVector<QPair<QLineF, QPen>> lines;
+    QStringList texts;
+};
+
+class LineAndTextRecordingPaintDevice final : public QPaintDevice {
+public:
+    explicit LineAndTextRecordingPaintDevice(QSize size) : m_size(size) {}
+    QPaintEngine *paintEngine() const override {
+        return const_cast<LineAndTextRecordingPaintEngine *>(&engine);
+    }
+
+    mutable LineAndTextRecordingPaintEngine engine;
+
+protected:
+    int metric(PaintDeviceMetric metric) const override {
+        switch (metric) {
+        case PdmWidth:
+        case PdmWidthMM:
+            return m_size.width();
+        case PdmHeight:
+        case PdmHeightMM:
+            return m_size.height();
+        case PdmDpiX:
+        case PdmDpiY:
+        case PdmPhysicalDpiX:
+        case PdmPhysicalDpiY:
+            return 96;
+        case PdmDevicePixelRatio:
+            return 1;
+        case PdmDevicePixelRatioScaled:
+            return static_cast<int>(QPaintDevice::devicePixelRatioFScale());
+        case PdmNumColors:
+            return 16'777'216;
+        case PdmDepth:
+            return 32;
+        default:
+            return 0;
+        }
+    }
+
+private:
+    QSize m_size;
+};
+
+// The vertical lines a waveform paint draws in a pen of `style`.
+QVector<double> verticalLinesIn(const LineAndTextRecordingPaintEngine &engine, Qt::PenStyle style,
+                                const QColor &color = QColor()) {
+    QVector<double> xs;
+    for (const auto &[line, pen] : engine.lines) {
+        if (line.dx() == 0.0 && line.dy() != 0.0 && pen.style() == style
+            && (!color.isValid() || pen.color() == color)) {
+            xs.push_back(line.x1());
+        }
+    }
+    return xs;
+}
+
+// The bridge a waveform surface reads, with the real one's types: its mute
+// mask has 64 bits, and isChannelMuted() is no binding dependency.
+class WaveformSurfaceTestBridge final : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(QString playbackState MEMBER m_playbackState CONSTANT)
+    Q_PROPERTY(QString currentTrackPath MEMBER m_currentTrackPath CONSTANT)
+    Q_PROPERTY(QByteArray waveformPeaksPacked MEMBER m_waveformPeaksPacked CONSTANT)
+    Q_PROPERTY(double waveformCoverageSeconds MEMBER m_waveformCoverageSeconds CONSTANT)
+    Q_PROPERTY(bool waveformComplete MEMBER m_waveformComplete CONSTANT)
+    Q_PROPERTY(double durationSeconds MEMBER m_durationSeconds CONSTANT)
+    Q_PROPERTY(int spectrogramViewMode MEMBER m_spectrogramViewMode CONSTANT)
+    Q_PROPERTY(bool spectrogramZoomEnabled MEMBER m_flag CONSTANT)
+    Q_PROPERTY(bool showSpectrogramScale MEMBER m_unset CONSTANT)
+    Q_PROPERTY(bool showSpectrogramCrosshair MEMBER m_unset CONSTANT)
+    Q_PROPERTY(bool showFps MEMBER m_unset CONSTANT)
+    Q_PROPERTY(int currentTrackChannels MEMBER m_currentTrackChannels NOTIFY trackMetadataChanged)
+    Q_PROPERTY(QStringList currentTrackChannelLabels MEMBER m_currentTrackChannelLabels CONSTANT)
+    Q_PROPERTY(quint64 mutedChannelsMask MEMBER m_mutedChannelsMask NOTIFY playbackChanged)
+    Q_PROPERTY(QList<bool> mutedChannels READ mutedChannels NOTIFY playbackChanged)
+    Q_PROPERTY(int soloedChannel MEMBER m_soloedChannel NOTIFY playbackChanged)
+    Q_PROPERTY(int channelButtonsVisibility MEMBER m_channelButtonsVisibility CONSTANT)
+
+public:
+    QList<bool> mutedChannels() const {
+        QList<bool> muted(64);
+        for (int channel = 0; channel < 64; ++channel) {
+            muted[channel] = isChannelMuted(channel);
+        }
+        return muted;
+    }
+    Q_INVOKABLE bool isChannelMuted(int channel) const {
+        return channel >= 0 && channel < 64 && (m_mutedChannelsMask & (1ULL << channel)) != 0;
+    }
+    Q_INVOKABLE void toggleChannelMute(int) {}
+    Q_INVOKABLE void soloChannel(int) {}
+    void setChannels(int channels) {
+        m_currentTrackChannels = channels;
+        emit trackMetadataChanged();
+    }
+    void setMutes(quint64 mask, int soloed) {
+        m_mutedChannelsMask = mask;
+        m_soloedChannel = soloed;
+        emit playbackChanged();
+    }
+
+signals:
+    void trackMetadataChanged();
+    void playbackChanged();
+
+private:
+    QString m_playbackState{QStringLiteral("Stopped")};
+    QString m_currentTrackPath;
+    QByteArray m_waveformPeaksPacked;
+    double m_waveformCoverageSeconds{0.0};
+    bool m_waveformComplete{false};
+    double m_durationSeconds{10.0};
+    int m_spectrogramViewMode{1};
+    bool m_flag{true};
+    bool m_unset{false};
+    int m_currentTrackChannels{2};
+    QStringList m_currentTrackChannelLabels;
+    quint64 m_mutedChannelsMask{0};
+    int m_soloedChannel{-1};
+    int m_channelButtonsVisibility{2};
+};
+
+// Records each signal of an item that reaches its slots while the item's
+// state mutex is held. A slot that reads the item, as a QML binding does,
+// would take the mutex again and deadlock.
+class StateMutexProbe final : public QObject {
+    Q_OBJECT
+
+public:
+    StateMutexProbe(QObject *item, QMutex *mutex) : m_mutex(mutex) {
+        const QMetaObject *meta = item->metaObject();
+        const QMetaMethod probe =
+            staticMetaObject.method(staticMetaObject.indexOfSlot("delivered()"));
+        for (int index = QObject::staticMetaObject.methodCount();
+             index < meta->methodCount(); ++index) {
+            const QMetaMethod method = meta->method(index);
+            if (method.methodType() == QMetaMethod::Signal) {
+                connect(item, method, this, probe, Qt::DirectConnection);
+            }
+        }
+    }
+
+    QStringList heldSignals;
+    int deliveries{0};
+
+public slots:
+    void delivered() {
+        ++deliveries;
+        if (m_mutex->tryLock()) {
+            m_mutex->unlock();
+            return;
+        }
+        heldSignals << QString::fromLatin1(
+            sender()->metaObject()->method(senderSignalIndex()).methodSignature());
+    }
+
+private:
+    QMutex *m_mutex;
+};
+
 class QmlSmokeTest : public QObject {
     Q_OBJECT
 
@@ -833,6 +1049,7 @@ private slots:
     void spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers();
     void spectrogramHoverChannelButtonsRemainClickable();
     void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
+    void waveformSurfaceMuteButtonsFollowTheMutedChannels();
     void mainWindowContentStartsBelowMenuBar();
     void consecutiveErrorsAreBothVisible();
     void repeatedErrorsAreCounted();
@@ -932,6 +1149,11 @@ private slots:
     void waveformEditorCachedDecoderPreservesOverlappingSamples();
     void waveformEditorDownmixUsesMixedExtremaAtEveryZoom();
     void waveformEditorCancelsAndBoundsObsoleteDecodes();
+    void waveformEditorDetailArrivesWhileScrolling();
+    void waveformEditorSignalsWithoutItsStateLocked();
+    void waveformEditorFrameReadsTheClockOnce();
+    void waveformEditorSeeksWhereTheCrosshairShows_data();
+    void waveformEditorSeeksWhereTheCrosshairShows();
     void waveformEditorSampleMarkersRequireSampleResolution();
     void waveformEditorFormatsViewportDuration();
     void waveformEditorConnectsSamplesBeforeMarkers();
@@ -1068,6 +1290,10 @@ private slots:
     void spectrogramClickToSeekEmitsSignalWhenCrosshairEnabled();
     void spectrogramClickToSeekUsesCurrentPositionWhenCrosshairCacheIsStale();
     void spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode();
+    void spectrogramSignalsWithoutItsStateLocked();
+    void spectrogramClickToSeekMatchesTheHeldView_data();
+    void spectrogramClickToSeekMatchesTheHeldView();
+    void spectrogramCenteredViewMatchesTheDecodersModel();
     void spectrogramClickToSeekSuppressedWhenCrosshairDisabled();
     void spectrogramLeftClickDoesNotSeek();
     void spectrogramClickToSeekDisabledInRollingMode();
@@ -2208,6 +2434,71 @@ Item {
 
     surface->setProperty("interactiveOverlaysVisible", false);
     QTRY_VERIFY(!waveform->crosshairEnabled());
+}
+
+void QmlSmokeTest::waveformSurfaceMuteButtonsFollowTheMutedChannels() {
+    QQmlApplicationEngine engine;
+    WaveformSurfaceTestBridge bridge;
+    engine.rootContext()->setContextProperty(QStringLiteral("testBridge"), &bridge);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "viewers" as Viewers
+
+Item {
+    width: 640
+    height: 320
+
+    Viewers.WaveformSurface {
+        anchors.fill: parent
+        uiBridge: testBridge
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *rootItem = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY(rootItem != nullptr);
+    auto *waveform = root->findChild<WaveformEditorItem *>(QStringLiteral("waveformEditorItem"));
+    QVERIFY(waveform != nullptr);
+    // Whether a channel's mute button shows it muted, or -1 without one.
+    // A Repeater's delegates are only its parent's child items.
+    const std::function<int(QQuickItem *, int)> muteShownIn = [&muteShownIn](
+                                                                  QQuickItem *item, int channel) {
+        if (item->objectName() == QStringLiteral("waveformChannelMuteButton")
+            && item->property("channelIndex").toInt() == channel) {
+            return item->property("active").toBool() ? 1 : 0;
+        }
+        for (QQuickItem *child : item->childItems()) {
+            const int shown = muteShownIn(child, channel);
+            if (shown >= 0) return shown;
+        }
+        return -1;
+    };
+
+    for (const int channels : {2, 6}) {
+        bridge.setChannels(channels);
+        QTRY_COMPARE(waveform->channelCount(), channels);
+        // Muting some channels, then soloing each one, which mutes all the
+        // others: the engine's mask then has its high bits set too.
+        QList<QPair<quint64, int>> states{{0b10, -1}, {0, -1}};
+        for (int soloed = 0; soloed < channels; ++soloed) {
+            states.push_back({~(quint64{1} << soloed), soloed});
+        }
+        for (const auto &[mask, soloed] : states) {
+            bridge.setMutes(mask, soloed);
+            for (int channel = 0; channel < channels; ++channel) {
+                const int muted = (mask >> channel) & 1U ? 1 : 0;
+                QVERIFY2(muteShownIn(rootItem, channel) == muted,
+                    qPrintable(QStringLiteral("%1 channels, mask %2: channel %3 shows %4")
+                        .arg(channels).arg(mask, 16, 16, QLatin1Char('0')).arg(channel)
+                        .arg(muteShownIn(rootItem, channel))));
+            }
+            // The waveform greys out the same channels.
+            QCOMPARE(waveform->mutedChannelsMask(), mask);
+        }
+    }
 }
 
 void QmlSmokeTest::mainWindowContentStartsBelowMenuBar() {
@@ -5900,6 +6191,276 @@ void QmlSmokeTest::waveformEditorCancelsAndBoundsObsoleteDecodes() {
     QCOMPARE(started->load(), 2);
 }
 
+void QmlSmokeTest::waveformEditorDetailArrivesWhileScrolling() {
+    // A detail window for [start, end] at 48 kHz, as the decoder sends one.
+    const auto window = [](double start, double end, int maxPoints) {
+        const quint32 frames = static_cast<quint32>(std::ceil((end - start) * 48'000.0));
+        const quint32 framesPerPoint = std::max<quint32>(
+            1, (frames + static_cast<quint32>(maxPoints) - 1) / static_cast<quint32>(maxPoints));
+        const quint32 points = (frames + framesPerPoint - 1) / framesPerPoint;
+        QByteArray bytes("WVF2", 4);
+        appendLe<quint32>(bytes, 48'000);
+        appendLe<quint16>(bytes, 1);
+        appendLe<quint16>(bytes, 0);
+        for (const double seconds : {start, end}) {
+            quint64 bits = 0;
+            std::memcpy(&bits, &seconds, sizeof(bits));
+            appendLe<quint64>(bytes, bits);
+        }
+        appendLe<quint32>(bytes, framesPerPoint);
+        appendLe<quint32>(bytes, points);
+        bytes.append(QByteArray(static_cast<qsizetype>(points) * 4 * 4, '\0'));
+        return bytes;
+    };
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(120);
+    item.setDurationSeconds(60.0);
+    item.setZoomLevel(1'200.0);
+    // Frames ask for detail as the view moves; nothing else does.
+    item.m_requestTimer.blockSignals(true);
+    auto gate = std::make_shared<QSemaphore>();
+    item.m_decodeWindow = [gate, window](const QString &, double start, double end, int points,
+                                         const std::shared_ptr<std::atomic_bool> &) {
+        gate->tryAcquire(1, 5000);
+        return window(start, end, points);
+    };
+    item.setSourcePath(QStringLiteral("/fixture/deep-zoom.wav"));
+
+    // Each frame, playback moves on by more than a pending request's margin
+    // to spare (0.3 s here), and a decode takes two frames: the view
+    // outruns every request before it arrives, but not its range (0.65 s
+    // ahead of the view, and more before the sample rate is known).
+    constexpr double kStepSeconds = 0.32;
+    constexpr int kDecodeFrames = 2;
+    int decodeAge = 0;
+    bool detailShown = false;
+    for (int frame = 0; frame < 24 && !detailShown; ++frame) {
+        if (item.m_decodeActive && ++decodeAge >= kDecodeFrames) {
+            gate->release();
+            QTRY_VERIFY(!item.m_decodeActive);
+            decodeAge = 0;
+        }
+        bool request = false;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_clockState.anchorSeconds = 20.0 + frame * kStepSeconds;
+            const auto [start, end] = item.visibleRangeLocked();
+            request = !item.detailOrPendingRequestCoversLocked(start, end);
+            detailShown = item.detailCoversRangeLocked(start, end)
+                && item.detailResolutionCoversLocked(start, end);
+        }
+        if (request) item.requestDetailWindow();
+    }
+    QVERIFY2(detailShown, "the view never had its detail");
+    item.setSourcePath(QString());
+    gate->release(4);
+    QTRY_VERIFY(!item.m_decodeActive);
+}
+
+void QmlSmokeTest::waveformEditorSignalsWithoutItsStateLocked() {
+    WaveformEditorItem item;
+    StateMutexProbe probe(&item, &item.m_stateMutex);
+    item.m_decodeWindow = [](const QString &, double start, double end, int,
+                             const std::shared_ptr<std::atomic_bool> &) {
+        QByteArray bytes("WVF2", 4);
+        appendLe<quint32>(bytes, 48'000);
+        appendLe<quint16>(bytes, 2);
+        appendLe<quint16>(bytes, 0);
+        for (const double seconds : {start, end}) {
+            quint64 bits = 0;
+            std::memcpy(&bits, &seconds, sizeof(bits));
+            appendLe<quint64>(bytes, bits);
+        }
+        appendLe<quint32>(bytes, 4'096);
+        appendLe<quint32>(bytes, 64);
+        bytes.append(QByteArray(64 * 6 * 4, '\0'));
+        return bytes;
+    };
+    item.setWidth(320);
+    item.setHeight(120);
+    item.setDurationSeconds(30.0);
+    item.setOverviewData(QByteArray(512, '\x40'));
+    item.setOverviewCoverageSeconds(30.0);
+    item.setOverviewComplete(true);
+    item.setZoomEnabled(false);
+    item.setZoomEnabled(true);
+    item.setGridEnabled(true);
+    item.setCrosshairEnabled(true);
+    item.setShowFpsOverlay(true);
+    item.setViewMode(1);
+    item.setChannelCountHint(2);
+    item.setMutedChannelsMask(1);
+    item.setSoloedChannel(1);
+    item.setPlaying(true);
+    setTestPosition(item, 4.0);
+    // A detail window arrives with the channels and the sample rate.
+    item.setSourcePath(QStringLiteral("/fixture/signals.wav"));
+    QTRY_COMPARE(item.channelCount(), 2);
+    item.setZoomLevel(4.0);
+    QHoverEvent hover(QEvent::HoverMove, QPointF(40.0, 30.0), QPointF(40.0, 30.0), QPointF());
+    item.hoverMoveEvent(&hover);
+    QMouseEvent seek(QEvent::MouseButtonPress, QPointF(40.0, 30.0), QPointF(40.0, 30.0),
+        Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+    item.mousePressEvent(&seek);
+    QWheelEvent wheel(QPointF(40.0, 30.0), QPointF(40.0, 30.0), QPoint(), QPoint(0, 120),
+        Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    item.wheelEvent(&wheel);
+    QMouseEvent reset(QEvent::MouseButtonPress, QPointF(40.0, 30.0), QPointF(40.0, 30.0),
+        Qt::MiddleButton, Qt::MiddleButton, Qt::NoModifier);
+    item.mousePressEvent(&reset);
+    item.setPlaying(false);
+    item.setSourcePath(QString());
+    QTRY_VERIFY(!item.m_decodeActive);
+    QVERIFY(probe.deliveries >= 20);
+    QVERIFY2(probe.heldSignals.isEmpty(), qPrintable(probe.heldSignals.join(QLatin1String(", "))));
+}
+
+void QmlSmokeTest::waveformEditorFrameReadsTheClockOnce() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(120);
+    item.setDurationSeconds(60.0);
+    // 50 ms in view: a millisecond of playback is 6.4 pixels.
+    item.setZoomLevel(1'200.0);
+    item.setPlaying(true);
+    // Each reading of the clock is a millisecond after the last.
+    qint64 now = 1'000'000'000;
+    int readings = 0;
+    item.m_nowNs = [&now, &readings]() {
+        ++readings;
+        now += 1'000'000;
+        return now;
+    };
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_clockState.anchorSeconds = 20.0;
+        item.m_clockState.anchorNs = now;
+        item.m_clockState.rate = 1.0;
+        item.m_clockState.durationSeconds = 60.0;
+    }
+    for (int frame = 0; frame < 3; ++frame) {
+        QImage canvas(320, 120, QImage::Format_RGB32);
+        canvas.fill(Qt::black);
+        readings = 0;
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        painter.end();
+        QCOMPARE(readings, 1);
+        // The view follows the playhead, which stays in the middle of it,
+        // on column 160: a dash of it starts at the top.
+        QVector<int> playhead;
+        for (int x = 0; x < canvas.width(); ++x) {
+            if (QColor(canvas.pixel(x, 1)).red() > 60) playhead.push_back(x);
+        }
+        QCOMPARE(playhead, QVector<int>{160});
+    }
+}
+
+void QmlSmokeTest::waveformEditorSeeksWhereTheCrosshairShows_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<double>("zoom");
+    QTest::addColumn<double>("position");
+    for (const double scale : {1.0, 1.5, 2.0}) {
+        // The whole track; zoomed in at its start, where the view stays
+        // still; and zoomed in, following the playhead.
+        QTest::addRow("%gx, whole track", scale) << scale << 1.0 << 5.0;
+        QTest::addRow("%gx, zoomed at the start", scale) << scale << 8.0 << 0.2;
+        QTest::addRow("%gx, zoomed and following", scale) << scale << 8.0 << 5.0;
+    }
+}
+
+void QmlSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
+    QFETCH(double, scale);
+    QFETCH(double, zoom);
+    QFETCH(double, position);
+    QQuickWindow window;
+    if (scale != 1.0 && !showOnScreen(window, scale)) {
+        QSKIP("Needs the offscreen platform's HiDPI test screens");
+    }
+    auto *item = new WaveformEditorItem(scale != 1.0 ? window.contentItem() : nullptr);
+    std::unique_ptr<WaveformEditorItem> unparented(scale != 1.0 ? nullptr : item);
+    // The pointer is the test's, not the window's.
+    item->setAcceptHoverEvents(false);
+    QCOMPARE(item->renderScaleLocked(), scale);
+    item->setWidth(320);
+    item->setHeight(120);
+    item->setDurationSeconds(10.0);
+    item->setCrosshairEnabled(true);
+    item->setGridEnabled(true);
+    item->setZoomLevel(zoom);
+    setTestPosition(*item, position);
+    const auto record = [item]() {
+        auto device = std::make_unique<LineAndTextRecordingPaintDevice>(QSize(320, 120));
+        QPainter painter(device.get());
+        item->paint(&painter);
+        painter.end();
+        return device;
+    };
+
+    for (const double pointerX : {0.2, 137.7, 211.33, 319.9}) {
+        item->setHoverPosition(pointerX, 50.0, true);
+        const auto drawn = record();
+        // The crosshair is on the device column under the pointer, at its
+        // left edge.
+        const QVector<double> crosshair = verticalLinesIn(drawn->engine, Qt::DotLine);
+        QCOMPARE(crosshair.size(), 1);
+        const double columnX = std::floor(pointerX * scale + 1e-6) / scale;
+        QVERIFY(std::abs(crosshair.constFirst() - columnX) < 1e-9);
+        static const QRegularExpression timeLabel(QStringLiteral("^\\d+:\\d\\d\\.\\d{3}$"));
+        const QStringList shown = drawn->engine.texts.filter(timeLabel);
+        QCOMPARE(shown.size(), 1);
+
+        // A click there seeks to the time it shows.
+        QSignalSpy seekSpy(item, &WaveformEditorItem::seekRequested);
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(pointerX, 50.0), QPointF(pointerX, 50.0),
+            Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+        item->mousePressEvent(&press);
+        QCOMPARE(seekSpy.count(), 1);
+        const double seconds = seekSpy.at(0).at(0).toDouble();
+        QCOMPARE(WaveformEditorItem::formatCrosshairTime(seconds), shown.constFirst());
+        double start = 0.0;
+        double end = 0.0;
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            std::tie(start, end) = item->visibleRangeLocked();
+        }
+        QVERIFY(std::abs(seconds - (start + columnX / 320.0 * (end - start))) < 1e-9);
+
+        // Unless the view moves to follow it, the playhead goes there too.
+        testClock(*item).holdAt(seconds);
+        double heldStart = 0.0;
+        double heldEnd = 0.0;
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            std::tie(heldStart, heldEnd) = item->visibleRangeLocked();
+        }
+        if (heldStart == start && heldEnd == end) {
+            const QVector<double> playhead =
+                verticalLinesIn(record()->engine, Qt::CustomDashLine);
+            QCOMPARE(playhead.size(), 1);
+            QVERIFY2(std::abs(playhead.constFirst() - columnX) < 1e-9,
+                qPrintable(QStringLiteral("playhead at %1, crosshair at %2")
+                    .arg(playhead.constFirst()).arg(columnX)));
+        } else {
+            // Only a zoomed view follows, once the playhead is past its
+            // middle.
+            QVERIFY(zoom > 1.0 && seconds > (end - start) * 0.5);
+        }
+        setTestPosition(*item, position);
+    }
+
+    // The playhead at a grid line's time is on that line.
+    if (zoom == 1.0) {
+        testClock(*item).holdAt(5.0);
+        const auto drawn = record();
+        const QVector<double> playhead = verticalLinesIn(drawn->engine, Qt::CustomDashLine);
+        QCOMPARE(playhead.size(), 1);
+        QVERIFY(verticalLinesIn(drawn->engine, Qt::SolidLine, QColor(20, 82, 49))
+            .contains(playhead.constFirst()));
+    }
+}
+
 void QmlSmokeTest::waveformEditorCachedDecoderPreservesOverlappingSamples() {
     QByteArray wav("RIFF", 4);
     constexpr quint32 frames = 30'000;
@@ -8027,15 +8588,15 @@ void QmlSmokeTest::waveformSceneGraphLaysOutEachLabelOnce() {
 }
 
 void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
-    // 100 s over 1001 pixels: the playhead moves a pixel every 0.1 s.
+    // 100 s over 1000 pixels: the playhead moves a pixel every 0.1 s.
     WaveformEditorItem item;
-    item.setWidth(1001);
+    item.setWidth(1000);
     item.setHeight(100);
     item.setDurationSeconds(100.0);
     item.setOverviewComplete(true);
     item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
     // The window paints, then hears that the frame is on screen.
-    QImage canvas(1001, 100, QImage::Format_RGB32);
+    QImage canvas(1000, 100, QImage::Format_RGB32);
     const auto paint = [&item, &canvas]() {
         QPainter painter(&canvas);
         item.paint(&painter);
@@ -8046,10 +8607,10 @@ void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     const quint64 requested = item.m_playbackFrameRequests;
     paint();
     item.handleWindowFrameSwapped();
-    // The whole track is in view: no frame until pixel 101 at 10.05 s.
+    // The whole track is in view: no frame until pixel 101 at 10.1 s.
     QCOMPARE(item.m_playbackFrameRequests, requested);
     QVERIFY(item.m_playbackFrameTimer.isActive());
-    const double untilChangeMs = (10.05 - testClock(item).positionAt(monotonicNowNs())) * 1000.0;
+    const double untilChangeMs = (10.1 - testClock(item).positionAt(monotonicNowNs())) * 1000.0;
     QVERIFY2(std::abs(item.m_playbackFrameTimer.remainingTime() - untilChangeMs) <= 3.0,
         qPrintable(QStringLiteral("%1 ms for %2 ms")
             .arg(item.m_playbackFrameTimer.remainingTime()).arg(untilChangeMs)));
@@ -8091,12 +8652,12 @@ void QmlSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
 }
 
 void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
-    // 100 s over 101 pixels: a pixel a second. The frame painted at 10.4 s
-    // shows pixel 10 until 10.5 s. Its frame-swapped callback arrives late,
+    // 100 s over 100 pixels: a pixel a second. The frame painted at 10.4 s
+    // shows pixel 10 until 11 s. Its frame-swapped callback arrives late,
     // after playback has passed that: the next frame is due at once, not
     // at the boundary after.
     WaveformEditorItem item;
-    item.setWidth(101);
+    item.setWidth(100);
     item.setHeight(50);
     item.setDurationSeconds(100.0);
     item.setOverviewComplete(true);
@@ -8104,14 +8665,14 @@ void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
     setTestPosition(item, 10.4);
     item.setPlaying(true);
     setTestPosition(item, 10.4);
-    QImage canvas(101, 50, QImage::Format_RGB32);
+    QImage canvas(100, 50, QImage::Format_RGB32);
     {
         QPainter painter(&canvas);
         item.paint(&painter);
     }
     PlaybackClock &clock = testClock(item);
     QVERIFY(QTest::qWaitFor(
-        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 10.52; }, 2000));
+        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 11.02; }, 2000));
     const quint64 requested = item.m_playbackFrameRequests;
     item.handleWindowFrameSwapped();
     QCOMPARE(item.m_playbackFrameRequests, requested + 1);
@@ -8122,7 +8683,7 @@ void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
         item.paint(&painter);
     }
     QVERIFY(QTest::qWaitFor(
-        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 11.52; }, 2000));
+        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 12.02; }, 2000));
     PlaybackSample sample;
     sample.positionSeconds = clock.positionAt(monotonicNowNs()) + 0.001;
     sample.sampledAtNs = monotonicNowNs();
@@ -11821,6 +12382,169 @@ void QmlSmokeTest::spectrogramClickToSeekIgnoresLaggingDecodedTailInCenteredMode
             .arg(seekSeconds, 0, 'f', 3)));
 }
 
+void QmlSmokeTest::spectrogramSignalsWithoutItsStateLocked() {
+    SpectrogramItem item;
+    StateMutexProbe probe(&item, &item.m_stateMutex);
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDbRange(90.0);
+    item.setLogScale(true);
+    item.setSampleRateHz(44'100);
+    item.setMaxColumns(1'024);
+    item.setShowFpsOverlay(true);
+    item.setCrosshairEnabled(true);
+    item.setGridEnabled(true);
+    item.setShowTimeLabels(true);
+    item.setCrosshairSharedX(20.0);
+    item.setChannelMuted(true);
+    item.setZoomEnabled(true);
+    item.setDisplayMode(1);
+    item.setPlaying(true);
+    constexpr int bins = 8;
+    constexpr int columns = 2'000;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, columns, 48'000, 1'024, true, true, 1, true, 1);
+    QVERIFY(item.precomputedReady());
+    setTestPosition(item, 10.0);
+    item.setZoomLevel(2.0);
+    QVERIFY(sendPendingBackendZoom(item));
+    QHoverEvent enter(QEvent::HoverEnter, QPointF(60.0, 40.0), QPointF(60.0, 40.0), QPointF());
+    item.hoverEnterEvent(&enter);
+    QHoverEvent move(QEvent::HoverMove, QPointF(70.0, 40.0), QPointF(70.0, 40.0), QPointF());
+    item.hoverMoveEvent(&move);
+    QMouseEvent seek(QEvent::MouseButtonPress, QPointF(70.0, 40.0), QPointF(70.0, 40.0),
+        Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+    item.mousePressEvent(&seek);
+    QWheelEvent wheel(QPointF(70.0, 40.0), QPointF(70.0, 40.0), QPoint(), QPoint(0, 120),
+        Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    item.wheelEvent(&wheel);
+    QMouseEvent reset(QEvent::MouseButtonPress, QPointF(70.0, 40.0), QPointF(70.0, 40.0),
+        Qt::MiddleButton, Qt::MiddleButton, Qt::NoModifier);
+    item.mousePressEvent(&reset);
+    QHoverEvent leave(QEvent::HoverLeave, QPointF(), QPointF(), QPointF());
+    item.hoverLeaveEvent(&leave);
+    item.setWidth(400);
+    item.setPlaying(false);
+    item.clearPrecomputed();
+    QVERIFY(!item.precomputedReady());
+    QVERIFY(probe.deliveries >= 20);
+    QVERIFY2(probe.heldSignals.isEmpty(), qPrintable(probe.heldSignals.join(QLatin1String(", "))));
+}
+
+void QmlSmokeTest::spectrogramClickToSeekMatchesTheHeldView_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<bool>("steppedBack");
+    for (const double scale : {1.0, 2.0}) {
+        QTest::addRow("%gx", scale) << scale << false;
+        QTest::addRow("%gx, a column back", scale) << scale << true;
+    }
+}
+
+void QmlSmokeTest::spectrogramClickToSeekMatchesTheHeldView() {
+    QFETCH(double, scale);
+    QFETCH(bool, steppedBack);
+    QQuickWindow window;
+    if (scale == 1.0) {
+        window.resize(240, 160);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    } else if (!showOnScreen(window, scale)) {
+        QSKIP("Needs the offscreen platform's HiDPI test screens");
+    }
+    QCOMPARE(window.effectiveDevicePixelRatio(), scale);
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    // The pointer is the test's, not the window's.
+    item.setAcceptHoverEvents(false);
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setCrosshairEnabled(true);
+    item.setShowTimeLabels(true);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    constexpr double columnsPerSecond = 48000.0 / 1024.0;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    // Between columns, so that the centered view scrolls by part of one.
+    setTestPosition(item, 10.31);
+    const QPointF pointer(73.75, 30.0);
+    QHoverEvent hover(QEvent::HoverEnter, pointer, pointer, QPointF());
+    item.hoverEnterEvent(&hover);
+    QSGNode *node = paintSettled(item, nullptr);
+    if (steppedBack) {
+        // The clock steps back a column, as a correction of its course
+        // can: the view stays at its canvas's columns rather than jitter
+        // back and forth.
+        qint64 canvasLeft = 0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            canvasLeft = item.m_precomputedCanvasDisplayLeft;
+        }
+        setTestPosition(item, 10.31 - 1.0 / columnsPerSecond);
+        node = paintSettled(item, node);
+        QMutexLocker lock(&item.m_stateMutex);
+        const SpectrogramItem::CenteredDisplayRange unheld = SpectrogramItem::centeredDisplayRange(
+            static_cast<qint64>(std::floor((10.31 - 1.0 / columnsPerSecond) * columnsPerSecond)),
+            200, columns, columns, columnsPerSecond);
+        QCOMPARE(unheld.left, canvasLeft - 1);
+        QCOMPARE(item.m_crosshairCachedDisplayLeft, canvasLeft);
+    }
+
+    // The time the crosshair's label shows.
+    QString shown;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        static const QRegularExpression timeLabel(QStringLiteral("^(\\d+):(\\d\\d\\.\\d{3})$"));
+        for (const SpectrogramOverlayImage &image : item.m_crosshair.images) {
+            if (timeLabel.match(image.text).hasMatch()) {
+                shown = image.text;
+            }
+        }
+    }
+    QVERIFY(!shown.isEmpty());
+    const QStringList parts = shown.split(QLatin1Char(':'));
+    const double shownSeconds = parts.at(0).toDouble() * 60.0 + parts.at(1).toDouble();
+
+    QSignalSpy seekSpy(&item, &SpectrogramItem::seekRequested);
+    QMouseEvent press(QEvent::MouseButtonPress, pointer, pointer,
+        Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+    item.mousePressEvent(&press);
+    QCOMPARE(seekSpy.count(), 1);
+    const double seconds = seekSpy.at(0).at(0).toDouble();
+    // To the millisecond the label shows; a column is 21 ms.
+    QVERIFY2(std::abs(seconds - shownSeconds) <= 0.0005 + 1e-9,
+        qPrintable(QStringLiteral("seeks to %1 s, shows %2").arg(seconds, 0, 'f', 4).arg(shown)));
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramCenteredViewMatchesTheDecodersModel() {
+    // The cases the decoder's model of the view is tested against too.
+    QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/../src/analysis/fixtures/centered-view.txt"));
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+    constexpr double columnsPerSecond = 100.0;
+    int checked = 0;
+    while (!file.atEnd()) {
+        const QString line = QString::fromUtf8(file.readLine()).trimmed();
+        if (line.isEmpty() || line.startsWith(QLatin1Char('#'))) {
+            continue;
+        }
+        const QStringList values = line.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        QCOMPARE(values.size(), 4);
+        const auto columnsOf = [&values](int index) {
+            return static_cast<qint64>(std::llround(values.at(index).toDouble() * columnsPerSecond));
+        };
+        const qint64 total = columnsOf(2);
+        // The whole track decoded, as the model assumes.
+        const SpectrogramItem::CenteredDisplayRange range = SpectrogramItem::centeredDisplayRange(
+            columnsOf(0), static_cast<int>(columnsOf(1)), total, total, columnsPerSecond);
+        QVERIFY2(range.left == columnsOf(3),
+            qPrintable(QStringLiteral("%1: starts at column %2").arg(line).arg(range.left)));
+        ++checked;
+    }
+    QVERIFY(checked >= 9);
+}
+
 void QmlSmokeTest::spectrogramClickToSeekSuppressedWhenCrosshairDisabled() {
     SpectrogramItem item;
     item.setWidth(320);
@@ -15367,21 +16091,6 @@ ApplicationWindow {
 }
 
 namespace {
-
-// A window on the HiDPI test screen at `scale`, shown.
-bool showOnScreen(QQuickWindow &window, double scale) {
-    QScreen *screen = hiDpiTestScreen(scale);
-    if (screen == nullptr) {
-        return false;
-    }
-    window.resize(240, 160);
-    if (!moveWindowToScreen(window, screen)) {
-        return false;
-    }
-    window.show();
-    return QTest::qWaitForWindowExposed(&window, 5000)
-        && std::abs(window.effectiveDevicePixelRatio() - scale) < 1e-9;
-}
 
 // The rows of a pixel's column of a canvas that are `color`.
 QVector<int> rowsOfColor(const QImage &canvas, int x, QRgb color) {

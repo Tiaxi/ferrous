@@ -48,7 +48,8 @@ Item {
         showFpsOverlay: root.uiBridge.showFps
         viewMode: root.uiBridge.spectrogramViewMode
         channelCountHint: Math.max(1, root.uiBridge.currentTrackChannels)
-        mutedChannelsMask: root.uiBridge.mutedChannelsMask
+        // Per channel: a 64-bit mask loses its low bits as a QML number.
+        mutedChannels: root.uiBridge.mutedChannels || []
         soloedChannel: root.uiBridge.soloedChannel
         onSeekRequested: function(seconds) {
             if (root.seekCommitted) {
@@ -105,7 +106,11 @@ Item {
                 }
 
                 Rectangle {
-                    property bool active: root.uiBridge.isChannelMuted(index)
+                    objectName: "waveformChannelMuteButton"
+                    readonly property int channelIndex: index
+                    // mutedChannels notifies when it changes;
+                    // isChannelMuted() does not.
+                    property bool active: waveform.mutedChannels[index] === true
                     visible: root.interactiveOverlaysVisible
                         && (root.uiBridge.channelButtonsVisibility === 2
                             || (root.uiBridge.channelButtonsVisibility === 1

@@ -54,6 +54,36 @@ constexpr QColor kPlayhead(190, 190, 200, 150);
 constexpr QColor kPlayheadContrast(8, 18, 14, 235);
 constexpr QColor kOverlay(190, 190, 200, 180);
 
+// The view's time axis: `width` logical pixels from `start` to `end`, which
+// is how the body is drawn. The playhead, the grid, the crosshair and seeks
+// use the device columns, `scale` to a logical pixel: a time is shown on the
+// column it falls in, at that column's left edge, and the pointer over a
+// column shows and seeks to the time there.
+struct TimeAxis {
+    double start{0.0};
+    double end{0.0};
+    int width{1};
+    double scale{1.0};
+
+    int columns() const {
+        return std::max(1, static_cast<int>(std::ceil(width * scale - 1e-6)));
+    }
+    // The column at `x` logical pixels; a fraction of a pixel short of a
+    // column's edge, as a time mapped there and back can be, is on it.
+    int columnAt(double x) const {
+        return std::clamp(
+            static_cast<int>(std::floor(x * scale + 1e-6)), 0, columns() - 1);
+    }
+    int columnOf(double time) const {
+        return columnAt((time - start) / (end - start) * width);
+    }
+    // Where a column starts, in logical pixels, and the time there.
+    double x(int column) const { return column / scale; }
+    double timeAt(int column) const {
+        return start + x(column) / width * (end - start);
+    }
+};
+
 bool rasterCoversRange(double rasterStart, double rasterEnd,
                        double visibleStart, double visibleEnd) {
     // Converting time to a pixel grid and back can round a covered endpoint
@@ -304,7 +334,7 @@ void WaveformEditorItem::clockStateChanged() {
             && rangeMoved
             && !cacheCoversRangeLocked(start, end);
         if (cacheNeedsUpdate) invalidateCacheLocked();
-        if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(monotonicNowNs());
+        if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(m_nowNs());
     }
     emit positionSecondsChanged();
     if (request) scheduleDetailRequest();
@@ -412,7 +442,24 @@ void WaveformEditorItem::setShowFpsOverlay(bool value) {
     update();
 }
 void WaveformEditorItem::setViewMode(int value) { value = std::clamp(value, 0, 1); { QMutexLocker lock(&m_stateMutex); if (m_viewMode == value) return; m_viewMode = value; invalidateCacheLocked(); } emit viewModeChanged(); emit channelCountChanged(); update(); }
-void WaveformEditorItem::setMutedChannelsMask(qulonglong value) { { QMutexLocker lock(&m_stateMutex); if (m_mutedChannelsMask == value) return; m_mutedChannelsMask = value; invalidateCacheLocked(); } emit mutedChannelsMaskChanged(); update(); }
+void WaveformEditorItem::setMutedChannelsMask(qulonglong value) { { QMutexLocker lock(&m_stateMutex); if (m_mutedChannelsMask == value) return; m_mutedChannelsMask = value; invalidateCacheLocked(); } emit mutedChannelsChanged(); update(); }
+
+QList<bool> WaveformEditorItem::mutedChannels() const {
+    const qulonglong mask = mutedChannelsMask();
+    QList<bool> muted(64);
+    for (int channel = 0; channel < 64; ++channel) {
+        muted[channel] = (mask & (qulonglong{1} << channel)) != 0;
+    }
+    return muted;
+}
+
+void WaveformEditorItem::setMutedChannels(const QList<bool> &value) {
+    qulonglong mask = 0;
+    for (qsizetype channel = 0; channel < std::min<qsizetype>(value.size(), 64); ++channel) {
+        if (value[channel]) mask |= qulonglong{1} << channel;
+    }
+    setMutedChannelsMask(mask);
+}
 void WaveformEditorItem::setSoloedChannel(int value) { { QMutexLocker lock(&m_stateMutex); if (m_soloedChannel == value) return; m_soloedChannel = value; invalidateCacheLocked(); } emit soloedChannelChanged(); update(); }
 void WaveformEditorItem::setChannelCountHint(int value) {
     value = std::clamp(value, 1, 64);
@@ -563,6 +610,16 @@ void WaveformEditorItem::requestDetailWindow() {
         QMutexLocker lock(&m_stateMutex);
         if (m_sourcePath.isEmpty() || m_durationSeconds <= 0.0 || width() < 2.0) return;
         if (m_decodeActive) {
+            // A request still in flight for part of the view stays: its
+            // arrival asks for what it misses. Replacing it instead would
+            // starve a view that moves on before any decode completes, such
+            // as playback at a deep zoom.
+            const auto [visibleStart, visibleEnd] = detailRequestVisibleRangeLocked();
+            if (m_requestInFlight
+                && m_requestedStartSeconds < visibleEnd
+                && m_requestedEndSeconds > visibleStart) {
+                return;
+            }
             invalidateDetailRequestLocked();
             return;
         }
@@ -774,9 +831,13 @@ void WaveformEditorItem::clearPendingRequestLocked() {
     m_requestedRenderWidth = 0;
 }
 
-double WaveformEditorItem::displayedPositionSecondsLocked() const {
+double WaveformEditorItem::displayedPositionSecondsLocked(qint64 nowNs) const {
     return std::clamp(
-        m_clockState.positionAt(monotonicNowNs()), 0.0, std::max(0.0, m_durationSeconds));
+        m_clockState.positionAt(nowNs), 0.0, std::max(0.0, m_durationSeconds));
+}
+
+double WaveformEditorItem::displayedPositionSecondsLocked() const {
+    return displayedPositionSecondsLocked(m_nowNs());
 }
 
 bool WaveformEditorItem::detailOrPendingRequestCoversLocked(
@@ -833,17 +894,26 @@ bool WaveformEditorItem::detailResolutionCoversPixelSpanLocked(
     return visiblePoints >= requiredPoints * 0.9;
 }
 std::pair<double, double> WaveformEditorItem::visibleRangeForZoomLocked(
-    double zoomLevel) const {
+    double zoomLevel, qint64 nowNs) const {
     if (m_durationSeconds <= 0.0) return {0.0, 0.0};
     const double span = m_durationSeconds / std::max(1.0, zoomLevel);
     if (span >= m_durationSeconds * 0.9999) return {0.0, m_durationSeconds};
-    double start = displayedPositionSecondsLocked() - span * 0.5;
+    double start = displayedPositionSecondsLocked(nowNs) - span * 0.5;
     start = std::clamp(start, 0.0, m_durationSeconds - span);
     return {start, start + span};
 }
 
+std::pair<double, double> WaveformEditorItem::visibleRangeForZoomLocked(
+    double zoomLevel) const {
+    return visibleRangeForZoomLocked(zoomLevel, m_nowNs());
+}
+
+std::pair<double, double> WaveformEditorItem::visibleRangeLocked(qint64 nowNs) const {
+    return visibleRangeForZoomLocked(m_presentedZoomLevel, nowNs);
+}
+
 std::pair<double, double> WaveformEditorItem::visibleRangeLocked() const {
-    return visibleRangeForZoomLocked(m_presentedZoomLevel);
+    return visibleRangeLocked(m_nowNs());
 }
 
 std::pair<double, double> WaveformEditorItem::detailRequestVisibleRangeLocked() const {
@@ -1177,7 +1247,7 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
             invalidateCacheLocked();
         }
         // Detail arriving asks for its own frame.
-        frameDelayNs = playbackFrameDelayNsLocked(monotonicNowNs());
+        frameDelayNs = playbackFrameDelayNsLocked(m_nowNs());
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (m_profile.enabled) {
             if (m_profile.frameInitialized) {
@@ -1234,14 +1304,16 @@ double WaveformEditorItem::frameChangeSecondsLocked(
     const double followFrom = span * 0.5;
     const double followTo = m_durationSeconds - span * 0.5;
     if (!wholeTrack && position > followFrom && position < followTo) return kMoving;
-    // Until then, the playhead moves a pixel at a time: see paint.
-    const double secondsPerPixel = span / static_cast<double>(width - 1);
+    // Until then, the playhead moves a device column at a time, and leaves
+    // the view after its end: see paint.
+    const TimeAxis axis{visibleStart, visibleEnd, width, renderScaleLocked()};
     double change = std::numeric_limits<double>::infinity();
     if (position < visibleStart) {
         change = visibleStart;
     } else if (position <= visibleEnd) {
-        const double pixel = std::round((position - visibleStart) / secondsPerPixel);
-        change = visibleStart + (pixel + 0.5) * secondsPerPixel;
+        change = std::min(
+            axis.timeAt(axis.columnOf(position) + 1),
+            std::nextafter(visibleEnd, std::numeric_limits<double>::infinity()));
     }
     if (!wholeTrack && position <= followFrom) change = std::min(change, followFrom);
     return change;
@@ -1346,7 +1418,7 @@ void WaveformEditorItem::beginStagedCacheForRangeLocked(
 #endif
 }
 
-bool WaveformEditorItem::advanceStagedCacheLocked() {
+bool WaveformEditorItem::advanceStagedCacheLocked(qint64 nowNs) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profile.lastStagedCacheMs = 0.0;
     m_profile.lastStagedCacheColumns = 0;
@@ -1401,8 +1473,8 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
 
     const bool commitsDeferredZoom = m_stagedCacheCommitsDeferredZoom;
     const auto [visibleStart, visibleEnd] = commitsDeferredZoom
-        ? visibleRangeForZoomLocked(m_zoomLevel)
-        : visibleRangeLocked();
+        ? visibleRangeForZoomLocked(m_zoomLevel, nowNs)
+        : visibleRangeLocked(nowNs);
     bool presentationCommitted = false;
     if (rasterCoversRange(m_stagedCacheStartSeconds, m_stagedCacheEndSeconds,
             visibleStart, visibleEnd)) {
@@ -1436,6 +1508,10 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
         beginStagedCacheForRangeLocked(visibleStart, visibleEnd, true);
     }
     return presentationCommitted;
+}
+
+bool WaveformEditorItem::advanceStagedCacheLocked() {
+    return advanceStagedCacheLocked(m_nowNs());
 }
 
 void WaveformEditorItem::queueGuiContinuationFromPaint(
@@ -1524,6 +1600,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     std::vector<PlaybackTilePaint> playbackTilePaints;
     bool presentationCommitted = false;
     bool stagingContinues = false;
+    double scale = 1.0;
     const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
     const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
     // Replace body pixels rather than blending with the previous raster; the
@@ -1531,8 +1608,11 @@ void WaveformEditorItem::paint(QPainter *painter) {
     painter->setCompositionMode(QPainter::CompositionMode_Source);
     {
         QMutexLocker lock(&m_stateMutex);
-        presentationCommitted = advanceStagedCacheLocked();
-        std::tie(visibleStart, visibleEnd) = visibleRangeLocked();
+        // One time for the whole frame: the view and the playhead move with
+        // the clock, and must not move apart while the frame is drawn.
+        const qint64 frameNs = m_nowNs();
+        presentationCommitted = advanceStagedCacheLocked(frameNs);
+        std::tie(visibleStart, visibleEnd) = visibleRangeLocked(frameNs);
         directDetail = renderDetailDirectlyLocked(visibleStart, visibleEnd);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         profileEnabled = m_profile.enabled;
@@ -1580,14 +1660,17 @@ void WaveformEditorItem::paint(QPainter *painter) {
                     visibleStart, visibleEnd, canvasWidth, canvasHeight);
             }
             if (!playbackTilesComplete) {
-                rebuildCacheLocked(renderPixelWidthLocked(), renderPixelHeightLocked());
+                rebuildCacheLocked(
+                    renderPixelWidthLocked(), renderPixelHeightLocked(),
+                    visibleStart, visibleEnd);
                 cache = m_cache;
             }
         }
         hover = m_hoverPosition;
         hoverActive = m_hoverActive;
         crosshair = m_crosshairEnabled;
-        position = displayedPositionSecondsLocked();
+        scale = renderScaleLocked();
+        position = displayedPositionSecondsLocked(frameNs);
         m_paintedFrameChangeSeconds = frameChangeSecondsLocked(
             visibleStart, visibleEnd, position, canvasWidth);
         cacheStart = m_cacheStartSeconds;
@@ -1647,12 +1730,12 @@ void WaveformEditorItem::paint(QPainter *painter) {
             *painter, canvasWidth, canvasHeight, visibleStart, visibleEnd, channels);
         drawChannelSeparators(*painter, canvasWidth, canvasHeight, channels);
     }
-    const double span = visibleEnd - visibleStart;
-    if (span > 0.0 && position >= visibleStart && position <= visibleEnd) {
-        const int x = static_cast<int>(std::round((position - visibleStart) / span * (canvasWidth - 1)));
+    if (visibleEnd > visibleStart && position >= visibleStart && position <= visibleEnd) {
+        const TimeAxis axis{visibleStart, visibleEnd, canvasWidth, scale};
+        const double x = axis.x(axis.columnOf(position));
         drawContrastingLine(
             *painter,
-            QLine(x, 0, x, canvasHeight - 1),
+            QLineF(x, 0.0, x, canvasHeight - 1.0),
             kPlayhead,
             kPlayheadContrast);
     }
@@ -2061,12 +2144,12 @@ WaveformEditorItem::playbackTilePaintsLocked(
     return paints;
 }
 
-void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
+void WaveformEditorItem::rebuildCacheLocked(
+    int width, int height, double visibleStart, double visibleEnd) {
     if (!m_cacheDirty && m_cachedViewportWidth == width && m_cachedViewportHeight == height) return;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto profileRebuildStarted = std::chrono::steady_clock::now();
 #endif
-    const auto [visibleStart, visibleEnd] = visibleRangeLocked();
     const bool detailCoversViewport = detailCoversRangeLocked(
         visibleStart, visibleEnd);
     const bool detailReady = detailCoversViewport
@@ -2134,6 +2217,11 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
 #endif
 }
 
+void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
+    const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+    rebuildCacheLocked(width, height, visibleStart, visibleEnd);
+}
+
 void WaveformEditorItem::drawChannelSeparators(
     QPainter &painter, int width, int height, int channels) {
     if (channels < 2) return;
@@ -2146,7 +2234,7 @@ void WaveformEditorItem::drawChannelSeparators(
 }
 
 void WaveformEditorItem::drawContrastingLine(
-    QPainter &painter, const QLine &line,
+    QPainter &painter, const QLineF &line,
     const QColor &foreground, const QColor &contrast) {
     painter.save();
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
@@ -2228,13 +2316,14 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
     painter.setPen(QPen(kGrid, 1.0));
     const double span = visibleEnd - visibleStart;
     if (span > 0.0) {
+        const TimeAxis axis{visibleStart, visibleEnd, width, renderScaleLocked()};
         const double interval = selectTimeInterval(span, width);
         for (double time = std::ceil(visibleStart / interval) * interval; time <= visibleEnd; time += interval) {
-            const int x = static_cast<int>(std::round((time - visibleStart) / span * (width - 1)));
-            painter.drawLine(x, 0, x, height - 1);
+            const double x = axis.x(axis.columnOf(time));
+            painter.drawLine(QLineF(x, 0.0, x, height - 1.0));
             const QString label = formatTime(time, span);
             const int labelX = std::clamp(
-                x - metrics.horizontalAdvance(label) / 2,
+                static_cast<int>(x) - metrics.horizontalAdvance(label) / 2,
                 2,
                 std::max(2, width - metrics.horizontalAdvance(label) - 2));
             painter.setPen(QColor(152, 165, 157));
@@ -2452,14 +2541,20 @@ void WaveformEditorItem::drawDetailSliceLocked(
 
 void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
                                         double visibleStart, double visibleEnd) const {
-    const int x = std::clamp(static_cast<int>(m_hoverPosition.x()), 0, width - 1);
+    // On the column under the pointer, showing the time a click there
+    // seeks to.
+    const TimeAxis axis{visibleStart, visibleEnd, width, renderScaleLocked()};
+    const int column = axis.columnAt(m_hoverPosition.x());
+    const double lineX = axis.x(column);
+    const int x = static_cast<int>(lineX);
     const int y = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, height - 1);
     QPen pen(QColor(255, 255, 255, 140));
     pen.setStyle(Qt::DotLine);
     pen.setWidthF(1.0);
     painter.setPen(pen);
-    painter.drawLine(x, 0, x, height - 1); painter.drawLine(0, y, width - 1, y);
-    const double time = visibleStart + static_cast<double>(x) / std::max(1, width - 1) * (visibleEnd - visibleStart);
+    painter.drawLine(QLineF(lineX, 0.0, lineX, height - 1.0));
+    painter.drawLine(0, y, width - 1, y);
+    const double time = axis.timeAt(column);
     const int channels = displayedChannelCountLocked();
     const double channelHeight = static_cast<double>(height) / channels;
     const double localY = std::fmod(static_cast<double>(y), channelHeight);
@@ -2512,7 +2607,14 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::MiddleButton && zoomEnabled()) { event->accept(); resetZoom(); return; }
     if (event->button() != Qt::RightButton || !crosshairEnabled()) { event->ignore(); return; }
     double seconds = 0.0;
-    { QMutexLocker lock(&m_stateMutex); const auto [start, end] = visibleRangeLocked(); seconds = start + std::clamp(event->position().x() / std::max(1.0, width()), 0.0, 1.0) * (end - start); }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        const auto [start, end] = visibleRangeLocked();
+        // Where the crosshair is: see drawCrosshair.
+        const TimeAxis axis{
+            start, end, std::max(1, static_cast<int>(std::floor(width()))), renderScaleLocked()};
+        seconds = end > start ? axis.timeAt(axis.columnAt(event->position().x())) : start;
+    }
     event->accept(); emit seekRequested(seconds);
 }
 

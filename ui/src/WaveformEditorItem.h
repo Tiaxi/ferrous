@@ -51,7 +51,9 @@ class WaveformEditorItem : public QQuickItem {
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     Q_PROPERTY(int viewMode READ viewMode WRITE setViewMode NOTIFY viewModeChanged)
-    Q_PROPERTY(qulonglong mutedChannelsMask READ mutedChannelsMask WRITE setMutedChannelsMask NOTIFY mutedChannelsMaskChanged)
+    // Whether each channel, 0 to 63, is muted: a 64-bit mask would lose its
+    // low bits as a QML number.
+    Q_PROPERTY(QList<bool> mutedChannels READ mutedChannels WRITE setMutedChannels NOTIFY mutedChannelsChanged)
     Q_PROPERTY(int soloedChannel READ soloedChannel WRITE setSoloedChannel NOTIFY soloedChannelChanged)
     Q_PROPERTY(int channelCountHint READ channelCountHint WRITE setChannelCountHint NOTIFY channelCountHintChanged)
     Q_PROPERTY(int channelCount READ channelCount NOTIFY channelCountChanged)
@@ -91,6 +93,8 @@ public:
     void setViewMode(int value);
     qulonglong mutedChannelsMask() const;
     void setMutedChannelsMask(qulonglong value);
+    QList<bool> mutedChannels() const;
+    void setMutedChannels(const QList<bool> &value);
     int soloedChannel() const;
     void setSoloedChannel(int value);
     int channelCountHint() const;
@@ -121,7 +125,7 @@ signals:
     void crosshairEnabledChanged();
     void showFpsOverlayChanged();
     void viewModeChanged();
-    void mutedChannelsMaskChanged();
+    void mutedChannelsChanged();
     void soloedChannelChanged();
     void channelCountHintChanged();
     void channelCountChanged();
@@ -209,13 +213,19 @@ private:
     void requestDetailWindow();
     void clearDetailLocked();
     void clearPendingRequestLocked();
+    // The playback position and the view at a time on the clock. A frame
+    // reads the clock once, so that its view and playhead agree.
+    double displayedPositionSecondsLocked(qint64 nowNs) const;
     double displayedPositionSecondsLocked() const;
     bool detailOrPendingRequestCoversLocked(double startSeconds, double endSeconds) const;
     bool detailCoversRangeLocked(double startSeconds, double endSeconds) const;
     bool detailResolutionCoversLocked(double startSeconds, double endSeconds) const;
     bool detailResolutionCoversPixelSpanLocked(
         double startSeconds, double endSeconds, int pixelWidth) const;
+    std::pair<double, double> visibleRangeForZoomLocked(
+        double zoomLevel, qint64 nowNs) const;
     std::pair<double, double> visibleRangeForZoomLocked(double zoomLevel) const;
+    std::pair<double, double> visibleRangeLocked(qint64 nowNs) const;
     std::pair<double, double> visibleRangeLocked() const;
     std::pair<double, double> detailRequestVisibleRangeLocked() const;
     std::pair<double, double> requestRangeLocked(
@@ -269,9 +279,12 @@ private:
     void beginStagedCacheLocked();
     void beginStagedCacheForRangeLocked(
         double visibleStart, double visibleEnd, bool commitsDeferredZoom);
+    bool advanceStagedCacheLocked(qint64 nowNs);
     bool advanceStagedCacheLocked();
     void queueGuiContinuationFromPaint(
         bool notifySamplePointsChanged, bool requestRepaint);
+    void rebuildCacheLocked(
+        int width, int height, double visibleStart, double visibleEnd);
     void rebuildCacheLocked(int width, int height);
     bool playbackTilesEligibleLocked(
         double visibleStart, double visibleEnd) const;
@@ -291,7 +304,7 @@ private:
     static void drawChannelSeparators(
         QPainter &painter, int width, int height, int channels);
     static void drawContrastingLine(
-        QPainter &painter, const QLine &line,
+        QPainter &painter, const QLineF &line,
         const QColor &foreground, const QColor &contrast);
     static QPainterPath buildSamplePath(const QPolygonF &samples);
     static QString formatCrosshairTime(double seconds);
@@ -320,6 +333,8 @@ private:
     double m_overviewCoverageSeconds{0.0};
     bool m_overviewComplete{false};
     QPointer<PlaybackClock> m_clock;
+    // Now on the clock playback is stamped with; tests set their own.
+    std::function<qint64()> m_nowNs{monotonicNowNs};
     QMetaObject::Connection m_clockConnection;
     // A copy of the clock's state, which the render thread evaluates.
     PlaybackClockState m_clockState;

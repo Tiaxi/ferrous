@@ -279,6 +279,7 @@ private slots:
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void testMutedChannelsMaskDecoding();
     void currentTrackChannelsExposesDecodedMetadata();
+    void mutedChannelsKeepEveryBitOfTheMask();
     void metadataChannelLabelsDecodeOptionalTail();
     void channelLayoutFollowsMatchingMetadataAcrossTracks();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
@@ -4583,6 +4584,29 @@ void BridgeClientTest::channelLayoutFollowsMatchingMetadataAcrossTracks()
     QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("5.1"));
     QCOMPARE(client.currentTrackChannelLayoutIconKey(), QStringLiteral("5.1"));
     QCOMPARE(client.currentTrackChannelLabels(), snapshot.metadata.channelLabels);
+}
+
+void BridgeClientTest::mutedChannelsKeepEveryBitOfTheMask()
+{
+    // Soloing channel 0 mutes all the others: the engine's mask has its
+    // high bits set, which a QML number would round away.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/fixture/surround.wav");
+    for (const int soloed : {0, 5}) {
+        snapshot.playback.mutedChannelsMask = ~(quint64{1} << soloed);
+        snapshot.playback.soloedChannel = soloed;
+        QVERIFY(client.processBinarySnapshot(snapshot));
+        const QList<bool> muted = client.property("mutedChannels").value<QList<bool>>();
+        QCOMPARE(muted.size(), 64);
+        for (int channel = 0; channel < 64; ++channel) {
+            QCOMPARE(muted.at(channel), channel != soloed);
+            QCOMPARE(client.isChannelMuted(channel), channel != soloed);
+        }
+    }
 }
 
 void BridgeClientTest::testSoloChannelCommandEncoding()

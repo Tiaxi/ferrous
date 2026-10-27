@@ -26,6 +26,8 @@ The lookahead policy is shared by Rust and Qt through `ferrous_ffi_spectrogram_r
 
 Detail requests run on Qt worker threads. A shared Rust service gives them one persistent decoder, held for one tile at a time, and caches PCM and min/max summaries; the level meter decodes between the tiles of a detail window. File identity includes path, length, and modification time, and one file is opened at a time. A cancelled request does not wait for the service; incomplete cancelled tiles are not cached. The summary pyramid starts at 64-frame blocks and supports coarser power-of-two queries without decoding again. Clipped endpoints use PCM to avoid including samples outside the requested interval.
 
+The waveform editor has at most one detail request in flight. While playback moves the view on, that request stays as long as it covers part of the view, and its arrival asks for what it misses. A zoom, a resize, another track, or a seek to a view it does not cover cancels it.
+
 Native channels and the arithmetic downmix have separate extrema: averaging channel extrema would destroy phase cancellation. The versioned WVF2 payload carries both. The compact whole-track overview remains a separate background job with a persistent cache, partial-coverage metadata, and peak-preserving reduction. Only an overview whose decode reached the end of the file is saved, with the seconds it covers; one that an error stopped shows what it covers and is decoded again the next time the track plays. Loading a saved overview counts as a use, and the cache keeps the 4,096 used last.
 
 ## Channel positions
