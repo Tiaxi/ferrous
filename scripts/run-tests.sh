@@ -22,6 +22,13 @@ RUN_AUDIT="${FERROUS_RUN_AUDIT:-1}"
 RUN_COVERAGE="${FERROUS_RUN_COVERAGE:-0}"
 COVERAGE_MIN="${FERROUS_COVERAGE_MIN:-35}"
 RUST_FEATURES="${FERROUS_TEST_FEATURES:-gst}"
+# Cargo's default features include gst, so the checks build without them,
+# with the command-line frontend and the features named here; none, as with
+# ' ', selects the mock backend.
+CARGO_FEATURE_ARGS=(--no-default-features --features cli)
+if [[ -n "${RUST_FEATURES//[[:space:],]/}" ]]; then
+    CARGO_FEATURE_ARGS+=(--features "${RUST_FEATURES}")
+fi
 
 reset_stale_cmake_cache() {
     local cache_file="${BUILD_DIR}/CMakeCache.txt"
@@ -52,7 +59,8 @@ Options:
   -h, --help        Show this help
 
 Environment:
-  FERROUS_TEST_FEATURES   Cargo feature set for checks/tests (default: gst)
+  FERROUS_TEST_FEATURES   Cargo feature set for checks/tests (default: gst;
+                          ' ' for none, which tests the mock backend)
   FERROUS_RUN_CLIPPY      Run strict Clippy in Rust checks (default: 1)
   FERROUS_RUN_AUDIT       Run cargo audit in Rust checks (default: 1)
   FERROUS_RUN_COVERAGE    Run coverage gate via cargo-llvm-cov (default: 0)
@@ -127,9 +135,9 @@ with_test_user_dirs() {
 
 if [[ ${RUN_RUST} -eq 1 ]]; then
     cargo fmt --check
-    cargo check --features "${RUST_FEATURES}"
+    cargo check "${CARGO_FEATURE_ARGS[@]}"
     if [[ ${RUN_CLIPPY} -eq 1 ]]; then
-        cargo clippy --features "${RUST_FEATURES}" --all-targets -- -D warnings -D clippy::pedantic
+        cargo clippy "${CARGO_FEATURE_ARGS[@]}" --all-targets -- -D warnings -D clippy::pedantic
     fi
     if [[ ${RUN_COVERAGE} -eq 1 ]]; then
         if ! grep -qE '^[[:space:]]+llvm-cov([[:space:]]|$)' <<<"$(cargo --list)"; then
@@ -143,11 +151,11 @@ if [[ ${RUN_RUST} -eq 1 ]]; then
             echo "FERROUS_COVERAGE_MIN must be a number (got '${COVERAGE_MIN}')." >&2
             exit 1
         fi
-        with_test_user_dirs cargo llvm-cov --features "${RUST_FEATURES}" \
+        with_test_user_dirs cargo llvm-cov "${CARGO_FEATURE_ARGS[@]}" \
             --workspace --all-targets --summary-only \
             --fail-under-lines "${COVERAGE_MIN}"
     else
-        with_test_user_dirs cargo test --features "${RUST_FEATURES}"
+        with_test_user_dirs cargo test "${CARGO_FEATURE_ARGS[@]}"
     fi
     if [[ ${RUN_AUDIT} -eq 1 ]]; then
         if ! grep -qE '^[[:space:]]+audit([[:space:]]|$)' <<<"$(cargo --list)"; then

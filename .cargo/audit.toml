@@ -1,6 +1,7 @@
+# cargo audit reads this file; scripts/run-tests.sh and CI run it.
 [advisories]
-# paste is currently transitive via gstreamer/lofty/eframe stack.
-# Revisit on dependency upgrades and remove this ignore when upstreams migrate away.
 ignore = [
+  # paste is unmaintained. lofty uses it only as a build-time proc-macro, so no
+  # paste code ships. Remove this once lofty no longer depends on it.
   "RUSTSEC-2024-0436",
 ]

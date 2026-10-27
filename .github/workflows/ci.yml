@@ -73,6 +73,7 @@ jobs:
             shadow-utils \
             gcc \
             pkgconf-pkg-config \
+            dbus-devel \
             glib2-devel \
             gstreamer1-devel \
             gstreamer1-plugins-base-devel \
@@ -124,9 +125,10 @@ jobs:
         run: cargo clippy --locked --all-features --all-targets -- -D warnings -D clippy::pedantic
 
       # The mock backend builds code that the GStreamer features leave out.
+      # gst is a default feature, so it builds without the defaults.
       - name: Clippy (mock backend)
         if: matrix.lint
-        run: cargo clippy --locked --all-targets -- -D warnings -D clippy::pedantic
+        run: cargo clippy --locked --no-default-features --features cli --all-targets -- -D warnings -D clippy::pedantic
 
       - name: Install cargo-audit
         if: matrix.lint
@@ -169,7 +171,7 @@ jobs:
       - name: Test (mock backend)
         if: matrix.toolchain == 'pinned'
         shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
-        run: cargo test --locked
+        run: cargo test --locked --no-default-features --features cli
 
   ui:
     name: "UI Build + Smoke Tests${{ matrix.profile_logs == 'ON' && ' (profiling, Debug)' || '' }}"
@@ -199,10 +201,10 @@ jobs:
             cmake \
             ninja-build \
             gcc-c++ \
-            zsh \
             rust \
             cargo \
             pkgconf-pkg-config \
+            dbus-devel \
             glib2-devel \
             gstreamer1-devel \
             gstreamer1-plugins-base-devel \
@@ -219,19 +221,20 @@ jobs:
           persist-credentials: false
 
       # The UI jobs build the Rust library with Fedora's Rust, as the release
-      # RPMs do; the Rust job covers the pinned toolchain.
+      # RPMs do; the Rust job covers the pinned toolchain. CMake builds it in
+      # the build directory's own Cargo target directory.
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v0-ui-fedora-44-fedora-rust
           key: profile-logs-${{ matrix.profile_logs }}
+          workspaces: ". -> ui/build/cargo"
 
       - name: Configure UI
         run: >-
           cmake -S ui -B ui/build -G Ninja
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DFERROUS_ENABLE_PROFILE_LOGS=${{ matrix.profile_logs }}
-          -DFERROUS_CARGO_ARGS=--locked
 
       - name: Build UI
         run: cmake --build ui/build -j2

@@ -21,6 +21,7 @@ NUKE_DB=0
 NUKE_SESSION=0
 NUKE_THUMBNAILS=0
 CLEAR_DIAGNOSTICS_LOG=0
+ASSUME_YES=0
 ENABLE_COREDUMP=0
 ENABLE_PROFILE_LOGS=0
 APP_ARGS=()
@@ -38,82 +39,102 @@ reset_stale_cmake_cache() {
     fi
 }
 
-remove_file_target() {
-    local target="$1"
-    local label="$2"
+CLEANUP_PATHS=()
+CLEANUP_KINDS=()
+CLEANUP_LABELS=()
 
-    if [[ -f "${target}" ]]; then
-        echo "Removing ${label}: ${target}"
-        rm -f -- "${target}"
+# Usage: add_cleanup_target file|dir <path> <label>
+add_cleanup_target() {
+    CLEANUP_KINDS+=("$1")
+    CLEANUP_PATHS+=("$2")
+    CLEANUP_LABELS+=("$3")
+}
+
+cleanup_target_exists() {
+    local index="$1"
+    local path="${CLEANUP_PATHS[index]}"
+
+    if [[ "${CLEANUP_KINDS[index]}" == dir ]]; then
+        [[ -d "${path}" && ! -L "${path}" ]]
     else
-        echo "No ${label} at ${target}"
+        [[ -f "${path}" || -L "${path}" ]]
     fi
 }
 
-remove_dir_target() {
-    local target="$1"
-    local label="$2"
-
-    if [[ -d "${target}" ]]; then
-        echo "Removing ${label}: ${target}"
-        rm -rf -- "${target}"
-    else
-        echo "No ${label} at ${target}"
-    fi
-}
-
-nuke_library_db() {
+collect_cleanup_targets() {
     local data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+    local config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+    local cache_home="${XDG_CACHE_HOME:-${HOME}/.cache}"
     local db_path="${data_home}/ferrous/library.sqlite3"
 
-    remove_file_target "${db_path}" "library database"
-    remove_file_target "${db_path}-wal" "library database WAL"
-    remove_file_target "${db_path}-shm" "library database SHM"
-}
-
-nuke_session() {
-    local config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
-    local session_path="${config_home}/ferrous/session.json"
-
-    remove_file_target "${session_path}" "saved session"
-}
-
-nuke_thumbnail_cache() {
-    local cache_home="${XDG_CACHE_HOME:-${HOME}/.cache}"
-    local primary_path="${cache_home}/ferrous/thumbnails/library"
-    local fallback_path="/tmp/ferrous/thumbnails/library"
-
-    remove_dir_target "${primary_path}" "thumbnail cache"
-    if [[ "${fallback_path}" != "${primary_path}" ]]; then
-        remove_dir_target "${fallback_path}" "thumbnail cache fallback"
+    if [[ ${NUKE_DB} -eq 1 ]]; then
+        add_cleanup_target file "${db_path}" "library database"
+        add_cleanup_target file "${db_path}-wal" "library database WAL"
+        add_cleanup_target file "${db_path}-shm" "library database SHM"
+    fi
+    if [[ ${NUKE_SESSION} -eq 1 ]]; then
+        add_cleanup_target file "${config_home}/ferrous/session.json" "saved session"
+    fi
+    if [[ ${NUKE_THUMBNAILS} -eq 1 ]]; then
+        # Only older versions kept library thumbnails. Their folder under /tmp
+        # was shared by every user, so it is left alone.
+        add_cleanup_target dir "${cache_home}/ferrous/thumbnails/library" "thumbnail cache"
+    fi
+    if [[ ${CLEAR_DIAGNOSTICS_LOG} -eq 1 ]]; then
+        add_cleanup_target file "${data_home}/ferrous/diagnostics.log" "diagnostics log"
     fi
 }
 
-clear_diagnostics_log() {
-    local data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
-    local diagnostics_path="${data_home}/ferrous/diagnostics.log"
+confirm_cleanup() {
+    local reply=""
 
-    remove_file_target "${diagnostics_path}" "diagnostics log"
+    if [[ ${ASSUME_YES} -eq 1 ]]; then
+        return
+    fi
+    if [[ ! -t 0 ]]; then
+        echo "Not deleting without confirmation; pass --yes to delete without asking." >&2
+        exit 1
+    fi
+    read -r -p "Delete these? [y/N] " reply
+    if [[ ! "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        echo "Nothing was deleted." >&2
+        exit 1
+    fi
 }
 
 run_requested_cleanup() {
-    if [[ ${NUKE_DB} -eq 0 && ${NUKE_SESSION} -eq 0 && ${NUKE_THUMBNAILS} -eq 0 && ${CLEAR_DIAGNOSTICS_LOG} -eq 0 ]]; then
+    local existing=()
+    local index=0
+
+    collect_cleanup_targets
+    if [[ ${#CLEANUP_PATHS[@]} -eq 0 ]]; then
         return
     fi
 
-    echo "Running requested Ferrous cleanup..."
-    if [[ ${NUKE_DB} -eq 1 ]]; then
-        nuke_library_db
+    for index in "${!CLEANUP_PATHS[@]}"; do
+        if cleanup_target_exists "${index}"; then
+            existing+=("${index}")
+        else
+            echo "No ${CLEANUP_LABELS[index]} at ${CLEANUP_PATHS[index]}"
+        fi
+    done
+    if [[ ${#existing[@]} -eq 0 ]]; then
+        return
     fi
-    if [[ ${NUKE_SESSION} -eq 1 ]]; then
-        nuke_session
-    fi
-    if [[ ${NUKE_THUMBNAILS} -eq 1 ]]; then
-        nuke_thumbnail_cache
-    fi
-    if [[ ${CLEAR_DIAGNOSTICS_LOG} -eq 1 ]]; then
-        clear_diagnostics_log
-    fi
+
+    echo "This deletes Ferrous data:"
+    for index in "${existing[@]}"; do
+        echo "  ${CLEANUP_LABELS[index]}: ${CLEANUP_PATHS[index]}"
+    done
+    confirm_cleanup
+    for index in "${existing[@]}"; do
+        echo "Removing ${CLEANUP_LABELS[index]}: ${CLEANUP_PATHS[index]}"
+        if [[ "${CLEANUP_KINDS[index]}" == dir ]]; then
+            rm -rf -- "${CLEANUP_PATHS[index]}"
+        else
+            rm -f -- "${CLEANUP_PATHS[index]}"
+        fi
+    done
 }
 
 usage() {
@@ -129,10 +150,12 @@ Options:
   --profile-logs    Alias for --spectrogram-instrumentation
   --nuke-db         Delete Ferrous library DB (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/library.sqlite3 + -wal/-shm)
   --nuke-session    Delete saved playlist/session (${XDG_CONFIG_HOME:-\$HOME/.config}/ferrous/session.json)
-  --nuke-thumbnails Delete Ferrous library thumbnail cache (${XDG_CACHE_HOME:-\$HOME/.cache}/ferrous/thumbnails/library)
+  --nuke-thumbnails Delete the library thumbnail cache of older versions (${XDG_CACHE_HOME:-\$HOME/.cache}/ferrous/thumbnails/library)
   --clear-diagnostics-log
                     Delete Ferrous diagnostics log (${XDG_DATA_HOME:-\$HOME/.local/share}/ferrous/diagnostics.log)
   --nuke-all        Equivalent to --nuke-db --nuke-session --nuke-thumbnails
+  -y, --yes         Delete what the options above name without asking; needed
+                    when stdin is not a terminal
   --coredump        Enable unlimited core dump size and print coredumpctl hints
   -h, --help        Show this help
 
@@ -177,6 +200,9 @@ while [[ $# -gt 0 ]]; do
             NUKE_SESSION=1
             NUKE_THUMBNAILS=1
             ;;
+        -y|--yes)
+            ASSUME_YES=1
+            ;;
         --coredump)
             ENABLE_COREDUMP=1
             ;;
@@ -199,18 +225,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 run_requested_cleanup
-
-if ! command -v cargo >/dev/null 2>&1; then
-    if [[ -f "$HOME/.cargo/env" ]]; then
-        # shellcheck disable=SC1090
-        source "$HOME/.cargo/env"
-    fi
-fi
-
-if ! command -v cargo >/dev/null 2>&1; then
-    echo "cargo not found in PATH. Install Rust or source ~/.cargo/env" >&2
-    exit 1
-fi
 
 if [[ ${DO_CONFIGURE} -eq 1 ]]; then
     reset_stale_cmake_cache

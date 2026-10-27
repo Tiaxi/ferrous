@@ -21,8 +21,25 @@ if ! [[ "${NEW_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-# Cargo.toml — single source of truth
-sed -i "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" "${REPO_ROOT}/Cargo.toml"
+# Cargo.toml — single source of truth. Only the [package] table's version:
+# other tables, such as a dependency's, have their own.
+CARGO_TOML="${REPO_ROOT}/Cargo.toml"
+cargo_toml_tmp="$(mktemp "${CARGO_TOML}.XXXXXX")"
+trap 'rm -f -- "${cargo_toml_tmp}"' EXIT
+if ! awk -v version="${NEW_VERSION}" '
+    /^[[:space:]]*\[/ { table = $0; gsub(/^[[:space:]]*\[|\][[:space:]]*(#.*)?$/, "", table) }
+    table == "package" && !done && /^version[[:space:]]*=/ {
+        sub(/"[^"]*"/, "\"" version "\"")
+        done = 1
+    }
+    { print }
+    END { exit done ? 0 : 1 }
+' "${CARGO_TOML}" >"${cargo_toml_tmp}"; then
+    echo "Error: no version in the [package] table of ${CARGO_TOML}" >&2
+    exit 1
+fi
+chmod --reference="${CARGO_TOML}" "${cargo_toml_tmp}"
+mv -f -- "${cargo_toml_tmp}" "${CARGO_TOML}"
 
 # Regenerate Cargo.lock to match
 (cd "${REPO_ROOT}" && cargo update -p ferrous --quiet)

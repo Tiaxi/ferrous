@@ -16,12 +16,15 @@ set(FERROUS_CARGO_ARGS "" CACHE STRING "Extra arguments for the Cargo build of t
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)
 find_package(KF6Kirigami 6.0 REQUIRED)
 find_package(PkgConfig REQUIRED)
+# The system libraries that the Rust static library needs, which a static
+# archive cannot bring along; dbus-1 is the Secret Service keyring's.
 pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
     gstreamer-1.0
     gstreamer-app-1.0
     gstreamer-audio-1.0
     gstreamer-pbutils-1.0
     gio-2.0
+    dbus-1
 )
 
 qt_standard_project_setup(REQUIRES 6.6)
@@ -42,19 +45,62 @@ function(ferrous_enable_strict_warnings target_name)
 endfunction()
 
 set(FERROUS_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
-set(FERROUS_RUST_STATIC_LIB "${FERROUS_ROOT_DIR}/target/release/libferrous.a")
 
-# Read app version from Cargo.toml (single source of truth).
-file(STRINGS "${FERROUS_ROOT_DIR}/Cargo.toml" _cargo_version_line REGEX "^version *= *\"")
-string(REGEX REPLACE "^version *= *\"([^\"]+)\"" "\\1" FERROUS_APP_VERSION "${_cargo_version_line}")
+# Cargo from $CARGO, or else from the path, as in a shell; with rustup, its
+# proxy then picks the toolchain at build time and honours RUSTUP_TOOLCHAIN.
+# Cargo's own install directory is only a fallback for an environment without
+# it on the path.
+if(DEFINED ENV{CARGO} AND NOT FERROUS_CARGO)
+    set(FERROUS_CARGO "$ENV{CARGO}" CACHE FILEPATH "Cargo executable for the Rust library")
+endif()
+set(_ferrous_cargo_fallback_dirs "$ENV{HOME}/.cargo/bin")
+if(DEFINED ENV{CARGO_HOME})
+    list(PREPEND _ferrous_cargo_fallback_dirs "$ENV{CARGO_HOME}/bin")
+endif()
+find_program(FERROUS_CARGO cargo
+    PATHS ${_ferrous_cargo_fallback_dirs}
+    DOC "Cargo executable for the Rust library"
+    REQUIRED
+)
+message(STATUS "Cargo: ${FERROUS_CARGO}")
+
+# Each build directory has its own Cargo target directory, so a build with
+# other features, such as profiling, never replaces the archive this one links,
+# and CARGO_TARGET_DIR in the environment cannot move it away from here.
+set(FERROUS_CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo"
+    CACHE PATH "Cargo target directory for the Rust library")
+set(FERROUS_RUST_STATIC_LIB "${FERROUS_CARGO_TARGET_DIR}/release/libferrous.a")
+
+# Read app version from Cargo.toml's [package] table (single source of truth),
+# and configure again when Cargo.toml changes.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FERROUS_ROOT_DIR}/Cargo.toml")
+file(STRINGS "${FERROUS_ROOT_DIR}/Cargo.toml" _cargo_toml_lines)
+set(_cargo_table "")
+set(FERROUS_APP_VERSION "")
+foreach(_cargo_line IN LISTS _cargo_toml_lines)
+    if(_cargo_line MATCHES "^[ \t]*\\[([^]]*)\\]")
+        set(_cargo_table "${CMAKE_MATCH_1}")
+    elseif(_cargo_table STREQUAL "package" AND _cargo_line MATCHES "^version *= *\"([^\"]+)\"")
+        set(FERROUS_APP_VERSION "${CMAKE_MATCH_1}")
+        break()
+    endif()
+endforeach()
+if(FERROUS_APP_VERSION STREQUAL "")
+    message(FATAL_ERROR "Cannot read the package version from ${FERROUS_ROOT_DIR}/Cargo.toml")
+endif()
 message(STATUS "Ferrous version: ${FERROUS_APP_VERSION}")
 set(FERROUS_RUST_FEATURES "gst")
 if(FERROUS_ENABLE_PROFILE_LOGS)
     set(FERROUS_RUST_FEATURES "gst,profiling-logs")
 endif()
+separate_arguments(_ferrous_cargo_extra_args UNIX_COMMAND "${FERROUS_CARGO_ARGS}")
 
 add_custom_target(ferrous_rust_bridge ALL
-    COMMAND /bin/zsh -lc "if [ -f \"$HOME/.cargo/env\" ]; then source \"$HOME/.cargo/env\"; fi; cargo build --release --features ${FERROUS_RUST_FEATURES} --lib ${FERROUS_CARGO_ARGS}"
+    COMMAND "${FERROUS_CARGO}" build --release --locked --lib
+        --manifest-path "${FERROUS_ROOT_DIR}/Cargo.toml"
+        --target-dir "${FERROUS_CARGO_TARGET_DIR}"
+        --no-default-features --features "${FERROUS_RUST_FEATURES}"
+        ${_ferrous_cargo_extra_args}
     WORKING_DIRECTORY "${FERROUS_ROOT_DIR}"
     BYPRODUCTS "${FERROUS_RUST_STATIC_LIB}"
     COMMENT "Building Rust static library for in-process bridge"
@@ -194,13 +240,6 @@ target_link_libraries(ferrous PRIVATE
     pthread
 )
 
-if(UNIX AND NOT APPLE AND NOT MSVC)
-    # Keep symbols from static archives (notably vendored libdbus from Rust deps)
-    # out of the executable's dynamic symbol table so Qt binds to the shared
-    # system libraries it loaded, not our private static copies.
-    target_link_options(ferrous PRIVATE "-Wl,--exclude-libs,ALL")
-endif()
-
 if(FERROUS_ENABLE_PROFILE_LOGS)
     target_sources(ferrous PRIVATE src/SpectrogramSeekTrace.cpp)
     target_compile_definitions(ferrous PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
@@ -248,6 +287,14 @@ if(BUILD_TESTING)
             COMMAND "${FERROUS_DESKTOP_FILE_VALIDATE}" "${CMAKE_CURRENT_SOURCE_DIR}/ferrous.desktop"
         )
     endif()
+    # The repository scripts, run on scratch copies and stand-in commands.
+    find_program(FERROUS_BASH bash REQUIRED)
+    foreach(_script_test IN ITEMS bump-version install-rpm run-ui-cleanup)
+        add_test(NAME ferrous_script_${_script_test}
+            COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/tests/${_script_test}-test.sh"
+                "${CMAKE_CURRENT_BINARY_DIR}/script-tests/${_script_test}"
+        )
+    endforeach()
 
     qt_add_executable(ferrous_playback_clock_tests
         tests/tst_playback_clock.cpp
