@@ -47,6 +47,7 @@
 #include "../src/BinaryBridgeCodec.h"
 #include <QtEndian>
 #include "../src/SpectrogramTraceLogging.h"
+#include "TestPlatform.h"
 #include "TestUserDirectories.h"
 
 namespace {
@@ -360,6 +361,7 @@ private slots:
     void coverImageProviderUrlForPathFormat();
     void coverImageProviderReadsTheFileOfAStampedId();
     void replacedCoverReloadsForANewStampButNotFromTheCache();
+    void drawsOffscreenUnlessAPlatformIsChosen();
 
 private:
     QString m_userDirectoriesParent;
@@ -1025,12 +1027,15 @@ void BridgeClientTest::aRenamePreviewOfRowsLoadedAgainIsOutOfDate() {
 }
 
 void BridgeClientTest::tagEditorExitDoesNotWaitForAStalledSave() {
+    auto started = std::make_shared<QSemaphore>();
     auto stalled = std::make_shared<QSemaphore>();
     auto finished = std::make_shared<QSemaphore>();
     auto editor = std::make_unique<TagEditorController>(nullptr);
     QVERIFY(loadTagEditorRows(*editor, tagEditorRows(1, 1)));
-    editor->m_executeOperation = [stalled, finished](TagEditorController::Operation, const QByteArray &,
-                                                     const TagEditorController::RenameGate &) {
+    editor->m_executeOperation = [started, stalled, finished](TagEditorController::Operation,
+                                                              const QByteArray &,
+                                                              const TagEditorController::RenameGate &) {
+        started->release();
         // Storage that does not answer, for longer than any exit may take.
         stalled->tryAcquire(1, 30000);
         finished->release();
@@ -1042,7 +1047,7 @@ void BridgeClientTest::tagEditorExitDoesNotWaitForAStalledSave() {
 
     // The application waits for its global pool at exit however long its
     // work takes, so the save must not run there.
-    QTest::qWait(50);
+    QVERIFY(started->tryAcquire(1, 10000));
     QCOMPARE(QThreadPool::globalInstance()->activeThreadCount(), 0);
 
     // Destruction returns while the save is still stalled, without waiting
@@ -6030,7 +6035,12 @@ void BridgeClientTest::coverRevisionLinksKeepThePublishedLinkThroughABurst() {
     QVERIFY(QFileInfo(newest).isSymLink());
 }
 
+void BridgeClientTest::drawsOffscreenUnlessAPlatformIsChosen() {
+    verifyOffscreenPlatformByDefault();
+}
+
 int main(int argc, char **argv) {
+    useOffscreenPlatformByDefault();
     // Bridge construction starts library workers; keep scans and tag operations
     // independent of saved application data and concurrent test processes.
     // Each test also gets user directories of its own; see init().

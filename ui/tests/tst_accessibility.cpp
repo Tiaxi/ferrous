@@ -36,6 +36,7 @@
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
+#include "TestPlatform.h"
 
 namespace {
 
@@ -298,6 +299,7 @@ private slots:
     void tagEditorCaseButtonsAreBesideTheScrollBar();
     void modeSwitchIconFollowsTheMode();
     void visualizationsHaveAccessibleRoles();
+    void drawsOffscreenUnlessAPlatformIsChosen();
 };
 
 void AccessibilityTest::initTestCase() {
@@ -2060,7 +2062,12 @@ void AccessibilityTest::visualizationsHaveAccessibleRoles() {
     }
 }
 
+void AccessibilityTest::drawsOffscreenUnlessAPlatformIsChosen() {
+    verifyOffscreenPlatformByDefault();
+}
+
 int main(int argc, char **argv) {
+    useOffscreenPlatformByDefault();
     QTemporaryDir testStorage;
     if (!testStorage.isValid()) return 1;
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));

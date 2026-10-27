@@ -117,6 +117,7 @@ qt_add_executable(ferrous
     src/WaveformSceneGraph.h
     src/WaveformEditorItem.cpp
     src/LevelMeterItem.cpp
+    src/QmlTypes.cpp
 )
 
 target_include_directories(ferrous PRIVATE src)
@@ -130,10 +131,14 @@ qt_add_resources(ferrous ferrous_app_resources
         assets/ferrous.svg
 )
 
-qt_add_qml_module(ferrous
+# The QML module is a library of its own, which the app and the test that
+# loads the module as the app does both link.
+qt_add_library(ferrous_ui_qml STATIC)
+qt_add_qml_module(ferrous_ui_qml
     URI FerrousUi
     VERSION 1.0
-    NO_IMPORT_SCAN
+    NO_PLUGIN
+    OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/FerrousUi"
     QML_FILES
         qml/Main.qml
         qml/components/ActionShortcuts.qml
@@ -203,14 +208,11 @@ qt_add_qml_module(ferrous
         qml/logic/WheelUtils.js
 )
 
-if(NOT MSVC)
-    set_source_files_properties(
-        "${CMAKE_CURRENT_BINARY_DIR}/.rcc/qmlcache/ferrous_qml/Main_qml.cpp"
-        PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter"
-    )
-endif()
+ferrous_enable_strict_warnings(ferrous_ui_qml)
 
+set_target_properties(ferrous PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
 target_link_libraries(ferrous PRIVATE
+    ferrous_ui_qml
     "${FERROUS_RUST_STATIC_LIB}"
     PkgConfig::FERROUS_GSTREAMER
     Qt6::Core
@@ -240,6 +242,17 @@ install(FILES io.github.tiaxi.ferrous.metainfo.xml DESTINATION share/metainfo)
 
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
+
+    # Run without a platform chosen, as a developer may run it, a test binary
+    # draws offscreen instead of opening windows; tests/TestPlatform.h.
+    function(ferrous_add_default_platform_test target test_function)
+        add_test(NAME ${target}_default_platform COMMAND ${target} ${test_function})
+        set_tests_properties(${target}_default_platform PROPERTIES
+            ENVIRONMENT_MODIFICATION "QT_QPA_PLATFORM=unset:;DISPLAY=unset:;WAYLAND_DISPLAY=unset:"
+            FAIL_REGULAR_EXPRESSION "SKIP"
+            TIMEOUT 60
+        )
+    endfunction()
 
     add_test(NAME ferrous_metainfo_release_version
         COMMAND "${CMAKE_COMMAND}"
@@ -291,6 +304,16 @@ if(BUILD_TESTING)
             COMMAND "${FERROUS_DESKTOP_FILE_VALIDATE}" "${CMAKE_CURRENT_SOURCE_DIR}/ferrous.desktop"
         )
     endif()
+    foreach(metadata_test IN ITEMS
+            ferrous_metainfo_release_version
+            ferrous_release_version_check
+            ferrous_release_version_consistent
+            ferrous_metainfo_validate
+            ferrous_desktop_file_validate)
+        if(TEST ${metadata_test})
+            set_tests_properties(${metadata_test} PROPERTIES TIMEOUT 60)
+        endif()
+    endforeach()
 
     qt_add_executable(ferrous_playback_clock_tests
         tests/tst_playback_clock.cpp
@@ -300,6 +323,7 @@ if(BUILD_TESTING)
     target_link_libraries(ferrous_playback_clock_tests PRIVATE Qt6::Core Qt6::Test)
     ferrous_enable_strict_warnings(ferrous_playback_clock_tests)
     add_test(NAME ferrous_playback_clock_tests COMMAND ferrous_playback_clock_tests)
+    set_tests_properties(ferrous_playback_clock_tests PROPERTIES TIMEOUT 60)
 
     qt_add_executable(ferrous_level_meter_tests
         tests/tst_level_meter.cpp
@@ -317,10 +341,13 @@ if(BUILD_TESTING)
     add_test(NAME ferrous_level_meter_tests COMMAND ferrous_level_meter_tests)
     set_tests_properties(ferrous_level_meter_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software"
+        TIMEOUT 90
     )
+    ferrous_add_default_platform_test(ferrous_level_meter_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     qt_add_executable(ferrous_qml_smoke_tests
         tests/tst_qml_smoke.cpp
+        src/QmlTypes.cpp
         src/BinaryBridgeCodec.cpp
         src/BridgeClient.cpp
         src/CoverImageProvider.cpp
@@ -372,10 +399,43 @@ if(BUILD_TESTING)
     set_target_properties(ferrous_qml_smoke_tests PROPERTIES
         QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
-    add_test(NAME ferrous_qml_smoke_tests COMMAND ferrous_qml_smoke_tests)
-    set_tests_properties(ferrous_qml_smoke_tests PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    # The smoke tests run by area, each area in a process of its own, so a
+    # crash or hang in one area costs only that area's results, and quickly.
+    # The areas are the test classes of tst_qml_smoke.cpp. Each timeout is
+    # many times the area's run time in CI, for slower machines.
+    set(FERROUS_QML_SMOKE_AREAS
+        spectrogram 180
+        waveform 120
+        library_queue 120
+        transport_input 90
+        window 120
+        preferences 60
+        errors 120
+        tag_editor 180
     )
+    set(ferrous_smoke_area_names "")
+    list(LENGTH FERROUS_QML_SMOKE_AREAS ferrous_smoke_area_values)
+    math(EXPR ferrous_smoke_area_last "${ferrous_smoke_area_values} - 1")
+    foreach(index RANGE 0 ${ferrous_smoke_area_last} 2)
+        math(EXPR timeout_index "${index} + 1")
+        list(GET FERROUS_QML_SMOKE_AREAS ${index} area)
+        list(GET FERROUS_QML_SMOKE_AREAS ${timeout_index} timeout)
+        list(APPEND ferrous_smoke_area_names ${area})
+        add_test(NAME ferrous_qml_smoke_${area} COMMAND ferrous_qml_smoke_tests -area ${area})
+        set_tests_properties(ferrous_qml_smoke_${area} PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            TIMEOUT ${timeout}
+        )
+    endforeach()
+    # Fails when the binary has an area that is not registered here.
+    add_test(NAME ferrous_qml_smoke_areas
+        COMMAND ferrous_qml_smoke_tests -check-areas ${ferrous_smoke_area_names}
+    )
+    set_tests_properties(ferrous_qml_smoke_areas PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 60
+    )
+    ferrous_add_default_platform_test(ferrous_qml_smoke_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     qt_add_executable(ferrous_accessibility_tests
         tests/tst_accessibility.cpp
@@ -435,7 +495,9 @@ if(BUILD_TESTING)
     add_test(NAME ferrous_accessibility_tests COMMAND ferrous_accessibility_tests)
     set_tests_properties(ferrous_accessibility_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 180
     )
+    ferrous_add_default_platform_test(ferrous_accessibility_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     qt_add_executable(ferrous_app_instance_tests
         tests/tst_app_instance_controller.cpp
@@ -453,7 +515,9 @@ if(BUILD_TESTING)
     add_test(NAME ferrous_app_instance_tests COMMAND ferrous_app_instance_tests)
     set_tests_properties(ferrous_app_instance_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 60
     )
+    ferrous_add_default_platform_test(ferrous_app_instance_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     qt_add_executable(ferrous_display_sleep_inhibitor_tests
         tests/tst_display_sleep_inhibitor.cpp
@@ -470,6 +534,7 @@ if(BUILD_TESTING)
         NAME ferrous_display_sleep_inhibitor_tests
         COMMAND ferrous_display_sleep_inhibitor_tests
     )
+    set_tests_properties(ferrous_display_sleep_inhibitor_tests PROPERTIES TIMEOUT 60)
 
     qt_add_executable(ferrous_bridge_client_tests
         tests/tst_bridge_client.cpp
@@ -526,5 +591,59 @@ if(BUILD_TESTING)
     # a machine without one, such as a CI runner, reports it as an error.
     set_tests_properties(ferrous_bridge_client_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;FERROUS_GST_OUTPUT_SINK=fakesink"
+        TIMEOUT 180
     )
+    ferrous_add_default_platform_test(ferrous_bridge_client_tests drawsOffscreenUnlessAPlatformIsChosen)
+
+    # The QML module as the app loads it; tests/tst_qml_module.cpp.
+    qt_add_executable(ferrous_qml_module_tests
+        tests/tst_qml_module.cpp
+        src/BinaryBridgeCodec.cpp
+        src/CoverRevisionLinks.cpp
+        src/LevelMeterItem.cpp
+        src/LibraryTreeModel.cpp
+        src/PlaybackClock.cpp
+        src/QmlTypes.cpp
+        src/SpectrogramItem.cpp
+        src/WaveformEditorItem.cpp
+        src/WaveformItem.cpp
+        src/WaveformSceneGraph.cpp
+        src/WaveformSceneGraph.h
+    )
+    target_include_directories(ferrous_qml_module_tests PRIVATE src)
+    add_dependencies(ferrous_qml_module_tests ferrous_rust_bridge)
+    target_compile_definitions(ferrous_qml_module_tests PRIVATE
+        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(ferrous_qml_module_tests PRIVATE
+        ferrous_ui_qml
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Qml
+        Qt6::Quick
+        Qt6::QuickControls2
+        Qt6::Concurrent
+        Qt6::Widgets
+        Qt6::Test
+        KF6::Kirigami
+        "${FERROUS_RUST_STATIC_LIB}"
+        PkgConfig::FERROUS_GSTREAMER
+        dl
+        m
+        pthread
+    )
+    ferrous_enable_strict_warnings(ferrous_qml_module_tests)
+    if(FERROUS_ENABLE_PROFILE_LOGS)
+        target_sources(ferrous_qml_module_tests PRIVATE src/SpectrogramSeekTrace.cpp)
+        target_compile_definitions(ferrous_qml_module_tests PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
+    endif()
+    set_target_properties(ferrous_qml_module_tests PROPERTIES
+        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
+    )
+    add_test(NAME ferrous_qml_module_tests COMMAND ferrous_qml_module_tests)
+    set_tests_properties(ferrous_qml_module_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 120
+    )
+    ferrous_add_default_platform_test(ferrous_qml_module_tests drawsOffscreenUnlessAPlatformIsChosen)
 endif()

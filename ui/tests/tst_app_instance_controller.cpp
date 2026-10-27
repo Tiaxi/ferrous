@@ -2,11 +2,13 @@
 
 #include <QCloseEvent>
 #include <QDBusAbstractAdaptor>
+#include <QGuiApplication>
 #include <QWindow>
 #include <QtTest/QtTest>
 
 #include "../src/AppInstanceController.h"
 #include "../src/WindowActivation.h"
+#include "TestPlatform.h"
 
 #include <memory>
 
@@ -80,6 +82,7 @@ private slots:
     void activationRaisesMainWindowNotHiddenViewer();
     void closeMainWindowSendsTheMainWindowACloseEvent();
     void activationTokenReachesOnlyWayland();
+    void drawsOffscreenUnlessAPlatformIsChosen();
 };
 
 void AppInstanceControllerTest::sanitizeOpenTargetsDropsBlankEntries() {
@@ -263,7 +266,16 @@ void AppInstanceControllerTest::activationTokenReachesOnlyWayland() {
     qunsetenv("XDG_ACTIVATION_TOKEN");
 }
 
-QTEST_MAIN(AppInstanceControllerTest)
+void AppInstanceControllerTest::drawsOffscreenUnlessAPlatformIsChosen() {
+    verifyOffscreenPlatformByDefault();
+}
+
+int main(int argc, char **argv) {
+    useOffscreenPlatformByDefault();
+    QGuiApplication app(argc, argv);
+    AppInstanceControllerTest test;
+    return QTest::qExec(&test, argc, argv);
+}
 
 void AppInstanceControllerTest::closeMainWindowSendsTheMainWindowACloseEvent() {
     // Counts close events and refuses them, as a window still saving does.

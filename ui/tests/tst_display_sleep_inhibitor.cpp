@@ -3,10 +3,13 @@
 #include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusPendingCall>
+#include <QDBusPendingCallWatcher>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QSignalSpy>
 #include <QtTest/QtTest>
 
+#include <algorithm>
 #include <memory>
 
 #include "../src/DisplaySleepInhibitor.h"
@@ -57,9 +60,17 @@ struct FakeScreenSaver {
     }
 };
 
-// Replies to completed calls reach the watcher through queued events.
-void deliverReplies() {
-    QTest::qWait(20);
+// Replies to completed calls reach the backend's watchers from another
+// thread. Each watcher is deleted once the backend has handled its reply.
+bool deliverReplies(const QObject &backend) {
+    QList<QPointer<QDBusPendingCallWatcher>> watchers;
+    for (QDBusPendingCallWatcher *watcher : backend.findChildren<QDBusPendingCallWatcher *>()) {
+        watchers.push_back(watcher);
+    }
+    return QTest::qWaitFor([&watchers]() {
+        return std::all_of(watchers.cbegin(), watchers.cend(),
+            [](const QPointer<QDBusPendingCallWatcher> &watcher) { return watcher.isNull(); });
+    }, 5000);
 }
 
 void verifyScreenSaverEndpoint(const QDBusMessage &message) {
@@ -120,7 +131,7 @@ void DisplaySleepInhibitorTest::inhibitsIdleOnlyThroughScreenSaver() {
     QCOMPARE(inhibit.arguments().size(), 2);
     QCOMPARE(inhibit.arguments().at(0).toString(), QStringLiteral("Ferrous"));
     QVERIFY(!inhibit.arguments().at(1).toString().isEmpty());
-    deliverReplies();
+    QVERIFY(deliverReplies(backend));
 
     backend.setInhibited(false);
     QCOMPARE(screenSaver.members(), (QStringList{QStringLiteral("Inhibit"), QStringLiteral("UnInhibit")}));
@@ -139,7 +150,7 @@ void DisplaySleepInhibitorTest::releasesCookieThatArrivesAfterRelease() {
     backend.setInhibited(true);
     backend.setInhibited(false);
     QCOMPARE(screenSaver.members(), QStringList{QStringLiteral("Inhibit")});
-    deliverReplies();
+    QVERIFY(deliverReplies(backend));
     QCOMPARE(screenSaver.calls.size(), 2);
     QCOMPARE(screenSaver.calls.last().member(), QStringLiteral("UnInhibit"));
     QCOMPARE(screenSaver.calls.last().arguments(), QVariantList{QVariant::fromValue(quint32{41})});
@@ -152,7 +163,7 @@ void DisplaySleepInhibitorTest::keepsOneRequestWhenToggledBeforeReply() {
     backend.setInhibited(true);
     backend.setInhibited(false);
     backend.setInhibited(true);
-    deliverReplies();
+    QVERIFY(deliverReplies(backend));
     QCOMPARE(screenSaver.members(), QStringList{QStringLiteral("Inhibit")});
 
     backend.setInhibited(false);
@@ -164,7 +175,7 @@ void DisplaySleepInhibitorTest::destructionReleasesHeldCookie() {
     {
         ScreenSaverInhibitorBackend backend(screenSaver.caller());
         backend.setInhibited(true);
-        deliverReplies();
+        QVERIFY(deliverReplies(backend));
     }
     QCOMPARE(screenSaver.members(), (QStringList{QStringLiteral("Inhibit"), QStringLiteral("UnInhibit")}));
 }
@@ -176,7 +187,7 @@ void DisplaySleepInhibitorTest::failedInhibitHoldsNoCookie() {
 
     QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("Unable to inhibit display sleep")));
     backend.setInhibited(true);
-    deliverReplies();
+    QVERIFY(deliverReplies(backend));
     backend.setInhibited(false);
     QCOMPARE(screenSaver.members(), QStringList{QStringLiteral("Inhibit")});
 
@@ -189,12 +200,14 @@ void DisplaySleepInhibitorTest::failedInhibitHoldsNoCookie() {
 void DisplaySleepInhibitorTest::failedInhibitIsReportedWhileRequested() {
     FakeScreenSaver screenSaver;
     screenSaver.failInhibit = true;
-    DisplaySleepInhibitor inhibitor(std::make_unique<ScreenSaverInhibitorBackend>(screenSaver.caller()));
+    auto ownedBackend = std::make_unique<ScreenSaverInhibitorBackend>(screenSaver.caller());
+    const ScreenSaverInhibitorBackend &backend = *ownedBackend;
+    DisplaySleepInhibitor inhibitor(std::move(ownedBackend));
     QSignalSpy failures(&inhibitor, &DisplaySleepInhibitor::inhibitionFailed);
 
     QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("Unable to inhibit display sleep")));
     inhibitor.setInhibited(true);
-    deliverReplies();
+    QVERIFY(deliverReplies(backend));
     QCOMPARE(failures.size(), 1);
     const QString message = failures.at(0).at(0).toString();
     QVERIFY2(message.contains(QStringLiteral("Couldn't keep the screen awake")), qPrintable(message));
@@ -204,7 +217,7 @@ void DisplaySleepInhibitorTest::failedInhibitIsReportedWhileRequested() {
     inhibitor.setInhibited(false);
     inhibitor.setInhibited(true);
     inhibitor.setInhibited(false);
-    deliverReplies();
+    QVERIFY(deliverReplies(backend));
     QCOMPARE(failures.size(), 1);
 }
 

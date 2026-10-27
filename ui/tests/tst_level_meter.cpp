@@ -18,6 +18,7 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#include "TestPlatform.h"
 #define private public
 #include "LevelMeterItem.h"
 #undef private
@@ -245,6 +246,7 @@ private slots:
     void idleMeterWakesForItsNextPixel();
     void pauseAndResumeKeepTheTimeBetween();
     void idleWakesTakeEveryBufferedBin();
+    void drawsOffscreenUnlessAPlatformIsChosen();
 };
 
 void LevelMeterTest::attackReleaseAndPeakHold() {
@@ -530,7 +532,7 @@ void LevelMeterTest::sceneGraphDrawsFixedGradientAndThinSurroundRows() {
         item.m_channels[0].peak = -2;
         item.m_shown = item.m_channels;
         item.update();
-        QTest::qWait(30);
+        // Grabbing draws the window's scene as it is now.
         const QImage image = view.grabWindow();
         QVERIFY(!image.isNull());
         QCOMPARE(item.height(), 20.0);
@@ -783,7 +785,12 @@ void LevelMeterTest::idleWakesTakeEveryBufferedBin() {
              qPrintable(QString::number(reference.channel.peak)));
 }
 
+void LevelMeterTest::drawsOffscreenUnlessAPlatformIsChosen() {
+    verifyOffscreenPlatformByDefault();
+}
+
 int main(int argc, char **argv) {
+    useOffscreenPlatformByDefault();
     QTemporaryDir testStorage;
     if (!testStorage.isValid()) return 1;
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
