@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::cell::Cell;
 use std::path::Path;
 use std::time::Duration;
 
 use gst::prelude::*;
 use gstreamer as gst;
 
-use super::cache::usize_to_u64;
+use super::cache::{usize_to_u64, WaveformSourceStamp};
 use super::fft::{reduce_waveform_peaks, OverviewProgress};
+use super::track_io::stamp_of;
+use crate::playback::file_source::FileSource;
 use crate::raw_audio::{configure_raw_surround_decoding, filter_raw_surround_source};
 
 pub(super) struct GstWaveformAccumulator {
@@ -81,14 +84,17 @@ impl GstWaveformAccumulator {
     }
 }
 
+/// The overview pipeline of the file at `path`, its bus, its `level`, and
+/// its source, the playback's `ferrousfilesrc`, which tells the metadata of
+/// the file it opened.
 pub(super) fn build_waveform_gst_pipeline(
     path: &Path,
-) -> anyhow::Result<(gst::Pipeline, gst::Bus, gst::Element)> {
+) -> anyhow::Result<(gst::Pipeline, gst::Bus, gst::Element, FileSource)> {
     let pipeline = gst::Pipeline::new();
-    let src = gst::ElementFactory::make("filesrc")
-        .build()
-        .map_err(|_| anyhow::anyhow!("missing filesrc element"))?;
-    src.set_property("location", path.to_string_lossy().to_string());
+    let file_source = gst::glib::Object::builder::<FileSource>()
+        .property("location", path.to_string_lossy().to_string())
+        .build();
+    let src = file_source.clone().upcast::<gst::Element>();
     filter_raw_surround_source(&src);
 
     let decodebin = gst::ElementFactory::make("decodebin")
@@ -154,7 +160,7 @@ pub(super) fn build_waveform_gst_pipeline(
     let bus = pipeline
         .bus()
         .ok_or_else(|| anyhow::anyhow!("waveform pipeline has no bus"))?;
-    Ok((pipeline, bus, level))
+    Ok((pipeline, bus, level, file_source))
 }
 
 pub(super) fn configure_waveform_gst_pipeline(
@@ -177,9 +183,14 @@ pub(super) fn configure_waveform_gst_pipeline(
     Ok(duration_ns)
 }
 
+/// Decode the overview of the file at `path` with `GStreamer`. `source`
+/// tells, for each update, the stamp of the file the decode reads, taken
+/// from the handle its source opened, as another file may be at the path
+/// before the source opens it, or by the time the decode ends.
 pub(super) fn decode_waveform_peaks_stream_gst<F, C>(
     path: &Path,
     max_points: usize,
+    source: &Cell<Option<WaveformSourceStamp>>,
     mut on_update: F,
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
@@ -187,15 +198,18 @@ where
     F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
     C: FnMut() -> bool,
 {
+    source.set(None);
     if is_cancelled() {
         return Ok(());
     }
 
     gst::init()?;
     configure_raw_surround_decoding();
-    let (pipeline, bus, level) = build_waveform_gst_pipeline(path)?;
+    let (pipeline, bus, level, file_source) = build_waveform_gst_pipeline(path)?;
     let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     let duration_ns = configure_waveform_gst_pipeline(&pipeline, &level, max_points)?;
+    // The source opened the file when the pipeline started.
+    source.set(file_source.opened_metadata().as_ref().and_then(stamp_of));
     let mut waveform = GstWaveformAccumulator::new(max_points, duration_ns);
     loop {
         if is_cancelled() {
@@ -383,7 +397,7 @@ mod tests {
     #[test]
     fn failed_waveform_configuration_releases_the_started_pipeline() {
         gst::init().expect("gstreamer initialization");
-        let (pipeline, _, level) =
+        let (pipeline, _, level, _) =
             build_waveform_gst_pipeline(Path::new("/missing/waveform-startup.wav"))
                 .expect("build pipeline");
         {
@@ -405,9 +419,11 @@ mod tests {
             ));
             std::fs::write(&path, ripped_surround_bytes(stream).0).expect("write fixture");
             let mut finished = None;
+            let source = Cell::new(None);
             let result = decode_waveform_peaks_stream_gst(
                 &path,
                 64,
+                &source,
                 |peaks, coverage, progress| {
                     if progress == OverviewProgress::Complete {
                         finished = Some((peaks, coverage));

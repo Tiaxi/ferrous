@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The file source of the `playbin3` pipelines, whose reads a flush
-//! interrupts.
+//! interrupts. The waveform overview reads with it too, for the metadata of
+//! the file it opened (`FileSource::opened_metadata`).
 //!
 //! `filesrc` reads its file on the streaming thread that asks for the data.
 //! A `read()` that the kernel does not return, from a network share that
@@ -86,6 +87,15 @@ glib::wrapper! {
     pub(crate) struct FileSource(ObjectSubclass<imp::FileSource>)
         @extends gst_base::BaseSrc, gst::Element, gst::Object,
         @implements gst::URIHandler;
+}
+
+impl FileSource {
+    /// The metadata of the file the source has open, which it read from the
+    /// open handle (`fstat`): that of the file it reads, whichever file is
+    /// at its location by now. `None` while it has none open.
+    pub(crate) fn opened_metadata(&self) -> Option<std::fs::Metadata> {
+        self.imp().opened_metadata()
+    }
 }
 
 /// The files of stopped sources that have not been closed yet, behind a
@@ -478,6 +488,8 @@ struct Open {
     path: Arc<Path>,
     reader: Arc<Reader>,
     seekable: bool,
+    /// The file's metadata, read from the handle when it was opened.
+    metadata: std::fs::Metadata,
     /// The size of the file when it was opened, or when the reader was
     /// last asked.
     size: u64,
@@ -595,9 +607,14 @@ mod imp {
                 // Only a regular file has a size and can be read anywhere.
                 seekable: kind.is_file(),
                 size: metadata.len(),
+                metadata,
                 size_unasked: true,
                 release: None,
             })
+        }
+
+        pub(super) fn opened_metadata(&self) -> Option<std::fs::Metadata> {
+            lock(&self.open).as_ref().map(|open| open.metadata.clone())
         }
 
         /// Ask the reader for `op` on the file, and wait for the answer,
