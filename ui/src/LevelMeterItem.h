@@ -4,9 +4,11 @@
 
 #include <QPointer>
 #include <QQuickItem>
+#include <QTimer>
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -45,6 +47,8 @@ signals:
 
 protected:
     QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) override;
+    void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+    void itemChange(ItemChange change, const ItemChangeData &value) override;
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -74,6 +78,10 @@ private:
     bool visibleForPlayback() const;
     void scheduleTick();
     void tick();
+    void showCurrent();
+    double deviceWidth() const;
+    bool showsPainted(const std::vector<Channel> &channels, double deviceWidth) const;
+    void scheduleWake(Clock::time_point now, double position);
     void requestWindow(double position);
     void advance(double position, double elapsed);
     double currentPosition(Clock::time_point now) const;
@@ -90,6 +98,16 @@ private:
     Clock::time_point m_retryAt{};
     double m_readPosition{0.0};
     std::vector<Channel> m_channels{2};
+    // The channels as drawn. While playback consumes bins, they stay at the
+    // end of the newest bin heard (m_shownAt, in track seconds), so a steady
+    // signal shows steady bars; otherwise they are m_channels (m_shownAt NaN).
+    std::vector<Channel> m_shown{2};
+    double m_shownAt{std::numeric_limits<double>::quiet_NaN()};
+    double m_shownStep{0.0};
+    // Fill and peak marker device pixels of each channel in the last frame.
+    std::vector<int> m_paintedPixels;
+    // Wakes the meter when the drawn levels next change, while no frame is due.
+    QTimer m_wakeTimer;
     Window m_window;
     Window m_stagedWindow;
     quint64 m_generation{0};
