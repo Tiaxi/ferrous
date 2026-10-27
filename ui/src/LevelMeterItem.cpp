@@ -129,7 +129,7 @@ void LevelMeterItem::reset() {
     m_channels.assign(static_cast<std::size_t>(m_channelCountHint), {});
     showCurrent();
     m_wakeTimer.stop();
-    m_frameAt = Clock::now();
+    m_frameAt = m_now();
     m_readPosition = currentPosition(m_frameAt);
     m_retryAt = {};
     scheduleTick();
@@ -178,8 +178,9 @@ void LevelMeterItem::setDurationSeconds(double value) {
 
 void LevelMeterItem::setPlaying(bool value) {
     if (m_playing == value) return;
+    // An idle meter is not ticked; bring its levels to now under the old mode.
+    advanceTo(m_now());
     m_playing = value;
-    m_frameAt = Clock::now();
     if (!value) cancelRequest();
     emit playingChanged();
     scheduleTick();
@@ -253,17 +254,22 @@ bool LevelMeterItem::showsPainted(const std::vector<Channel> &channels, double d
     return true;
 }
 
+double LevelMeterItem::advanceTo(Clock::time_point now) {
+    const double elapsed = std::chrono::duration<double>(now - m_frameAt).count();
+    m_frameAt = now;
+    const double position = currentPosition(now);
+    advance(position, elapsed);
+    return position;
+}
+
 void LevelMeterItem::tick() {
     m_wakeTimer.stop();
     if (!visibleForPlayback()) return;
     const bool moving = m_playing || std::any_of(m_channels.begin(), m_channels.end(),
         [](const Channel &channel) { return channel.peak > kFloorDb || channel.level > kFloorDb; });
     if (!moving) return;
-    const auto now = Clock::now();
-    const double elapsed = std::chrono::duration<double>(now - m_frameAt).count();
-    m_frameAt = now;
-    const double position = currentPosition(now);
-    advance(position, elapsed);
+    const auto now = m_now();
+    const double position = advanceTo(now);
     if (m_playing) requestWindow(position);
     // A frame that would draw the same pixels is skipped. The frame after a
     // change ticks again; otherwise the meter sleeps until its next change.
@@ -341,10 +347,11 @@ void LevelMeterItem::advance(double position, double elapsed) {
             m_channels.assign(static_cast<std::size_t>(data.channels), {});
         }
         const int points = static_cast<int>(data.peaksDb.size() / data.channels);
-        // A late decode or resumed window must not replay old peaks. A bin is
+        // Every bin that ended since the last frame counts once, also after a
+        // long idle wait. Bins before it, such as those of a late decode or of
+        // a window resumed after a pause, are never replayed. A bin is
         // eligible only after its end reaches the audible playhead.
-        const double begin = std::max(m_readPosition, position - 0.1);
-        const int first = static_cast<int>(std::clamp(std::floor((begin - data.start) / data.step), 0.0, double(points)));
+        const int first = static_cast<int>(std::clamp(std::floor((m_readPosition - data.start) / data.step), 0.0, double(points)));
         const int last = position >= data.end ? points
             : static_cast<int>(std::clamp(std::floor((position - data.start) / data.step), 0.0, double(points)));
         for (int point = first; point < last; ++point) {
@@ -386,7 +393,7 @@ void LevelMeterItem::advance(double position, double elapsed) {
 
 void LevelMeterItem::requestWindow(double position) {
     if (m_requestActive || m_sourcePath.isEmpty() || m_durationSeconds <= position
-        || !visibleForPlayback() || Clock::now() < m_retryAt) return;
+        || !visibleForPlayback() || m_now() < m_retryAt) return;
     const Window &latest = m_stagedWindow.channels > 0 ? m_stagedWindow : m_window;
     if (latest.channels > 0 && latest.end >= std::min(m_durationSeconds, position + kRequestLeadSeconds)) return;
     // Two seconds of millisecond-scale extrema, shared with waveform detail's
@@ -406,7 +413,7 @@ void LevelMeterItem::requestWindow(double position) {
         watcher->deleteLater();
         if (generation == m_generation) {
             if (next.channels > 0) m_stagedWindow = std::move(next);
-            else m_retryAt = Clock::now() + std::chrono::seconds(1);
+            else m_retryAt = m_now() + std::chrono::seconds(1);
         }
         scheduleTick();
     });

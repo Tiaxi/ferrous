@@ -78,6 +78,8 @@ private:
     bool visibleForPlayback() const;
     void scheduleTick();
     void tick();
+    // Runs the ballistics up to `now`; returns the playback position there.
+    double advanceTo(Clock::time_point now);
     void showCurrent();
     double deviceWidth() const;
     bool showsPainted(const std::vector<Channel> &channels, double deviceWidth) const;
@@ -94,6 +96,8 @@ private:
     double m_durationSeconds{0.0};
     bool m_playing{false};
     int m_channelCountHint{2};
+    // The meter's time; tests drive it by hand.
+    std::function<Clock::time_point()> m_now{&Clock::now};
     Clock::time_point m_frameAt{Clock::now()};
     Clock::time_point m_retryAt{};
     double m_readPosition{0.0};

@@ -16,6 +16,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 #define private public
 #include "LevelMeterItem.h"
@@ -79,24 +80,13 @@ LevelMeterItem::Window levelWindow(double start, double end, const std::function
     return window;
 }
 
-// A meter playing `db(t)` in a 400 px window, with frames counted.
-struct PlayingMeter {
-    explicit PlayingMeter(std::function<float(double)> db) {
+// A 400 px meter in a window, playing a 100 s track on its own clock.
+struct MeterFixture {
+    MeterFixture() {
         view.resize(400, 20);
         // As QML does: the item joins the window after it is made.
         item.setParentItem(view.contentItem());
         item.setSize(QSizeF(400, 20));
-        item.setClock(&clock);
-        item.setDurationSeconds(100);
-        item.m_decodeWindow = [db](const QString &, double start, double end,
-                                   const LevelMeterItem::Cancellation &) {
-            return levelWindow(start, end, db);
-        };
-        QObject::connect(&view, &QQuickWindow::frameSwapped, &view, [this] { ++frames; });
-        view.show();
-        item.setSourcePath(QStringLiteral("fixture.wav"));
-        setAdvancing(true);
-        item.setPlaying(true);
     }
     void setAdvancing(bool advancing) {
         PlaybackSample sample;
@@ -108,12 +98,6 @@ struct PlayingMeter {
         clock.applySample(sample, false);
     }
     double position() const { return clock.positionAt(clock.nowNs()); }
-    // Frames per second over `ms` of real time.
-    double framesPerSecond(int ms) {
-        frames = 0;
-        QTest::qWait(ms);
-        return frames * 1000.0 / ms;
-    }
     int fill(int channel = 0) const {
         const auto index = static_cast<std::size_t>(channel) * 2;
         return item.m_paintedPixels.size() > index ? item.m_paintedPixels[index] : -2;
@@ -126,7 +110,113 @@ struct PlayingMeter {
     PlaybackClock clock;
     QQuickWindow view;
     LevelMeterItem item;
+};
+
+// A meter playing `db(t)` in real time, with frames counted.
+struct PlayingMeter : MeterFixture {
+    explicit PlayingMeter(std::function<float(double)> db) {
+        item.setClock(&clock);
+        item.setDurationSeconds(100);
+        item.m_decodeWindow = [db](const QString &, double start, double end,
+                                   const LevelMeterItem::Cancellation &) {
+            return levelWindow(start, end, db);
+        };
+        QObject::connect(&view, &QQuickWindow::frameSwapped, &view, [this] { ++frames; });
+        view.show();
+        item.setSourcePath(QStringLiteral("fixture.wav"));
+        setAdvancing(true);
+        item.setPlaying(true);
+    }
+    // Frames per second over `ms` of real time.
+    double framesPerSecond(int ms) {
+        frames = 0;
+        QTest::qWait(ms);
+        return frames * 1000.0 / ms;
+    }
+
     int frames{0};
+};
+
+// A meter playing `db(t)` on time the test sets. The test ticks its frames
+// and draws them with grabWindow, so nothing depends on real time; between
+// ticks the meter is idle, as while its wake timer waits.
+struct SteppedMeter : MeterFixture {
+    static constexpr qint64 kStartNs = 1'000'000'000'000;
+
+    explicit SteppedMeter(const std::function<float(double)> &db) {
+        clock.setTimeSource([this] { return nowNs; });
+        item.m_now = [this] {
+            return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(nowNs));
+        };
+        item.setClock(&clock);
+        item.setDurationSeconds(100);
+        view.show();
+        exposed = QTest::qWaitForWindowExposed(&view);
+        // The first sample starts a track, which clears the meter.
+        setAdvancing(true);
+        // Without a source the meter requests nothing; it plays this window.
+        item.m_window = levelWindow(0, 10, db);
+        item.setPlaying(true);
+    }
+    void at(double seconds) {
+        time = seconds;
+        nowNs = kStartNs + static_cast<qint64>(std::llround(seconds * 1e9));
+    }
+    // Ticks a frame and draws it if a bar or marker moved; returns whether it drew.
+    bool frame() {
+        item.tick();
+        if (item.showsPainted(item.m_shown, item.deviceWidth())) return false;
+        view.grabWindow();
+        return true;
+    }
+    // Ticks frames at 60 Hz until `seconds`; returns how many drew.
+    int framesUntil(double seconds) {
+        int drawn = 0;
+        while (time + 1.0 / 60 <= seconds + 1e-9) {
+            at(time + 1.0 / 60);
+            drawn += frame() ? 1 : 0;
+        }
+        return drawn;
+    }
+
+    qint64 nowNs{kStartNs};
+    double time{0.0};
+    bool exposed{false};
+};
+
+// A meter that takes every bin of the first channel when the bin ends: what
+// a meter ticked at every bin would show.
+struct ReferenceMeter {
+    explicit ReferenceMeter(LevelMeterItem::Window data) : window(std::move(data)) {}
+    // Takes the bins that ended by `position`; returns the newest one's end.
+    double hear(double position) {
+        const auto heard = static_cast<std::size_t>(std::floor((position - window.start) / window.step));
+        for (; bins < heard; ++bins) {
+            channel.decay(window.step);
+            channel.observe(window.peaksDb[bins * static_cast<std::size_t>(window.channels)], 0);
+        }
+        return window.start + double(bins) * window.step;
+    }
+    // Empty if `item` shows the reference as of the newest bin at `position`
+    // and holds it decayed to `position`; otherwise what differs.
+    QString mismatch(const LevelMeterItem &item, double position) {
+        const double heardAt = hear(position);
+        auto now = channel;
+        now.decay(position - heardAt);
+        const auto &shown = item.m_shown[0];
+        const auto &state = item.m_channels[0];
+        const auto close = [](double a, double b) { return std::abs(a - b) < 1e-9; };
+        if (close(shown.level, channel.level) && close(shown.peak, channel.peak)
+            && close(shown.hold, channel.hold) && close(item.m_shownAt, heardAt)
+            && close(state.level, now.level) && close(state.peak, now.peak) && close(state.hold, now.hold)) return {};
+        return QStringLiteral("at %1: shown %2 dB, peak %3 dB, hold %4 s at %5; reference %6, %7, %8 at %9")
+            .arg(position).arg(shown.level).arg(shown.peak).arg(shown.hold).arg(item.m_shownAt)
+            .arg(channel.level).arg(channel.peak).arg(channel.hold).arg(heardAt);
+    }
+
+    LevelMeterItem::Window window;
+    LevelMeterItem::Channel channel;
+    std::size_t bins{0};
 };
 
 // Device pixels of `db` on the 400 px meter.
@@ -153,6 +243,8 @@ private slots:
     void pauseDrawsOnlyTheDecay();
     void changingLevelsRedraw();
     void idleMeterWakesForItsNextPixel();
+    void pauseAndResumeKeepTheTimeBetween();
+    void idleWakesTakeEveryBufferedBin();
 };
 
 void LevelMeterTest::attackReleaseAndPeakHold() {
@@ -339,7 +431,11 @@ void LevelMeterTest::lateDataDoesNotReplayOldPeaks() {
     item.m_playing = true;
     item.m_window = {0, 1, 0.01, 1, std::vector<float>(100, -60)};
     item.m_window.peaksDb[0] = 0;
-    item.advance(0.8, 0.8);
+    // Frames ran on to 0.7 s before the window arrived.
+    auto late = std::exchange(item.m_window, {});
+    item.advance(0.7, 0.7);
+    item.m_window = std::move(late);
+    item.advance(0.8, 0.1);
     QCOMPARE(item.m_channels[0].peak, -60.0);
     item.m_stagedWindow = {0.7, 1.7, 0.01, 1, std::vector<float>(100, -60)};
     item.m_stagedWindow.peaksDb[0] = 0;
@@ -473,35 +569,17 @@ void LevelMeterTest::shownLevelsFollowTheBallistics() {
     LevelMeterItem item;
     item.m_playing = true;
     item.m_window = levelWindow(0, 8, program);
-    // The reference meter takes every bin when it ends.
-    LevelMeterItem::Channel reference;
-    std::size_t bins = 0;
-    const auto referenceAt = [&](double position) {
-        const auto heard = static_cast<std::size_t>(std::floor(position / kBinSeconds));
-        for (; bins < heard; ++bins) {
-            reference.decay(kBinSeconds);
-            reference.observe(item.m_window.peaksDb[bins * 2], 0);
-        }
-        return double(bins) * kBinSeconds;
-    };
+    ReferenceMeter reference(item.m_window);
     const std::vector<double> frameSeconds{1.0 / 60, 1.0 / 144, 0.0123, 0.031, 1.0 / 360};
     double position = 0;
     for (int frame = 0; position < 7.0; ++frame) {
         const double elapsed = frameSeconds[static_cast<std::size_t>(frame) % frameSeconds.size()];
         position += elapsed;
         item.advance(position, elapsed);
-        const double heardAt = referenceAt(position);
-        const auto &shown = item.m_shown[0];
         // The bars show the newest bin heard; the state runs on to the frame.
-        QVERIFY2(std::abs(shown.level - reference.level) < 1e-9, qPrintable(QString::number(position)));
-        QVERIFY(std::abs(shown.peak - reference.peak) < 1e-9);
-        QVERIFY(std::abs(shown.hold - reference.hold) < 1e-9);
-        QVERIFY(std::abs(item.m_shownAt - heardAt) < 1e-9);
-        auto now = reference;
-        now.decay(position - heardAt);
-        QVERIFY(std::abs(item.m_channels[0].level - now.level) < 1e-9);
-        QVERIFY(std::abs(item.m_channels[0].peak - now.peak) < 1e-9);
-        if (position > 0.05 && position < 1.6) QCOMPARE(shown.peak, -3.0);
+        const QString mismatch = reference.mismatch(item, position);
+        QVERIFY2(mismatch.isEmpty(), qPrintable(mismatch));
+        if (position > 0.05 && position < 1.6) QCOMPARE(item.m_shown[0].peak, -3.0);
     }
     // The hold ended 1.5 s after the loud passage; the peak fell at 12 dB/s.
     QCOMPARE(item.m_shown[0].peak, -60.0);
@@ -552,90 +630,157 @@ void LevelMeterTest::silenceDrawsNoFrames() {
     QCOMPARE(fps, 0.0);
     QCOMPARE(meter.fill(), 0);
     QCOMPARE(meter.peak(), -1);
-}
-
-void LevelMeterTest::pauseDrawsOnlyTheDecay() {
-    PlayingMeter meter([](double) { return -54.0F; });
-    QTRY_COMPARE(meter.fill(), pixels(-54));
-    QTest::qWait(200);
-    meter.setAdvancing(false);
-    meter.item.setPlaying(false);
-    // The bar falls to the floor in 0.1 s; the peak holds for 1.5 s.
-    QTRY_COMPARE(meter.fill(), 0);
-    QTest::qWait(200);
-    QCOMPARE(meter.peak(), pixels(-54));
-    const double holdFps = meter.framesPerSecond(1000);
-    qInfo("paused, peak held: %.1f frames/s", holdFps);
-    QCOMPARE(holdFps, 0.0);
-    QCOMPARE(meter.peak(), pixels(-54));
-    // Then it falls 6 dB at 12 dB/s, a frame for each pixel, and settles.
-    meter.frames = 0;
-    QTRY_COMPARE_WITH_TIMEOUT(meter.peak(), -1, 2000);
-    QVERIFY(meter.frames > 5);
-    QVERIFY(meter.frames <= pixels(-54) + 2);
-    QTest::qWait(50);
-    const double settledFps = meter.framesPerSecond(1000);
-    qInfo("paused, settled: %.1f frames/s", settledFps);
-    QCOMPARE(settledFps, 0.0);
-    QVERIFY(!meter.item.m_wakeTimer.isActive());
-    // Stopped, nothing is drawn either.
+    // Stopped, nothing is drawn and nothing waits.
     meter.item.setSourcePath(QString());
     QTest::qWait(50);
     QCOMPARE(meter.framesPerSecond(500), 0.0);
     QVERIFY(!meter.item.m_wakeTimer.isActive());
 }
 
+void LevelMeterTest::pauseDrawsOnlyTheDecay() {
+    SteppedMeter meter([](double) { return -54.0F; });
+    QVERIFY(meter.exposed);
+    meter.framesUntil(0.5);
+    QCOMPARE(meter.fill(), pixels(-54));
+    QCOMPARE(meter.peak(), pixels(-54));
+    QCOMPARE(meter.framesUntil(1.0), 0);
+    meter.setAdvancing(false);
+    meter.item.setPlaying(false);
+    // The bar falls to the floor in 0.1 s, a frame for each tick.
+    QVERIFY(meter.framesUntil(1.2) >= 5);
+    QCOMPARE(meter.fill(), 0);
+    // The peak holds for 1.5 s from the last bin: no frames, and the timer
+    // waits for the hold to end and the marker to leave its pixel (6.25 ms).
+    QVERIFY(meter.item.m_wakeTimer.isActive());
+    const int expected = int(std::ceil((meter.item.m_shown[0].hold + 0.00625) * 1000));
+    QVERIFY2(std::abs(meter.item.m_wakeTimer.interval() - expected) <= 1,
+             qPrintable(QString::number(meter.item.m_wakeTimer.interval())));
+    QCOMPARE(meter.framesUntil(2.45), 0);
+    QCOMPARE(meter.peak(), pixels(-54));
+    // Then it falls 6 dB at 12 dB/s, at most a frame per pixel, and settles.
+    const int falling = meter.framesUntil(3.1);
+    QCOMPARE(meter.peak(), -1);
+    QVERIFY(falling > 5);
+    QVERIFY(falling <= pixels(-54) + 1);
+    QCOMPARE(meter.framesUntil(4.0), 0);
+    QVERIFY(!meter.item.m_wakeTimer.isActive());
+}
+
 void LevelMeterTest::changingLevelsRedraw() {
     // Quiet, a step up at 1 s, then alternating every 0.1 s from 1.5 s.
-    PlayingMeter meter([](double t) -> float {
+    SteppedMeter meter([](double t) -> float {
         if (t < 1.0) return -40;
         if (t < 1.5) return -6;
         return std::fmod(t, 0.2) < 0.1 ? -6 : -30;
     });
-    double stepDrawnAt = -1;
-    QObject::connect(&meter.view, &QQuickWindow::frameSwapped, &meter.view, [&] {
-        if (stepDrawnAt < 0 && meter.fill() == pixels(-6)) stepDrawnAt = meter.position();
-    });
-    QTRY_COMPARE(meter.fill(), pixels(-40));
-    QVERIFY(meter.position() < 0.6);
-    QTest::qWait(qMax(0, int((0.9 - meter.position()) * 1000)));
-    QVERIFY(meter.position() < 0.95);
+    QVERIFY(meter.exposed);
+    meter.framesUntil(0.4);
     QCOMPARE(meter.fill(), pixels(-40));
-    QTRY_VERIFY(stepDrawnAt > 0);
-    // The step is drawn when it is heard, not at the next look ahead.
-    QVERIFY2(stepDrawnAt >= 1.0 && stepDrawnAt < 1.1, qPrintable(QString::number(stepDrawnAt)));
-    QTest::qWait(qMax(0, int((1.6 - meter.position()) * 1000)));
-    const double fps = meter.framesPerSecond(1000);
-    qInfo("alternating levels: %.1f frames/s", fps);
-    QVERIFY(fps >= 10);
+    QCOMPARE(meter.framesUntil(0.9), 0);
+    // Idle, the meter waits for the end of the first loud bin.
+    std::size_t loud = 0;
+    while (meter.item.m_window.peaksDb[loud * 2] != -6.0F) ++loud;
+    const double loudEnd = double(loud + 1) * kBinSeconds;
+    QVERIFY(meter.item.m_wakeTimer.isActive());
+    const int wait = meter.item.m_wakeTimer.interval();
+    QVERIFY2(std::abs(wait - std::ceil((loudEnd - meter.time) * 1000)) <= 1, qPrintable(QString::number(wait)));
+    // Its wake draws the step.
+    meter.at(meter.time + wait / 1000.0);
+    QVERIFY(meter.frame());
+    QCOMPARE(meter.fill(), pixels(-6));
+    meter.framesUntil(1.6);
+    const int drawn = meter.framesUntil(2.6);
+    // The quiet halves fall a pixel or more each frame; the loud halves hold.
+    qInfo("alternating levels: %d of 60 frames drawn", drawn);
+    QVERIFY(drawn >= 30);
 }
 
 void LevelMeterTest::idleMeterWakesForItsNextPixel() {
-    QQuickWindow view;
-    view.resize(400, 20);
-    LevelMeterItem item(view.contentItem());
-    item.setSize(QSizeF(400, 20));
-    view.show();
-    QTRY_VERIFY(view.isExposed());
-    item.m_channels.assign(2, {});
+    SteppedMeter meter([](double) { return -60.0F; });
+    QVERIFY(meter.exposed);
+    meter.setAdvancing(false);
+    meter.item.setPlaying(false);
+    auto &item = meter.item;
     // The bar is down; the peak holds at -30 dB for another second.
     item.m_channels[0] = {-60, -30, 1.0};
     item.m_shown = item.m_channels;
-    item.m_frameAt = std::chrono::steady_clock::now();
-    item.update();
-    // The frame drawn wakes nothing until the marker leaves its pixel,
-    // 0.075 dB below, 6.25 ms after the hold.
-    QTRY_VERIFY(item.m_wakeTimer.isActive());
-    QCOMPARE(item.m_paintedPixels.size(), std::size_t(4));
-    QCOMPARE(item.m_paintedPixels[1], pixels(-30));
-    const int remaining = item.m_wakeTimer.remainingTime();
-    QVERIFY2(remaining > 900 && remaining <= 1007, qPrintable(QString::number(remaining)));
+    QVERIFY(meter.frame());
+    QCOMPARE(meter.peak(), pixels(-30));
+    QVERIFY(!meter.frame());
+    // The marker leaves its pixel 0.075 dB below, 6.25 ms after the hold.
+    QVERIFY(item.m_wakeTimer.isActive());
+    QCOMPARE(item.m_wakeTimer.interval(), 1007);
     // A falling bar wakes for each pixel: half of one, 0.075 dB, takes 1.25 ms.
     item.m_channels[0] = {-30, -30, 1.0};
     item.m_shown = item.m_channels;
-    item.update();
-    QTRY_VERIFY(item.m_wakeTimer.isActive() && item.m_wakeTimer.remainingTime() <= 2);
-    QTRY_COMPARE(item.m_paintedPixels[0], 0);
+    QVERIFY(meter.frame());
+    QVERIFY(!meter.frame());
+    QCOMPARE(item.m_wakeTimer.interval(), 2);
+}
+
+void LevelMeterTest::pauseAndResumeKeepTheTimeBetween() {
+    {
+        // Resumed after an idle pause, the hold has run on meanwhile.
+        SteppedMeter meter([](double) { return -30.0F; });
+        QVERIFY(meter.exposed);
+        meter.framesUntil(0.5);
+        meter.setAdvancing(false);
+        meter.item.setPlaying(false);
+        meter.framesUntil(1.0);
+        const double hold = meter.item.m_channels[0].hold;
+        QVERIFY(std::abs(hold - 1.0) < 0.01);
+        meter.at(1.8);
+        meter.setAdvancing(true);
+        meter.item.setPlaying(true);
+        QVERIFY(std::abs(meter.item.m_channels[0].hold - (hold - 0.8)) < 1e-9);
+        QCOMPARE(meter.item.m_channels[0].peak, -30.0);
+    }
+    {
+        // Paused after an idle stretch of playback, that stretch counts.
+        SteppedMeter meter([](double t) { return t < 1.0 ? -6.0F : -60.0F; });
+        QVERIFY(meter.exposed);
+        ReferenceMeter reference(meter.item.m_window);
+        meter.framesUntil(1.0);
+        meter.at(1.8);
+        meter.setAdvancing(false);
+        meter.item.setPlaying(false);
+        const double heardAt = reference.hear(1.8);
+        auto expected = reference.channel;
+        expected.decay(1.8 - heardAt);
+        const auto &state = meter.item.m_channels[0];
+        QVERIFY(std::abs(state.level - expected.level) < 1e-9);
+        QVERIFY(std::abs(state.peak - expected.peak) < 1e-9);
+        QVERIFY(std::abs(state.hold - expected.hold) < 1e-9);
+        // The bar fell 48 dB and the hold ran 0.8 s since the last loud bin.
+        QVERIFY(std::abs(state.level - (-54.0)) < 0.1);
+        QVERIFY(std::abs(state.hold - 0.7) < 0.01);
+    }
+}
+
+void LevelMeterTest::idleWakesTakeEveryBufferedBin() {
+    // A loud start, then silence with two short peaks: one under the held
+    // peak, and one barely above the falling peak, which holds it again.
+    SteppedMeter meter([](double t) -> float {
+        if (t < 0.05) return -6;
+        if (t >= 0.7 && t < 0.702) return -20;
+        if (t >= 1.6 && t < 1.602) return -6.58F;
+        return -60;
+    });
+    QVERIFY(meter.exposed);
+    ReferenceMeter reference(meter.item.m_window);
+    // Irregular wakes, with sleeps of up to 0.5 s over buffered peaks.
+    for (const double time : {0.016, 0.033, 0.1, 0.5, 1.0, 1.1, 1.55, 1.9, 2.4, 3.0, 3.5, 4.5, 5.0}) {
+        meter.at(time);
+        meter.frame();
+        const QString mismatch = reference.mismatch(meter.item, meter.position());
+        QVERIFY2(mismatch.isEmpty(), qPrintable(mismatch));
+        const double peak = reference.channel.peak;
+        QCOMPARE(meter.peak(), peak > -60 ? qRound(400 * (peak + 60) / 60) : -1);
+    }
+    // The second peak held the marker again until about 3.1 s; without it
+    // the marker would be near -47 dB by now.
+    QVERIFY2(reference.channel.peak > -29.5 && reference.channel.peak < -29.2,
+             qPrintable(QString::number(reference.channel.peak)));
 }
 
 int main(int argc, char **argv) {
