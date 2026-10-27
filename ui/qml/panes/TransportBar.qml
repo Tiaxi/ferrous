@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
 import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
@@ -140,7 +141,21 @@ ToolBar {
             readonly property bool durationKnown: root.uiBridge.durationSeconds > 1.0
             readonly property bool seekAllowed: durationKnown
                 && root.uiBridge.playbackState !== "Stopped"
-            readonly property real stableVisualPosition: seekAllowed ? visualPosition : 0.0
+            // The window's device pixels to a logical one, which fractional
+            // scaling can make differ from its screen's. Qt before 6.11 gives
+            // only the screen's.
+            readonly property real windowDevicePixelRatio: Window.window
+                && Window.window.devicePixelRatio !== undefined
+                ? Window.window.devicePixelRatio
+                : Screen.devicePixelRatio
+            // The bar's width in device pixels.
+            readonly property real barDevicePixels: Math.max(1, Math.round(width * windowDevicePixelRatio))
+            // The position the bar draws. Playback moves it by whole device
+            // pixels of the bar, so the window draws no frame for a move it
+            // would not show; a gesture's is drawn as it is.
+            readonly property real stableVisualPosition: !seekAllowed ? 0.0
+                : adjusting ? visualPosition
+                : Math.round(visualPosition * barDevicePixels) / barDevicePixels
 
             enabled: seekAllowed
             // The arrow keys' step; a drag does not snap to it.
