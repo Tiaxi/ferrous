@@ -170,10 +170,17 @@ jobs:
         run: cargo test --locked
 
   ui:
-    name: "UI Build + Smoke Tests${{ matrix.profile_logs == 'ON' && ' (profiling)' || '' }}"
+    name: "UI Build + Smoke Tests${{ matrix.profile_logs == 'ON' && ' (profiling, Debug)' || '' }}"
     strategy:
       matrix:
-        profile_logs: ['OFF', 'ON']
+        # The profiling build is a Debug build too, which enables Q_ASSERT in
+        # the app and in Qt's headers, such as Qt's check that a slot does not
+        # run on a half-destroyed object.
+        include:
+          - profile_logs: 'OFF'
+            build_type: RelWithDebInfo
+          - profile_logs: 'ON'
+            build_type: Debug
     runs-on: ubuntu-latest
     timeout-minutes: 40
     container:
@@ -220,6 +227,7 @@ jobs:
       - name: Configure UI
         run: >-
           cmake -S ui -B ui/build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DFERROUS_ENABLE_PROFILE_LOGS=${{ matrix.profile_logs }}
           -DFERROUS_CARGO_ARGS=--locked
 

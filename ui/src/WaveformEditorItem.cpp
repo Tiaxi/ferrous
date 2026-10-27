@@ -199,6 +199,12 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
 }
 
 WaveformEditorItem::~WaveformEditorItem() {
+    // ~QQuickItem takes the item out of its window, which emits
+    // windowChanged once this item's members are gone: its handler, which
+    // rebinds the window connections and reads the state, must not run then.
+    disconnect(this, nullptr, this, nullptr);
+    disconnect(m_frameSwappedConnection);
+    disconnect(m_windowVisibilityConnection);
     if (m_decodeCancelled) m_decodeCancelled->store(true);
 }
 
