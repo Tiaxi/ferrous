@@ -822,6 +822,11 @@ if(BUILD_TESTING)
     ferrous_add_default_platform_test(ferrous_i18n_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The app and the module test have the module's compiled QML.
+    add_test(NAME ferrous_qml_cache_symbol_patterns
+        COMMAND "${CMAKE_COMMAND}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_qml_cache_symbol_patterns.cmake"
+    )
+    set_tests_properties(ferrous_qml_cache_symbol_patterns PROPERTIES TIMEOUT 60)
     if(CMAKE_NM)
         foreach(qml_binary IN ITEMS ferrous ferrous_qml_module_tests)
             add_test(NAME ${qml_binary}_qml_cache_linked
@@ -850,12 +855,14 @@ if(BUILD_TESTING)
                 -DBINARY=${CMAKE_CURRENT_SOURCE_DIR}/tests/qml_cache_plain_link.cpp
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_qml_cache_linked.cmake"
         )
+        # CMake wraps the error message at spaces, so a line break and
+        # indentation may separate the words.
         set_tests_properties(ferrous_qml_cache_check_rejects_plain_link PROPERTIES
-            PASS_REGULAR_EXPRESSION "lacks QmlCacheGeneratedCode::_qt_qml_FerrousUi_qml_Main_qml::"
+            PASS_REGULAR_EXPRESSION "lacks[ \t\r\n]+QmlCacheGeneratedCode::_qt_qml_FerrousUi_qml_Main_qml::"
             TIMEOUT 60
         )
         set_tests_properties(ferrous_qml_cache_check_rejects_unreadable_binary PROPERTIES
-            PASS_REGULAR_EXPRESSION "could not read"
+            PASS_REGULAR_EXPRESSION "could[ \t\r\n]+not[ \t\r\n]+read"
             TIMEOUT 60
         )
     endif()
