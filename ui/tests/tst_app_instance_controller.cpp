@@ -271,7 +271,7 @@ void AppInstanceControllerTest::drawsOffscreenUnlessAPlatformIsChosen() {
 }
 
 int main(int argc, char **argv) {
-    useOffscreenPlatformByDefault();
+    useOffscreenPlatformByDefault(argc, argv);
     QGuiApplication app(argc, argv);
     AppInstanceControllerTest test;
     return QTest::qExec(&test, argc, argv);

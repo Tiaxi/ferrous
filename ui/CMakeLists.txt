@@ -246,12 +246,22 @@ if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
 
     # Run without a platform chosen, as a developer may run it, a test binary
-    # draws offscreen instead of opening windows; tests/TestPlatform.h.
+    # draws offscreen instead of opening windows; tests/TestPlatform.h. With
+    # -platform it uses the platform chosen, and the check skips.
     function(ferrous_add_default_platform_test target test_function)
+        set(no_platform "QT_QPA_PLATFORM=unset:;DISPLAY=unset:;WAYLAND_DISPLAY=unset:")
         add_test(NAME ${target}_default_platform COMMAND ${target} ${test_function})
         set_tests_properties(${target}_default_platform PROPERTIES
-            ENVIRONMENT_MODIFICATION "QT_QPA_PLATFORM=unset:;DISPLAY=unset:;WAYLAND_DISPLAY=unset:"
+            ENVIRONMENT_MODIFICATION "${no_platform}"
             FAIL_REGULAR_EXPRESSION "SKIP"
+            TIMEOUT 60
+        )
+        add_test(NAME ${target}_chosen_platform
+            COMMAND ${target} ${test_function} -platform minimal
+        )
+        set_tests_properties(${target}_chosen_platform PROPERTIES
+            ENVIRONMENT_MODIFICATION "${no_platform}"
+            PASS_REGULAR_EXPRESSION "SKIP   : [A-Za-z]+::${test_function}\\(\\)"
             TIMEOUT 60
         )
     endfunction()

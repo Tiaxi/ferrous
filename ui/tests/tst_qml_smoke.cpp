@@ -19078,7 +19078,7 @@ int runSmokeTests(const QString &userDirectoriesParent, const QStringList &argum
 } // namespace
 
 int main(int argc, char **argv) {
-    useOffscreenPlatformByDefault();
+    useOffscreenPlatformByDefault(argc, argv);
     disableGpuShaderCaches();
     // Bridge construction starts library workers; keep scans and tag operations
     // independent of saved application data and concurrent test processes.

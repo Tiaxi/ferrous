@@ -2067,7 +2067,7 @@ void AccessibilityTest::drawsOffscreenUnlessAPlatformIsChosen() {
 }
 
 int main(int argc, char **argv) {
-    useOffscreenPlatformByDefault();
+    useOffscreenPlatformByDefault(argc, argv);
     disableGpuShaderCaches();
     QTemporaryDir testStorage;
     if (!testStorage.isValid()) return 1;

@@ -2,22 +2,30 @@
 
 #pragma once
 
+#include <QByteArrayView>
 #include <QGuiApplication>
 #include <QString>
 #include <QtTest/QtTest>
 
 // Makes a test binary that is run without a platform chosen draw offscreen,
 // so that running one directly never opens windows on the desktop. Call it
-// in main() before the application object is made.
+// in main(), with main()'s arguments, before the application object is made.
 //
 // A run that needs a native platform chooses it, with QT_QPA_PLATFORM or
-// -platform, as CI's comparison of native waveform rendering does.
+// with -platform (or --platform), as CI's comparison of native waveform
+// rendering does.
 inline bool &offscreenPlatformChosenByDefault() {
     static bool chosen = false;
     return chosen;
 }
 
-inline void useOffscreenPlatformByDefault() {
+inline void useOffscreenPlatformByDefault(int argc, char **argv) {
+    for (int i = 1; i + 1 < argc; ++i) {
+        const QByteArrayView argument(argv[i]);
+        if (argument == "-platform" || argument == "--platform") {
+            return;
+        }
+    }
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");
         offscreenPlatformChosenByDefault() = true;
@@ -36,7 +44,7 @@ inline void disableGpuShaderCaches() {
 // The test of the default, for a test slot of each binary that shows windows.
 inline void verifyOffscreenPlatformByDefault() {
     if (!offscreenPlatformChosenByDefault()) {
-        QSKIP("QT_QPA_PLATFORM chose the platform");
+        QSKIP("QT_QPA_PLATFORM or -platform chose the platform");
     }
     QCOMPARE(QGuiApplication::platformName(), QStringLiteral("offscreen"));
 }
