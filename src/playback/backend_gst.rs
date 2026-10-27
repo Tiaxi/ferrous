@@ -3101,7 +3101,7 @@ impl StreamDurations {
 /// items lock of uridecodebin3 nor stream locks, so a switch only waits for
 /// them; they are not ordered.
 #[derive(Default)]
-struct InputSwitches {
+pub(crate) struct InputSwitches {
     state: Mutex<InputSwitchState>,
     /// Signalled when a handover or a switch has finished.
     settled: Condvar,
@@ -3117,6 +3117,9 @@ struct InputSwitchState {
     /// The sources of the run, the `urisourcebin` of each input, in the
     /// order of their activation.
     sources: Vec<RunSource>,
+    /// Ends of runs that wait for a handover or a switch to finish.
+    #[cfg(test)]
+    ends_waiting: usize,
 }
 
 struct RunSource {
@@ -3233,9 +3236,13 @@ impl InputSwitches {
     /// until it has returned. Both take moments: a switch is let through
     /// only once the input has drained, so uridecodebin3 does not wait for
     /// the input.
-    fn end_run<R>(&self, end: impl FnOnce() -> R) -> R {
+    pub(crate) fn end_run<R>(&self, end: impl FnOnce() -> R) -> R {
         let mut state = self.lock();
         state.ending = true;
+        #[cfg(test)]
+        {
+            state.ends_waiting += 1;
+        }
         while state.handovers > 0
             || state
                 .sources
@@ -3246,6 +3253,10 @@ impl InputSwitches {
                 .settled
                 .wait(state)
                 .unwrap_or_else(PoisonError::into_inner);
+        }
+        #[cfg(test)]
+        {
+            state.ends_waiting -= 1;
         }
         drop(state);
         let result = end();
@@ -3266,7 +3277,7 @@ impl InputSwitches {
 
     /// Run `hand_over`, which hands a successor to the pipeline, unless the
     /// run ends. Returns what it returned, if it ran.
-    fn hand_over<T>(&self, hand_over: impl FnOnce() -> T) -> Option<T> {
+    pub(crate) fn hand_over<T>(&self, hand_over: impl FnOnce() -> T) -> Option<T> {
         {
             let mut state = self.lock();
             if state.ending {
@@ -3280,9 +3291,16 @@ impl InputSwitches {
         Some(result)
     }
 
+    /// Whether the end of a run waits for a handover in progress.
+    #[cfg(test)]
+    fn run_end_waits_for_handover(&self) -> bool {
+        let state = self.lock();
+        state.ends_waiting > 0 && state.handovers > 0
+    }
+
     /// Watch the outputs of every source that uridecodebin3 in `playbin`
     /// adds.
-    fn connect(self: &Arc<Self>, playbin: &gst::Element) {
+    pub(crate) fn connect(self: &Arc<Self>, playbin: &gst::Element) {
         let switches = Arc::clone(self);
         playbin.connect("deep-element-added", false, move |values| {
             let element = values.get(2)?.get::<gst::Element>().ok()?;
@@ -4711,10 +4729,8 @@ mod gst_integration_tests {
 
     impl Drop for TestEngine {
         fn drop(&mut self) {
-            let runtime = &self.runtime;
-            let _ = runtime
-                .source_activation
-                .set_state(&runtime.playbin, gst::State::Null);
+            // As the engine ends its runs (see `InputSwitches::end_run`).
+            let _ = self.runtime.set_pipeline_state(gst::State::Null);
         }
     }
 
@@ -7580,11 +7596,131 @@ mod engine_tests {
 
     impl Drop for DirectEngine {
         fn drop(&mut self) {
-            let runtime = &self.runtime;
-            let _ = runtime
-                .source_activation
-                .set_state(&runtime.playbin, gst::State::Null);
+            // As the engine ends its runs: after a handover in progress,
+            // which would deadlock with the state change (see
+            // `InputSwitches`).
+            let _ = self.runtime.set_pipeline_state(gst::State::Null);
         }
+    }
+
+    #[derive(Default)]
+    struct HandoverHoldState {
+        /// The handover reached the hold, and whether about-to-finish was
+        /// in progress then.
+        reached: Option<bool>,
+        released: bool,
+    }
+
+    /// Holds the thread that hands a file over to the pipeline inside the
+    /// handover: when the activation of the file's source adds its type
+    /// finder, under the locks of uridecodebin3 and with the queue locked.
+    #[derive(Default)]
+    struct HandoverHold {
+        state: Mutex<HandoverHoldState>,
+        released: Condvar,
+    }
+
+    impl HandoverHold {
+        fn new(runtime: &GstPlaybackRuntime, file: &Path) -> Arc<Self> {
+            let hold = Arc::new(Self::default());
+            let uri = file_uri(file).unwrap();
+            let calls = Arc::clone(&runtime.about_to_finish);
+            let state = Arc::downgrade(&hold);
+            runtime
+                .playbin
+                .connect("deep-element-added", false, move |values| {
+                    let bin = values.get(1)?.get::<gst::Element>().ok()?;
+                    let element = values.get(2)?.get::<gst::Element>().ok()?;
+                    let is_source = bin.factory().is_some_and(|f| f.name() == "urisourcebin")
+                        && bin.property::<Option<String>>("uri").as_deref() == Some(&uri);
+                    if is_source && element.factory().is_some_and(|f| f.name() == "typefind") {
+                        let in_handover = calls.emitted.load(Ordering::SeqCst)
+                            > calls.returned.load(Ordering::SeqCst);
+                        state.upgrade()?.hold(in_handover);
+                    }
+                    None
+                });
+            hold
+        }
+
+        /// On the thread that hands the file over. Gives up after a while,
+        /// so that a test that fails does not hold the thread forever.
+        fn hold(&self, in_handover: bool) {
+            let mut state = self.state.lock().unwrap();
+            if state.reached.is_some() {
+                return;
+            }
+            state.reached = Some(in_handover);
+            let _released = self
+                .released
+                .wait_timeout_while(state, TIMEOUT * 2, |state| !state.released)
+                .unwrap();
+        }
+
+        fn reached(&self) -> Option<bool> {
+            self.state.lock().unwrap().reached
+        }
+
+        fn release(&self) {
+            self.state.lock().unwrap().released = true;
+            self.released.notify_all();
+        }
+    }
+
+    #[test]
+    fn direct_engine_teardown_waits_for_a_handover_in_progress() {
+        // #309: the teardown changed the pipeline's state to Null while
+        // about-to-finish handed over the successor, and deadlocked with it
+        // on uridecodebin3's state lock and a stream lock.
+        let fixtures = Fixtures::new("teardown-handover");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_500);
+        let mut engine = DirectEngine::start();
+        let hold = HandoverHold::new(&engine.runtime, &b);
+        engine.play_until_opened(vec![a, b], RepeatMode::Off);
+        // Not through the runtime, whose queue the handover holds.
+        let deadline = Instant::now() + TIMEOUT;
+        while hold.reached().is_none() {
+            assert!(Instant::now() < deadline, "the handover of B was not held");
+            std::thread::sleep(millis(1));
+        }
+        assert_eq!(hold.reached(), Some(true), "B was not handed over");
+
+        let switches = Arc::clone(&engine.runtime.input_switches);
+        let activation = Arc::clone(&engine.runtime.source_activation);
+        let calls = Arc::clone(&engine.runtime.about_to_finish);
+        let playbin = engine.runtime.playbin.clone();
+        let (dropped_tx, dropped) = unbounded();
+        let teardown = std::thread::spawn(move || {
+            drop(engine);
+            let _ = dropped_tx.send(());
+        });
+        let deadline = Instant::now() + TIMEOUT;
+        while !switches.run_end_waits_for_handover() && !activation.run_ends() {
+            assert!(
+                Instant::now() < deadline,
+                "the teardown did not end the run"
+            );
+            std::thread::sleep(millis(1));
+        }
+        assert!(
+            !activation.run_ends(),
+            "the teardown changed the pipeline's state during the handover"
+        );
+        assert!(dropped.try_recv().is_err());
+
+        hold.release();
+        assert_eq!(
+            dropped.recv_timeout(TIMEOUT),
+            Ok(()),
+            "the teardown did not finish once the handover returned"
+        );
+        teardown.join().unwrap();
+        assert_eq!(playbin.current_state(), gst::State::Null);
+        assert_eq!(
+            calls.returned.load(Ordering::SeqCst),
+            calls.emitted.load(Ordering::SeqCst)
+        );
     }
 
     /// Rename `a` and `b` to each other's names on disk.
