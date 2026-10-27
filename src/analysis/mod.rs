@@ -2662,7 +2662,7 @@ mod tests {
         // Nothing drains this, so the spectrogram worker blocks on its
         // output, as when the UI stops reading during shutdown.
         let (spectral_tx, spectral_rx) = crossbeam_channel::bounded(1);
-        let (mut engine, event_rx) =
+        let (engine, event_rx) =
             AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
                 sender: spectral_tx,
                 generation: Arc::new(AtomicU64::new(0)),
@@ -2682,9 +2682,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(engine.running_threads(), 4);
-        assert_eq!(engine.stop_threads(), 0);
+        let finished: Vec<_> = engine
+            .threads
+            .iter()
+            .map(JoinableThread::finished)
+            .collect();
         drop(engine);
 
+        // Wait for the threads themselves, not the shutdown bound, which a
+        // loaded machine can outlast.
+        for thread in finished {
+            assert_eq!(
+                thread.recv_timeout(Duration::from_secs(20)),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected),
+                "a thread did not stop"
+            );
+        }
         events_after_threads_ended(&spectral_rx);
         assert_no_worker_failure(&events_after_threads_ended(&event_rx));
         std::fs::remove_file(path).unwrap();
