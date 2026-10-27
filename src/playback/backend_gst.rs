@@ -1890,7 +1890,19 @@ impl GstPlaybackRuntime {
     fn volume_ramp_pending(&self) -> bool {
         self.startup_ramp_hold_until.is_some()
             || ((self.target_volume - self.applied_volume).abs() > f32::EPSILON
-                && (self.snapshot.state == PlaybackState::Playing || self.startup_gain_ramp))
+                && self.snapshot.state == PlaybackState::Playing
+                && !self.startup_fade_held())
+    }
+
+    /// Whether the fade-in of a track start waits for the pipeline to play.
+    /// Until the playbin confirms Playing, and while playback is paused, no
+    /// sample reaches the output. A pipeline slow to start, such as under
+    /// load, would otherwise reach the end of the fade before its first
+    /// sample did. The bus wakes the engine when the pipeline plays.
+    fn startup_fade_held(&self) -> bool {
+        self.startup_gain_ramp
+            && (self.snapshot.state != PlaybackState::Playing
+                || self.playing_state_requested_at.is_some())
     }
 
     /// Advance the volume fade to `now`, respecting the optional silence hold
@@ -1899,10 +1911,7 @@ impl GstPlaybackRuntime {
     /// commands or bridge polls arrive.  Fades run on the volume-level scale,
     /// so they sound even.
     fn poll_volume_ramp(&mut self, now: Instant) {
-        // The fade-in of a track start runs once the pipeline plays. A
-        // pipeline slow to start, such as under load, would otherwise reach
-        // the end of the fade before its first sample reached the output.
-        if self.startup_gain_ramp && self.playing_state_requested_at.is_some() {
+        if self.startup_fade_held() {
             self.volume_ramp_tick_at = None;
             return;
         }
@@ -9847,25 +9856,44 @@ mod engine_tests {
     fn fade_in_waits_for_a_pipeline_slow_to_start() {
         // A first read that takes long, as from a slow drive or under load,
         // holds the pipeline back from playing for longer than the fade.
-        let fixtures = Fixtures::new("slow-start-fade");
-        let a = fixtures.wav("a.wav", 4_000);
-        let mut engine = DirectEngine::start();
-        let hold = hold_reads(&a);
-        engine
-            .runtime
-            .apply_command(PlaybackCommand::LoadQueue(vec![a]));
-        engine.runtime.apply_command(PlaybackCommand::Play);
-        engine.wait_until("no read was held", |_| hold.holds_a_read());
-        let now = Instant::now();
-        engine.runtime.poll_volume_ramp(now);
-        engine
-            .runtime
-            .poll_volume_ramp(now + Duration::from_secs(1));
-        assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
+        // Paused before it plays, the track fades in once it plays after
+        // the resume.
+        for pause_first in [false, true] {
+            let fixtures = Fixtures::new(&format!("slow-start-fade-{pause_first}"));
+            let a = fixtures.wav("a.wav", 4_000);
+            let mut engine = DirectEngine::start();
+            let hold = hold_reads(&a);
+            engine
+                .runtime
+                .apply_command(PlaybackCommand::LoadQueue(vec![a]));
+            engine.runtime.apply_command(PlaybackCommand::Play);
+            engine.wait_until("no read was held", |_| hold.holds_a_read());
+            if pause_first {
+                engine.runtime.apply_command(PlaybackCommand::Pause);
+                assert_eq!(engine.runtime.snapshot.state, PlaybackState::Paused);
+                engine
+                    .runtime
+                    .apply_command(PlaybackCommand::SetVolume(0.5));
+                // The paused engine does not wake to step the fade.
+                assert_ne!(engine.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+            }
+            let now = Instant::now();
+            engine.runtime.poll_volume_ramp(now);
+            engine
+                .runtime
+                .poll_volume_ramp(now + Duration::from_secs(1));
+            assert!(
+                engine.runtime.applied_volume.abs() < f32::EPSILON,
+                "pause_first={pause_first}"
+            );
 
-        // The track fades in once it plays.
-        hold.release();
-        engine.assert_fades_in_from_silence();
+            if pause_first {
+                engine.runtime.apply_command(PlaybackCommand::Play);
+            }
+            // The track fades in once it plays.
+            hold.release();
+            engine.assert_fades_in_from_silence();
+        }
     }
 
     /// How long the file of a stopped source may stay open before the
