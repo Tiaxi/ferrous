@@ -345,8 +345,11 @@ struct GstPlaybackRuntime {
     /// Linear gain currently set on playbin.
     applied_volume: f32,
     startup_gain_ramp: bool,
-    startup_ramp_hold_until: Option<Instant>,
-    /// Time of the previous fade step; `None` while no fade is running.
+    /// Silence still to hold before the fade-in of an AC3/DTS track start.
+    /// It counts down only while the pipeline plays.
+    startup_ramp_hold_left: Option<Duration>,
+    /// Time of the previous step of a fade or silence hold; `None` while
+    /// neither runs.
     volume_ramp_tick_at: Option<Instant>,
     buffering_active: bool,
     /// Number of `Seek` commands received, which numbers each seek.
@@ -556,7 +559,7 @@ impl GstPlaybackRuntime {
             target_volume: 1.0,
             applied_volume: 1.0,
             startup_gain_ramp: false,
-            startup_ramp_hold_until: None,
+            startup_ramp_hold_left: None,
             volume_ramp_tick_at: None,
             buffering_active: false,
             seek_requests: 0,
@@ -943,7 +946,7 @@ impl GstPlaybackRuntime {
         let _ = self.set_pipeline_state(gst::State::Ready);
         self.begin_pipeline_run(false);
         self.startup_gain_ramp = false;
-        self.startup_ramp_hold_until = None;
+        self.startup_ramp_hold_left = None;
         self.buffering_active = false;
         self.reset_channel_mute_state();
         self.snapshot.current = None;
@@ -1291,7 +1294,7 @@ impl GstPlaybackRuntime {
             }
         }
         self.startup_gain_ramp = false;
-        self.startup_ramp_hold_until = None;
+        self.startup_ramp_hold_left = None;
         self.buffering_active = false;
         self.clear_recent_seek_trace();
         self.snapshot.state = PlaybackState::Stopped;
@@ -1356,7 +1359,7 @@ impl GstPlaybackRuntime {
         }
         self.snapshot.state = PlaybackState::Paused;
         self.startup_gain_ramp = false;
-        self.startup_ramp_hold_until = None;
+        self.startup_ramp_hold_left = None;
         self.queued_seek = Some(SeekTarget {
             position,
             serial: 0,
@@ -1635,12 +1638,12 @@ impl GstPlaybackRuntime {
         // silence until the decoder has stabilised. Other codecs produce
         // clean output immediately, so skip the hold to avoid swallowing
         // the start of the track.
-        self.startup_ramp_hold_until = self
+        self.startup_ramp_hold_left = self
             .snapshot
             .current
             .as_deref()
             .is_some_and(is_raw_surround_file)
-            .then(|| Instant::now() + RAW_SURROUND_START_HOLD);
+            .then_some(RAW_SURROUND_START_HOLD);
     }
 
     fn hold_stream_ends(&self) {
@@ -1888,19 +1891,20 @@ impl GstPlaybackRuntime {
     /// Whether the engine loop must wake on [`VOLUME_RAMP_TICK`] to drive a
     /// silence hold or fade.
     fn volume_ramp_pending(&self) -> bool {
-        self.startup_ramp_hold_until.is_some()
-            || ((self.target_volume - self.applied_volume).abs() > f32::EPSILON
-                && self.snapshot.state == PlaybackState::Playing
-                && !self.startup_fade_held())
+        !self.startup_fade_held()
+            && (self.startup_ramp_hold_left.is_some()
+                || ((self.target_volume - self.applied_volume).abs() > f32::EPSILON
+                    && self.snapshot.state == PlaybackState::Playing))
     }
 
-    /// Whether the fade-in of a track start waits for the pipeline to play.
-    /// Until the playbin confirms Playing, and while playback is paused, no
-    /// sample reaches the output. A pipeline slow to start, such as under
-    /// load, would otherwise reach the end of the fade before its first
-    /// sample did. The bus wakes the engine when the pipeline plays.
+    /// Whether the fade-in of a track start, and its silence hold, wait for
+    /// the pipeline to play. Until the playbin confirms Playing, and while
+    /// playback is paused, no sample reaches the output. A pipeline slow to
+    /// start, such as under load, would otherwise reach the end of the hold
+    /// or fade before its first sample did. The bus wakes the engine when
+    /// the pipeline plays.
     fn startup_fade_held(&self) -> bool {
-        self.startup_gain_ramp
+        (self.startup_gain_ramp || self.startup_ramp_hold_left.is_some())
             && (self.snapshot.state != PlaybackState::Playing
                 || self.playing_state_requested_at.is_some())
     }
@@ -1916,18 +1920,26 @@ impl GstPlaybackRuntime {
             return;
         }
         // Startup silence hold: keep volume at zero until the decoder has
-        // had time to stabilise (prevents AC3/DTS garbage frames from
-        // reaching the speakers).
-        if let Some(hold_until) = self.startup_ramp_hold_until {
-            if now < hold_until {
+        // played long enough to stabilise (prevents AC3/DTS garbage frames
+        // from reaching the speakers). The first step of the hold only
+        // starts its clock.
+        if let Some(left) = self.startup_ramp_hold_left {
+            let held = self
+                .volume_ramp_tick_at
+                .replace(now)
+                .map_or(Duration::ZERO, |previous| {
+                    now.saturating_duration_since(previous)
+                });
+            if let Some(left) = left.checked_sub(held).filter(|left| !left.is_zero()) {
+                self.startup_ramp_hold_left = Some(left);
                 if self.applied_volume != 0.0 {
                     self.applied_volume = 0.0;
                     self.playbin.set_property("volume", 0.0_f64);
                 }
-                self.volume_ramp_tick_at = None;
                 return;
             }
-            self.startup_ramp_hold_until = None;
+            self.startup_ramp_hold_left = None;
+            self.volume_ramp_tick_at = None;
         }
 
         if !self.volume_ramp_pending() {
@@ -1963,7 +1975,7 @@ impl GstPlaybackRuntime {
     fn poll(&mut self) {
         if self.snapshot.state == PlaybackState::Stopped
             && !self.startup_gain_ramp
-            && self.startup_ramp_hold_until.is_none()
+            && self.startup_ramp_hold_left.is_none()
         {
             return;
         }
@@ -2441,7 +2453,7 @@ impl GstPlaybackRuntime {
                 self.buffering_active = false;
                 self.clear_recent_seek_trace();
                 self.startup_gain_ramp = false;
-                self.startup_ramp_hold_until = None;
+                self.startup_ramp_hold_left = None;
                 let _ = self.set_pipeline_state(gst::State::Ready);
                 self.begin_pipeline_run(false);
                 super::stop_snapshot_at_terminal_eos(&mut self.snapshot, (self.clock)());
@@ -2593,10 +2605,10 @@ impl GstPlaybackRuntime {
         } else if self.snapshot.state == PlaybackState::Paused {
             let _ = self.set_pipeline_state(gst::State::Paused);
             self.startup_gain_ramp = false;
-            self.startup_ramp_hold_until = None;
+            self.startup_ramp_hold_left = None;
         } else {
             self.startup_gain_ramp = false;
-            self.startup_ramp_hold_until = None;
+            self.startup_ramp_hold_left = None;
         }
         // The new run starts at the beginning and advances once it plays.
         self.set_position_sample(Duration::ZERO, false);
@@ -4074,8 +4086,9 @@ mod tests {
         runtime.applied_volume = 0.0;
         runtime.playbin.set_property("volume", 0.0_f64);
         runtime.startup_gain_ramp = true;
-        runtime.startup_ramp_hold_until = Some(start + Duration::from_millis(80));
+        runtime.startup_ramp_hold_left = Some(Duration::from_millis(80));
 
+        runtime.poll_volume_ramp(start);
         runtime.poll_volume_ramp(start + Duration::from_millis(40));
         assert_gain(&runtime, 0.0);
         assert_eq!(runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
@@ -5096,6 +5109,13 @@ mod engine_tests {
             }
             let path = self.dir.join(name);
             std::fs::write(&path, bytes).unwrap();
+            path
+        }
+
+        /// About 1 s of a raw AC3 tone, which starts with a silence hold.
+        fn ac3(&self, name: &str) -> PathBuf {
+            let path = self.dir.join(name);
+            std::fs::write(&path, crate::raw_audio::TEST_AC3).unwrap();
             path
         }
     }
@@ -9894,6 +9914,97 @@ mod engine_tests {
             hold.release();
             engine.assert_fades_in_from_silence();
         }
+    }
+
+    impl DirectEngine {
+        /// Assert that the silence hold of a track start, then its fade-in
+        /// to volume level 0.5, run for `hold` of playback, however long
+        /// ago the pipeline was asked to play.
+        #[track_caller]
+        fn assert_holds_silence_for(&mut self, hold: Duration) {
+            self.wait_until_confirmed_playing();
+            let later = Instant::now() + Duration::from_secs(2);
+            self.runtime.poll_volume_ramp(later);
+            self.runtime.poll_volume_ramp(later + hold - millis(5));
+            assert!(self.runtime.applied_volume.abs() < f32::EPSILON);
+            assert!(self.runtime.playbin.property::<f64>("volume").abs() < f64::EPSILON);
+            assert_eq!(self.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+            // The hold ends, and the 90 ms startup fade starts its clock.
+            self.runtime.poll_volume_ramp(later + hold);
+            assert!(self.runtime.applied_volume.abs() < f32::EPSILON);
+            self.runtime.poll_volume_ramp(later + hold + millis(30));
+            let level = super::super::volume_gain_to_level(self.runtime.applied_volume);
+            assert!((level - 1.0 / 3.0).abs() < 1e-3, "level {level}");
+        }
+
+        /// Pause, and assert that the paused engine neither wakes to step
+        /// the silence hold nor lets it run.
+        #[track_caller]
+        fn pause_during_the_hold(&mut self, now: Instant) {
+            self.runtime.apply_command(PlaybackCommand::Pause);
+            assert_eq!(self.runtime.snapshot.state, PlaybackState::Paused);
+            self.runtime.poll_volume_ramp(now);
+            assert_ne!(self.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+            self.runtime.poll_volume_ramp(now + Duration::from_secs(3));
+            assert_ne!(self.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+            assert!(self.runtime.applied_volume.abs() < f32::EPSILON);
+            self.runtime.apply_command(PlaybackCommand::Play);
+        }
+    }
+
+    #[test]
+    fn raw_surround_hold_waits_for_a_pipeline_slow_to_start() {
+        // A first read that takes long holds the pipeline back from playing
+        // for longer than the silence hold of an AC3 track start. The hold
+        // runs once the pipeline plays. Paused before it plays, the track
+        // holds silence once it plays after the resume.
+        for pause_first in [false, true] {
+            let fixtures = Fixtures::new(&format!("slow-start-hold-{pause_first}"));
+            let a = fixtures.ac3("a.ac3");
+            let mut engine = DirectEngine::start();
+            let hold = hold_reads(&a);
+            engine
+                .runtime
+                .apply_command(PlaybackCommand::LoadQueue(vec![a]));
+            engine.runtime.apply_command(PlaybackCommand::Play);
+            engine.wait_until("no read was held", |_| hold.holds_a_read());
+            let now = Instant::now();
+            engine.runtime.poll_volume_ramp(now);
+            engine
+                .runtime
+                .poll_volume_ramp(now + Duration::from_secs(1));
+            assert!(
+                engine.runtime.applied_volume.abs() < f32::EPSILON,
+                "pause_first={pause_first}"
+            );
+            if pause_first {
+                engine.pause_during_the_hold(now + Duration::from_secs(1));
+            }
+
+            hold.release();
+            engine.assert_holds_silence_for(RAW_SURROUND_START_HOLD);
+        }
+    }
+
+    #[test]
+    fn raw_surround_hold_paused_goes_on_after_the_resume() {
+        let fixtures = Fixtures::new("paused-hold");
+        let a = fixtures.ac3("a.ac3");
+        let mut engine = DirectEngine::start();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(vec![a]));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_until_confirmed_playing();
+        let now = Instant::now();
+        engine.runtime.poll_volume_ramp(now);
+        engine.runtime.poll_volume_ramp(now + millis(30));
+        assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
+        assert_eq!(engine.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+
+        engine.pause_during_the_hold(now + millis(40));
+        // The rest of the hold runs once the pipeline plays again.
+        engine.assert_holds_silence_for(RAW_SURROUND_START_HOLD - millis(30));
     }
 
     /// How long the file of a stopped source may stay open before the
