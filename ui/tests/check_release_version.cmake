@@ -55,4 +55,19 @@ expect_check(stale_spec v1.2.3 fail "RPM spec version '1\\.2\\.2' does not match
 write_fixture(stale_metainfo 1.2.3 1.2.3 1.2.2)
 expect_check(stale_metainfo v1.2.3 fail "AppStream metadata does not match")
 
+# Only the [package] table holds the app version; a dependency table before it
+# has a version of its own.
+write_fixture(dependency_table_first 1.2.2 1.2.3 1.2.3)
+file(READ "${WORK_DIR}/dependency_table_first/Cargo.toml" cargo_toml)
+file(WRITE "${WORK_DIR}/dependency_table_first/Cargo.toml"
+    "[dependencies.extra]\nversion = \"1.2.3\"\n\n${cargo_toml}")
+expect_check(dependency_table_first v1.2.3 fail "Cargo.toml version '1\\.2\\.2' does not match")
+expect_check(dependency_table_first v1.2.2 fail "RPM spec version '1\\.2\\.3' does not match")
+
+# A comment after the version, with a quoted version in it, is not the version.
+write_fixture(comment_with_version 1.2.2 1.2.3 1.2.3)
+file(WRITE "${WORK_DIR}/comment_with_version/Cargo.toml"
+    "[ package ]\nname = 'ferrous'\nversion = '1.2.2' # next \"1.2.3\"\n")
+expect_check(comment_with_version v1.2.3 fail "Cargo.toml version '1\\.2\\.2' does not match tag v1\\.2\\.3")
+
 file(REMOVE_RECURSE "${WORK_DIR}")

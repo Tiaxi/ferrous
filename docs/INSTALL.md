@@ -21,11 +21,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 Install these tools and development libraries:
 
 - Rust toolchain (`cargo`, `rustc`)
-- Bash and `/bin/zsh` (CMake invokes Cargo through zsh)
+- Bash, for the repository scripts
 - CMake 3.24 or newer, Ninja, pkg-config, and a C++20 compiler
 - Qt 6.8 or newer development libraries: Core, DBus, Gui, Qml, Quick, QuickControls2, Network, Widgets, Concurrent, and Test
 - KDE Frameworks 6 Kirigami development libraries and QML runtime modules
 - GLib/GIO and GStreamer development libraries, including app, audio, and pbutils
+- The D-Bus development library (libdbus), which the Last.fm keyring support links
 - GStreamer runtime codec plugins for the formats you want to play
 
 To run Ferrous, also install the KDE `qqc2-desktop-style` QML module (`kf6-qqc2-desktop-style` on Fedora). Ferrous uses its `org.kde.desktop` controls style and does not start without it. Plasma desktops include it.
@@ -35,8 +36,8 @@ Although CMake declares a Qt 6.6 minimum, it unconditionally enables [QTP0004, i
 For Fedora, the build package set used by CI is:
 
 ```bash
-sudo dnf install git rust cargo zsh cmake ninja-build gcc-c++ \
-  pkgconf-pkg-config glib2-devel gstreamer1-devel \
+sudo dnf install git rust cargo cmake ninja-build gcc-c++ \
+  pkgconf-pkg-config dbus-devel glib2-devel gstreamer1-devel \
   gstreamer1-plugins-base-devel qt6-qtbase-devel \
   qt6-qtdeclarative-devel qt6-qtquickcontrols2-devel kf6-kirigami-devel
 ```
@@ -83,7 +84,7 @@ sudo dnf builddep packaging/rpm/ferrous.spec
 
 The helper packages the current working tree, vendors the crates that `Cargo.lock` lists into a second source tarball, validates the desktop entry and AppStream metadata, runs package checks, and writes RPMs under `dist/rpm/RPMS/`. Vendoring needs network access unless Cargo has already downloaded the crates; the package build itself runs offline. Package builds do not treat compiler warnings as errors.
 
-rpmbuild checks that Fedora's `rust` and `cargo` packages are installed, but it does not choose the compiler: CMake runs the first `cargo` on the path after loading `~/.cargo/env`. Release packages are built in a clean Fedora container, where Fedora's toolchain is the only one. On a machine with rustup, a local package build uses the rustup toolchain unless you link Fedora's toolchain into rustup and select it:
+rpmbuild checks that Fedora's `rust` and `cargo` packages are installed, but it does not choose the compiler: CMake runs `$CARGO` when set, otherwise the first `cargo` on the path, and `~/.cargo/bin/cargo` only when the path has none. Release packages are built in a clean Fedora container, where Fedora's toolchain is the only one. On a machine with rustup's `~/.cargo/bin` on the path, that `cargo` is rustup's proxy, so a local package build uses the rustup toolchain unless you link Fedora's toolchain into rustup and select it:
 
 ```bash
 rustup toolchain link fedora /usr

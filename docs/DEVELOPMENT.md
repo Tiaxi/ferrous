@@ -9,11 +9,13 @@ Run commands from the repository root. See [installation](INSTALL.md) for build 
 ./scripts/run-ui.sh --no-run
 ```
 
-The launcher configures CMake, builds the Rust static library and Qt executable, and launches the app unless `--no-run` is given. CMake invokes Cargo through `/bin/zsh`.
+The launcher configures CMake, builds the Rust static library and Qt executable, and launches the app unless `--no-run` is given. CMake builds the Rust library with `--locked` and the `cargo` it finds at configure time: `$CARGO` when set, otherwise the first `cargo` on the path, and `~/.cargo/bin/cargo` only when the path has none. Set the `FERROUS_CARGO` cache variable to choose another.
 
 Repository scripts load optional `build.env` settings. Start with `cp build.env.example build.env` and replace the placeholder values. Last.fm builds need `FERROUS_LASTFM_API_KEY` and `FERROUS_LASTFM_SHARED_SECRET` at compile time; they are optional for other features. `FERROUS_DNF_CMD` overrides the local RPM installation command. Keep credentials out of version control.
 
-Set `FERROUS_UI_BUILD_DIR` to use another UI build directory. The Rust archive still builds under `target/release`. The launcher also accepts `CMAKE_BUILD_TYPE` and `CMAKE_GENERATOR`.
+Set `FERROUS_UI_BUILD_DIR` to use another UI build directory. Each UI build directory builds the Rust archive in its own Cargo target directory, `cargo/` inside it, so builds with and without profiling never link each other's archive; `CARGO_TARGET_DIR` does not move it, and the `FERROUS_CARGO_TARGET_DIR` cache variable does. The launcher also accepts `CMAKE_BUILD_TYPE` and `CMAKE_GENERATOR`.
+
+Cargo's default features are `gst`, the GStreamer playback backend, and `cli`, the command-line frontend, so plain `cargo run`, `cargo test` and `cargo build` use GStreamer. Build with `--no-default-features --features cli` for the mock backend. `profiling-logs` adds the profiling output described below. The CMake build selects its own features. Release builds keep Rust line tables, so backtraces, coredumps and debuginfo packages show Rust files and line numbers.
 
 ## Validation
 
@@ -32,7 +34,7 @@ Use the repository script for validation:
 | UI/QML only | `./scripts/run-tests.sh --ui-only` |
 | Both stacks, build configuration, or uncertain scope | `./scripts/run-tests.sh` |
 
-The Rust path runs formatting, `cargo check`, strict Clippy (`--all-targets -- -D warnings -D clippy::pedantic`; test code is exempt from the pedantic group only), tests, and cargo-audit with the ignore list in `.cargo/audit.toml`, in that order. CI runs the same Clippy and audit checks, and builds with `--locked`. The default feature set is `gst`. The UI path configures and builds with CMake, then runs all registered Qt tests through CTest with offscreen rendering where configured. UI builds also rebuild the Rust static library. The script configures profiling logs off. Tests run with temporary `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME` directories that the script removes afterwards; Rust unit tests also resolve the XDG directories under a per-process temporary root regardless of the environment.
+The Rust path runs formatting, `cargo check`, strict Clippy (`--all-targets -- -D warnings -D clippy::pedantic`; test code is exempt from the pedantic group only), tests, and cargo-audit with the ignore list in `.cargo/audit.toml`, in that order. CI runs the same Clippy and audit checks, and builds with `--locked`. The script builds without Cargo's default features and with `cli` and the features in `FERROUS_TEST_FEATURES`, `gst` unless set. The UI path configures and builds with CMake, then runs all registered Qt tests through CTest with offscreen rendering where configured. UI builds also rebuild the Rust static library. The script configures profiling logs off. Tests run with temporary `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME` directories that the script removes afterwards; Rust unit tests also resolve the XDG directories under a per-process temporary root regardless of the environment.
 
 Keep Clippy and audit enabled. Fix failures and new warnings; report checks that could not run. For documentation-only changes, verify commands and claims against the source, check relative links, and run `git diff --check`.
 
@@ -42,7 +44,7 @@ CI also tests the mock playback backend. To exercise that path locally through t
 FERROUS_TEST_FEATURES=' ' ./scripts/run-tests.sh --rust-only
 ```
 
-The single space deliberately supplies no Cargo features; an empty value falls back to `gst` in the script. Add this run when changing shared playback behavior or mock-only tests.
+The single space deliberately selects no backend feature; an empty value falls back to `gst` in the script. Add this run when changing shared playback behavior or mock-only tests. Without the script, `cargo test --no-default-features --features cli` tests the mock backend.
 
 Optional coverage gate (default minimum line coverage: 35%, overridden by `FERROUS_COVERAGE_MIN`):
 
@@ -57,10 +59,10 @@ cargo install cargo-llvm-cov
 The backend CLI uses the in-process bridge without Qt:
 
 ```bash
-cargo run --bin frontend_cli --features gst
+cargo run --bin frontend_cli
 ```
 
-It prints its commands at startup. These cover playback, seeking, volume, display settings, and snapshots; the UI does not launch this CLI as a subprocess.
+It prints its commands at startup and reads them from standard input until `quit` or the end of the input, so it also takes commands from a pipe. These cover playback, seeking, volume, display settings, and snapshots; the UI does not launch this CLI as a subprocess.
 
 For crash investigation, `./scripts/run-ui.sh --coredump` enables core dumps and prints `coredumpctl` commands.
 
@@ -70,11 +72,11 @@ The launcher also provides cleanup options that delete local app state:
 | --- | --- |
 | `--nuke-db` | Library database, including waveform cache, and SQLite WAL/SHM files |
 | `--nuke-session` | Saved queue/session |
-| `--nuke-thumbnails` | Library thumbnail cache, including its temporary fallback |
+| `--nuke-thumbnails` | Library thumbnail cache that older versions kept under `$XDG_CACHE_HOME/ferrous` |
 | `--nuke-all` | All three of the above; settings and embedded cover cache remain |
 | `--clear-diagnostics-log` | Current diagnostics log |
 
-See [data locations](INSTALL.md#data-locations). Use `./scripts/run-ui.sh --help` for the complete launcher interface.
+The launcher lists what these options would delete and asks before deleting it. Pass `--yes` to delete without asking; without a terminal, the options need it. See [data locations](INSTALL.md#data-locations). Use `./scripts/run-ui.sh --help` for the complete launcher interface.
 
 A GStreamer test that times out reports its pipeline's state, the elements still changing state, and its latest bus messages. Starving the tests of CPU makes stalls more likely, for example with `taskset -c 0,1 cargo test --features gst --lib -- --test-threads=4`. With `FERROUS_TEST_THREAD_DUMPS` set to a directory, the report also names a file there with the `gdb` stacks of every thread, taken while the pipeline stalls. This needs `gdb` and a `ptrace` scope that lets a process trace its parent (`kernel.yama.ptrace_scope` 0).
 
@@ -91,7 +93,7 @@ Profiling logs are disabled at compile time by default. To build and run with UI
 This enables `FERROUS_ENABLE_PROFILE_LOGS` and launches with `FERROUS_PROFILE_UI=1` unless already set. For Rust backend profiling:
 
 ```bash
-FERROUS_PROFILE=1 cargo run --bin frontend_cli --features 'gst profiling-logs'
+FERROUS_PROFILE=1 cargo run --bin frontend_cli --features profiling-logs
 ```
 
 With a profiling build, these runtime variables select additional output:
@@ -151,6 +153,6 @@ Other useful runtime controls:
 
 See [local package builds](INSTALL.md#local-package-builds) for RPM instructions. `./scripts/install-rpm.sh` installs the newest local RPM without rebuilding it. `./scripts/smoke-test-rpm.sh [rpm-path]` installs the newest local RPM, or the given one, in a fresh Fedora container with podman and network access, then validates the installed files and checks that Ferrous starts.
 
-`./scripts/bump-version.sh <version>` updates the version in `Cargo.toml`, `Cargo.lock`, the RPM spec, and the AppStream metadata in `ui/io.github.tiaxi.ferrous.metainfo.xml`, where it adds a release dated today. The UI tests fail when the newest AppStream release is not the `Cargo.toml` version, and they validate the metadata and desktop entry when `appstreamcli` and `desktop-file-validate` are installed. The RPM changelog has one entry, generated from the version and the packaged commit's date.
+`./scripts/bump-version.sh <version>` updates the version in `Cargo.toml`'s `[package]` table, `Cargo.lock`, the RPM spec, and the AppStream metadata in `ui/io.github.tiaxi.ferrous.metainfo.xml`, where it adds a release dated today. The UI tests fail when the newest AppStream release is not the `Cargo.toml` version, and they validate the metadata and desktop entry when `appstreamcli` and `desktop-file-validate` are installed. CMake configures again when `Cargo.toml` changes, so the next build uses the new version. The RPM changelog has one entry, generated from the version and the packaged commit's date. The UI tests also run `scripts/tests/`, which test the repository scripts on scratch copies.
 
 Pushing a `vX.Y.Z` tag runs the [release workflow](../.github/workflows/release.yml). It first runs `./scripts/check-release-version.sh <tag>`, which fails unless the tag matches the version in `Cargo.toml`, the RPM spec, and the newest AppStream release; run it locally before tagging. The workflow then runs the CI workflow on the tagged commit and builds the RPMs for each Fedora release with `%check` enabled. It publishes the release, with a `SHA256SUMS` file for the packages, only when CI and every required package build pass. A Fedora release that is not out yet is built too, but its failure does not block the release.

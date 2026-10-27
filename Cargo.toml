@@ -20,7 +20,8 @@ gstreamer-audio = { version = "0.25", optional = true }
 gstreamer-base = { version = "0.25", optional = true }
 gstreamer-pbutils = { version = "0.25", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native-sync-persistent", "windows-native", "vendored"] }
+# Linux only, against the system libdbus.
+keyring = { version = "3", default-features = false, features = ["linux-native-sync-persistent"] }
 lofty = "0.24"
 md5 = "0.7"
 parking_lot = "0.12"
@@ -31,17 +32,28 @@ serde = { version = "1", features = ["derive"] }
 strsim = "0.11"
 serde_json = "1"
 symphonia = { version = "0.5", default-features = false, features = ["aac", "aiff", "alac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
-thiserror = "2"
 unicode-normalization = "0.1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"], optional = true }
 url = "2"
 walkdir = "2"
 
+[[bin]]
+name = "frontend_cli"
+required-features = ["cli"]
+
 [features]
-default = []
+# The desktop app's CMake build selects its features itself, without these
+# defaults. Build without default features for the mock playback backend.
+default = ["gst", "cli"]
+# The command-line frontend in src/bin/frontend_cli.rs.
+cli = ["dep:tracing-subscriber"]
 gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-audio", "dep:gstreamer-base", "dep:gstreamer-pbutils"]
 profiling-logs = []
+
+# Line tables give backtraces, coredumps and debuginfo packages Rust file and
+# line numbers.
+[profile.release]
+debug = "line-tables-only"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -71,8 +71,8 @@ spec_file="${SOURCE_DIR}/packaging/rpm/ferrous.spec"
 metainfo="${SOURCE_DIR}/ui/io.github.tiaxi.ferrous.metainfo.xml"
 failed=0
 
-# The same lookup as scripts/build-rpm.sh and ui/CMakeLists.txt.
-cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "${cargo_toml}" | head -n 1)"
+# The [package] version, which scripts/build-rpm.sh and ui/CMakeLists.txt use.
+cargo_version="$("${SCRIPT_DIR}/cargo-package-version.sh" "${cargo_toml}" 2>/dev/null || true)"
 if [[ "${cargo_version}" != "${version}" ]]; then
     echo "Cargo.toml version '${cargo_version}' does not match tag ${tag}." >&2
     failed=1

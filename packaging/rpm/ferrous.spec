@@ -24,13 +24,13 @@ BuildRequires:  qt6-qtbase-devel
 BuildRequires:  qt6-qtdeclarative-devel
 BuildRequires:  rust
 BuildRequires:  kf6-kirigami-devel
+# The Secret Service keyring links the system libdbus.
+BuildRequires:  pkgconfig(dbus-1)
 BuildRequires:  pkgconfig(gio-2.0)
 BuildRequires:  pkgconfig(gstreamer-1.0)
 BuildRequires:  pkgconfig(gstreamer-app-1.0)
 BuildRequires:  pkgconfig(gstreamer-audio-1.0)
 BuildRequires:  pkgconfig(gstreamer-pbutils-1.0)
-# CMake runs Cargo through /bin/zsh.
-BuildRequires:  zsh
 BuildRequires:  appstream
 BuildRequires:  desktop-file-utils
 

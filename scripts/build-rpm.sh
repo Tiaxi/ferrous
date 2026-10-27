@@ -111,7 +111,7 @@ fi
 mkdir -p "${RPM_TOPDIR}"/BUILD "${RPM_TOPDIR}"/BUILDROOT "${RPM_TOPDIR}"/RPMS \
     "${RPM_TOPDIR}"/SOURCES "${RPM_TOPDIR}"/SPECS "${RPM_TOPDIR}"/SRPMS
 
-version="$(sed -n 's/^version = "\(.*\)"/\1/p' "${REPO_ROOT}/Cargo.toml" | head -n 1)"
+version="$("${SCRIPT_DIR}/cargo-package-version.sh" "${REPO_ROOT}/Cargo.toml" || true)"
 if [[ -z "${version}" ]]; then
     echo "Failed to determine Cargo version from Cargo.toml" >&2
     exit 1
