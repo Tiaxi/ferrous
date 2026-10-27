@@ -200,30 +200,48 @@ pub(super) fn touch_waveform_in_db(conn: &Connection, path: &Path) {
     );
 }
 
-/// Save a waveform whose decode reached the end of the file, covering
-/// `coverage_seconds` of audio.
+/// Save a waveform whose decode reached the end of the file of `stamp`,
+/// covering `coverage_seconds` of audio. Returns whether it was saved.
+///
+/// It is not if the library row of `path` has another known identity: the
+/// file decoded is no longer the one there, as when a scan read the file
+/// that replaced it during the decode and deleted its saved waveform. A
+/// load trusts the library's identity (see [`load_waveform_from_db`]), so
+/// the save would bring that waveform back for the other file. The check
+/// and the write are one statement, and the scan writes the identity and
+/// deletes the waveform in one transaction, so a save either comes before
+/// the scan, which deletes it, or sees the new identity. Where the file
+/// system did not keep identities, such a save waits for the scan that
+/// stores the new identity, as the load does.
 pub(super) fn persist_waveform_to_db(
     conn: &Connection,
     path: &Path,
     stamp: WaveformSourceStamp,
     peaks: &[f32],
     coverage_seconds: f32,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     if peaks.is_empty() {
         delete_waveform_from_db(conn, path);
-        return Ok(());
+        return Ok(false);
     }
     let blob = encode_peaks_blob(peaks);
     let now = unix_ts_i64();
     let (device, inode) = file_id_columns(stamp.file_id);
-    conn.execute(
+    let saved = conn.execute(
         r"
         INSERT INTO waveform_cache(
             path, size_bytes, modified_secs, modified_nanos,
             format_version, peak_count, peaks_blob, updated_at,
             complete, coverage_seconds, file_device, file_inode
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11)
+        SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11
+        WHERE NOT EXISTS(
+            SELECT 1 FROM tracks
+            WHERE path = ?1
+              AND file_device IS NOT NULL AND file_inode IS NOT NULL
+              AND ?10 IS NOT NULL
+              AND (file_device <> ?10 OR file_inode <> ?11)
+        )
         ON CONFLICT(path) DO UPDATE SET
             size_bytes=excluded.size_bytes,
             modified_secs=excluded.modified_secs,
@@ -251,7 +269,7 @@ pub(super) fn persist_waveform_to_db(
             inode,
         ],
     )?;
-    Ok(())
+    Ok(saved > 0)
 }
 
 /// Forget the saved waveform of `path`. A failed write leaves it to the
@@ -663,5 +681,31 @@ mod tests {
             Some(vec![0.5])
         );
         assert_eq!(stored_file_id(&conn, a), stamp_of(Some(7)).file_id);
+    }
+
+    #[test]
+    fn a_waveform_is_not_saved_for_a_file_the_library_has_another_identity_for() {
+        let conn = Connection::open_in_memory().expect("database");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let path = Path::new("/music/a.flac");
+        // A scan read the file that replaced the one decoded.
+        index(&conn, path, stamp_of(Some(8)));
+        assert!(
+            !persist_waveform_to_db(&conn, path, stamp_of(Some(7)), &[0.5], 1.0).expect("save")
+        );
+        assert_eq!(load_waveform_from_db(&conn, path, stamp_of(Some(8))), None);
+
+        // That of the file the library has, or of one of unknown identity,
+        // is saved; so is any while the library row has no identity yet.
+        assert!(
+            persist_waveform_to_db(&conn, path, stamp_of(Some(8)), &[0.25], 1.0).expect("save")
+        );
+        assert!(persist_waveform_to_db(&conn, path, stamp_of(None), &[0.25], 1.0).expect("save"));
+        index(&conn, path, stamp_of(None));
+        assert!(persist_waveform_to_db(&conn, path, stamp_of(Some(7)), &[0.5], 1.0).expect("save"));
+        assert_eq!(
+            load_waveform_from_db(&conn, path, stamp_of(Some(7))),
+            Some(vec![0.5])
+        );
     }
 }

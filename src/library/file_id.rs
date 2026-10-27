@@ -32,7 +32,9 @@
 //!   changed without a tie is used only once the library row at its path
 //!   has the file's current identity, which a scan stores without reading
 //!   the file only where identities are not kept. A scan that reads a file
-//!   again because it is another one deletes its saved waveform.
+//!   again because it is another one deletes its saved waveform, and a
+//!   decode that ends later is not saved if the file it read has another
+//!   identity than the row.
 //!
 //! A row with no identity yet, as from before identities were stored,
 //! takes the file's identity the next time it matches by size and time.

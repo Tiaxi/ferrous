@@ -2229,13 +2229,7 @@ where
     source.set(None);
     #[cfg(feature = "gst")]
     if is_raw_surround_file(path) {
-        return decode_waveform_peaks_stream_gst_checked(
-            path,
-            max_points,
-            source,
-            on_update,
-            is_cancelled,
-        );
+        return decode_waveform_peaks_stream_gst(path, max_points, source, on_update, is_cancelled);
     }
 
     let unreadable = match File::open(path)
@@ -2263,42 +2257,10 @@ where
         if is_cancelled() {
             return Ok(());
         }
-        decode_waveform_peaks_stream_gst_checked(path, max_points, source, on_update, is_cancelled)
+        decode_waveform_peaks_stream_gst(path, max_points, source, on_update, is_cancelled)
     }
     #[cfg(not(feature = "gst"))]
     Err(unreadable)
-}
-
-/// Decode the overview with the `gst` pipeline, whose `filesrc` opens the
-/// file by its path after this has read its stamp. The file at the path when the
-/// decode ends is the one it read only if it still has that stamp; if not,
-/// as when another file was swapped in, `source` is `None` for the last
-/// update.
-#[cfg(feature = "gst")]
-fn decode_waveform_peaks_stream_gst_checked<F, C>(
-    path: &Path,
-    max_points: usize,
-    source: &Cell<Option<WaveformSourceStamp>>,
-    mut on_update: F,
-    is_cancelled: C,
-) -> anyhow::Result<()>
-where
-    F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
-    C: FnMut() -> bool,
-{
-    let before = track_io::source_stamp(path);
-    source.set(None);
-    decode_waveform_peaks_stream_gst(
-        path,
-        max_points,
-        |peaks, coverage_seconds, progress| {
-            if progress != OverviewProgress::Partial {
-                source.set(before.filter(|before| track_io::source_stamp(path) == Some(*before)));
-            }
-            on_update(peaks, coverage_seconds, progress)
-        },
-        is_cancelled,
-    )
 }
 
 /// Decode the overview with Symphonia. Returns whether it decoded audio
@@ -5625,21 +5587,22 @@ mod tests {
     }
 
     /// The stamps the overview decode of `path` reports with its updates,
-    /// with the files at `a` and `b` swapped after `before` it opens them,
-    /// as by another program; and whether it completed.
+    /// with the files at `a` and `b` swapped, as by another program: before
+    /// the decode starts if `before_start`, and at each of its first
+    /// `swaps` checks for a cancel; and whether it completed.
     fn decoded_sources(
         path: &Path,
         b: &Path,
-        before_open: bool,
+        before_start: bool,
+        swaps: usize,
     ) -> (Vec<Option<WaveformSourceStamp>>, bool) {
         let source = Cell::new(None);
         let mut sources = Vec::new();
         let mut complete = false;
-        let mut swapped = false;
-        if before_open {
+        if before_start {
             swap(path, b);
-            swapped = true;
         }
+        let mut swaps_left = swaps;
         decode_waveform_peaks_stream(
             path,
             64,
@@ -5650,14 +5613,15 @@ mod tests {
                 true
             },
             || {
-                if !swapped {
+                if swaps_left > 0 {
                     swap(path, b);
-                    swapped = true;
+                    swaps_left -= 1;
                 }
                 false
             },
         )
         .expect("decode");
+        assert_eq!(swaps_left, 0, "the decode checked for a cancel too seldom");
         (sources, complete)
     }
 
@@ -5671,7 +5635,7 @@ mod tests {
         // The track was loaded when the file first at `a` was there; the
         // decode opens the one swapped in since.
         let loaded = track_io::source_stamp(&a).expect("stamp");
-        let (sources, complete) = decoded_sources(&a, &b, true);
+        let (sources, complete) = decoded_sources(&a, &b, true, 0);
         assert!(complete);
         let opened = track_io::source_stamp(&a).expect("stamp");
         assert_ne!(opened, loaded);
@@ -5679,7 +5643,7 @@ mod tests {
 
         // Swapped once the decode has the file open, it reads on, and tells
         // the stamp of the file it opened.
-        let (sources, complete) = decoded_sources(&a, &b, false);
+        let (sources, complete) = decoded_sources(&a, &b, false, 1);
         assert!(complete);
         assert!(sources.iter().all(|source| *source == Some(opened)));
         std::fs::remove_dir_all(folder).expect("cleanup");
@@ -5687,20 +5651,109 @@ mod tests {
 
     #[cfg(feature = "gst")]
     #[test]
-    fn a_waveform_gstreamer_decoded_from_a_file_swapped_in_after_its_stat_is_not_saved() {
+    fn a_waveform_gstreamer_decoded_is_saved_with_the_stamp_of_the_file_its_source_opened() {
         let (a, b, folder) =
             same_size_and_time("decode-gst", include_bytes!("fixtures/raw-tone.dts"), "dts");
-        // Swapped before the decode reads the stamp: the file it opens.
-        let (sources, complete) = decoded_sources(&a, &b, true);
-        assert!(complete);
-        assert_eq!(sources.last(), Some(&track_io::source_stamp(&a)));
-        assert!(sources.last().is_some_and(Option::is_some));
+        // Swapped before the decode starts, or after it starts and before
+        // its source opens the file by its path: the file it opens.
+        for (before_start, swaps) in [(true, 0), (false, 1)] {
+            let (sources, complete) = decoded_sources(&a, &b, before_start, swaps);
+            assert!(complete);
+            let opened = track_io::source_stamp(&a);
+            assert!(opened.is_some());
+            assert!(sources.iter().all(|source| *source == opened));
+        }
 
-        // Swapped after the stamp is read, before `filesrc` opens the file
-        // by its path: the stamp is not that of the file decoded.
-        let (sources, complete) = decoded_sources(&a, &b, false);
+        // Swapped before the source opens the file, and back while it
+        // reads: the file at the path has its stamp again, but the decode
+        // read the other file, whose stamp it tells.
+        let (sources, complete) = decoded_sources(&a, &b, false, 2);
         assert!(complete);
-        assert_eq!(sources.last(), Some(&None));
+        let read = track_io::source_stamp(&b);
+        assert_ne!(read, track_io::source_stamp(&a));
+        assert!(sources.iter().all(|source| *source == read));
+        std::fs::remove_dir_all(folder).expect("cleanup");
+    }
+
+    /// The stamp the overview decode of `path` with `GStreamer` tells for
+    /// its last update, and the seconds it covers.
+    #[cfg(feature = "gst")]
+    fn gst_overview(path: &Path) -> (Option<WaveformSourceStamp>, f32) {
+        let source = Cell::new(None);
+        let mut finished = None;
+        decode_waveform_peaks_stream_gst(
+            path,
+            64,
+            &source,
+            |_, coverage, progress| {
+                if progress == OverviewProgress::Complete {
+                    finished = Some((source.get(), coverage));
+                }
+                true
+            },
+            || false,
+        )
+        .expect("decode");
+        finished.expect("a complete overview")
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_gstreamer_decode_trims_the_raw_surround_file_it_reads() {
+        use crate::raw_audio::{ripped_surround_bytes_after_junk, TEST_DTS};
+
+        // A ripped file whose audio starts late, and a plain stream of the
+        // same size, which holds about twice as much audio.
+        let (ripped, _) = ripped_surround_bytes_after_junk(12_000, TEST_DTS);
+        let plain: Vec<u8> = TEST_DTS
+            .iter()
+            .copied()
+            .cycle()
+            .take(ripped.len())
+            .collect();
+        let folder = crate::paths::test_root().join("analysis-decode-gst-trim");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("folder");
+        let (a, b) = (folder.join("a.dts"), folder.join("b.dts"));
+        let time = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (path, bytes) in [(&a, &ripped), (&b, &plain)] {
+            std::fs::write(path, bytes).expect("audio");
+            File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(time))
+                .expect("modification time");
+        }
+        let (ripped_stamp, ripped_coverage) = gst_overview(&a);
+        let (plain_stamp, plain_coverage) = gst_overview(&b);
+        assert!(
+            plain_coverage > ripped_coverage + 0.3,
+            "{plain_coverage} s, {ripped_coverage} s"
+        );
+
+        // Swapped once the decode has read the audio range of the file at
+        // `a`, before its source starts.
+        let (from, to) = (a.clone(), b.clone());
+        let mut swapped = false;
+        gst_waveform::test_hooks::after_each_source_built(move || {
+            if !std::mem::replace(&mut swapped, true) {
+                swap(&from, &to);
+            }
+        });
+        let (stamp, coverage) = gst_overview(&a);
+        gst_waveform::test_hooks::clear();
+
+        // The overview is that of the file whose stamp it tells.
+        let expected = if stamp == ripped_stamp {
+            ripped_coverage
+        } else {
+            assert_eq!(stamp, plain_stamp);
+            plain_coverage
+        };
+        assert!(
+            (coverage - expected).abs() < 0.05,
+            "covers {coverage} s, the file it tells {expected} s"
+        );
         std::fs::remove_dir_all(folder).expect("cleanup");
     }
 

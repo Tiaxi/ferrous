@@ -621,6 +621,59 @@ mod tests {
     }
 
     #[test]
+    fn a_late_save_of_a_file_replaced_during_its_decode_is_not_taken_for_its_replacement() {
+        let folder = crate::paths::test_root().join("track-io-late-save-after-scan");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("folder");
+        let (track, outside) = (folder.join("a.mp3"), folder.join("outside.mp3"));
+        // A time no other test's files have, so that nothing ties with them.
+        let time = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_277);
+        for path in [&track, &outside] {
+            std::fs::write(path, include_bytes!("fixtures/seek-tone.mp3")).expect("audio");
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(time))
+                .expect("modification time");
+        }
+        crate::library::index_tracks_for_test(&folder, std::slice::from_ref(&track));
+        let mut io = TrackIo::new(Some(open_waveform_cache_db().expect("database")));
+        // A decode opens the file; another program replaces it with one of
+        // the same size and time, which nothing in the library ties with.
+        let decoded = source_stamp(&track);
+        std::fs::rename(&outside, &track).expect("replace");
+        // A scan reads the file again, stores its identity and deletes the
+        // waveform saved for the file it replaced, before the decode ends.
+        crate::library::index_tracks_for_test(&folder, std::slice::from_ref(&track));
+        io.handle(TrackIoRequest::SaveWaveform {
+            path: track.clone(),
+            stamp: decoded,
+            peaks: vec![0.1],
+            coverage_seconds: 1.0,
+        });
+
+        let replacement = source_stamp(&track);
+        assert_ne!(replacement, decoded);
+        assert_eq!(io.saved_waveform(&track, replacement), None);
+        let mut reopened = TrackIo::new(io.db.take());
+        assert_eq!(reopened.saved_waveform(&track, replacement), None);
+
+        // The decode of the file there now is saved.
+        reopened.handle(TrackIoRequest::SaveWaveform {
+            path: track.clone(),
+            stamp: replacement,
+            peaks: vec![0.2],
+            coverage_seconds: 1.0,
+        });
+        let mut reopened = TrackIo::new(reopened.db.take());
+        assert_eq!(
+            reopened.saved_waveform(&track, replacement),
+            Some(vec![0.2])
+        );
+        std::fs::remove_dir_all(folder).expect("cleanup");
+    }
+
+    #[test]
     fn a_load_probes_the_file_unless_it_is_unchanged() {
         let path =
             std::env::temp_dir().join(format!("ferrous-track-io-{}.mp3", std::process::id()));

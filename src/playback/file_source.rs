@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The file source of the `playbin3` pipelines, whose reads a flush
-//! interrupts.
+//! interrupts. The waveform overview reads with it too, for the metadata of
+//! the file it opened (`FileSource::opened_metadata`).
 //!
 //! `filesrc` reads its file on the streaming thread that asks for the data.
 //! A `read()` that the kernel does not return, from a network share that
@@ -86,6 +87,23 @@ glib::wrapper! {
     pub(crate) struct FileSource(ObjectSubclass<imp::FileSource>)
         @extends gst_base::BaseSrc, gst::Element, gst::Object,
         @implements gst::URIHandler;
+}
+
+impl FileSource {
+    /// The metadata of the file the source has open, which it read from the
+    /// open handle (`fstat`): that of the file it reads, whichever file is
+    /// at its location by now. `None` while it has none open.
+    pub(crate) fn opened_metadata(&self) -> Option<std::fs::Metadata> {
+        self.imp().opened_metadata()
+    }
+
+    /// Read `file`, which the caller opened at the source's location, at
+    /// the next start instead of opening the location again, so that the
+    /// caller and the pipeline read the same file. Later starts open the
+    /// location.
+    pub(crate) fn read_opened(&self, file: File) {
+        self.imp().read_opened(file);
+    }
 }
 
 /// The files of stopped sources that have not been closed yet, behind a
@@ -478,6 +496,8 @@ struct Open {
     path: Arc<Path>,
     reader: Arc<Reader>,
     seekable: bool,
+    /// The file's metadata, read from the handle when it was opened.
+    metadata: std::fs::Metadata,
     /// The size of the file when it was opened, or when the reader was
     /// last asked.
     size: u64,
@@ -519,6 +539,8 @@ mod imp {
     #[derive(Default)]
     pub(crate) struct FileSource {
         location: Mutex<Option<PathBuf>>,
+        /// A file opened at the location, for the next start to read.
+        opened: Mutex<Option<File>>,
         open: Mutex<Option<Open>>,
         wait: Arc<Wait>,
         releases: Mutex<Option<Arc<Releases>>>,
@@ -537,12 +559,20 @@ mod imp {
                 ));
             }
             *lock(&self.location) = location;
+            // A file opened at the old location is not the new one's.
+            *lock(&self.opened) = None;
             Ok(())
         }
 
-        /// Open the file at `path`, and give it to its reader.
-        fn open(path: &Path) -> Result<Open, gst::ErrorMessage> {
-            let file = File::open(path).map_err(|err| match err.kind() {
+        pub(super) fn read_opened(&self, file: File) {
+            *lock(&self.opened) = Some(file);
+        }
+
+        /// Open the file at `path`, unless `opened` is open there already,
+        /// and give it to its reader.
+        fn open(path: &Path, opened: Option<File>) -> Result<Open, gst::ErrorMessage> {
+            let opened = opened.map_or_else(|| File::open(path), Ok);
+            let file = opened.map_err(|err| match err.kind() {
                 io::ErrorKind::NotFound => gst::error_msg!(
                     gst::ResourceError::NotFound,
                     ["No such file \"{}\"", path.display()]
@@ -595,9 +625,14 @@ mod imp {
                 // Only a regular file has a size and can be read anywhere.
                 seekable: kind.is_file(),
                 size: metadata.len(),
+                metadata,
                 size_unasked: true,
                 release: None,
             })
+        }
+
+        pub(super) fn opened_metadata(&self) -> Option<std::fs::Metadata> {
+            lock(&self.open).as_ref().map(|open| open.metadata.clone())
         }
 
         /// Ask the reader for `op` on the file, and wait for the answer,
@@ -771,7 +806,7 @@ mod imp {
                     ("No file name specified for reading.")
                 ));
             };
-            let open = Self::open(&path)?;
+            let open = Self::open(&path, lock(&self.opened).take())?;
             let handle = open.handle;
             // The pipeline asks for the size again only when it reaches the
             // end it knows, never for a duration query, which the engine's
