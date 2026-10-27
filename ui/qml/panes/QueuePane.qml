@@ -5,6 +5,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 Rectangle {
     id: root
@@ -25,24 +26,146 @@ Rectangle {
     required property var droppedExternalPaths
 
     // The columns, which the header and the rows share. The title takes the
-    // width the others leave; the others follow the font size.
+    // width the others leave. Artist, Album and Length have the widths the
+    // user dragged their handles to, which the settings keep, or defaults
+    // that follow the font size.
     readonly property real columnMargin: 8
     readonly property real columnSpacing: 6
-    readonly property real artistColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 25)
-    readonly property real albumColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 28)
-    readonly property real lengthColumnWidth: Math.ceil(Math.max(
+    readonly property real defaultArtistColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 25)
+    readonly property real defaultAlbumColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 28)
+    readonly property real defaultLengthColumnWidth: Math.ceil(Math.max(
         lengthHeaderMetrics.advanceWidth,
         lengthValueMetrics.advanceWidth) + columnFontMetrics.averageCharacterWidth)
+    readonly property real artistColumnWidth: root.columnWidths.artist
+    readonly property real albumColumnWidth: root.columnWidths.album
+    readonly property real lengthColumnWidth: root.columnWidths.length
+    // The narrowest a column can be dragged: a few characters, and no
+    // narrower than the backend keeps.
+    readonly property real minimumResizedColumnWidth: Math.max(
+        16, Math.ceil(columnFontMetrics.averageCharacterWidth * 4))
+    // The width Artist, Album and Length share, which leaves the title its
+    // minimum.
+    readonly property real resizableColumnsRoom: Math.max(0, queueHeaderRow.width
+        - root.playlistIndicatorColumnWidth - root.playlistOrderColumnWidth
+        - root.minimumTitleColumnWidth - 5 * root.columnSpacing)
+    // The column whose handle is being dragged, or moved with the keys, and
+    // its width until the drag ends and the width is kept.
+    property string resizingColumn: ""
+    property real resizingWidth: 0
+    property real resizeStartWidth: 0
+
+    function defaultColumnWidth(column) {
+        if (column === "artist") {
+            return root.defaultArtistColumnWidth
+        }
+        if (column === "album") {
+            return root.defaultAlbumColumnWidth
+        }
+        return root.defaultLengthColumnWidth
+    }
+
+    // The width the column would have with room enough.
+    function preferredColumnWidth(column) {
+        if (root.resizingColumn === column) {
+            return root.resizingWidth
+        }
+        const saved = root.uiBridge.queueColumnWidths
+            ? Number(root.uiBridge.queueColumnWidths[column])
+            : 0
+        return saved > 0
+            ? Math.max(root.minimumResizedColumnWidth, saved)
+            : root.defaultColumnWidth(column)
+    }
+
+    // The widths of Artist, Album and Length. When the queue is too narrow
+    // for their preferred widths with the title at its minimum, as in a
+    // window made smaller after a column was widened, each gives up a share
+    // of what it has beyond its minimum.
+    readonly property var columnWidths: {
+        const names = ["artist", "album", "length"]
+        const preferred = names.map(root.preferredColumnWidth)
+        const minimum = root.minimumResizedColumnWidth
+        const room = root.resizableColumnsRoom
+        const total = preferred.reduce((sum, width) => sum + width, 0)
+        let widths = preferred
+        if (room > 0 && total > room) {
+            const slack = preferred.map(width => Math.max(0, width - minimum))
+            const totalSlack = slack.reduce((sum, width) => sum + width, 0)
+            const overflow = Math.min(total - room, totalSlack)
+            if (totalSlack > 0) {
+                widths = preferred.map((width, i) => width - overflow * slack[i] / totalSlack)
+            }
+        }
+        return {
+            "artist": Math.round(widths[0]),
+            "album": Math.round(widths[1]),
+            "length": Math.round(widths[2])
+        }
+    }
+
+    // The widest `column` can be: as wide as leaves the title its minimum.
+    function maximumColumnWidth(column) {
+        let others = 0
+        for (const name of ["artist", "album", "length"]) {
+            if (name !== column) {
+                others += root.columnWidths[name]
+            }
+        }
+        return Math.max(root.minimumResizedColumnWidth, root.resizableColumnsRoom - others)
+    }
+
+    function beginColumnResize(column) {
+        if (root.resizingColumn !== column) {
+            root.finishColumnResize()
+            // The width it has now, before the column follows resizingWidth.
+            const width = root.columnWidths[column]
+            root.resizeStartWidth = width
+            root.resizingWidth = width
+            root.resizingColumn = column
+        }
+    }
+
+    function resizeColumnTo(column, width) {
+        root.beginColumnResize(column)
+        root.resizingWidth = Math.round(Math.max(
+            root.minimumResizedColumnWidth,
+            Math.min(root.maximumColumnWidth(column), width)))
+    }
+
+    // Keep the width the drag ended at, once per drag, if it changed.
+    function finishColumnResize() {
+        const column = root.resizingColumn
+        if (column === "") {
+            return
+        }
+        const width = Math.round(root.resizingWidth)
+        if (width !== Math.round(root.resizeStartWidth)) {
+            root.uiBridge.setQueueColumnWidth(column, width)
+        }
+        root.resizingColumn = ""
+    }
+
+    function cancelColumnResize() {
+        root.resizingColumn = ""
+    }
+
+    function restoreDefaultColumnWidth(column) {
+        root.cancelColumnResize()
+        root.uiBridge.setQueueColumnWidth(column, 0)
+    }
     // The narrowest the queue gets: every column, and a title column wide
     // enough to tell the tracks apart. The number column is counted for
     // queues of up to 99,999 tracks rather than at its width now, so that
-    // the window's minimum does not change as tracks are queued.
+    // the window's minimum does not change as tracks are queued, and the
+    // default widths of the others, so that it does not change as they are
+    // resized either: narrower windows shrink resized columns.
     readonly property real minimumTitleColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 12)
     readonly property real minimumOrderColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 6.5)
     readonly property real minimumContentWidth: Math.ceil(2 * root.columnMargin
         + root.playlistIndicatorColumnWidth + root.minimumOrderColumnWidth
-        + root.minimumTitleColumnWidth + root.artistColumnWidth + root.albumColumnWidth
-        + root.lengthColumnWidth + 5 * root.columnSpacing + root.scrollBarAllowance)
+        + root.minimumTitleColumnWidth + root.defaultArtistColumnWidth
+        + root.defaultAlbumColumnWidth + root.defaultLengthColumnWidth + 5 * root.columnSpacing
+        + root.scrollBarAllowance)
     // Room for the scroll bar beside the rows, which some styles widen
     // while it is used; see reservedRightPadding.
     readonly property real scrollBarAllowance: 20
@@ -87,6 +210,7 @@ Rectangle {
             }
 
             RowLayout {
+                id: queueHeaderRow
                 anchors.fill: parent
                 anchors.leftMargin: root.columnMargin
                 anchors.rightMargin: root.columnMargin
@@ -118,6 +242,7 @@ Rectangle {
                     color: root.uiPalette.uiMutedTextColor
                 }
                 Label {
+                    id: artistHeader
                     objectName: "queueHeader_artist"
                     text: "Artist"
                     Layout.preferredWidth: root.artistColumnWidth
@@ -125,6 +250,7 @@ Rectangle {
                     color: root.uiPalette.uiMutedTextColor
                 }
                 Label {
+                    id: albumHeader
                     objectName: "queueHeader_album"
                     text: "Album"
                     Layout.preferredWidth: root.albumColumnWidth
@@ -132,11 +258,117 @@ Rectangle {
                     color: root.uiPalette.uiMutedTextColor
                 }
                 Label {
+                    id: lengthHeader
                     objectName: "queueHeader_length"
                     text: "Length"
                     Layout.preferredWidth: root.lengthColumnWidth
                     horizontalAlignment: Text.AlignRight
                     color: root.uiPalette.uiMutedTextColor
+                }
+            }
+
+            // A handle on the left of each resizable column: the title
+            // fills the width the others leave, so dragging it left widens
+            // the column after it. Double-click, or Home, restores the
+            // column's default width; Left and Right move it from the
+            // keyboard.
+            Repeater {
+                model: [
+                    { "column": "artist", "label": "Artist", "header": artistHeader },
+                    { "column": "album", "label": "Album", "header": albumHeader },
+                    { "column": "length", "label": "Length", "header": lengthHeader }
+                ]
+
+                delegate: Item {
+                    id: resizeHandle
+                    objectName: "queueColumnHandle_" + modelData.column
+                    required property var modelData
+                    readonly property string column: modelData.column
+                    readonly property bool highlighted: resizeMouseArea.containsMouse
+                        || resizeMouseArea.pressed || resizeHandle.activeFocus
+                    // Where the pointer was when the drag started, in the
+                    // pane, which stays put as the columns move.
+                    property real pressX: 0
+
+                    x: queueHeaderRow.x + modelData.header.x - root.columnSpacing / 2 - width / 2
+                    width: Math.max(8, root.columnSpacing + 2)
+                    height: parent.height
+                    activeFocusOnTab: true
+
+                    Accessible.role: Accessible.Separator
+                    Accessible.name: "Resize the " + modelData.label + " column"
+                    Accessible.description: "Left or Right to resize, Home for the default width"
+                    Accessible.focusable: true
+
+                    Rectangle {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: resizeHandle.highlighted ? 2 : 1
+                        height: parent.height * (resizeHandle.highlighted ? 1 : 0.5)
+                        color: resizeHandle.highlighted
+                            ? root.uiPalette.uiAccentColor
+                            : root.uiPalette.uiBorderColor
+                    }
+
+                    MouseArea {
+                        id: resizeMouseArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        preventStealing: true
+                        cursorShape: Qt.SplitHCursor
+
+                        onPressed: function(mouse) {
+                            resizeHandle.pressX = mapToItem(root, mouse.x, 0).x
+                            root.beginColumnResize(resizeHandle.column)
+                        }
+                        onPositionChanged: function(mouse) {
+                            if (pressed && root.resizingColumn === resizeHandle.column) {
+                                const x = mapToItem(root, mouse.x, 0).x
+                                root.resizeColumnTo(resizeHandle.column,
+                                    root.resizeStartWidth + resizeHandle.pressX - x)
+                            }
+                        }
+                        onReleased: root.finishColumnResize()
+                        onCanceled: root.cancelColumnResize()
+                        onDoubleClicked: root.restoreDefaultColumnWidth(resizeHandle.column)
+                    }
+
+                    function keyResizes(event) {
+                        return KeyUtils.isUnmodified(event)
+                            && (event.key === Qt.Key_Left || event.key === Qt.Key_Right
+                                || event.key === Qt.Key_Home)
+                    }
+                    // The keys move the focused handle rather than seeking.
+                    Keys.onShortcutOverride: function(event) {
+                        event.accepted = resizeHandle.keyResizes(event)
+                    }
+                    Keys.onPressed: function(event) {
+                        if (!resizeHandle.keyResizes(event)) {
+                            return
+                        }
+                        event.accepted = true
+                        if (event.key === Qt.Key_Home) {
+                            root.restoreDefaultColumnWidth(resizeHandle.column)
+                            return
+                        }
+                        const step = Math.max(1, Math.round(columnFontMetrics.averageCharacterWidth))
+                        root.resizeColumnTo(resizeHandle.column,
+                            root.columnWidths[resizeHandle.column]
+                                + (event.key === Qt.Key_Left ? step : -step))
+                    }
+                    // A held key moves the handle until it is let go, when
+                    // the width is kept.
+                    Keys.onReleased: function(event) {
+                        if (!event.isAutoRepeat && resizeHandle.keyResizes(event)) {
+                            event.accepted = true
+                            root.finishColumnResize()
+                        }
+                    }
+                    onActiveFocusChanged: {
+                        if (!resizeHandle.activeFocus && !resizeMouseArea.pressed) {
+                            root.finishColumnResize()
+                        }
+                    }
                 }
             }
         }

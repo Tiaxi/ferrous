@@ -1073,6 +1073,7 @@ private slots:
     void theSmallestWindowFitsALaptopScreenAndShowsEveryControl();
     void windowLayoutSurvivesARestart();
     void aWindowSavedOffTheScreensOpensOnOne();
+    void queueColumnWidthsSurviveARestart();
     void theWindowOpensWithoutASavedLayoutThatDoesNotCome();
     void quittingWhileMinimizedKeepsTheWindowMaximized();
     void consecutiveErrorsAreBothVisible();
@@ -3392,6 +3393,90 @@ void QmlSmokeTest::aWindowSavedOffTheScreensOpensOnOne() {
                                        .arg(window->y())
                                        .arg(window->width())
                                        .arg(window->height())));
+    QVERIFY(closeThroughTheQuitFlow(window));
+    QFile::remove(savedSettingsPath());
+}
+
+void QmlSmokeTest::queueColumnWidthsSurviveARestart() {
+    // Saved by a build that also had a Genre column, which this one keeps,
+    // on one of the large test screens, which has room for the columns.
+    QFile::remove(savedSettingsPath());
+    QVERIFY(QDir().mkpath(QFileInfo(savedSettingsPath()).path()));
+    QFile settings(savedSettingsPath());
+    QVERIFY(settings.open(QIODevice::WriteOnly));
+    settings.write("window_geometry=100200,150,1300,820\n"
+                   "queue_column_widths=artist:260,genre:99,album:9\nfuture_key=1\n");
+    settings.close();
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    const auto header = [](QQuickWindow *window, const char *column) {
+        auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+        return queue != nullptr
+            ? shownItemNamed(queue, QStringLiteral("queueHeader_") + QLatin1String(column))
+            : nullptr;
+    };
+    qreal album = 0;
+    {
+        BridgeClient bridge;
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+        QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+        QVERIFY2(window != nullptr, "Main.qml failed to show");
+        QQuickItem *artist = header(window, "artist");
+        QQuickItem *albumHeader = header(window, "album");
+        QVERIFY(artist != nullptr && albumHeader != nullptr);
+        // As the window is first shown, without a jump from the default.
+        QCOMPARE(artist->width(), 260.0);
+        // The album's width was out of range: its default.
+        const qreal defaultAlbum = albumHeader->width();
+        QVERIFY(defaultAlbum > 100);
+
+        QQuickItem *handle = shownItemNamed(window->contentItem(),
+                                            QStringLiteral("queueColumnHandle_album"));
+        QVERIFY(handle != nullptr);
+        QPoint at = handle->mapToScene(QPointF(handle->width() / 2, handle->height() / 2)).toPoint();
+        QTest::mouseMove(window, at);
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, at);
+        for (int step = 0; step < 5; ++step) {
+            at -= QPoint(8, 0);
+            QTest::mouseMove(window, at);
+        }
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, at);
+        QTRY_COMPARE(albumHeader->width(), defaultAlbum + 40);
+        album = albumHeader->width();
+        QVERIFY(closeThroughTheQuitFlow(window));
+    }
+    QVERIFY(settings.open(QIODevice::ReadOnly));
+    const QByteArray saved = settings.readAll();
+    settings.close();
+    const QByteArray line = "\nqueue_column_widths=artist:260,album:" + QByteArray::number(int(album))
+        + ",genre:99\n";
+    QVERIFY2(saved.contains(line), saved.constData());
+    QVERIFY2(saved.contains("\nfuture_key=1\n"), saved.constData());
+
+    BridgeClient bridge;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QCOMPARE(header(window, "artist")->width(), 260.0);
+    QCOMPARE(header(window, "album")->width(), album);
+
+    // In the narrowest window the widened columns give way, so the title
+    // keeps its minimum, and they come back as the window grows again.
+    auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+    const QRect wide = window->geometry();
+    window->resize(window->minimumWidth(), window->minimumHeight());
+    QTRY_COMPARE(window->width(), window->minimumWidth());
+    QTRY_VERIFY(header(window, "artist")->width() < 260.0);
+    QVERIFY(header(window, "title")->width()
+            >= queue->property("minimumTitleColumnWidth").toReal() - 1);
+    QVERIFY(header(window, "album")->width()
+            >= queue->property("minimumResizedColumnWidth").toReal());
+    window->setGeometry(wide);
+    QTRY_COMPARE(header(window, "artist")->width(), 260.0);
+    QTRY_COMPARE(header(window, "album")->width(), album);
     QVERIFY(closeThroughTheQuitFlow(window));
     QFile::remove(savedSettingsPath());
 }

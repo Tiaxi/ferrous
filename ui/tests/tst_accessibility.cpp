@@ -291,6 +291,7 @@ private slots:
     void modifiedKeysReachTheShortcutsFromFocusedButtons();
     void rowHeightsAndScrollingFollowTheFont();
     void queueHeaderAndRowsShareTheColumnWidths();
+    void queueColumnsResizeByTheirHandles();
     void lightPaletteLeavesNoFixedColours();
     void tagEditorCaseButtonsAreBesideTheScrollBar();
     void modeSwitchIconFollowsTheMode();
@@ -1489,6 +1490,104 @@ void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
     QVERIFY(scaled[4] > defaults[4] * 1.3);
     QVERIFY(scaled[5] > defaults[5] * 1.3);
     dropMinimumSizeWarnings();
+}
+
+void AccessibilityTest::queueColumnsResizeByTheirHandles() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    auto *queue = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(queue != nullptr);
+    QSignalSpy kept(bridge, SIGNAL(queueColumnWidthsChanged()));
+    QVERIFY(kept.isValid());
+
+    // The width of `column` in the header and in the first row, or -1 if
+    // they differ.
+    const auto widthOf = [&](const QString &column) -> qreal {
+        const QList<QQuickItem *> rows = visibleRows(queue, QStringLiteral("queueRow"));
+        QQuickItem *header = visibleItemNamed(window, QStringLiteral("queueHeader_") + column);
+        if (rows.isEmpty() || header == nullptr) {
+            return -1;
+        }
+        const QList<QQuickItem *> cells =
+            itemsNamed(rows.first(), QStringLiteral("queueCell_") + column);
+        if (cells.size() != 1
+            || std::abs(header->mapToScene(QPointF()).x() - cells.first()->mapToScene(QPointF()).x())
+                > 0.5
+            || std::abs(header->width() - cells.first()->width()) > 0.5) {
+            return -1;
+        }
+        return header->width();
+    };
+    qreal defaultArtist = -1;
+    QTRY_VERIFY((defaultArtist = widthOf(QStringLiteral("artist"))) > 0);
+    const qreal title = widthOf(QStringLiteral("title"));
+    QVERIFY(title > 100);
+
+    QQuickItem *artistHandle = visibleItemNamed(window, QStringLiteral("queueColumnHandle_artist"));
+    QQuickItem *albumHandle = visibleItemNamed(window, QStringLiteral("queueColumnHandle_album"));
+    QVERIFY(artistHandle != nullptr && albumHandle != nullptr);
+    QCOMPARE(accessibleText(artistHandle, QAccessible::Name),
+             QStringLiteral("Resize the Artist column"));
+    QVERIFY(artistHandle->activeFocusOnTab());
+
+    // A drag to the left widens the column after the handle, in the
+    // header and the rows together, and the width is kept once, when the
+    // drag ends.
+    QPoint at = centerOf(artistHandle);
+    QTest::mouseMove(window, at);
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, at);
+    for (int step = 0; step < 6; ++step) {
+        at -= QPoint(10, 0);
+        QTest::mouseMove(window, at);
+        QTRY_COMPARE(widthOf(QStringLiteral("artist")), defaultArtist + 10 * (step + 1));
+        QTRY_COMPARE(widthOf(QStringLiteral("title")), title - 10 * (step + 1));
+    }
+    QCOMPARE(kept.count(), 0);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, at);
+    QTRY_COMPARE(kept.count(), 1);
+    QCOMPARE(bridge->property("queueColumnWidths").toMap(),
+             (QVariantMap{{QStringLiteral("artist"), int(defaultArtist) + 60}}));
+    QCOMPARE(widthOf(QStringLiteral("artist")), defaultArtist + 60);
+
+    // The title keeps its minimum however far the handle goes.
+    auto *pane = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+    QVERIFY(pane != nullptr);
+    at = centerOf(artistHandle);
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, at);
+    QTest::mouseMove(window, at - QPoint(20, 0));
+    QTest::mouseMove(window, QPoint(2, at.y()));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, QPoint(2, at.y()));
+    QTRY_COMPARE(kept.count(), 2);
+    QTRY_VERIFY(std::abs(widthOf(QStringLiteral("title"))
+                         - pane->property("minimumTitleColumnWidth").toReal()) <= 1);
+
+    // A double-click restores the default width.
+    QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, centerOf(artistHandle));
+    QTRY_COMPARE(widthOf(QStringLiteral("artist")), defaultArtist);
+    QVERIFY(bridge->property("queueColumnWidths").toMap().isEmpty());
+    QCOMPARE(kept.count(), 3);
+
+    // Left and Right resize the focused column, and Home restores it.
+    const qreal defaultAlbum = widthOf(QStringLiteral("album"));
+    albumHandle->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(albumHandle->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Left);
+    QTest::keyClick(window, Qt::Key_Left);
+    QTRY_VERIFY(widthOf(QStringLiteral("album")) > defaultAlbum + 2);
+    QCOMPARE(kept.count(), 5);
+    const qreal widened = widthOf(QStringLiteral("album"));
+    QCOMPARE(bridge->property("queueColumnWidths").toMap().value(QStringLiteral("album")).toInt(),
+             int(widened));
+    QTest::keyClick(window, Qt::Key_Right);
+    QTRY_VERIFY(widthOf(QStringLiteral("album")) < widened);
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_COMPARE(widthOf(QStringLiteral("album")), defaultAlbum);
+    QVERIFY(bridge->property("queueColumnWidths").toMap().isEmpty());
 }
 
 // A light theme's window with the transport bar and the tag editor.

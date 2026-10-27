@@ -243,6 +243,19 @@ fn set_window_layout(
     }
 }
 
+/// Keep the queue's column widths the UI sent, to save them with the
+/// settings.
+fn set_queue_column_widths(
+    state: &mut BridgeState,
+    context: &mut BridgeCommandContext<'_>,
+    widths: super::QueueColumnWidths,
+) {
+    if state.settings.queue_columns.widths != widths {
+        state.settings.queue_columns.widths = widths;
+        *context.settings_dirty = true;
+    }
+}
+
 fn handle_settings_bridge_command(
     cmd: &BridgeSettingsCommand,
     state: &mut BridgeState,
@@ -326,6 +339,9 @@ fn handle_settings_bridge_command(
         }
         BridgeSettingsCommand::SetWindowLayout(layout) => {
             set_window_layout(state, context, *layout);
+        }
+        BridgeSettingsCommand::SetQueueColumnWidths(widths) => {
+            set_queue_column_widths(state, context, *widths);
         }
         BridgeSettingsCommand::SetLastFmScrobblingEnabled(_)
         | BridgeSettingsCommand::BeginLastFmAuth

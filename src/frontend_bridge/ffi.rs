@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use std::os::fd::RawFd;
 
 use super::imports::{ImportGate, RenamedDetails};
+use super::queue_columns::{self, QueueColumnWidths};
 use super::queue_relay::{QueueBatch, QueueRelay};
 use super::window_layout::{self, WindowGeometry, WindowLayout};
 use super::{
@@ -76,7 +77,8 @@ const SECTION_STATE_SAVED: u16 = 1 << 9;
 /// Every snapshot carries it.
 const SECTION_QUEUE_UNDO: u16 = 1 << 10;
 /// The window layout saved in the settings, sent once at startup: the
-/// fields of the command that sets it; see [`read_window_layout`].
+/// fields of the command that sets it, see [`read_window_layout`], then the
+/// queue's column widths as [`read_queue_column_widths`] reads them.
 const SECTION_WINDOW_LAYOUT: u16 = 1 << 11;
 
 #[cfg(unix)]
@@ -665,8 +667,14 @@ impl FfiEncoder {
                         request_id, &result,
                     )));
                 }
-                BridgeEvent::WindowLayout(layout) => {
-                    prepared.push(PreparedEvent::Binary(encode_window_layout_event(&layout)));
+                BridgeEvent::WindowLayout {
+                    layout,
+                    queue_columns,
+                } => {
+                    prepared.push(PreparedEvent::Binary(encode_window_layout_event(
+                        &layout,
+                        &queue_columns,
+                    )));
                 }
             }
         }
@@ -2130,6 +2138,26 @@ fn read_window_layout(reader: &mut BinaryReader<'_>) -> Result<WindowLayout, Str
     })
 }
 
+/// The widths of the queue's Artist, Album and Length columns, each a u16
+/// in logical pixels, 0 for the default. A width out of range is the
+/// default, as when the settings are read.
+fn read_queue_column_widths(reader: &mut BinaryReader<'_>) -> Result<QueueColumnWidths, String> {
+    let mut width =
+        || -> Result<Option<u16>, String> { Ok(queue_columns::checked_width(reader.read_u16()?)) };
+    Ok(QueueColumnWidths {
+        artist: width()?,
+        album: width()?,
+        length: width()?,
+    })
+}
+
+/// The queue's column widths as [`read_queue_column_widths`] reads them.
+fn push_queue_column_widths(out: &mut Vec<u8>, widths: &QueueColumnWidths) {
+    for width in [widths.artist, widths.album, widths.length] {
+        push_u16(out, width.unwrap_or(0));
+    }
+}
+
 fn parse_settings_command(
     cmd_id: u16,
     reader: &mut BinaryReader<'_>,
@@ -2171,6 +2199,7 @@ fn parse_settings_command(
         59 => BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(reader.read_u8()? != 0),
         67 => BridgeSettingsCommand::SetLibraryWatchEnabled(reader.read_u8()? != 0),
         71 => BridgeSettingsCommand::SetWindowLayout(read_window_layout(reader)?),
+        72 => BridgeSettingsCommand::SetQueueColumnWidths(read_queue_column_widths(reader)?),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -2277,6 +2306,10 @@ impl<'a> BinaryReader<'a> {
 
     fn read_u8(&mut self) -> Result<u8, String> {
         Ok(self.read_exact::<1>()?[0])
+    }
+
+    fn read_u16(&mut self) -> Result<u16, String> {
+        Ok(u16::from_le_bytes(self.read_exact::<2>()?))
     }
 
     fn read_u32(&mut self) -> Result<u32, String> {
@@ -2428,15 +2461,15 @@ fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec
 }
 
 /// The window layout saved in the settings, laid out as the command that
-/// sets it; see [`read_window_layout`].
-fn encode_window_layout_event(layout: &WindowLayout) -> Vec<u8> {
+/// sets it, see [`read_window_layout`], then the queue's column widths.
+fn encode_window_layout_event(layout: &WindowLayout, queue_columns: &QueueColumnWidths) -> Vec<u8> {
     let geometry = layout.geometry.unwrap_or(WindowGeometry {
         x: 0,
         y: 0,
         width: 0,
         height: 0,
     });
-    let mut payload = Vec::with_capacity(28);
+    let mut payload = Vec::with_capacity(34);
     push_u8(&mut payload, u8::from(layout.geometry.is_some()));
     payload.extend_from_slice(&geometry.x.to_le_bytes());
     payload.extend_from_slice(&geometry.y.to_le_bytes());
@@ -2447,6 +2480,7 @@ fn encode_window_layout_event(layout: &WindowLayout) -> Vec<u8> {
     payload.extend_from_slice(&layout.queue_height_ratio.unwrap_or(-1.0).to_le_bytes());
     push_u8(&mut payload, layout.visualization_mode);
     push_u8(&mut payload, u8::from(layout.follow_current_track));
+    push_queue_column_widths(&mut payload, queue_columns);
     encode_packet(&[(SECTION_WINDOW_LAYOUT, payload)])
 }
 
@@ -2819,6 +2853,7 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         u8::from(snapshot.settings.display.show_level_meter),
     );
     push_u8(&mut out, u8::from(snapshot.settings.library_watch_enabled));
+    push_queue_column_widths(&mut out, &snapshot.settings.queue_columns.widths);
     out
 }
 
@@ -3307,6 +3342,7 @@ mod tests {
                     lastfm_username: "tester".to_string(),
                 },
                 window: WindowLayout::default(),
+                queue_columns: super::super::QueueColumnSettings::default(),
                 unknown_lines: Vec::new(),
             },
             lastfm: crate::lastfm::RuntimeState {
@@ -3857,6 +3893,11 @@ mod tests {
             visualization_mode: 1,
             follow_current_track: false,
         };
+        let saved_columns = QueueColumnWidths {
+            artist: None,
+            album: Some(260),
+            length: Some(90),
+        };
         let handle = ffi_bridge_with(BridgeRuntimeOptions {
             persisted_state_enabled: true,
             ..BridgeRuntimeOptions::default()
@@ -3870,6 +3911,10 @@ mod tests {
             read_window_layout(&mut reader).expect("read"),
             WindowLayout::default()
         );
+        assert_eq!(
+            read_queue_column_widths(&mut reader).expect("read the column widths"),
+            QueueColumnWidths::default()
+        );
         reader.expect_done().expect("the whole section");
         // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
         assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
@@ -3877,6 +3922,7 @@ mod tests {
         let mut settings = super::super::BridgeSettings::default();
         config::load_settings_into(&mut settings);
         settings.window = saved;
+        settings.queue_columns.widths = saved_columns;
         config::save_settings(&settings).expect("save the settings");
         let handle = ffi_bridge_with(BridgeRuntimeOptions {
             persisted_state_enabled: true,
@@ -3887,6 +3933,10 @@ mod tests {
         let payload = section(&packet, SECTION_WINDOW_LAYOUT).expect("the layout section");
         let mut reader = BinaryReader::new(&payload);
         assert_eq!(read_window_layout(&mut reader).expect("read"), saved);
+        assert_eq!(
+            read_queue_column_widths(&mut reader).expect("read the column widths"),
+            saved_columns
+        );
         reader.expect_done().expect("the whole section");
         // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
         assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
@@ -4872,8 +4922,11 @@ mod tests {
             let mut snapshot = sample_snapshot();
             snapshot.settings.display.show_level_meter = enabled;
             let settings = encode_settings_section(&snapshot);
-            // Followed by library watching.
-            assert_eq!(settings[settings.len() - 2], u8::from(enabled));
+            // Followed by library watching and the queue's column widths.
+            assert_eq!(
+                settings[settings.len() - 2 - QUEUE_COLUMN_WIDTHS_BYTES],
+                u8::from(enabled)
+            );
         }
         assert!(parse_binary_command(&encode_command(65, &[])).is_err());
         assert!(parse_binary_command(&encode_command(65, &[1, 0])).is_err());
@@ -4890,12 +4943,69 @@ mod tests {
                 if value == enabled));
             let mut snapshot = sample_snapshot();
             snapshot.settings.library_watch_enabled = enabled;
+            let settings = encode_settings_section(&snapshot);
+            // Followed by the queue's column widths.
             assert_eq!(
-                encode_settings_section(&snapshot).last(),
-                Some(&u8::from(enabled))
+                settings[settings.len() - 1 - QUEUE_COLUMN_WIDTHS_BYTES],
+                u8::from(enabled)
             );
         }
         assert!(parse_binary_command(&encode_command(67, &[])).is_err());
+    }
+
+    /// The bytes of the queue's column widths that end the settings
+    /// section and the window layout section.
+    const QUEUE_COLUMN_WIDTHS_BYTES: usize = 6;
+
+    fn queue_column_widths_payload(artist: u16, album: u16, length: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        for width in [artist, album, length] {
+            payload.extend_from_slice(&width.to_le_bytes());
+        }
+        payload
+    }
+
+    #[test]
+    fn queue_column_widths_command_and_snapshot_share_protocol() {
+        let parsed = |payload: &[u8]| match parse_binary_command(&encode_command(72, payload)) {
+            Ok(Some(BridgeCommand::Settings(BridgeSettingsCommand::SetQueueColumnWidths(
+                widths,
+            )))) => Ok(widths),
+            other => Err(format!("{other:?}")),
+        };
+        let widths = QueueColumnWidths {
+            artist: Some(170),
+            album: None,
+            length: Some(76),
+        };
+        assert_eq!(
+            parsed(&queue_column_widths_payload(170, 0, 76)).expect("parse"),
+            widths
+        );
+        // Widths out of range are the defaults.
+        assert_eq!(
+            parsed(&queue_column_widths_payload(15, 4097, u16::MAX)).expect("parse"),
+            QueueColumnWidths::default()
+        );
+        assert!(parsed(&queue_column_widths_payload(1, 2, 3)[..5]).is_err());
+        let mut long = queue_column_widths_payload(170, 190, 76);
+        long.push(0);
+        assert!(parsed(&long).is_err());
+
+        // The settings section ends with them, as the command lays them out.
+        let mut snapshot = sample_snapshot();
+        snapshot.settings.queue_columns.widths = widths;
+        snapshot
+            .settings
+            .queue_columns
+            .other_entries
+            .push("genre:90".to_string());
+        let settings = encode_settings_section(&snapshot);
+        let tail = &settings[settings.len() - QUEUE_COLUMN_WIDTHS_BYTES..];
+        assert_eq!(tail, queue_column_widths_payload(170, 0, 76).as_slice());
+        let mut reader = BinaryReader::new(tail);
+        assert_eq!(read_queue_column_widths(&mut reader).expect("read"), widths);
+        reader.expect_done().expect("the whole tail");
     }
 
     #[test]
@@ -4969,11 +5079,9 @@ mod tests {
         let settings = &packet[offset..offset + settings_len];
         // Settings tail: system media controls, fullscreen mode, display mode,
         // crosshair, scale, channel buttons, zoom, display sleep, level meter,
-        // library watching.
-        assert_eq!(
-            &settings[settings.len() - 10..],
-            &[0, 1, 0, 0, 0, 1, 1, 0, 1, 1]
-        );
+        // library watching, then the queue's column widths.
+        let flags = &settings[..settings.len() - QUEUE_COLUMN_WIDTHS_BYTES];
+        assert_eq!(&flags[flags.len() - 10..], &[0, 1, 0, 0, 0, 1, 1, 0, 1, 1]);
     }
 
     #[test]
@@ -4994,8 +5102,9 @@ mod tests {
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
         // Crosshair, scale, channel buttons, zoom, display sleep, level meter,
-        // library watching.
-        assert_eq!(&settings[settings.len() - 7..], &[1, 1, 1, 1, 1, 1, 1]);
+        // library watching, then the queue's column widths.
+        let flags = &settings[..settings.len() - QUEUE_COLUMN_WIDTHS_BYTES];
+        assert_eq!(&flags[flags.len() - 7..], &[1, 1, 1, 1, 1, 1, 1]);
     }
 
     #[test]

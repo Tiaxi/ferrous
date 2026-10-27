@@ -256,6 +256,7 @@ ApplicationWindow {
         property int channelButtonsVisibility: 1
         property bool systemMediaControlsEnabled: true
         property bool libraryWatchEnabled: true
+        property var queueColumnWidths: ({})
         property bool lastFmScrobblingEnabled: false
         property bool lastFmBuildConfigured: false
         property string lastFmUsername: ""
@@ -423,6 +424,15 @@ ApplicationWindow {
         function hasSavedWindowLayout() { return true }
         function savedWindowLayout() { return ({}) }
         function setWindowLayout(layout) {}
+        function setQueueColumnWidth(column, width) {
+            const widths = Object.assign({}, bridgeFallback.queueColumnWidths)
+            if (width > 0) {
+                widths[column] = width
+            } else {
+                delete widths[column]
+            }
+            bridgeFallback.queueColumnWidths = widths
+        }
         function shutdown() {}
         signal stateSaveFinished(int requestId, bool saved, string message)
         function saveStateBeforeQuit() {
