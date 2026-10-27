@@ -44,14 +44,21 @@ pub(super) struct AudioLayout {
 }
 
 pub(super) fn read_audio_layout(path: &Path) -> Option<AudioLayout> {
-    let mut file = File::open(path).ok()?;
+    read_audio_layout_of(path, &mut File::open(path).ok()?)
+}
+
+/// The layout of `file`, opened at `path`, whose name tells the codec. Leaves
+/// the file at its start.
+fn read_audio_layout_of(path: &Path, file: &mut File) -> Option<AudioLayout> {
     let file_len = file.seek(SeekFrom::End(0)).ok()?;
-    let audio_end = file_len - appended_tag_len(&mut file, file_len);
+    let audio_end = file_len - appended_tag_len(file, file_len);
     file.seek(SeekFrom::Start(0)).ok()?;
     let mut head = Vec::new();
-    file.take(audio_end.min(FRAME_SCAN_BYTES))
+    Read::by_ref(file)
+        .take(audio_end.min(FRAME_SCAN_BYTES))
         .read_to_end(&mut head)
         .ok()?;
+    file.seek(SeekFrom::Start(0)).ok()?;
     let first_frame = first_frame_offset(&head, Codec::of_path(path)).map(|offset| offset as u64);
     Some(AudioLayout {
         file_len,
@@ -65,10 +72,17 @@ pub(super) fn read_audio_layout(path: &Path) -> Option<AudioLayout> {
 /// through end of audio (before `APEv2` tag).  Returns `None` for non-raw
 /// surround files or when there is nothing to strip.
 pub(crate) fn audio_byte_range(path: &Path) -> Option<(u64, u64)> {
+    audio_byte_range_of(path, &mut File::open(path).ok()?)
+}
+
+/// [`audio_byte_range`] of `file`, opened at `path`: that of the file the
+/// handle reads, whichever file is at the path by now. Leaves the file at
+/// its start.
+pub(crate) fn audio_byte_range_of(path: &Path, file: &mut File) -> Option<(u64, u64)> {
     if !is_raw_surround_file(path) {
         return None;
     }
-    let layout = read_audio_layout(path)?;
+    let layout = read_audio_layout_of(path, file)?;
     let audio_start = layout.first_frame.unwrap_or(0);
     if audio_start == 0 && layout.audio_end == layout.file_len {
         return None; // nothing to strip
@@ -175,7 +189,15 @@ pub(crate) fn filter_raw_surround_source(source: &gst::Element) {
     let Ok(Some(location)) = source.property_value("location").get::<Option<String>>() else {
         return;
     };
-    let Some(range) = audio_byte_range(Path::new(&location)) else {
+    filter_raw_surround_source_to(source, audio_byte_range(Path::new(&location)));
+}
+
+/// [`filter_raw_surround_source`] with the audio `range` of the file the
+/// source reads, as [`audio_byte_range_of`] found it; `None` filters
+/// nothing.
+#[cfg(feature = "gst")]
+pub(crate) fn filter_raw_surround_source_to(source: &gst::Element, range: Option<(u64, u64)>) {
+    let Some(range) = range else {
         return;
     };
     let Some(pad) = source.static_pad("src") else {

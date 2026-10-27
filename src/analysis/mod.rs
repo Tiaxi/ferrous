@@ -5675,6 +5675,88 @@ mod tests {
         std::fs::remove_dir_all(folder).expect("cleanup");
     }
 
+    /// The stamp the overview decode of `path` with `GStreamer` tells for
+    /// its last update, and the seconds it covers.
+    #[cfg(feature = "gst")]
+    fn gst_overview(path: &Path) -> (Option<WaveformSourceStamp>, f32) {
+        let source = Cell::new(None);
+        let mut finished = None;
+        decode_waveform_peaks_stream_gst(
+            path,
+            64,
+            &source,
+            |_, coverage, progress| {
+                if progress == OverviewProgress::Complete {
+                    finished = Some((source.get(), coverage));
+                }
+                true
+            },
+            || false,
+        )
+        .expect("decode");
+        finished.expect("a complete overview")
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_gstreamer_decode_trims_the_raw_surround_file_it_reads() {
+        use crate::raw_audio::{ripped_surround_bytes_after_junk, TEST_DTS};
+
+        // A ripped file whose audio starts late, and a plain stream of the
+        // same size, which holds about twice as much audio.
+        let (ripped, _) = ripped_surround_bytes_after_junk(12_000, TEST_DTS);
+        let plain: Vec<u8> = TEST_DTS
+            .iter()
+            .copied()
+            .cycle()
+            .take(ripped.len())
+            .collect();
+        let folder = crate::paths::test_root().join("analysis-decode-gst-trim");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("folder");
+        let (a, b) = (folder.join("a.dts"), folder.join("b.dts"));
+        let time = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (path, bytes) in [(&a, &ripped), (&b, &plain)] {
+            std::fs::write(path, bytes).expect("audio");
+            File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(time))
+                .expect("modification time");
+        }
+        let (ripped_stamp, ripped_coverage) = gst_overview(&a);
+        let (plain_stamp, plain_coverage) = gst_overview(&b);
+        assert!(
+            plain_coverage > ripped_coverage + 0.3,
+            "{plain_coverage} s, {ripped_coverage} s"
+        );
+
+        // Swapped once the decode has read the audio range of the file at
+        // `a`, before its source starts.
+        let (from, to) = (a.clone(), b.clone());
+        let mut swapped = false;
+        gst_waveform::test_hooks::after_each_source_built(move || {
+            if !std::mem::replace(&mut swapped, true) {
+                swap(&from, &to);
+            }
+        });
+        let (stamp, coverage) = gst_overview(&a);
+        gst_waveform::test_hooks::clear();
+
+        // The overview is that of the file whose stamp it tells.
+        let expected = if stamp == ripped_stamp {
+            ripped_coverage
+        } else {
+            assert_eq!(stamp, plain_stamp);
+            plain_coverage
+        };
+        assert!(
+            (coverage - expected).abs() < 0.05,
+            "covers {coverage} s, the file it tells {expected} s"
+        );
+        std::fs::remove_dir_all(folder).expect("cleanup");
+    }
+
     /// A file source that fails to read past `limit` bytes, as a file on a
     /// share that goes away does.
     struct FailingSource {

@@ -11,7 +11,9 @@ use super::cache::{usize_to_u64, WaveformSourceStamp};
 use super::fft::{reduce_waveform_peaks, OverviewProgress};
 use super::track_io::stamp_of;
 use crate::playback::file_source::FileSource;
-use crate::raw_audio::{configure_raw_surround_decoding, filter_raw_surround_source};
+use crate::raw_audio::{
+    audio_byte_range_of, configure_raw_surround_decoding, filter_raw_surround_source_to,
+};
 
 pub(super) struct GstWaveformAccumulator {
     observed_span_ns: u64,
@@ -87,15 +89,26 @@ impl GstWaveformAccumulator {
 /// The overview pipeline of the file at `path`, its bus, its `level`, and
 /// its source, the playback's `ferrousfilesrc`, which tells the metadata of
 /// the file it opened.
+///
+/// The file is opened once, here: the audio range of a raw surround file is
+/// read from that handle, and the source reads it, so that the range, the
+/// audio and the stamp are all of one file, even if another one replaces
+/// it at the path meanwhile.
 pub(super) fn build_waveform_gst_pipeline(
     path: &Path,
 ) -> anyhow::Result<(gst::Pipeline, gst::Bus, gst::Element, FileSource)> {
     let pipeline = gst::Pipeline::new();
+    let mut file = std::fs::File::open(path)
+        .map_err(|err| anyhow::anyhow!("cannot open \"{}\": {err}", path.display()))?;
+    let range = audio_byte_range_of(path, &mut file);
     let file_source = gst::glib::Object::builder::<FileSource>()
         .property("location", path.to_string_lossy().to_string())
         .build();
+    file_source.read_opened(file);
     let src = file_source.clone().upcast::<gst::Element>();
-    filter_raw_surround_source(&src);
+    filter_raw_surround_source_to(&src, range);
+    #[cfg(test)]
+    test_hooks::source_built();
 
     let decodebin = gst::ElementFactory::make("decodebin")
         .build()
@@ -390,6 +403,35 @@ fn materialize_waveform_peaks(events: &[(u64, f32)], span_ns: u64, max_points: u
     peaks
 }
 
+/// Swap files where a decode has read the audio range of its file but its
+/// source has not started.
+#[cfg(test)]
+pub(super) mod test_hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SOURCE_BUILT: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `hook` each time this thread has built an overview pipeline,
+    /// before it starts.
+    pub(in super::super) fn after_each_source_built(hook: impl FnMut() + 'static) {
+        SOURCE_BUILT.with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(in super::super) fn clear() {
+        SOURCE_BUILT.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    pub(super) fn source_built() {
+        SOURCE_BUILT.with(|cell| {
+            if let Some(hook) = cell.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,9 +439,10 @@ mod tests {
     #[test]
     fn failed_waveform_configuration_releases_the_started_pipeline() {
         gst::init().expect("gstreamer initialization");
-        let (pipeline, _, level, _) =
-            build_waveform_gst_pipeline(Path::new("/missing/waveform-startup.wav"))
-                .expect("build pipeline");
+        // A directory opens, but its source cannot read it.
+        let folder = crate::paths::test_root().join("waveform-startup");
+        std::fs::create_dir_all(&folder).expect("folder");
+        let (pipeline, _, level, _) = build_waveform_gst_pipeline(&folder).expect("build pipeline");
         {
             let _shutdown = super::super::gst_lifecycle::PipelineShutdown::new(&pipeline);
             assert!(configure_waveform_gst_pipeline(&pipeline, &level, 100).is_err());

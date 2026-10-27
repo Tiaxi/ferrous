@@ -96,6 +96,14 @@ impl FileSource {
     pub(crate) fn opened_metadata(&self) -> Option<std::fs::Metadata> {
         self.imp().opened_metadata()
     }
+
+    /// Read `file`, which the caller opened at the source's location, at
+    /// the next start instead of opening the location again, so that the
+    /// caller and the pipeline read the same file. Later starts open the
+    /// location.
+    pub(crate) fn read_opened(&self, file: File) {
+        self.imp().read_opened(file);
+    }
 }
 
 /// The files of stopped sources that have not been closed yet, behind a
@@ -531,6 +539,8 @@ mod imp {
     #[derive(Default)]
     pub(crate) struct FileSource {
         location: Mutex<Option<PathBuf>>,
+        /// A file opened at the location, for the next start to read.
+        opened: Mutex<Option<File>>,
         open: Mutex<Option<Open>>,
         wait: Arc<Wait>,
         releases: Mutex<Option<Arc<Releases>>>,
@@ -549,12 +559,20 @@ mod imp {
                 ));
             }
             *lock(&self.location) = location;
+            // A file opened at the old location is not the new one's.
+            *lock(&self.opened) = None;
             Ok(())
         }
 
-        /// Open the file at `path`, and give it to its reader.
-        fn open(path: &Path) -> Result<Open, gst::ErrorMessage> {
-            let file = File::open(path).map_err(|err| match err.kind() {
+        pub(super) fn read_opened(&self, file: File) {
+            *lock(&self.opened) = Some(file);
+        }
+
+        /// Open the file at `path`, unless `opened` is open there already,
+        /// and give it to its reader.
+        fn open(path: &Path, opened: Option<File>) -> Result<Open, gst::ErrorMessage> {
+            let opened = opened.map_or_else(|| File::open(path), Ok);
+            let file = opened.map_err(|err| match err.kind() {
                 io::ErrorKind::NotFound => gst::error_msg!(
                     gst::ResourceError::NotFound,
                     ["No such file \"{}\"", path.display()]
@@ -788,7 +806,7 @@ mod imp {
                     ("No file name specified for reading.")
                 ));
             };
-            let open = Self::open(&path)?;
+            let open = Self::open(&path, lock(&self.opened).take())?;
             let handle = open.handle;
             // The pipeline asks for the size again only when it reaches the
             // end it knows, never for a duration query, which the engine's
