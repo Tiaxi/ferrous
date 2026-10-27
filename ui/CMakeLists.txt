@@ -261,10 +261,17 @@ install(FILES io.github.tiaxi.ferrous.metainfo.xml DESTINATION share/metainfo)
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
 
+    # The line a Qt test prints for a skipped test function, for any test
+    # class name.
+    function(ferrous_skip_line_regex out_var test_function)
+        set(${out_var} "SKIP   : [A-Za-z0-9_]+::${test_function}\\(\\)" PARENT_SCOPE)
+    endfunction()
+
     # Run without a platform chosen, as a developer may run it, a test binary
     # draws offscreen instead of opening windows; tests/TestPlatform.h. With
     # -platform it uses the platform chosen, and the check skips.
     function(ferrous_add_default_platform_test target test_function)
+        ferrous_skip_line_regex(skip_line ${test_function})
         set(no_platform "QT_QPA_PLATFORM=unset:;DISPLAY=unset:;WAYLAND_DISPLAY=unset:")
         add_test(NAME ${target}_default_platform COMMAND ${target} ${test_function})
         set_tests_properties(${target}_default_platform PROPERTIES
@@ -277,10 +284,21 @@ if(BUILD_TESTING)
         )
         set_tests_properties(${target}_chosen_platform PROPERTIES
             ENVIRONMENT_MODIFICATION "${no_platform}"
-            PASS_REGULAR_EXPRESSION "SKIP   : [A-Za-z]+::${test_function}\\(\\)"
+            PASS_REGULAR_EXPRESSION "${skip_line}"
             TIMEOUT 60
         )
     endfunction()
+
+    # Test class names may have digits and underscores.
+    ferrous_skip_line_regex(skip_line drawsOffscreenUnlessAPlatformIsChosen)
+    add_test(NAME ferrous_skip_line_regex_class_names
+        COMMAND "${CMAKE_COMMAND}" -E echo
+            "SKIP   : Area2_Test::drawsOffscreenUnlessAPlatformIsChosen()"
+    )
+    set_tests_properties(ferrous_skip_line_regex_class_names PROPERTIES
+        PASS_REGULAR_EXPRESSION "${skip_line}"
+        TIMEOUT 60
+    )
 
     add_test(NAME ferrous_metainfo_release_version
         COMMAND "${CMAKE_COMMAND}"
@@ -804,6 +822,11 @@ if(BUILD_TESTING)
     ferrous_add_default_platform_test(ferrous_i18n_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The app and the module test have the module's compiled QML.
+    add_test(NAME ferrous_qml_cache_symbol_patterns
+        COMMAND "${CMAKE_COMMAND}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_qml_cache_symbol_patterns.cmake"
+    )
+    set_tests_properties(ferrous_qml_cache_symbol_patterns PROPERTIES TIMEOUT 60)
     if(CMAKE_NM)
         foreach(qml_binary IN ITEMS ferrous ferrous_qml_module_tests)
             add_test(NAME ${qml_binary}_qml_cache_linked
@@ -814,5 +837,33 @@ if(BUILD_TESTING)
             )
             set_tests_properties(${qml_binary}_qml_cache_linked PROPERTIES TIMEOUT 60)
         endforeach()
+
+        # The check rejects a binary that links the archive without
+        # WHOLE_ARCHIVE, and one that nm cannot read.
+        add_executable(ferrous_qml_cache_plain_link tests/qml_cache_plain_link.cpp)
+        target_link_libraries(ferrous_qml_cache_plain_link PRIVATE ferrous_ui_qml)
+        ferrous_enable_strict_warnings(ferrous_qml_cache_plain_link)
+        add_test(NAME ferrous_qml_cache_check_rejects_plain_link
+            COMMAND "${CMAKE_COMMAND}"
+                -DNM=${CMAKE_NM}
+                -DBINARY=$<TARGET_FILE:ferrous_qml_cache_plain_link>
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_qml_cache_linked.cmake"
+        )
+        add_test(NAME ferrous_qml_cache_check_rejects_unreadable_binary
+            COMMAND "${CMAKE_COMMAND}"
+                -DNM=${CMAKE_NM}
+                -DBINARY=${CMAKE_CURRENT_SOURCE_DIR}/tests/qml_cache_plain_link.cpp
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_qml_cache_linked.cmake"
+        )
+        # CMake wraps the error message at spaces, so a line break and
+        # indentation may separate the words.
+        set_tests_properties(ferrous_qml_cache_check_rejects_plain_link PROPERTIES
+            PASS_REGULAR_EXPRESSION "lacks[ \t\r\n]+QmlCacheGeneratedCode::_qt_qml_FerrousUi_qml_Main_qml::"
+            TIMEOUT 60
+        )
+        set_tests_properties(ferrous_qml_cache_check_rejects_unreadable_binary PROPERTIES
+            PASS_REGULAR_EXPRESSION "could[ \t\r\n]+not[ \t\r\n]+read"
+            TIMEOUT 60
+        )
     endif()
 endif()
