@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -66,8 +67,9 @@ struct SpectrogramRasterTarget {
     qint64 epoch{0};
     quint64 trackToken{0};
     quint64 ringGeneration{0};
-    // When the inputs were taken, which the canvas then shows.
-    std::chrono::steady_clock::time_point capturedAt{};
+    // How far playback had travelled when the inputs were taken, which
+    // the canvas then shows.
+    double capturedTravelSeconds{0.0};
     std::shared_ptr<const SpectrogramProjection> projection;
 };
 
@@ -316,6 +318,12 @@ private:
     qint64 currentRollingDisplayRightLocked(std::chrono::steady_clock::time_point now) const;
     void truncateRollingTailLocked(qint64 newWriteSeq);
     double currentRenderPositionSecondsLocked(std::chrono::steady_clock::time_point now) const;
+    // The track seconds the shown position has moved on continuously up to
+    // `now`: a pause adds nothing, and nor does a jump, such as a seek.
+    double playbackTravelSecondsLocked(std::chrono::steady_clock::time_point now) const;
+    // Counts the travel up to `now`; done before the shown position changes
+    // course, so that the new course does not count the time before it.
+    void foldPlaybackTravelLocked(std::chrono::steady_clock::time_point now);
     bool positionHeldLocked(qint64 nowNs) const;
     void clockStateChanged();
     void holdPositionLocked(
@@ -361,11 +369,13 @@ private:
         bool rollingMode,
         double canvasViewZoom,
         double columnsPerSecond) const;
-    int maxSyncAppendPixelsLocked(int canvasWidth, double canvasZoom) const;
+    int maxSyncAppendPixelsLocked(
+        int canvasWidth, double canvasZoom, std::chrono::steady_clock::time_point now) const;
     bool advancePrecomputedCanvasLocked(
         qint64 displayLeft,
         qint64 displayRight,
-        bool rollingMode);
+        bool rollingMode,
+        std::chrono::steady_clock::time_point now);
     void drawPrecomputedColumnAtLocked(
         int x,
         qint64 displayIndex,
@@ -561,9 +571,16 @@ private:
     // The playhead's position when the clock or the data last changed it.
     double m_positionSeconds{0.0};
     QPointer<PlaybackClock> m_clock;
+    // Now on the clock playback is stamped with; tests set their own.
+    std::function<std::chrono::steady_clock::time_point()> m_now{
+        &std::chrono::steady_clock::now};
     QMetaObject::Connection m_clockConnection;
     // A copy of the clock's state, which the render thread evaluates.
     PlaybackClockState m_clockState;
+    // The playback travel up to m_playbackTravelAt; the shown position's
+    // course since then adds the rest.
+    double m_playbackTravelSeconds{0.0};
+    std::chrono::steady_clock::time_point m_playbackTravelAt{};
     bool m_playing{false};
     // Rolling history is in write order, so after a jump the playhead
     // goes on along m_positionHoldTrajectory (plus its offset) until the
@@ -630,8 +647,9 @@ private:
     // a rolling one's.
     quint64 m_precomputedCanvasTrackToken{0};
     quint64 m_precomputedCanvasRingGeneration{0};
-    // When the canvas's columns were last brought up to the view.
-    std::chrono::steady_clock::time_point m_precomputedCanvasDrawnAt{};
+    // The playback travel when the canvas's columns were last brought up
+    // to the view.
+    double m_precomputedCanvasDrawnTravelSeconds{0.0};
     // The scaled canvas drawn last, so that clicks seek where it shows:
     // the track time at anchor X, and pixels per second.
     bool m_zoomPreviewShown{false};

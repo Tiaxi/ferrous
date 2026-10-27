@@ -1445,13 +1445,13 @@ void SpectrogramItem::setClock(PlaybackClock *value) {
 }
 
 void SpectrogramItem::clockStateChanged() {
-    using Clock = std::chrono::steady_clock;
     const PlaybackClockState next = m_clock ? m_clock->state() : PlaybackClockState{};
     bool courseCorrection = false;
     {
         QMutexLocker lock(&m_stateMutex);
-        const auto now = Clock::now();
+        const auto now = m_now();
         const qint64 nowNs = monotonicNs(now);
+        foldPlaybackTravelLocked(now);
         const bool held = positionHeldLocked(nowNs);
         const PlaybackClockState previous = m_clockState;
         const double previousPosition = currentRenderPositionSecondsLocked(now);
@@ -1522,6 +1522,7 @@ void SpectrogramItem::holdPositionLocked(
     const PlaybackClockState &trajectory,
     double offset,
     std::chrono::steady_clock::time_point now) {
+    foldPlaybackTravelLocked(now);
     m_positionJumpHoldActive = true;
     m_positionHoldTrajectory = trajectory;
     m_positionHoldOffset = offset;
@@ -1530,6 +1531,7 @@ void SpectrogramItem::holdPositionLocked(
 }
 
 void SpectrogramItem::releasePositionHoldLocked(std::chrono::steady_clock::time_point now) {
+    foldPlaybackTravelLocked(now);
     m_positionJumpHoldActive = false;
     m_positionJumpHoldUntilNs = 0;
     m_positionSeconds = currentRenderPositionSecondsLocked(now);
@@ -1541,6 +1543,7 @@ void SpectrogramItem::continueGaplessLocked(std::chrono::steady_clock::time_poin
     // track. The engine stamps the successor's start with the time the
     // previous track ends, which can still be ahead; until then the
     // previous track plays on.
+    foldPlaybackTravelLocked(now);
     const qint64 nowNs = monotonicNs(now);
     qint64 startNs = nowNs;
     double startPosition = m_clockState.positionAt(nowNs);
@@ -1571,7 +1574,6 @@ bool SpectrogramItem::isPlaying() const {
 }
 
 void SpectrogramItem::setPlaying(bool value) {
-    using Clock = std::chrono::steady_clock;
     bool changed = false;
     {
         QMutexLocker lock(&m_stateMutex);
@@ -1583,7 +1585,7 @@ void SpectrogramItem::setPlaying(bool value) {
             // Playback stopped while the playhead waited for data: it stays
             // where it is, and the rolling history stays parked there until
             // the worker restarts.
-            const auto now = Clock::now();
+            const auto now = m_now();
             const double parked = currentRenderPositionSecondsLocked(now);
             PlaybackClockState frozen;
             frozen.anchorSeconds = parked;
@@ -1677,7 +1679,7 @@ void SpectrogramItem::setDisplayMode(int value) {
         const int previousMode = m_displayMode;
         m_displayMode = clamped;
         if (previousMode == 1 && clamped == 0) {
-            reanchorRollingEpochForCurrentDataLocked(std::chrono::steady_clock::now());
+            reanchorRollingEpochForCurrentDataLocked(m_now());
         }
         if (m_precomputedReady) {
             m_precomputedLastRightCol = -1;
@@ -2073,7 +2075,7 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
                 / static_cast<double>(m_precomputedHopSize)
             : 1.0;
         const double playheadSeconds = std::max(
-            0.0, currentRenderPositionSecondsLocked(std::chrono::steady_clock::now()));
+            0.0, currentRenderPositionSecondsLocked(m_now()));
         const qint64 displayRightCol = static_cast<qint64>(
             playheadSeconds * cps) + screenWidth / 2;
         const qint64 displayRightCapped =
@@ -2150,7 +2152,6 @@ void SpectrogramItem::feedPrecomputedChunk(
     int sampleRate, int hopSize, bool complete,
     bool bufferReset, quint64 trackToken, bool clearHistoryOnReset,
     quint64 generation) {
-    using Clock = std::chrono::steady_clock;
     QMutexLocker lock(&m_stateMutex);
 
     FERROUS_SPECTROGRAM_LOGF(stderr,
@@ -2394,7 +2395,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedHopSize = hopSize;
         }
         // The playhead follows the clock, which shows the new track.
-        releasePositionHoldLocked(Clock::now());
+        releasePositionHoldLocked(m_now());
         m_precomputedTrackToken = trackToken;
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
@@ -2500,20 +2501,20 @@ void SpectrogramItem::feedPrecomputedChunk(
         // this data may report the new track in either order.
         if (m_displayMode == 0) {
             if (m_clockState.trackToken == trackToken) {
-                continueGaplessLocked(Clock::now());
+                continueGaplessLocked(m_now());
             } else {
                 m_gaplessContinuationPending = true;
             }
         } else {
             // Centered mode: the new track uses 0-based coordinates, and
             // the playhead already follows the clock.
-            releasePositionHoldLocked(Clock::now());
+            releasePositionHoldLocked(m_now());
         }
         m_precomputedLastRightCol = -1;
         m_precomputedLastDisplaySeq = -1;
         m_timeGridDirty = true;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        m_debugLastTransitionFeedAt = Clock::now();
+        m_debugLastTransitionFeedAt = m_now();
         {
             const qint64 validCount = std::max<qint64>(0, m_ringWriteSeq - m_ringOldestSeq);
             FERROUS_SPECTROGRAM_LOGF(
@@ -2617,7 +2618,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         if (appliedReset) {
             // The worker's data for the new position has arrived, so the
             // playhead follows the clock again.
-            const auto now = Clock::now();
+            const auto now = m_now();
             releasePositionHoldLocked(now);
             if (m_displayMode == 0
                 && m_playing
@@ -3060,7 +3061,7 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         // Any speculative lookahead beyond the current playback head is stale
         // after a seek/non-gapless reset; keeping it and remapping to the
         // write head makes the spectrogram jump forward and "speed up".
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = m_now();
         const qint64 displayRight = currentRollingDisplayRightLocked(now);
         truncateRollingTailLocked(displayRight + 1);
         m_rollingEpoch = displayRight - static_cast<qint64>(startIndex);
@@ -3160,6 +3161,25 @@ double SpectrogramItem::currentRenderPositionSecondsLocked(
     return std::max(0.0, m_clockState.positionAt(nowNs) + m_gaplessPositionOffset);
 }
 
+double SpectrogramItem::playbackTravelSecondsLocked(
+    std::chrono::steady_clock::time_point now) const {
+    // The shown position keeps one course since m_playbackTravelAt: what it
+    // has moved on along it since then, if forward, is travel. A course
+    // that starts with a jump begins at m_playbackTravelAt, so the jump
+    // does not count.
+    if (now <= m_playbackTravelAt) {
+        return m_playbackTravelSeconds;
+    }
+    return m_playbackTravelSeconds + std::max(0.0,
+        currentRenderPositionSecondsLocked(now)
+            - currentRenderPositionSecondsLocked(m_playbackTravelAt));
+}
+
+void SpectrogramItem::foldPlaybackTravelLocked(std::chrono::steady_clock::time_point now) {
+    m_playbackTravelSeconds = playbackTravelSecondsLocked(now);
+    m_playbackTravelAt = std::max(m_playbackTravelAt, now);
+}
+
 void SpectrogramItem::reset() {
     QMutexLocker lock(&m_stateMutex);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -3247,7 +3267,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto paintStart = std::chrono::steady_clock::now();
 #endif
-    const auto renderNow = std::chrono::steady_clock::now();
+    const auto renderNow = m_now();
     auto *node = static_cast<SpectrogramSceneNode *>(oldNode);
     QQuickWindow *currentWindow = window();
     const quintptr windowId = reinterpret_cast<quintptr>(currentWindow);
@@ -3533,7 +3553,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         * canvasZoom;
                     if (canvasZoom < 0.999 && pixelShift < 1.0) {
                         // Old canvas is still close enough — skip.
-                    } else if (!advancePrecomputedCanvasLocked(displayLeft, displayRight, rollingMode)) {
+                    } else if (!advancePrecomputedCanvasLocked(
+                                   displayLeft, displayRight, rollingMode, renderNow)) {
                         requestPrecomputedRasterLocked(cw, ch, displayLeft, displayRight, rollingMode);
                     }
                 }
@@ -4230,7 +4251,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
         && m_precomputedTotalColumnsEstimate > 0) {
         // The view the paint draws, held as it holds it.
         const CenteredView view = centeredViewLocked(
-            currentRenderPositionSecondsLocked(std::chrono::steady_clock::now()),
+            currentRenderPositionSecondsLocked(m_now()),
             canvasWidthLocked(),
             canvasHeightLocked(),
             canvasZoomLocked(),
@@ -5129,7 +5150,7 @@ std::shared_ptr<SpectrogramRasterJob> SpectrogramItem::makeRasterJobLocked(
     target.epoch = rollingMode ? m_rollingEpoch : 0;
     target.trackToken = m_precomputedTrackToken;
     target.ringGeneration = m_ringGeneration;
-    target.capturedAt = std::chrono::steady_clock::now();
+    target.capturedTravelSeconds = playbackTravelSecondsLocked(m_now());
     target.projection = precomputedProjectionLocked(height);
     // Copying the ring shares its blocks; only the slot lookup, one per
     // display column, costs anything here.
@@ -5341,7 +5362,7 @@ bool SpectrogramItem::installRasterResultLocked(const SpectrogramRasterResult &r
     m_precomputedCanvasEpoch = target.epoch;
     m_precomputedCanvasTrackToken = target.trackToken;
     m_precomputedCanvasRingGeneration = target.ringGeneration;
-    m_precomputedCanvasDrawnAt = target.capturedAt;
+    m_precomputedCanvasDrawnTravelSeconds = target.capturedTravelSeconds;
     m_precomputedCanvasPixelsPerSecond =
         target.effectiveZoom / target.scale * target.columnsPerSecond;
     if (!target.rollingMode) {
@@ -5410,29 +5431,26 @@ void SpectrogramItem::drawCenteredColumnsInPlaceLocked(
         dispL, viewRight, false, canvasZoom, projection);
 }
 
-int SpectrogramItem::maxSyncAppendPixelsLocked(int canvasWidth, double canvasZoom) const {
-    // The render sync moves the canvas on as far as playback can have moved
-    // it since it was drawn, with half again for uneven frames, and at least
+int SpectrogramItem::maxSyncAppendPixelsLocked(
+    int canvasWidth, double canvasZoom, std::chrono::steady_clock::time_point now) const {
+    // The render sync moves the canvas on as far as playback has travelled
+    // since it was drawn, with half again for uneven frames, and at least
     // 128 canvas pixels (about a millisecond at 719 rows and 4097 bins, and
     // less at device pixels, whose columns share their bins). That is
     // 6000 columns a second at 384 kHz and 16x zoom: 200 pixels a frame at
     // 30 fps, and more after a slow frame or a slow rasterization, whose
-    // columns are caught up here. A jump beyond that, such as a seek, goes
-    // to a worker like a full rebuild, and so does a whole canvas.
+    // columns are caught up here. Time paused, or before a seek, is no
+    // travel: a jump beyond that, such as a seek, goes to a worker like a
+    // full rebuild, and so does a whole canvas.
     constexpr int kMinSyncAppendPixels = 128;
     constexpr double kPlaybackSlack = 1.5;
-    const double rate = std::max(
-        m_clockState.rate, m_positionJumpHoldActive ? m_positionHoldTrajectory.rate : 0.0);
     double playbackPixels = 0.0;
-    if (rate > 0.0
-        && m_precomputedHopSize > 0
-        && m_precomputedCanvasDrawnAt != std::chrono::steady_clock::time_point{}) {
-        const double elapsedSeconds = std::max(0.0, std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - m_precomputedCanvasDrawnAt).count());
+    if (m_precomputedHopSize > 0) {
+        const double travelSeconds = std::max(
+            0.0, playbackTravelSecondsLocked(now) - m_precomputedCanvasDrawnTravelSeconds);
         const double columnsPerSecond = static_cast<double>(m_precomputedSampleRateHz)
             / static_cast<double>(m_precomputedHopSize);
-        playbackPixels =
-            elapsedSeconds * rate * columnsPerSecond * canvasZoom * kPlaybackSlack;
+        playbackPixels = travelSeconds * columnsPerSecond * canvasZoom * kPlaybackSlack;
     }
     const double budget = std::max(static_cast<double>(kMinSyncAppendPixels), std::ceil(playbackPixels));
     return static_cast<int>(std::min(static_cast<double>(canvasWidth - 1), budget));
@@ -5441,7 +5459,8 @@ int SpectrogramItem::maxSyncAppendPixelsLocked(int canvasWidth, double canvasZoo
 bool SpectrogramItem::advancePrecomputedCanvasLocked(
     qint64 displayLeft,
     qint64 displayRight,
-    bool rollingMode) {
+    bool rollingMode,
+    std::chrono::steady_clock::time_point now) {
     const double canvasZoom = canvasZoomLocked();
     if (m_canvas.isNull()
         || m_canvas.width() <= 0
@@ -5472,7 +5491,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
         m_precomputedCanvasViewRight = displayRight;
         m_precomputedCanvasDirty = false;
         m_precomputedCanvasSubpixelOffset = 0.0;
-        m_precomputedCanvasDrawnAt = std::chrono::steady_clock::now();
+        m_precomputedCanvasDrawnTravelSeconds = playbackTravelSecondsLocked(now);
         return true;
     }
 
@@ -5481,7 +5500,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
             std::max(m_precomputedCanvasDisplayRight + 1, displayLeft);
         const qint64 appendCount =
             std::max<qint64>(0, displayRight - appendStart + 1);
-        if (appendCount > maxSyncAppendPixelsLocked(width, canvasZoom)) {
+        if (appendCount > maxSyncAppendPixelsLocked(width, canvasZoom, now)) {
             return false;
         }
 
@@ -5504,7 +5523,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
         m_precomputedCanvasViewRight = displayRight;
         m_precomputedCanvasDirty = false;
         m_precomputedCanvasSubpixelOffset = 0.0;
-        m_precomputedCanvasDrawnAt = std::chrono::steady_clock::now();
+        m_precomputedCanvasDrawnTravelSeconds = playbackTravelSecondsLocked(now);
         return true;
     }
 
@@ -5565,7 +5584,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
             --firstPixel;
         }
     }
-    if (newFilledPixels - firstPixel > maxSyncAppendPixelsLocked(width, canvasZoom)) {
+    if (newFilledPixels - firstPixel > maxSyncAppendPixelsLocked(width, canvasZoom, now)) {
         return fallBack();
     }
 
@@ -5590,7 +5609,7 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
     m_precomputedCanvasViewRight = displayRight;
     m_precomputedCanvasDirty = false;
     m_precomputedCanvasSubpixelOffset = nextSubpixelOffset;
-    m_precomputedCanvasDrawnAt = std::chrono::steady_clock::now();
+    m_precomputedCanvasDrawnTravelSeconds = playbackTravelSecondsLocked(now);
     return true;
 }
 
@@ -5714,8 +5733,7 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
 
 void SpectrogramItem::handleWindowAfterAnimating() {
     if (!isVisible()) return;
-    using Clock = std::chrono::steady_clock;
-    const auto now = Clock::now();
+    const auto now = m_now();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 #endif
@@ -5801,7 +5819,7 @@ void SpectrogramItem::schedulePlaybackFrame() {
             m_playbackFrameTimer->stop();
             return;
         }
-        delayNs = playbackFrameDelayNsLocked(monotonicNowNs());
+        delayNs = playbackFrameDelayNsLocked(monotonicNs(m_now()));
     }
     if (delayNs == 0) {
         m_playbackFrameTimer->stop();

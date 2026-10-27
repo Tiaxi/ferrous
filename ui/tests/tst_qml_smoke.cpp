@@ -94,7 +94,7 @@ void setTestPosition(Item &item, double seconds, quint64 trackToken = 0) {
     PlaybackClock &clock = testClock(item);
     PlaybackSample sample;
     sample.positionSeconds = seconds;
-    sample.sampledAtNs = monotonicNowNs();
+    sample.sampledAtNs = clock.nowNs();
     sample.trackToken = trackToken != 0 ? trackToken : clock.state().trackToken;
     clock.applySample(sample, false);
     if (item.property("playing").toBool()) {
@@ -110,12 +110,30 @@ void setTestPositionAgo(Item &item, double seconds, double agoSeconds) {
     PlaybackClock &clock = testClock(item);
     PlaybackSample sample;
     sample.positionSeconds = seconds;
-    sample.sampledAtNs = monotonicNowNs() - static_cast<qint64>(agoSeconds * 1e9);
+    sample.sampledAtNs = clock.nowNs() - static_cast<qint64>(agoSeconds * 1e9);
     sample.trackToken = clock.state().trackToken;
     clock.applySample(sample, false);
     sample.advancing = true;
     clock.applySample(sample, false);
 }
+
+// Time a test sets for an item and its clock, so that nothing the test
+// checks depends on how fast it runs. It outlives the items it drives.
+struct TestTime {
+    qint64 nowNs{monotonicNowNs()};
+
+    void drive(SpectrogramItem &item) {
+        item.m_now = [this]() {
+            return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(nowNs));
+        };
+        testClock(item).setTimeSource([this]() { return nowNs; });
+    }
+    void drive(WaveformEditorItem &item) {
+        item.m_nowNs = [this]() { return nowNs; };
+        testClock(item).setTimeSource([this]() { return nowNs; });
+    }
+    void advance(double seconds) { nowNs += static_cast<qint64>(std::llround(seconds * 1e9)); }
+};
 
 // How much larger than in the canvas the drawn canvas spans are on screen:
 // all of them share one scale. -1 without spans, -2 for differing scales.
@@ -1331,6 +1349,8 @@ private slots:
     void waveformItemCachesAtDevicePixels();
     void spectrogramCachedBackwardSeekKeepsTheCanvasOnScreen();
     void spectrogramCachedForwardSeekRasterizesOffTheRenderSync();
+    void spectrogramResumedForwardSeekRasterizesOffTheRenderSync();
+    void spectrogramPlaybackTravelCountsOnlyContinuousPlayback();
     void spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data();
     void spectrogramHighRatePlaybackAdvancesWithoutRebuilds();
     void spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback();
@@ -6615,7 +6635,7 @@ void QmlSmokeTest::spectrogramSmoothnessProfileTracksAdvanceFallbackSignals() {
         item.m_precomputedCanvasDisplayRight = 0;
         item.m_precomputedCanvasRolling = false;
         // A jump past the whole canvas goes to a worker.
-        QVERIFY(!item.advancePrecomputedCanvasLocked(400, 410, false));
+        QVERIFY(!item.advancePrecomputedCanvasLocked(400, 410, false, item.m_now()));
         state = item.debugSmoothnessProfileStateLocked();
     }
 
@@ -9217,7 +9237,9 @@ void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
     // shows pixel 10 until 11 s. Its frame-swapped callback arrives late,
     // after playback has passed that: the next frame is due at once, not
     // at the boundary after.
+    TestTime time;
     WaveformEditorItem item;
+    time.drive(item);
     item.setWidth(100);
     item.setHeight(50);
     item.setDurationSeconds(100.0);
@@ -9232,8 +9254,8 @@ void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
         item.paint(&painter);
     }
     PlaybackClock &clock = testClock(item);
-    QVERIFY(QTest::qWaitFor(
-        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 11.02; }, 2000));
+    time.advance(0.62);
+    QCOMPARE(clock.positionAt(clock.nowNs()), 11.02);
     const quint64 requested = item.m_playbackFrameRequests;
     item.handleWindowFrameSwapped();
     QCOMPARE(item.m_playbackFrameRequests, requested + 1);
@@ -9243,11 +9265,10 @@ void QmlSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
         QPainter painter(&canvas);
         item.paint(&painter);
     }
-    QVERIFY(QTest::qWaitFor(
-        [&clock]() { return clock.positionAt(monotonicNowNs()) >= 12.02; }, 2000));
+    time.advance(1.0);
     PlaybackSample sample;
-    sample.positionSeconds = clock.positionAt(monotonicNowNs()) + 0.001;
-    sample.sampledAtNs = monotonicNowNs();
+    sample.positionSeconds = clock.positionAt(clock.nowNs()) + 0.001;
+    sample.sampledAtNs = clock.nowNs();
     sample.advancing = true;
     sample.trackToken = clock.state().trackToken;
     const quint64 corrected = item.m_playbackFrameRequests;
@@ -13724,6 +13745,102 @@ void QmlSmokeTest::spectrogramCachedForwardSeekRasterizesOffTheRenderSync() {
     delete node;
 }
 
+void QmlSmokeTest::spectrogramResumedForwardSeekRasterizesOffTheRenderSync() {
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    TestTime time;
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    time.drive(item);
+    prepareFullscreenForwardSeek(item);
+    QSGNode *node = paintSettled(item, nullptr);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, qint64(0));
+
+    // Paused for 100 s, nothing moves, and frames draw nothing.
+    time.advance(100.0);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(!spectrogramRasterPending(item));
+
+    // Playback resumes, and seeks on to 105 s before the next frame. Most
+    // of the view is new: 3201 of its 3440 columns. The pause is no
+    // playback, so the frame hands them to a worker rather than drawing
+    // them itself.
+    item.setPlaying(true);
+    setTestPosition(item, 30.0);
+    time.advance(0.005);
+    setTestPosition(item, 105.0);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    node = item.updatePaintNode(node, nullptr);
+    qInfo("resumed forward seek frame: %.3f ms", static_cast<double>(elapsed.nsecsElapsed()) / 1e6);
+    QVERIFY(spectrogramRasterPending(item));
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, qint64(0));
+
+    node = paintSettled(item, node);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, qint64(4921 - 1720));
+
+    // Playback goes on from there: its frames draw their columns in.
+    quint64 serial = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        serial = item.m_rasterSerial;
+    }
+    for (int frame = 0; frame < 3; ++frame) {
+        time.advance(0.033);
+        node = item.updatePaintNode(node, nullptr);
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY2(!item.m_rasterPending && item.m_rasterSerial == serial,
+                 qPrintable(QStringLiteral("frame %1 asked for a rasterization").arg(frame)));
+    }
+    delete node;
+}
+
+void QmlSmokeTest::spectrogramPlaybackTravelCountsOnlyContinuousPlayback() {
+    TestTime time;
+    SpectrogramItem item;
+    time.drive(item);
+    item.setWidth(200);
+    item.setHeight(50);
+    item.setDisplayMode(1);
+    item.setPlaying(true);
+    setTestPosition(item, 10.0);
+    const auto travel = [&item, &time]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.playbackTravelSecondsLocked(
+            std::chrono::steady_clock::time_point(std::chrono::nanoseconds(time.nowNs)));
+    };
+    const double start = travel();
+
+    // Two seconds of playback, with a course correction on the way: the
+    // second runs 5% fast to make up a tenth of a second.
+    time.advance(1.0);
+    PlaybackClock &clock = testClock(item);
+    PlaybackSample sample;
+    sample.positionSeconds = clock.positionAt(clock.nowNs()) + 0.1;
+    sample.sampledAtNs = clock.nowNs();
+    sample.advancing = true;
+    sample.trackToken = clock.state().trackToken;
+    clock.applySample(sample, false);
+    time.advance(1.0);
+    const double played = travel() - start;
+    QVERIFY2(std::abs(played - 2.05) < 1e-6, qPrintable(QString::number(played)));
+
+    // A pause adds nothing, however long; nor do seeks either way.
+    item.setPlaying(false);
+    setTestPosition(item, clock.positionAt(clock.nowNs()));
+    time.advance(100.0);
+    QVERIFY(std::abs(travel() - start - played) < 1e-6);
+    item.setPlaying(true);
+    setTestPosition(item, 80.0);
+    QVERIFY(std::abs(travel() - start - played) < 1e-6);
+    time.advance(0.5);
+    setTestPosition(item, 20.0);
+    time.advance(0.5);
+    const double resumed = travel() - start - played;
+    QVERIFY2(std::abs(resumed - 1.0) < 1e-6, qPrintable(QString::number(resumed)));
+}
+
 void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds_data() {
     QTest::addColumn<bool>("rolling");
     // Device pixels to a logical pixel.
@@ -13740,7 +13857,9 @@ void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds() {
     QFETCH(double, scale);
     constexpr int logicalWidth = 1000;
     const int width = static_cast<int>(std::floor(logicalWidth * scale + 1e-6));
+    TestTime time;
     SpectrogramItem item;
+    time.drive(item);
     item.m_canvasScale = scale;
     prepareHighRatePlayback(item, logicalWidth, 50, 8, rolling);
     QSGNode *node = paintSettled(item, nullptr);
@@ -13753,7 +13872,7 @@ void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds() {
     // Painting at about 30 fps, playback moves the view about 200 pixels a
     // frame: the paint draws them in, and asks a worker for nothing.
     for (int frame = 0; frame < 10; ++frame) {
-        QTest::qWait(33);
+        time.advance(0.033);
         node = item.updatePaintNode(node, nullptr);
         QMutexLocker lock(&item.m_stateMutex);
         QVERIFY2(!item.m_rasterPending && item.m_rasterSerial == serial,
@@ -13770,22 +13889,25 @@ void QmlSmokeTest::spectrogramHighRatePlaybackAdvancesWithoutRebuilds() {
             QVERIFY(item.m_precomputedCanvasDisplayRight >= item.m_precomputedLastDisplaySeq);
         }
     }
-    QVERIFY(item.m_precomputedLastDisplaySeq > 3000 + 10 * 33 * 6);
+    QVERIFY2(item.m_precomputedLastDisplaySeq >= 3000 + 10 * 33 * 6 - 1,
+             qPrintable(QString::number(item.m_precomputedLastDisplaySeq)));
     delete node;
 }
 
 void QmlSmokeTest::spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback() {
     constexpr int width = 2000;
+    TestTime time;
     SpectrogramItem item;
+    time.drive(item);
     prepareHighRatePlayback(item, width, 50, 8, true);
     QSGNode *node = paintSettled(item, nullptr);
 
     // A rasterization is delivered 120 ms after the frame that asked for
-    // it, by when playback has moved on by 700 columns.
+    // it, by when playback has moved on by 720 columns.
     item.setDbRange(120.0);
     node = item.updatePaintNode(node, nullptr);
     QVERIFY(spectrogramRasterPending(item));
-    QTest::qSleep(120);
+    time.advance(0.120);
     QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
     quint64 serial = 0;
     {
@@ -13804,7 +13926,7 @@ void QmlSmokeTest::spectrogramSlowRasterIsCaughtUpDuringHighRatePlayback() {
             QCOMPARE(item.m_canvasFilledCols, width);
             QCOMPARE(item.m_precomputedCanvasDisplayRight, item.m_precomputedLastDisplaySeq);
         }
-        QTest::qWait(33);
+        time.advance(0.033);
     }
     delete node;
 }
@@ -14341,7 +14463,7 @@ void QmlSmokeTest::spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill()
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        QVERIFY(item.advancePrecomputedCanvasLocked(0, 4, true));
+        QVERIFY(item.advancePrecomputedCanvasLocked(0, 4, true, item.m_now()));
         QCOMPARE(item.m_canvasFilledCols, 10);
         QCOMPARE(item.m_canvasWriteX, 10);
         QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(0));
@@ -14399,7 +14521,7 @@ void QmlSmokeTest::spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally()
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        QVERIFY(item.advancePrecomputedCanvasLocked(1, 6, true));
+        QVERIFY(item.advancePrecomputedCanvasLocked(1, 6, true, item.m_now()));
         QCOMPARE(item.m_canvasFilledCols, 12);
         QCOMPARE(item.m_canvasWriteX, 2);
         QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(1));
@@ -14464,7 +14586,7 @@ void QmlSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFractionalZoom
 
     {
         QMutexLocker lock(&item.m_stateMutex);
-        QVERIFY(item.advancePrecomputedCanvasLocked(1, 4, true));
+        QVERIFY(item.advancePrecomputedCanvasLocked(1, 4, true, item.m_now()));
         QCOMPARE(item.m_canvasFilledCols, 7);
         QCOMPARE(item.m_canvasWriteX, 1);
         QVERIFY(item.m_precomputedCanvasSubpixelOffset > 0.70);
@@ -14544,7 +14666,7 @@ void QmlSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset() {
         item.m_binsPerColumn = bins;
         item.ensureMapping(10);
         rebuildCanvasNow(item, 100, 10, 50, 149, false);
-        QVERIFY(item.advancePrecomputedCanvasLocked(60, 159, false));
+        QVERIFY(item.advancePrecomputedCanvasLocked(60, 159, false, item.m_now()));
     }
 
     // Column 151 is not decoded yet, so its physical circular slot is black.
@@ -17217,7 +17339,7 @@ void QmlSmokeTest::spectrogramDevicePixelCanvasAdvancesAsItsRasterization() {
     // Scrolled by part of a pixel, the canvas's pixel q starts where a
     // rasterization from `back` columns earlier puts its pixel q + shift.
     for (qint64 left = 100 + step; left <= 100 + 4 * step; left += step) {
-        QVERIFY(item.advancePrecomputedCanvasLocked(left, left + span, rolling));
+        QVERIFY(item.advancePrecomputedCanvasLocked(left, left + span, rolling, item.m_now()));
         const double offset = item.m_precomputedCanvasSubpixelOffset;
         int back = 0;
         while (std::abs(back * scale - offset - std::round(back * scale - offset)) > 1e-6) {
