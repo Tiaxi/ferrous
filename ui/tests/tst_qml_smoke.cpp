@@ -1212,6 +1212,7 @@ private slots:
     void waveformEditorFpsOverlayTracksPaintRate();
     void waveformEditorUsesSceneGraphAndNativeFrameInterpolation();
     void waveformSceneGraphReusesTextures();
+    void waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn();
     void waveformSceneGraphMatchesRaster_data();
     void waveformSceneGraphMatchesRaster();
     void waveformSceneGraphBenchmark();
@@ -8403,6 +8404,40 @@ void QmlSmokeTest::waveformSceneGraphReusesTextures() {
     QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, native ? quint64{1} : quint64{0});
     if (native) QCOMPARE(WaveformSceneGraph::statistics(node).residentBytes, quint64{4096 * 180 * 4});
     delete node;
+}
+
+void QmlSmokeTest::waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn() {
+    // ~QQuickItem takes an item out of its window once the item's own
+    // members are destroyed, and emits windowChanged. The item's handler
+    // for it once ran then, on its destroyed window connections and state.
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    // Parented after construction, as QML does, so it binds the window.
+    auto *item = new WaveformEditorItem;
+    item->setParentItem(window.contentItem());
+    item->setWidth(200);
+    item->setHeight(100);
+    item->setDurationSeconds(10.0);
+    item->setOverviewComplete(true);
+    item->setOverviewData(QByteArray(1024, static_cast<char>(128)));
+    QVERIFY(item->m_frameSwappedConnection);
+    QVERIFY(item->m_windowVisibilityConnection);
+
+    QObject probe;
+    bool windowChangedDuringDestruction = false;
+    bool ownHandlersStillConnected = false;
+    QObject::connect(item, &QQuickItem::windowChanged, &probe, [&](QQuickWindow *window) {
+        if (window != nullptr) {
+            return;
+        }
+        windowChangedDuringDestruction = true;
+        ownHandlersStillConnected = QObject::disconnect(item, nullptr, item, nullptr);
+    });
+    delete item;
+    QVERIFY(windowChangedDuringDestruction);
+    QVERIFY(!ownHandlersStillConnected);
 }
 
 void QmlSmokeTest::waveformSceneGraphMatchesRaster_data() {
