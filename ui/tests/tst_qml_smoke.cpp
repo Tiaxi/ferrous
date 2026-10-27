@@ -1238,6 +1238,8 @@ private slots:
     void waveformEditorUsesSceneGraphAndNativeFrameInterpolation();
     void waveformSceneGraphReusesTextures();
     void waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn();
+    void waveformEditorMadeInAWindowSchedulesPlaybackFrames();
+    void waveformEditorParentedByQmlBindsItsWindowOnce();
     void waveformSceneGraphMatchesRaster_data();
     void waveformSceneGraphMatchesRaster();
     void waveformSceneGraphBenchmark();
@@ -9069,6 +9071,92 @@ void QmlSmokeTest::waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn() {
     delete item;
     QVERIFY(windowChangedDuringDestruction);
     QVERIFY(!ownHandlersStillConnected);
+}
+
+namespace {
+// Counts the item connections to a window's presented frames and visibility.
+class ListenerCountingWindow final : public QQuickWindow {
+public:
+    int frameSwappedListeners() const { return receivers(SIGNAL(frameSwapped())); }
+    int visibleChangedListeners() const { return receivers(SIGNAL(visibleChanged(bool))); }
+};
+
+// A track that the editor, zoomed in, follows on every presented frame.
+void playFollowingThePlayhead(WaveformEditorItem &item) {
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDurationSeconds(250.0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    item.setZoomLevel(8.0);
+    setTestPosition(item, 100.0);
+    item.setPlaying(true);
+    setTestPosition(item, 100.0);
+}
+} // namespace
+
+void QmlSmokeTest::waveformEditorMadeInAWindowSchedulesPlaybackFrames() {
+    // windowChanged fires inside QQuickItem's constructor, before the
+    // editor's handler for it is connected.
+    ListenerCountingWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    const int frameListeners = window.frameSwappedListeners();
+    const int visibilityListeners = window.visibleChangedListeners();
+    auto *item = new WaveformEditorItem(window.contentItem());
+    playFollowingThePlayhead(*item);
+    const quint64 requested = item->m_playbackFrameRequests;
+    QTRY_VERIFY_WITH_TIMEOUT(item->m_playbackFrameRequests >= requested + 5, 2000);
+    QVERIFY(item->m_frameSwappedConnection);
+    QVERIFY(item->m_windowVisibilityConnection);
+    QCOMPARE(window.frameSwappedListeners(), frameListeners + 1);
+    QCOMPARE(window.visibleChangedListeners(), visibilityListeners + 1);
+
+    // Moved within the window, or told of the same window again, it keeps
+    // one connection of each.
+    QQuickItem sibling(window.contentItem());
+    item->setParentItem(&sibling);
+    emit item->windowChanged(&window);
+    QCOMPARE(window.frameSwappedListeners(), frameListeners + 1);
+    QCOMPARE(window.visibleChangedListeners(), visibilityListeners + 1);
+
+    delete item;
+    QCOMPARE(window.frameSwappedListeners(), frameListeners);
+    QCOMPARE(window.visibleChangedListeners(), visibilityListeners);
+}
+
+void QmlSmokeTest::waveformEditorParentedByQmlBindsItsWindowOnce() {
+    ListenerCountingWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    const int frameListeners = window.frameSwappedListeners();
+    const int visibilityListeners = window.visibleChangedListeners();
+    QQmlEngine engine;
+    QString errors;
+    std::unique_ptr<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(
+        "import QtQuick\n"
+        "import FerrousUi 1.0\n"
+        "Item { WaveformEditorItem { objectName: \"editor\" } }\n"),
+        QUrl::fromLocalFile(
+            QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/WaveformEditorParent.qml")),
+        &errors));
+    QVERIFY2(root, qPrintable(errors));
+    auto *item = root->findChild<WaveformEditorItem *>(QStringLiteral("editor"));
+    QVERIFY(item != nullptr);
+    QVERIFY(!item->m_frameSwappedConnection);
+    qobject_cast<QQuickItem *>(root.get())->setParentItem(window.contentItem());
+    QCOMPARE(window.frameSwappedListeners(), frameListeners + 1);
+    QCOMPARE(window.visibleChangedListeners(), visibilityListeners + 1);
+    playFollowingThePlayhead(*item);
+    const quint64 requested = item->m_playbackFrameRequests;
+    QTRY_VERIFY_WITH_TIMEOUT(item->m_playbackFrameRequests >= requested + 5, 2000);
+    QCOMPARE(window.frameSwappedListeners(), frameListeners + 1);
+
+    root.reset();
+    QCOMPARE(window.frameSwappedListeners(), frameListeners);
+    QCOMPARE(window.visibleChangedListeners(), visibilityListeners);
 }
 
 void QmlSmokeTest::waveformSceneGraphMatchesRaster_data() {

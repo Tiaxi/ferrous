@@ -196,6 +196,8 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
 #endif
     connect(&m_requestTimer, &QTimer::timeout, this, &WaveformEditorItem::requestDetailWindow);
     connect(this, &QQuickItem::windowChanged, this, &WaveformEditorItem::bindWindowFrameLoop);
+    // An item made with a parent in a window already has it; no change follows.
+    if (window()) bindWindowFrameLoop(window());
 }
 
 WaveformEditorItem::~WaveformEditorItem() {
