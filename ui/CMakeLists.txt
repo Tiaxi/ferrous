@@ -132,7 +132,9 @@ qt_add_resources(ferrous ferrous_app_resources
 )
 
 # The QML module is a library of its own, which the app and the test that
-# loads the module as the app does both link.
+# loads the module as the app does both link. They link the whole archive:
+# nothing refers to its compiled QML or its type registration, which the
+# linker would otherwise leave out, so QML would compile at run time.
 qt_add_library(ferrous_ui_qml STATIC)
 qt_add_qml_module(ferrous_ui_qml
     URI FerrousUi
@@ -212,7 +214,7 @@ ferrous_enable_strict_warnings(ferrous_ui_qml)
 
 set_target_properties(ferrous PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
 target_link_libraries(ferrous PRIVATE
-    ferrous_ui_qml
+    "$<LINK_LIBRARY:WHOLE_ARCHIVE,ferrous_ui_qml>"
     "${FERROUS_RUST_STATIC_LIB}"
     PkgConfig::FERROUS_GSTREAMER
     Qt6::Core
@@ -620,7 +622,7 @@ if(BUILD_TESTING)
         FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_qml_module_tests PRIVATE
-        ferrous_ui_qml
+        "$<LINK_LIBRARY:WHOLE_ARCHIVE,ferrous_ui_qml>"
         Qt6::Core
         Qt6::Gui
         Qt6::Qml
@@ -650,4 +652,17 @@ if(BUILD_TESTING)
         TIMEOUT 120
     )
     ferrous_add_default_platform_test(ferrous_qml_module_tests drawsOffscreenUnlessAPlatformIsChosen)
+
+    # The app and the module test have the module's compiled QML.
+    if(CMAKE_NM)
+        foreach(qml_binary IN ITEMS ferrous ferrous_qml_module_tests)
+            add_test(NAME ${qml_binary}_qml_cache_linked
+                COMMAND "${CMAKE_COMMAND}"
+                    -DNM=${CMAKE_NM}
+                    -DBINARY=$<TARGET_FILE:${qml_binary}>
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_qml_cache_linked.cmake"
+            )
+            set_tests_properties(${qml_binary}_qml_cache_linked PROPERTIES TIMEOUT 60)
+        endforeach()
+    endif()
 endif()
