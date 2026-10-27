@@ -220,6 +220,21 @@ if(BUILD_TESTING)
             -DEXPECTED_VERSION=${FERROUS_APP_VERSION}
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_metainfo_release.cmake"
     )
+    # The release workflow runs this check on the pushed tag.
+    find_program(FERROUS_BASH bash)
+    if(FERROUS_BASH)
+        add_test(NAME ferrous_release_version_check
+            COMMAND "${CMAKE_COMMAND}"
+                -DBASH=${FERROUS_BASH}
+                -DCHECK_SCRIPT=${FERROUS_ROOT_DIR}/scripts/check-release-version.sh
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-version-check
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_release_version.cmake"
+        )
+        add_test(NAME ferrous_release_version_consistent
+            COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/check-release-version.sh"
+                "v${FERROUS_APP_VERSION}"
+        )
+    endif()
     find_program(FERROUS_APPSTREAMCLI appstreamcli)
     if(FERROUS_APPSTREAMCLI)
         add_test(NAME ferrous_metainfo_validate

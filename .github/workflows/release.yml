@@ -9,18 +9,53 @@ permissions:
   contents: read
 
 jobs:
-  build-rpm:
-    name: Build RPM (Fedora ${{ matrix.fedora }})
+  version:
+    name: Check release version
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Fails unless the tag is vX.Y.Z and matches Cargo.toml, the RPM spec
+      # and the newest AppStream release, before anything is built.
+      - name: Check tag against the version in the tree
+        run: ./scripts/check-release-version.sh "$GITHUB_REF_NAME"
+
+  # The full CI suite on the tagged commit: formatting, Clippy, cargo audit,
+  # and the Rust and UI tests. A tag need not point at a commit CI has tested.
+  ci:
+    name: CI
+    needs: [version]
+    uses: ./.github/workflows/ci.yml
+
+  build-rpm:
+    name: "Build RPM (Fedora ${{ matrix.fedora }}${{ matrix.experimental && ', non-blocking' || '' }})"
+    needs: [version]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        fedora: [44]
+        # experimental: a Fedora release that is not out yet. Its packages are
+        # published when they build, but a failure does not block the release.
+        # Drop the flag once that Fedora is released.
+        include:
+          - fedora: '44'
+          - fedora: '45'
+            experimental: true
+    continue-on-error: ${{ matrix.experimental == true }}
     container:
       image: fedora:${{ matrix.fedora }}
+    env:
+      # Give up on a stalled mirror instead of waiting on it.
+      DNF_OPTS: --setopt=retries=3 --setopt=timeout=30 --setopt=minrate=10240
     steps:
       - name: Install packaging tools
-        run: dnf -y install git rpm-build appstream desktop-file-utils
+        timeout-minutes: 10
+        run: dnf -y $DNF_OPTS install git rpm-build appstream desktop-file-utils
 
       - name: Checkout
         uses: actions/checkout@v5
@@ -33,22 +68,33 @@ jobs:
       # rpmbuild checks the spec's BuildRequires, including Fedora's Rust
       # toolchain, which builds the package.
       - name: Install build dependencies
-        run: dnf -y builddep packaging/rpm/ferrous.spec
+        timeout-minutes: 10
+        run: dnf -y $DNF_OPTS builddep packaging/rpm/ferrous.spec
 
+      # The spec's %check runs the UI test suite against this Fedora release,
+      # with the test user directories inside the build tree.
       - name: Build RPM
         env:
           FERROUS_LASTFM_API_KEY: ${{ secrets.FERROUS_LASTFM_API_KEY }}
           FERROUS_LASTFM_SHARED_SECRET: ${{ secrets.FERROUS_LASTFM_SHARED_SECRET }}
+        run: ./scripts/build-rpm.sh --release "1%{?dist}"
+
+      - name: Check package versions
         run: |
           version="${GITHUB_REF_NAME#v}"
-          ./scripts/build-rpm.sh \
-            --release "1%{?dist}" \
-            --no-check
+          for rpm in dist/rpm/RPMS/*/*.rpm; do
+            rpm_version="$(rpm -qp --queryformat '%{VERSION}' "$rpm")"
+            if [ "$rpm_version" != "$version" ]; then
+              echo "$rpm has version $rpm_version, not $version." >&2
+              exit 1
+            fi
+          done
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v5
         with:
           name: rpm-package-fc${{ matrix.fedora }}
+          if-no-files-found: error
           path: |
             dist/rpm/RPMS/**/*.rpm
             !dist/rpm/RPMS/**/*-debuginfo-*.rpm
@@ -56,7 +102,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-rpm]
+    needs: [ci, build-rpm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -66,9 +112,37 @@ jobs:
         with:
           path: packages
 
+      # The release lists assets by file name, so collect them in one directory
+      # and checksum them by name; `sha256sum -c SHA256SUMS` then works in a
+      # directory of downloaded assets.
+      - name: Collect assets and write SHA256SUMS
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          mkdir release-assets
+          for rpm in packages/rpm-package-fc*/**/*.rpm; do
+            name="$(basename "$rpm")"
+            if [ -e "release-assets/$name" ]; then
+              echo "Two packages are named $name." >&2
+              exit 1
+            fi
+            mv "$rpm" "release-assets/$name"
+          done
+          cd release-assets
+          rpms=(*.rpm)
+          if [ ${#rpms[@]} -eq 0 ]; then
+            echo "No packages to release." >&2
+            exit 1
+          fi
+          sha256sum -- "${rpms[@]}" > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            packages/rpm-package-fc*/**/*.rpm
+            release-assets/*.rpm
+            release-assets/SHA256SUMS
