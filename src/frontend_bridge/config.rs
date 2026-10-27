@@ -1273,16 +1273,20 @@ mod tests {
     }
 
     fn state_at(position: Duration, playback_state: PlaybackState) -> BridgeState {
-        let mut state = BridgeState::default();
-        state.queue = vec![p("/a.flac"), p("/b.flac")];
-        state.playback.current = Some(p("/b.flac"));
-        state.playback.current_queue_index = Some(1);
-        state.playback.current_file = Some(stamp());
-        state.playback.position = position;
-        state.playback.state = playback_state;
-        state.playback.repeat_mode = RepeatMode::One;
-        state.playback.shuffle_enabled = true;
-        state
+        BridgeState {
+            queue: vec![p("/a.flac"), p("/b.flac")],
+            playback: crate::playback::PlaybackSnapshot {
+                current: Some(p("/b.flac")),
+                current_queue_index: Some(1),
+                current_file: Some(stamp()),
+                position,
+                state: playback_state,
+                repeat_mode: RepeatMode::One,
+                shuffle_enabled: true,
+                ..crate::playback::PlaybackSnapshot::default()
+            },
+            ..BridgeState::default()
+        }
     }
 
     #[test]
