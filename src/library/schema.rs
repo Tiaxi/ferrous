@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -186,9 +187,39 @@ const DROP_FULL_TEXT_INDEX: &str = r"
     DROP TABLE IF EXISTS tracks_fts;
 ";
 
-/// Brings the schema to [`SCHEMA_VERSION`]. A database already there is
-/// left alone, so connections other than the library worker's can call this
-/// cheaply each time they open the database.
+/// Held by the connection of this process that prepares the library
+/// database (see [`prepare_database`]), so that no other one writes to the
+/// database before it uses write-ahead logging.
+///
+/// Switching to write-ahead logging takes a read lock and then the write
+/// lock, and `SQLite` does not wait for the write lock then, whatever the
+/// busy timeout: a reader that waited for a writer could deadlock with it.
+/// So a switch fails at once if another connection writes, as the analysis
+/// worker's does at start-up, and the database keeps the rollback journal.
+/// Every connection of this process prepares the database before it first
+/// writes, and does so under this lock; it then finds the database
+/// switched, or switches it itself while no other connection writes.
+pub(super) static PREPARING: Mutex<()> = Mutex::new(());
+
+/// Brings the schema to [`SCHEMA_VERSION`] and switches the database to
+/// write-ahead logging; see [`prepare_database`], which also tells why the
+/// database does not use write-ahead logging.
+///
+/// # Errors
+///
+/// As [`prepare_database`].
+pub(super) fn init_schema(conn: &Connection) -> anyhow::Result<()> {
+    prepare_database(conn).map(drop)
+}
+
+/// Brings the schema to [`SCHEMA_VERSION`] and switches the database to
+/// write-ahead logging, which it keeps for every later connection: readers
+/// then never wait for a writer, and a writer waits only for another
+/// writer's transaction. A database already there is left alone, without
+/// waiting for [`PREPARING`], so every connection can call this cheaply
+/// each time it opens the database. Returns a notice for the user if
+/// write-ahead logging could not be enabled; the library still works then,
+/// but edits can wait for a scan's batches.
 ///
 /// The migration runs in one transaction: it either completes, or leaves
 /// the database as it was and returns the error.
@@ -197,7 +228,40 @@ const DROP_FULL_TEXT_INDEX: &str = r"
 ///
 /// Fails if the database cannot be read or written, if it was written by a
 /// newer version of Ferrous, or if a migration step fails.
-pub(super) fn init_schema(conn: &Connection) -> anyhow::Result<()> {
+pub(super) fn prepare_database(conn: &Connection) -> anyhow::Result<Option<String>> {
+    // Reading finds the write-ahead log of a database that has one, which
+    // the journal mode then tells.
+    if check_version(user_version(conn)?)? && journal_mode(conn)?.eq_ignore_ascii_case("wal") {
+        return Ok(None);
+    }
+    let _preparing = PREPARING.lock().unwrap_or_else(PoisonError::into_inner);
+    migrate(conn)?;
+    Ok(enable_write_ahead_log(conn))
+}
+
+fn journal_mode(conn: &Connection) -> rusqlite::Result<String> {
+    conn.pragma_query_value(None, "journal_mode", |row| row.get(0))
+}
+
+/// Switches the database to write-ahead logging; see [`PREPARING`] for why
+/// no other connection of this process may write meanwhile. Returns a
+/// notice if the mode could not be enabled.
+fn enable_write_ahead_log(conn: &Connection) -> Option<String> {
+    match conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0)) {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => None,
+        Ok(mode) => Some(format!(
+            "the library database could not use write-ahead logging and uses the {mode} \
+             journal instead; tag edits may wait for library scans"
+        )),
+        Err(error) => Some(format!(
+            "the library database could not use write-ahead logging ({error}); tag edits \
+             may wait for library scans"
+        )),
+    }
+}
+
+/// Brings the schema to [`SCHEMA_VERSION`], in one transaction.
+fn migrate(conn: &Connection) -> anyhow::Result<()> {
     if check_version(user_version(conn)?)? {
         return Ok(());
     }

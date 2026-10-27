@@ -2,7 +2,7 @@
 
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 use std::time::Instant;
 
@@ -10,7 +10,7 @@ use rusqlite::params;
 use rusqlite::types::Value;
 
 use super::*;
-use crate::library::schema::{user_version, SCHEMA_VERSION};
+use crate::library::schema::{init_schema, user_version, BUSY_TIMEOUT, PREPARING, SCHEMA_VERSION};
 use crate::library::test_fixtures::{
     build_version_0_library, library_rows, schema_objects, table_rows,
 };
@@ -464,6 +464,187 @@ fn every_connection_reads_and_writes_while_another_holds_a_read_transaction() {
         .expect("read");
     assert_eq!(title, "Edited");
     drop(conn);
+    fs::remove_dir_all(folder).expect("cleanup");
+}
+
+/// Why the switch to write-ahead logging must not meet another writer
+/// (#307): `SQLite` takes a read lock for it and then the write lock, and
+/// does not wait for another connection's write lock then, since a reader
+/// that waits for a writer can deadlock with it. The busy handler is not
+/// called, however long the busy timeout. Beginning a write does wait.
+#[test]
+fn switching_to_write_ahead_logging_does_not_wait_for_another_writer() {
+    static WAITS: AtomicUsize = AtomicUsize::new(0);
+    fn count_wait(_attempts: i32) -> bool {
+        WAITS.fetch_add(1, Ordering::Relaxed);
+        false
+    }
+    let folder = test_folder("wal-switch-busy");
+    let path = folder.join("library.sqlite3");
+    let writer = Connection::open(&path).expect("writer");
+    writer
+        .execute_batch("CREATE TABLE t (x); BEGIN IMMEDIATE; INSERT INTO t VALUES (1)")
+        .expect("write lock");
+    let switcher = Connection::open(&path).expect("switcher");
+    switcher.busy_handler(Some(count_wait)).expect("handler");
+
+    let error = switcher
+        .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+        .expect_err("the switch meets the writer");
+    assert_eq!(error.sqlite_error_code(), Some(ErrorCode::DatabaseBusy));
+    assert_eq!(WAITS.load(Ordering::Relaxed), 0, "the switch did not wait");
+    switcher
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect_err("the writer still writes");
+    assert_eq!(WAITS.load(Ordering::Relaxed), 1, "a write waits");
+
+    writer.execute_batch("COMMIT").expect("release");
+    assert_eq!(journal_mode_after_switch(&switcher), "wal");
+    drop((writer, switcher));
+    fs::remove_dir_all(folder).expect("cleanup");
+}
+
+fn journal_mode_after_switch(conn: &Connection) -> String {
+    conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+        .expect("switch")
+}
+
+/// How the library database is when the app starts, for the start-up tests.
+#[derive(Clone, Copy, Debug)]
+enum StartingLibrary {
+    /// A new install.
+    New,
+    /// A library from before schema versions and write-ahead logging.
+    Version0,
+    /// A current library that an earlier start left in the rollback journal.
+    CurrentInRollbackJournal,
+}
+
+impl StartingLibrary {
+    const ALL: [Self; 3] = [Self::New, Self::Version0, Self::CurrentInRollbackJournal];
+
+    fn build(self, path: &Path) {
+        match self {
+            Self::New => {}
+            Self::Version0 => {
+                build_version_0_library(path, 10);
+            }
+            Self::CurrentInRollbackJournal => {
+                let OpenedLibrary { conn, .. } = open_worker_db(path, SHORT_WAIT).expect("open");
+                conn.pragma_update(None, "journal_mode", "DELETE")
+                    .expect("rollback journal");
+                assert_eq!(journal_mode(&conn), "delete");
+            }
+        }
+    }
+}
+
+/// Opens the library database at `path` as the analysis worker opens its
+/// waveform cache, and writes to it as the cache does.
+fn open_as_the_waveform_cache(path: &Path) -> Connection {
+    let conn = crate::library::open_library_database_at(path, Duration::from_millis(250))
+        .expect("waveform cache");
+    conn.execute_batch("BEGIN IMMEDIATE; DELETE FROM waveform_cache WHERE peak_count <= 0")
+        .expect("waveform cache write");
+    conn
+}
+
+/// The waveform cache, the library worker's peer at start-up, writes just
+/// as the library worker opens the database (#307). Whichever opens the
+/// database first prepares it, and the other finds it in write-ahead
+/// logging, so the library worker has nothing to report.
+#[test]
+fn the_library_uses_write_ahead_logging_while_the_waveform_cache_writes() {
+    for starting in StartingLibrary::ALL {
+        let folder = test_folder("wal-cache-writes");
+        let path = folder.join("library.sqlite3");
+        starting.build(&path);
+        let (writing_tx, writing) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let cache = {
+            let path = path.clone();
+            thread::spawn(move || {
+                let conn = open_as_the_waveform_cache(&path);
+                writing_tx.send(()).expect("tell writing");
+                release_rx.recv().expect("release");
+                conn.execute_batch("COMMIT").expect("commit");
+            })
+        };
+        writing.recv().expect("the cache writes");
+
+        let OpenedLibrary { conn, notice } =
+            open_worker_db(&path, SHORT_WAIT).expect("library worker");
+
+        assert_eq!(notice, None, "{starting:?}");
+        assert_eq!(journal_mode(&conn), "wal", "{starting:?}");
+        assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
+        release.send(()).expect("release the cache");
+        cache.join().expect("cache thread");
+        drop(conn);
+        fs::remove_dir_all(folder).expect("cleanup");
+    }
+}
+
+/// The library worker and the waveform cache open the database at the same
+/// time, as at every start, and each writes as soon as it has it open.
+#[test]
+fn the_library_and_the_waveform_cache_open_a_database_together() {
+    for round in 0..10 {
+        for starting in StartingLibrary::ALL {
+            let folder = test_folder("wal-open-together");
+            let path = folder.join("library.sqlite3");
+            starting.build(&path);
+            let start = Arc::new(Barrier::new(2));
+            let cache = {
+                let (path, start) = (path.clone(), Arc::clone(&start));
+                thread::spawn(move || {
+                    start.wait();
+                    open_as_the_waveform_cache(&path)
+                        .execute_batch("COMMIT")
+                        .expect("commit");
+                })
+            };
+            start.wait();
+            let opened = open_worker_db(&path, BUSY_TIMEOUT).expect("library worker");
+            opened
+                .conn
+                .execute("DELETE FROM external_tracks WHERE 0", [])
+                .expect("library write");
+            cache.join().expect("cache thread");
+
+            assert_eq!(opened.notice, None, "round {round}, {starting:?}");
+            assert_eq!(journal_mode(&opened.conn), "wal");
+            drop(opened);
+            fs::remove_dir_all(folder).expect("cleanup");
+        }
+    }
+}
+
+/// A connection to a current library in write-ahead logging, as at every
+/// start but the first, opens without waiting for one that prepares the
+/// database.
+#[test]
+fn a_prepared_library_opens_without_waiting_for_a_preparation() {
+    let folder = test_folder("wal-prepared");
+    let path = folder.join("library.sqlite3");
+    drop(open_worker_db(&path, SHORT_WAIT).expect("prepare"));
+    let preparing = PREPARING.lock().expect("the preparation lock");
+    let (opened_tx, opened) = mpsc::channel();
+    let opener = {
+        let path = path.clone();
+        thread::spawn(move || {
+            let result = open_worker_db(&path, SHORT_WAIT).map(|opened| opened.notice);
+            opened_tx.send(result).expect("tell opened");
+        })
+    };
+
+    let result = opened
+        .recv_timeout(Duration::from_secs(30))
+        .expect("opened without waiting for the preparation");
+
+    drop(preparing);
+    assert_eq!(result, Ok(None));
+    opener.join().expect("opener");
     fs::remove_dir_all(folder).expect("cleanup");
 }
 
