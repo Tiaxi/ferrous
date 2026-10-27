@@ -1899,6 +1899,13 @@ impl GstPlaybackRuntime {
     /// commands or bridge polls arrive.  Fades run on the volume-level scale,
     /// so they sound even.
     fn poll_volume_ramp(&mut self, now: Instant) {
+        // The fade-in of a track start runs once the pipeline plays. A
+        // pipeline slow to start, such as under load, would otherwise reach
+        // the end of the fade before its first sample reached the output.
+        if self.startup_gain_ramp && self.playing_state_requested_at.is_some() {
+            self.volume_ramp_tick_at = None;
+            return;
+        }
         // Startup silence hold: keep volume at zero until the decoder has
         // had time to stabilise (prevents AC3/DTS garbage frames from
         // reaching the speakers).
@@ -7492,6 +7499,8 @@ mod engine_tests {
                     .successor_handed_to_pipeline()
                     && runtime.snapshot.position >= millis(3_000)
             });
+            // The engine loop would have finished the fade-in by now.
+            self.finish_fade();
             self.runtime
                 .apply_command(PlaybackCommand::Seek(millis(500)));
             assert_eq!(self.runtime.restart, Some(RunRestart::Prerolling));
@@ -9725,8 +9734,18 @@ mod engine_tests {
     }
 
     impl DirectEngine {
+        /// Handle bus messages until the pipeline has confirmed that it
+        /// plays.
+        #[track_caller]
+        fn wait_until_confirmed_playing(&mut self) {
+            self.wait_until("the pipeline did not play", |runtime| {
+                runtime.playing_state_requested_at.is_none()
+            });
+        }
+
         /// Run the fade in progress to its end, as the engine loop would.
         fn finish_fade(&mut self) {
+            self.wait_until_confirmed_playing();
             let now = Instant::now();
             self.runtime.poll_volume_ramp(now);
             self.runtime.poll_volume_ramp(now + Duration::from_secs(1));
@@ -9750,6 +9769,7 @@ mod engine_tests {
         #[track_caller]
         fn assert_fades_in_from_silence(&mut self) {
             assert!(self.runtime.startup_gain_ramp);
+            self.wait_until_confirmed_playing();
             let later = Instant::now() + Duration::from_secs(2);
             self.runtime.poll_volume_ramp(later);
             assert!(self.runtime.applied_volume.abs() < f32::EPSILON);
@@ -9820,6 +9840,31 @@ mod engine_tests {
             runtime.restart.is_none()
         });
         assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+        engine.assert_fades_in_from_silence();
+    }
+
+    #[test]
+    fn fade_in_waits_for_a_pipeline_slow_to_start() {
+        // A first read that takes long, as from a slow drive or under load,
+        // holds the pipeline back from playing for longer than the fade.
+        let fixtures = Fixtures::new("slow-start-fade");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start();
+        let hold = hold_reads(&a);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(vec![a]));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_until("no read was held", |_| hold.holds_a_read());
+        let now = Instant::now();
+        engine.runtime.poll_volume_ramp(now);
+        engine
+            .runtime
+            .poll_volume_ramp(now + Duration::from_secs(1));
+        assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
+
+        // The track fades in once it plays.
+        hold.release();
         engine.assert_fades_in_from_silence();
     }
 

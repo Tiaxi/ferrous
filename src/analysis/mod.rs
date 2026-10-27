@@ -6437,6 +6437,12 @@ mod tests {
     fn a_file_the_spectrogram_cannot_read_is_reported_and_the_next_track_analyses() {
         let broken = write_fixture("broken.flac", b"fLaC but not really audio");
         let good = write_engine_test_wave(1, 16_000);
+        // Symphonia cannot read the broken file, so the worker tries
+        // GStreamer, whose first initialisation builds its registry.  With
+        // a fresh cache, as the test script gives each run, that takes
+        // seconds, and it is not what the waits below are for.
+        #[cfg(feature = "gst")]
+        gstreamer::init().expect("gstreamer initialization");
         for mode in MODES {
             let (engine, events) = AnalysisEngine::new();
             engine.command(AnalysisCommand::SetSpectrogramDisplayMode(mode));

@@ -4321,6 +4321,12 @@ mod tests {
     fn a_continuation_without_a_session_is_rejected_and_starts_nothing() {
         let path = write_tone_fixture("fallback", 1, 8_000);
         let missing = path.with_extension("missing.wav");
+        // Symphonia cannot open the missing file, so the worker tries
+        // GStreamer, whose first initialisation builds its registry.  With
+        // a fresh cache, as the test script gives each run, that takes
+        // seconds, and it is not what the waits below are for.
+        #[cfg(feature = "gst")]
+        gstreamer::init().expect("gstreamer initialization");
         // The continuation's file cannot be opened, and it arrives while the
         // session has ended and the worker is idle, or while it is parked
         // at EOF.  The analysis thread starts any session; the worker
