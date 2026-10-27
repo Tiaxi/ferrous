@@ -19,7 +19,10 @@
 //!
 //! - **A tie.** Another file the library or the waveform cache knows has
 //!   the same size and time, so only identities can tell the two apart, as
-//!   in a swap. The file is read or decoded again.
+//!   in a swap. For a scan, so does a file new to the library that the
+//!   same scan finds, as the other file of a swap whose first rename an
+//!   earlier scan of changed paths saw alone. The file is read or decoded
+//!   again.
 //! - **A scan: the other files of the device kept theirs.** A scan counts,
 //!   by stored device, the unchanged files that kept their identity and
 //!   those that did not. Where most kept theirs, the identities are stable,
