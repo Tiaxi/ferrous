@@ -4,6 +4,7 @@ use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use crossbeam_channel::RecvTimeoutError;
 use rusqlite::Connection;
 
 use super::*;
@@ -591,16 +592,19 @@ fn stopping_the_service_stops_a_scan_and_keeps_its_committed_batches() {
         assert!(Instant::now() < deadline, "no batch was committed");
         std::thread::sleep(Duration::from_millis(10));
     }
-    drop(events);
 
-    let stopping = Instant::now();
     drop(service);
 
-    assert!(
-        stopping.elapsed() < Duration::from_secs(1),
-        "stopping took {:?}",
-        stopping.elapsed()
-    );
+    // The worker holds the only event sender, so the events close when it
+    // has ended, without waiting for the held read.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match events.rx.recv_deadline(deadline) {
+            Ok(_) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => panic!("the worker did not stop"),
+        }
+    }
     let indexed = fixture.indexed();
     assert_eq!(indexed.len(), 2, "one batch: {indexed:?}");
     assert!(!indexed.contains(&fixture.track("d.mp3")));
@@ -608,7 +612,10 @@ fn stopping_the_service_stops_a_scan_and_keeps_its_committed_batches() {
         !fixture.folder.join("library.sqlite3-wal").exists(),
         "the log was checkpointed when the database closed"
     );
-    drop(release);
+    assert!(
+        release.try_send(()).is_ok(),
+        "the held read ended before the worker"
+    );
 }
 
 #[test]

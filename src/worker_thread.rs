@@ -36,6 +36,13 @@ impl JoinableThread {
     pub(crate) fn is_running(&self) -> bool {
         !self.handle.is_finished()
     }
+
+    /// A receiver that disconnects when the thread has ended, as
+    /// [`JoinableThread::join_by`] sees it, to wait for it without a bound.
+    #[cfg(test)]
+    pub(crate) fn finished(&self) -> Receiver<()> {
+        self.finished.clone()
+    }
 }
 
 /// Start a named thread that [`JoinableThread::join_by`] can wait for.
