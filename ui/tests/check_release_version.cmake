@@ -64,4 +64,10 @@ file(WRITE "${WORK_DIR}/dependency_table_first/Cargo.toml"
 expect_check(dependency_table_first v1.2.3 fail "Cargo.toml version '1\\.2\\.2' does not match")
 expect_check(dependency_table_first v1.2.2 fail "RPM spec version '1\\.2\\.3' does not match")
 
+# A comment after the version, with a quoted version in it, is not the version.
+write_fixture(comment_with_version 1.2.2 1.2.3 1.2.3)
+file(WRITE "${WORK_DIR}/comment_with_version/Cargo.toml"
+    "[ package ]\nname = 'ferrous'\nversion = '1.2.2' # next \"1.2.3\"\n")
+expect_check(comment_with_version v1.2.3 fail "Cargo.toml version '1\\.2\\.2' does not match tag v1\\.2\\.3")
+
 file(REMOVE_RECURSE "${WORK_DIR}")

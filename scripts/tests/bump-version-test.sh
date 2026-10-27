@@ -21,7 +21,7 @@ fail() {
 rm -rf -- "${WORK_DIR}"
 repo="${WORK_DIR}/repo"
 mkdir -p "${repo}/scripts" "${repo}/packaging/rpm" "${repo}/ui" "${WORK_DIR}/bin"
-cp "${SCRIPT_DIR}/../bump-version.sh" "${repo}/scripts/"
+cp "${SCRIPT_DIR}/../bump-version.sh" "${SCRIPT_DIR}/../cargo-package-version.sh" "${repo}/scripts/"
 
 # The dependency tables share the package's old version, so a script that
 # rewrites every version line changes them too.
@@ -87,10 +87,21 @@ bash "${repo}/scripts/bump-version.sh" 1.4.0 >/dev/null
 [[ "$(grep -c '<release version="1.4.0"' "${repo}/ui/io.github.tiaxi.ferrous.metainfo.xml")" -eq 1 ]] \
     || fail "a repeated bump added a second release"
 
+# Single quotes, a comment with a quoted version, a header with spaces in its
+# brackets and CRLF line endings: only the value changes, and nothing else.
+printf '%s\r\n' '[dependencies.extra]' 'version = "1.4.0"' '' '[ package ] # the app' \
+    "name = 'ferrous'" "version = '1.4.0' # next \"2.0.0\"" 'edition = "2021"' >"${repo}/Cargo.toml"
+expected_toml="$(sed "s/^version = '1.4.0' # next/version = '1.5.0' # next/" "${repo}/Cargo.toml")"
+bash "${repo}/scripts/bump-version.sh" 1.5.0 >/dev/null
+[[ "$(cat "${repo}/Cargo.toml")" == "${expected_toml}" ]] \
+    || fail "the TOML variants changed beyond the package version: $(diff <(echo "${expected_toml}") "${repo}/Cargo.toml" | od -c | head -20)"
+[[ "$(bash "${repo}/scripts/cargo-package-version.sh" "${repo}/Cargo.toml")" == 1.5.0 ]] \
+    || fail "the bumped version does not read back"
+
 # Without a [package] version, the script fails and leaves Cargo.toml alone.
 printf '[workspace]\nmembers = []\n\n[dependencies.extra]\nversion = "0.2.2"\n' >"${repo}/Cargo.toml"
 before="$(cat "${repo}/Cargo.toml")"
-if bash "${repo}/scripts/bump-version.sh" 1.5.0 >/dev/null 2>&1; then
+if bash "${repo}/scripts/bump-version.sh" 1.6.0 >/dev/null 2>&1; then
     fail "the script succeeded without a [package] version"
 fi
 [[ "$(cat "${repo}/Cargo.toml")" == "${before}" ]] || fail "a failed bump changed Cargo.toml"

@@ -26,16 +26,9 @@ fi
 CARGO_TOML="${REPO_ROOT}/Cargo.toml"
 cargo_toml_tmp="$(mktemp "${CARGO_TOML}.XXXXXX")"
 trap 'rm -f -- "${cargo_toml_tmp}"' EXIT
-if ! awk -v version="${NEW_VERSION}" '
-    /^[[:space:]]*\[/ { table = $0; gsub(/^[[:space:]]*\[|\][[:space:]]*(#.*)?$/, "", table) }
-    table == "package" && !done && /^version[[:space:]]*=/ {
-        sub(/"[^"]*"/, "\"" version "\"")
-        done = 1
-    }
-    { print }
-    END { exit done ? 0 : 1 }
-' "${CARGO_TOML}" >"${cargo_toml_tmp}"; then
-    echo "Error: no version in the [package] table of ${CARGO_TOML}" >&2
+if ! "${SCRIPT_DIR}/cargo-package-version.sh" --set "${NEW_VERSION}" "${CARGO_TOML}" \
+    >"${cargo_toml_tmp}"; then
+    echo "Error: could not set the [package] version in ${CARGO_TOML}" >&2
     exit 1
 fi
 chmod --reference="${CARGO_TOML}" "${cargo_toml_tmp}"

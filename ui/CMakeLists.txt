@@ -74,20 +74,8 @@ set(FERROUS_RUST_STATIC_LIB "${FERROUS_CARGO_TARGET_DIR}/release/libferrous.a")
 # Read app version from Cargo.toml's [package] table (single source of truth),
 # and configure again when Cargo.toml changes.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FERROUS_ROOT_DIR}/Cargo.toml")
-file(STRINGS "${FERROUS_ROOT_DIR}/Cargo.toml" _cargo_toml_lines)
-set(_cargo_table "")
-set(FERROUS_APP_VERSION "")
-foreach(_cargo_line IN LISTS _cargo_toml_lines)
-    if(_cargo_line MATCHES "^[ \t]*\\[([^]]*)\\]")
-        set(_cargo_table "${CMAKE_MATCH_1}")
-    elseif(_cargo_table STREQUAL "package" AND _cargo_line MATCHES "^version *= *\"([^\"]+)\"")
-        set(FERROUS_APP_VERSION "${CMAKE_MATCH_1}")
-        break()
-    endif()
-endforeach()
-if(FERROUS_APP_VERSION STREQUAL "")
-    message(FATAL_ERROR "Cannot read the package version from ${FERROUS_ROOT_DIR}/Cargo.toml")
-endif()
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FerrousCargoVersion.cmake")
+ferrous_cargo_package_version("${FERROUS_ROOT_DIR}/Cargo.toml" FERROUS_APP_VERSION)
 message(STATUS "Ferrous version: ${FERROUS_APP_VERSION}")
 set(FERROUS_RUST_FEATURES "gst")
 if(FERROUS_ENABLE_PROFILE_LOGS)
@@ -272,6 +260,14 @@ if(BUILD_TESTING)
         add_test(NAME ferrous_release_version_consistent
             COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/check-release-version.sh"
                 "v${FERROUS_APP_VERSION}"
+        )
+        # Configuring and the scripts read the same [package] version.
+        add_test(NAME ferrous_cargo_package_version
+            COMMAND "${CMAKE_COMMAND}"
+                -DBASH=${FERROUS_BASH}
+                -DSCRIPT=${FERROUS_ROOT_DIR}/scripts/cargo-package-version.sh
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cargo-package-version
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_cargo_package_version.cmake"
         )
         # The other repository scripts, run on scratch copies and stand-in
         # commands.
