@@ -1673,3 +1673,6 @@ mod backend;
 #[cfg(feature = "gst")]
 #[path = "backend_gst.rs"]
 mod backend;
+/// For tests of other `playbin3` pipelines that hand over successors.
+#[cfg(all(test, feature = "gst"))]
+pub(crate) use backend::InputSwitches;

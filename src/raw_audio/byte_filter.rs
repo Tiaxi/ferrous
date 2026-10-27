@@ -520,6 +520,7 @@ mod gst_tests {
         race_type_finding_with_activation, ActivationRace,
     };
     use crate::playback::source_activation::SourceActivation;
+    use crate::playback::InputSwitches;
     use crate::raw_audio::{build_test_apev2_tag, test_path, TEST_AC3, TEST_DTS};
     use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes_after_junk};
     use gst::prelude::*;
@@ -631,6 +632,7 @@ mod gst_tests {
         delivered: Arc<Mutex<Vec<Delivered>>>,
         trace: PipelineTrace,
         activation: Arc<SourceActivation>,
+        switches: Arc<InputSwitches>,
     }
 
     impl Player {
@@ -642,6 +644,8 @@ mod gst_tests {
                 .expect("playbin3");
             install_raw_surround_source_probe(&playbin);
             let activation = SourceActivation::connect(&playbin);
+            let switches = Arc::<InputSwitches>::default();
+            switches.connect(&playbin);
             let player = Self {
                 trace: PipelineTrace::new(&playbin),
                 playbin,
@@ -649,6 +653,7 @@ mod gst_tests {
                 parsed: Arc::default(),
                 delivered: Arc::default(),
                 activation,
+                switches,
             };
             player.record_delivered_buffers();
             player.record_parsed_frames();
@@ -768,11 +773,17 @@ mod gst_tests {
             self.playbin.set_property("uri", file_uri(path));
         }
 
+        /// Change the state of the pipeline as the playback engine does,
+        /// ending a run once no successor is handed over (see
+        /// `InputSwitches::end_run`).
         fn set_state(&self, state: gst::State) -> Result<(), String> {
-            self.activation
-                .set_state(&self.playbin, state)
-                .map(|_| ())
-                .map_err(|err| err.to_string())
+            let change = || self.activation.set_state(&self.playbin, state);
+            let result = if state <= gst::State::Ready {
+                self.switches.end_run(change)
+            } else {
+                change()
+            };
+            result.map(|_| ()).map_err(|err| err.to_string())
         }
 
         fn wait_for(&self, wanted: gst::MessageType) -> Result<(), String> {
@@ -863,12 +874,17 @@ mod gst_tests {
         player.set_path(&paths[0]);
         let queue = Mutex::new(paths[1..].iter().cloned().collect::<VecDeque<_>>());
         let activation = Arc::clone(&player.activation);
+        let switches = Arc::clone(&player.switches);
         player
             .playbin
             .connect("about-to-finish", false, move |values| {
                 let playbin = values.first()?.get::<gst::Element>().ok()?;
-                let next = queue.lock().ok()?.pop_front()?;
-                activation.hand_over(|| playbin.set_property("uri", file_uri(&next)));
+                // Not while the run ends, as the engine does.
+                switches.hand_over(|| {
+                    let next = queue.lock().ok()?.pop_front()?;
+                    activation.hand_over(|| playbin.set_property("uri", file_uri(&next)));
+                    Some(())
+                });
                 None
             });
         let result = (|| {
