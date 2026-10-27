@@ -72,7 +72,34 @@ fn read_audio_layout_of(path: &Path, file: &mut File) -> Option<AudioLayout> {
 /// through end of audio (before `APEv2` tag).  Returns `None` for non-raw
 /// surround files or when there is nothing to strip.
 pub(crate) fn audio_byte_range(path: &Path) -> Option<(u64, u64)> {
+    // Playback asks for every file it starts, on the thread that stages
+    // it: only a raw surround file is opened, as a close can wait for a
+    // network share.
+    if !is_raw_surround_file(path) {
+        return None;
+    }
+    #[cfg(test)]
+    test_hooks::opening();
     audio_byte_range_of(path, &mut File::open(path).ok()?)
+}
+
+/// Counts the files that [`audio_byte_range`] opens on this thread.
+#[cfg(test)]
+mod test_hooks {
+    use std::cell::Cell;
+
+    thread_local! {
+        static OPENS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn opening() {
+        OPENS.with(|opens| opens.set(opens.get() + 1));
+    }
+
+    /// The files opened on this thread so far.
+    pub(super) fn opens() -> usize {
+        OPENS.with(Cell::get)
+    }
 }
 
 /// [`audio_byte_range`] of `file`, opened at `path`: that of the file the
@@ -365,6 +392,26 @@ mod tests {
     use super::{audio_byte_range, audio_position, file_position, trim, Trim};
     use crate::raw_audio::{ripped_surround_bytes, test_path, TEST_AC3, TEST_DTS};
     use std::path::Path;
+
+    #[test]
+    fn audio_byte_range_opens_only_raw_surround_files() {
+        use super::test_hooks::opens;
+
+        for ext in ["flac", "mp3"] {
+            let path = test_path("audio-byte-range-not-surround", ext);
+            std::fs::write(&path, b"not surround").expect("write test file");
+            let before = opens();
+            assert!(audio_byte_range(&path).is_none());
+            assert_eq!(opens(), before, "{ext} was opened");
+            let _ = std::fs::remove_file(path);
+        }
+        let path = test_path("audio-byte-range-surround", "ac3");
+        std::fs::write(&path, ripped_surround_bytes(TEST_AC3).0).expect("write test file");
+        let before = opens();
+        assert!(audio_byte_range(&path).is_some());
+        assert_eq!(opens(), before + 1);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn audio_byte_range_strips_leading_partial_frame_and_apev2_tag() {
