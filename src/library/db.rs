@@ -11,7 +11,7 @@ use rusqlite::{Connection, ErrorCode};
 
 use crate::no_replace::rename_no_replace;
 
-use super::schema::{init_schema, open_library_db_at};
+use super::schema::{open_library_db_at, prepare_database};
 
 /// The files `SQLite` keeps beside a database while it is in use. They hold
 /// committed data that may not be in the main file yet, so they move with it.
@@ -74,28 +74,8 @@ pub(super) fn open_worker_db(path: &Path, busy_timeout: Duration) -> Result<Open
 
 fn open_and_migrate(path: &Path, busy_timeout: Duration) -> anyhow::Result<OpenedLibrary> {
     let conn = open_library_db_at(path, busy_timeout)?;
-    init_schema(&conn)?;
-    let notice = enable_write_ahead_log(&conn);
+    let notice = prepare_database(&conn)?;
     Ok(OpenedLibrary { conn, notice })
-}
-
-/// Switches the database to write-ahead logging, which it keeps for every
-/// later connection: readers then never wait for a writer, and a writer
-/// waits only for another writer's transaction. Returns a notice if the mode
-/// could not be enabled; the library still works then, but edits can wait
-/// for a scan's batches.
-fn enable_write_ahead_log(conn: &Connection) -> Option<String> {
-    match conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0)) {
-        Ok(mode) if mode.eq_ignore_ascii_case("wal") => None,
-        Ok(mode) => Some(format!(
-            "the library database could not use write-ahead logging and uses the {mode} \
-             journal instead; tag edits may wait for library scans"
-        )),
-        Err(error) => Some(format!(
-            "the library database could not use write-ahead logging ({error}); tag edits \
-             may wait for library scans"
-        )),
-    }
 }
 
 /// Copies the write-ahead log into the database file as far as no reader

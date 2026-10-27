@@ -37,13 +37,22 @@ pub(crate) use scan::{
 pub(crate) use scan::{read_library_snapshot_from_db, ExternalReadFailures, ExternalTrackCache};
 
 /// Opens the library database, which also holds the analysis worker's
-/// waveform cache, and brings its schema up to date as every connection
-/// does. `busy_timeout` applies from then on; the migration may wait longer
-/// for another connection's.
+/// waveform cache, and prepares it as every connection does: brings its
+/// schema up to date and switches it to write-ahead logging, unless the
+/// library worker's connection or another one has. `busy_timeout` applies
+/// from then on; the preparation may wait longer for another connection's.
 pub(crate) fn open_library_database(
     busy_timeout: Duration,
 ) -> anyhow::Result<rusqlite::Connection> {
-    let conn = schema::open_library_db()?;
+    open_library_database_at(&crate::paths::library_db_path()?, busy_timeout)
+}
+
+/// [`open_library_database`] for the database at `path`.
+fn open_library_database_at(
+    path: &std::path::Path,
+    busy_timeout: Duration,
+) -> anyhow::Result<rusqlite::Connection> {
+    let conn = schema::open_library_db_at(path, schema::BUSY_TIMEOUT)?;
     schema::init_schema(&conn)?;
     conn.busy_timeout(busy_timeout)?;
     Ok(conn)
