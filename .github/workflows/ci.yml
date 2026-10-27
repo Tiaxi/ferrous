@@ -60,11 +60,15 @@ jobs:
             "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$FEDORA.noarch.rpm"
           rpm --checksig "$release_rpm"
           dnf -y $DNF_OPTS --setopt=localpkg_gpgcheck=1 install "$release_rpm"
+          # util-linux has setpriv and shadow-utils has useradd, which the
+          # test user steps need; newer images no longer bring util-linux.
           dnf -y $DNF_OPTS install --allowerasing \
             git \
             curl \
             tar \
             zstd \
+            util-linux \
+            shadow-utils \
             gcc \
             pkgconf-pkg-config \
             glib2-devel \
