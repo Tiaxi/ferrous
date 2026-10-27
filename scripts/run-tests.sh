@@ -43,7 +43,7 @@ Usage: $(basename "$0") [options]
 Options:
   --rust-only       Run only Rust checks/tests
   --ui-only         Run only UI smoke tests
-  --no-clippy       Skip strict Clippy (-D clippy::pedantic)
+  --no-clippy       Skip strict Clippy (all targets, -D warnings -D clippy::pedantic)
   --no-audit        Skip cargo audit
   --coverage        Run Rust tests via cargo llvm-cov with line threshold gate
   --no-coverage     Skip coverage gate (cargo llvm-cov)
@@ -129,7 +129,7 @@ if [[ ${RUN_RUST} -eq 1 ]]; then
     cargo fmt --check
     cargo check --features "${RUST_FEATURES}"
     if [[ ${RUN_CLIPPY} -eq 1 ]]; then
-        cargo clippy --features "${RUST_FEATURES}" -- -D clippy::pedantic
+        cargo clippy --features "${RUST_FEATURES}" --all-targets -- -D warnings -D clippy::pedantic
     fi
     if [[ ${RUN_COVERAGE} -eq 1 ]]; then
         if ! grep -qE '^[[:space:]]+llvm-cov([[:space:]]|$)' <<<"$(cargo --list)"; then
