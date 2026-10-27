@@ -269,6 +269,7 @@ private slots:
     void seekDragOutlastsAKeyRelease();
     void seekDragOutlastsTheFocus();
     void seekClickSeeksOnce();
+    void playbackMovesTheSeekBarByWholePixels();
     void transportBarHasNoWarnings();
     void transportBarHasNoWarningsUnderTheBasicStyle();
     void clicksLeaveSpaceToPlayOrPause();
@@ -604,6 +605,8 @@ ApplicationWindow {
     property alias bridge: bridge
     property alias startButton: startButton
     property real positionSeconds: 50
+    // Whole seconds, as the playback clock's text.
+    property string positionText: String(Math.floor(positionSeconds))
     // What the transport bar sent, in order.
     property var seeks: []
     property var volumes: []
@@ -651,6 +654,7 @@ ApplicationWindow {
             volumeMuted: false
             keyboardSeekStepSeconds: 5
             displayedPositionSeconds: harness.positionSeconds
+            positionText: harness.positionText
             toggleMutedVolume: function() {}
             setAppVolume: function(value) {
                 const last = harness.volumes.length > 0
@@ -1073,6 +1077,91 @@ void AccessibilityTest::seekClickSeeksOnce() {
     const QList<double> seeks = recordedValues(root.data(), "seeks");
     QVERIFY2(seeks.size() == 1 && seeks.constFirst() > 130.0 && seeks.constFirst() < 170.0,
              qPrintable(describeValues(seeks)));
+}
+
+void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QQuickItem *handle = visibleItemNamed(window, QStringLiteral("seekHandle"));
+    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekProgress"));
+    QVERIFY(seek != nullptr && handle != nullptr && progress != nullptr);
+    int frames = 0;
+    connect(window, &QQuickWindow::frameSwapped, window, [&frames]() { ++frames; });
+    QTRY_VERIFY(frames > 0);
+    // Waits until the window draws no more frames, for up to five seconds.
+    const auto settle = [&frames]() {
+        int seen = -1;
+        for (int wait = 0; wait < 50 && seen != frames; ++wait) {
+            seen = frames;
+            QTest::qWait(100);
+        }
+        return seen == frames;
+    };
+    QVERIFY(settle());
+
+    // Three seconds of playback in 60 position updates a second. At 1x, the
+    // bar moves about 3 device pixels a second, and the time label once.
+    const double startSeconds = 50.0;
+    const double durationSeconds = 200.0;
+    const int steps = 180;
+    struct Drawn {
+        qreal handleX;
+        qreal progressWidth;
+        QString positionText;
+        bool operator==(const Drawn &) const = default;
+    };
+    const auto drawn = [&]() {
+        return Drawn{handle->x(), progress->width(), root->property("positionText").toString()};
+    };
+    Drawn previous = drawn();
+    int changes = 0;
+    frames = 0;
+    for (int step = 1; step <= steps; ++step) {
+        root->setProperty("positionSeconds", startSeconds + step / 60.0);
+        const Drawn now = drawn();
+        changes += now == previous ? 0 : 1;
+        previous = now;
+        QTest::qWait(16);
+    }
+    QVERIFY(settle());
+    const QString counts = QStringLiteral("%1 frames, %2 drawn changes").arg(frames).arg(changes);
+    qInfo("seek bar playback: %s in %d position updates", qPrintable(counts), steps);
+    QVERIFY2(changes >= 3 && changes < steps / 4 && frames <= changes, qPrintable(counts));
+
+    // The value stays exact, and the bar is within a device pixel of it.
+    const double endSeconds = startSeconds + steps / 60.0;
+    QVERIFY(fuzzyEqual(seek->property("value").toDouble(), endSeconds));
+    const qreal devicePixel = 1.0 / window->effectiveDevicePixelRatio();
+    const qreal exactWidth = progress->parentItem()->width() * endSeconds / durationSeconds;
+    QVERIFY2(std::abs(progress->width() - exactWidth) <= devicePixel,
+             qPrintable(QStringLiteral("%1 vs %2").arg(progress->width()).arg(exactWidth)));
+
+    // A held key draws its value as it is.
+    QVERIFY(tabTo(window, seek));
+    QTest::keyPress(window, Qt::Key_Right);
+    QVERIFY(seek->property("adjusting").toBool());
+    QVERIFY(fuzzyEqual(seek->property("value").toDouble(), endSeconds + 5.0));
+    QVERIFY(fuzzyEqual(progress->width(),
+                       progress->parentItem()->width() * (endSeconds + 5.0) / durationSeconds));
+    QTest::keyRelease(window, Qt::Key_Right);
+    QVERIFY(sameValues(recordedValues(root.data(), "seeks"), {endSeconds + 5.0}));
+
+    // A wheel step seeks at once, as the desktop style's wheel does, and the
+    // bar draws the seek's position.
+    root->setProperty("positionSeconds", endSeconds + 5.0);
+    seek->setProperty("wheelEnabled", true);
+    QVERIFY(sendWheel(window, seek->mapToScene(QPointF(seek->width() / 2, seek->height() / 2)),
+                      QPoint(0, 120)));
+    const QList<double> seeks = recordedValues(root.data(), "seeks");
+    QVERIFY2(sameValues(seeks, {endSeconds + 5.0, endSeconds + 10.0}), qPrintable(describeValues(seeks)));
+    root->setProperty("positionSeconds", endSeconds + 10.0);
+    QVERIFY(std::abs(progress->width()
+                     - progress->parentItem()->width() * (endSeconds + 10.0) / durationSeconds)
+            <= devicePixel);
 }
 
 void AccessibilityTest::transportBarHasNoWarnings() {
