@@ -290,12 +290,11 @@ fn files_added_changed_removed_and_renamed_reach_the_library_without_a_rescan() 
     assert!(running.mirror.status.unwatched_roots.is_empty());
 }
 
-#[test]
-fn files_of_the_same_size_and_time_swapped_outside_the_app_get_their_own_tags() {
-    let fixture = Fixture::new("outside-swap");
-    // One size, as the titles have one length, and one modification time.
-    // FLAC files, which, unlike raw surround files without a duration,
-    // a scan reads only when they changed.
+/// FLAC files `alpha.flac` and `bravo.flac` titled after them, of one size,
+/// as the titles have one length, and one modification time. Unlike raw
+/// surround files without a duration, a scan reads them only when they
+/// changed.
+fn same_size_and_time(fixture: &Fixture) -> (PathBuf, PathBuf) {
     let (alpha, bravo) = (fixture.path("alpha.flac"), fixture.path("bravo.flac"));
     let time = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     for (path, title) in [(&alpha, "Alpha"), (&bravo, "Bravo")] {
@@ -306,14 +305,11 @@ fn files_of_the_same_size_and_time_swapped_outside_the_app_get_their_own_tags() 
             .and_then(|file| file.set_modified(time))
             .expect("modification time");
     }
-    let mut running = fixture.start_watching(tuning(Duration::from_secs(3600)));
-    assert_eq!(running.title_of(&alpha).as_deref(), Some("Alpha"));
+    (alpha, bravo)
+}
 
-    let aside = fixture.path("aside.tmp");
-    fs::rename(&alpha, &aside).expect("aside");
-    fs::rename(&bravo, &alpha).expect("bravo to alpha");
-    fs::rename(&aside, &bravo).expect("alpha to bravo");
-
+/// Waits until `alpha` has Bravo's tags and `bravo` Alpha's.
+fn wait_for_swapped_tags(running: &mut Running, alpha: &Path, bravo: &Path) {
     running.wait_for("each file with its own tags", |mirror| {
         let title = |path: &Path| {
             mirror
@@ -323,9 +319,43 @@ fn files_of_the_same_size_and_time_swapped_outside_the_app_get_their_own_tags() 
                 .find(|track| track.path == path)
                 .map(|track| track.title.clone())
         };
-        title(&alpha).as_deref() == Some("Bravo") && title(&bravo).as_deref() == Some("Alpha")
+        title(alpha).as_deref() == Some("Bravo") && title(bravo).as_deref() == Some("Alpha")
     });
     assert_eq!(running.mirror.status.last_error, None);
+}
+
+#[test]
+fn files_of_the_same_size_and_time_swapped_outside_the_app_get_their_own_tags() {
+    let fixture = Fixture::new("outside-swap");
+    let (alpha, bravo) = same_size_and_time(&fixture);
+    let mut running = fixture.start_watching(tuning(Duration::from_secs(3600)));
+    assert_eq!(running.title_of(&alpha).as_deref(), Some("Alpha"));
+
+    let aside = fixture.path("aside.tmp");
+    fs::rename(&alpha, &aside).expect("aside");
+    fs::rename(&bravo, &alpha).expect("bravo to alpha");
+    fs::rename(&aside, &bravo).expect("alpha to bravo");
+
+    wait_for_swapped_tags(&mut running, &alpha, &bravo);
+}
+
+/// A swap made in steps further apart than the watcher's quiet period, as
+/// by hand or on a loaded machine: the first rename is scanned alone.
+#[test]
+fn a_swap_whose_first_rename_is_scanned_alone_gets_each_file_its_own_tags() {
+    let fixture = Fixture::new("outside-swap-steps");
+    let (alpha, bravo) = same_size_and_time(&fixture);
+    let mut running = fixture.start_watching(tuning(Duration::from_secs(3600)));
+
+    let aside = fixture.path("aside.tmp");
+    fs::rename(&alpha, &aside).expect("aside");
+    running.wait_for("alpha removed", |mirror| {
+        mirror.paths() == vec![bravo.clone()] && !mirror.status.scan_in_progress
+    });
+    fs::rename(&bravo, &alpha).expect("bravo to alpha");
+    fs::rename(&aside, &bravo).expect("alpha to bravo");
+
+    wait_for_swapped_tags(&mut running, &alpha, &bravo);
 }
 
 fn cover_of(mirror: &LibraryMirror, track: &Path) -> Option<String> {
@@ -815,17 +845,13 @@ fn stopping_the_service_stops_the_watcher_at_once() {
         mirror.paths().contains(&fixture.path("new.mp3"))
     });
 
-    let stopping = Instant::now();
+    // The change was scanned and the root is watched, so the watcher waits
+    // for its next event with nothing due: only the stop wakes it. Wait for
+    // the thread to end, not for a time a loaded machine can outlast.
     running.service.watcher.stop();
-    assert!(running
-        .service
-        .watcher
-        .join_by(Instant::now() + Duration::from_secs(1)));
-    drop(running);
     assert!(
-        stopping.elapsed() < Duration::from_secs(1),
-        "stopping took {:?}",
-        stopping.elapsed()
+        running.service.watcher.join_by(Instant::now() + WAIT),
+        "the watcher did not stop"
     );
 }
 

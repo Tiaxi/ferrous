@@ -2419,7 +2419,30 @@ fn session_emit_finalize_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossbeam_channel::unbounded;
+    use crossbeam_channel::{unbounded, RecvTimeoutError};
+
+    /// How long a test waits for a worker's output before it fails. The
+    /// tests wait for the output itself; this bound matters only when it
+    /// never comes, so a starved worker has time to produce it.
+    const OUTPUT_WAIT: Duration = Duration::from_secs(20);
+
+    /// Wait for the next chunk that satisfies `wanted`. `Err` names why
+    /// none came: the worker ended, which closes its events, or it sent
+    /// nothing for [`OUTPUT_WAIT`].
+    fn wait_for_chunk(
+        events: &Receiver<AnalysisEvent>,
+        mut wanted: impl FnMut(&PrecomputedSpectrogramChunk) -> bool,
+    ) -> Result<PrecomputedSpectrogramChunk, RecvTimeoutError> {
+        loop {
+            if let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) =
+                events.recv_timeout(OUTPUT_WAIT)?
+            {
+                if wanted(&chunk) {
+                    return Ok(chunk);
+                }
+            }
+        }
+    }
 
     #[test]
     fn stopping_a_session_keeps_the_worker_alive_until_disconnect() {
@@ -2469,19 +2492,12 @@ mod tests {
                         handoff: SessionHandoff::default(),
                     })
                     .unwrap();
-                let deadline = std::time::Instant::now() + Duration::from_secs(2);
-                loop {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "worker stopped permanently"
-                    );
-                    if let Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) =
-                        event_rx.recv_timeout(Duration::from_millis(20))
-                    {
-                        if chunk.track_token == token && chunk.complete {
-                            break;
-                        }
-                    }
+                // The worker holds the only event sender, so a worker that
+                // stopped permanently closes the events.
+                if let Err(error) = wait_for_chunk(&event_rx, |chunk| {
+                    chunk.track_token == token && chunk.complete
+                }) {
+                    panic!("no EOF for track {token}: {error}");
                 }
             }
             drop(commands);
@@ -2644,19 +2660,9 @@ mod tests {
                     &unbounded().0,
                 )
             });
-            let wait_for_eof = || {
-                let deadline = std::time::Instant::now() + Duration::from_secs(2);
-                while std::time::Instant::now() < deadline {
-                    if let Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) =
-                        event_rx.recv_timeout(Duration::from_millis(20))
-                    {
-                        if chunk.complete {
-                            return Some(chunk);
-                        }
-                    }
-                }
-                None
-            };
+            // The worker parks at EOF until its next command, so an EOF
+            // published only when the session ends would not arrive.
+            let wait_for_eof = || wait_for_chunk(&event_rx, |chunk| chunk.complete);
             let first = wait_for_eof();
             commands
                 .send(SpectrogramWorkerCommand::Seek {
@@ -2670,8 +2676,9 @@ mod tests {
             worker.join().expect("join worker");
             std::fs::remove_file(path).expect("remove fixture");
             for result in [first, second] {
-                let chunk =
-                    result.expect("EOF must arrive without replacing or stopping the track");
+                let chunk = result.unwrap_or_else(|error| {
+                    panic!("EOF must arrive without replacing or stopping the track: {error}")
+                });
                 assert_eq!(chunk.track_token, 1);
                 assert_eq!(chunk.generation, 1);
                 assert_eq!(chunk.column_count, 0);
@@ -2700,23 +2707,23 @@ mod tests {
         rx: &Receiver<AnalysisEvent>,
     ) -> std::collections::BTreeMap<u32, Vec<u8>> {
         let mut columns = std::collections::BTreeMap::new();
-        loop {
-            let event = rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("worker output before timeout");
-            if let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = event {
-                if chunk.complete {
-                    return columns;
-                }
-                let width = usize::from(chunk.bins_per_column) * usize::from(chunk.channel_count);
-                for (offset, column) in chunk.columns_u8.chunks_exact(width).enumerate() {
-                    columns.insert(
-                        chunk.start_column_index + u32::try_from(offset).unwrap(),
-                        column.to_vec(),
-                    );
-                }
+        let complete = wait_for_chunk(rx, |chunk| {
+            if chunk.complete {
+                return true;
             }
+            let width = usize::from(chunk.bins_per_column) * usize::from(chunk.channel_count);
+            for (offset, column) in chunk.columns_u8.chunks_exact(width).enumerate() {
+                columns.insert(
+                    chunk.start_column_index + u32::try_from(offset).unwrap(),
+                    column.to_vec(),
+                );
+            }
+            false
+        });
+        if let Err(error) = complete {
+            panic!("no EOF from the worker: {error}");
         }
+        columns
     }
 
     fn write_seek_grid_fixture() -> PathBuf {

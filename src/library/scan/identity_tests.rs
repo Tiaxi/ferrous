@@ -197,6 +197,49 @@ fn files_of_the_same_size_and_time_swapped_outside_the_app_are_read_again() {
     fs::remove_dir_all(root.parent().expect("dir")).expect("cleanup");
 }
 
+/// Scans `paths`, as the watcher has the worker scan the paths that
+/// changed.
+fn scan_paths(conn: &Connection, library: &mut WorkerLibrary, root: &Path, paths: &[&PathBuf]) {
+    run(
+        conn,
+        library,
+        LibraryCommand::ScanPaths {
+            root: root.to_path_buf(),
+            paths: paths.iter().map(|path| (*path).clone()).collect(),
+        },
+    );
+}
+
+#[test]
+fn a_swap_whose_first_rename_was_scanned_alone_is_read_again() {
+    let root = test_root("swapped-in-steps");
+    let paths = same_size_and_time(&root, &["Alpha", "Bravo"]);
+    let (alpha, bravo) = (&paths[0], &paths[1]);
+    let (conn, mut library) = scanned(&root);
+
+    // A scan of the first rename's paths removes the row of alpha.
+    let aside = root.join("aside");
+    fs::rename(alpha, &aside).expect("aside");
+    scan_paths(&conn, &mut library, &root, &[alpha, &aside]);
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(rows, 1, "alpha's row is removed");
+
+    // No other row ties with bravo now, but the new file at alpha, which
+    // the same scan finds, does.
+    fs::rename(bravo, alpha).expect("bravo to alpha");
+    fs::rename(&aside, bravo).expect("alpha to bravo");
+    scan_paths(&conn, &mut library, &root, &[alpha, bravo, &aside]);
+
+    assert_eq!(title(&conn, alpha), "Bravo");
+    assert_eq!(title(&conn, bravo), "Alpha");
+    assert_eq!(reads(&paths), [2, 2]);
+    assert_eq!(stored_file_id(&conn, alpha), file_id(alpha));
+    assert_eq!(stored_file_id(&conn, bravo), file_id(bravo));
+    fs::remove_dir_all(root.parent().expect("dir")).expect("cleanup");
+}
+
 #[test]
 fn identities_not_kept_for_files_of_the_same_size_and_time_cost_a_read_not_their_tags() {
     let root = test_root("not-kept-tied");

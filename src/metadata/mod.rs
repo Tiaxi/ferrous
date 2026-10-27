@@ -864,11 +864,19 @@ mod tests {
 
         let (service, rx) = MetadataService::new_with_delay(Duration::ZERO);
         service.request(path.clone());
+        // The worker loads the queued request, then ends, which closes the
+        // events after the request's final metadata.
+        drop(service);
 
         let mut final_metadata = None;
-        while let Ok(event) = rx.recv_timeout(Duration::from_millis(250)) {
-            let MetadataEvent::Loaded(metadata) = event;
-            final_metadata = Some(metadata);
+        loop {
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(MetadataEvent::Loaded(metadata)) => final_metadata = Some(metadata),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    panic!("the metadata worker did not finish")
+                }
+            }
         }
 
         let metadata = final_metadata.expect("final metadata");

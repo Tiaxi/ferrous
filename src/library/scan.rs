@@ -3500,6 +3500,11 @@ struct RootScan<'a> {
     /// The rows, by path, of files the scan walked that were not rows of
     /// its root when it started; see [`SeenRows`].
     found: HashMap<String, RowState>,
+    /// The sizes and modification times of the files the scan walked that
+    /// were not rows of its root when it started. An unchanged file whose
+    /// identity changed ties with such a file, as with the other file of a
+    /// swap whose row an earlier scan removed; see `super::file_id`.
+    new_files: HashSet<(i64, i64)>,
     now: i64,
     tuning: ScanTuning,
     /// Rows read or covers checked, and not yet written.
@@ -3948,6 +3953,7 @@ fn scan_root_in(
         root_str: &root_str,
         existing: &existing,
         found: HashMap::new(),
+        new_files: HashSet::new(),
         now: unix_ts_i64(),
         tuning,
         batch: Vec::new(),
@@ -3967,9 +3973,9 @@ fn scan_root_in(
         None => LibraryWalk::new(&root, &roots),
     };
 
-    // Unchanged files whose identity changed, with no other file of their
-    // size and time: decided once the walk has counted the identities their
-    // devices kept; see `super::file_id`.
+    // Unchanged files whose identity changed, with no other row of their
+    // size and time: decided once the walk has found the new files and
+    // counted the identities their devices kept; see `super::file_id`.
     let mut unconfirmed: Vec<(MetadataTask, &ExistingTrackScanState)> = Vec::new();
     let complete = 'scan: {
         for ScanCandidate {
@@ -3990,6 +3996,7 @@ fn scan_root_in(
             let existing_state = existing.get(&path_string);
             if existing_state.is_none() {
                 scan.note_row(&path_string)?;
+                scan.new_files.insert((size_bytes, mtime_ns));
             }
             let task = MetadataTask {
                 path,
@@ -4023,8 +4030,12 @@ fn scan_root_in(
             if sink.should_stop(conn) {
                 break 'scan false;
             }
-            if scan.identities.kept_on_device_of(existing_state) {
-                // Another file, such as one swapped in from outside the
+            if scan.new_files.contains(&(task.size_bytes, task.mtime_ns))
+                || scan.identities.kept_on_device_of(existing_state)
+            {
+                // Another file: one tied with a new file, such as the other
+                // file of a swap whose first rename an earlier scan of
+                // changed paths saw, or one swapped in from outside the
                 // library.
                 scan.dispatch(task, Some(existing_state), true, &mut workers, covers, sink)?;
             } else if scope.is_none() {
