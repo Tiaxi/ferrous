@@ -838,6 +838,8 @@ private slots:
     void theSmallestWindowFitsALaptopScreenAndShowsEveryControl();
     void windowLayoutSurvivesARestart();
     void aWindowSavedOffTheScreensOpensOnOne();
+    void theWindowOpensWithoutASavedLayoutThatDoesNotCome();
+    void quittingWhileMinimizedKeepsTheWindowMaximized();
     void consecutiveErrorsAreBothVisible();
     void repeatedErrorsAreCounted();
     void errorHistoryKeepsTheLatestErrors();
@@ -3027,6 +3029,9 @@ void QmlSmokeTest::windowLayoutSurvivesARestart() {
         window->showMaximized();
         QTRY_COMPARE(window->visibility(), QWindow::Maximized);
         QVERIFY(window->geometry() != normalOnTheSmallScreen);
+        // Quit while minimized, as from the desktop's media controls.
+        window->showMinimized();
+        QTRY_COMPARE(window->visibility(), QWindow::Minimized);
         QVERIFY(closeThroughTheQuitFlow(window));
     }
     QVERIFY(settings.open(QIODevice::ReadOnly));
@@ -3077,6 +3082,149 @@ void QmlSmokeTest::aWindowSavedOffTheScreensOpensOnOne() {
                                        .arg(window->height())));
     QVERIFY(closeThroughTheQuitFlow(window));
     QFile::remove(savedSettingsPath());
+}
+
+namespace {
+
+// A window with its layout controller, over a bridge that sends the saved
+// layout only when the test calls sendLayout.
+const QByteArray kWindowLayoutHarness = QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "controllers" as Controllers
+
+Window {
+    id: harness
+    visible: false
+    property alias controller: layoutController
+    property var sentLayouts: []
+
+    QtObject {
+        id: fakeBridge
+        property bool sent: false
+        property var layout: ({})
+        signal savedWindowLayoutRead()
+        function hasSavedWindowLayout() { return fakeBridge.sent }
+        function savedWindowLayout() { return fakeBridge.layout }
+        function setWindowLayout(layout) {
+            harness.sentLayouts = harness.sentLayouts.concat([layout])
+        }
+    }
+    QtObject {
+        id: fakeViewer
+        property int visualizationMode: 0
+    }
+    QtObject {
+        id: fakeQueue
+        property bool autoCenterSelection: true
+    }
+
+    function sendLayout(layout) {
+        fakeBridge.layout = layout
+        fakeBridge.sent = true
+        fakeBridge.savedWindowLayoutRead()
+    }
+
+    Controllers.WindowLayoutController {
+        id: layoutController
+        uiBridge: fakeBridge
+        window: harness
+        viewerController: fakeViewer
+        queueController: fakeQueue
+        layoutDeadlineMs: 300
+    }
+
+    width: layoutController.initialWidth
+    height: layoutController.initialHeight
+    Component.onCompleted: layoutController.showWindow()
+}
+)QML");
+
+// Has the harness's bridge send `layout` as the saved layout.
+bool sendSavedLayout(QQuickWindow *harness, const QVariantMap &layout) {
+    return QMetaObject::invokeMethod(harness, "sendLayout", Q_ARG(QVariant, QVariant(layout)));
+}
+
+QQuickWindow *createWindowLayoutHarness(QQmlEngine &engine, QString *errorText) {
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    return qobject_cast<QQuickWindow *>(
+        createQmlObjectFromSource(engine, kWindowLayoutHarness, baseUrl, errorText));
+}
+
+} // namespace
+
+void QmlSmokeTest::theWindowOpensWithoutASavedLayoutThatDoesNotCome() {
+    QQmlEngine engine;
+    QString errorText;
+    QScopedPointer<QQuickWindow> window(createWindowLayoutHarness(engine, &errorText));
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    // Held back for the saved layout...
+    QVERIFY(!window->isVisible());
+    // ...but not beyond the deadline, as for settings on a hung drive.
+    QTRY_VERIFY_WITH_TIMEOUT(window->isVisible(), 3000);
+    QCOMPARE(window->visibility(), QWindow::Windowed);
+    QCOMPARE(window->size(), QSize(1600, 980));
+    // A layout that comes later does not move the open window.
+    QVERIFY(sendSavedLayout(window.get(), QVariantMap{{QStringLiteral("x"), 10}, {QStringLiteral("y"), 10},
+                                    {QStringLiteral("width"), 900},
+                                    {QStringLiteral("height"), 600},
+                                    {QStringLiteral("maximized"), true}}));
+    QCoreApplication::processEvents();
+    QCOMPARE(window->size(), QSize(1600, 980));
+    QCOMPARE(window->visibility(), QWindow::Windowed);
+
+    // One that comes in time is applied before the window is shown.
+    QScopedPointer<QQuickWindow> second(createWindowLayoutHarness(engine, &errorText));
+    QVERIFY2(second != nullptr, qPrintable(errorText));
+    QSignalSpy shown(second.get(), &QWindow::visibleChanged);
+    QVERIFY(sendSavedLayout(second.get(), QVariantMap{{QStringLiteral("x"), 40}, {QStringLiteral("y"), 50},
+                                    {QStringLiteral("width"), 900},
+                                    {QStringLiteral("height"), 600},
+                                    {QStringLiteral("maximized"), false}}));
+    QVERIFY(second->isVisible());
+    QCOMPARE(shown.count(), 1);
+    QCOMPARE(second->size(), QSize(900, 600));
+}
+
+void QmlSmokeTest::quittingWhileMinimizedKeepsTheWindowMaximized() {
+    QQmlEngine engine;
+    QString errorText;
+    QScopedPointer<QQuickWindow> window(createWindowLayoutHarness(engine, &errorText));
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QVERIFY(sendSavedLayout(window.get(), QVariantMap{{QStringLiteral("x"), 40}, {QStringLiteral("y"), 40},
+                                    {QStringLiteral("width"), 700},
+                                    {QStringLiteral("height"), 500},
+                                    {QStringLiteral("maximized"), false}}));
+    QVERIFY(QTest::qWaitForWindowExposed(window.get()));
+    QObject *controller = window->property("controller").value<QObject *>();
+    QVERIFY(controller != nullptr);
+    const auto savedLayout = [&]() {
+        QVariant layout;
+        QMetaObject::invokeMethod(controller, "layout", Q_RETURN_ARG(QVariant, layout));
+        return layout.toMap();
+    };
+
+    window->showMaximized();
+    QTRY_COMPARE(window->visibility(), QWindow::Maximized);
+    window->showMinimized();
+    QTRY_COMPARE(window->visibility(), QWindow::Minimized);
+    // As MPRIS or the task manager quits it now.
+    QVERIFY(QMetaObject::invokeMethod(controller, "persist"));
+    const QVariantList sent = window->property("sentLayouts").toList();
+    QVERIFY(!sent.isEmpty());
+    const QVariantMap last = sent.last().toMap();
+    QCOMPARE(last.value(QStringLiteral("maximized")).toBool(), true);
+    QCOMPARE(last.value(QStringLiteral("width")).toInt(), 700);
+    QCOMPARE(last.value(QStringLiteral("height")).toInt(), 500);
+    QCOMPARE(savedLayout().value(QStringLiteral("maximized")).toBool(), true);
+
+    // Shown normally and minimized again, it is saved as not maximized.
+    window->showNormal();
+    QTRY_COMPARE(window->visibility(), QWindow::Windowed);
+    window->showMinimized();
+    QTRY_COMPARE(window->visibility(), QWindow::Minimized);
+    QCOMPARE(savedLayout().value(QStringLiteral("maximized")).toBool(), false);
 }
 
 void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {

@@ -1042,6 +1042,28 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             ok = sectionPayload.isEmpty();
             break;
         }
+        case SectionWindowLayout: {
+            Reader sectionReader(sectionPayload);
+            WindowLayout layout;
+            quint8 hasGeometry = 0;
+            quint8 maximized = 0;
+            quint8 follow = 0;
+            ok = sectionReader.readU8(&hasGeometry) && sectionReader.readI32(&layout.x)
+                && sectionReader.readI32(&layout.y) && sectionReader.readU32(&layout.width)
+                && sectionReader.readU32(&layout.height) && sectionReader.readU8(&maximized)
+                && sectionReader.readF32(&layout.sidebarWidthRatio)
+                && sectionReader.readF32(&layout.queueHeightRatio)
+                && sectionReader.readU8(&layout.visualizationMode)
+                && sectionReader.readU8(&follow) && sectionReader.atEnd();
+            if (ok) {
+                layout.hasGeometry = hasGeometry != 0;
+                layout.maximized = maximized != 0;
+                layout.followCurrentTrack = follow != 0;
+                out->hasWindowLayout = true;
+                out->windowLayout = layout;
+            }
+            break;
+        }
         case SectionStateSaved: {
             Reader sectionReader(sectionPayload);
             quint32 requestId = 0;

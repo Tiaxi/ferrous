@@ -13,13 +13,13 @@ use std::os::fd::RawFd;
 
 use super::imports::{ImportGate, RenamedDetails};
 use super::queue_relay::{QueueBatch, QueueRelay};
-use super::window_layout::{self, FerrousWindowLayout, WindowGeometry, WindowLayout};
+use super::window_layout::{self, WindowGeometry, WindowLayout};
 use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand,
     BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame,
-    BridgeSettings, BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory,
-    FrontendBridgeHandle, LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueUndoState,
-    RowsMove, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
+    BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory, FrontendBridgeHandle,
+    LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueUndoState, RowsMove,
+    ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
@@ -75,6 +75,9 @@ const SECTION_STATE_SAVED: u16 = 1 << 9;
 /// (u32 start, u32 count) ranges of the rows it brought back, ascending.
 /// Every snapshot carries it.
 const SECTION_QUEUE_UNDO: u16 = 1 << 10;
+/// The window layout saved in the settings, sent once at startup: the
+/// fields of the command that sets it; see [`read_window_layout`].
+const SECTION_WINDOW_LAYOUT: u16 = 1 << 11;
 
 #[cfg(unix)]
 fn create_nonblocking_pipe() -> Option<(RawFd, RawFd)> {
@@ -662,6 +665,9 @@ impl FfiEncoder {
                         request_id, &result,
                     )));
                 }
+                BridgeEvent::WindowLayout(layout) => {
+                    prepared.push(PreparedEvent::Binary(encode_window_layout_event(&layout)));
+                }
             }
         }
 
@@ -1152,32 +1158,6 @@ pub extern "C" fn ferrous_ffi_spectrogram_zoom_after_request(current: f32, reque
         "ferrous_ffi_spectrogram_zoom_after_request",
         |_| current,
         || crate::analysis::accepted_spectrogram_zoom(current, requested).unwrap_or(current),
-    )
-}
-
-/// Fill `out` with the window layout saved in the settings file, or the
-/// default layout if there is none. The UI calls this once before it shows
-/// the window, which reads the file. Returns false if `out` is null.
-///
-/// # Safety
-///
-/// `out` must be null or point to a writable `FerrousWindowLayout`.
-#[no_mangle]
-pub unsafe extern "C" fn ferrous_ffi_saved_window_layout(out: *mut FerrousWindowLayout) -> bool {
-    ffi_call(
-        "ferrous_ffi_saved_window_layout",
-        |_| false,
-        || {
-            if out.is_null() {
-                return false;
-            }
-            let mut settings = BridgeSettings::default();
-            super::config::load_settings_into(&mut settings);
-            // SAFETY: The caller guarantees that a non-null `out` points to
-            // a writable `FerrousWindowLayout`.
-            unsafe { out.write(FerrousWindowLayout::from(&settings.window)) };
-            true
-        },
     )
 }
 
@@ -2445,6 +2425,29 @@ fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec
         result.as_ref().err().map_or("", String::as_str),
     );
     encode_packet(&[(SECTION_STATE_SAVED, payload)])
+}
+
+/// The window layout saved in the settings, laid out as the command that
+/// sets it; see [`read_window_layout`].
+fn encode_window_layout_event(layout: &WindowLayout) -> Vec<u8> {
+    let geometry = layout.geometry.unwrap_or(WindowGeometry {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    });
+    let mut payload = Vec::with_capacity(28);
+    push_u8(&mut payload, u8::from(layout.geometry.is_some()));
+    payload.extend_from_slice(&geometry.x.to_le_bytes());
+    payload.extend_from_slice(&geometry.y.to_le_bytes());
+    push_u32(&mut payload, geometry.width);
+    push_u32(&mut payload, geometry.height);
+    push_u8(&mut payload, u8::from(layout.maximized));
+    payload.extend_from_slice(&layout.sidebar_width_ratio.unwrap_or(-1.0).to_le_bytes());
+    payload.extend_from_slice(&layout.queue_height_ratio.unwrap_or(-1.0).to_le_bytes());
+    push_u8(&mut payload, layout.visualization_mode);
+    push_u8(&mut payload, u8::from(layout.follow_current_track));
+    encode_packet(&[(SECTION_WINDOW_LAYOUT, payload)])
 }
 
 fn encode_stopped_event() -> Vec<u8> {
@@ -3839,23 +3842,11 @@ mod tests {
     }
 
     #[test]
-    fn the_saved_window_layout_is_read_from_the_settings_file() {
+    fn the_saved_window_layout_is_sent_once_the_bridge_starts() {
         let _config = crate::paths::TestConfigDir::new();
-        let read = || {
-            let mut out = FerrousWindowLayout::from(&WindowLayout {
-                maximized: true,
-                ..WindowLayout::default()
-            });
-            // SAFETY: `out` is a writable layout.
-            assert!(unsafe { ferrous_ffi_saved_window_layout(&raw mut out) });
-            out
-        };
-        // Without a settings file: the default layout.
-        assert_eq!(read(), FerrousWindowLayout::from(&WindowLayout::default()));
-
         let saved = WindowLayout {
             geometry: Some(WindowGeometry {
-                x: 2560,
+                x: -2560,
                 y: 0,
                 width: 1100,
                 height: 700,
@@ -3866,14 +3857,39 @@ mod tests {
             visualization_mode: 1,
             follow_current_track: false,
         };
-        super::super::config::save_settings(&BridgeSettings {
-            window: saved,
-            ..BridgeSettings::default()
-        })
-        .expect("save the settings");
-        assert_eq!(read(), FerrousWindowLayout::from(&saved));
-        // SAFETY: A null pointer is refused.
-        assert!(!unsafe { ferrous_ffi_saved_window_layout(std::ptr::null_mut()) });
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            persisted_state_enabled: true,
+            ..BridgeRuntimeOptions::default()
+        });
+        // Without a settings file: the default layout.
+        let packet = ffi_wait_for_mask(handle, SECTION_WINDOW_LAYOUT, Duration::from_secs(5))
+            .expect("the layout");
+        let payload = section(&packet, SECTION_WINDOW_LAYOUT).expect("the layout section");
+        let mut reader = BinaryReader::new(&payload);
+        assert_eq!(
+            read_window_layout(&mut reader).expect("read"),
+            WindowLayout::default()
+        );
+        reader.expect_done().expect("the whole section");
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        let mut settings = super::super::BridgeSettings::default();
+        config::load_settings_into(&mut settings);
+        settings.window = saved;
+        config::save_settings(&settings).expect("save the settings");
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            persisted_state_enabled: true,
+            ..BridgeRuntimeOptions::default()
+        });
+        let packet = ffi_wait_for_mask(handle, SECTION_WINDOW_LAYOUT, Duration::from_secs(5))
+            .expect("the layout");
+        let payload = section(&packet, SECTION_WINDOW_LAYOUT).expect("the layout section");
+        let mut reader = BinaryReader::new(&payload);
+        assert_eq!(read_window_layout(&mut reader).expect("read"), saved);
+        reader.expect_done().expect("the whole section");
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
     }
 
     #[test]

@@ -209,6 +209,7 @@ private slots:
     void libraryViewStateKeepsOffsetsIntoTallRows();
     void savedWindowGeometryIsFittedToTheScreens();
     void windowLayoutIsSentAsTheBackendReadsIt();
+    void savedWindowLayoutIsDecodedAndFittedToTheScreens();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
@@ -1159,6 +1160,58 @@ void BridgeClientTest::windowLayoutIsSentAsTheBackendReadsIt() {
     QCOMPARE(quint8(second[26]), quint8(1));
     // Following the current track is the default.
     QCOMPARE(quint8(second[27]), quint8(1));
+}
+
+void BridgeClientTest::savedWindowLayoutIsDecodedAndFittedToTheScreens() {
+    // The backend lays the section out as the command that sets it.
+    BinaryBridgeCodec::WindowLayout saved;
+    saved.hasGeometry = true;
+    saved.x = 5000;
+    saved.y = 3000;
+    saved.width = 1000;
+    saved.height = 600;
+    saved.maximized = true;
+    saved.sidebarWidthRatio = 0.25F;
+    saved.visualizationMode = 1;
+    saved.followCurrentTrack = false;
+    const QByteArray section = BinaryBridgeCodec::encodeCommandWindowLayout(saved).mid(
+        BinaryBridgeCodec::kCommandHeaderBytes);
+    QByteArray packet;
+    QDataStream header(&packet, QIODevice::WriteOnly);
+    header.setByteOrder(QDataStream::LittleEndian);
+    header << quint32(0xFE550001u) << quint32(16 + section.size())
+           << quint16(BinaryBridgeCodec::SectionWindowLayout) << quint16(0)
+           << quint32(section.size());
+    packet.append(section);
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error), qPrintable(error));
+    QVERIFY(decoded.hasWindowLayout);
+
+    // Saved on a monitor that is gone: centred on the laptop's screen.
+    const QVariantMap layout =
+        BridgeClient::windowLayoutMap(decoded.windowLayout, {QRect(0, 0, 1280, 680)});
+    QCOMPARE(layout.value(QStringLiteral("x")).toInt(), 140);
+    QCOMPARE(layout.value(QStringLiteral("y")).toInt(), 40);
+    QCOMPARE(layout.value(QStringLiteral("width")).toInt(), 1000);
+    QCOMPARE(layout.value(QStringLiteral("height")).toInt(), 600);
+    QCOMPARE(layout.value(QStringLiteral("maximized")).toBool(), true);
+    QCOMPARE(layout.value(QStringLiteral("sidebarWidthRatio")).toDouble(), 0.25);
+    QVERIFY(!layout.contains(QStringLiteral("queueHeightRatio")));
+    QCOMPARE(layout.value(QStringLiteral("visualizationMode")).toInt(), 1);
+    QCOMPARE(layout.value(QStringLiteral("followCurrentTrack")).toBool(), false);
+
+    // Without a geometry, the window manager places the window.
+    decoded.windowLayout.hasGeometry = false;
+    QVERIFY(!BridgeClient::windowLayoutMap(decoded.windowLayout, {QRect(0, 0, 1280, 680)})
+                 .contains(QStringLiteral("width")));
+
+    // A section of another length is refused.
+    QByteArray truncated = packet;
+    truncated.chop(1);
+    qToLittleEndian<quint32>(quint32(16 + section.size() - 1), truncated.data() + 4);
+    qToLittleEndian<quint32>(quint32(section.size() - 1), truncated.data() + 12);
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(truncated, &decoded, &error));
 }
 
 void BridgeClientTest::libraryViewStateKeepsOffsetsIntoTallRows() {

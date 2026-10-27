@@ -428,6 +428,9 @@ pub enum BridgeEvent {
         request_id: u32,
         result: Result<(), String>,
     },
+    /// The window layout saved in the settings, sent once at startup, for
+    /// the UI to show the window with.
+    WindowLayout(WindowLayout),
 }
 
 #[derive(Debug, Clone)]
@@ -817,6 +820,8 @@ struct BridgeRuntimeOptions {
     /// A Last.fm service to use instead of starting one.
     #[cfg(test)]
     lastfm: Option<(LastFmHandle, Receiver<LastFmEvent>)>,
+    /// The settings, read before the bridge starts its workers.
+    settings: Option<BridgeSettings>,
     /// A library database of the test's own, instead of the process's.
     #[cfg(test)]
     library_db: Option<PathBuf>,
@@ -832,6 +837,7 @@ impl Default for BridgeRuntimeOptions {
         Self {
             metadata_delay: Duration::ZERO,
             persisted_state_enabled: cfg!(not(test)),
+            settings: None,
             #[cfg(test)]
             lastfm: None,
             #[cfg(test)]
@@ -2589,7 +2595,9 @@ fn prepare_initial_bridge_state(
     playback: &PlaybackEngine,
 ) -> (BridgeState, LastFmHandle, Receiver<LastFmEvent>) {
     let mut state = BridgeState::default();
-    if options.persisted_state_enabled {
+    if let Some(settings) = options.settings.take() {
+        state.settings = settings;
+    } else if options.persisted_state_enabled {
         load_settings_into(&mut state.settings);
     }
     state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
@@ -2650,11 +2658,12 @@ fn should_sync_queue_details_on_initial_restore(state: &BridgeState) -> bool {
 fn run_bridge_loop(
     cmd_rx: &Receiver<BridgeCommand>,
     event_tx: &Sender<BridgeEvent>,
-    options: BridgeRuntimeOptions,
+    mut options: BridgeRuntimeOptions,
     spectral_tx: SpectrogramOutputRoute,
     imports: imports::ImportWorker,
 ) -> bool {
     let ran = crate::panic_guard::catch("the bridge thread", || {
+        send_window_layout(&mut options, event_tx);
         let mut runtime = BridgeLoopRuntime::with_imports(options, Some(spectral_tx), imports);
         runtime.run(cmd_rx, event_tx)
     });
@@ -2672,6 +2681,17 @@ fn run_bridge_loop(
             false
         }
     }
+}
+
+/// Read the settings, before the workers start, and send the UI the window
+/// layout in them, which it waits for to show the window.
+fn send_window_layout(options: &mut BridgeRuntimeOptions, event_tx: &Sender<BridgeEvent>) {
+    let mut settings = BridgeSettings::default();
+    if options.persisted_state_enabled {
+        load_settings_into(&mut settings);
+    }
+    let _ = try_send_event(event_tx, BridgeEvent::WindowLayout(settings.window));
+    options.settings = Some(settings);
 }
 
 /// Events waiting for the relay past which the bridge holds back the ones a

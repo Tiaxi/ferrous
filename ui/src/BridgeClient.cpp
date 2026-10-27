@@ -2672,19 +2672,18 @@ QRect BridgeClient::fitWindowToScreens(
     return fitted;
 }
 
+bool BridgeClient::hasSavedWindowLayout() const {
+    return m_hasSavedWindowLayout;
+}
+
 QVariantMap BridgeClient::savedWindowLayout() const {
-    // The window opens with it, so it is read here, once, before the window
-    // is shown; the backend sends no snapshot that early.
-    FerrousWindowLayout saved{};
-    if (!ferrous_ffi_saved_window_layout(&saved)) {
-        return {};
-    }
+    return m_savedWindowLayout;
+}
+
+QVariantMap BridgeClient::windowLayoutMap(
+    const BinaryBridgeCodec::WindowLayout &saved, const QList<QRect> &screens) {
     QVariantMap layout;
     if (saved.hasGeometry) {
-        QList<QRect> screens;
-        for (const QScreen *screen : QGuiApplication::screens()) {
-            screens.push_back(screen->availableGeometry());
-        }
         // The backend keeps extents below 65536, so they fit an int.
         const QRect fitted = fitWindowToScreens(
             QRect(saved.x, saved.y, static_cast<int>(saved.width), static_cast<int>(saved.height)),
@@ -2697,13 +2696,13 @@ QVariantMap BridgeClient::savedWindowLayout() const {
         layout.insert(QStringLiteral("height"), fitted.height());
     }
     layout.insert(QStringLiteral("maximized"), saved.maximized);
-    if (saved.sidebarWidthRatio >= 0.0F) {
+    if (std::isfinite(saved.sidebarWidthRatio) && saved.sidebarWidthRatio >= 0.0F) {
         layout.insert(QStringLiteral("sidebarWidthRatio"), static_cast<double>(saved.sidebarWidthRatio));
     }
-    if (saved.queueHeightRatio >= 0.0F) {
+    if (std::isfinite(saved.queueHeightRatio) && saved.queueHeightRatio >= 0.0F) {
         layout.insert(QStringLiteral("queueHeightRatio"), static_cast<double>(saved.queueHeightRatio));
     }
-    layout.insert(QStringLiteral("visualizationMode"), static_cast<int>(saved.visualizationMode));
+    layout.insert(QStringLiteral("visualizationMode"), std::min<int>(saved.visualizationMode, 1));
     layout.insert(QStringLiteral("followCurrentTrack"), saved.followCurrentTrack);
     return layout;
 }
@@ -5058,6 +5057,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (snapshot.hasStateSaved) {
         emit stateSaveFinished(
             snapshot.stateSaveRequestId, snapshot.stateSaved, snapshot.stateSaveError);
+        return false;
+    }
+
+    if (snapshot.hasWindowLayout) {
+        QList<QRect> screens;
+        for (const QScreen *screen : QGuiApplication::screens()) {
+            screens.push_back(screen->availableGeometry());
+        }
+        m_savedWindowLayout = windowLayoutMap(snapshot.windowLayout, screens);
+        m_hasSavedWindowLayout = true;
+        emit savedWindowLayoutRead();
         return false;
     }
 

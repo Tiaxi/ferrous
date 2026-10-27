@@ -9,27 +9,6 @@ extern "C" {
 struct FerrousFfiBridge;
 struct FerrousFfiRenameGate;
 
-// The main window's layout saved in the settings. It must match
-// FerrousWindowLayout in src/frontend_bridge/window_layout.rs.
-struct FerrousWindowLayout {
-    bool hasGeometry;
-    std::int32_t x;
-    std::int32_t y;
-    std::uint32_t width;
-    std::uint32_t height;
-    bool maximized;
-    // Negative for the default.
-    float sidebarWidthRatio;
-    // Negative for the default.
-    float queueHeightRatio;
-    std::uint8_t visualizationMode;
-    bool followCurrentTrack;
-};
-static_assert(sizeof(FerrousWindowLayout) == 36, "FerrousWindowLayout layout mismatch");
-
-// Reads the settings file. Returns false if out is null.
-bool ferrous_ffi_saved_window_layout(FerrousWindowLayout *out);
-
 std::uint64_t ferrous_ffi_spectrogram_ring_capacity(
     std::uint32_t width, std::uint32_t sampleRate, std::uint32_t hop,
     std::uint32_t bins, std::uint32_t channels, double zoom, bool centered);

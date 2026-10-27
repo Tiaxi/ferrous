@@ -2,9 +2,10 @@
 
 //! The main window's layout. The UI sends it with
 //! [`super::BridgeSettingsCommand::SetWindowLayout`], it is saved in the
-//! settings file, and the UI reads it back with
-//! [`super::ffi::ferrous_ffi_saved_window_layout`] before it shows the
-//! window. The UI fits the geometry to the screens it finds then.
+//! settings file, and the bridge sends it back at startup with
+//! [`super::BridgeEvent::WindowLayout`], which the UI waits for, for a
+//! moment, before it shows the window. The UI fits the geometry to the
+//! screens it finds then.
 
 use std::fmt::Write as _;
 
@@ -165,48 +166,6 @@ pub(super) fn format_settings(layout: &WindowLayout, text: &mut String) {
     );
 }
 
-/// [`WindowLayout`] as the UI reads it; see `FerrousWindowLayout` in
-/// `ui/src/FerrousBridgeFfi.h`, which must match it.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FerrousWindowLayout {
-    pub has_geometry: bool,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub maximized: bool,
-    /// Negative for the default.
-    pub sidebar_width_ratio: f32,
-    /// Negative for the default.
-    pub queue_height_ratio: f32,
-    pub visualization_mode: u8,
-    pub follow_current_track: bool,
-}
-
-impl From<&WindowLayout> for FerrousWindowLayout {
-    fn from(layout: &WindowLayout) -> Self {
-        let geometry = layout.geometry.unwrap_or(WindowGeometry {
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-        });
-        Self {
-            has_geometry: layout.geometry.is_some(),
-            x: geometry.x,
-            y: geometry.y,
-            width: geometry.width,
-            height: geometry.height,
-            maximized: layout.maximized,
-            sidebar_width_ratio: layout.sidebar_width_ratio.unwrap_or(-1.0),
-            queue_height_ratio: layout.queue_height_ratio.unwrap_or(-1.0),
-            visualization_mode: layout.visualization_mode,
-            follow_current_track: layout.follow_current_track,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,19 +248,5 @@ mod tests {
         assert!(!parse_setting(&mut layout, "volume", "0.5"));
         assert!(!parse_setting(&mut layout, "window_unknown", "1"));
         assert_eq!(layout, WindowLayout::default());
-    }
-
-    #[test]
-    fn the_ffi_layout_has_the_size_the_ui_expects() {
-        // static_assert in ui/src/FerrousBridgeFfi.h.
-        assert_eq!(std::mem::size_of::<FerrousWindowLayout>(), 36);
-    }
-
-    #[test]
-    fn the_ffi_layout_marks_defaults() {
-        let ffi = FerrousWindowLayout::from(&WindowLayout::default());
-        assert!(!ffi.has_geometry);
-        assert!(ffi.sidebar_width_ratio < 0.0 && ffi.queue_height_ratio < 0.0);
-        assert!(ffi.follow_current_track);
     }
 }

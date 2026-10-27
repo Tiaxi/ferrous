@@ -6,7 +6,10 @@ import QtQuick.Window 2.15
 // The main window's layout: its geometry, whether it is maximized, the
 // shares of the library pane and the queue, the visualization mode, and
 // whether the queue follows the current track. The backend saves it with
-// the settings, and the window opens with what was saved.
+// the settings and sends it back at startup. The window waits for it,
+// hidden, so that it opens as it was without a visible jump, but only for
+// `layoutDeadlineMs`: settings on a slow or hung drive must not keep the
+// window from opening, which it does then with the default layout.
 QtObject {
     id: root
 
@@ -15,9 +18,14 @@ QtObject {
     required property var viewerController
     required property var queueController
 
-    // What was saved, read once as the window is created, before it is
-    // shown; see BridgeClient::savedWindowLayout.
-    readonly property var saved: root.uiBridge.savedWindowLayout()
+    // How long the window waits for the saved layout before it opens.
+    property int layoutDeadlineMs: 1000
+    // Set once the window has been shown, with the saved layout or without.
+    property bool settled: false
+    // What was saved, as the backend sent it; see
+    // BridgeClient::savedWindowLayout. Set before the window is shown, and
+    // left empty if it did not come in time.
+    property var saved: ({})
     readonly property bool hasSavedGeometry: root.saved.width !== undefined
     readonly property int initialWidth: root.hasSavedGeometry ? root.saved.width : 1600
     readonly property int initialHeight: root.hasSavedGeometry ? root.saved.height : 980
@@ -42,6 +50,51 @@ QtObject {
     property rect normalGeometry: root.hasSavedGeometry
         ? Qt.rect(root.saved.x, root.saved.y, root.saved.width, root.saved.height)
         : Qt.rect(0, 0, 0, 0)
+    // Whether the window was maximized when it was last shown, rather than
+    // minimized: what is saved while it is minimized.
+    property bool maximizedWhenShown: root.saved.maximized === true
+
+    // Show the window with the saved layout if the backend has sent it, or
+    // once it does, or with the default layout at the deadline.
+    function showWindow() {
+        if (root.uiBridge.hasSavedWindowLayout()) {
+            root.showWith(root.uiBridge.savedWindowLayout())
+        } else {
+            root._deadline.start()
+        }
+    }
+
+    function showWith(layout) {
+        if (root.settled) {
+            // Too late: the window opened without it.
+            return
+        }
+        root.settled = true
+        root._deadline.stop()
+        root.saved = layout
+        if (root.hasSavedGeometry) {
+            root.window.x = layout.x
+            root.window.y = layout.y
+        }
+        if (root.initiallyMaximized) {
+            root.window.showMaximized()
+        } else {
+            root.window.show()
+        }
+    }
+
+    property Timer _deadline: Timer {
+        interval: root.layoutDeadlineMs
+        onTriggered: root.showWith(({}))
+    }
+
+    property Connections _bridgeConnections: Connections {
+        target: root.uiBridge
+        ignoreUnknownSignals: true
+        function onSavedWindowLayoutRead() {
+            root.showWith(root.uiBridge.savedWindowLayout())
+        }
+    }
 
     function clamp(value, minimum, maximum) {
         return Math.max(minimum, Math.min(maximum, value))
@@ -90,7 +143,7 @@ QtObject {
     function layout() {
         const geometry = root.normalGeometry
         const result = {
-            "maximized": root.window.visibility === Window.Maximized,
+            "maximized": root.maximizedWhenShown,
             "visualizationMode": root.viewerController.visualizationMode,
             "followCurrentTrack": root.queueController.autoCenterSelection
         }
@@ -122,9 +175,12 @@ QtObject {
         function onWidthChanged() { root.noteWindowGeometry() }
         function onHeightChanged() { root.noteWindowGeometry() }
         function onVisibilityChanged() {
-            if (root.window.visibility === Window.Windowed
-                    || root.window.visibility === Window.Maximized) {
+            const visibility = root.window.visibility
+            if (visibility === Window.Windowed || visibility === Window.Maximized) {
+                root.maximizedWhenShown = visibility === Window.Maximized
                 root.persist()
+            } else if (visibility === Window.FullScreen) {
+                root.maximizedWhenShown = false
             }
         }
     }

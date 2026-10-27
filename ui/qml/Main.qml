@@ -24,7 +24,8 @@ ApplicationWindow {
     height: windowLayoutController.initialHeight
     minimumWidth: root.contentMinimumWidth
     minimumHeight: root.contentMinimumHeight
-    visible: true
+    // Shown by windowLayoutController once the saved layout is applied.
+    visible: false
     readonly property string appDisplayName: "Ferrous"
     title: {
         const context = playbackController.windowTitleContext()
@@ -157,31 +158,6 @@ ApplicationWindow {
         window: root
         viewerController: viewerController
         queueController: queueController
-    }
-
-    // The window opens where it was, unless that is off the screens there
-    // are now; see BridgeClient::savedWindowLayout. Without a saved
-    // geometry, the window manager places it.
-    Binding {
-        target: root
-        property: "x"
-        value: windowLayoutController.saved.x
-        when: windowLayoutController.hasSavedGeometry
-        restoreMode: Binding.RestoreNone
-    }
-    Binding {
-        target: root
-        property: "y"
-        value: windowLayoutController.saved.y
-        when: windowLayoutController.hasSavedGeometry
-        restoreMode: Binding.RestoreNone
-    }
-    Binding {
-        target: root
-        property: "visibility"
-        value: Window.Maximized
-        when: windowLayoutController.initiallyMaximized
-        restoreMode: Binding.RestoreNone
     }
 
     readonly property int visualizationMinimumHeight: 220
@@ -444,6 +420,7 @@ ApplicationWindow {
         function scanRoot(path) {}
         function scanDefaultMusicRoot() {}
         function requestSnapshot() {}
+        function hasSavedWindowLayout() { return true }
         function savedWindowLayout() { return ({}) }
         function setWindowLayout(layout) {}
         function shutdown() {}
@@ -1559,7 +1536,11 @@ ApplicationWindow {
         viewerController.closeAlbumArtViewer()
         viewerController.closeSpectrogramViewer()
         if (root.visibility === Window.Minimized || !root.visible) {
-            root.showNormal()
+            if (windowLayoutController.maximizedWhenShown) {
+                root.showMaximized()
+            } else {
+                root.showNormal()
+            }
         }
         if (!root.active) {
             root.requestActivate()
@@ -1719,6 +1700,7 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        windowLayoutController.showWindow()
         libraryController.requestTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
         playbackController.initializeFromBridge()
         queueController.initializeFromBridge()

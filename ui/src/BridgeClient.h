@@ -351,13 +351,19 @@ public:
     Q_INVOKABLE void unregisterSpectrogramItem(QObject *item);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
     Q_INVOKABLE void setLibraryWatchEnabled(bool value);
-    // The main window's layout saved in the settings, read from the file,
-    // for the window to open with before it is shown. The keys are "x",
-    // "y", "width", and "height" (if a geometry was saved, fitted to the
-    // screens there are now; see fitWindowToScreens), "maximized",
-    // "sidebarWidthRatio" and "queueHeightRatio" (if saved),
-    // "visualizationMode", and "followCurrentTrack".
+    // Whether the backend has sent the window layout saved in the settings,
+    // which it does once at startup; savedWindowLayoutRead tells when.
+    Q_INVOKABLE bool hasSavedWindowLayout() const;
+    // That layout, for the window to open with before it is shown. The keys
+    // are "x", "y", "width", and "height" (if a geometry was saved, fitted
+    // to the screens there were when it arrived; see fitWindowToScreens),
+    // "maximized", "sidebarWidthRatio" and "queueHeightRatio" (if saved),
+    // "visualizationMode", and "followCurrentTrack". Empty until it has
+    // arrived.
     Q_INVOKABLE QVariantMap savedWindowLayout() const;
+    // The layout the backend sent as a map, as savedWindowLayout gives it.
+    static QVariantMap windowLayoutMap(
+        const BinaryBridgeCodec::WindowLayout &saved, const QList<QRect> &screens);
     // Keep `layout`, with the keys of savedWindowLayout, to save it with the
     // settings. The geometry is the window's when it is neither maximized
     // nor fullscreen.
@@ -492,6 +498,8 @@ signals:
     // whether the settings and the queue were saved, and what to show the
     // user if not.
     void stateSaveFinished(quint32 requestId, bool saved, const QString &message);
+    // The backend sent the window layout saved in the settings.
+    void savedWindowLayoutRead();
 
 private:
     struct SearchWorkerInputFrame {
@@ -857,6 +865,9 @@ private:
     bool m_connected{false};
     QString m_backendFailure;
     quint32 m_lastStateSaveRequestId{0};
+    // The window layout the backend sent at startup.
+    bool m_hasSavedWindowLayout{false};
+    QVariantMap m_savedWindowLayout;
     // Set once the UI has asked the backend to stop, after which its stop is expected.
     bool m_bridgeShutdownRequested{false};
     bool m_loggedStartupQueueMissing{false};

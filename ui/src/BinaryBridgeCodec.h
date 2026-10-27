@@ -43,6 +43,9 @@ enum SnapshotSection : quint16 {
     // brought back; every snapshot carries it. The layout is described at
     // SECTION_QUEUE_UNDO in src/frontend_bridge/ffi.rs.
     SectionQueueUndo = 1u << 10,
+    // The window layout saved in the settings, sent once at startup, laid
+    // out as CmdSetWindowLayout's payload.
+    SectionWindowLayout = 1u << 11,
 };
 
 // What part of Ferrous an error concerns. Mirrors ErrorCategory in
@@ -385,6 +388,22 @@ struct DecodedQueueUndo {
     QVector<QPair<int, int>> restoredRanges;
 };
 
+// The main window's layout, as src/frontend_bridge/window_layout.rs saves it.
+struct WindowLayout {
+    bool hasGeometry{false};
+    qint32 x{0};
+    qint32 y{0};
+    quint32 width{0};
+    quint32 height{0};
+    bool maximized{false};
+    // Negative for the default.
+    float sidebarWidthRatio{-1.0F};
+    // Negative for the default.
+    float queueHeightRatio{-1.0F};
+    quint8 visualizationMode{0};
+    bool followCurrentTrack{true};
+};
+
 struct DecodedSnapshot {
     quint16 sectionMask{0};
     bool hasStopped{false};
@@ -396,6 +415,8 @@ struct DecodedSnapshot {
     quint32 stateSaveRequestId{0};
     bool stateSaved{false};
     QString stateSaveError;
+    bool hasWindowLayout{false};
+    WindowLayout windowLayout;
     DecodedPlayback playback;
     DecodedQueue queue;
     DecodedLibraryMeta library;
@@ -460,21 +481,6 @@ QByteArray encodeCommandLibraryViewState(
     float anchorOffset);
 QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query, quint32 limit = 0);
 
-// The main window's layout, as src/frontend_bridge/window_layout.rs saves it.
-struct WindowLayout {
-    bool hasGeometry{false};
-    qint32 x{0};
-    qint32 y{0};
-    quint32 width{0};
-    quint32 height{0};
-    bool maximized{false};
-    // Negative for the default.
-    float sidebarWidthRatio{-1.0F};
-    // Negative for the default.
-    float queueHeightRatio{-1.0F};
-    quint8 visualizationMode{0};
-    bool followCurrentTrack{true};
-};
 // CmdSetWindowLayout: hasGeometry (u8), x, y (i32), width, height (u32),
 // maximized (u8), the sidebar and queue ratios (f32), visualizationMode (u8),
 // and followCurrentTrack (u8).
