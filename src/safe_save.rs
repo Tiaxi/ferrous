@@ -895,12 +895,7 @@ mod tests {
         let dir = test_dir("group");
         let path = dir.join("song.flac");
         fs::write(&path, b"original").expect("write original");
-        fchown(
-            &File::open(&path).expect("open original"),
-            None,
-            Some(group),
-        )
-        .expect("chgrp");
+        fchown(File::open(&path).expect("open original"), None, Some(group)).expect("chgrp");
         fs::set_permissions(&path, Permissions::from_mode(0o664)).expect("chmod");
 
         rewrite_via_temp_copy(&path, |file| replace_contents(file, b"edited")).expect("rewrite");

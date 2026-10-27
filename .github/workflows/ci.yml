@@ -12,20 +12,36 @@ permissions:
 
 jobs:
   rust-backend:
-    name: "Rust Backend Checks${{ matrix.toolchain == 'fedora' && ' (Fedora Rust)' || '' }}"
+    name: "Rust Backend Checks${{ matrix.toolchain == 'fedora' && ' (Fedora Rust)' || '' }}${{ matrix.fedora != '44' && format(' (Fedora {0}, non-blocking)', matrix.fedora) || '' }}"
     strategy:
       fail-fast: false
       matrix:
-        # pinned: the reviewed toolchain, which also runs formatting and Clippy.
+        # pinned: the reviewed toolchain, which also runs formatting, Clippy
+        # and cargo audit on the release platform.
         # fedora: Fedora's rust and cargo packages, which build the release RPMs.
-        toolchain: [pinned, fedora]
+        # The next Fedora release tests the pinned toolchain against its
+        # system libraries, without blocking merges.
+        include:
+          - fedora: '44'
+            toolchain: pinned
+            lint: true
+            timeout: 30
+          - fedora: '44'
+            toolchain: fedora
+            timeout: 30
+          - fedora: '45'
+            toolchain: pinned
+            experimental: true
+            timeout: 40
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    continue-on-error: ${{ matrix.experimental == true }}
+    timeout-minutes: ${{ matrix.timeout }}
     container:
-      image: fedora:44
+      image: fedora:${{ matrix.fedora }}
     env:
       # Give up on a stalled mirror instead of waiting on it.
       DNF_OPTS: --setopt=retries=3 --setopt=timeout=30 --setopt=minrate=10240
+      FEDORA: ${{ matrix.fedora }}
     steps:
       - name: Install system dependencies
         timeout-minutes: 10
@@ -34,19 +50,25 @@ jobs:
           # plugin has the AC-3, DTS, AAC and MP3 codecs the fixture tests use.
           # The release RPM comes from a mirror, so check its signature
           # against RPM Fusion's key from Fedora's signed distribution-gpg-keys.
+          # Retry refused connections and other errors too: the mirror
+          # redirector sometimes refuses them.
           dnf -y $DNF_OPTS install distribution-gpg-keys
-          rpm --import /usr/share/distribution-gpg-keys/rpmfusion/RPM-GPG-KEY-rpmfusion-free-fedora-44
-          release_rpm="$RUNNER_TEMP/rpmfusion-free-release-44.noarch.rpm"
-          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+          rpm --import "/usr/share/distribution-gpg-keys/rpmfusion/RPM-GPG-KEY-rpmfusion-free-fedora-$FEDORA"
+          release_rpm="$RUNNER_TEMP/rpmfusion-free-release-$FEDORA.noarch.rpm"
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors --max-time 120 \
             --output "$release_rpm" \
-            https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm
+            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$FEDORA.noarch.rpm"
           rpm --checksig "$release_rpm"
           dnf -y $DNF_OPTS --setopt=localpkg_gpgcheck=1 install "$release_rpm"
+          # util-linux has setpriv and shadow-utils has useradd, which the
+          # test user steps need; newer images no longer bring util-linux.
           dnf -y $DNF_OPTS install --allowerasing \
             git \
             curl \
             tar \
             zstd \
+            util-linux \
+            shadow-utils \
             gcc \
             pkgconf-pkg-config \
             glib2-devel \
@@ -86,17 +108,34 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v0-rust-fedora-44${{ matrix.toolchain == 'fedora' && '-fedora-rust' || '' }}"
+          prefix-key: "v0-rust-fedora-${{ matrix.fedora }}${{ matrix.toolchain == 'fedora' && '-fedora-rust' || '' }}"
 
       # Lints stay on the pinned toolchain, so that new lints in a Fedora Rust
-      # update do not fail CI.
+      # update do not fail CI. Test code is linted too; src/lib.rs exempts it
+      # from the pedantic group only.
       - name: Check formatting
-        if: matrix.toolchain == 'pinned'
+        if: matrix.lint
         run: cargo fmt --check
 
       - name: Clippy
-        if: matrix.toolchain == 'pinned'
-        run: cargo clippy --all-features -- -D clippy::pedantic
+        if: matrix.lint
+        run: cargo clippy --locked --all-features --all-targets -- -D warnings -D clippy::pedantic
+
+      # The mock backend builds code that the GStreamer features leave out.
+      - name: Clippy (mock backend)
+        if: matrix.lint
+        run: cargo clippy --locked --all-targets -- -D warnings -D clippy::pedantic
+
+      - name: Install cargo-audit
+        if: matrix.lint
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Reads the ignore list in .cargo/audit.toml, as scripts/run-tests.sh does.
+      - name: Audit dependencies
+        if: matrix.lint
+        run: cargo audit
 
       - name: Isolate test user directories
         run: |
@@ -118,17 +157,17 @@ jobs:
 
       - name: Test (GStreamer backend)
         shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
-        run: cargo test --features gst
+        run: cargo test --locked --features gst
 
       - name: Test (profiling instrumentation)
         if: matrix.toolchain == 'pinned'
         shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
-        run: cargo test --features "gst profiling-logs"
+        run: cargo test --locked --features "gst profiling-logs"
 
       - name: Test (mock backend)
         if: matrix.toolchain == 'pinned'
         shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
-        run: cargo test
+        run: cargo test --locked
 
   ui:
     name: "UI Build + Smoke Tests${{ matrix.profile_logs == 'ON' && ' (profiling)' || '' }}"
@@ -170,8 +209,19 @@ jobs:
         with:
           persist-credentials: false
 
+      # The UI jobs build the Rust library with Fedora's Rust, as the release
+      # RPMs do; the Rust job covers the pinned toolchain.
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v0-ui-fedora-44-fedora-rust
+          key: profile-logs-${{ matrix.profile_logs }}
+
       - name: Configure UI
-        run: cmake -S ui -B ui/build -G Ninja -DFERROUS_ENABLE_PROFILE_LOGS=${{ matrix.profile_logs }}
+        run: >-
+          cmake -S ui -B ui/build -G Ninja
+          -DFERROUS_ENABLE_PROFILE_LOGS=${{ matrix.profile_logs }}
+          -DFERROUS_CARGO_ARGS=--locked
 
       - name: Build UI
         run: cmake --build ui/build -j2

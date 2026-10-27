@@ -1659,16 +1659,16 @@ mod tests {
         PathBuf::from(path)
     }
 
-    fn library_root(path: &PathBuf) -> LibraryRoot {
+    fn library_root(path: &Path) -> LibraryRoot {
         LibraryRoot {
-            path: path.clone(),
+            path: path.to_path_buf(),
             name: String::new(),
         }
     }
 
     fn library_track(
         path: &str,
-        root: &PathBuf,
+        root: &Path,
         artist: &str,
         album: &str,
         year: Option<i32>,
@@ -1677,7 +1677,7 @@ mod tests {
         crate::library::LibraryTrack {
             search_tags: crate::library::SearchTags::default(),
             path: p(path),
-            root_path: root.clone(),
+            root_path: root.to_path_buf(),
             title: String::new(),
             artist: artist.to_string(),
             album: album.to_string(),
@@ -1821,7 +1821,6 @@ mod tests {
                 Some(1),
             )]),
             search_revision: 7,
-            ..LibrarySnapshot::default()
         };
         let first = Arc::new(library.clone());
         let second = Arc::new(library);
@@ -1847,7 +1846,6 @@ mod tests {
                 Some(1),
             )]),
             search_revision: 7,
-            ..LibrarySnapshot::default()
         };
         let first = Arc::new(library.clone());
         let second = Arc::new(LibrarySnapshot {
@@ -1862,7 +1860,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&prepared_first, &prepared_second));
     }
 
-    fn many_tracks(root: &PathBuf, count: usize) -> Vec<crate::library::LibraryTrack> {
+    fn many_tracks(root: &Path, count: usize) -> Vec<crate::library::LibraryTrack> {
         (0..count)
             .map(|index| {
                 library_track(
@@ -1986,7 +1984,6 @@ mod tests {
                 duration_secs: Some(60.0),
             }]),
             search_revision: 1,
-            ..LibrarySnapshot::default()
         };
         let (_tx, rx) = crossbeam_channel::unbounded::<SearchWorkerQuery>();
         let mut prepared_cache = SearchWorkerPreparedCache::default();

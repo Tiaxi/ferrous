@@ -1450,8 +1450,11 @@ struct DiskRenameJournal {
     /// Runs just before each rename on disk, so tests can take a name in
     /// between the checks and the rename.
     #[cfg(test)]
-    before_move: Option<Box<dyn FnMut(&Path, &Path)>>,
+    before_move: Option<BeforeMove>,
 }
+
+#[cfg(test)]
+type BeforeMove = Box<dyn FnMut(&Path, &Path)>;
 
 struct DiskMove {
     file: usize,
@@ -5296,7 +5299,7 @@ mod tests {
         if readable {
             // A readable `._` file without the header is a track (#201), so
             // the root is reachable and the missing tracks are gone.
-            assert_eq!(indexed, [leftover.clone()]);
+            assert_eq!(indexed, std::slice::from_ref(&leftover));
             let mut removed = outcome.removed.clone();
             removed.sort();
             assert_eq!(
@@ -6592,7 +6595,7 @@ mod tests {
         write_stub(&b.join("Album/song.mp3"), b"song");
         std::os::unix::fs::symlink(b.join("Album"), a.join("Linked")).expect("link");
         scan(&conn, &a);
-        assert_eq!(indexed_paths(&conn), [song.clone()]);
+        assert_eq!(indexed_paths(&conn), std::slice::from_ref(&song));
 
         // The link still resolves, but `b`'s scan cannot list the folder, as
         // on a network share whose lookups are cached, and indexes nothing.
@@ -6638,7 +6641,7 @@ mod tests {
         write_stub(&target, b"not utf-8");
         std::os::unix::fs::symlink(&target, &song).expect("link");
         scan(&conn, &a);
-        assert_eq!(indexed_paths(&conn), [song.clone()]);
+        assert_eq!(indexed_paths(&conn), std::slice::from_ref(&song));
 
         // While the target is away, `b` indexes another file, whose name is
         // the target's name with its byte replaced as a lossy conversion does.

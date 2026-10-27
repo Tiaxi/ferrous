@@ -4837,8 +4837,8 @@ mod gst_integration_tests {
         build_audio_output_bin(analysis_tx, &Arc::new(AtomicU64::new(0)), &sink).unwrap()
     }
 
-    /// Full app pipeline pattern: custom typefinders + source probe
-    /// + full analysis sink.  Verifies that MP3 files with APE tags
+    /// Full app pipeline pattern: custom typefinders, source probe and
+    /// full analysis sink.  Verifies that MP3 files with APE tags
     /// play correctly (regression test for apedemux rank demotion).
     #[test]
     fn playbin3_mp3_with_typefinders_and_full_sink() {
@@ -4876,7 +4876,7 @@ mod gst_integration_tests {
         install_raw_surround_source_probe(&playbin);
         let activation = SourceActivation::connect(&playbin);
         let set_state = |state| activation.set_state(&playbin, state);
-        playbin.set_property("audio-sink", &make_full_analysis_sink());
+        playbin.set_property("audio-sink", make_full_analysis_sink());
         let trace = PipelineTrace::new(&playbin);
 
         let _ = set_state(gst::State::Ready);

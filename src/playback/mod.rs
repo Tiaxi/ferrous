@@ -679,10 +679,8 @@ mod tests {
         let deadline = Instant::now() + timeout;
         let mut last = None;
         while Instant::now() < deadline {
-            if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
-                if let PlaybackEvent::Snapshot(s) = evt {
-                    last = Some(s);
-                }
+            if let Ok(PlaybackEvent::Snapshot(s)) = rx.recv_timeout(Duration::from_millis(10)) {
+                last = Some(s);
             }
         }
         last
@@ -694,10 +692,10 @@ mod tests {
     ) -> Option<Duration> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
-                if let PlaybackEvent::Seeked { position } = evt {
-                    return Some(position);
-                }
+            if let Ok(PlaybackEvent::Seeked { position }) =
+                rx.recv_timeout(Duration::from_millis(10))
+            {
+                return Some(position);
             }
         }
         None
@@ -913,18 +911,16 @@ mod tests {
         let deadline = Instant::now() + Duration::from_millis(300);
         let mut observed = None;
         while Instant::now() < deadline {
-            if let Ok(evt) = rx.recv_timeout(Duration::from_millis(10)) {
-                if let PlaybackEvent::TrackChanged {
-                    path,
-                    queue_index: _,
-                    kind,
-                    track_token: _,
-                } = evt
-                {
-                    if path == b && matches!(kind, TrackChangeKind::Gapless) {
-                        observed = Some((path, kind));
-                        break;
-                    }
+            if let Ok(PlaybackEvent::TrackChanged {
+                path,
+                queue_index: _,
+                kind,
+                track_token: _,
+            }) = rx.recv_timeout(Duration::from_millis(10))
+            {
+                if path == b && matches!(kind, TrackChangeKind::Gapless) {
+                    observed = Some((path, kind));
+                    break;
                 }
             }
         }

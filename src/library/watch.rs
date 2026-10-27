@@ -1301,7 +1301,8 @@ pub(crate) mod watch_test_hooks {
     static WATCHED: Mutex<Vec<(PathBuf, Sender<usize>)>> = Mutex::new(Vec::new());
     /// A held root: the sender told when watching it waits, and the
     /// receiver that releases it.
-    static HELD_WATCHING: Mutex<Vec<(PathBuf, Sender<()>, Receiver<()>)>> = Mutex::new(Vec::new());
+    type HeldWatch = (PathBuf, Sender<()>, Receiver<()>);
+    static HELD_WATCHING: Mutex<Vec<HeldWatch>> = Mutex::new(Vec::new());
     static DEFERRED_WALKS: Mutex<Vec<(PathBuf, Sender<()>)>> = Mutex::new(Vec::new());
 
     fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

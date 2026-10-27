@@ -755,8 +755,10 @@ mod tests {
 
         let (playback, _) = PlaybackEngine::new(analysis_tx);
         let (event_tx, _) = crossbeam_channel::unbounded();
-        let mut state = BridgeState::default();
-        state.queue = vec![p("/missing/a.flac"), p("/missing/b.flac")];
+        let mut state = BridgeState {
+            queue: vec![p("/missing/a.flac"), p("/missing/b.flac")],
+            ..BridgeState::default()
+        };
         for command in [
             BridgeQueueCommand::Select(Some(1)),
             BridgeQueueCommand::PlayAt(0),

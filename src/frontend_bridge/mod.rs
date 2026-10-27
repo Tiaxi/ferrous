@@ -2679,7 +2679,7 @@ mod tests {
 
     fn library_track(
         path: &str,
-        root: &PathBuf,
+        root: &Path,
         artist: &str,
         album: &str,
         year: Option<i32>,
@@ -2688,7 +2688,7 @@ mod tests {
         crate::library::LibraryTrack {
             search_tags: crate::library::SearchTags::default(),
             path: p(path),
-            root_path: root.clone(),
+            root_path: root.to_path_buf(),
             title: String::new(),
             artist: artist.to_string(),
             album: album.to_string(),
@@ -2702,9 +2702,9 @@ mod tests {
         }
     }
 
-    fn library_root(path: &PathBuf) -> LibraryRoot {
+    fn library_root(path: &Path) -> LibraryRoot {
         LibraryRoot {
-            path: path.clone(),
+            path: path.to_path_buf(),
             name: String::new(),
         }
     }
@@ -2962,8 +2962,10 @@ mod tests {
 
     #[test]
     fn initial_restore_skips_queue_detail_sync_until_library_is_loaded() {
-        let mut state = BridgeState::default();
-        state.queue = vec![p("/music/a.flac")];
+        let mut state = BridgeState {
+            queue: vec![p("/music/a.flac")],
+            ..BridgeState::default()
+        };
         assert!(!should_sync_queue_details_on_initial_restore(&state));
 
         state.library = Arc::new(LibrarySnapshot {
@@ -3089,11 +3091,11 @@ mod tests {
     {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if let Some(event) = bridge.recv_timeout(Duration::from_millis(30)) {
-                if let BridgeEvent::Snapshot(snapshot) = event {
-                    if predicate(&snapshot) {
-                        return Some(*snapshot);
-                    }
+            if let Some(BridgeEvent::Snapshot(snapshot)) =
+                bridge.recv_timeout(Duration::from_millis(30))
+            {
+                if predicate(&snapshot) {
+                    return Some(*snapshot);
                 }
             }
             while let Some(event) = bridge.try_recv() {
@@ -4592,9 +4594,16 @@ mod tests {
         pairs.into_iter().collect()
     }
 
+    /// A case's name, the files it selects, and its renames.
+    type RenameCase = (
+        &'static str,
+        [&'static str; 2],
+        [(&'static str, &'static str); 2],
+    );
+
     /// Renumbering `01 -> 02, 02 -> 03` and swapping `a <-> b` both rename a
     /// file to another selected file's old name.
-    const OVERLAPPING_RENAMES: [(&str, [&str; 2], [(&str, &str); 2]); 2] = [
+    const OVERLAPPING_RENAMES: [RenameCase; 2] = [
         (
             "renumber",
             ["01.flac", "02.flac"],
@@ -5418,19 +5427,19 @@ mod tests {
             .collect()
     }
 
-    /// The order in which the bridge handles a rename A→B and a save at B
+    /// What the bridge handles first, of a rename A→B and a save at B
     /// made after it.
     #[derive(Clone, Copy, Debug)]
-    enum SaveAfterRename {
+    enum ArrivesFirst {
         /// The save's result is applied before the rename's notification.
-        ResultFirst,
+        SaveResult,
         /// The save is asked for before the rename's notification, and its
         /// result arrives after it.
-        RequestFirst,
-        RenameFirst,
+        SaveRequest,
+        Rename,
     }
 
-    fn save_after_rename_shows_the_saved_tags(order: SaveAfterRename) {
+    fn save_after_rename_shows_the_saved_tags(order: ArrivesFirst) {
         let _guard = test_guard();
         let (a, b) = (p("/music/stale/A/x/a.flac"), p("/music/stale/A/x/b.flac"));
         // A queued file outside the library, renamed and saved with a.
@@ -5445,18 +5454,18 @@ mod tests {
             &[(&a, &b), (&e, &f)],
             &[(&b, "Renamed"), (&f, "Renamed F")],
         );
-        if matches!(order, SaveAfterRename::RenameFirst) {
+        if matches!(order, ArrivesFirst::Rename) {
             apply_next_import_result(&mut runtime, &event_tx);
         }
         refreshes.set(&[(&b, "Saved"), (&f, "Saved F")]);
         save(&mut runtime, &refreshes, &[&b, &f], &event_tx);
         match order {
-            SaveAfterRename::ResultFirst => {
+            ArrivesFirst::SaveResult => {
                 accept_refresh(&mut runtime, &refreshes, &event_tx);
                 apply_next_import_result(&mut runtime, &event_tx);
             }
-            SaveAfterRename::RequestFirst => apply_next_import_result(&mut runtime, &event_tx),
-            SaveAfterRename::RenameFirst => {}
+            ArrivesFirst::SaveRequest => apply_next_import_result(&mut runtime, &event_tx),
+            ArrivesFirst::Rename => {}
         }
         finish_edit_refreshes(&mut runtime, &refreshes, &event_tx);
 
@@ -5474,17 +5483,17 @@ mod tests {
 
     #[test]
     fn a_save_after_a_rename_applied_before_the_rename_arrives_is_shown() {
-        save_after_rename_shows_the_saved_tags(SaveAfterRename::ResultFirst);
+        save_after_rename_shows_the_saved_tags(ArrivesFirst::SaveResult);
     }
 
     #[test]
     fn a_save_after_a_rename_in_flight_when_the_rename_arrives_is_shown() {
-        save_after_rename_shows_the_saved_tags(SaveAfterRename::RequestFirst);
+        save_after_rename_shows_the_saved_tags(ArrivesFirst::SaveRequest);
     }
 
     #[test]
     fn a_save_after_a_rename_the_bridge_already_applied_is_shown() {
-        save_after_rename_shows_the_saved_tags(SaveAfterRename::RenameFirst);
+        save_after_rename_shows_the_saved_tags(ArrivesFirst::Rename);
     }
 
     #[test]

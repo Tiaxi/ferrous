@@ -3637,7 +3637,7 @@ mod tests {
         let reference_est = duration_requery_estimate_for_session(effective_frames, REFERENCE_HOP);
         // Reference-hop gives the raw ~14125 figure + 64 padding.
         assert!(
-            reference_est >= 14_000 && reference_est <= 14_200,
+            (14_000..=14_200).contains(&reference_est),
             "reference-hop est out of expected range: {}",
             reference_est,
         );
