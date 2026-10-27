@@ -94,9 +94,9 @@ See [supported formats](../README.md#supported-formats). Playback codec support 
 | --- | --- |
 | Library database and waveform cache | `$XDG_DATA_HOME/ferrous/library.sqlite3`, with SQLite's `-wal` and `-shm` files while Ferrous runs; a damaged database is kept in `library.sqlite3.damaged-<UTC time>/` |
 | Diagnostics log | `$XDG_DATA_HOME/ferrous/diagnostics.log` |
-| Settings | `$XDG_CONFIG_HOME/ferrous/settings.txt` |
+| Settings, including the window's size, position, pane sizes, visualization mode, and whether the queue follows the current track | `$XDG_CONFIG_HOME/ferrous/settings.txt` |
 | Pending Last.fm scrobbles | `$XDG_CONFIG_HOME/ferrous/lastfm_queue.json`; an unreadable file is kept as `lastfm_queue.json.corrupt` |
-| Session restore | `$XDG_CONFIG_HOME/ferrous/session.json` |
+| Session restore: the queue, the library view, repeat, shuffle, and where the current track was paused or playing | `$XDG_CONFIG_HOME/ferrous/session.json` |
 | Embedded cover art | `$XDG_CACHE_HOME/ferrous/embedded_covers` |
 | Album art links for desktop media controls (MPRIS) | `$XDG_CACHE_HOME/ferrous/mpris_art` |
 

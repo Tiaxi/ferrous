@@ -13,6 +13,7 @@ use std::os::fd::RawFd;
 
 use super::imports::{ImportGate, RenamedDetails};
 use super::queue_relay::{QueueBatch, QueueRelay};
+use super::window_layout::{self, WindowGeometry, WindowLayout};
 use super::{
     BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand,
     BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame,
@@ -74,6 +75,9 @@ const SECTION_STATE_SAVED: u16 = 1 << 9;
 /// (u32 start, u32 count) ranges of the rows it brought back, ascending.
 /// Every snapshot carries it.
 const SECTION_QUEUE_UNDO: u16 = 1 << 10;
+/// The window layout saved in the settings, sent once at startup: the
+/// fields of the command that sets it; see [`read_window_layout`].
+const SECTION_WINDOW_LAYOUT: u16 = 1 << 11;
 
 #[cfg(unix)]
 fn create_nonblocking_pipe() -> Option<(RawFd, RawFd)> {
@@ -660,6 +664,9 @@ impl FfiEncoder {
                     prepared.push(PreparedEvent::Binary(encode_state_saved_event(
                         request_id, &result,
                     )));
+                }
+                BridgeEvent::WindowLayout(layout) => {
+                    prepared.push(PreparedEvent::Binary(encode_window_layout_event(&layout)));
                 }
             }
         }
@@ -2092,6 +2099,37 @@ fn parse_library_ui_command(
     Ok(Some(BridgeCommand::Library(command)))
 }
 
+/// The payload of the command that sets the window layout: `has_geometry`
+/// (u8), `x`, `y` (i32), `width`, `height` (u32), `maximized` (u8), the
+/// sidebar and queue shares (f32, negative for the default),
+/// `visualization_mode` (u8), and `follow_current_track` (u8). Values out
+/// of range are dropped or brought in range, as when the settings are read.
+fn read_window_layout(reader: &mut BinaryReader<'_>) -> Result<WindowLayout, String> {
+    let has_geometry = reader.read_u8()? != 0;
+    let (x, y) = (reader.read_i32()?, reader.read_i32()?);
+    let (width, height) = (reader.read_u32()?, reader.read_u32()?);
+    let maximized = reader.read_u8()? != 0;
+    let ratio = |value: f32| {
+        (value >= 0.0)
+            .then_some(value)
+            .and_then(window_layout::checked_ratio)
+    };
+    let sidebar_width_ratio = ratio(reader.read_f32()?);
+    let queue_height_ratio = ratio(reader.read_f32()?);
+    let visualization_mode = reader.read_u8()?.min(1);
+    let follow_current_track = reader.read_u8()? != 0;
+    Ok(WindowLayout {
+        geometry: has_geometry
+            .then(|| WindowGeometry::checked(x, y, width, height))
+            .flatten(),
+        maximized,
+        sidebar_width_ratio,
+        queue_height_ratio,
+        visualization_mode,
+        follow_current_track,
+    })
+}
+
 fn parse_settings_command(
     cmd_id: u16,
     reader: &mut BinaryReader<'_>,
@@ -2132,6 +2170,7 @@ fn parse_settings_command(
         )),
         59 => BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(reader.read_u8()? != 0),
         67 => BridgeSettingsCommand::SetLibraryWatchEnabled(reader.read_u8()? != 0),
+        71 => BridgeSettingsCommand::SetWindowLayout(read_window_layout(reader)?),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -2386,6 +2425,29 @@ fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec
         result.as_ref().err().map_or("", String::as_str),
     );
     encode_packet(&[(SECTION_STATE_SAVED, payload)])
+}
+
+/// The window layout saved in the settings, laid out as the command that
+/// sets it; see [`read_window_layout`].
+fn encode_window_layout_event(layout: &WindowLayout) -> Vec<u8> {
+    let geometry = layout.geometry.unwrap_or(WindowGeometry {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    });
+    let mut payload = Vec::with_capacity(28);
+    push_u8(&mut payload, u8::from(layout.geometry.is_some()));
+    payload.extend_from_slice(&geometry.x.to_le_bytes());
+    payload.extend_from_slice(&geometry.y.to_le_bytes());
+    push_u32(&mut payload, geometry.width);
+    push_u32(&mut payload, geometry.height);
+    push_u8(&mut payload, u8::from(layout.maximized));
+    payload.extend_from_slice(&layout.sidebar_width_ratio.unwrap_or(-1.0).to_le_bytes());
+    payload.extend_from_slice(&layout.queue_height_ratio.unwrap_or(-1.0).to_le_bytes());
+    push_u8(&mut payload, layout.visualization_mode);
+    push_u8(&mut payload, u8::from(layout.follow_current_track));
+    encode_packet(&[(SECTION_WINDOW_LAYOUT, payload)])
 }
 
 fn encode_stopped_event() -> Vec<u8> {
@@ -3141,6 +3203,7 @@ mod tests {
                 position: Duration::from_secs(12),
                 duration: Duration::from_secs(180),
                 current: Some(PathBuf::from("/music/a.flac")),
+                current_file: None,
                 current_queue_index: Some(0),
                 current_bitrate_kbps: Some(905),
                 volume: 0.75,
@@ -3243,6 +3306,7 @@ mod tests {
                     lastfm_scrobbling_enabled: true,
                     lastfm_username: "tester".to_string(),
                 },
+                window: WindowLayout::default(),
                 unknown_lines: Vec::new(),
             },
             lastfm: crate::lastfm::RuntimeState {
@@ -3689,6 +3753,143 @@ mod tests {
             parse_binary_command(&encode_command(62, &payload)).err(),
             Some("unknown binary command id 62".to_string())
         );
+    }
+
+    fn window_layout_payload(
+        geometry: Option<(i32, i32, u32, u32)>,
+        maximized: bool,
+        ratios: (f32, f32),
+        mode: u8,
+        follow: bool,
+    ) -> Vec<u8> {
+        let (x, y, width, height) = geometry.unwrap_or_default();
+        let mut payload = vec![u8::from(geometry.is_some())];
+        payload.extend_from_slice(&x.to_le_bytes());
+        payload.extend_from_slice(&y.to_le_bytes());
+        payload.extend_from_slice(&width.to_le_bytes());
+        payload.extend_from_slice(&height.to_le_bytes());
+        payload.push(u8::from(maximized));
+        payload.extend_from_slice(&ratios.0.to_le_bytes());
+        payload.extend_from_slice(&ratios.1.to_le_bytes());
+        payload.push(mode);
+        payload.push(u8::from(follow));
+        payload
+    }
+
+    fn parsed_window_layout(payload: &[u8]) -> Result<WindowLayout, String> {
+        match parse_binary_command(&encode_command(71, payload))? {
+            Some(BridgeCommand::Settings(BridgeSettingsCommand::SetWindowLayout(layout))) => {
+                Ok(layout)
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_binary_command_reads_the_window_layout() {
+        let layout = parsed_window_layout(&window_layout_payload(
+            Some((-1920, 24, 1280, 720)),
+            true,
+            (0.3, 0.6),
+            1,
+            false,
+        ))
+        .expect("parse");
+        assert_eq!(
+            layout,
+            WindowLayout {
+                geometry: Some(WindowGeometry {
+                    x: -1920,
+                    y: 24,
+                    width: 1280,
+                    height: 720
+                }),
+                maximized: true,
+                sidebar_width_ratio: Some(0.3),
+                queue_height_ratio: Some(0.6),
+                visualization_mode: 1,
+                follow_current_track: false,
+            }
+        );
+
+        // Defaults and values out of range.
+        let layout = parsed_window_layout(&window_layout_payload(
+            Some((0, 0, 0, 720)),
+            false,
+            (-1.0, f32::NAN),
+            9,
+            true,
+        ))
+        .expect("parse");
+        assert_eq!(
+            layout,
+            WindowLayout {
+                visualization_mode: 1,
+                ..WindowLayout::default()
+            }
+        );
+        let layout = parsed_window_layout(&window_layout_payload(None, false, (3.0, 0.0), 0, true))
+            .expect("parse");
+        assert_eq!(layout.geometry, None);
+        assert_eq!(layout.sidebar_width_ratio, Some(0.95));
+        assert_eq!(layout.queue_height_ratio, Some(0.05));
+
+        // A payload of another length is refused.
+        let mut long = window_layout_payload(None, false, (0.5, 0.5), 0, true);
+        long.push(0);
+        assert!(parsed_window_layout(&long).is_err());
+        assert!(parsed_window_layout(&long[..long.len() - 2]).is_err());
+    }
+
+    #[test]
+    fn the_saved_window_layout_is_sent_once_the_bridge_starts() {
+        let _config = crate::paths::TestConfigDir::new();
+        let saved = WindowLayout {
+            geometry: Some(WindowGeometry {
+                x: -2560,
+                y: 0,
+                width: 1100,
+                height: 700,
+            }),
+            maximized: true,
+            sidebar_width_ratio: Some(0.25),
+            queue_height_ratio: None,
+            visualization_mode: 1,
+            follow_current_track: false,
+        };
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            persisted_state_enabled: true,
+            ..BridgeRuntimeOptions::default()
+        });
+        // Without a settings file: the default layout.
+        let packet = ffi_wait_for_mask(handle, SECTION_WINDOW_LAYOUT, Duration::from_secs(5))
+            .expect("the layout");
+        let payload = section(&packet, SECTION_WINDOW_LAYOUT).expect("the layout section");
+        let mut reader = BinaryReader::new(&payload);
+        assert_eq!(
+            read_window_layout(&mut reader).expect("read"),
+            WindowLayout::default()
+        );
+        reader.expect_done().expect("the whole section");
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+
+        let mut settings = super::super::BridgeSettings::default();
+        config::load_settings_into(&mut settings);
+        settings.window = saved;
+        config::save_settings(&settings).expect("save the settings");
+        let handle = ffi_bridge_with(BridgeRuntimeOptions {
+            persisted_state_enabled: true,
+            ..BridgeRuntimeOptions::default()
+        });
+        let packet = ffi_wait_for_mask(handle, SECTION_WINDOW_LAYOUT, Duration::from_secs(5))
+            .expect("the layout");
+        let payload = section(&packet, SECTION_WINDOW_LAYOUT).expect("the layout section");
+        let mut reader = BinaryReader::new(&payload);
+        assert_eq!(read_window_layout(&mut reader).expect("read"), saved);
+        reader.expect_done().expect("the whole section");
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
     }
 
     #[test]

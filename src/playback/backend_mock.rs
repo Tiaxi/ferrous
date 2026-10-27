@@ -2,7 +2,8 @@
 
 use super::queue::{same_audio_extension, CancelledAdvance, GaplessQueue, Handoff};
 use super::{
-    EngineExit, PlaybackCommand, PlaybackEvent, PlaybackSnapshot, PlaybackState, TrackChangeKind,
+    EngineExit, FileStamp, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
+    PlaybackSnapshot, PlaybackState, TrackChangeKind,
 };
 use crate::analysis::AnalysisCommand;
 use crossbeam_channel::{unbounded, Sender};
@@ -226,6 +227,7 @@ impl MockPlaybackRuntime {
                     position: self.snapshot.position,
                 });
             }
+            PlaybackCommand::Cue { position, expected } => self.cue(position, expected),
             PlaybackCommand::SetVolume(vol) => {
                 self.snapshot.volume = vol.clamp(0.0, 1.0);
             }
@@ -255,6 +257,7 @@ impl MockPlaybackRuntime {
         self.about_to_finish_fired = false;
         self.track_token_counter += 1;
         let track_token = self.track_token_counter;
+        self.snapshot.current_file = FileStamp::of(&path);
         self.snapshot.current = Some(path.clone());
         self.snapshot.current_queue_index = Some(queue_index);
         self.snapshot.duration = TRACK_DURATION;
@@ -327,11 +330,41 @@ impl MockPlaybackRuntime {
     fn stop_with_empty_queue(&mut self) {
         self.reset_mute();
         self.snapshot.current = None;
+        self.snapshot.current_file = None;
         self.snapshot.current_queue_index = None;
         self.snapshot.state = PlaybackState::Stopped;
         self.snapshot.position = Duration::ZERO;
         self.snapshot.duration = Duration::ZERO;
         self.snapshot.track_token = 0;
+    }
+    /// Like the `GStreamer` backend; see [`PlaybackCommand::Cue`].
+    fn cue(&mut self, position: Duration, expected: FileStamp) {
+        let Some(path) = self
+            .snapshot
+            .current
+            .clone()
+            .filter(|_| self.snapshot.state == PlaybackState::Stopped)
+        else {
+            return;
+        };
+        match self.snapshot.current_file {
+            None => {
+                let _ = self.event_tx.send(PlaybackEvent::Error(PlaybackError {
+                    detail: FileStamp::missing_detail(&path),
+                    path: Some(path),
+                    outcome: PlaybackErrorOutcome::NotResumed,
+                }));
+                return;
+            }
+            Some(stamp) if stamp != expected => return,
+            Some(_) => {}
+        }
+        self.snapshot.state = PlaybackState::Paused;
+        self.snapshot.current_queue_index = self.queue.current_index();
+        self.snapshot.position = position.min(self.snapshot.duration);
+        let _ = self.event_tx.send(PlaybackEvent::Seeked {
+            position: self.snapshot.position,
+        });
     }
     fn advance_manually(&mut self, next: bool) {
         let target = if next {

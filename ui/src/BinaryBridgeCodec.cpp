@@ -793,6 +793,28 @@ QByteArray encodeCommandLibraryViewState(
     return finalizeCommand(cmdId, payload);
 }
 
+QByteArray encodeCommandWindowLayout(const WindowLayout &layout) {
+    QByteArray payload;
+    payload.reserve(32);
+    const auto appendF32 = [&payload](float value) {
+        quint32 bits = 0;
+        static_assert(sizeof(value) == sizeof(bits), "float size mismatch");
+        std::memcpy(&bits, &value, sizeof(bits));
+        appendLe<quint32>(payload, bits);
+    };
+    appendLe<quint8>(payload, layout.hasGeometry ? 1 : 0);
+    appendLe<qint32>(payload, layout.x);
+    appendLe<qint32>(payload, layout.y);
+    appendLe<quint32>(payload, layout.width);
+    appendLe<quint32>(payload, layout.height);
+    appendLe<quint8>(payload, layout.maximized ? 1 : 0);
+    appendF32(layout.sidebarWidthRatio);
+    appendF32(layout.queueHeightRatio);
+    appendLe<quint8>(payload, layout.visualizationMode);
+    appendLe<quint8>(payload, layout.followCurrentTrack ? 1 : 0);
+    return finalizeCommand(CmdSetWindowLayout, payload);
+}
+
 QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &query, quint32 limit) {
     QByteArray payload;
     payload.reserve(12 + query.size());
@@ -1018,6 +1040,28 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
         case SectionStopped: {
             out->hasStopped = true;
             ok = sectionPayload.isEmpty();
+            break;
+        }
+        case SectionWindowLayout: {
+            Reader sectionReader(sectionPayload);
+            WindowLayout layout;
+            quint8 hasGeometry = 0;
+            quint8 maximized = 0;
+            quint8 follow = 0;
+            ok = sectionReader.readU8(&hasGeometry) && sectionReader.readI32(&layout.x)
+                && sectionReader.readI32(&layout.y) && sectionReader.readU32(&layout.width)
+                && sectionReader.readU32(&layout.height) && sectionReader.readU8(&maximized)
+                && sectionReader.readF32(&layout.sidebarWidthRatio)
+                && sectionReader.readF32(&layout.queueHeightRatio)
+                && sectionReader.readU8(&layout.visualizationMode)
+                && sectionReader.readU8(&follow) && sectionReader.atEnd();
+            if (ok) {
+                layout.hasGeometry = hasGeometry != 0;
+                layout.maximized = maximized != 0;
+                layout.followCurrentTrack = follow != 0;
+                out->hasWindowLayout = true;
+                out->windowLayout = layout;
+            }
             break;
         }
         case SectionStateSaved: {

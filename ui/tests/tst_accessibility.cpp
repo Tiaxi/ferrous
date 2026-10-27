@@ -71,6 +71,18 @@ QString takeCapturedMessagesText() {
     return text;
 }
 
+// Drops the captured messages that are `message`.
+void dropCapturedMessages(const QString &message) {
+    QMutexLocker locker(&capturedMessageMutex());
+    capturedMessages().removeAll(message);
+}
+
+// A larger font widens the columns and raises the window's minimum size
+// with them; the offscreen platform warns that it ignores the new minimum.
+void dropMinimumSizeWarnings() {
+    dropCapturedMessages(QStringLiteral("This plugin does not support propagateSizeHints()"));
+}
+
 QString formatQmlErrors(const QList<QQmlError> &errors) {
     QStringList lines;
     for (const QQmlError &error : errors) {
@@ -1403,13 +1415,17 @@ void AccessibilityTest::rowHeightsAndScrollingFollowTheFont() {
              qPrintable(QString::number(defaultRowHeight)));
     check(defaultRowHeight);
 
+    const int defaultMinimumWidth = window->minimumWidth();
     QFont larger = window->property("font").value<QFont>();
     larger.setPointSizeF((larger.pointSizeF() > 0 ? larger.pointSizeF() : 10.0) * 2);
     QVERIFY(window->setProperty("font", larger));
     QTRY_VERIFY(queue->property("rowHeight").toReal() > defaultRowHeight * 1.6);
+    // The window keeps room for the wider columns.
+    QTRY_VERIFY(window->minimumWidth() > defaultMinimumWidth);
     check(queue->property("rowHeight").toReal());
     // The now-playing labels' column widens with them.
     QTRY_VERIFY(metadataCard->property("labelColumnWidth").toReal() > defaultLabelWidth * 1.6);
+    dropMinimumSizeWarnings();
 }
 
 void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
@@ -1472,6 +1488,7 @@ void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
     QVERIFY(scaled[1] > defaults[1] * 1.3);
     QVERIFY(scaled[4] > defaults[4] * 1.3);
     QVERIFY(scaled[5] > defaults[5] * 1.3);
+    dropMinimumSizeWarnings();
 }
 
 // A light theme's window with the transport bar and the tag editor.

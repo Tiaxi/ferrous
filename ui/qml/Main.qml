@@ -20,11 +20,12 @@ import "viewers" as Viewers
 
 ApplicationWindow {
     id: root
-    width: 1600
-    height: 980
-    minimumWidth: 1280
-    minimumHeight: 780
-    visible: true
+    width: windowLayoutController.initialWidth
+    height: windowLayoutController.initialHeight
+    minimumWidth: root.contentMinimumWidth
+    minimumHeight: root.contentMinimumHeight
+    // Shown by windowLayoutController once the saved layout is applied.
+    visible: false
     readonly property string appDisplayName: "Ferrous"
     title: {
         const context = playbackController.windowTitleContext()
@@ -114,6 +115,7 @@ ApplicationWindow {
         id: queueController
         objectName: "queueController"
         uiBridge: root.uiBridge
+        autoCenterSelection: windowLayoutController.initialFollowCurrentTrack
         tagEditorApi: root.tagEditorApi
         openTagEditorDialog: function() { tagEditorDialog.open() }
         playAt: function(index) { playbackController.playAt(index) }
@@ -146,7 +148,36 @@ ApplicationWindow {
         objectName: "viewerController"
         uiBridge: root.uiBridge
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
+        visualizationMode: windowLayoutController.initialVisualizationMode
     }
+
+    Controllers.WindowLayoutController {
+        id: windowLayoutController
+        objectName: "windowLayoutController"
+        uiBridge: root.uiBridge
+        window: root
+        viewerController: viewerController
+        queueController: queueController
+    }
+
+    readonly property int visualizationMinimumHeight: 220
+    // Room for a split handle, which is a few pixels thick in every style.
+    readonly property int splitHandleAllowance: 8
+    // The smallest window that shows every pane at its own minimum size,
+    // with the level meter whether it is shown or not, so that the window's
+    // minimum does not change with a setting. The error banner, which comes
+    // and goes, takes its room from the panes.
+    readonly property int contentMinimumWidth: Math.ceil(Math.max(
+        sidebarPane.SplitView.minimumWidth + rightSplit.SplitView.minimumWidth
+            + root.splitHandleAllowance,
+        transportBar.implicitWidth))
+    readonly property int contentMinimumHeight: Math.ceil(
+        (root.menuBar ? root.menuBar.implicitHeight : 0)
+        + transportBar.implicitHeight
+        + queuePane.SplitView.minimumHeight
+        + root.visualizationMinimumHeight + root.levelMeterHeight
+        + root.splitHandleAllowance
+        + (root.footer ? root.footer.implicitHeight : 0))
 
     readonly property var libraryViewRef: libraryController.view
 
@@ -389,6 +420,9 @@ ApplicationWindow {
         function scanRoot(path) {}
         function scanDefaultMusicRoot() {}
         function requestSnapshot() {}
+        function hasSavedWindowLayout() { return true }
+        function savedWindowLayout() { return ({}) }
+        function setWindowLayout(layout) {}
         function shutdown() {}
         signal stateSaveFinished(int requestId, bool saved, string message)
         function saveStateBeforeQuit() {
@@ -1206,12 +1240,26 @@ ApplicationWindow {
             enabled: !root.backendStopped
             orientation: Qt.Horizontal
 
+            // A drag of a handle sets the share the pane keeps as the window
+            // is resized.
+            onResizingChanged: {
+                if (!resizing) {
+                    windowLayoutController.noteSidebarWidth(sidebarPane.width, mainSplit.width)
+                }
+            }
+
             Panes.SidebarPane {
+                id: sidebarPane
+                objectName: "sidebarPane"
                 controller: libraryController
                 uiBridge: root.uiBridge
                 libraryModel: root.libraryTreeModel
                 uiPalette: root.uiPalette
-                splitPreferredWidth: Math.max(300, root.width * 0.26)
+                splitPreferredWidth: windowLayoutController.sidebarWidth(
+                    mainSplit.width,
+                    sidebarPane.SplitView.minimumWidth,
+                    rightSplit.SplitView.minimumWidth + root.splitHandleAllowance,
+                    Math.max(300, mainSplit.width * 0.26))
                 replaceFromItunesAction: replaceFromItunesAction
                 currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason
                 openAlbumArtViewer: viewerController.openAlbumArtViewer
@@ -1225,15 +1273,29 @@ ApplicationWindow {
             }
 
             SplitView {
+                id: rightSplit
+                objectName: "rightSplit"
                 orientation: Qt.Vertical
                 SplitView.fillWidth: true
+                SplitView.minimumWidth: queuePane.minimumContentWidth
+
+                onResizingChanged: {
+                    if (!resizing) {
+                        windowLayoutController.noteQueueHeight(queuePane.height, rightSplit.height)
+                    }
+                }
 
                 Panes.QueuePane {
+                    id: queuePane
                     objectName: "mainQueuePane"
                     controller: queueController
                     uiBridge: root.uiBridge
                     uiPalette: root.uiPalette
-                    preferredHeight: Math.max(220, root.height * 0.58 - root.embeddedLevelMeterHeight)
+                    preferredHeight: windowLayoutController.queueHeight(
+                        rightSplit.height,
+                        queuePane.SplitView.minimumHeight,
+                        spectrogramPane.SplitView.minimumHeight + root.splitHandleAllowance,
+                        Math.max(220, root.height * 0.58 - root.embeddedLevelMeterHeight))
                     playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
                     playlistOrderColumnWidth: root.playlistOrderColumnWidth
                     playlistOrderText: FormatUtils.playlistOrderText
@@ -1250,7 +1312,7 @@ ApplicationWindow {
                     id: spectrogramPane
                     SplitView.fillWidth: true
                     SplitView.fillHeight: true
-                    SplitView.minimumHeight: 220 + root.embeddedLevelMeterHeight
+                    SplitView.minimumHeight: root.visualizationMinimumHeight + root.embeddedLevelMeterHeight
                     openViewer: viewerController.openSpectrogramViewer
                     visualizationMode: viewerController.visualizationMode
                     setVisualizationMode: viewerController.setVisualizationMode
@@ -1435,8 +1497,10 @@ ApplicationWindow {
     }
 
     function saveStateBeforeClosing() {
-        // The library view is saved with the queue.
+        // The library view is saved with the queue, and the window's layout
+        // with the settings.
         libraryController.persistLibraryViewState()
+        windowLayoutController.persist()
         quitStateSaveTimeout.restart()
         root.quitStateRequestId = uiBridge.saveStateBeforeQuit()
     }
@@ -1472,7 +1536,11 @@ ApplicationWindow {
         viewerController.closeAlbumArtViewer()
         viewerController.closeSpectrogramViewer()
         if (root.visibility === Window.Minimized || !root.visible) {
-            root.showNormal()
+            if (windowLayoutController.maximizedWhenShown) {
+                root.showMaximized()
+            } else {
+                root.showNormal()
+            }
         }
         if (!root.active) {
             root.requestActivate()
@@ -1632,6 +1700,7 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        windowLayoutController.showWindow()
         libraryController.requestTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
         playbackController.initializeFromBridge()
         queueController.initializeFromBridge()

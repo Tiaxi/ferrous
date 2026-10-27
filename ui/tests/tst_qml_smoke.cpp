@@ -1051,6 +1051,12 @@ private slots:
     void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
     void waveformSurfaceMuteButtonsFollowTheMutedChannels();
     void mainWindowContentStartsBelowMenuBar();
+    void draggedSplitSizesSurviveAWindowResize();
+    void theSmallestWindowFitsALaptopScreenAndShowsEveryControl();
+    void windowLayoutSurvivesARestart();
+    void aWindowSavedOffTheScreensOpensOnOne();
+    void theWindowOpensWithoutASavedLayoutThatDoesNotCome();
+    void quittingWhileMinimizedKeepsTheWindowMaximized();
     void consecutiveErrorsAreBothVisible();
     void repeatedErrorsAreCounted();
     void errorHistoryKeepsTheLatestErrors();
@@ -2547,6 +2553,38 @@ QQuickWindow *loadMainWindowShown(QQmlApplicationEngine &engine, LibraryTreeMode
     return window;
 }
 
+// The item at `index` of the split view `split`.
+QQuickItem *splitItemAt(QQuickItem *split, int index) {
+    QQuickItem *item = nullptr;
+    if (split == nullptr
+        || !QMetaObject::invokeMethod(split, "itemAt", Q_RETURN_ARG(QQuickItem *, item),
+                                      Q_ARG(int, index))) {
+        return nullptr;
+    }
+    return item;
+}
+
+// Drags the handle between `item` and `next`, the item after it in their
+// split view, by `delta`, as the user does.
+void dragSplitHandleBetween(QQuickWindow *window, QQuickItem *item, QQuickItem *next,
+                            Qt::Orientation orientation, int delta) {
+    const bool horizontal = orientation == Qt::Horizontal;
+    // In the middle of the handle, which fills the gap between them.
+    const QPointF end = item->mapToScene(QPointF(item->width(), item->height()));
+    const QPointF start = next->mapToScene(QPointF(0, 0));
+    QPoint at = horizontal
+        ? QPointF((end.x() + start.x()) / 2, (start.y() + end.y()) / 2).toPoint()
+        : QPointF((start.x() + end.x()) / 2, (end.y() + start.y()) / 2).toPoint();
+    QTest::mouseMove(window, at);
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, at);
+    const QPoint step = horizontal ? QPoint(delta / 10, 0) : QPoint(0, delta / 10);
+    for (int i = 0; i < 10; ++i) {
+        at += step;
+        QTest::mouseMove(window, at);
+    }
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, at);
+}
+
 // Sends an error from the bridge as BridgeClient does. The categories and
 // severities are BinaryBridgeCodec's.
 bool sendBridgeError(QObject *bridge, const QString &message, int category = 1,
@@ -2779,14 +2817,70 @@ void QmlSmokeTest::aLongErrorIsShownWhole() {
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
+void QmlSmokeTest::draggedSplitSizesSurviveAWindowResize() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    window->resize(1400, 860);
+    QTRY_COMPARE(window->width(), 1400);
+    QTRY_COMPARE(window->height(), 860);
+    auto *mainSplit = window->findChild<QQuickItem *>(QStringLiteral("mainSplit"));
+    QQuickItem *sidebar = splitItemAt(mainSplit, 0);
+    QQuickItem *rightSplit = splitItemAt(mainSplit, 1);
+    QQuickItem *queue = splitItemAt(rightSplit, 0);
+    QVERIFY(mainSplit != nullptr && sidebar != nullptr && rightSplit != nullptr
+            && queue != nullptr);
+
+    // The splits have been laid out for the window when their last items
+    // reach their ends.
+    QQuickItem *visualization = splitItemAt(rightSplit, 1);
+    QVERIFY(visualization != nullptr);
+    const auto laidOut = [&]() {
+        return qFuzzyCompare(rightSplit->x() + rightSplit->width(), mainSplit->width())
+            && qFuzzyCompare(visualization->y() + visualization->height(), rightSplit->height());
+    };
+    QTRY_COMPARE(mainSplit->width(), 1400.0);
+    QTRY_VERIFY(laidOut());
+    const qreal sidebarBefore = sidebar->width();
+    dragSplitHandleBetween(window, sidebar, rightSplit, Qt::Horizontal, 200);
+    QTRY_VERIFY2(sidebar->width() > sidebarBefore + 150,
+                 qPrintable(QStringLiteral("%1 -> %2").arg(sidebarBefore).arg(sidebar->width())));
+    const qreal queueBefore = queue->height();
+    dragSplitHandleBetween(window, queue, visualization, Qt::Vertical, -100);
+    QTRY_VERIFY2(queue->height() < queueBefore - 70,
+                 qPrintable(QStringLiteral("%1 -> %2").arg(queueBefore).arg(queue->height())));
+    const qreal sidebarShare = sidebar->width() / mainSplit->width();
+    const qreal queueShare = queue->height() / rightSplit->height();
+
+    // A larger window keeps the shares the user dragged to, rather than
+    // the sizes the window would have by default.
+    window->resize(1700, 1000);
+    QTRY_COMPARE(window->width(), 1700);
+    QTRY_COMPARE(window->height(), 1000);
+    QTRY_COMPARE(mainSplit->width(), 1700.0);
+    QTRY_VERIFY(laidOut());
+    QTRY_VERIFY2(std::abs(sidebar->width() / mainSplit->width() - sidebarShare) < 0.01,
+                 qPrintable(QStringLiteral("sidebar %1 of %2, was %3")
+                                .arg(sidebar->width())
+                                .arg(mainSplit->width())
+                                .arg(sidebarShare)));
+    QTRY_VERIFY2(std::abs(queue->height() / rightSplit->height() - queueShare) < 0.01,
+                 qPrintable(QStringLiteral("queue %1 of %2, was %3")
+                                .arg(queue->height())
+                                .arg(rightSplit->height())
+                                .arg(queueShare)));
+    QVERIFY(finishIncubation(engine));
+}
+
 void QmlSmokeTest::aLongMultiLineErrorKeepsTheControlsInTheWindow() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     // The smallest window Ferrous allows.
-    window->resize(1280, 780);
-    QTRY_COMPARE(window->height(), 780);
+    window->resize(window->minimumWidth(), window->minimumHeight());
+    QTRY_COMPARE(window->height(), window->minimumHeight());
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     auto *mainBanner = window->findChild<QQuickItem *>(QStringLiteral("mainErrorBanner"));
     auto *body = window->findChild<QQuickItem *>(QStringLiteral("errorBannerBody"));
@@ -2991,6 +3085,438 @@ void callMprisQuit() {
 }
 
 } // namespace
+
+namespace {
+
+// The first item named `objectName` below `root` that is shown.
+QQuickItem *shownItemNamed(QQuickItem *root, const QString &objectName) {
+    for (QQuickItem *child : root->childItems()) {
+        if (!child->isVisible()) {
+            continue;
+        }
+        if (child->objectName() == objectName) {
+            return child;
+        }
+        if (QQuickItem *found = shownItemNamed(child, objectName)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+// Whether `item` is shown, and inside `window`.
+bool shownInside(QQuickWindow *window, QQuickItem *item) {
+    if (item == nullptr || !item->isVisible()) {
+        return false;
+    }
+    const QRectF rect = item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    return rect.left() >= -0.5 && rect.top() >= -0.5 && rect.right() <= window->width() + 0.5
+        && rect.bottom() <= window->height() + 0.5;
+}
+
+// Whether `items` are side by side from left to right without overlapping,
+// each at least `minimumWidth` wide.
+QString overlapsInRow(const QList<QQuickItem *> &items, qreal minimumWidth) {
+    qreal right = -1e9;
+    for (QQuickItem *item : items) {
+        const QRectF rect = item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+        if (rect.left() < right - 0.5 || rect.width() < minimumWidth) {
+            return QStringLiteral("%1 at %2..%3 after %4")
+                .arg(item->objectName())
+                .arg(rect.left())
+                .arg(rect.right())
+                .arg(right);
+        }
+        right = rect.right();
+    }
+    return {};
+}
+
+// Closes `window` as the user does and waits until it has closed: after
+// the backend has saved the settings and the queue.
+bool closeThroughTheQuitFlow(QQuickWindow *window) {
+    return QMetaObject::invokeMethod(window, "close")
+        && QTest::qWaitFor([window]() { return !window->isVisible(); }, 15000);
+}
+
+QString savedSettingsPath() {
+    return QDir(qEnvironmentVariable("XDG_CONFIG_HOME"))
+        .filePath(QStringLiteral("ferrous/settings.txt"));
+}
+
+} // namespace
+
+void QmlSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    // A 1080p screen at 150% has 1280 x 720 logical pixels, of which a
+    // panel and the window's frame take some.
+    const int minimumWidth = window->minimumWidth();
+    const int minimumHeight = window->minimumHeight();
+    QVERIFY2(minimumWidth > 0 && minimumWidth <= 1280 - 16 && minimumHeight > 0
+                 && minimumHeight <= 720 - 80,
+             qPrintable(QStringLiteral("%1 x %2").arg(minimumWidth).arg(minimumHeight)));
+
+    window->resize(minimumWidth, minimumHeight);
+    QTRY_COMPARE(window->width(), minimumWidth);
+    QTRY_COMPARE(window->height(), minimumHeight);
+    auto *mainSplit = window->findChild<QQuickItem *>(QStringLiteral("mainSplit"));
+    auto *sidebar = window->findChild<QQuickItem *>(QStringLiteral("sidebarPane"));
+    auto *rightSplit = window->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
+    auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+    QQuickItem *visualization = splitItemAt(rightSplit, 1);
+    auto *statusBar = qvariant_cast<QQuickItem *>(window->property("footer"));
+    QVERIFY(mainSplit != nullptr && sidebar != nullptr && rightSplit != nullptr
+            && queue != nullptr && visualization != nullptr && statusBar != nullptr);
+    QTRY_COMPARE(mainSplit->width(), qreal(minimumWidth));
+    QTRY_VERIFY(qFuzzyCompare(rightSplit->x() + rightSplit->width(), mainSplit->width()));
+    QTRY_VERIFY(qFuzzyCompare(visualization->y() + visualization->height(), rightSplit->height()));
+
+    // Every pane gets at least its own minimum.
+    QVERIFY2(sidebar->width() >= 250 - 0.5, qPrintable(QString::number(sidebar->width())));
+    QVERIFY2(rightSplit->width() >= queue->property("minimumContentWidth").toReal() - 0.5,
+             qPrintable(QStringLiteral("%1 < %2")
+                            .arg(rightSplit->width())
+                            .arg(queue->property("minimumContentWidth").toReal())));
+    QVERIFY2(queue->height() >= 220 - 0.5, qPrintable(QString::number(queue->height())));
+    QVERIFY2(visualization->height() >= 220 - 0.5,
+             qPrintable(QString::number(visualization->height())));
+    QVERIFY(shownInside(window, mainSplit));
+    QVERIFY(shownInside(window, statusBar));
+
+    // The playback controls stay whole and apart.
+    QList<QQuickItem *> controls;
+    for (const char *name : {"transportButton_previous", "transportButton_play",
+                             "transportButton_pause", "transportButton_stop",
+                             "transportButton_next", "seekSlider", "muteButton",
+                             "volumeSlider"}) {
+        QQuickItem *control = shownItemNamed(window->contentItem(), QString::fromLatin1(name));
+        QVERIFY2(shownInside(window, control), name);
+        controls.push_back(control);
+    }
+    const QString controlOverlap = overlapsInRow(controls, 8);
+    QVERIFY2(controlOverlap.isEmpty(), qPrintable(controlOverlap));
+    QQuickItem *seek = controls.at(5);
+    QVERIFY2(seek->width() >= 100, qPrintable(QString::number(seek->width())));
+
+    // So do the queue's columns, with room for the titles.
+    QList<QQuickItem *> columns;
+    for (const char *name : {"queueHeader_indicator", "queueHeader_order", "queueHeader_title",
+                             "queueHeader_artist", "queueHeader_album", "queueHeader_length"}) {
+        QQuickItem *column = shownItemNamed(queue, QString::fromLatin1(name));
+        QVERIFY2(shownInside(window, column), name);
+        columns.push_back(column);
+    }
+    const QString columnOverlap = overlapsInRow(columns, 1);
+    QVERIFY2(columnOverlap.isEmpty(), qPrintable(columnOverlap));
+    QVERIFY2(columns.at(2)->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1,
+             qPrintable(QString::number(columns.at(2)->width())));
+    const QRectF queueRect = queue->mapRectToScene(QRectF(0, 0, queue->width(), queue->height()));
+    const QRectF lengthRect = columns.last()->mapRectToScene(
+        QRectF(0, 0, columns.last()->width(), columns.last()->height()));
+    QVERIFY(lengthRect.right() <= queueRect.right() + 0.5);
+
+    QVERIFY(finishIncubation(engine));
+}
+
+void QmlSmokeTest::windowLayoutSurvivesARestart() {
+    // The bridge runs with the test's own config directory; see main().
+    QFile::remove(savedSettingsPath());
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    // On one of the large test screens, which has room for the window.
+    const QRect geometry(100'200, 150, 1300, 820);
+    const QRect normalOnTheSmallScreen(40, 40, 880, 600);
+    qreal sidebarShare = 0;
+    qreal queueShare = 0;
+    {
+        BridgeClient bridge;
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+        QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+        QVERIFY2(window != nullptr, "Main.qml failed to show");
+        window->setGeometry(geometry);
+        QTRY_COMPARE(window->geometry(), geometry);
+        auto *mainSplit = window->findChild<QQuickItem *>(QStringLiteral("mainSplit"));
+        auto *sidebar = window->findChild<QQuickItem *>(QStringLiteral("sidebarPane"));
+        auto *rightSplit = window->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
+        auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+        QQuickItem *visualization = splitItemAt(rightSplit, 1);
+        QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+        QObject *queueController = window->findChild<QObject *>(QStringLiteral("queueController"));
+        QVERIFY(mainSplit != nullptr && sidebar != nullptr && rightSplit != nullptr
+                && queue != nullptr && visualization != nullptr && viewer != nullptr
+                && queueController != nullptr);
+        QTRY_COMPARE(mainSplit->width(), 1300.0);
+        QTRY_VERIFY(qFuzzyCompare(rightSplit->x() + rightSplit->width(), mainSplit->width()));
+        QTRY_VERIFY(
+            qFuzzyCompare(visualization->y() + visualization->height(), rightSplit->height()));
+        const qreal sidebarBefore = sidebar->width();
+        dragSplitHandleBetween(window, sidebar, rightSplit, Qt::Horizontal, 120);
+        QTRY_VERIFY(sidebar->width() > sidebarBefore + 100);
+        const qreal queueBefore = queue->height();
+        dragSplitHandleBetween(window, queue, visualization, Qt::Vertical, -60);
+        QTRY_VERIFY(queue->height() < queueBefore - 40);
+        sidebarShare = sidebar->width() / mainSplit->width();
+        queueShare = queue->height() / rightSplit->height();
+        QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+        QVERIFY(queueController->setProperty("autoCenterSelection", false));
+
+        QVERIFY(closeThroughTheQuitFlow(window));
+    }
+    QFile settings(savedSettingsPath());
+    QVERIFY(settings.open(QIODevice::ReadOnly));
+    const QByteArray saved = settings.readAll();
+    settings.close();
+    QVERIFY2(saved.contains("\nwindow_geometry=100200,150,1300,820\n"), saved.constData());
+    QVERIFY2(saved.contains("\nvisualization_mode=1\n"), saved.constData());
+    QVERIFY2(saved.contains("\nfollow_current_track=0\n"), saved.constData());
+
+    {
+        BridgeClient bridge;
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+        QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+        QVERIFY2(window != nullptr, "Main.qml failed to show");
+        QCOMPARE(window->geometry(), geometry);
+        auto *mainSplit = window->findChild<QQuickItem *>(QStringLiteral("mainSplit"));
+        auto *sidebar = window->findChild<QQuickItem *>(QStringLiteral("sidebarPane"));
+        auto *rightSplit = window->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
+        auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+        QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+        QObject *queueController =
+            window->findChild<QObject *>(QStringLiteral("queueController"));
+        QTRY_VERIFY2(std::abs(sidebar->width() / mainSplit->width() - sidebarShare) < 0.01,
+                     qPrintable(QStringLiteral("%1 of %2, was %3")
+                                    .arg(sidebar->width())
+                                    .arg(mainSplit->width())
+                                    .arg(sidebarShare)));
+        QTRY_VERIFY2(std::abs(queue->height() / rightSplit->height() - queueShare) < 0.01,
+                     qPrintable(QStringLiteral("%1 of %2, was %3")
+                                    .arg(queue->height())
+                                    .arg(rightSplit->height())
+                                    .arg(queueShare)));
+        QCOMPARE(viewer->property("visualizationMode").toInt(), 1);
+        QCOMPARE(queueController->property("autoCenterSelection").toBool(), false);
+        QObject *followAction = nullptr;
+        for (QObject *object : window->findChildren<QObject *>()) {
+            if (object->property("text").toString()
+                == QStringLiteral("&Follow Current Track in Playlist")) {
+                followAction = object;
+            }
+        }
+        QVERIFY(followAction != nullptr);
+        QCOMPARE(followAction->property("checked").toBool(), false);
+
+        // Maximized, it comes back maximized, keeping the geometry it has
+        // when it is not. On the small test screen, so that the
+        // visualization does not grow as large as the large ones, which
+        // the spectrogram's buffers would keep for later tests.
+        window->setGeometry(normalOnTheSmallScreen);
+        QTRY_COMPARE(window->geometry(), normalOnTheSmallScreen);
+        window->showMaximized();
+        QTRY_COMPARE(window->visibility(), QWindow::Maximized);
+        QVERIFY(window->geometry() != normalOnTheSmallScreen);
+        // Quit while minimized, as from the desktop's media controls.
+        window->showMinimized();
+        QTRY_COMPARE(window->visibility(), QWindow::Minimized);
+        QVERIFY(closeThroughTheQuitFlow(window));
+    }
+    QVERIFY(settings.open(QIODevice::ReadOnly));
+    const QByteArray savedMaximized = settings.readAll();
+    settings.close();
+    QVERIFY2(savedMaximized.contains("\nwindow_geometry=40,40,880,600\n"),
+             savedMaximized.constData());
+    QVERIFY2(savedMaximized.contains("\nwindow_maximized=1\n"), savedMaximized.constData());
+    BridgeClient bridge;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(window->visibility(), QWindow::Maximized);
+    QObject *layout = window->findChild<QObject *>(QStringLiteral("windowLayoutController"));
+    QVERIFY(layout != nullptr);
+    // No wider than the 800 x 800 screen it was saved on.
+    QCOMPARE(layout->property("normalGeometry").toRectF(), QRectF(0, 40, 800, 600));
+    QVERIFY(closeThroughTheQuitFlow(window));
+    QFile::remove(savedSettingsPath());
+}
+
+void QmlSmokeTest::aWindowSavedOffTheScreensOpensOnOne() {
+    // As if it was saved on a monitor that has been disconnected since.
+    QFile::remove(savedSettingsPath());
+    QVERIFY(QDir().mkpath(QFileInfo(savedSettingsPath()).path()));
+    QFile settings(savedSettingsPath());
+    QVERIFY(settings.open(QIODevice::WriteOnly));
+    settings.write("window_geometry=50000,40000,1200,700\nwindow_maximized=0\n");
+    settings.close();
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+
+    BridgeClient bridge;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    bool onAScreen = false;
+    for (const QScreen *screen : QGuiApplication::screens()) {
+        onAScreen |= screen->geometry().contains(window->geometry().center());
+    }
+    QVERIFY2(onAScreen, qPrintable(QStringLiteral("%1,%2 %3x%4")
+                                       .arg(window->x())
+                                       .arg(window->y())
+                                       .arg(window->width())
+                                       .arg(window->height())));
+    QVERIFY(closeThroughTheQuitFlow(window));
+    QFile::remove(savedSettingsPath());
+}
+
+namespace {
+
+// A window with its layout controller, over a bridge that sends the saved
+// layout only when the test calls sendLayout.
+const QByteArray kWindowLayoutHarness = QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "controllers" as Controllers
+
+Window {
+    id: harness
+    visible: false
+    property alias controller: layoutController
+    property var sentLayouts: []
+
+    QtObject {
+        id: fakeBridge
+        property bool sent: false
+        property var layout: ({})
+        signal savedWindowLayoutRead()
+        function hasSavedWindowLayout() { return fakeBridge.sent }
+        function savedWindowLayout() { return fakeBridge.layout }
+        function setWindowLayout(layout) {
+            harness.sentLayouts = harness.sentLayouts.concat([layout])
+        }
+    }
+    QtObject {
+        id: fakeViewer
+        property int visualizationMode: 0
+    }
+    QtObject {
+        id: fakeQueue
+        property bool autoCenterSelection: true
+    }
+
+    function sendLayout(layout) {
+        fakeBridge.layout = layout
+        fakeBridge.sent = true
+        fakeBridge.savedWindowLayoutRead()
+    }
+
+    Controllers.WindowLayoutController {
+        id: layoutController
+        uiBridge: fakeBridge
+        window: harness
+        viewerController: fakeViewer
+        queueController: fakeQueue
+        layoutDeadlineMs: 300
+    }
+
+    width: layoutController.initialWidth
+    height: layoutController.initialHeight
+    Component.onCompleted: layoutController.showWindow()
+}
+)QML");
+
+// Has the harness's bridge send `layout` as the saved layout.
+bool sendSavedLayout(QQuickWindow *harness, const QVariantMap &layout) {
+    return QMetaObject::invokeMethod(harness, "sendLayout", Q_ARG(QVariant, QVariant(layout)));
+}
+
+QQuickWindow *createWindowLayoutHarness(QQmlEngine &engine, QString *errorText) {
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    return qobject_cast<QQuickWindow *>(
+        createQmlObjectFromSource(engine, kWindowLayoutHarness, baseUrl, errorText));
+}
+
+} // namespace
+
+void QmlSmokeTest::theWindowOpensWithoutASavedLayoutThatDoesNotCome() {
+    QQmlEngine engine;
+    QString errorText;
+    QScopedPointer<QQuickWindow> window(createWindowLayoutHarness(engine, &errorText));
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    // Held back for the saved layout...
+    QVERIFY(!window->isVisible());
+    // ...but not beyond the deadline, as for settings on a hung drive.
+    QTRY_VERIFY_WITH_TIMEOUT(window->isVisible(), 3000);
+    QCOMPARE(window->visibility(), QWindow::Windowed);
+    QCOMPARE(window->size(), QSize(1600, 980));
+    // A layout that comes later does not move the open window.
+    QVERIFY(sendSavedLayout(window.get(), QVariantMap{{QStringLiteral("x"), 10}, {QStringLiteral("y"), 10},
+                                    {QStringLiteral("width"), 900},
+                                    {QStringLiteral("height"), 600},
+                                    {QStringLiteral("maximized"), true}}));
+    QCoreApplication::processEvents();
+    QCOMPARE(window->size(), QSize(1600, 980));
+    QCOMPARE(window->visibility(), QWindow::Windowed);
+
+    // One that comes in time is applied before the window is shown.
+    QScopedPointer<QQuickWindow> second(createWindowLayoutHarness(engine, &errorText));
+    QVERIFY2(second != nullptr, qPrintable(errorText));
+    QSignalSpy shown(second.get(), &QWindow::visibleChanged);
+    QVERIFY(sendSavedLayout(second.get(), QVariantMap{{QStringLiteral("x"), 40}, {QStringLiteral("y"), 50},
+                                    {QStringLiteral("width"), 900},
+                                    {QStringLiteral("height"), 600},
+                                    {QStringLiteral("maximized"), false}}));
+    QVERIFY(second->isVisible());
+    QCOMPARE(shown.count(), 1);
+    QCOMPARE(second->size(), QSize(900, 600));
+}
+
+void QmlSmokeTest::quittingWhileMinimizedKeepsTheWindowMaximized() {
+    QQmlEngine engine;
+    QString errorText;
+    QScopedPointer<QQuickWindow> window(createWindowLayoutHarness(engine, &errorText));
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QVERIFY(sendSavedLayout(window.get(), QVariantMap{{QStringLiteral("x"), 40}, {QStringLiteral("y"), 40},
+                                    {QStringLiteral("width"), 700},
+                                    {QStringLiteral("height"), 500},
+                                    {QStringLiteral("maximized"), false}}));
+    QVERIFY(QTest::qWaitForWindowExposed(window.get()));
+    QObject *controller = window->property("controller").value<QObject *>();
+    QVERIFY(controller != nullptr);
+    const auto savedLayout = [&]() {
+        QVariant layout;
+        QMetaObject::invokeMethod(controller, "layout", Q_RETURN_ARG(QVariant, layout));
+        return layout.toMap();
+    };
+
+    window->showMaximized();
+    QTRY_COMPARE(window->visibility(), QWindow::Maximized);
+    window->showMinimized();
+    QTRY_COMPARE(window->visibility(), QWindow::Minimized);
+    // As MPRIS or the task manager quits it now.
+    QVERIFY(QMetaObject::invokeMethod(controller, "persist"));
+    const QVariantList sent = window->property("sentLayouts").toList();
+    QVERIFY(!sent.isEmpty());
+    const QVariantMap last = sent.last().toMap();
+    QCOMPARE(last.value(QStringLiteral("maximized")).toBool(), true);
+    QCOMPARE(last.value(QStringLiteral("width")).toInt(), 700);
+    QCOMPARE(last.value(QStringLiteral("height")).toInt(), 500);
+    QCOMPARE(savedLayout().value(QStringLiteral("maximized")).toBool(), true);
+
+    // Shown normally and minimized again, it is saved as not maximized.
+    window->showNormal();
+    QTRY_COMPARE(window->visibility(), QWindow::Windowed);
+    window->showMinimized();
+    QTRY_COMPARE(window->visibility(), QWindow::Minimized);
+    QCOMPARE(savedLayout().value(QStringLiteral("maximized")).toBool(), false);
+}
 
 void QmlSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
     LibraryTreeModel libraryModel;

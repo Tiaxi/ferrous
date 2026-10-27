@@ -177,7 +177,8 @@ fn drain_bridge_events(bridge: &FrontendBridgeHandle) {
             BridgeEvent::SearchResults(frame) => {
                 println!("search seq={} rows={}", frame.seq, frame.rows.len());
             }
-            BridgeEvent::PrecomputedSpectrogramChunk(_) => {}
+            // The CLI draws no spectrogram and has no window.
+            BridgeEvent::PrecomputedSpectrogramChunk(_) | BridgeEvent::WindowLayout(_) => {}
             BridgeEvent::Error(err) => {
                 eprintln!("bridge error: {err}");
             }

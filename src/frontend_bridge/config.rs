@@ -3,12 +3,14 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::json;
 
 use crate::analysis::{SpectrogramDisplayMode, SpectrogramViewMode};
 use crate::playback::{
-    volume_gain_to_level, volume_level_to_gain, PlaybackCommand, PlaybackEngine,
+    volume_gain_to_level, volume_level_to_gain, FileStamp, PlaybackCommand, PlaybackEngine,
+    PlaybackState, RepeatMode,
 };
 
 use super::{BridgeSettings, BridgeState, LibrarySortMode, ViewerFullscreenMode};
@@ -23,7 +25,44 @@ pub(super) struct SessionSnapshot {
     pub(super) library_view_selection_key: String,
     pub(super) library_view_anchor_key: String,
     pub(super) library_view_anchor_offset: f32,
+    pub(super) repeat_mode: RepeatMode,
+    pub(super) shuffle_enabled: bool,
+    /// Where the current track was paused or playing.
+    pub(super) position: Option<SavedPosition>,
+    /// Keys this build does not know, saved as they were.
+    pub(super) unknown_keys: serde_json::Map<String, serde_json::Value>,
 }
+
+/// A position in the current track, with the stamp its file had then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SavedPosition {
+    pub(super) position: Duration,
+    /// The track's duration, if playback knew it then.
+    pub(super) duration: Option<Duration>,
+    pub(super) file: FileStamp,
+}
+
+/// The largest position in milliseconds that playback can seek to: a
+/// `GStreamer` seek takes a signed 64-bit count of nanoseconds.
+const MAX_POSITION_MS: u64 = i64::MAX.unsigned_abs() / 1_000_000;
+
+/// The keys of the session file that this build reads and writes. Others
+/// are kept as they were.
+const SESSION_KEYS: &[&str] = &[
+    "queue",
+    "queue_path_bytes",
+    "selected_queue_index",
+    "current_queue_index",
+    "current_path",
+    "current_path_bytes",
+    "library_expanded_keys",
+    "library_view_selection_key",
+    "library_view_anchor_key",
+    "library_view_anchor_offset",
+    "repeat_mode",
+    "shuffle",
+    "playback_position",
+];
 
 pub(super) fn config_base_path() -> Option<PathBuf> {
     crate::paths::config_dir()
@@ -54,12 +93,80 @@ pub(super) fn session_snapshot_for_state(state: &BridgeState) -> SessionSnapshot
         queue: state.queue.clone(),
         selected_queue_index: state.selected_queue_index,
         current_queue_index,
-        current_path,
         library_expanded_keys,
         library_view_selection_key: state.library_view_selection_key.clone(),
         library_view_anchor_key: state.library_view_anchor_key.clone(),
         library_view_anchor_offset: state.library_view_anchor_offset,
+        repeat_mode: state.playback.repeat_mode,
+        shuffle_enabled: state.playback.shuffle_enabled,
+        position: current_path.as_ref().and_then(|_| saved_position(state)),
+        unknown_keys: state.session_unknown_keys.clone(),
+        current_path,
     }
+}
+
+/// Where the current track is, while it plays or is paused away from its
+/// start. A stopped track starts again from its beginning.
+fn saved_position(state: &BridgeState) -> Option<SavedPosition> {
+    let playback = &state.playback;
+    if playback.state == PlaybackState::Stopped || playback.position.is_zero() {
+        return None;
+    }
+    Some(SavedPosition {
+        position: playback.position,
+        duration: Some(playback.duration).filter(|duration| !duration.is_zero()),
+        file: playback.current_file?,
+    })
+}
+
+/// How often the position of a track that plays is saved. After a pause,
+/// a stop, or a track change it is saved with the next periodic save, and
+/// quitting saves it too.
+pub(super) const PLAYING_POSITION_SAVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Whether `next` has to be saved over `saved`, the session saved last.
+/// While a track plays, its position changes all the time, so a change of
+/// the position alone is saved only `since_position_save` after the last
+/// save reached [`PLAYING_POSITION_SAVE_INTERVAL`].
+pub(super) fn session_save_due(
+    saved: Option<&SessionSnapshot>,
+    next: &SessionSnapshot,
+    playing: bool,
+    since_position_save: Duration,
+) -> bool {
+    let Some(saved) = saved else {
+        return true;
+    };
+    if saved.position != next.position
+        && (!playing || since_position_save >= PLAYING_POSITION_SAVE_INTERVAL)
+    {
+        return true;
+    }
+    let SessionSnapshot {
+        queue,
+        selected_queue_index,
+        current_queue_index,
+        current_path,
+        library_expanded_keys,
+        library_view_selection_key,
+        library_view_anchor_key,
+        library_view_anchor_offset,
+        repeat_mode,
+        shuffle_enabled,
+        position: _,
+        unknown_keys,
+    } = next;
+    saved.queue != *queue
+        || saved.selected_queue_index != *selected_queue_index
+        || saved.current_queue_index != *current_queue_index
+        || saved.current_path != *current_path
+        || saved.library_expanded_keys != *library_expanded_keys
+        || saved.library_view_selection_key != *library_view_selection_key
+        || saved.library_view_anchor_key != *library_view_anchor_key
+        || saved.library_view_anchor_offset.to_bits() != library_view_anchor_offset.to_bits()
+        || saved.repeat_mode != *repeat_mode
+        || saved.shuffle_enabled != *shuffle_enabled
+        || saved.unknown_keys != *unknown_keys
 }
 
 pub(super) fn resolve_session_current_index(
@@ -101,6 +208,12 @@ pub(super) fn apply_session_restore(
         .library_view_anchor_key
         .clone_from(&session.library_view_anchor_key);
     state.library_view_anchor_offset = session.library_view_anchor_offset;
+    state.session_unknown_keys.clone_from(&session.unknown_keys);
+    // Before the queue, which the engine orders for shuffle.
+    state.playback.repeat_mode = session.repeat_mode;
+    state.playback.shuffle_enabled = session.shuffle_enabled;
+    playback.command(PlaybackCommand::SetRepeatMode(session.repeat_mode));
+    playback.command(PlaybackCommand::SetShuffle(session.shuffle_enabled));
     if state.queue.is_empty() {
         return;
     }
@@ -109,6 +222,19 @@ pub(super) fn apply_session_restore(
         state.playback.current = state.queue.get(idx).cloned();
         state.playback.current_queue_index = Some(idx);
         playback.command(PlaybackCommand::PlayAt(idx));
+        // The position was saved for the track at `current_path`. The
+        // engine opens it paused there, unless its file has changed since;
+        // nothing starts playing.
+        if let Some(saved) = session
+            .position
+            .filter(|_| state.playback.current.is_some())
+            .filter(|_| state.playback.current == session.current_path)
+        {
+            playback.command(PlaybackCommand::Cue {
+                position: saved.position,
+                expected: saved.file,
+            });
+        }
     } else {
         state.playback.current_queue_index = None;
     }
@@ -196,6 +322,74 @@ pub(super) fn parse_session_text(text: &str) -> Option<SessionSnapshot> {
         library_view_selection_key,
         library_view_anchor_key,
         library_view_anchor_offset,
+        repeat_mode: value
+            .get("repeat_mode")
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_repeat_mode)
+            .unwrap_or_default(),
+        shuffle_enabled: value
+            .get("shuffle")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or_default(),
+        position: value
+            .get("playback_position")
+            .and_then(parse_saved_position),
+        unknown_keys: unknown_session_keys(&value),
+    })
+}
+
+/// The keys of a session file that this build does not know.
+fn unknown_session_keys(value: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    value
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .filter(|(key, _)| !SESSION_KEYS.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn repeat_mode_value(mode: RepeatMode) -> &'static str {
+    match mode {
+        RepeatMode::Off => "off",
+        RepeatMode::One => "one",
+        RepeatMode::All => "all",
+    }
+}
+
+fn parse_repeat_mode(value: &str) -> Option<RepeatMode> {
+    match value {
+        "off" => Some(RepeatMode::Off),
+        "one" => Some(RepeatMode::One),
+        "all" => Some(RepeatMode::All),
+        _ => None,
+    }
+}
+
+/// A position saved by [`format_session_text`]; `None` unless every part is
+/// there, and the position is past the start, before the track's end, and
+/// one that playback can seek to.
+fn parse_saved_position(value: &serde_json::Value) -> Option<SavedPosition> {
+    let number = |key: &str| value.get(key).and_then(serde_json::Value::as_u64);
+    let millis = number("ms").filter(|ms| (1..=MAX_POSITION_MS).contains(ms))?;
+    let position = Duration::from_millis(millis);
+    let duration = match value.get("duration_ms") {
+        None => None,
+        Some(duration) => Some(Duration::from_millis(duration.as_u64()?)),
+    };
+    if duration.is_some_and(|duration| position >= duration) {
+        return None;
+    }
+    Some(SavedPosition {
+        position,
+        duration,
+        file: FileStamp {
+            size: number("file_size")?,
+            modified_ns: number("file_modified_ns")?,
+        },
     })
 }
 
@@ -216,7 +410,21 @@ pub(super) fn format_session_text(session: &SessionSnapshot) -> String {
         "library_view_selection_key": &session.library_view_selection_key,
         "library_view_anchor_key": &session.library_view_anchor_key,
         "library_view_anchor_offset": session.library_view_anchor_offset,
+        "repeat_mode": repeat_mode_value(session.repeat_mode),
+        "shuffle": session.shuffle_enabled,
     });
+    if let Some(saved) = session.position {
+        payload["playback_position"] = json!({
+            "ms": u64::try_from(saved.position.as_millis()).unwrap_or(u64::MAX),
+            "file_size": saved.file.size,
+            "file_modified_ns": saved.file.modified_ns,
+        });
+        if let Some(duration) = saved.duration {
+            payload["playback_position"]["duration_ms"] = u64::try_from(duration.as_millis())
+                .unwrap_or(u64::MAX)
+                .into();
+        }
+    }
     // JSON strings hold only Unicode, so a path that is not UTF-8 is also
     // saved as its bytes. Builds that don't read them still find each entry
     // at its index.
@@ -231,6 +439,11 @@ pub(super) fn format_session_text(session: &SessionSnapshot) -> String {
     }
     if let Some(raw) = session.current_path.as_deref().and_then(path_to_hex) {
         payload["current_path_bytes"] = raw.into();
+    }
+    if let Some(object) = payload.as_object_mut() {
+        for (key, value) in &session.unknown_keys {
+            object.entry(key.clone()).or_insert_with(|| value.clone());
+        }
     }
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
 }
@@ -383,6 +596,7 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                 settings.integrations.lastfm_username = value.to_string();
             }
             "library_watch_enabled" => parse_flag(value, &mut settings.library_watch_enabled),
+            _ if super::window_layout::parse_setting(&mut settings.window, key, value) => {}
             // Kept for the build that wrote it.
             _ => settings.unknown_lines.push(line.to_string()),
         }
@@ -472,6 +686,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.integrations.lastfm_username,
         i32::from(settings.library_watch_enabled),
     );
+    super::window_layout::format_settings(&settings.window, &mut text);
     for line in &settings.unknown_lines {
         text.push_str(line);
         text.push('\n');
@@ -481,7 +696,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BridgeDisplaySettings, BridgeIntegrationSettings};
+    use super::super::{BridgeDisplaySettings, BridgeIntegrationSettings, WindowLayout};
     use super::*;
     use std::path::PathBuf;
 
@@ -528,6 +743,7 @@ mod tests {
                 lastfm_scrobbling_enabled: true,
                 lastfm_username: "tester".to_string(),
             },
+            window: WindowLayout::default(),
             unknown_lines: Vec::new(),
         };
         let text = format_settings_text(&settings);
@@ -589,6 +805,37 @@ mod tests {
         parse_settings_text(&mut reloaded, &saved);
         parse_settings_text(&mut reloaded, &saved);
         assert_eq!(format_settings_text(&reloaded), saved);
+    }
+
+    #[test]
+    fn the_window_layout_is_saved_with_the_settings_and_keeps_unknown_lines() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume_cubic=0.5\nfuture_key=1\n");
+        assert_eq!(settings.window, WindowLayout::default(), "older files");
+        settings.window = WindowLayout {
+            geometry: Some(super::super::WindowGeometry {
+                x: 10,
+                y: 20,
+                width: 1100,
+                height: 700,
+            }),
+            maximized: true,
+            sidebar_width_ratio: Some(0.2),
+            queue_height_ratio: Some(0.7),
+            visualization_mode: 1,
+            follow_current_track: false,
+        };
+        let text = format_settings_text(&settings);
+        assert!(
+            text.contains("\nwindow_geometry=10,20,1100,700\n"),
+            "{text}"
+        );
+        assert!(text.contains("\nfuture_key=1\n"), "{text}");
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(&mut parsed, &text);
+        assert_eq!(parsed.window, settings.window);
+        assert_eq!(parsed.unknown_lines, vec!["future_key=1".to_string()]);
+        assert_eq!(format_settings_text(&parsed), text);
     }
 
     #[test]
@@ -757,6 +1004,17 @@ mod tests {
             library_view_selection_key: "track|/music/Artist/Album/a.flac".to_string(),
             library_view_anchor_key: "album|/music|Artist|Album".to_string(),
             library_view_anchor_offset: 7.5,
+            repeat_mode: RepeatMode::One,
+            shuffle_enabled: true,
+            position: Some(SavedPosition {
+                position: Duration::from_millis(83_250),
+                duration: Some(Duration::from_millis(241_000)),
+                file: FileStamp {
+                    size: 31_337_000,
+                    modified_ns: 1_761_000_000_123_456_789,
+                },
+            }),
+            unknown_keys: serde_json::Map::new(),
         };
         let text = format_session_text(&session);
         let parsed = parse_session_text(&text).expect("parse session text");
@@ -829,6 +1087,303 @@ mod tests {
         let text = format_session_text(&utf8);
         assert!(!text.contains("_bytes"), "{text}");
         assert_eq!(parse_session_text(&text).expect("parse session text"), utf8);
+    }
+
+    fn stamp() -> FileStamp {
+        FileStamp {
+            size: 4_096,
+            modified_ns: 1_700_000_000_000_000_001,
+        }
+    }
+
+    fn at(millis: u64) -> Option<SavedPosition> {
+        Some(SavedPosition {
+            position: Duration::from_millis(millis),
+            duration: None,
+            file: stamp(),
+        })
+    }
+
+    #[test]
+    fn a_session_from_an_older_build_restores_repeat_and_shuffle_off_and_no_position() {
+        let text = r#"{"queue": ["/a.flac"], "current_queue_index": 0, "current_path": "/a.flac"}"#;
+        let parsed = parse_session_text(text).expect("parse session text");
+        assert_eq!(parsed.repeat_mode, RepeatMode::Off);
+        assert!(!parsed.shuffle_enabled);
+        assert_eq!(parsed.position, None);
+        assert!(parsed.unknown_keys.is_empty());
+    }
+
+    #[test]
+    fn corrupt_repeat_shuffle_and_position_values_are_ignored() {
+        for (repeat, shuffle, position) in [
+            (
+                r#""sometimes""#,
+                r#""yes""#,
+                r#"{"ms": -5, "file_size": 1, "file_modified_ns": 2}"#,
+            ),
+            ("3", "1", r#"{"ms": 1000, "file_size": 1}"#),
+            (
+                "null",
+                "null",
+                r#"{"ms": "1000", "file_size": 1, "file_modified_ns": 2}"#,
+            ),
+            (r#""ONE""#, "[]", r#"[1000, 1, 2]"#),
+            (
+                r#""all ""#,
+                "{}",
+                r#"{"ms": 0, "file_size": 1, "file_modified_ns": 2}"#,
+            ),
+            (
+                r#""one""#,
+                "true",
+                r#"{"ms": 1.5e3, "file_size": 1, "file_modified_ns": 2}"#,
+            ),
+        ] {
+            let text = format!(
+                r#"{{"queue": ["/a.flac"], "repeat_mode": {repeat}, "shuffle": {shuffle}, "playback_position": {position}}}"#
+            );
+            let parsed = parse_session_text(&text).expect("parse session text");
+            let expected_repeat = if repeat == r#""one""# {
+                RepeatMode::One
+            } else {
+                RepeatMode::Off
+            };
+            assert_eq!(parsed.repeat_mode, expected_repeat, "{text}");
+            assert_eq!(parsed.shuffle_enabled, shuffle == "true", "{text}");
+            assert_eq!(parsed.position, None, "{text}");
+            // A key this build knows is not kept as an unknown one.
+            assert!(parsed.unknown_keys.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn positions_playback_cannot_seek_to_are_not_restored() {
+        let parse = |position: &str| {
+            let text = format!(
+                r#"{{"queue": ["/a.flac"], "playback_position": {{{position}, "file_size": 1, "file_modified_ns": 2}}}}"#
+            );
+            parse_session_text(&text)
+                .expect("parse session text")
+                .position
+                .map(|saved| saved.position)
+        };
+        // Saturated, as a corrupt or hand-edited file may have it.
+        assert_eq!(parse(&format!(r#""ms": {}"#, u64::MAX)), None);
+        assert_eq!(parse(&format!(r#""ms": {}"#, MAX_POSITION_MS + 1)), None);
+        assert_eq!(
+            parse(&format!(r#""ms": {MAX_POSITION_MS}"#)),
+            Some(Duration::from_millis(MAX_POSITION_MS))
+        );
+        // At or past the end of the track.
+        assert_eq!(parse(r#""ms": 60000, "duration_ms": 60000"#), None);
+        assert_eq!(parse(r#""ms": 90000, "duration_ms": 60000"#), None);
+        assert_eq!(parse(r#""ms": 59000, "duration_ms": "long""#), None);
+        assert_eq!(
+            parse(r#""ms": 59000, "duration_ms": 60000"#),
+            Some(Duration::from_millis(59_000))
+        );
+    }
+
+    #[test]
+    fn session_keys_this_build_does_not_know_are_saved_as_they_were() {
+        let text = r#"{
+            "queue": ["/a.flac"],
+            "queue_path_bytes": {"0": "2f61"},
+            "current_path_bytes": "2f61",
+            "future_flag": true,
+            "future_settings": {"zoom": [1, 2, 3], "name": "x"},
+            "repeat_mode": "all"
+        }"#;
+        let mut session = parse_session_text(text).expect("parse session text");
+        assert_eq!(session.unknown_keys.len(), 2);
+        session.shuffle_enabled = true;
+
+        let saved = format_session_text(&session);
+        let value: serde_json::Value = serde_json::from_str(&saved).expect("json");
+        assert_eq!(value["future_flag"], serde_json::json!(true));
+        assert_eq!(
+            value["future_settings"],
+            serde_json::json!({"zoom": [1, 2, 3], "name": "x"})
+        );
+        assert_eq!(value["repeat_mode"], "all");
+        assert_eq!(value["shuffle"], true);
+        // Keys this build writes only when it needs them do not come back
+        // from the file read.
+        assert!(value.get("queue_path_bytes").is_none(), "{saved}");
+        assert!(value.get("current_path_bytes").is_none(), "{saved}");
+        // Loading and saving again keeps them once, unchanged.
+        let again = parse_session_text(&saved).expect("parse session text");
+        assert_eq!(again, session);
+        assert_eq!(format_session_text(&again), saved);
+    }
+
+    #[test]
+    fn the_position_alone_of_a_playing_track_is_saved_every_interval() {
+        let saved = SessionSnapshot {
+            queue: vec![p("/a.flac")],
+            current_queue_index: Some(0),
+            current_path: Some(p("/a.flac")),
+            position: at(10_000),
+            ..SessionSnapshot::default()
+        };
+        let later = SessionSnapshot {
+            position: at(12_000),
+            ..saved.clone()
+        };
+        let soon = Duration::from_secs(2);
+        assert!(session_save_due(None, &saved, true, soon));
+        assert!(!session_save_due(Some(&saved), &saved, false, soon));
+        // While it plays, only once the interval has passed.
+        assert!(!session_save_due(Some(&saved), &later, true, soon));
+        assert!(session_save_due(
+            Some(&saved),
+            &later,
+            true,
+            PLAYING_POSITION_SAVE_INTERVAL
+        ));
+        // Paused, seeked while paused, or stopped: at once.
+        assert!(session_save_due(Some(&saved), &later, false, soon));
+        let stopped = SessionSnapshot {
+            position: None,
+            ..saved.clone()
+        };
+        assert!(session_save_due(Some(&saved), &stopped, false, soon));
+        // Anything else is saved at once, also while playing.
+        for changed in [
+            SessionSnapshot {
+                repeat_mode: RepeatMode::All,
+                ..later.clone()
+            },
+            SessionSnapshot {
+                shuffle_enabled: true,
+                ..later.clone()
+            },
+            SessionSnapshot {
+                current_queue_index: None,
+                ..later.clone()
+            },
+            SessionSnapshot {
+                queue: vec![p("/a.flac"), p("/b.flac")],
+                ..later.clone()
+            },
+        ] {
+            assert!(session_save_due(Some(&saved), &changed, true, soon));
+        }
+    }
+
+    fn state_at(position: Duration, playback_state: PlaybackState) -> BridgeState {
+        BridgeState {
+            queue: vec![p("/a.flac"), p("/b.flac")],
+            playback: crate::playback::PlaybackSnapshot {
+                current: Some(p("/b.flac")),
+                current_queue_index: Some(1),
+                current_file: Some(stamp()),
+                position,
+                state: playback_state,
+                repeat_mode: RepeatMode::One,
+                shuffle_enabled: true,
+                ..crate::playback::PlaybackSnapshot::default()
+            },
+            ..BridgeState::default()
+        }
+    }
+
+    #[test]
+    fn the_session_saves_repeat_shuffle_and_the_position_of_a_paused_or_playing_track() {
+        let secs = Duration::from_secs;
+        for playback_state in [PlaybackState::Playing, PlaybackState::Paused] {
+            let session = session_snapshot_for_state(&state_at(secs(42), playback_state));
+            assert_eq!(session.repeat_mode, RepeatMode::One);
+            assert!(session.shuffle_enabled);
+            assert_eq!(session.position, at(42_000));
+        }
+        // A stopped track starts from its beginning, and so does one at it.
+        let stopped = session_snapshot_for_state(&state_at(secs(42), PlaybackState::Stopped));
+        assert_eq!(stopped.position, None);
+        let at_start = session_snapshot_for_state(&state_at(secs(0), PlaybackState::Paused));
+        assert_eq!(at_start.position, None);
+        // Without the stamp of its file, the position could not be checked.
+        let mut unstamped = state_at(secs(42), PlaybackState::Paused);
+        unstamped.playback.current_file = None;
+        assert_eq!(session_snapshot_for_state(&unstamped).position, None);
+        // Nor without its track in the queue.
+        let mut gone = state_at(secs(42), PlaybackState::Paused);
+        gone.queue.pop();
+        assert_eq!(session_snapshot_for_state(&gone).position, None);
+    }
+
+    /// The commands that restoring `session` sends to the engine.
+    fn restore_commands(session: &SessionSnapshot) -> (BridgeState, Vec<PlaybackCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let playback = PlaybackEngine::from_command_sender(tx);
+        let mut state = BridgeState::default();
+        apply_session_restore(&mut state, &playback, Some(session));
+        (state, rx.try_iter().collect())
+    }
+
+    #[test]
+    fn a_restored_session_sets_repeat_and_shuffle_and_cues_the_track_without_playing() {
+        let session = SessionSnapshot {
+            queue: vec![p("/a.flac"), p("/b.flac")],
+            current_queue_index: Some(1),
+            current_path: Some(p("/b.flac")),
+            repeat_mode: RepeatMode::All,
+            shuffle_enabled: true,
+            position: at(61_500),
+            ..SessionSnapshot::default()
+        };
+        let (state, commands) = restore_commands(&session);
+        assert_eq!(state.playback.repeat_mode, RepeatMode::All);
+        assert!(state.playback.shuffle_enabled);
+        let summary: Vec<String> = commands.iter().map(|c| format!("{c:?}")).collect();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [
+                    PlaybackCommand::SetRepeatMode(RepeatMode::All),
+                    PlaybackCommand::SetShuffle(true),
+                    PlaybackCommand::LoadQueue(_),
+                    PlaybackCommand::PlayAt(1),
+                    PlaybackCommand::Cue { position, expected },
+                ] if *position == Duration::from_millis(61_500) && *expected == stamp()
+            ),
+            "{summary:?}"
+        );
+        assert!(!commands
+            .iter()
+            .any(|command| matches!(command, PlaybackCommand::Play)));
+
+        // Repeat and shuffle come back with an empty queue too.
+        let (state, commands) = restore_commands(&SessionSnapshot {
+            repeat_mode: RepeatMode::One,
+            ..SessionSnapshot::default()
+        });
+        assert_eq!(state.playback.repeat_mode, RepeatMode::One);
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                PlaybackCommand::SetRepeatMode(RepeatMode::One),
+                PlaybackCommand::SetShuffle(false)
+            ]
+        ));
+    }
+
+    #[test]
+    fn a_position_saved_for_another_track_is_not_restored() {
+        // The saved row holds another file than the position was saved for.
+        let session = SessionSnapshot {
+            queue: vec![p("/a.flac"), p("/b.flac")],
+            current_queue_index: Some(0),
+            current_path: Some(p("/b.flac")),
+            position: at(61_500),
+            ..SessionSnapshot::default()
+        };
+        let (_, commands) = restore_commands(&session);
+        assert!(matches!(commands.last(), Some(PlaybackCommand::PlayAt(0))));
+        assert!(!commands
+            .iter()
+            .any(|command| matches!(command, PlaybackCommand::Cue { .. })));
     }
 
     #[test]

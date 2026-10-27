@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender};
 
@@ -46,6 +46,41 @@ pub fn volume_gain_to_level(gain: f32) -> f32 {
     gain.clamp(0.0, 1.0).cbrt()
 }
 
+/// The size and modification time of a file on disk. A position saved in
+/// a track still points at the same audio while these stay the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    pub size: u64,
+    /// Nanoseconds since the Unix epoch.
+    pub modified_ns: u64,
+}
+
+impl FileStamp {
+    /// Why the file at `path` has no stamp, for the user.
+    #[must_use]
+    pub fn missing_detail(path: &Path) -> String {
+        match std::fs::metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                "the file is gone, or its drive is not connected".to_string()
+            }
+            Err(error) => format!("the file cannot be read ({error})"),
+            Ok(_) => "the file could not be read".to_string(),
+        }
+    }
+
+    /// The stamp of the file at `path` now, or `None` when there is none or
+    /// it has no modification time.
+    #[must_use]
+    pub fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        Some(Self {
+            size: metadata.len(),
+            modified_ns: u64::try_from(modified.as_nanos()).ok()?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlaybackSnapshot {
     pub state: PlaybackState,
@@ -61,6 +96,8 @@ pub struct PlaybackSnapshot {
     pub position_advancing: bool,
     pub duration: Duration,
     pub current: Option<PathBuf>,
+    /// The stamp of `current`'s file when it became the current track.
+    pub current_file: Option<FileStamp>,
     pub current_queue_index: Option<usize>,
     pub current_bitrate_kbps: Option<u32>,
     /// Volume level requested by the user; see [`volume_level_to_gain`].
@@ -139,6 +176,16 @@ pub enum PlaybackCommand {
     /// stopped track from its beginning. A burst of seeks lands only at
     /// the last target.
     Seek(Duration),
+    /// Open the current track, which is stopped, paused at `position`, as
+    /// a restored session does; the position is applied like a seek but
+    /// takes no seek serial. Ignored unless the current track is stopped
+    /// and its file still has the stamp `expected`: a file that changed
+    /// since may not have the same audio there, so it stays stopped at its
+    /// start.
+    Cue {
+        position: Duration,
+        expected: FileStamp,
+    },
     SetVolume(f32),
     SetRepeatMode(RepeatMode),
     SetShuffle(bool),
@@ -166,7 +213,8 @@ pub enum PlaybackEvent {
         track_token: u64,
     },
     /// A seek was applied; `position` is where it landed. Seeks that are
-    /// refused, fail, or are superseded before they land send none.
+    /// refused, fail, or are superseded before they land send none. A
+    /// [`PlaybackCommand::Cue`] that lands sends one too.
     Seeked {
         position: Duration,
     },
@@ -192,6 +240,9 @@ pub enum PlaybackErrorOutcome {
     /// stopped reading it, behind a read or in a close that has not
     /// returned, so it stays open.
     NotReleased,
+    /// A [`PlaybackCommand::Cue`] found no file to open, so the track stays
+    /// stopped at its start.
+    NotResumed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +276,14 @@ impl PlaybackError {
             PlaybackErrorOutcome::EngineUnavailable => {
                 format!("Playback is unavailable: {detail}.")
             }
+            PlaybackErrorOutcome::NotResumed => match self.path.as_deref() {
+                // The whole path, which names the drive that may be gone.
+                Some(path) => format!(
+                    "Couldn't resume \u{201c}{}\u{201d} where it was left: {detail}.",
+                    path.display()
+                ),
+                None => format!("Couldn't resume the last track where it was left: {detail}."),
+            },
             // The whole path, which names the drive or share that hangs.
             PlaybackErrorOutcome::NotReleased => match self.path.as_deref() {
                 Some(path) => format!(
@@ -508,6 +567,15 @@ mod shared_tests {
             "Can't release \u{201c}/mnt/share/b.flac\u{201d}: reading or closing it has not \
              finished for 15 s."
         );
+        assert_eq!(
+            error(
+                Some("/media/usb/b.flac"),
+                "the file is gone, or its drive is not connected",
+                PlaybackErrorOutcome::NotResumed
+            ),
+            "Couldn't resume \u{201c}/media/usb/b.flac\u{201d} where it was left: the file is \
+             gone, or its drive is not connected."
+        );
     }
 
     #[test]
@@ -720,6 +788,64 @@ mod tests {
             super::backend::spawn_engine_with_clock(analysis_tx, event_tx, exit_tx, &clock)
         });
         (engine, rx, clock)
+    }
+
+    #[test]
+    fn a_cue_pauses_the_stopped_track_at_its_position_unless_its_file_changed() {
+        let dir = std::env::temp_dir().join(format!("ferrous-mock-cue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let track = dir.join("a.flac");
+        std::fs::write(&track, b"audio").unwrap();
+        let stamp = super::FileStamp::of(&track).expect("stamp");
+
+        let (engine, rx) = make_test_engine();
+        engine.command(PlaybackCommand::LoadQueue(vec![track.clone()]));
+        engine.command(PlaybackCommand::Cue {
+            position: Duration::from_secs(42),
+            expected: super::FileStamp {
+                modified_ns: stamp.modified_ns + 1,
+                ..stamp
+            },
+        });
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("snapshot");
+        assert_eq!(snapshot.current_file, Some(stamp));
+        assert_eq!(snapshot.state, PlaybackState::Stopped);
+        assert_eq!(snapshot.position, Duration::ZERO);
+
+        engine.command(PlaybackCommand::Cue {
+            position: Duration::from_secs(42),
+            expected: stamp,
+        });
+        assert_eq!(
+            recv_seeked_event(&rx, Duration::from_millis(100)),
+            Some(Duration::from_secs(42))
+        );
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("snapshot");
+        assert_eq!(snapshot.state, PlaybackState::Paused);
+        assert_eq!(snapshot.position, Duration::from_secs(42));
+        assert_eq!(snapshot.current_queue_index, Some(0));
+
+        // A file that is gone is reported, and its track stays stopped.
+        let (engine, rx) = make_test_engine();
+        let gone = dir.join("gone.flac");
+        engine.command(PlaybackCommand::LoadQueue(vec![gone.clone()]));
+        engine.command(PlaybackCommand::Cue {
+            position: Duration::from_secs(42),
+            expected: stamp,
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut error = None;
+        while error.is_none() && Instant::now() < deadline {
+            if let Ok(PlaybackEvent::Error(reported)) = rx.recv_timeout(Duration::from_millis(10)) {
+                error = Some(reported);
+            }
+        }
+        let error = error.expect("the missing file is reported");
+        assert_eq!(error.path.as_deref(), Some(gone.as_path()));
+        assert_eq!(error.outcome, super::PlaybackErrorOutcome::NotResumed);
+        let snapshot = recv_snapshot(&rx, Duration::from_millis(100)).expect("snapshot");
+        assert_eq!(snapshot.state, PlaybackState::Stopped);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
