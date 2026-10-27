@@ -30,11 +30,10 @@
 #include "../src/WaveformEditorItem.h"
 #undef private
 #include "../src/FerrousBridgeFfi.h"
-#include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
-#include "../src/SpectrogramItem.h"
-#include "../src/WaveformItem.h"
+#include "../src/QmlTypes.h"
+#include "TestPlatform.h"
 
 namespace {
 
@@ -169,7 +168,7 @@ QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &li
 
 } // namespace
 
-class I18nTest : public QObject {
+class TranslationTest : public QObject {
     Q_OBJECT
 
 private slots:
@@ -187,9 +186,10 @@ private slots:
     void drawnUnitsAreTranslated();
     void mainWindowShowsTranslatedText();
     void tagEditorTellsMixedValuesByAFlag();
+    void drawsOffscreenUnlessAPlatformIsChosen();
 };
 
-void I18nTest::initTestCase() {
+void TranslationTest::initTestCase() {
     previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
     // Gettext ignores the language KI18n asks for under the C locale.
     const char *messages = std::setlocale(LC_MESSAGES, nullptr);
@@ -199,30 +199,27 @@ void I18nTest::initTestCase() {
     KLocalizedString::addDomainLocaleDir(
         FerrousLocalization::kTranslationDomain, QStringLiteral(FERROUS_PSEUDO_LOCALE_DIR));
     KLocalizedString::setLanguages({QStringLiteral("x-test")});
+    // As the app does; registerFerrousQmlTypes() registers the I18n singleton.
     FerrousLocalization::setUpApplicationDomain();
-    FerrousLocalization::registerQmlTypes();
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-    qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
-    qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
+    registerFerrousQmlTypes();
 }
 
-void I18nTest::init() {
+void TranslationTest::init() {
     takeCapturedMessagesText();
 }
 
-void I18nTest::cleanup() {
+void TranslationTest::cleanup() {
     KLocalizedString::setLanguages({QStringLiteral("x-test")});
     const QString warnings = takeCapturedMessagesText();
     QVERIFY2(warnings.isEmpty(), qPrintable(warnings));
 }
 
-void I18nTest::cleanupTestCase() {
+void TranslationTest::cleanupTestCase() {
     qInstallMessageHandler(previousMessageHandler());
     previousMessageHandler() = nullptr;
 }
 
-void I18nTest::cppMessagesComeFromTheCatalog() {
+void TranslationTest::cppMessagesComeFromTheCatalog() {
     QCOMPARE(i18nc("@info:status", "Loading tags..."), pseudo(QStringLiteral("Loading tags...")));
 
     // A status the tag editor makes, through the catalog of its domain.
@@ -237,7 +234,7 @@ void I18nTest::cppMessagesComeFromTheCatalog() {
     QTRY_VERIFY(!editor.loading());
 }
 
-void I18nTest::qmlMessagesComeFromTheCatalog() {
+void TranslationTest::qmlMessagesComeFromTheCatalog() {
     QQmlEngine engine;
     QCOMPARE(evaluateQml(engine, {}, QStringLiteral(R"qml(I18n.i18nc("@title:window", "Edit Tags"))qml")),
              pseudo(QStringLiteral("Edit Tags")));
@@ -249,7 +246,7 @@ void I18nTest::qmlMessagesComeFromTheCatalog() {
              QStringLiteral("Not in the template"));
 }
 
-void I18nTest::pluralsFollowTheCount() {
+void TranslationTest::pluralsFollowTheCount() {
     // The queue summary of `count` tracks, as the status bar shows it.
     const auto queueSummary = [](QQmlEngine &engine, int count) {
         return evaluateQml(
@@ -278,7 +275,7 @@ void I18nTest::pluralsFollowTheCount() {
     QCOMPARE(i18ncp("@info:status", "Saved %1 file.", "Saved %1 files.", 3), QStringLiteral("Saved 3 files."));
 }
 
-void I18nTest::javaScriptLibrariesTranslate() {
+void TranslationTest::javaScriptLibrariesTranslate() {
     QQmlEngine engine;
     const QString errorUtils = QStringLiteral(R"qml(import "logic/ErrorUtils.js" as ErrorUtils)qml");
     QCOMPARE(evaluateQml(engine, errorUtils, QStringLiteral("ErrorUtils.categoryLabel(ErrorUtils.CategoryTags)")),
@@ -291,7 +288,7 @@ void I18nTest::javaScriptLibrariesTranslate() {
              pseudo(QStringLiteral("Repeat one")));
 }
 
-void I18nTest::channelLayoutIconFollowsTheLayoutNotItsText() {
+void TranslationTest::channelLayoutIconFollowsTheLayoutNotItsText() {
     BridgeClient client;
     isolateBridgeClient(client);
 
@@ -308,7 +305,7 @@ void I18nTest::channelLayoutIconFollowsTheLayoutNotItsText() {
     QVERIFY(client.currentTrackChannelLayoutIconKey().isEmpty());
 }
 
-void I18nTest::albumArtRefusalsAreTranslated() {
+void TranslationTest::albumArtRefusalsAreTranslated() {
     BridgeClient client;
     isolateBridgeClient(client);
     QSignalSpy errors(&client, &BridgeClient::bridgeError);
@@ -332,7 +329,7 @@ void I18nTest::albumArtRefusalsAreTranslated() {
                                    "the artwork search started.")));
 }
 
-void I18nTest::backendStopWithoutAReasonIsTranslated() {
+void TranslationTest::backendStopWithoutAReasonIsTranslated() {
     BridgeClient client;
     isolateBridgeClient(client);
     client.m_bridgeShutdownRequested = false;
@@ -343,14 +340,14 @@ void I18nTest::backendStopWithoutAReasonIsTranslated() {
              pseudo(QStringLiteral("The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.")));
 }
 
-void I18nTest::drawnUnitsAreTranslated() {
+void TranslationTest::drawnUnitsAreTranslated() {
     WaveformEditorItem item;
     QCOMPARE(item.formatViewportDuration(0.834), pseudo(QStringLiteral("834 ms")));
     // Durations of a second and more have no unit to translate.
     QCOMPARE(item.formatViewportDuration(245.2), QStringLiteral("04:05"));
 }
 
-void I18nTest::mainWindowShowsTranslatedText() {
+void TranslationTest::mainWindowShowsTranslatedText() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
@@ -381,7 +378,7 @@ void I18nTest::mainWindowShowsTranslatedText() {
     QCOMPARE(summary->property("text").toString(), pseudo(QStringLiteral("2 tracks (4:00)")));
 }
 
-void I18nTest::tagEditorTellsMixedValuesByAFlag() {
+void TranslationTest::tagEditorTellsMixedValuesByAFlag() {
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
                                    const TagEditorController::RenameGate &) {
@@ -418,7 +415,13 @@ void I18nTest::tagEditorTellsMixedValuesByAFlag() {
     QTRY_VERIFY(!dialog->property("visible").toBool());
 }
 
+void TranslationTest::drawsOffscreenUnlessAPlatformIsChosen() {
+    verifyOffscreenPlatformByDefault();
+}
+
 int main(int argc, char **argv) {
+    useOffscreenPlatformByDefault(argc, argv);
+    disableGpuShaderCaches();
     // Main.qml keeps its settings and caches here, away from the user's.
     QTemporaryDir testStorage;
     if (!testStorage.isValid()) return 1;
@@ -433,7 +436,7 @@ int main(int argc, char **argv) {
     qputenv("LC_ALL", "en_US.UTF-8");
 
     QApplication app(argc, argv);
-    I18nTest test;
+    TranslationTest test;
     return QTest::qExec(&test, argc, argv);
 }
 
