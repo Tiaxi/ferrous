@@ -168,7 +168,7 @@ To write the translation template, `po/ferrous.pot`, which is not committed:
 cmake --build ui/build --target extract-messages
 ```
 
-The script runs `ui/Messages.sh`, the extraction script that KDE's translation tooling looks for, with `xgettext` and KI18n's keywords. The `ferrous_translation_template` test checks the template, and `ferrous_i18n_tests` runs the interface under `x-test`, a pseudo-translation made at build time that wraps every message in `⟦` and `⟧`.
+The script runs `ui/Messages.sh`, the extraction script that KDE's translation tooling looks for, with `xgettext` and KI18n's keywords. The `ferrous_translation_template` test checks the template, and `ferrous_i18n_tests` runs the interface under `x-test`, a pseudo-translation made at build time that wraps every message in `⟦` and `⟧`. Gettext translates nothing under the C locale, so that test runs in `en_US.UTF-8` (`glibc-langpack-en` on Fedora).
 
 ## Packaging
 

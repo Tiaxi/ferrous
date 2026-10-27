@@ -214,6 +214,7 @@ jobs:
             kf6-kirigami-devel \
             kf6-ki18n-devel \
             gettext \
+            glibc-langpack-en \
             xorg-x11-server-Xvfb \
             mesa-dri-drivers
 

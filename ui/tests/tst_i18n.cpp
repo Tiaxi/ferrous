@@ -20,6 +20,8 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <clocale>
+#include <cstring>
 #include <memory>
 
 #define private public
@@ -186,6 +188,11 @@ private slots:
 
 void I18nTest::initTestCase() {
     previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
+    // Gettext ignores the language KI18n asks for under the C locale.
+    const char *messages = std::setlocale(LC_MESSAGES, nullptr);
+    QVERIFY2(messages != nullptr && std::strcmp(messages, "C") != 0
+                 && std::strcmp(messages, "POSIX") != 0 && std::strcmp(messages, "C.UTF-8") != 0,
+             "The en_US.UTF-8 locale is missing; on Fedora, install glibc-langpack-en.");
     KLocalizedString::addDomainLocaleDir(
         FerrousLocalization::kTranslationDomain, QStringLiteral(FERROUS_PSEUDO_LOCALE_DIR));
     KLocalizedString::setLanguages({QStringLiteral("x-test")});
@@ -376,6 +383,9 @@ int main(int argc, char **argv) {
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
     qputenv("FERROUS_GST_OUTPUT_SINK", "fakesink");
+    // A locale other than C, in which gettext uses the catalog of the language
+    // that KI18n asks for; QApplication sets it up from the environment.
+    qputenv("LC_ALL", "en_US.UTF-8");
 
     QApplication app(argc, argv);
     I18nTest test;

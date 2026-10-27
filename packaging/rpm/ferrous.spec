@@ -28,6 +28,8 @@ BuildRequires:  kf6-kirigami-devel
 # and make a pseudo-translation with GNU gettext.
 BuildRequires:  kf6-ki18n-devel
 BuildRequires:  gettext
+# The i18n tests run in en_US.UTF-8: under the C locale, gettext translates nothing.
+BuildRequires:  glibc-langpack-en
 # The Secret Service keyring links the system libdbus.
 BuildRequires:  pkgconfig(dbus-1)
 BuildRequires:  pkgconfig(gio-2.0)
