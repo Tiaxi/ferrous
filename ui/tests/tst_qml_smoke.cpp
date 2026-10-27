@@ -6333,6 +6333,8 @@ void QmlSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
     }
     auto *item = new WaveformEditorItem(scale != 1.0 ? window.contentItem() : nullptr);
     std::unique_ptr<WaveformEditorItem> unparented(scale != 1.0 ? nullptr : item);
+    // The pointer is the test's, not the window's.
+    item->setAcceptHoverEvents(false);
     QCOMPARE(item->renderScaleLocked(), scale);
     item->setWidth(320);
     item->setHeight(120);
@@ -12404,6 +12406,8 @@ void QmlSmokeTest::spectrogramClickToSeekMatchesTheHeldView() {
     }
     QCOMPARE(window.effectiveDevicePixelRatio(), scale);
     SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    // The pointer is the test's, not the window's.
+    item.setAcceptHoverEvents(false);
     item.setWidth(200);
     item.setHeight(100);
     item.setDisplayMode(1);
