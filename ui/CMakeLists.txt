@@ -273,6 +273,14 @@ if(BUILD_TESTING)
             COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/check-release-version.sh"
                 "v${FERROUS_APP_VERSION}"
         )
+        # The other repository scripts, run on scratch copies and stand-in
+        # commands.
+        foreach(_script_test IN ITEMS bump-version install-rpm run-ui-cleanup)
+            add_test(NAME ferrous_script_${_script_test}
+                COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/tests/${_script_test}-test.sh"
+                    "${CMAKE_CURRENT_BINARY_DIR}/script-tests/${_script_test}"
+            )
+        endforeach()
     endif()
     find_program(FERROUS_APPSTREAMCLI appstreamcli)
     if(FERROUS_APPSTREAMCLI)
@@ -287,14 +295,6 @@ if(BUILD_TESTING)
             COMMAND "${FERROUS_DESKTOP_FILE_VALIDATE}" "${CMAKE_CURRENT_SOURCE_DIR}/ferrous.desktop"
         )
     endif()
-    # The repository scripts, run on scratch copies and stand-in commands.
-    find_program(FERROUS_BASH bash REQUIRED)
-    foreach(_script_test IN ITEMS bump-version install-rpm run-ui-cleanup)
-        add_test(NAME ferrous_script_${_script_test}
-            COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/tests/${_script_test}-test.sh"
-                "${CMAKE_CURRENT_BINARY_DIR}/script-tests/${_script_test}"
-        )
-    endforeach()
 
     qt_add_executable(ferrous_playback_clock_tests
         tests/tst_playback_clock.cpp
