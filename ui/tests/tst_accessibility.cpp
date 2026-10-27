@@ -15,6 +15,8 @@
 #include <QQmlContext>
 #include <QQmlExpression>
 #include <QQuickItem>
+#include <QQuickRenderControl>
+#include <QQuickRenderTarget>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QTemporaryDir>
@@ -270,6 +272,7 @@ private slots:
     void seekDragOutlastsTheFocus();
     void seekClickSeeksOnce();
     void playbackMovesTheSeekBarByWholePixels();
+    void seekBarStepsByTheWindowsDevicePixels();
     void transportBarHasNoWarnings();
     void transportBarHasNoWarningsUnderTheBasicStyle();
     void clicksLeaveSpaceToPlayOrPause();
@@ -1162,6 +1165,68 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     QVERIFY(std::abs(progress->width()
                      - progress->parentItem()->width() * (endSeconds + 10.0) / durationSeconds)
             <= devicePixel);
+}
+
+void AccessibilityTest::seekBarStepsByTheWindowsDevicePixels() {
+    // A window drawn at 1.25 device pixels to a logical one on a screen at
+    // one, as fractional scaling can make it.
+    QQuickRenderControl control;
+    QQuickWindow window(&control);
+    QImage canvas(16, 16, QImage::Format_ARGB32_Premultiplied);
+    QQuickRenderTarget renderTarget = QQuickRenderTarget::fromPaintDevice(&canvas);
+    renderTarget.setDevicePixelRatio(1.25);
+    window.setRenderTarget(renderTarget);
+    QCOMPARE(window.effectiveDevicePixelRatio(), 1.25);
+    QCOMPARE(window.screen()->devicePixelRatio(), 1.0);
+
+    // The transport harness as an item of that window.
+    QQmlEngine engine;
+    QString errorText;
+    QByteArray source = transportHarnessQml();
+    QVERIFY(source.contains("ApplicationWindow {"));
+    source.replace("ApplicationWindow {", "Control {");
+    QScopedPointer<QObject> root(createQml(engine, source, &errorText));
+    auto *harness = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY2(harness != nullptr, qPrintable(errorText));
+    harness->setParentItem(window.contentItem());
+    control.polishItems();
+    QQuickItem *progress = itemsNamed(harness, QStringLiteral("seekProgress")).value(0);
+    QVERIFY(progress != nullptr && progress->parentItem()->width() > 500);
+
+    // Each step the bar takes in five seconds of playback is one of the
+    // window's device pixels.
+    const auto checkSteps = [&](double fromSeconds) {
+        root->setProperty("positionSeconds", fromSeconds);
+        QList<qreal> steps;
+        qreal width = progress->width();
+        for (int step = 1; step <= 250; ++step) {
+            root->setProperty("positionSeconds", fromSeconds + step / 50.0);
+            if (progress->width() != width) {
+                steps.push_back((progress->width() - width) * window.effectiveDevicePixelRatio());
+                width = progress->width();
+            }
+        }
+        QStringList stepsText;
+        for (const qreal step : steps) {
+            stepsText.push_back(QString::number(step));
+        }
+        QVERIFY2(steps.size() >= 10 && std::all_of(steps.begin(), steps.end(),
+                     [](qreal step) { return std::abs(step - 1.0) < 0.01; }),
+                 qPrintable(QStringLiteral("at %1: %2")
+                                .arg(window.effectiveDevicePixelRatio())
+                                .arg(stepsText.join(QStringLiteral(", ")))));
+    };
+    checkSteps(50.0);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    // The window's ratio changes, as when it moves to another screen.
+    renderTarget.setDevicePixelRatio(2.0);
+    window.setRenderTarget(renderTarget);
+    QEvent changed(QEvent::DevicePixelRatioChange);
+    QCoreApplication::sendEvent(&window, &changed);
+    checkSteps(60.0);
 }
 
 void AccessibilityTest::transportBarHasNoWarnings() {
