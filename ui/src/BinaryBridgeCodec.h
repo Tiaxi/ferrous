@@ -395,11 +395,15 @@ struct DecodedLastFm {
     QString authUrl;
 };
 
+// Mirrors QueueUndoKind in src/frontend_bridge/queue_undo.rs, whose tests
+// compare the two. The decoder refuses a kind past QueueUndoLast.
 enum QueueUndoKind : quint8 {
     QueueUndoNone = 0,
     QueueUndoCleared = 1,
     QueueUndoRemoved = 2,
     QueueUndoReplaced = 3,
+    QueueUndoMoved = 4,
+    QueueUndoLast = QueueUndoMoved,
 };
 
 struct DecodedQueueUndo {

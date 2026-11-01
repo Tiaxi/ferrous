@@ -23,6 +23,9 @@ pub(super) const STALE_UNDO_MESSAGE: &str =
 /// selects only the restored selection.
 const MAX_RESTORED_RANGES: usize = 128;
 
+/// Sent to the UI as its value. `QueueUndoKind` in
+/// `ui/src/BinaryBridgeCodec.h` mirrors it, and refuses a packet with a kind
+/// it does not know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueUndoKind {
     Cleared = 1,
@@ -196,6 +199,36 @@ mod tests {
             selected: Some(0),
             current: None,
         }
+    }
+
+    /// The `Name = value` lines of the enum that `declaration` opens.
+    fn enum_values<'a>(source: &'a str, declaration: &str) -> Vec<(&'a str, u8)> {
+        let (_, body) = source.split_once(declaration).expect("the enum");
+        let (body, _) = body.split_once('}').expect("the end of the enum");
+        body.lines()
+            .filter_map(|line| line.trim().trim_end_matches(',').split_once(" = "))
+            .filter_map(|(name, value)| Some((name, value.parse().ok()?)))
+            .collect()
+    }
+
+    #[test]
+    fn the_kinds_are_the_ones_the_qt_decoder_knows() {
+        let header = include_str!("../../ui/src/BinaryBridgeCodec.h");
+        let qt: Vec<(&str, u8)> = enum_values(header, "enum QueueUndoKind : quint8 {")
+            .into_iter()
+            .map(|(name, value)| (name.strip_prefix("QueueUndo").expect("the prefix"), value))
+            .collect();
+        let mut kinds = vec![("None", 0)];
+        kinds.extend(enum_values(
+            include_str!("queue_undo.rs"),
+            "pub enum QueueUndoKind {",
+        ));
+        assert_eq!(qt, kinds);
+        let (last, _) = kinds.last().expect("the kinds");
+        assert!(
+            header.contains(&format!("QueueUndoLast = QueueUndo{last},")),
+            "the decoder must accept {last}"
+        );
     }
 
     #[test]

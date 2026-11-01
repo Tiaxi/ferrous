@@ -251,6 +251,7 @@ private slots:
     void tagEditorPreviewsRenamesWithoutRenaming();
     void aRenamePreviewOfRowsLoadedAgainIsOutOfDate();
     void anUndoOfAClearWhileStoppedKeepsTheStoppedRowOfARepeatedTrack();
+    void movedRowsGoBackThroughTheBackendAndAreSelected();
     void artworkGoesToTheTrackItWasSearchedForAfterPlaybackMovesOn();
     void artworkForATrackMovedSinceTheSearchIsRefusedAndWritesNothing();
     void aConfirmedRenameRunsOnlyThePreviewedRenames();
@@ -2137,10 +2138,19 @@ void BridgeClientTest::queueUndoSectionIsDecoded() {
     QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(packet(QByteArray(29, '\0')), &decoded, &error));
     QCOMPARE(decoded.queueUndo.offerId, quint64(0));
 
+    // A move is the last kind the backend sends, as
+    // queue_undo_kinds_keep_their_values_on_the_wire encodes it.
+    QByteArray moved = section;
+    moved[8] = 4;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet(moved), &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.queueUndo.kind, int(BinaryBridgeCodec::QueueUndoMoved));
+    QCOMPARE(int(BinaryBridgeCodec::QueueUndoLast), 4);
+
     // An unknown kind, a range count past the payload, and trailing bytes
     // are refused.
     QByteArray unknownKind = section;
-    unknownKind[8] = 4;
+    unknownKind[8] = 5;
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(unknownKind), &decoded, &error));
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(section.left(section.size() - 4)),
                                                      &decoded, &error));
@@ -2458,6 +2468,69 @@ void BridgeClientTest::anUndoOfAClearWhileStoppedKeepsTheStoppedRowOfARepeatedTr
                               qPrintable(QString::number(bridge.playingQueueIndex()) + QLatin1Char(' ')
                                          + bridge.currentTrackPath()),
                               10000);
+    QCOMPARE(bridge.playbackState(), QStringLiteral("Stopped"));
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
+
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    isolateBridgeClient(bridge);
+}
+
+void BridgeClientTest::movedRowsGoBackThroughTheBackendAndAreSelected() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (const char *name : {"a.wav", "b.wav", "c.wav", "d.wav"}) {
+        paths.push_back(base + QLatin1Char('/') + QLatin1String(name));
+        QVERIFY(writeTestWav(paths.back(), 2000));
+    }
+    // The GStreamer backend, with the fake output CTest sets up. Nothing
+    // plays, as in the test above: the current track stays while stopped.
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    QSignalSpy errors(&bridge, &BridgeClient::bridgeError);
+    QSignalSpy restored(&bridge, &BridgeClient::queueUndoRestored);
+    const auto rows = [&bridge]() {
+        QStringList out;
+        for (int row = 0; row < bridge.queueLength(); ++row) {
+            out.push_back(bridge.queuePathAt(row));
+        }
+        return out;
+    };
+    bridge.clearQueue();
+    bridge.appendPaths(paths);
+    // This queue, not one an earlier test left in the saved session.
+    QTRY_VERIFY_WITH_TIMEOUT(rows() == paths && bridge.currentTrackPath() == paths[0], 10000);
+    // The backend has the selection before the rows move.
+    bridge.selectQueueIndex(1);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.m_pendingQueueSelection, -1, 10000);
+    QCOMPARE(bridge.selectedQueueIndex(), 1);
+
+    // The selected B and the current A follow their rows.
+    bridge.moveQueueRows(QVariantList{0, 2}, 4);
+    const QStringList moved{paths[1], paths[3], paths[0], paths[2]};
+    QTRY_VERIFY2_WITH_TIMEOUT(rows() == moved
+                                  && bridge.queueUndoKind() == BinaryBridgeCodec::QueueUndoMoved,
+                              qPrintable(errors.isEmpty() ? rows().join(QLatin1Char(' '))
+                                                          : errors.first().first().toString()),
+                              10000);
+    QVERIFY(bridge.queueUndoId() > 0);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.selectedQueueIndex(), 0, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.playingQueueIndex(), 2, 10000);
+
+    bridge.undoQueueChange();
+    QTRY_COMPARE_WITH_TIMEOUT(rows(), paths, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(restored.count(), 1, 10000);
+    QCOMPARE(restored[0][0].toList(), (QVariantList{0, 2}));
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueUndoId(), 0.0, 10000);
+    QCOMPARE(bridge.selectedQueueIndex(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.playingQueueIndex(), 0, 10000);
+    QCOMPARE(bridge.currentTrackPath(), paths[0]);
+    // The engine has its rows back too: the track after A is B again.
+    bridge.next();
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.playingQueueIndex() == 1 && bridge.currentTrackPath() == paths[1],
+                             10000);
     QCOMPARE(bridge.playbackState(), QStringLiteral("Stopped"));
     QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
 

@@ -6231,6 +6231,20 @@ mod tests {
         assert!(parse_binary_command(&encode_command(68, &[1, 2, 3])).is_err());
     }
 
+    #[test]
+    fn queue_undo_kinds_keep_their_values_on_the_wire() {
+        // BridgeClientTest::queueUndoSectionIsDecoded decodes these values.
+        use super::super::QueueUndoKind::{Cleared, Moved, Removed, Replaced};
+        for (kind, value) in [(Cleared, 1), (Removed, 2), (Replaced, 3), (Moved, 4)] {
+            let state = QueueUndoState {
+                offer_id: 7,
+                kind: Some(kind),
+                ..QueueUndoState::default()
+            };
+            assert_eq!(encode_queue_undo_section(&state)[8], value, "{kind:?}");
+        }
+    }
+
     /// The UI's view of the queue undo section.
     #[derive(Debug, Default, PartialEq, Eq)]
     struct TestQueueUndo {
