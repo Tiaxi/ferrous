@@ -6,6 +6,7 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
+import "../logic/ErrorUtils.js" as ErrorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 
 ToolBar {
@@ -15,7 +16,8 @@ ToolBar {
     required property var uiPalette
     required property var channelStatusIconSource
     required property bool themeIsDark
-    // The app's ErrorController; the status bar shows how many errors it keeps.
+    // The app's ErrorController; the status bar shows how many errors it
+    // keeps, and stands out until the user has seen the newest.
     property var errorController: null
     property string positionText: "00:00"
 
@@ -37,6 +39,8 @@ ToolBar {
     }
 
     readonly property int errorCount: root.errorController ? root.errorController.count : 0
+    readonly property bool hasUnseenError: root.errorController !== null
+        && root.errorController.latestUnseen
     readonly property string backendFailure: root.uiBridge.backendFailure || ""
     readonly property bool backendStopped: root.backendFailure.length > 0
     readonly property bool isDisconnected: !root.uiBridge.connected && !root.backendStopped
@@ -190,26 +194,43 @@ ToolBar {
             Layout.fillWidth: true
         }
 
-        // Opens the recent errors, which stay after their banner is dismissed.
+        // Opens the recent errors. With none there is nothing to show.
         ToolButton {
             objectName: "statusBarErrorsButton"
             visible: root.errorCount > 0
             Layout.preferredHeight: 20
             padding: 0
+            leftPadding: 6
+            rightPadding: 6
             icon.name: "dialog-warning"
             icon.width: 16
             icon.height: 16
             text: I18n.i18ncp("@action:button", "%1 error", "%1 errors", root.errorCount)
             display: AbstractButton.TextBesideIcon
-            palette.buttonText: ColorUtils.mixColor(
-                Kirigami.Theme.negativeTextColor,
-                root.uiPalette.uiTextColor,
-                root.themeIsDark ? 0.18 : 0.08)
+            palette.buttonText: root.hasUnseenError
+                ? Kirigami.Theme.highlightedTextColor
+                : ColorUtils.mixColor(
+                    Kirigami.Theme.negativeTextColor,
+                    root.uiPalette.uiTextColor,
+                    root.themeIsDark ? 0.18 : 0.08)
             Accessible.name: I18n.i18ncp("@action:button",
                 "%1 error: show recent errors", "%1 errors: show recent errors", root.errorCount)
+            // The status bar's only word on an error it has not shown yet.
+            Accessible.description: root.hasUnseenError
+                ? ErrorUtils.describe(root.errorController.latest)
+                : ""
             ToolTip.visible: hovered
             ToolTip.text: I18n.i18nc("@info:tooltip", "Show recent errors")
-            onClicked: root.errorController.toggleHistory()
+            onClicked: root.errorController.historyRequested()
+
+            Rectangle {
+                objectName: "statusBarNewErrorHighlight"
+                anchors.fill: parent
+                z: -2
+                visible: root.hasUnseenError
+                radius: Kirigami.Units.cornerRadius
+                color: Kirigami.Theme.negativeTextColor
+            }
         }
     }
 }

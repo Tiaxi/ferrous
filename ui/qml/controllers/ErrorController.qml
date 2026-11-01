@@ -4,7 +4,8 @@ import QtQuick 2.15
 import QtQml 2.15
 import "../logic/ErrorUtils.js" as ErrorUtils
 
-// The errors shown to the user: the latest in banners, and a short history.
+// The errors shown to the user: the status bar counts them, the viewers'
+// banners show the latest, and the recent errors dialog lists a short history.
 // An error that repeats one in the history is counted there, not added.
 QtObject {
     id: root
@@ -15,15 +16,21 @@ QtObject {
     // times it was first and last reported, in ms since the epoch.
     property ListModel entries: ListModel {}
     readonly property int count: entries.count
-    // Whether the banners show the newest entry; the user can dismiss it.
-    property bool latestShown: false
-    property bool historyExpanded: false
+    // Whether the user has yet to see the newest entry: the viewers' banners
+    // show it and the status bar stands out, until the user dismisses it or
+    // opens the history.
+    property bool latestUnseen: false
     // Bumped whenever an entry changes, for bindings to the newest one.
     property int revision: 0
     readonly property var latest: {
         root.revision
         return root.entries.count > 0 ? root.entries.get(0) : null
     }
+
+    // Asks for the history to open.
+    signal historyRequested()
+    // An error arrived or repeated, and is the newest entry now.
+    signal reported()
 
     function report(category, severity, subject, message) {
         const text = String(message || "").trim()
@@ -48,8 +55,9 @@ QtObject {
                 if (i > 0) {
                     root.entries.move(i, 0, 1)
                 }
-                root.latestShown = true
+                root.latestUnseen = true
                 root.revision++
+                root.reported()
                 return
             }
         }
@@ -65,13 +73,14 @@ QtObject {
         while (root.entries.count > Math.max(1, root.historyLimit)) {
             root.entries.remove(root.entries.count - 1)
         }
-        root.latestShown = true
+        root.latestUnseen = true
         root.revision++
+        root.reported()
     }
 
     // Hide the banners until the next error; the history keeps it.
     function dismissLatest() {
-        root.latestShown = false
+        root.latestUnseen = false
     }
 
     function remove(index) {
@@ -80,22 +89,14 @@ QtObject {
         }
         root.entries.remove(index)
         if (index === 0) {
-            root.latestShown = false
-        }
-        if (root.entries.count === 0) {
-            root.historyExpanded = false
+            root.latestUnseen = false
         }
         root.revision++
     }
 
     function clear() {
         root.entries.clear()
-        root.latestShown = false
-        root.historyExpanded = false
+        root.latestUnseen = false
         root.revision++
-    }
-
-    function toggleHistory() {
-        root.historyExpanded = !root.historyExpanded && root.entries.count > 0
     }
 }

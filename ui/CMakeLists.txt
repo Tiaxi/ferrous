@@ -154,6 +154,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/ErrorBanner.qml
         qml/components/SearchResultIcon.qml
         qml/components/FullscreenControlsAutoHide.qml
+        qml/components/KeyScrollView.qml
         qml/components/MetadataMarqueeRow.qml
         qml/components/PopupTransition.qml
         qml/components/SurfaceCard.qml
@@ -176,6 +177,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/dialogs/LibraryRootNameDialog.qml
         qml/dialogs/PreferencesDialog.qml
         qml/dialogs/QuitSaveFailedDialog.qml
+        qml/dialogs/RecentErrorsDialog.qml
         qml/dialogs/RenamePreviewDialog.qml
         qml/dialogs/AutoNumberDialog.qml
         qml/dialogs/TagEditorCloseConfirmDialog.qml
