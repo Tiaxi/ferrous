@@ -2192,24 +2192,31 @@ void SpectrogramItem::feedPrecomputedChunk(
     // the token matches the current track — a stale finalize for a
     // superseded track would otherwise corrupt the new-track estimate.
     // Skip all other reset / ring / canvas logic; only the estimate
-    // needs to change.
+    // and the end of a canvas freeze need to change.
     if (complete && columns == 0 && !bufferReset && !clearHistoryOnReset) {
-        if (totalEstimate > 0
-            && (m_precomputedCommittedToken == 0
+        const bool currentSession =
+            (m_precomputedCommittedToken == 0
                 || trackToken == m_precomputedCommittedToken)
             && (!hasGeneration
                 || m_precomputedSessionGeneration == 0
-                || generation == m_precomputedSessionGeneration)
+                || generation == m_precomputedSessionGeneration);
+        if (!currentSession) {
+            return;
+        }
+        if (totalEstimate > 0
             && m_precomputedTotalColumnsEstimate > 0
             && static_cast<int>(totalEstimate) < m_precomputedTotalColumnsEstimate) {
             m_precomputedTotalColumnsEstimate = totalEstimate;
             m_precomputedCanvasDirty = true;
-            // EOF can make the viewport attainable when the duration estimate
-            // extends past decoded audio. No further data may arrive to end
-            // the preserved-canvas handoff, so re-evaluate it here too.
-            updateCanvasFillReadinessLocked();
-            update();
         }
+        // The session has ended, so whatever the freeze waits for will not
+        // arrive: show what there is rather than the frozen image of another
+        // position while playback goes on.  A zoom waits for its own session.
+        if (m_zoomFillActive && !m_awaitingZoomData) {
+            m_zoomFillActive = false;
+            m_precomputedCanvasDirty = true;
+        }
+        update();
         return;
     }
 

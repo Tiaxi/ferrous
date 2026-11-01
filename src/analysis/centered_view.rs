@@ -4,8 +4,28 @@
 //! `ui/src/SpectrogramItem.cpp`), which decode windows must cover. Both are
 //! tested against the cases in `fixtures/centered-view.txt`.
 
+use super::REFERENCE_HOP;
+
 /// The view shows the whole track once its window covers this share of it.
 const WHOLE_TRACK_SHARE: f64 = 0.9;
+
+/// How long before the view's left edge a decode window starts, for the
+/// STFT to warm up.
+pub(super) const WARMUP_SECONDS: f64 = 2.0;
+
+/// How many seconds a view of `width` pixels shows, of a session whose
+/// columns are `effective_hop` samples apart, `columns_per_second` a second.
+pub(super) fn window_seconds(
+    width: u32,
+    zoom: f32,
+    effective_hop: usize,
+    columns_per_second: f64,
+) -> f64 {
+    // Hop sizes are small; precision loss from usize→f64 is negligible.
+    #[allow(clippy::cast_precision_loss)]
+    let effective_zoom = f64::from(zoom) * effective_hop as f64 / REFERENCE_HOP as f64;
+    f64::from(width) / effective_zoom.max(0.01) / columns_per_second
+}
 
 /// The left edge, in seconds, of a centered view `window_seconds` wide with
 /// the playhead at `position_seconds`, in a track `duration_seconds` long (0
@@ -30,9 +50,43 @@ pub(super) fn visible_left_edge_seconds(
     centered_left.min((duration_seconds - window_seconds).max(0.0))
 }
 
+/// Where a decode window for a playhead at `position_seconds` starts, so
+/// that playback from there to the end of the track never shows columns
+/// that were not decoded on the left of the view.
+pub(super) fn decode_start_seconds(
+    position_seconds: f64,
+    window_seconds: f64,
+    duration_seconds: f64,
+) -> f64 {
+    (visible_left_edge_seconds(position_seconds, window_seconds, duration_seconds) - WARMUP_SECONDS)
+        .max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::visible_left_edge_seconds;
+    use super::{decode_start_seconds, visible_left_edge_seconds, window_seconds};
+
+    #[test]
+    fn decode_windows_start_before_the_view() {
+        // Mid track, half a window before the playhead, and warm-up.
+        assert!((decode_start_seconds(100.0, 20.0, 400.0) - 88.0).abs() < 1e-9);
+        // A window before the end of the track, near it.
+        assert!((decode_start_seconds(399.0, 20.0, 400.0) - 378.0).abs() < 1e-9);
+        // An unknown length ends no view.
+        assert!((decode_start_seconds(399.0, 20.0, 0.0) - 387.0).abs() < 1e-9);
+        // Never before the start of the track.
+        assert!(decode_start_seconds(5.0, 20.0, 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_window_is_as_wide_as_the_columns_the_view_shows() {
+        // 1920 pixels of a column each, at 46.875 columns a second.
+        let seconds = window_seconds(1920, 1.0, 1024, 46.875);
+        assert!((seconds - 40.96).abs() < 1e-9, "{seconds}");
+        // Zoomed in twice, on columns half as far apart: a pixel a column.
+        let seconds = window_seconds(1920, 2.0, 512, 93.75);
+        assert!((seconds - 20.48).abs() < 1e-9, "{seconds}");
+    }
 
     #[test]
     fn matches_the_cases_shared_with_the_qt_view() {

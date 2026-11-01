@@ -23,7 +23,8 @@ use gstreamer as gst;
 use crate::raw_audio::is_raw_surround_file;
 #[cfg(feature = "gst")]
 use crate::raw_audio::{
-    conceal_damaged_ac3_frames, configure_raw_surround_decoding, filter_raw_surround_source,
+    conceal_damaged_ac3_frames, configure_raw_surround_decoding, estimate_duration_from_bitstream,
+    filter_raw_surround_source,
     is_dts_file,
 };
 #[cfg(feature = "gst")]
@@ -66,7 +67,33 @@ pub(super) struct SymphoniaFile {
     pub(super) track_id: u32,
     pub(super) native_sample_rate: u64,
     pub(super) native_channels: usize,
-    pub(super) total_columns: u32,
+    pub(super) length: TrackLength,
+}
+
+/// The length assumed for a file that does not tell its own, until decoding
+/// it shows more.
+const UNKNOWN_LENGTH_SECONDS: u64 = 300;
+
+/// The length of a file, in reference-hop columns, as far as opening it
+/// tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TrackLength {
+    /// Includes the 64-column STFT-edge allowance of Qt's estimate.
+    pub(super) columns: u32,
+    /// Whether the file told it. Otherwise `columns` only sizes the UI's
+    /// buffers, and says nothing of where the track ends.
+    pub(super) known: bool,
+}
+
+impl TrackLength {
+    fn of_frames(frames: Option<u64>, sample_rate: u64) -> Self {
+        let columns =
+            (frames.unwrap_or(sample_rate * UNKNOWN_LENGTH_SECONDS) / (REFERENCE_HOP as u64)) + 64;
+        Self {
+            columns: u32::try_from(columns).unwrap_or(u32::MAX),
+            known: frames.is_some(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -495,9 +522,8 @@ impl Drop for AudioFrameSource {
 
 /// Try to open an audio file, first via Symphonia, then falling back to
 /// `GStreamer` for formats Symphonia cannot decode (AC3/DTS).
-/// Returns `(source, native_sample_rate, native_channels, total_columns_estimate)`.
-#[allow(clippy::type_complexity)]
-pub(super) fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
+/// Returns `(source, native_sample_rate, native_channels, length)`.
+pub(super) fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, TrackLength)> {
     // Skip Symphonia for raw AC3/DTS — it can't decode them but its probe
     // can misidentify the bitstream as another format, returning wrong
     // sample rate and channel count (e.g. 32 kHz stereo for a 48 kHz 5.1
@@ -522,7 +548,7 @@ pub(super) fn open_audio_file(path: &Path) -> Option<(AudioFrameSource, u64, usi
             },
             sf.native_sample_rate,
             sf.native_channels,
-            sf.total_columns,
+            sf.length,
         ));
     }
     profile_eprintln!("[spect-worker] Symphonia failed, trying GStreamer fallback");
@@ -586,14 +612,7 @@ pub(super) fn open_symphonia_file(path: &Path) -> Option<SymphoniaFile> {
         .codec_params
         .channels
         .map_or(2, |ch| ch.count().max(1));
-    let n_frames = track
-        .codec_params
-        .n_frames
-        .unwrap_or(native_sample_rate * 300);
-    let effective_frames = n_frames;
-    let total_columns =
-        u32::try_from(((effective_frames / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
-            .unwrap_or(u32::MAX);
+    let length = TrackLength::of_frames(track.codec_params.n_frames, native_sample_rate);
     let audio_decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .ok()?;
@@ -603,7 +622,7 @@ pub(super) fn open_symphonia_file(path: &Path) -> Option<SymphoniaFile> {
         track_id,
         native_sample_rate,
         native_channels,
-        total_columns,
+        length,
     })
 }
 
@@ -642,14 +661,16 @@ fn spectrogram_seek_flags_for_path(path: &Path) -> gst::SeekFlags {
 }
 
 /// Open an audio file with a `GStreamer` pipeline for the spectrogram worker.
-/// Returns `(source, native_sample_rate, native_channels, total_columns_estimate)`.
+/// Returns `(source, native_sample_rate, native_channels, length)`.
 ///
 /// Pipeline: `filesrc → decodebin → audioconvert → capsfilter(F32LE) → appsink(sync=false)`
 ///
 /// Unlike the waveform pipeline, no `audioresample` — the spectrogram needs
 /// native sample rate for correct frequency resolution.
 #[cfg(feature = "gst")]
-pub(super) fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64, usize, u32)> {
+pub(super) fn open_gstreamer_file(
+    path: &Path,
+) -> Option<(AudioFrameSource, u64, usize, TrackLength)> {
     gst::init().ok()?;
     configure_raw_surround_decoding();
 
@@ -660,7 +681,7 @@ pub(super) fn open_gstreamer_file(path: &Path) -> Option<(AudioFrameSource, u64,
 fn open_gstreamer_pipeline(
     path: &Path,
     pipeline: gst::Pipeline,
-) -> Option<(AudioFrameSource, u64, usize, u32)> {
+) -> Option<(AudioFrameSource, u64, usize, TrackLength)> {
     let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     conceal_damaged_ac3_frames(pipeline.upcast_ref());
     let src = gst::ElementFactory::make("filesrc").build().ok()?;
@@ -718,15 +739,14 @@ fn open_gstreamer_pipeline(
     let channels =
         usize::try_from(structure.get::<i32>("channels").ok().filter(|&c| c > 0)?).ok()?;
 
-    // Query duration for column estimate.
+    // Query duration for column estimate. The parser of a raw AC3/DTS file
+    // has seen too few frames to tell it yet.
     let duration_ns = pipeline
         .query_duration::<gst::ClockTime>()
-        .map(gst::ClockTime::nseconds);
-    let total_frames = duration_ns.map_or(rate * 300, |ns| ns * rate / 1_000_000_000);
-    let effective_frames = total_frames;
-    let total_columns =
-        u32::try_from(((effective_frames / (REFERENCE_HOP as u64)) + 64).min(u64::from(u32::MAX)))
-            .unwrap_or(u32::MAX);
+        .map(gst::ClockTime::nseconds)
+        .or_else(|| raw_surround_duration_ns(path));
+    let total_frames = duration_ns.map(|ns| ns * rate / 1_000_000_000);
+    let length = TrackLength::of_frames(total_frames, rate);
 
     // Transition to PLAYING so the pipeline starts streaming.
     pipeline.set_state(gst::State::Playing).ok()?;
@@ -741,7 +761,18 @@ fn open_gstreamer_pipeline(
     };
 
     shutdown.disarm(); // AudioFrameSource::drop now owns pipeline shutdown.
-    Some((source, rate, channels, total_columns))
+    Some((source, rate, channels, length))
+}
+
+/// The duration of a raw AC3/DTS file, from its first frame header and the
+/// length of its frames.
+#[cfg(feature = "gst")]
+fn raw_surround_duration_ns(path: &Path) -> Option<u64> {
+    if !is_raw_surround_file(path) {
+        return None;
+    }
+    let seconds = estimate_duration_from_bitstream(path)?;
+    Some(f64_to_u64_saturating(f64::from(seconds) * 1_000_000_000.0))
 }
 
 #[cfg(feature = "gst")]
@@ -1190,6 +1221,51 @@ mod tests {
         let _ = gst::init();
         let result = open_gstreamer_file(Path::new("/nonexistent/path/to/file.ac3"));
         assert!(result.is_none());
+    }
+
+    /// A raw AC3 file has no index, and its parser tells the length only
+    /// after some frames, while a session needs it for the view it decodes
+    /// around: longer than the assumed length, it is past that length that
+    /// the bug showed.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_raw_file_tells_its_length_when_it_opens() {
+        use crate::raw_audio::TEST_AC3;
+
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-analysis-raw-length-{}.ac3",
+            std::process::id()
+        ));
+        // 720 repeats of 1.024 s.
+        std::fs::write(&path, TEST_AC3.repeat(720)).expect("write fixture");
+        let opened = open_audio_file(&path);
+        std::fs::remove_file(&path).expect("remove fixture");
+        let (_, rate, _, length) = opened.expect("open");
+        assert_eq!(rate, 48_000);
+        assert!(length.known, "{length:?}");
+        let expected = 720.0 * 32.0 * 1536.0 / 1024.0 + 64.0;
+        assert!(
+            (f64::from(length.columns) - expected).abs() < 10.0,
+            "{length:?}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn a_length_the_file_does_not_tell_is_not_known() {
+        assert_eq!(
+            TrackLength::of_frames(None, 48_000),
+            TrackLength {
+                columns: 14_126,
+                known: false
+            }
+        );
+        assert_eq!(
+            TrackLength::of_frames(Some(48_000), 48_000),
+            TrackLength {
+                columns: 110,
+                known: true
+            }
+        );
     }
 
     #[cfg(feature = "gst")]
