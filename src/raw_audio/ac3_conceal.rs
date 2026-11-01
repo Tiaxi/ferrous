@@ -115,6 +115,10 @@ impl Concealer {
     /// intact frame. Every AC3 frame stands on its own, and the decoder's
     /// transform overlaps it with its neighbours, so it leaves no seams.
     fn replacement(&mut self, buffer: &gst::Buffer) -> Option<gst::Buffer> {
+        // The audio before a discontinuity is from elsewhere.
+        if buffer.flags().contains(gst::BufferFlags::DISCONT) {
+            self.last_intact = None;
+        }
         let map = buffer.map_readable().ok()?;
         match check_frame(&map) {
             Frame::Unchecked => None,
@@ -133,12 +137,12 @@ impl Concealer {
         }
     }
 
-    /// Nothing from before a flush or from another track may stand in for
-    /// a frame after it: that would play audio from elsewhere, perhaps with
-    /// another channel layout.
+    /// Nothing from before a flush, from another track or in another format
+    /// may stand in for a frame after it: that would play audio from
+    /// elsewhere, perhaps with another channel layout or another length.
     fn handle_event(&mut self, event: gst::EventType) {
         match event {
-            gst::EventType::FlushStop => self.last_intact = None,
+            gst::EventType::FlushStop | gst::EventType::Caps => self.last_intact = None,
             gst::EventType::StreamStart | gst::EventType::Eos => {
                 self.last_intact = None;
                 let concealed = std::mem::take(&mut self.concealed);
@@ -399,7 +403,7 @@ mod tests {
 #[cfg(all(test, feature = "gst"))]
 mod pipeline_tests {
     use super::{
-        conceal_damaged_ac3_frames, record_decoder_input, silenced, with_damaged_frames,
+        conceal_damaged_ac3_frames, record_decoder_input, silenced, with_damaged_frames, Concealer,
         DecoderFrame, AC3_DECODERS, AC3_FRAME_LEN, SEAMED_FRAME, TEST_AC3_FRAMES,
     };
     use crate::raw_audio::{
@@ -543,6 +547,43 @@ mod pipeline_tests {
             step > 10.0 * largest_step(&clean.samples),
             "the largest step is {step}, in a tone with {}",
             largest_step(&clean.samples)
+        );
+    }
+
+    #[test]
+    fn a_new_format_or_a_discontinuity_ends_what_can_stand_in() {
+        gst::init().expect("gst init");
+        let stream = with_damaged_frames(TEST_AC3, &[1]);
+        let intact = gst::Buffer::from_slice(stream[..AC3_FRAME_LEN].to_vec());
+        let damaged_bytes = stream[AC3_FRAME_LEN..2 * AC3_FRAME_LEN].to_vec();
+        let damaged = gst::Buffer::from_slice(damaged_bytes.clone());
+        let mut discontinuous = damaged.clone();
+        discontinuous
+            .make_mut()
+            .set_flags(gst::BufferFlags::DISCONT);
+        let bytes = |buffer: Option<gst::Buffer>| {
+            let buffer = buffer.expect("a replacement");
+            let map = buffer.map_readable().expect("map frame");
+            map.to_vec()
+        };
+
+        let mut concealer = Concealer::default();
+        assert!(concealer.replacement(&intact).is_none());
+        assert_eq!(
+            bytes(concealer.replacement(&damaged)),
+            stream[..AC3_FRAME_LEN]
+        );
+
+        concealer.handle_event(gst::EventType::Caps);
+        assert_eq!(
+            bytes(concealer.replacement(&damaged)),
+            silenced(&damaged_bytes)
+        );
+
+        assert!(concealer.replacement(&intact).is_none());
+        assert_eq!(
+            bytes(concealer.replacement(&discontinuous)),
+            silenced(&damaged_bytes)
         );
     }
 
