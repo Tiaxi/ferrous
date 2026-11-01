@@ -2718,6 +2718,11 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
             &mut out,
             unwatched.map_or("", |unwatched| unwatched.reason.as_str()),
         );
+        // Whether that is expected, and not a problem to report.
+        push_u8(
+            &mut out,
+            u8::from(unwatched.is_some_and(|unwatched| unwatched.expected)),
+        );
         // What the latest scan of the root could not do; empty if nothing.
         let problem = snapshot
             .library_status
@@ -5083,6 +5088,7 @@ mod tests {
         snapshot.library_status.unwatched_roots = vec![crate::library::UnwatchedRoot {
             path: PathBuf::from("/nas"),
             reason: "it is on nfs4".to_string(),
+            expected: true,
         }];
         snapshot.library_status.root_problems = vec![crate::library::RootProblem {
             path: PathBuf::from("/music"),
@@ -5098,18 +5104,27 @@ mod tests {
 
         let mut tail = Vec::new();
         push_u16(&mut tail, 2);
-        for (values, tracks) in [
-            (["/music", "Music", "", "could not read 1 folder"], 1234),
-            (["/nas", "", "it is on nfs4", ""], 0),
+        for (path, name, reason, expected, problem, tracks) in [
+            (
+                "/music",
+                "Music",
+                "",
+                false,
+                "could not read 1 folder",
+                1234,
+            ),
+            ("/nas", "", "it is on nfs4", true, "", 0),
         ] {
-            for value in values {
-                push_string(&mut tail, value);
-            }
+            push_string(&mut tail, path);
+            push_string(&mut tail, name);
+            push_string(&mut tail, reason);
+            push_u8(&mut tail, u8::from(expected));
+            push_string(&mut tail, problem);
             push_u32(&mut tail, tracks);
         }
         assert!(
             section.ends_with(&tail),
-            "path, name, reason, problem and track count per root"
+            "path, name, reason, whether expected, problem and track count per root"
         );
     }
 

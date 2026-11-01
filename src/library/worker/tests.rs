@@ -229,6 +229,7 @@ fn only_a_running_scan_that_has_yet_to_start_a_root_covers_its_changed_paths() {
 fn the_watchers_newest_status_runs_first_and_its_scans_stop_at_shutdown() {
     let unwatched = |path: &str| {
         LibraryCommand::SetUnwatchedRoots(vec![crate::library::UnwatchedRoot {
+            expected: true,
             path: root(path),
             reason: "reason".to_string(),
         }])

@@ -423,12 +423,15 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     rootEntries.reserve(rootPathCount);
     for (quint16 i = 0; i < rootPathCount; ++i) {
         DecodedLibraryRoot root;
+        quint8 unwatchedExpected = 0;
         quint32 rootTrackCount = 0;
         if (!reader.readUtf8(&root.path) || !reader.readUtf8(&root.name)
-            || !reader.readUtf8(&root.unwatchedReason) || !reader.readUtf8(&root.scanProblem)
+            || !reader.readUtf8(&root.unwatchedReason) || !reader.readU8(&unwatchedExpected)
+            || unwatchedExpected > 1 || !reader.readUtf8(&root.scanProblem)
             || !reader.readU32(&rootTrackCount)) {
             return false;
         }
+        root.unwatchedExpected = unwatchedExpected != 0;
         root.trackCount = static_cast<int>(
             std::min<quint32>(rootTrackCount, std::numeric_limits<int>::max()));
         rootPaths.push_back(root.path);

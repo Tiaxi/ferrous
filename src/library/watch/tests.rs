@@ -266,6 +266,52 @@ fn unwatched_roots_say_why_and_what_happens_instead() {
     assert_eq!(describe_interval(Duration::from_secs(1)), "1 second");
 }
 
+#[test]
+fn only_a_network_or_fuse_file_system_is_expected() {
+    assert!(Fallback::FileSystem("nfs4".to_string()).is_expected());
+    for fallback in [
+        Fallback::WatchLimit,
+        Fallback::Missing,
+        Fallback::Failed("no".to_string()),
+        Fallback::Unavailable("no".to_string()),
+    ] {
+        assert!(!fallback.is_expected(), "{fallback:?}");
+    }
+}
+
+#[test]
+fn reports_say_which_unwatched_roots_are_expected() {
+    let folder = test_folder("expected");
+    let share = folder.join("share");
+    let holder = folder.join("holder");
+    let gone = folder.join("gone");
+    for path in [&share, &holder.join("nas")] {
+        std::fs::create_dir_all(path).expect("folders");
+    }
+    watch_test_hooks::set_fs_type(&share, "nfs4");
+    watch_test_hooks::set_fs_type(&holder.join("nas"), "fuse.sshfs");
+    let (mut watcher, commands) = watching(&[share.clone(), holder.clone(), gone.clone()]);
+
+    watcher.report();
+    let reported = commands.try_iter().collect::<Vec<_>>();
+    let [LibraryCommand::SetUnwatchedRoots(unwatched)] = reported.as_slice() else {
+        panic!("one report: {reported:?}");
+    };
+    let expected: Vec<(&Path, bool)> = unwatched
+        .iter()
+        .map(|root| (root.path.as_path(), root.expected))
+        .collect();
+    assert_eq!(
+        expected,
+        vec![
+            (gone.as_path(), false),
+            (holder.as_path(), true),
+            (share.as_path(), true)
+        ]
+    );
+    let _ = std::fs::remove_dir_all(folder);
+}
+
 /// A watcher run by the test itself, and the commands it sends.
 fn watcher() -> (Watcher, Receiver<LibraryCommand>) {
     let (commands_tx, commands) = unbounded();

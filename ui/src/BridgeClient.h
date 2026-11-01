@@ -874,7 +874,7 @@ private:
     QStringList m_diagnosticsLines;
     QStringList m_pendingDiagnosticsDiskLines;
     QString m_libraryLastError;
-    // The roots, with their reasons, already reported as not watched.
+    // The roots, with their reasons, already reported or logged as not watched.
     QSet<QString> m_reportedUnwatchedRoots;
     bool m_libraryWatchEnabled{true};
     QString m_pendingAddRootPath;

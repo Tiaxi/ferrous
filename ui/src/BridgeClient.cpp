@@ -5980,16 +5980,23 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             entry.insert(QStringLiteral("scanProblem"), root.scanProblem);
             entry.insert(QStringLiteral("trackCount"), root.trackCount);
             rootEntries.push_back(entry);
-            // Told once per root and reason; the preferences show it while it lasts.
+            // Told once per root and reason; the preferences show it while it
+            // lasts. An expected one, a network or FUSE file system, is only logged.
             const QString reported = root.path + QLatin1Char('\n') + root.unwatchedReason;
             if (!root.unwatchedReason.isEmpty() && !m_reportedUnwatchedRoots.contains(reported)) {
                 m_reportedUnwatchedRoots.insert(reported);
-                reportError(BinaryBridgeCodec::ErrorCategoryLibrary,
-                            i18nc("@info folder name, reason",
-                                  "Not watched for changes in library folder %1: %2",
-                                  trimmedName.isEmpty() ? root.path : trimmedName,
-                                  root.unwatchedReason),
-                            root.path, BinaryBridgeCodec::ErrorSeverityWarning);
+                if (root.unwatchedExpected) {
+                    logDiagnostic(QStringLiteral("library"),
+                                  QStringLiteral("not watching %1: %2")
+                                      .arg(root.path, root.unwatchedReason));
+                } else {
+                    reportError(BinaryBridgeCodec::ErrorCategoryLibrary,
+                                i18nc("@info folder name, reason",
+                                      "Not watched for changes in library folder %1: %2",
+                                      trimmedName.isEmpty() ? root.path : trimmedName,
+                                      root.unwatchedReason),
+                                root.path, BinaryBridgeCodec::ErrorSeverityWarning);
+                }
             }
         }
     }

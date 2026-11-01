@@ -344,6 +344,7 @@ private slots:
     void libraryWatchingDecodesFromBinaryPayload();
     void libraryScanErrorsAreReportedAsLibraryErrors();
     void unwatchedLibraryRootsAreShownAndReportedOnce();
+    void expectedUnwatchedLibraryRootsAreShownButNotReported();
     void searchExtendedMatchDetailsDecodeAndHighlight();
     void searchResultsRankFilterAndHighlight();
     void searchProtocolTotalsAndExpansion();
@@ -5370,7 +5371,8 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     };
 
     // The library meta section as Rust encodes it: path, name, the reason
-    // a root is not watched, its scan problem, and its track count, per root.
+    // a root is not watched, whether that is expected, its scan problem, and
+    // its track count, per root.
     for (quint32 value : {2u, 0u, 0u, 0u}) append(value); // roots, tracks, artists, albums
     append(quint8(0));                                       // scan in progress
     append(qint32(0));                                       // sort mode
@@ -5379,15 +5381,17 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     append(float(0.0f));
     append(float(-1.0f));
     append(quint16(2));
-    for (const QString &value : {QStringLiteral("/music"), QStringLiteral("Music"), QString(),
-                                 QStringLiteral("could not read 1 folder")}) {
-        text(value);
-    }
+    text(QStringLiteral("/music"));
+    text(QStringLiteral("Music"));
+    text(QString());
+    append(quint8(0));
+    text(QStringLiteral("could not read 1 folder"));
     append(quint32(1234));
-    for (const QString &value : {QStringLiteral("/nas"), QString(), QStringLiteral("it is on nfs4"),
-                                 QString()}) {
-        text(value);
-    }
+    text(QStringLiteral("/nas"));
+    text(QString());
+    text(QStringLiteral("it is on nfs4"));
+    append(quint8(1));
+    text(QString());
     append(quint32(0));
     BinaryBridgeCodec::DecodedSnapshot decoded;
     QString error;
@@ -5397,8 +5401,10 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     QCOMPARE(decoded.library.rootEntries.size(), 2);
     QCOMPARE(decoded.library.rootEntries[0].name, QStringLiteral("Music"));
     QVERIFY(decoded.library.rootEntries[0].unwatchedReason.isEmpty());
+    QVERIFY(!decoded.library.rootEntries[0].unwatchedExpected);
     QCOMPARE(decoded.library.rootEntries[1].path, QStringLiteral("/nas"));
     QCOMPARE(decoded.library.rootEntries[1].unwatchedReason, QStringLiteral("it is on nfs4"));
+    QVERIFY(decoded.library.rootEntries[1].unwatchedExpected);
     QCOMPARE(decoded.library.rootEntries[0].scanProblem, QStringLiteral("could not read 1 folder"));
     QVERIFY(decoded.library.rootEntries[1].scanProblem.isEmpty());
     QCOMPARE(decoded.library.rootEntries[0].trackCount, 1234);
@@ -5465,7 +5471,7 @@ void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
     BinaryBridgeCodec::DecodedLibraryRoot share;
     share.path = QStringLiteral("/nas");
     share.name = QStringLiteral("NAS");
-    share.unwatchedReason = QStringLiteral("it is on nfs4");
+    share.unwatchedReason = QStringLiteral("it has more folders than the watch limit allows");
     watched.scanProblem = QStringLiteral("could not read 1 folder");
     share.trackCount = 42;
     snapshot.library.rootEntries = {watched, share};
@@ -5477,13 +5483,14 @@ void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
     QCOMPARE(entries.size(), 2);
     QVERIFY(entries[0].toMap().value(QStringLiteral("unwatchedReason")).toString().isEmpty());
     QCOMPARE(entries[1].toMap().value(QStringLiteral("unwatchedReason")).toString(),
-             QStringLiteral("it is on nfs4"));
+             QStringLiteral("it has more folders than the watch limit allows"));
     QCOMPARE(entries[0].toMap().value(QStringLiteral("scanProblem")).toString(),
              QStringLiteral("could not read 1 folder"));
     QCOMPARE(entries[1].toMap().value(QStringLiteral("trackCount")).toInt(), 42);
     QCOMPARE(errors.count(), 1);
     QCOMPARE(errors[0][0].toString(),
-             QStringLiteral("Not watched for changes in library folder NAS: it is on nfs4"));
+             QStringLiteral("Not watched for changes in library folder NAS: "
+                            "it has more folders than the watch limit allows"));
     QCOMPARE(errors[0][1].toInt(), int(BinaryBridgeCodec::ErrorCategoryLibrary));
     QCOMPARE(errors[0][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityWarning));
     QCOMPARE(errors[0][3].toString(), QStringLiteral("/nas"));
@@ -5502,6 +5509,45 @@ void BridgeClientTest::unwatchedLibraryRootsAreShownAndReportedOnce() {
     QCOMPARE(client.libraryWatchEnabled(), true);
     client.setLibraryWatchEnabled(false);
     QCOMPARE(client.libraryWatchEnabled(), false);
+}
+
+void BridgeClientTest::expectedUnwatchedLibraryRootsAreShownButNotReported() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    const QString reason = QStringLiteral("it is on a network or FUSE file system (nfs4)");
+    const QString logged = QStringLiteral("[library] not watching /nas: ") + reason;
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.library.present = true;
+    BinaryBridgeCodec::DecodedLibraryRoot share;
+    share.path = QStringLiteral("/nas");
+    share.unwatchedReason = reason;
+    share.unwatchedExpected = true;
+    snapshot.library.rootEntries = {share};
+    snapshot.library.rootPaths = {share.path};
+
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    const QVariantList entries = client.libraryRootEntries();
+    QCOMPARE(entries.size(), 1);
+    QCOMPARE(entries[0].toMap().value(QStringLiteral("unwatchedReason")).toString(), reason);
+    QCOMPARE(errors.count(), 0);
+    const auto loggedCount = [&client, &logged]() {
+        return std::count_if(client.m_diagnosticsLines.cbegin(), client.m_diagnosticsLines.cend(),
+                             [&logged](const QString &line) { return line.endsWith(logged); });
+    };
+    QCOMPARE(loggedCount(), 1);
+
+    // Every later snapshot stays as quiet, in the log as well.
+    QVERIFY(!client.processBinarySnapshot(snapshot));
+    QCOMPARE(errors.count(), 0);
+    QCOMPARE(loggedCount(), 1);
+
+    // The share going away is a problem, and is reported.
+    snapshot.library.rootEntries[0].unwatchedReason = QStringLiteral("the folder is not available");
+    snapshot.library.rootEntries[0].unwatchedExpected = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(errors[0][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityWarning));
 }
 
 void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {
