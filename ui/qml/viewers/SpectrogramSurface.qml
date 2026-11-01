@@ -18,6 +18,7 @@ Item {
     property bool viewerMode: false
     property bool interactiveOverlaysVisible: true
     property var pointerActivity: null
+    property size reservedCorner: Qt.size(0, 0)
     readonly property int pointerCursorShape: root.interactiveOverlaysVisible
         ? Qt.ArrowCursor
         : Qt.BlankCursor
@@ -267,6 +268,9 @@ Item {
                     dbRange: root.uiBridge.dbRange
                     logScale: root.uiBridge.logScale
                     showFpsOverlay: index === 0 ? (root.uiBridge.showFps || spectrogramPaneItem.forceFpsOverlay) : false
+                    // A short pane can have the corner reach into the next.
+                    reservedCorner: Qt.size(root.reservedCorner.width,
+                                            Math.max(0, root.reservedCorner.height - parent.y))
                     sampleRateHz: root.uiBridge.sampleRateHz
                     clock: root.clock
                     playing: (root.uiBridge.playbackState || "") === "Playing"

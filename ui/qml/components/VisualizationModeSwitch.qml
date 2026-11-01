@@ -13,18 +13,18 @@ Row {
     required property var setMode
     property bool controlsVisible: true
     property var pointerActivity: null
-    property bool proximityHovered: false
+    property bool pointerHovered: false
     // A button of the switch has keyboard focus.
     property bool keyboardFocused: false
-    // Stays visible, dimmed until the pointer comes close or a button
-    // has keyboard focus.
+    // Stays visible, dimmed until the pointer is on it or a button has
+    // keyboard focus.
     readonly property real idleOpacity: 0.55
     spacing: 1
     visible: controlsVisible
-    opacity: !controlsVisible ? 0 : (proximityHovered || keyboardFocused ? 1 : idleOpacity)
+    opacity: !controlsVisible ? 0 : (pointerHovered || keyboardFocused ? 1 : idleOpacity)
     onControlsVisibleChanged: {
         if (!controlsVisible) {
-            proximityHovered = false
+            pointerHovered = false
         }
     }
 
@@ -32,11 +32,11 @@ Row {
         NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
     }
 
+    // Without a margin: one takes hover from the view under it, whose
+    // crosshair and readout then stop following the pointer.
     HoverHandler {
-        id: proximityHover
         enabled: root.controlsVisible
-        margin: 24
-        onHoveredChanged: root.proximityHovered = hovered
+        onHoveredChanged: root.pointerHovered = hovered
         onPointChanged: {
             if (root.pointerActivity) {
                 root.pointerActivity(

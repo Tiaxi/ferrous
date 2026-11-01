@@ -5,6 +5,7 @@
 
 #include "SpectrogramSeekTrace.h"
 #include "SpectrogramTraceLogging.h"
+#include "ViewCorner.h"
 
 #include <KLocalizedString>
 #include <QFont>
@@ -1005,6 +1006,17 @@ int deviceLineWidth(double scale) {
     return std::max(1, static_cast<int>(std::lround(scale)));
 }
 
+QFont fpsCounterFont() {
+    QFont font;
+    font.setPixelSize(10);
+    return font;
+}
+
+QString fpsCounterText(int fps) {
+    static const QString format = i18nc("@item:intext frames per second", "%1 fps");
+    return format.arg(fps);
+}
+
 constexpr int kGridLabelPadding = 2;
 constexpr int kCrosshairLabelPadding = 3;
 
@@ -1370,6 +1382,36 @@ bool SpectrogramItem::showFpsOverlay() const {
 
 bool SpectrogramItem::forceFpsOverlay() const {
     return m_forceFpsOverlay;
+}
+
+QSizeF SpectrogramItem::reservedCorner() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_reservedCorner;
+}
+
+void SpectrogramItem::setReservedCorner(const QSizeF &value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_reservedCorner == value) {
+            return;
+        }
+        m_reservedCorner = value;
+        m_freqGridDirty = true;
+        m_crosshairDirty = true;
+    }
+    emit reservedCornerChanged();
+    update();
+}
+
+QRectF SpectrogramItem::fpsCounterRect() const {
+    QMutexLocker lock(&m_stateMutex);
+    if (!m_showFpsOverlay || m_fpsValue <= 0) {
+        return QRectF();
+    }
+    const QFontMetrics metrics(fpsCounterFont());
+    return ViewCorner::fpsCounterRect(
+        width(), m_reservedCorner,
+        QSizeF(metrics.horizontalAdvance(fpsCounterText(m_fpsValue)), metrics.height()));
 }
 
 void SpectrogramItem::setShowFpsOverlay(bool value) {
@@ -3340,6 +3382,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     bool overlayChanged = false;
     QImage overlayImage;
     QSize overlaySize;
+    QSizeF reservedCorner;
 
     SpectrogramOverlayFrame freqGridFrame;
     SpectrogramOverlayFrame timeGridFrame;
@@ -3890,6 +3933,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         }
 
         showOverlay = m_showFpsOverlay && m_fpsValue > 0;
+        reservedCorner = m_reservedCorner;
         if (showOverlay) {
             if (m_overlayDirty || node->overlayTexture == nullptr) {
                 updateOverlayImageLocked();
@@ -4041,11 +4085,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     const QVector<QSGTexture *> unusedOverlayTextures = node->takeUnusedOverlayTextures();
 
     if (showOverlay && node->overlayTexture != nullptr && !overlaySize.isEmpty()) {
-        const QRectF target(
-            static_cast<double>(w) - static_cast<double>(overlaySize.width()) / scale - 8.0,
-            4.0,
-            static_cast<double>(overlaySize.width()) / scale,
-            static_cast<double>(overlaySize.height()) / scale);
+        const QRectF target = ViewCorner::fpsCounterRect(
+            static_cast<double>(w), reservedCorner, QSizeF(overlaySize) / scale);
         node->noteTextureNode(configureTextureNode(
             node->overlay,
             node->overlayTexture,
@@ -4432,7 +4473,9 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
             const int textW = fm.horizontalAdvance(text);
             const int textH = fm.height();
             const int labelY = std::clamp(mouseY - textH / 2, 0, logicalHeight - textH - 2 * pad);
-            const int labelX = logicalWidth - textW - 2 * pad - 2;
+            const int labelX = ViewCorner::labelXClearOfCorner(
+                logicalWidth - textW - 2 * pad - 2, labelY, textW + 2 * pad, textH + 2 * pad,
+                logicalWidth, m_reservedCorner);
             m_crosshairFreqLabelRect = QRect(labelX, labelY, textW + 2 * pad, textH + 2 * pad);
             m_crosshair.images.push_back({SpectrogramOverlayImage::CrosshairLabel, text, 0,
                 QRectF(m_crosshairFreqLabelRect), QString()});
@@ -4524,7 +4567,9 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
         const int textH = fm.height();
         const int labelY = std::clamp(
             static_cast<int>(pixelY / scale) - textH / 2, 0, logicalHeight - textH - 2 * pad);
-        const int labelX = logicalWidth - textW - 2 * pad - 2;
+        const int labelX = ViewCorner::labelXClearOfCorner(
+            logicalWidth - textW - 2 * pad - 2, labelY, textW + 2 * pad, textH + 2 * pad,
+            logicalWidth, m_reservedCorner);
         m_freqGrid.images.push_back({SpectrogramOverlayImage::GridLabel, label, 0,
             QRectF(labelX, labelY, textW + 2 * pad, textH + 2 * pad), QString()});
     }
@@ -5644,10 +5689,8 @@ void SpectrogramItem::updateOverlayImageLocked() {
         return;
     }
 
-    QFont font;
-    font.setPixelSize(10);
-    static const QString fpsFormat = i18nc("@item:intext frames per second", "%1 fps");
-    const QString text = fpsFormat.arg(m_fpsValue);
+    const QFont font = fpsCounterFont();
+    const QString text = fpsCounterText(m_fpsValue);
     const QFontMetrics metrics(font);
     const int imageWidth = std::max(1, metrics.horizontalAdvance(text));
     const int imageHeight = std::max(1, metrics.height());

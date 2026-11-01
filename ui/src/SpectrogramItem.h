@@ -9,6 +9,8 @@
 #include <QMutex>
 #include <QPointer>
 #include <QQuickItem>
+#include <QRectF>
+#include <QSizeF>
 #include <QTimer>
 #include <QVector>
 #include <QVariantList>
@@ -137,6 +139,8 @@ class SpectrogramItem : public QQuickItem {
     Q_PROPERTY(bool logScale READ logScale WRITE setLogScale NOTIFY logScaleChanged)
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     Q_PROPERTY(bool forceFpsOverlay READ forceFpsOverlay CONSTANT)
+    // What the controls over the top right corner take of it; see ViewCorner.
+    Q_PROPERTY(QSizeF reservedCorner READ reservedCorner WRITE setReservedCorner NOTIFY reservedCornerChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz WRITE setSampleRateHz NOTIFY sampleRateHzChanged)
     Q_PROPERTY(int maxColumns READ maxColumns WRITE setMaxColumns NOTIFY maxColumnsChanged)
     // Where playback is; the playhead follows its position.
@@ -166,6 +170,10 @@ public:
     bool showFpsOverlay() const;
     void setShowFpsOverlay(bool value);
     bool forceFpsOverlay() const;
+    QSizeF reservedCorner() const;
+    void setReservedCorner(const QSizeF &value);
+    // Where the FPS counter shows, in this item; empty while it does not.
+    QRectF fpsCounterRect() const;
 
     int sampleRateHz() const;
     void setSampleRateHz(int value);
@@ -229,6 +237,7 @@ signals:
     void dbRangeChanged();
     void logScaleChanged();
     void showFpsOverlayChanged();
+    void reservedCornerChanged();
     void sampleRateHzChanged();
     void maxColumnsChanged();
     void clockChanged();
@@ -517,6 +526,7 @@ private:
     std::chrono::steady_clock::time_point m_lastAnimationTick{};
     bool m_forceFpsOverlay{false};
     bool m_showFpsOverlay{false};
+    QSizeF m_reservedCorner;
     bool m_fpsInitialized{false};
     int m_fpsValue{0};
     int m_fpsAccumFrames{0};

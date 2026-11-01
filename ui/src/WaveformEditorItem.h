@@ -17,6 +17,7 @@
 #include <QPolygonF>
 #include <QQuickItem>
 #include <QRectF>
+#include <QSizeF>
 #include <QString>
 #include <QTimer>
 
@@ -50,6 +51,8 @@ class WaveformEditorItem : public QQuickItem {
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
+    // What the controls over the top right corner take of it; see ViewCorner.
+    Q_PROPERTY(QSizeF reservedCorner READ reservedCorner WRITE setReservedCorner NOTIFY reservedCornerChanged)
     Q_PROPERTY(int viewMode READ viewMode WRITE setViewMode NOTIFY viewModeChanged)
     // Whether each channel, 0 to 63, is muted: a 64-bit mask would lose its
     // low bits as a QML number.
@@ -89,6 +92,10 @@ public:
     void setCrosshairEnabled(bool value);
     bool showFpsOverlay() const;
     void setShowFpsOverlay(bool value);
+    QSizeF reservedCorner() const;
+    void setReservedCorner(const QSizeF &value);
+    // Where the FPS counter shows, in this item; empty while it does not.
+    QRectF fpsCounterRect() const;
     int viewMode() const;
     void setViewMode(int value);
     qulonglong mutedChannelsMask() const;
@@ -124,6 +131,7 @@ signals:
     void gridEnabledChanged();
     void crosshairEnabledChanged();
     void showFpsOverlayChanged();
+    void reservedCornerChanged();
     void viewModeChanged();
     void mutedChannelsChanged();
     void soloedChannelChanged();
@@ -310,7 +318,8 @@ private:
     static QString formatCrosshairTime(double seconds);
     static std::pair<QRect, QRect> crosshairLabelRects(
         int width, int height, int x, int y,
-        int valueTextWidth, int timeTextWidth, int textHeight);
+        int valueTextWidth, int timeTextWidth, int textHeight,
+        const QSizeF &reservedCorner = QSizeF());
     // These draw in the painter's pixels, pixelScale to a logical pixel.
     void drawOverviewLocked(QPainter &painter, int width, int height,
                             double visibleStart, double visibleEnd, int channels,
@@ -323,7 +332,8 @@ private:
                                int firstX, int lastX, double pixelScale = 1.0) const;
     void drawCrosshair(QPainter &painter, int width, int height,
                        double visibleStart, double visibleEnd) const;
-    static void drawFpsOverlay(QPainter &painter, int width, int fpsValue);
+    static void drawFpsOverlay(
+        QPainter &painter, int width, int fpsValue, const QSizeF &reservedCorner);
     int displayedChannelCountLocked() const;
     bool channelIsMutedLocked(int channel) const;
 
@@ -347,6 +357,7 @@ private:
     bool m_gridEnabled{false};
     bool m_crosshairEnabled{false};
     bool m_showFpsOverlay{false};
+    QSizeF m_reservedCorner;
     int m_viewMode{0};
     qulonglong m_mutedChannelsMask{0};
     int m_soloedChannel{-1};

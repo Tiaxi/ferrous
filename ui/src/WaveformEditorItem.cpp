@@ -4,6 +4,7 @@
 #include "WaveformSceneGraph.h"
 
 #include "FerrousBridgeFfi.h"
+#include "ViewCorner.h"
 
 #include <KLocalizedString>
 #include <QFontMetrics>
@@ -54,6 +55,17 @@ constexpr QColor kChannelSeparator(79, 94, 86);
 constexpr QColor kPlayhead(190, 190, 200, 150);
 constexpr QColor kPlayheadContrast(8, 18, 14, 235);
 constexpr QColor kOverlay(190, 190, 200, 180);
+
+QFont fpsCounterFont() {
+    QFont font;
+    font.setPixelSize(10);
+    return font;
+}
+
+QString fpsCounterText(int fps) {
+    static const QString format = i18nc("@item:intext frames per second", "%1 fps");
+    return format.arg(fps);
+}
 
 // The view's time axis: `width` logical pixels from `start` to `end`, which
 // is how the body is drawn. The playhead, the grid, the crosshair and seeks
@@ -227,6 +239,7 @@ bool WaveformEditorItem::zoomEnabled() const { QMutexLocker lock(&m_stateMutex);
 bool WaveformEditorItem::gridEnabled() const { QMutexLocker lock(&m_stateMutex); return m_gridEnabled; }
 bool WaveformEditorItem::crosshairEnabled() const { QMutexLocker lock(&m_stateMutex); return m_crosshairEnabled; }
 bool WaveformEditorItem::showFpsOverlay() const { QMutexLocker lock(&m_stateMutex); return m_showFpsOverlay; }
+QSizeF WaveformEditorItem::reservedCorner() const { QMutexLocker lock(&m_stateMutex); return m_reservedCorner; }
 int WaveformEditorItem::viewMode() const { QMutexLocker lock(&m_stateMutex); return m_viewMode; }
 qulonglong WaveformEditorItem::mutedChannelsMask() const { QMutexLocker lock(&m_stateMutex); return m_mutedChannelsMask; }
 int WaveformEditorItem::soloedChannel() const { QMutexLocker lock(&m_stateMutex); return m_soloedChannel; }
@@ -434,6 +447,23 @@ void WaveformEditorItem::setZoomLevel(double value) {
     update();
 }
 
+void WaveformEditorItem::setReservedCorner(const QSizeF &value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_reservedCorner == value) return;
+        m_reservedCorner = value;
+    }
+    emit reservedCornerChanged();
+    update();
+}
+QRectF WaveformEditorItem::fpsCounterRect() const {
+    QMutexLocker lock(&m_stateMutex);
+    if (!m_showFpsOverlay || m_fpsValue <= 0) return QRectF();
+    const QFontMetrics metrics(fpsCounterFont());
+    return ViewCorner::fpsCounterRect(
+        width(), m_reservedCorner,
+        QSizeF(metrics.horizontalAdvance(fpsCounterText(m_fpsValue)), metrics.height()));
+}
 void WaveformEditorItem::setZoomEnabled(bool value) { { QMutexLocker lock(&m_stateMutex); if (m_zoomEnabled == value) return; m_zoomEnabled = value; } emit zoomEnabledChanged(); }
 void WaveformEditorItem::setGridEnabled(bool value) { { QMutexLocker lock(&m_stateMutex); if (m_gridEnabled == value) return; m_gridEnabled = value; } emit gridEnabledChanged(); update(); }
 void WaveformEditorItem::setCrosshairEnabled(bool value) { { QMutexLocker lock(&m_stateMutex); if (m_crosshairEnabled == value) return; m_crosshairEnabled = value; } emit crosshairEnabledChanged(); update(); }
@@ -1605,6 +1635,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     int channels = 1;
     int fpsValue = 0;
     bool showFps = false;
+    QSizeF reservedCorner;
     bool directDetail = false;
     bool playbackTilesComplete = false;
     [[maybe_unused]] int playbackTilesRendered = 0;
@@ -1688,6 +1719,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         cacheSecondsPerPixel = m_cacheSecondsPerPixel;
         channels = displayedChannelCountLocked();
         showFps = m_showFpsOverlay;
+        reservedCorner = m_reservedCorner;
         stagingContinues = !m_stagedCache.isNull();
         if (showFps) updateFpsEstimateLocked();
         fpsValue = m_fpsValue;
@@ -1755,7 +1787,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         m_hoverPosition = hover;
         drawCrosshair(*painter, canvasWidth, canvasHeight, visibleStart, visibleEnd);
     }
-    if (showFps && fpsValue > 0) drawFpsOverlay(*painter, canvasWidth, fpsValue);
+    if (showFps && fpsValue > 0) drawFpsOverlay(*painter, canvasWidth, fpsValue, reservedCorner);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (profileEnabled) {
         const auto profilePaintEnded = std::chrono::steady_clock::now();
@@ -2291,11 +2323,15 @@ QString WaveformEditorItem::formatCrosshairTime(double seconds) {
 
 std::pair<QRect, QRect> WaveformEditorItem::crosshairLabelRects(
     int width, int height, int x, int y,
-    int valueTextWidth, int timeTextWidth, int textHeight) {
+    int valueTextWidth, int timeTextWidth, int textHeight,
+    const QSizeF &reservedCorner) {
     constexpr int padding = 3;
+    const int valueY = std::clamp(y - textHeight / 2, 0, height - textHeight - 2 * padding);
     const QRect valueRect(
-        width - valueTextWidth - 2 * padding - 2,
-        std::clamp(y - textHeight / 2, 0, height - textHeight - 2 * padding),
+        ViewCorner::labelXClearOfCorner(
+            width - valueTextWidth - 2 * padding - 2, valueY,
+            valueTextWidth + 2 * padding, textHeight + 2 * padding, width, reservedCorner),
+        valueY,
         valueTextWidth + 2 * padding,
         textHeight + 2 * padding);
     const QRect timeRect(
@@ -2325,6 +2361,15 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
     painter.setFont(font);
     const QFontMetrics metrics(font);
     painter.setPen(QPen(kGrid, 1.0));
+    const auto drawEdgeLabel = [&](const QString &text, int rightMargin, int baseline) {
+        const int textWidth = metrics.horizontalAdvance(text);
+        painter.drawText(
+            ViewCorner::labelXClearOfCorner(
+                width - textWidth - rightMargin, baseline - metrics.ascent(),
+                textWidth, metrics.height(), width, m_reservedCorner),
+            baseline,
+            text);
+    };
     const double span = visibleEnd - visibleStart;
     if (span > 0.0) {
         const TimeAxis axis{visibleStart, visibleEnd, width, renderScaleLocked()};
@@ -2350,10 +2395,7 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
         const double half = (bottom - top) * 0.5;
         const QString silenceLabel = QStringLiteral("-∞");
         painter.setPen(QColor(152, 165, 157));
-        painter.drawText(
-            width - metrics.horizontalAdvance(silenceLabel) - 3,
-            static_cast<int>(center) - 2,
-            silenceLabel);
+        drawEdgeLabel(silenceLabel, 3, static_cast<int>(center) - 2);
         painter.setPen(QPen(kGrid, 1.0));
         // Samples remain linear on screen. Converting dB ticks back to
         // amplitude makes their spacing nonlinear, matching editor-style
@@ -2366,8 +2408,8 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
             painter.drawLine(0, lower, width - 1, lower);
             const QString text = db == 0.0 ? QStringLiteral("0") : QString::number(static_cast<int>(db));
             painter.setPen(QColor(152, 165, 157));
-            painter.drawText(width - metrics.horizontalAdvance(text) - 3, upper + metrics.ascent(), text);
-            painter.drawText(width - metrics.horizontalAdvance(text) - 3, lower - 2, text);
+            drawEdgeLabel(text, 3, upper + metrics.ascent());
+            drawEdgeLabel(text, 3, lower - 2);
             painter.setPen(QPen(kGrid, 1.0));
         }
     }
@@ -2583,7 +2625,7 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     const int timeWidth = metrics.horizontalAdvance(timeText);
     const int textHeight = metrics.height();
     const auto [dbRect, timeRect] = crosshairLabelRects(
-        width, height, x, y, dbWidth, timeWidth, textHeight);
+        width, height, x, y, dbWidth, timeWidth, textHeight, m_reservedCorner);
     constexpr int padding = 3;
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 10, 160));
@@ -2600,18 +2642,16 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
         timeText);
 }
 
-void WaveformEditorItem::drawFpsOverlay(QPainter &painter, int width, int fpsValue) {
-    QFont font;
-    font.setPixelSize(10);
+void WaveformEditorItem::drawFpsOverlay(
+    QPainter &painter, int width, int fpsValue, const QSizeF &reservedCorner) {
+    const QFont font = fpsCounterFont();
     painter.setFont(font);
-    static const QString fpsFormat = i18nc("@item:intext frames per second", "%1 fps");
-    const QString text = fpsFormat.arg(fpsValue);
+    const QString text = fpsCounterText(fpsValue);
     const QFontMetrics metrics(font);
+    const QRectF counter = ViewCorner::fpsCounterRect(
+        width, reservedCorner, QSizeF(metrics.horizontalAdvance(text), metrics.height()));
     painter.setPen(kOverlay);
-    painter.drawText(
-        std::max(4, width - metrics.horizontalAdvance(text) - 8),
-        metrics.ascent() + 4,
-        text);
+    painter.drawText(QPointF(counter.x(), counter.y() + metrics.ascent()), text);
 }
 
 void WaveformEditorItem::hoverMoveEvent(QHoverEvent *event) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = true; m_hoverPosition = event->position(); } if (m_crosshairEnabled) update(); }
