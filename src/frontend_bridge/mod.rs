@@ -4423,7 +4423,6 @@ mod tests {
         let offer = runtime.state.snapshot(false).queue_undo;
         assert_ne!(offer.offer_id, 0);
         assert_eq!(offer.kind, Some(QueueUndoKind::Cleared));
-        assert_eq!(offer.track_count, 3);
         // Clearing the empty queue again keeps what the first clear took.
         runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
         assert_eq!(runtime.state.snapshot(false).queue_undo, offer);
@@ -4546,7 +4545,6 @@ mod tests {
         );
         let offer = runtime.state.snapshot(false).queue_undo;
         assert_eq!(offer.kind, Some(QueueUndoKind::Removed));
-        assert_eq!(offer.track_count, 3);
         // e, now row 1, plays.
         runtime.state.playback.current_queue_index = Some(1);
         assert!(runtime.emit_snapshot(&event_tx));
@@ -4599,7 +4597,6 @@ mod tests {
         assert_eq!(runtime.state.queue, album);
         let offer = runtime.state.snapshot(false).queue_undo;
         assert_eq!(offer.kind, Some(QueueUndoKind::Replaced));
-        assert_eq!(offer.track_count, 2);
         // The album plays from its first track.
         runtime.state.playback.current_queue_index = Some(0);
         let _ = queue_ops(&engine_rx);
@@ -4702,7 +4699,6 @@ mod tests {
         assert_eq!(ui, moved);
         let offer = snapshot.queue_undo;
         assert_eq!(offer.kind, Some(QueueUndoKind::Moved));
-        assert_eq!(offer.track_count, 2);
         assert!(runtime.emit_snapshot(&event_tx));
 
         runtime.handle_command(ui_undo(offer.offer_id), &event_tx);

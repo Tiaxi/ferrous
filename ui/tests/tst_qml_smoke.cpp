@@ -1382,7 +1382,7 @@ private slots:
     void wheelScrollsListsByTheWheelDelta();
     void queueKeysReachBothEndsAndOpenTheContextMenu();
     void deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus();
-    void queueRemovalOffersAnUndoThatSelectsTheRestoredRows();
+    void queueChangesShowNoNoticeAndEditUndoRestoresThem();
     void removingALibraryRootAsksFirstAndNamesIt();
     void libraryKeysReachBothEndsAndOpenTheContextMenu();
 };
@@ -16617,7 +16617,7 @@ void LibraryQueueSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() 
     QCOMPARE(remove->property("shortcut").value<QKeySequence>(), QKeySequence());
 }
 
-void LibraryQueueSmokeTest::queueRemovalOffersAnUndoThatSelectsTheRestoredRows() {
+void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -16626,12 +16626,38 @@ void LibraryQueueSmokeTest::queueRemovalOffersAnUndoThatSelectsTheRestoredRows()
     bridge->setProperty("queueRows", sampleQueueRows(5));
     bridge->setProperty("queueLength", 5);
     QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
-    QObject *notice = window->findChild<QObject *>(QStringLiteral("queueUndoNotice"));
     QObject *undoAction = window->findChild<QObject *>(QStringLiteral("undoQueueChangeAction"));
     auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
-    QVERIFY(controller != nullptr && notice != nullptr && undoAction != nullptr && queueView != nullptr);
-    QVERIFY(!notice->property("visible").toBool());
-    QVERIFY(!undoAction->property("enabled").toBool());
+    QVERIFY(controller != nullptr && undoAction != nullptr && queueView != nullptr);
+    QObject *undoMenuItem = nullptr;
+    for (QObject *object : window->findChildren<QObject *>()) {
+        if (object->inherits("QQuickMenuItem")
+            && qvariant_cast<QObject *>(object->property("action")) == undoAction) {
+            undoMenuItem = object;
+            break;
+        }
+    }
+    QVERIFY(undoMenuItem != nullptr);
+    QVERIFY(!undoMenuItem->property("enabled").toBool());
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo"));
+
+    // The queue keeps its height: nothing takes its place for a change.
+    const qreal queueHeight = queueView->height();
+    QVERIFY(queueHeight > 0);
+    const auto expectNoNotice = [&]() {
+        QVERIFY(window->findChild<QObject *>(QStringLiteral("queueUndoNotice")) == nullptr);
+        QVERIFY(window->findChild<QObject *>(QStringLiteral("queueUndoButton")) == nullptr);
+        QVERIFY(window->findChild<QObject *>(QStringLiteral("queueUndoDismissButton")) == nullptr);
+        QCOMPARE(queueView->height(), queueHeight);
+    };
+    const auto offerUndo = [&](int kind, double id) {
+        bridge->setProperty("queueUndoKind", kind);
+        bridge->setProperty("queueUndoId", id);
+    };
+    const auto takeBackOffer = [&]() {
+        bridge->setProperty("queueUndoKind", 0);
+        bridge->setProperty("queueUndoId", 0.0);
+    };
 
     QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 1)));
     QVERIFY(QMetaObject::invokeMethod(controller, "toggleSelection", Q_ARG(QVariant, 3)));
@@ -16642,54 +16668,47 @@ void LibraryQueueSmokeTest::queueRemovalOffersAnUndoThatSelectsTheRestoredRows()
     // The backend removed the rows and offers to undo it.
     bridge->setProperty("queueRows", sampleQueueRows(3));
     bridge->setProperty("queueLength", 3);
-    bridge->setProperty("queueUndoKind", 2);
-    bridge->setProperty("queueUndoTrackCount", 2);
-    bridge->setProperty("queueUndoId", 7.0);
-    QTRY_VERIFY(notice->property("visible").toBool());
-    auto *text = window->findChild<QQuickItem *>(QStringLiteral("queueUndoNoticeText"));
-    QVERIFY(text != nullptr);
-    QCOMPARE(text->property("text").toString(), QStringLiteral("Removed 2 tracks from the queue."));
-    QVERIFY(undoAction->property("enabled").toBool());
-    QCOMPARE(undoAction->property("text").toString(), QStringLiteral("&Undo Remove Tracks"));
-
-    QVERIFY(clickVisibleButton(window, QStringLiteral("queueUndoButton")));
+    offerUndo(2, 7.0);
+    expectNoNotice();
+    QVERIFY(undoMenuItem->property("enabled").toBool());
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Remove Tracks"));
+    QVERIFY(QMetaObject::invokeMethod(undoAction, "trigger"));
     QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 7"));
-    QTRY_VERIFY(!notice->property("visible").toBool());
     // The rows come back, and with them their highlight.
     bridge->setProperty("queueRows", sampleQueueRows(5));
     bridge->setProperty("queueLength", 5);
-    bridge->setProperty("queueUndoId", 0.0);
+    takeBackOffer();
     QVERIFY(QMetaObject::invokeMethod(bridge, "queueUndoRestored",
         Q_ARG(QVariant, QVariant(QVariantList{1, 3}))));
     QCOMPARE(controller->property("selectedIndices").toList(), (QVariantList{1, 3}));
-    QVERIFY(!undoAction->property("enabled").toBool());
+    QVERIFY(!undoMenuItem->property("enabled").toBool());
 
-    // Clear Playlist is offered too, and Ctrl+Z undoes it. A dismissed
-    // offer stays hidden; the next one shows again.
-    bridge->setProperty("queueUndoKind", 1);
-    bridge->setProperty("queueUndoTrackCount", 5);
-    bridge->setProperty("queueUndoId", 8.0);
-    QTRY_VERIFY(notice->property("visible").toBool());
-    QCOMPARE(text->property("text").toString(), QStringLiteral("Queue cleared (5 tracks)."));
-    QVERIFY(clickVisibleButton(window, QStringLiteral("queueUndoDismissButton")));
-    QTRY_VERIFY(!notice->property("visible").toBool());
+    // Clear Playlist, from the menu and from Ctrl+Z.
+    offerUndo(1, 8.0);
+    expectNoNotice();
+    QVERIFY(undoMenuItem->property("enabled").toBool());
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Clear Playlist"));
+    QVERIFY(QMetaObject::invokeMethod(undoAction, "trigger"));
+    QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 8"));
     QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
     QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 8"));
-    bridge->setProperty("queueUndoKind", 3);
-    bridge->setProperty("queueUndoTrackCount", 1);
-    bridge->setProperty("queueUndoId", 9.0);
-    QTRY_VERIFY(notice->property("visible").toBool());
-    QCOMPARE(text->property("text").toString(),
-             QStringLiteral("Queue replaced; the previous queue had 1 track."));
+    QCOMPARE(queueCommands(bridge).count(QStringLiteral("undo 8")), 2);
 
-    // Moved rows lose nothing, so no notice asks; Edit > Undo and Ctrl+Z
-    // put the whole move back.
-    bridge->setProperty("queueUndoKind", 4);
-    bridge->setProperty("queueUndoTrackCount", 3);
-    bridge->setProperty("queueUndoId", 10.0);
-    QTRY_VERIFY(!notice->property("visible").toBool());
-    QVERIFY(undoAction->property("enabled").toBool());
-    QCOMPARE(undoAction->property("text").toString(), QStringLiteral("&Undo Move Tracks"));
+    // A replaced queue, from the menu and from Ctrl+Z.
+    offerUndo(3, 9.0);
+    expectNoNotice();
+    QVERIFY(undoMenuItem->property("enabled").toBool());
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Replace Queue"));
+    QVERIFY(QMetaObject::invokeMethod(undoAction, "trigger"));
+    QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 9"));
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(queueCommands(bridge).count(QStringLiteral("undo 9")), 2);
+
+    // Moved rows go back the same way.
+    offerUndo(4, 10.0);
+    expectNoNotice();
+    QVERIFY(undoMenuItem->property("enabled").toBool());
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Move Tracks"));
     QVERIFY(QMetaObject::invokeMethod(queueView, "forceActiveFocus"));
     QTRY_VERIFY(queueView->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);

@@ -150,7 +150,6 @@ qt_add_qml_module(ferrous_ui_qml
         qml/Main.qml
         qml/components/ActionShortcuts.qml
         qml/components/AlbumArtTile.qml
-        qml/components/QueueUndoNotice.qml
         qml/components/ColumnHeaderRow.qml
         qml/components/ErrorBanner.qml
         qml/components/SearchResultIcon.qml

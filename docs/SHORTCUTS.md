@@ -41,7 +41,7 @@ Alt and an underlined letter open a menu, such as Alt+P for **Playback**. [Globa
 
 In the library, typing the start of an artist's name selects that artist.
 
-Delete acts only while the queue has focus. Playing from the library or global search replaces the queue. After Clear Playlist, Delete, or a replacement, a message under the queue offers **Undo**, as does Undo in the **Edit** menu (Ctrl+Z), until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start.
+Delete acts only while the queue has focus. Playing from the library or global search replaces the queue. After Clear Playlist, Delete, or a replacement, Undo in the **Edit** menu (Ctrl+Z) stays available until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start.
 
 The handles between the queue's column headings resize the Artist, Album and Length columns; the title takes the rest. Tab reaches them: Left widens the column after the handle, Right narrows it, and Home, or a double-click, restores its default width. Ferrous keeps the widths you set.
 

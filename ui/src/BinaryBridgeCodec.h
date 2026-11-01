@@ -407,7 +407,6 @@ struct DecodedQueueUndo {
     // 0 when there is nothing to undo.
     quint64 offerId{0};
     int kind{QueueUndoNone};
-    int trackCount{0};
     // The offer the latest undo restored, 0 for none; the queue revision it
     // left; and the rows it brought back, as ascending (start, count) pairs.
     quint64 restoredId{0};

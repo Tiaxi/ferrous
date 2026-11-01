@@ -2405,10 +2405,9 @@ fn encode_queue_undo_section(undo: &QueueUndoState) -> Vec<u8> {
         .restored
         .as_ref()
         .map_or(&[][..], |restored| restored.ranges.as_slice());
-    let mut out = Vec::with_capacity(33 + 8 * ranges.len());
+    let mut out = Vec::with_capacity(29 + 8 * ranges.len());
     push_u64(&mut out, undo.offer_id);
     push_u8(&mut out, undo.kind.map_or(0, |kind| kind as u8));
-    push_u32(&mut out, clamp_u32(undo.track_count));
     push_u64(
         &mut out,
         undo.restored.as_ref().map_or(0, |restored| restored.id),
@@ -6205,7 +6204,6 @@ mod tests {
         let state = QueueUndoState {
             offer_id: 7,
             kind: Some(super::super::QueueUndoKind::Removed),
-            track_count: 3,
             restored: Some(super::super::QueueUndoRestored {
                 id: 5,
                 revision: 9,
@@ -6215,7 +6213,6 @@ mod tests {
         let mut expected = Vec::new();
         expected.extend_from_slice(&7_u64.to_le_bytes());
         expected.push(2);
-        expected.extend_from_slice(&3_u32.to_le_bytes());
         expected.extend_from_slice(&5_u64.to_le_bytes());
         expected.extend_from_slice(&9_u64.to_le_bytes());
         expected.extend_from_slice(&2_u32.to_le_bytes());
@@ -6225,7 +6222,7 @@ mod tests {
         assert_eq!(encode_queue_undo_section(&state), expected);
         assert_eq!(
             encode_queue_undo_section(&QueueUndoState::default()),
-            [0_u8; 33].to_vec()
+            [0_u8; 29].to_vec()
         );
         assert!(matches!(
             parse_binary_command(&encode_command(68, &7_u64.to_le_bytes())),
@@ -6239,7 +6236,6 @@ mod tests {
     struct TestQueueUndo {
         offer_id: u64,
         kind: u8,
-        track_count: u32,
         restored_id: u64,
         restored_revision: u64,
         ranges: Vec<(u32, u32)>,
@@ -6253,7 +6249,6 @@ mod tests {
         };
         decoded.kind = section[offset];
         offset += 1;
-        decoded.track_count = read_u32(section, &mut offset);
         decoded.restored_id = read_u64(section, &mut offset);
         decoded.restored_revision = read_u64(section, &mut offset);
         for _ in 0..read_u32(section, &mut offset) {
@@ -6340,7 +6335,7 @@ mod tests {
         ui.wait(handle, "the undo of the clear", |ui| {
             ui.queue.paths.is_empty() && ui.undo.offer_id != 0
         });
-        assert_eq!((ui.undo.kind, ui.undo.track_count), (1, 3));
+        assert_eq!(ui.undo.kind, 1);
         let id = ui.undo.offer_id;
         assert!(ffi_send_binary(
             handle,
