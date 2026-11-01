@@ -275,6 +275,13 @@ private slots:
     void aLargeQueueEditDecodesOnlyTheChangedRows();
     void gaplessAndRepeatOneMoveOnlyThePlayingRow();
     void realBridgeQueueEditsArriveAsRowSignals();
+    void aSelectionFollowsAQueueChangeMadeBeforeItsEcho();
+    void aRestoredRowSelectedOnUndoStaysSelected();
+    void aSelectionStandsUntilItsEcho();
+    void aSelectionStandsOverASectionTheRowsCannotTake();
+    void aSelectionTheBackendNeverGotHoldsNothing();
+    void playingARowHoldsNoSelection();
+    void selectionSerialIsDecodedAndSentAsTheBackendReadsIt();
     void inProcessBridgeInstallsWakeNotifier();
     void aStalledClientReceivesTheLatestQueueAndEveryError();
     void aDrainEndsWithNoWakeupPending();
@@ -1712,8 +1719,6 @@ void BridgeClientTest::playAtDoesNotEmitImmediateSnapshotChanged() {
 
     QCOMPARE(snapshotSpy.count(), 0);
     QCOMPARE(client.m_selectedQueueIndex, 2);
-    QCOMPARE(client.m_pendingQueueSelection, 9);
-    QVERIFY(client.m_pendingQueueSelectionUntilMs > 0);
 }
 
 void BridgeClientTest::playAtKeepsTheClockUntilTheEngineSwitches() {
@@ -1970,13 +1975,14 @@ BinaryBridgeCodec::DecodedQueueTrack queueTrack(const QString &path, const QStri
 
 // A snapshot with the whole queue of `paths` at `revision`.
 BinaryBridgeCodec::DecodedSnapshot fullQueueSnapshot(
-    quint64 revision, const QStringList &paths, int selected = -1) {
+    quint64 revision, const QStringList &paths, int selected = -1, quint64 selectionSerial = 0) {
     BinaryBridgeCodec::DecodedSnapshot snapshot;
     snapshot.queue.present = true;
     snapshot.queue.kind = BinaryBridgeCodec::QueueFull;
     snapshot.queue.revision = revision;
     snapshot.queue.len = static_cast<int>(paths.size());
     snapshot.queue.selectedIndex = selected;
+    snapshot.queue.selectionSerial = selectionSerial;
     for (const QString &path : paths) {
         snapshot.queue.tracks.push_back(queueTrack(path));
     }
@@ -1989,7 +1995,8 @@ BinaryBridgeCodec::DecodedSnapshot queueDeltaSnapshot(
     quint64 revision,
     int len,
     QVector<BinaryBridgeCodec::DecodedQueueOp> ops,
-    int selected = -1) {
+    int selected = -1,
+    quint64 selectionSerial = 0) {
     BinaryBridgeCodec::DecodedSnapshot snapshot;
     snapshot.queue.present = true;
     snapshot.queue.kind = BinaryBridgeCodec::QueueDelta;
@@ -1997,6 +2004,7 @@ BinaryBridgeCodec::DecodedSnapshot queueDeltaSnapshot(
     snapshot.queue.revision = revision;
     snapshot.queue.len = len;
     snapshot.queue.selectedIndex = selected;
+    snapshot.queue.selectionSerial = selectionSerial;
     snapshot.queue.ops = std::move(ops);
     return snapshot;
 }
@@ -2077,11 +2085,13 @@ void putQueueRow(QByteArray &out, const QString &path, const QString &title) {
     putString(out, path);
 }
 
-void putQueueHeader(QByteArray &out, quint8 kind, quint64 revision, quint32 len) {
+void putQueueHeader(
+    QByteArray &out, quint8 kind, quint64 revision, quint32 len, quint64 selectionSerial = 0) {
     putLe<quint8>(out, kind);
     putLe<quint64>(out, revision);
     putLe<quint32>(out, len);
     putLe<qint32>(out, -1);
+    putLe<quint64>(out, selectionSerial);
     const double total = 60.0 * len;
     quint64 bits = 0;
     std::memcpy(&bits, &total, sizeof(bits));
@@ -2502,9 +2512,7 @@ void BridgeClientTest::movedRowsGoBackThroughTheBackendAndAreSelected() {
     bridge.appendPaths(paths);
     // This queue, not one an earlier test left in the saved session.
     QTRY_VERIFY_WITH_TIMEOUT(rows() == paths && bridge.currentTrackPath() == paths[0], 10000);
-    // The backend has the selection before the rows move.
     bridge.selectQueueIndex(1);
-    QTRY_COMPARE_WITH_TIMEOUT(bridge.m_pendingQueueSelection, -1, 10000);
     QCOMPARE(bridge.selectedQueueIndex(), 1);
 
     // The selected B and the current A follow their rows.
@@ -2978,7 +2986,8 @@ void BridgeClientTest::rowCommandsCarryTheQueueRevision() {
         QCOMPARE(qFromLittleEndian<quint64>(command.constData() + 6), quint64(42));
     }
     QCOMPARE(qFromLittleEndian<quint32>(sent.at(0).constData() + 14), quint32(1));
-    QCOMPARE(qFromLittleEndian<qint32>(sent.at(1).constData() + 14), qint32(2));
+    QCOMPARE(qFromLittleEndian<quint64>(sent.at(1).constData() + 14), quint64(1));
+    QCOMPARE(qFromLittleEndian<qint32>(sent.at(1).constData() + 22), qint32(2));
     QCOMPARE(qFromLittleEndian<quint32>(sent.at(2).constData() + 14), quint32(3));
     QCOMPARE(qFromLittleEndian<quint32>(sent.at(3).constData() + 14), quint32(0));
     QCOMPARE(qFromLittleEndian<quint32>(sent.at(3).constData() + 18), quint32(2));
@@ -3034,7 +3043,7 @@ void BridgeClientTest::aLargeQueueEditDecodesOnlyTheChangedRows() {
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
         queuePacket(delta.left(delta.size() - 1)), &refused, &error));
     QByteArray overlong = delta;
-    qToLittleEndian<quint32>(1000000, overlong.data() + 37);
+    qToLittleEndian<quint32>(1000000, overlong.data() + 45);
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(queuePacket(overlong), &refused, &error));
 }
 
@@ -3113,6 +3122,190 @@ void BridgeClientTest::realBridgeQueueEditsArriveAsRowSignals() {
     bridge.clearQueue();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
     isolateBridgeClient(bridge);
+}
+
+void BridgeClientTest::aSelectionFollowsAQueueChangeMadeBeforeItsEcho() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (const char *name : {"a.flac", "b.flac", "c.flac", "d.flac"}) {
+        QFile file(base + QLatin1Char('/') + QLatin1String(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("stub"), qint64(4));
+        paths.push_back(file.fileName());
+    }
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    bridge.clearQueue();
+    bridge.appendPaths(paths);
+    QTRY_VERIFY_WITH_TIMEOUT(queuePaths(bridge) == paths, 10000);
+    QCOMPARE(bridge.playbackState(), QStringLiteral("Stopped"));
+
+    // The move is made before the selection's echo can arrive. Nothing plays,
+    // so no snapshot comes after the one that reports where the row went.
+    bridge.selectQueueIndex(1);
+    bridge.moveQueue(1, 3);
+    QCOMPARE(bridge.selectedQueueIndex(), 1);
+    const QStringList moved{paths.at(0), paths.at(2), paths.at(3), paths.at(1)};
+    QTRY_VERIFY_WITH_TIMEOUT(queuePaths(bridge) == moved, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.selectedQueueIndex(), 3, 2000);
+
+    // A removal before the selected row moves it the same way.
+    bridge.selectQueueIndex(2);
+    bridge.removeAt(0);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 3, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.selectedQueueIndex(), 1, 2000);
+
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    isolateBridgeClient(bridge);
+}
+
+void BridgeClientTest::aRestoredRowSelectedOnUndoStaysSelected() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString base = QFileInfo(dir.path()).canonicalFilePath();
+    QStringList paths;
+    for (const char *name : {"a.flac", "b.flac", "c.flac", "d.flac"}) {
+        QFile file(base + QLatin1Char('/') + QLatin1String(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("stub"), qint64(4));
+        paths.push_back(file.fileName());
+    }
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    bridge.clearQueue();
+    bridge.appendPaths(paths);
+    QTRY_VERIFY_WITH_TIMEOUT(queuePaths(bridge) == paths, 10000);
+    bridge.selectQueueIndex(2);
+    bridge.removeIndices({QVariant(0), QVariant(1)});
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 2 && bridge.queueUndoId() > 0, 10000);
+    QCOMPARE(bridge.selectedQueueIndex(), 0);
+
+    // The queue controller selects a restored row the moment it is told of
+    // them, in the turn that took the backend's selection.
+    QObject context;
+    connect(&bridge, &BridgeClient::queueUndoRestored, &context,
+        [&bridge](const QVariantList &rows) { bridge.selectQueueIndex(rows.first().toInt()); });
+    bridge.undoQueueChange();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 4, 10000);
+    QCOMPARE(bridge.selectedQueueIndex(), 0);
+
+    // The backend has that row selected too: it follows the row it moves.
+    bridge.moveQueue(0, 3);
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queuePathAt(3) == paths.at(0), 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.selectedQueueIndex(), 3, 2000);
+
+    bridge.clearQueue();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+    isolateBridgeClient(bridge);
+}
+
+void BridgeClientTest::aSelectionStandsUntilItsEcho() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    acceptCommands(client);
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(1, numberedPaths(5), 0)));
+
+    client.selectQueueIndex(2);
+    QCOMPARE(client.selectedQueueIndex(), 2);
+    // A section the backend sent before it read the selection, such as an
+    // edit from MPRIS or a tag refresh, does not take it back.
+    client.processBinarySnapshot(queueDeltaSnapshot(1, 2, 5, {}, 0, 0));
+    QCOMPARE(client.selectedQueueIndex(), 2);
+    // Nor does playback moving on, which carries no queue.
+    QVERIFY(client.processBinarySnapshot(
+        playbackSnapshot(QStringLiteral("/music/1.flac"), 1.0, 1)));
+    QCOMPARE(client.selectedQueueIndex(), 2);
+
+    // Arrow keys: each row's echo is older than the next row.
+    client.selectQueueIndex(3);
+    client.selectQueueIndex(4);
+    QCOMPARE(client.m_queueSelectionsSent, quint64(3));
+    client.processBinarySnapshot(queueDeltaSnapshot(2, 2, 5, {}, 2, 1));
+    QCOMPARE(client.selectedQueueIndex(), 4);
+    client.processBinarySnapshot(queueDeltaSnapshot(2, 2, 5, {}, 3, 2));
+    QCOMPARE(client.selectedQueueIndex(), 4);
+
+    // The echo of the last says where the backend has it, at once.
+    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(
+        2, 3, 5, {queueOp(BinaryBridgeCodec::QueueOpMove, 4, 1)}, 1, 3)));
+    QCOMPARE(client.selectedQueueIndex(), 1);
+
+    // After it, the backend's selection counts from the first section on.
+    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(
+        3, 4, 5, {queueOp(BinaryBridgeCodec::QueueOpMove, 1, 0)}, 0, 3)));
+    QCOMPARE(client.selectedQueueIndex(), 0);
+}
+
+void BridgeClientTest::aSelectionStandsOverASectionTheRowsCannotTake() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    int commands = 0;
+    client.m_sendCommandOverride = [&commands](const QByteArray &) {
+        ++commands;
+        return true;
+    };
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(1, numberedPaths(5), 0)));
+    client.selectQueueIndex(2);
+    QCOMPARE(commands, 1);
+
+    // The section echoes the selection, but builds on rows the client does
+    // not have; its header is not the selection of the rows here.
+    client.processBinarySnapshot(queueDeltaSnapshot(9, 10, 2, {}, 1, 1));
+    QCOMPARE(client.selectedQueueIndex(), 2);
+    QCOMPARE(commands, 2);
+
+    // The whole queue the client asked for settles it.
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(10, numberedPaths(2), 1, 1)));
+    QCOMPARE(client.selectedQueueIndex(), 1);
+}
+
+void BridgeClientTest::aSelectionTheBackendNeverGotHoldsNothing() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_sendCommandOverride = [](const QByteArray &) { return false; };
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(1, numberedPaths(5), 0)));
+
+    client.selectQueueIndex(2);
+    QCOMPARE(client.m_queueSelectionsSent, quint64(0));
+    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(1, 2, 5, {}, 0, 0)));
+    QCOMPARE(client.selectedQueueIndex(), 0);
+}
+
+void BridgeClientTest::playingARowHoldsNoSelection() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    acceptCommands(client);
+    QVERIFY(client.processBinarySnapshot(fullQueueSnapshot(1, numberedPaths(5), 0)));
+
+    client.playAt(3);
+    QCOMPARE(client.selectedQueueIndex(), 0);
+    // The backend selects the row it plays, and a move after it counts.
+    QVERIFY(client.processBinarySnapshot(queueDeltaSnapshot(
+        1, 2, 5, {queueOp(BinaryBridgeCodec::QueueOpMove, 3, 4)}, 4, 0)));
+    QCOMPARE(client.selectedQueueIndex(), 4);
+}
+
+void BridgeClientTest::selectionSerialIsDecodedAndSentAsTheBackendReadsIt() {
+    QByteArray section;
+    putQueueHeader(section, BinaryBridgeCodec::QueueDelta, 2, 0, 0x0102030405060708ULL);
+    putLe<quint64>(section, 2);
+    putLe<quint32>(section, 0);
+    QCOMPARE(qFromLittleEndian<quint64>(section.constData() + 17), 0x0102030405060708ULL);
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(queuePacket(section), &decoded, &error),
+        qPrintable(error));
+    QCOMPARE(decoded.queue.selectionSerial, quint64(0x0102030405060708ULL));
+    QCOMPARE(decoded.queue.selectedIndex, -1);
+    QVERIFY(decoded.queue.ops.isEmpty());
+
+    const QByteArray command = BinaryBridgeCodec::encodeCommandSelectQueue(7, 9, 2);
+    QCOMPARE(qFromLittleEndian<quint16>(command.constData()),
+        quint16(BinaryBridgeCodec::CmdSelectQueue));
+    QCOMPARE(command.size(), 6 + 20);
 }
 
 void BridgeClientTest::inProcessBridgeInstallsWakeNotifier() {

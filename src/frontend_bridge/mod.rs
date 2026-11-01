@@ -119,6 +119,14 @@ pub enum BridgeCommand {
         revision: u64,
         command: BridgeQueueCommand,
     },
+    /// The UI selected a row, as [`Self::QueueAt`] would, in the command it
+    /// numbered `serial`. The next snapshot echoes the serial with the row
+    /// the bridge has selected then, whatever became of this command.
+    SelectQueueAt {
+        revision: u64,
+        serial: u64,
+        selected: Option<usize>,
+    },
     Library(BridgeLibraryCommand),
     Analysis(BridgeAnalysisCommand),
     Settings(BridgeSettingsCommand),
@@ -508,6 +516,9 @@ pub struct BridgeSnapshot {
     /// The queue's changes since the previous snapshot, if any.
     pub queue_update: Option<QueueUpdate>,
     pub selected_queue_index: Option<usize>,
+    /// The serial of the last selection command handled; see
+    /// [`BridgeCommand::SelectQueueAt`].
+    pub queue_selection_serial: u64,
     /// The queue change the UI can undo, and the rows the latest undo
     /// brought back.
     pub queue_undo: QueueUndoState,
@@ -765,8 +776,11 @@ impl BridgeState {
             },
             queue_len: self.queue.len(),
             queue_revision: self.queue_sync.revision(),
-            queue_update: self.queue_sync.update(&self.queue),
+            queue_update: self
+                .queue_sync
+                .update(&self.queue, self.selected_queue_index),
             selected_queue_index: self.selected_queue_index,
+            queue_selection_serial: self.queue_sync.selection_serial(),
             queue_undo: self.queue_undo.state(),
             settings: self.settings.clone(),
             queue_column_widths_generation: self.queue_column_widths_generation,
@@ -1803,6 +1817,26 @@ impl BridgeLoopRuntime {
         SnapshotUrgency::Immediate
     }
 
+    /// Handle a [`BridgeCommand::SelectQueueAt`]. A selection of a row that
+    /// is gone is dropped, and one of the selected row changes nothing, but
+    /// the UI waits for the answer to either.
+    fn select_queue_row(
+        &mut self,
+        revision: u64,
+        serial: u64,
+        selected: Option<usize>,
+        event_tx: &Sender<BridgeEvent>,
+    ) -> SnapshotUrgency {
+        self.state.queue_sync.answer_selection(serial);
+        let command = BridgeQueueCommand::Select(selected);
+        if let Ok(Some(command)) = self.state.queue_sync.resolve(revision, command) {
+            if queue::handle_queue_command(command, &mut self.state, &self.playback, event_tx) {
+                self.flags.session_dirty = true;
+            }
+        }
+        SnapshotUrgency::Immediate
+    }
+
     fn handle_command(
         &mut self,
         cmd: BridgeCommand,
@@ -1811,6 +1845,11 @@ impl BridgeLoopRuntime {
         #[cfg(test)]
         crate::panic_guard::test_hooks::checkpoint("bridge_command");
         let cmd = match cmd {
+            BridgeCommand::SelectQueueAt {
+                revision,
+                serial,
+                selected,
+            } => return self.select_queue_row(revision, serial, selected, event_tx),
             BridgeCommand::QueueAt { revision, command } => {
                 match self.state.queue_sync.resolve(revision, command) {
                     Ok(Some(command)) => BridgeCommand::Queue(command),
@@ -2320,7 +2359,9 @@ impl BridgeLoopRuntime {
             }
             self.last_snapshot_emit = Instant::now();
             self.snapshot_plan.include_tree_in_next_snapshot = false;
-            self.state.queue_sync.mark_sent();
+            self.state
+                .queue_sync
+                .mark_sent(self.state.selected_queue_index);
             self.flags.pending_snapshot = SnapshotUrgency::None;
             true
         } else {
@@ -4404,6 +4445,149 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn ui_select(revision: u64, serial: u64, selected: usize) -> BridgeCommand {
+        BridgeCommand::SelectQueueAt {
+            revision,
+            serial,
+            selected: Some(selected),
+        }
+    }
+
+    /// The bridge with `queue` in it, sent to the UI.
+    fn runtime_with_sent_queue(
+        queue: &[PathBuf],
+    ) -> (
+        BridgeLoopRuntime,
+        Sender<BridgeEvent>,
+        Receiver<BridgeEvent>,
+    ) {
+        let (mut runtime, _engine_rx, _event_tx, _album) = queue_order_runtime();
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        replace_queue(&mut runtime, queue, &event_tx);
+        assert!(runtime.emit_snapshot(&event_tx));
+        (runtime, event_tx, event_rx)
+    }
+
+    #[test]
+    fn the_next_snapshot_answers_every_selection_command() {
+        let _guard = test_guard();
+        let queue = vec![p("/music/a.flac"), p("/music/b.flac"), p("/music/c.flac")];
+        let (mut runtime, event_tx, _event_rx) = runtime_with_sent_queue(&queue);
+        let shown = runtime.state.queue_sync.revision();
+        let no_edits = |base_revision| {
+            Some(QueueUpdate::Edits {
+                base_revision,
+                edits: Vec::new(),
+            })
+        };
+
+        // A row is selected.
+        assert_eq!(
+            runtime.handle_command(ui_select(shown, 1, 1), &event_tx),
+            SnapshotUrgency::Immediate
+        );
+        let snapshot = runtime.state.snapshot(false);
+        assert_eq!(snapshot.queue_update, no_edits(shown));
+        assert_eq!(snapshot.selected_queue_index, Some(1));
+        assert_eq!(snapshot.queue_selection_serial, 1);
+        assert!(runtime.emit_snapshot(&event_tx));
+        assert_eq!(runtime.state.snapshot(false).queue_update, None);
+
+        // The selected row is selected again, which changes nothing.
+        assert_eq!(
+            runtime.handle_command(ui_select(shown, 2, 1), &event_tx),
+            SnapshotUrgency::Immediate
+        );
+        let snapshot = runtime.state.snapshot(false);
+        assert_eq!(snapshot.queue_update, no_edits(shown));
+        assert_eq!(snapshot.queue_selection_serial, 2);
+        assert!(runtime.emit_snapshot(&event_tx));
+
+        // The row the command names is gone, so the command is dropped.
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Remove(2)),
+            &event_tx,
+        );
+        assert!(runtime.emit_snapshot(&event_tx));
+        let edited = runtime.state.queue_sync.revision();
+        assert_eq!(
+            runtime.handle_command(ui_select(shown, 3, 2), &event_tx),
+            SnapshotUrgency::Immediate
+        );
+        let snapshot = runtime.state.snapshot(false);
+        assert_eq!(snapshot.queue_update, no_edits(edited));
+        assert_eq!(snapshot.selected_queue_index, Some(1));
+        assert_eq!(snapshot.queue_selection_serial, 3);
+        assert!(runtime.emit_snapshot(&event_tx));
+
+        // A revision the bridge never had drops the command too.
+        assert_eq!(
+            runtime.handle_command(ui_select(edited + 1, 4, 0), &event_tx),
+            SnapshotUrgency::Immediate
+        );
+        assert_eq!(runtime.state.snapshot(false).queue_selection_serial, 4);
+    }
+
+    #[test]
+    fn a_selection_and_a_move_report_where_the_row_went() {
+        let _guard = test_guard();
+        let queue = vec![
+            p("/music/a.flac"),
+            p("/music/b.flac"),
+            p("/music/c.flac"),
+            p("/music/d.flac"),
+        ];
+        let (mut runtime, event_tx, _event_rx) = runtime_with_sent_queue(&queue);
+        let shown = runtime.state.queue_sync.revision();
+
+        runtime.handle_command(ui_select(shown, 1, 1), &event_tx);
+        runtime.handle_command(
+            BridgeCommand::QueueAt {
+                revision: shown,
+                command: BridgeQueueCommand::Move { from: 1, to: 3 },
+            },
+            &event_tx,
+        );
+
+        let snapshot = runtime.state.snapshot(false);
+        assert_eq!(snapshot.selected_queue_index, Some(3));
+        assert_eq!(snapshot.queue_selection_serial, 1);
+        assert_eq!(
+            snapshot.queue_update,
+            Some(QueueUpdate::Edits {
+                base_revision: shown,
+                edits: vec![QueueEdit::Move { from: 1, to: 3 }],
+            })
+        );
+    }
+
+    #[test]
+    fn the_row_playing_selected_reaches_the_ui_without_a_queue_change() {
+        let _guard = test_guard();
+        let queue = vec![p("/music/a.flac"), p("/music/b.flac")];
+        let (mut runtime, event_tx, _event_rx) = runtime_with_sent_queue(&queue);
+        let shown = runtime.state.queue_sync.revision();
+
+        let urgency = runtime.handle_command(
+            BridgeCommand::QueueAt {
+                revision: shown,
+                command: BridgeQueueCommand::PlayAt(1),
+            },
+            &event_tx,
+        );
+
+        assert_eq!(urgency, SnapshotUrgency::Immediate);
+        let snapshot = runtime.state.snapshot(false);
+        assert_eq!(snapshot.selected_queue_index, Some(1));
+        assert_eq!(
+            snapshot.queue_update,
+            Some(QueueUpdate::Edits {
+                base_revision: shown,
+                edits: Vec::new(),
+            })
+        );
     }
 
     #[test]

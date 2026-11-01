@@ -914,8 +914,10 @@ private:
     quint64 m_seekLandedSerial{0};
     // Tests capture commands here instead of sending them to the bridge.
     std::function<bool(const QByteArray &)> m_sendCommandOverride;
-    int m_pendingQueueSelection{-1};
-    qint64 m_pendingQueueSelectionUntilMs{0};
+    // The serial of the last selection command sent. The queue sections
+    // before its echo predate it, so the row it chose stands over theirs.
+    // The bridge answers each command, in the order they are sent.
+    quint64 m_queueSelectionsSent{0};
     QTimer m_diagnosticsFlushTimer;
     QTimer m_snapshotNotifyTimer;
     QTimer m_globalSearchDebounceTimer;

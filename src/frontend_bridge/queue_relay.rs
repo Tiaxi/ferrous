@@ -10,8 +10,8 @@
 //!
 //! The section is little-endian. Every kind starts with a u8 kind, the u64
 //! revision of the rows it leaves, the u32 row count, the i32 selected row
-//! (-1 for none), the f64 total seconds and the u32 count of rows of
-//! unknown length.
+//! (-1 for none), the u64 serial of the last selection command handled, the
+//! f64 total seconds and the u32 count of rows of unknown length.
 //!
 //! - Full (0): the rows.
 //! - Delta (1): the u64 revision it applies to, a u32 operation count, and
@@ -45,7 +45,7 @@ const OP_MOVE: u8 = 3;
 const OP_UPDATE: u8 = 4;
 const OP_MOVE_ROWS: u8 = 5;
 /// The header every kind starts with.
-const HEADER_BYTES: usize = 1 + 8 + 4 + 4 + 8 + 4;
+const HEADER_BYTES: usize = 1 + 8 + 4 + 4 + 8 + 8 + 4;
 /// Where a delta's base revision, operation count and operations start.
 const DELTA_BASE_OFFSET: usize = HEADER_BYTES;
 const DELTA_COUNT_OFFSET: usize = DELTA_BASE_OFFSET + 8;
@@ -130,6 +130,15 @@ impl LibraryIndex {
             .collect();
         self.library = Some(Arc::clone(library));
     }
+}
+
+/// The selection a section's header reports.
+#[derive(Debug, Clone, Copy)]
+struct Selection {
+    /// The selected row, or -1.
+    row: i32,
+    /// The serial of the last selection command handled.
+    serial: u64,
 }
 
 /// The queue changes of a batch of snapshots, before they are encoded.
@@ -368,9 +377,12 @@ impl QueueRelay {
     /// The section for `batch`, with the selection of `snapshot`, the
     /// newest snapshot of the batch.
     pub(super) fn section(&self, batch: QueueBatch, snapshot: &BridgeSnapshot) -> Vec<u8> {
-        let selected = snapshot.selected_queue_index.map_or(-1, clamp_i32);
+        let selection = Selection {
+            row: snapshot.selected_queue_index.map_or(-1, clamp_i32),
+            serial: snapshot.queue_selection_serial,
+        };
         match batch {
-            QueueBatch::Full => self.full_section(selected),
+            QueueBatch::Full => self.full_section(selection),
             QueueBatch::Resync => self.resync_section(),
             QueueBatch::Delta {
                 base_revision,
@@ -378,10 +390,10 @@ impl QueueRelay {
                 ops,
             } => {
                 if self.full_is_smaller(ops.len()) {
-                    return self.full_section(selected);
+                    return self.full_section(selection);
                 }
                 let mut out = Vec::with_capacity(DELTA_OPS_OFFSET + ops.len());
-                self.push_header(&mut out, QUEUE_DELTA, selected);
+                self.push_header(&mut out, QUEUE_DELTA, selection);
                 push_u64(&mut out, base_revision);
                 push_u32(&mut out, op_count);
                 out.extend_from_slice(&ops);
@@ -397,11 +409,11 @@ impl QueueRelay {
         let Some(newer_delta) = Delta::parse(newer) else {
             return newer.to_vec();
         };
-        let selected = header_selected(newer);
+        let selection = header_selection(newer);
         let Some(older_delta) = Delta::parse(older) else {
             // The UI's queue is older still, or whole: it gets the rows.
             return if self.revision.is_some() {
-                self.full_section(selected)
+                self.full_section(selection)
             } else {
                 self.resync_section()
             };
@@ -409,7 +421,7 @@ impl QueueRelay {
         if older_delta.revision != newer_delta.base_revision
             || self.full_is_smaller(older_delta.ops.len() + newer_delta.ops.len())
         {
-            return self.full_section(selected);
+            return self.full_section(selection);
         }
         let mut out = Vec::with_capacity(newer.len() + older_delta.ops.len());
         out.extend_from_slice(&newer[..DELTA_BASE_OFFSET]);
@@ -432,7 +444,7 @@ impl QueueRelay {
         ops_bytes > MIN_FULL_FALLBACK_BYTES && ops_bytes > self.rows_bytes()
     }
 
-    fn push_header(&self, out: &mut Vec<u8>, kind: u8, selected: i32) {
+    fn push_header(&self, out: &mut Vec<u8>, kind: u8, selection: Selection) {
         let mut total_seconds = 0.0;
         let mut unknown = 0usize;
         for row in &self.rows {
@@ -444,14 +456,15 @@ impl QueueRelay {
         out.push(kind);
         push_u64(out, self.revision.unwrap_or(0));
         push_u32(out, clamp_u32(self.rows.len()));
-        push_i32(out, selected);
+        push_i32(out, selection.row);
+        push_u64(out, selection.serial);
         push_f64(out, total_seconds);
         push_u32(out, clamp_u32(unknown));
     }
 
-    fn full_section(&self, selected: i32) -> Vec<u8> {
+    fn full_section(&self, selection: Selection) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_BYTES + self.rows_bytes());
-        self.push_header(&mut out, QUEUE_FULL, selected);
+        self.push_header(&mut out, QUEUE_FULL, selection);
         for row in &self.rows {
             row.encode(&mut out);
         }
@@ -460,7 +473,7 @@ impl QueueRelay {
 
     fn resync_section(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_BYTES);
-        self.push_header(&mut out, QUEUE_RESYNC, -1);
+        self.push_header(&mut out, QUEUE_RESYNC, Selection { row: -1, serial: 0 });
         out
     }
 
@@ -527,12 +540,18 @@ impl<'a> Delta<'a> {
     }
 }
 
-/// The selected row in a section's header.
-fn header_selected(section: &[u8]) -> i32 {
-    section
-        .get(13..17)
-        .and_then(|bytes| bytes.try_into().ok())
-        .map_or(-1, i32::from_le_bytes)
+/// The selection in a section's header.
+fn header_selection(section: &[u8]) -> Selection {
+    Selection {
+        row: section
+            .get(13..17)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map_or(-1, i32::from_le_bytes),
+        serial: section
+            .get(17..25)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map_or(0, u64::from_le_bytes),
+    }
 }
 
 fn push_op(batch: &mut Option<QueueBatch>, write: impl FnOnce(&mut Vec<u8>)) {

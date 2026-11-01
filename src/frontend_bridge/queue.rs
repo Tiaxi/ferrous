@@ -1019,7 +1019,9 @@ mod tests {
         let mut ui_revision = 0;
         // What the UI's queue becomes with the update a snapshot carries now.
         let mut sync_ui = |state: &mut BridgeState| {
-            let update = state.queue_sync.update(&state.queue);
+            let update = state
+                .queue_sync
+                .update(&state.queue, state.selected_queue_index);
             if let Some(QueueUpdate::Edits { base_revision, .. }) = &update {
                 assert_eq!(
                     *base_revision, ui_revision,
@@ -1029,7 +1031,7 @@ mod tests {
             if let Some(update) = &update {
                 assert!(update.apply_to(&mut ui_queue));
             }
-            state.queue_sync.mark_sent();
+            state.queue_sync.mark_sent(state.selected_queue_index);
             ui_revision = state.queue_sync.revision();
             assert_eq!(ui_queue, state.queue);
             update

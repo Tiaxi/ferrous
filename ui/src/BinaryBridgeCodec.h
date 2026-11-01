@@ -71,7 +71,8 @@ enum ErrorSeverity : quint8 {
 // Queue commands that name rows (CmdPlayAt, CmdSelectQueue, CmdRemoveAt,
 // CmdMoveQueue, CmdRemoveMany, CmdMoveQueueRows) start with the u64 queue
 // revision the rows showed, so the backend can carry them across edits made
-// since.
+// since. CmdSelectQueue then has the u64 serial that the queue section echoes
+// once the backend has handled it.
 enum CommandId : quint16 {
     CmdPlay = 1,
     CmdPause = 2,
@@ -290,6 +291,8 @@ struct DecodedQueue {
     quint64 baseRevision{0};
     int len{0};
     int selectedIndex{-1};
+    // The serial of the last selection command the backend has handled.
+    quint64 selectionSerial{0};
     double totalDurationSeconds{0.0};
     int unknownDurationCount{0};
     // The rows of a whole queue.
@@ -523,7 +526,7 @@ QByteArray encodeCommandQueueColumnWidths(const QueueColumnWidths &widths, quint
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
 // Queue commands for rows of the queue at `revision`.
 QByteArray encodeCommandQueueRow(quint16 cmdId, quint64 revision, quint32 index);
-QByteArray encodeCommandSelectQueue(quint64 revision, qint32 index);
+QByteArray encodeCommandSelectQueue(quint64 revision, quint64 serial, qint32 index);
 QByteArray encodeCommandMoveQueue(quint64 revision, quint32 from, quint32 to);
 QByteArray encodeCommandRemoveMany(quint64 revision, const QList<quint32> &indices);
 // CmdMoveQueueRows: the u64 revision, a u8 QueueRowsMove, the u32 row a

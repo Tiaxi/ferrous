@@ -322,11 +322,13 @@ bool decodeQueueSection(const QByteArray &payload, DecodedQueue *out) {
     quint64 revision = 0;
     quint32 len = 0;
     qint32 selectedIndex = -1;
+    quint64 selectionSerial = 0;
     quint32 unknownDurationCount = 0;
     if (!reader.readU8(&kind)
         || !reader.readU64(&revision)
         || !reader.readU32(&len)
         || !reader.readI32(&selectedIndex)
+        || !reader.readU64(&selectionSerial)
         || !reader.readF64(&out->totalDurationSeconds)
         || !reader.readU32(&unknownDurationCount)
         || len > static_cast<quint32>(std::numeric_limits<int>::max())) {
@@ -374,6 +376,7 @@ bool decodeQueueSection(const QByteArray &payload, DecodedQueue *out) {
     out->baseRevision = baseRevision;
     out->len = static_cast<int>(len);
     out->selectedIndex = static_cast<int>(selectedIndex);
+    out->selectionSerial = selectionSerial;
     out->unknownDurationCount = static_cast<int>(unknownDurationCount);
     out->tracks = std::move(tracks);
     out->ops = std::move(ops);
@@ -871,10 +874,11 @@ QByteArray encodeCommandQueueRow(quint16 cmdId, quint64 revision, quint32 index)
     return finalizeCommand(cmdId, payload);
 }
 
-QByteArray encodeCommandSelectQueue(quint64 revision, qint32 index) {
+QByteArray encodeCommandSelectQueue(quint64 revision, quint64 serial, qint32 index) {
     QByteArray payload;
-    payload.reserve(12);
+    payload.reserve(20);
     appendLe<quint64>(payload, revision);
+    appendLe<quint64>(payload, serial);
     appendLe<qint32>(payload, index);
     return finalizeCommand(CmdSelectQueue, payload);
 }
