@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError,
 };
 use std::time::{Duration, Instant};
@@ -20,6 +20,7 @@ use crate::raw_audio::{
     install_raw_surround_source_probe, is_dts_file, is_raw_surround_file,
 };
 
+use super::channel_mix::ChannelMix;
 use super::clock::{self, MonotonicClock, MonotonicTime};
 use super::file_source::Releases;
 use super::parsebin_stall;
@@ -390,9 +391,9 @@ struct GstPlaybackRuntime {
     /// How long the pipeline may take to reach Playing:
     /// `PLAYING_STATE_TIMEOUT`, which tests shorten.
     playing_state_timeout: Duration,
-    channel_mute_mask: Arc<AtomicU64>,
-    solo_pre_mask: Option<u64>,
-    soloed_channel: Option<u8>,
+    output_mix: Arc<OutputMix>,
+    /// The channels of the output stream when the mix last followed it.
+    mix_channels: u32,
     /// Tracks that failed since a track last played to its end or a
     /// command started or navigated playback.
     consecutive_failures: u32,
@@ -536,7 +537,7 @@ impl GstPlaybackRuntime {
         analysis_tx: Sender<AnalysisCommand>,
 
         event_tx: Sender<PlaybackEvent>,
-        channel_mute_mask: Arc<AtomicU64>,
+        output_mix: Arc<OutputMix>,
         stream_durations: Arc<Mutex<StreamDurations>>,
         stream_ends: Arc<Mutex<StreamEndHold>>,
     ) -> Self {
@@ -577,9 +578,8 @@ impl GstPlaybackRuntime {
             stream_durations,
             playing_state_requested_at: None,
             playing_state_timeout: Self::PLAYING_STATE_TIMEOUT,
-            channel_mute_mask,
-            solo_pre_mask: None,
-            soloed_channel: None,
+            output_mix,
+            mix_channels: 0,
             consecutive_failures: 0,
             missing_plugin: None,
             missing_on_open: None,
@@ -912,11 +912,27 @@ impl GstPlaybackRuntime {
     }
 
     fn reset_channel_mute_state(&mut self) {
-        self.channel_mute_mask.store(0, Ordering::Relaxed);
-        self.solo_pre_mask = None;
-        self.soloed_channel = None;
-        self.snapshot.muted_channels_mask = 0;
-        self.snapshot.soloed_channel = None;
+        self.output_mix.store(ChannelMix::default());
+        self.follow_output_mix();
+    }
+
+    /// Bring the snapshot up to what the output plays now. Returns whether
+    /// that changed it. The output applies the mix to each stream on its
+    /// own, as this learns of a new stream only when it polls.
+    fn follow_output_mix(&mut self) -> bool {
+        let channels = self.output_mix.channels.load(Ordering::Relaxed);
+        let mut mix = self.output_mix.load();
+        if channels < self.mix_channels {
+            mix.fit_narrower_stream(channels);
+            self.output_mix.store(mix);
+        }
+        self.mix_channels = channels;
+        let (muted, soloed) = (mix.silenced(channels), mix.soloed_in(channels));
+        let changed = self.snapshot.muted_channels_mask != muted
+            || self.snapshot.soloed_channels_mask != soloed;
+        self.snapshot.muted_channels_mask = muted;
+        self.snapshot.soloed_channels_mask = soloed;
+        changed
     }
 
     fn switch_to_path(
@@ -1994,11 +2010,7 @@ impl GstPlaybackRuntime {
         {
             snapshot_changed |= self.refresh_duration();
         }
-        let current_mask = self.channel_mute_mask.load(Ordering::Relaxed);
-        if self.snapshot.muted_channels_mask != current_mask {
-            self.snapshot.muted_channels_mask = current_mask;
-            snapshot_changed = true;
-        }
+        snapshot_changed |= self.follow_output_mix();
         if self.check_stuck_state_change() {
             // Pipeline was stuck; recovery already emitted a snapshot.
             return;
@@ -2364,44 +2376,18 @@ impl GstPlaybackRuntime {
             PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(mode),
             PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
             PlaybackCommand::ToggleChannelMute(ch) => {
-                let ch = ch.min(63);
-                if self.soloed_channel == Some(ch) {
-                    // Clicking the soloed channel unsolos (restores pre-mask).
-                    if let Some(pre) = self.solo_pre_mask.take() {
-                        self.channel_mute_mask.store(pre, Ordering::Relaxed);
-                    }
-                    self.soloed_channel = None;
-                } else {
-                    let prev = self.channel_mute_mask.load(Ordering::Relaxed);
-                    self.channel_mute_mask
-                        .store(prev ^ (1u64 << ch), Ordering::Relaxed);
-                    self.solo_pre_mask = None;
-                    self.soloed_channel = None;
-                }
-                self.snapshot.muted_channels_mask = self.channel_mute_mask.load(Ordering::Relaxed);
-                self.snapshot.soloed_channel = self.soloed_channel;
+                let channels = self.output_mix.channels.load(Ordering::Relaxed);
+                let mut mix = self.output_mix.load();
+                mix.toggle_mute(ch, channels);
+                self.output_mix.store(mix);
+                self.follow_output_mix();
                 self.emit_snapshot();
             }
             PlaybackCommand::SoloChannel(ch) => {
-                let ch = ch.min(63);
-                if self.soloed_channel == Some(ch) {
-                    // Un-solo: restore saved mask.  solo_pre_mask is always
-                    // Some when soloed_channel is Some (set on entry).
-                    if let Some(pre) = self.solo_pre_mask.take() {
-                        self.channel_mute_mask.store(pre, Ordering::Relaxed);
-                    }
-                    self.soloed_channel = None;
-                } else {
-                    // Solo (fresh or switching target).
-                    if self.soloed_channel.is_none() {
-                        self.solo_pre_mask = Some(self.channel_mute_mask.load(Ordering::Relaxed));
-                    }
-                    self.channel_mute_mask
-                        .store(u64::MAX ^ (1u64 << ch), Ordering::Relaxed);
-                    self.soloed_channel = Some(ch);
-                }
-                self.snapshot.muted_channels_mask = self.channel_mute_mask.load(Ordering::Relaxed);
-                self.snapshot.soloed_channel = self.soloed_channel;
+                let mut mix = self.output_mix.load();
+                mix.toggle_solo(ch);
+                self.output_mix.store(mix);
+                self.follow_output_mix();
                 self.emit_snapshot();
             }
             PlaybackCommand::Poll => self.poll(),
@@ -2632,11 +2618,11 @@ fn start_gst_engine(
     })?;
     configure_playbin_buffering(&playbin);
 
-    let channel_mute_mask = Arc::new(AtomicU64::new(0));
+    let output_mix = Arc::new(OutputMix::default());
 
     let output = build_output()?;
     let output_segments = OutputSegments::observe(&output);
-    let analysis_sink = build_audio_output_bin(analysis_tx.clone(), &channel_mute_mask, &output)?;
+    let analysis_sink = build_audio_output_bin(analysis_tx.clone(), &output_mix, &output)?;
     playbin.set_property("audio-sink", &analysis_sink);
 
     // Strip leading partial-frame data and trailing APEv2 tags from raw
@@ -2658,7 +2644,7 @@ fn start_gst_engine(
         queue_state,
         analysis_tx,
         event_tx,
-        channel_mute_mask,
+        output_mix,
         stream_durations,
         stream_ends,
     );
@@ -3716,23 +3702,69 @@ fn seek_flags_for_path(path: Option<&Path>) -> gst::SeekFlags {
     }
 }
 
-/// Installs a buffer probe on `capsfilter`'s src pad that silences
-/// muted channels.  Placed after `audioconvert` + `audioresample` so
-/// the format is fully negotiated.
+/// The channel mix that the streaming thread applies, shared with the engine.
+#[derive(Default)]
+struct OutputMix {
+    muted: AtomicU64,
+    soloed: AtomicU64,
+    /// The channels of the stream that reaches the output, or 0 before any.
+    channels: AtomicU32,
+}
+
+impl OutputMix {
+    fn load(&self) -> ChannelMix {
+        ChannelMix {
+            muted: self.muted.load(Ordering::Relaxed),
+            soloed: self.soloed.load(Ordering::Relaxed),
+        }
+    }
+
+    /// A buffer read between the two stores sees the solos that were in
+    /// force with the new mutes, and still sounds as it did: solos win, and
+    /// turning them into mutes stores what they silenced.
+    fn store(&self, mix: ChannelMix) {
+        self.muted.store(mix.muted, Ordering::Relaxed);
+        self.soloed.store(mix.soloed, Ordering::Relaxed);
+    }
+}
+
+/// Installs probes on `capsfilter`'s src pad that report the channels of the
+/// stream and silence channels.  Placed after `audioconvert` +
+/// `audioresample` so the format is fully negotiated.
+///
+/// The probe works out the silenced channels for each buffer, so a stream
+/// with other channels than the last gets the right ones from its first
+/// sample, before the engine hears of it.
 ///
 /// Muted samples are replaced with inaudible low-level noise rather
 /// than hard zero.  Sustained digital silence triggers the auto-mute
 /// circuit on ESS Sabre DACs (e.g. Topping DX3 Pro+) after ~10 s,
 /// killing the analog output.  The alternating ±1-LSB pattern keeps
 /// the detector seeing AC energy without producing audible sound.
-fn install_channel_mute_probe(capsfilter: &gst::Element, channel_mute_mask: &Arc<AtomicU64>) {
+fn install_channel_mute_probe(capsfilter: &gst::Element, output_mix: &Arc<OutputMix>) {
     let Some(src_pad) = capsfilter.static_pad("src") else {
         return;
     };
-    let mute_mask = Arc::clone(channel_mute_mask);
+    let reported = Arc::clone(output_mix);
+    src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        if let Some(gst::PadProbeData::Event(ref event)) = info.data {
+            if let gst::EventView::Caps(caps) = event.view() {
+                if let Some(channels) = caps
+                    .caps()
+                    .structure(0)
+                    .and_then(|s| s.get::<i32>("channels").ok())
+                    .and_then(|channels| u32::try_from(channels).ok())
+                {
+                    reported.channels.store(channels, Ordering::Relaxed);
+                }
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+    let output_mix = Arc::clone(output_mix);
     src_pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-        let mask = mute_mask.load(Ordering::Relaxed);
-        if mask == 0 {
+        let mix = output_mix.load();
+        if mix == ChannelMix::default() {
             return gst::PadProbeReturn::Ok;
         }
         let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data else {
@@ -3776,6 +3808,10 @@ fn install_channel_mute_probe(capsfilter: &gst::Element, channel_mute_mask: &Arc
         );
         // channels is guaranteed positive by the check above.
         let num_channels = channels.cast_unsigned() as usize;
+        let mask = mix.silenced(channels.cast_unsigned());
+        if mask == 0 {
+            return gst::PadProbeReturn::Ok;
+        }
         let frame_size = num_channels * bps;
         let buffer = buffer.make_mut();
         if let Ok(mut map) = buffer.map_writable() {
@@ -3783,7 +3819,7 @@ fn install_channel_mute_probe(capsfilter: &gst::Element, channel_mute_mask: &Arc
             let mut toggle = false;
             for frame in data.chunks_exact_mut(frame_size) {
                 toggle = !toggle;
-                for ch in 0..num_channels {
+                for ch in 0..num_channels.min(u64::BITS as usize) {
                     if mask & (1u64 << ch) != 0 {
                         let start = ch * bps;
                         let end = start + bps;
@@ -3935,7 +3971,7 @@ fn install_caps_change_probe(element: &gst::Element, analysis_tx: Sender<Analysi
 /// audio it holds.
 fn build_audio_output_bin(
     analysis_tx: Sender<AnalysisCommand>,
-    channel_mute_mask: &Arc<AtomicU64>,
+    output_mix: &Arc<OutputMix>,
     sink: &gst::Element,
 ) -> anyhow::Result<gst::Bin> {
     let bin = gst::Bin::new();
@@ -3955,7 +3991,7 @@ fn build_audio_output_bin(
         .context("failed to add audio output elements")?;
     gst::Element::link_many(elements).context("failed to link audio output")?;
     install_caps_change_probe(&input_capsfilter, analysis_tx);
-    install_channel_mute_probe(&output_capsfilter, channel_mute_mask);
+    install_channel_mute_probe(&output_capsfilter, output_mix);
     let ingress = input_capsfilter
         .static_pad("sink")
         .context("missing ingress pad")?;
@@ -3993,7 +4029,7 @@ mod tests {
             Arc::new(Mutex::new(GaplessQueue::new())),
             analysis_tx,
             event_tx,
-            Arc::new(AtomicU64::new(0)),
+            Arc::default(),
             Arc::new(Mutex::new(StreamDurations::default())),
             Arc::new(Mutex::new(StreamEndHold::default())),
         );
@@ -4436,8 +4472,7 @@ mod gst_integration_tests {
                 .property("sync", false)
                 .build()
                 .unwrap();
-            let bin =
-                build_audio_output_bin(analysis_tx, &Arc::new(AtomicU64::new(0)), &sink).unwrap();
+            let bin = build_audio_output_bin(analysis_tx, &Arc::default(), &sink).unwrap();
             let factories: Vec<_> = bin
                 .children()
                 .iter()
@@ -4519,7 +4554,7 @@ mod gst_integration_tests {
                 Arc::new(Mutex::new(GaplessQueue::new())),
                 analysis_tx,
                 event_tx,
-                Arc::new(AtomicU64::new(0)),
+                Arc::default(),
                 Arc::new(Mutex::new(StreamDurations::default())),
                 Arc::new(Mutex::new(StreamEndHold::default())),
             );
@@ -4956,7 +4991,7 @@ mod gst_integration_tests {
             .property("sync", false)
             .build()
             .unwrap();
-        build_audio_output_bin(analysis_tx, &Arc::new(AtomicU64::new(0)), &sink).unwrap()
+        build_audio_output_bin(analysis_tx, &Arc::default(), &sink).unwrap()
     }
 
     /// Full app pipeline pattern: custom typefinders, source probe and
@@ -5073,24 +5108,32 @@ mod engine_tests {
         /// parser reads it in blocks of 4 KiB, so a higher rate makes the
         /// buffers the output receives shorter.
         fn wav_at(&self, name: &str, millis: u32, rate: u32) -> PathBuf {
+            self.wav_of(name, millis, rate, 1)
+        }
+
+        /// Like [`Self::wav_at`], with the same audio on `channels` channels.
+        fn wav_of(&self, name: &str, millis: u32, rate: u32, channels: u16) -> PathBuf {
             let frames = rate * millis / 1_000;
-            let data_len = frames * 2;
+            let frame_size = 2 * u32::from(channels);
+            let data_len = frames * frame_size;
             let mut bytes = Vec::new();
             bytes.extend_from_slice(b"RIFF");
             bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
             bytes.extend_from_slice(b"WAVEfmt ");
             bytes.extend_from_slice(&16u32.to_le_bytes());
             bytes.extend_from_slice(&1u16.to_le_bytes());
-            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&channels.to_le_bytes());
             bytes.extend_from_slice(&rate.to_le_bytes());
-            bytes.extend_from_slice(&(rate * 2).to_le_bytes());
-            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&(rate * frame_size).to_le_bytes());
+            bytes.extend_from_slice(&(2 * channels).to_le_bytes());
             bytes.extend_from_slice(&16u16.to_le_bytes());
             bytes.extend_from_slice(b"data");
             bytes.extend_from_slice(&data_len.to_le_bytes());
             for frame in 0..frames {
                 let sample = i16::try_from(frame % 40).unwrap() * 400 - 8_000;
-                bytes.extend_from_slice(&sample.to_le_bytes());
+                for _ in 0..channels {
+                    bytes.extend_from_slice(&sample.to_le_bytes());
+                }
             }
             let path = self.dir.join(name);
             std::fs::write(&path, bytes).unwrap();
@@ -5340,6 +5383,38 @@ mod engine_tests {
             }
             gst::PadProbeReturn::Ok
         });
+    }
+
+    /// The loudest sample of each channel of a buffer of 16-bit audio.
+    fn channel_peaks(frames: &[u8], channels: usize) -> Vec<i32> {
+        let mut peaks = vec![0; channels];
+        for frame in frames.chunks_exact(channels * 2) {
+            for (peak, sample) in peaks.iter_mut().zip(frame.chunks_exact(2)) {
+                let sample = i16::from_le_bytes([sample[0], sample[1]]);
+                *peak = (*peak).max(i32::from(sample).abs());
+            }
+        }
+        peaks
+    }
+
+    /// Record the peaks of each channel of every buffer that reaches the
+    /// output.
+    fn record_channel_peaks(playbin: &gst::Element) -> Arc<Mutex<Vec<Vec<i32>>>> {
+        let buffers = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&buffers);
+        output_sink_pad(playbin).add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let caps = pad.current_caps().unwrap();
+            let structure = caps.structure(0).unwrap();
+            assert_eq!(structure.get::<&str>("format").unwrap(), "S16LE");
+            let channels = usize::try_from(structure.get::<i32>("channels").unwrap()).unwrap();
+            let map = buffer.map_readable().unwrap();
+            recorded.lock().unwrap().push(channel_peaks(&map, channels));
+            gst::PadProbeReturn::Ok
+        });
+        buffers
     }
 
     /// Record the stream time at which the output first carries sound
@@ -5980,6 +6055,158 @@ mod engine_tests {
                 "row {index}: {durations:?}"
             );
         }
+    }
+
+    /// The loudest sample a silenced channel may carry: the probe's ±1 LSB.
+    const SILENCED_PEAK: i32 = 1;
+    /// The loudest sample of a WAV fixture.
+    const HEARD_PEAK: i32 = 8_000;
+
+    impl Engine {
+        /// Wait for the snapshot to show these masks, and for the output to
+        /// play channels with `heard`: whether each one sounds.
+        #[track_caller]
+        fn wait_for_mix(
+            &mut self,
+            peaks: &Mutex<Vec<Vec<i32>>>,
+            soloed: u64,
+            muted: u64,
+            heard: &[bool],
+        ) {
+            self.wait_until(
+                &format!("expected solos {soloed:b}, mutes {muted:b}"),
+                |engine| {
+                    engine.snapshot.soloed_channels_mask == soloed
+                        && engine.snapshot.muted_channels_mask == muted
+                },
+            );
+            peaks.lock().unwrap().clear();
+            let matches = |buffer: &Vec<i32>| {
+                buffer.len() == heard.len()
+                    && buffer.iter().zip(heard).all(|(peak, heard)| {
+                        if *heard {
+                            *peak == HEARD_PEAK
+                        } else {
+                            *peak <= SILENCED_PEAK
+                        }
+                    })
+            };
+            // Buffers of the last mix may still be on their way.
+            self.wait_until(&format!("expected heard channels {heard:?}"), |_| {
+                let peaks = peaks.lock().unwrap();
+                peaks.len() >= 3 && peaks.iter().rev().take(3).all(matches)
+            });
+        }
+    }
+
+    #[test]
+    fn soloed_channels_are_the_ones_the_output_plays() {
+        let fixtures = Fixtures::new("two-solos");
+        let track = fixtures.wav_of("four.wav", 4_000, WAV_RATE, 4);
+        let mut engine = Engine::start();
+        let peaks = record_channel_peaks(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![track]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_mix(&peaks, 0, 0, &[true; 4]);
+
+        engine.send(PlaybackCommand::ToggleChannelMute(1));
+        engine.wait_for_mix(&peaks, 0, 0b0010, &[true, false, true, true]);
+
+        // A muted channel that is soloed is heard.
+        engine.send(PlaybackCommand::SoloChannel(1));
+        engine.send(PlaybackCommand::SoloChannel(3));
+        engine.wait_for_mix(&peaks, 0b1010, 0b0101, &[false, true, false, true]);
+
+        engine.send(PlaybackCommand::SoloChannel(3));
+        engine.wait_for_mix(&peaks, 0b0010, 0b1101, &[false, true, false, false]);
+
+        // The last solo brings back the mute.
+        engine.send(PlaybackCommand::SoloChannel(1));
+        engine.wait_for_mix(&peaks, 0, 0b0010, &[true, false, true, true]);
+    }
+
+    #[test]
+    fn muting_another_channel_turns_solos_into_what_the_output_plays() {
+        let fixtures = Fixtures::new("solo-then-mute");
+        let track = fixtures.wav_of("four.wav", 4_000, WAV_RATE, 4);
+        let mut engine = Engine::start();
+        let peaks = record_channel_peaks(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![track]));
+        engine.send(PlaybackCommand::Play);
+        engine.send(PlaybackCommand::ToggleChannelMute(2));
+        engine.send(PlaybackCommand::SoloChannel(0));
+        engine.send(PlaybackCommand::SoloChannel(1));
+        engine.wait_for_mix(&peaks, 0b0011, 0b1100, &[true, true, false, false]);
+
+        engine.send(PlaybackCommand::ToggleChannelMute(3));
+        engine.wait_for_mix(&peaks, 0, 0b0100, &[true, true, false, true]);
+    }
+
+    #[test]
+    fn solos_of_channels_the_next_track_lacks_do_not_silence_it() {
+        let fixtures = Fixtures::new("solo-past-next");
+        let wide = fixtures.wav_of("wide.wav", 4_000, WAV_RATE, 4);
+        let narrow = fixtures.wav_of("narrow.wav", 4_500, WAV_RATE, 2);
+        let mut engine = Engine::start();
+        let peaks = record_channel_peaks(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![wide, narrow.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.send(PlaybackCommand::SoloChannel(3));
+        engine.wait_for_mix(&peaks, 0b1000, 0b0111, &[false, false, false, true]);
+
+        assert_change(&engine.wait_for_changes(2), &narrow, 1, Expect::Gapless);
+        engine.wait_for_mix(&peaks, 0, 0, &[true, true]);
+    }
+
+    #[test]
+    fn solos_of_channels_the_track_has_stay_through_a_narrower_track() {
+        let fixtures = Fixtures::new("solo-kept");
+        let wide = fixtures.wav_of("wide.wav", 4_000, WAV_RATE, 4);
+        let narrow = fixtures.wav_of("narrow.wav", 4_500, WAV_RATE, 2);
+        let mut engine = Engine::start();
+        let peaks = record_channel_peaks(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![wide, narrow.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.send(PlaybackCommand::SoloChannel(1));
+        engine.send(PlaybackCommand::SoloChannel(3));
+        engine.wait_for_mix(&peaks, 0b1010, 0b0101, &[false, true, false, true]);
+
+        assert_change(&engine.wait_for_changes(2), &narrow, 1, Expect::Gapless);
+        engine.wait_for_mix(&peaks, 0b0010, 0b0001, &[false, true]);
+    }
+
+    #[test]
+    fn mutes_for_a_wider_track_do_not_silence_the_next_one() {
+        let fixtures = Fixtures::new("mute-past-next");
+        let wide = fixtures.wav_of("wide.wav", 4_000, WAV_RATE, 4);
+        let narrow = fixtures.wav_of("narrow.wav", 4_500, WAV_RATE, 2);
+        let mut engine = Engine::start();
+        let peaks = record_channel_peaks(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![wide, narrow.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.send(PlaybackCommand::ToggleChannelMute(0));
+        engine.send(PlaybackCommand::ToggleChannelMute(1));
+        engine.wait_for_mix(&peaks, 0, 0b0011, &[false, false, true, true]);
+
+        assert_change(&engine.wait_for_changes(2), &narrow, 1, Expect::Gapless);
+        engine.wait_for_mix(&peaks, 0, 0, &[true, true]);
+    }
+
+    #[test]
+    fn repeat_one_keeps_solos() {
+        let fixtures = Fixtures::new("solo-repeat-one");
+        let track = fixtures.wav_of("four.wav", 4_000, WAV_RATE, 4);
+        let mut engine = Engine::start();
+        let peaks = record_channel_peaks(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![track.clone()]));
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+        engine.send(PlaybackCommand::Play);
+        engine.send(PlaybackCommand::SoloChannel(0));
+        engine.send(PlaybackCommand::SoloChannel(2));
+        engine.wait_for_mix(&peaks, 0b0101, 0b1010, &[true, false, true, false]);
+
+        assert_change(&engine.wait_for_changes(2), &track, 0, Expect::Gapless);
+        engine.wait_for_mix(&peaks, 0b0101, 0b1010, &[true, false, true, false]);
     }
 
     #[test]

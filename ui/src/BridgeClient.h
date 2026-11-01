@@ -148,7 +148,7 @@ class BridgeClient : public QObject {
     // Whether each channel, 0 to 63, is muted. QML numbers hold 53 bits, so
     // the 64-bit mask itself stays in C++.
     Q_PROPERTY(QList<bool> mutedChannels READ mutedChannels NOTIFY playbackChanged)
-    Q_PROPERTY(int soloedChannel READ soloedChannel NOTIFY playbackChanged)
+    Q_PROPERTY(QList<bool> soloedChannels READ soloedChannels NOTIFY playbackChanged)
     Q_PROPERTY(int channelButtonsVisibility READ channelButtonsVisibility NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFps READ showFps NOTIFY snapshotChanged)
     Q_PROPERTY(bool showLevelMeter READ showLevelMeter NOTIFY snapshotChanged)
@@ -269,7 +269,8 @@ public:
     bool shuffleEnabled() const;
     quint64 mutedChannelsMask() const;
     QList<bool> mutedChannels() const;
-    int soloedChannel() const;
+    quint64 soloedChannelsMask() const;
+    QList<bool> soloedChannels() const;
     int channelButtonsVisibility() const;
     bool showFps() const;
     bool showLevelMeter() const;
@@ -786,7 +787,7 @@ private:
     int m_repeatMode{0};
     bool m_shuffleEnabled{false};
     quint64 m_mutedChannelsMask{0};
-    int m_soloedChannel{-1};
+    quint64 m_soloedChannelsMask{0};
     int m_channelButtonsVisibility{1};
     bool m_showFps{false};
     bool m_showLevelMeter{true};

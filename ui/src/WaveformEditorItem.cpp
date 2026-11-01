@@ -229,7 +229,8 @@ bool WaveformEditorItem::crosshairEnabled() const { QMutexLocker lock(&m_stateMu
 bool WaveformEditorItem::showFpsOverlay() const { QMutexLocker lock(&m_stateMutex); return m_showFpsOverlay; }
 int WaveformEditorItem::viewMode() const { QMutexLocker lock(&m_stateMutex); return m_viewMode; }
 qulonglong WaveformEditorItem::mutedChannelsMask() const { QMutexLocker lock(&m_stateMutex); return m_mutedChannelsMask; }
-int WaveformEditorItem::soloedChannel() const { QMutexLocker lock(&m_stateMutex); return m_soloedChannel; }
+bool WaveformEditorItem::channelDrawnMuted(int channel) const { QMutexLocker lock(&m_stateMutex); return channelIsMutedLocked(channel); }
+qulonglong WaveformEditorItem::soloedChannelsMask() const { QMutexLocker lock(&m_stateMutex); return m_soloedChannelsMask; }
 int WaveformEditorItem::channelCountHint() const { QMutexLocker lock(&m_stateMutex); return m_channelCountHint; }
 int WaveformEditorItem::channelCount() const { QMutexLocker lock(&m_stateMutex); return displayedChannelCountLocked(); }
 int WaveformEditorItem::sampleRateHz() const { QMutexLocker lock(&m_stateMutex); return m_sampleRateHz; }
@@ -469,7 +470,24 @@ void WaveformEditorItem::setMutedChannels(const QList<bool> &value) {
     }
     setMutedChannelsMask(mask);
 }
-void WaveformEditorItem::setSoloedChannel(int value) { { QMutexLocker lock(&m_stateMutex); if (m_soloedChannel == value) return; m_soloedChannel = value; invalidateCacheLocked(); } emit soloedChannelChanged(); update(); }
+void WaveformEditorItem::setSoloedChannelsMask(qulonglong value) { { QMutexLocker lock(&m_stateMutex); if (m_soloedChannelsMask == value) return; m_soloedChannelsMask = value; invalidateCacheLocked(); } emit soloedChannelsChanged(); update(); }
+
+QList<bool> WaveformEditorItem::soloedChannels() const {
+    const qulonglong mask = soloedChannelsMask();
+    QList<bool> soloed(64);
+    for (int channel = 0; channel < 64; ++channel) {
+        soloed[channel] = (mask & (qulonglong{1} << channel)) != 0;
+    }
+    return soloed;
+}
+
+void WaveformEditorItem::setSoloedChannels(const QList<bool> &value) {
+    qulonglong mask = 0;
+    for (qsizetype channel = 0; channel < std::min<qsizetype>(value.size(), 64); ++channel) {
+        if (value[channel]) mask |= qulonglong{1} << channel;
+    }
+    setSoloedChannelsMask(mask);
+}
 void WaveformEditorItem::setChannelCountHint(int value) {
     value = std::clamp(value, 1, 64);
     {
@@ -1561,9 +1579,10 @@ int WaveformEditorItem::displayedChannelCountLocked() const {
     return m_viewMode == 0 ? 1 : std::max(1, sourceChannels);
 }
 bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
-    if (m_viewMode == 0) return false;
-    if (m_soloedChannel >= 0) return channel != m_soloedChannel;
-    return channel < 64 && (m_mutedChannelsMask & (qulonglong{1} << channel)) != 0;
+    if (m_viewMode == 0 || channel >= 64) return false;
+    const qulonglong bit = qulonglong{1} << channel;
+    if (m_soloedChannelsMask != 0) return (m_soloedChannelsMask & bit) == 0;
+    return (m_mutedChannelsMask & bit) != 0;
 }
 
 QSGNode *WaveformEditorItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) {

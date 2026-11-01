@@ -50,7 +50,7 @@ Item {
         channelCountHint: Math.max(1, root.uiBridge.currentTrackChannels)
         // Per channel: a 64-bit mask loses its low bits as a QML number.
         mutedChannels: root.uiBridge.mutedChannels || []
-        soloedChannel: root.uiBridge.soloedChannel
+        soloedChannels: root.uiBridge.soloedChannels || []
         onSeekRequested: function(seconds) {
             if (root.seekCommitted) {
                 root.seekCommitted(seconds)
@@ -140,7 +140,9 @@ Item {
                 }
 
                 Rectangle {
-                    property bool active: root.uiBridge.soloedChannel === index
+                    objectName: "waveformChannelSoloButton"
+                    readonly property int channelIndex: index
+                    property bool active: waveform.soloedChannels[index] === true
                     visible: root.interactiveOverlaysVisible
                         && (root.uiBridge.channelButtonsVisibility === 2
                             || (root.uiBridge.channelButtonsVisibility === 1

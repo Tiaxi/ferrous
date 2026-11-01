@@ -2024,8 +2024,16 @@ QList<bool> BridgeClient::mutedChannels() const {
     return muted;
 }
 
-int BridgeClient::soloedChannel() const {
-    return m_soloedChannel;
+quint64 BridgeClient::soloedChannelsMask() const {
+    return m_soloedChannelsMask;
+}
+
+QList<bool> BridgeClient::soloedChannels() const {
+    QList<bool> soloed(64);
+    for (int channel = 0; channel < 64; ++channel) {
+        soloed[channel] = (m_soloedChannelsMask & (1ULL << channel)) != 0;
+    }
+    return soloed;
 }
 
 int BridgeClient::channelButtonsVisibility() const {
@@ -5385,11 +5393,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         playbackSignalChanged = true;
     }
 
-    const int soloedChannel = snapshot.playback.present
-        ? snapshot.playback.soloedChannel
-        : m_soloedChannel;
-    if (m_soloedChannel != soloedChannel) {
-        m_soloedChannel = soloedChannel;
+    const quint64 soloedMask = snapshot.playback.present
+        ? snapshot.playback.soloedChannelsMask
+        : m_soloedChannelsMask;
+    if (m_soloedChannelsMask != soloedMask) {
+        m_soloedChannelsMask = soloedMask;
         changed = true;
         playbackSignalChanged = true;
     }

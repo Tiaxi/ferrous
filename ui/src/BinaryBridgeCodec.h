@@ -218,7 +218,7 @@ struct DecodedPlayback {
     int currentQueueIndex{-1};
     QString currentPath;
     quint64 mutedChannelsMask{0};
-    int soloedChannel{-1};
+    quint64 soloedChannelsMask{0};
     // Changes on every track change, also when the same file plays again.
     quint64 trackToken{0};
     // Serial of the last seek the engine is done with, and of the last one
