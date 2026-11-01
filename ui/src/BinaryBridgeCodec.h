@@ -303,6 +303,8 @@ struct DecodedLibraryRoot {
     QString name;
     // Why the library does not watch the root for changes; empty if it does.
     QString unwatchedReason;
+    // Whether that is expected, and not a problem to report.
+    bool unwatchedExpected{false};
     // What the latest scan of the root could not do; empty if nothing.
     QString scanProblem;
     // The tracks that removing the root takes out of the library.

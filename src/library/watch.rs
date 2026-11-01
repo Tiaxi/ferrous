@@ -257,6 +257,13 @@ impl Fallback {
             }
         }
     }
+
+    /// Whether this is simply how the root is, with nothing for the user to
+    /// do. A watch limit can be raised, and a missing folder or a failure
+    /// means something is wrong.
+    fn is_expected(&self) -> bool {
+        matches!(self, Self::FileSystem(_))
+    }
 }
 
 fn describe_interval(interval: Duration) -> String {
@@ -1220,10 +1227,15 @@ impl Watcher {
     /// are not, when they change.
     fn report(&mut self) {
         let periodic = self.tuning.periodic;
-        let mut reasons: BTreeMap<PathBuf, String> = self
+        let mut reasons: BTreeMap<PathBuf, (String, bool)> = self
             .unwatched
             .iter()
-            .map(|(root, fallback)| (root.clone(), fallback.describe(periodic)))
+            .map(|(root, fallback)| {
+                (
+                    root.clone(),
+                    (fallback.describe(periodic), fallback.is_expected()),
+                )
+            })
             .collect();
         let mut mounts: BTreeMap<&Path, Vec<(&Path, &str)>> = BTreeMap::new();
         for (mount_point, (root, fs_type)) in &self.unwatched_mounts {
@@ -1232,11 +1244,15 @@ impl Watcher {
         for (root, mounts) in mounts {
             reasons
                 .entry(root.to_path_buf())
-                .or_insert_with(|| describe_mounts(&mounts, periodic));
+                .or_insert_with(|| (describe_mounts(&mounts, periodic), true));
         }
         let unwatched: Vec<UnwatchedRoot> = reasons
             .into_iter()
-            .map(|(path, reason)| UnwatchedRoot { path, reason })
+            .map(|(path, (reason, expected))| UnwatchedRoot {
+                path,
+                reason,
+                expected,
+            })
             .collect();
         if unwatched != self.reported {
             let _ = self

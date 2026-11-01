@@ -280,6 +280,9 @@ pub struct UnwatchedRoot {
     pub path: PathBuf,
     /// Why, and what the library does instead, for the user.
     pub reason: String,
+    /// Whether this is simply how the root is, a network or FUSE file
+    /// system, and not a problem to report.
+    pub expected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
