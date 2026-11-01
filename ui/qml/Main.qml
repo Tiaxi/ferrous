@@ -141,6 +141,7 @@ ApplicationWindow {
     Controllers.ErrorController {
         id: errorController
         objectName: "errorController"
+        onHistoryRequested: recentErrorsDialog.open()
     }
 
     Controllers.ViewerController {
@@ -165,8 +166,7 @@ ApplicationWindow {
     readonly property int splitHandleAllowance: 8
     // The smallest window that shows every pane at its own minimum size,
     // with the level meter whether it is shown or not, so that the window's
-    // minimum does not change with a setting. The error banner, which comes
-    // and goes, takes its room from the panes.
+    // minimum does not change with a setting.
     readonly property int contentMinimumWidth: Math.ceil(Math.max(
         sidebarPane.SplitView.minimumWidth + rightSplit.SplitView.minimumWidth
             + root.splitHandleAllowance,
@@ -180,6 +180,19 @@ ApplicationWindow {
         + (root.footer ? root.footer.implicitHeight : 0))
 
     readonly property var libraryViewRef: libraryController.view
+
+    // A fullscreen viewer is a modal window over the main one, so the recent
+    // errors open in its window. Anything else is drawn in the main window,
+    // above the viewer popups.
+    readonly property var recentErrorsHost: {
+        if (root.useWholeScreenViewerMode && viewerController.spectrogramViewerOpen) {
+            return spectrogramViewerShell.windowHost
+        }
+        if (root.useWholeScreenViewerMode && viewerController.albumArtViewerOpen) {
+            return albumArtViewerShell.windowHost
+        }
+        return root.overlayHost
+    }
 
     function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
         return playbackController.shouldResetSpectrogramForStoppedTrackSwitch(
@@ -1164,6 +1177,16 @@ ApplicationWindow {
         popupTransitionMs: root.uiPopupTransitionMs
     }
 
+    Dialogs.RecentErrorsDialog {
+        id: recentErrorsDialog
+        objectName: "recentErrorsDialog"
+        parent: root.recentErrorsHost
+        errorController: errorController
+        uiPalette: root.uiPalette
+        windowRoot: root
+        popupTransitionMs: root.uiPopupTransitionMs
+    }
+
     Platform.FileDialog {
         id: externalFileDialog
         title: pendingFileDialogContext === "open"
@@ -1218,13 +1241,6 @@ ApplicationWindow {
             showCloseButton: false
             visible: root.backendStopped
             text: root.uiBridge.backendFailure || ""
-        }
-
-        Components.ErrorBanner {
-            objectName: "mainErrorBanner"
-            Layout.fillWidth: true
-            errorController: errorController
-            uiPalette: root.uiPalette
         }
 
         Panes.TransportBar {
@@ -1412,7 +1428,6 @@ ApplicationWindow {
         playbackPlaying: root.uiBridge.playbackState === "Playing"
         viewerActions: root.viewerActions
         errorController: errorController
-        uiPalette: root.uiPalette
     }
 
     Dialogs.ItunesArtworkDialog {
@@ -1439,7 +1454,6 @@ ApplicationWindow {
         openContextMenu: function() { albumArtSurface.openContextMenu() }
         viewerActions: root.viewerActions
         errorController: errorController
-        uiPalette: root.uiPalette
     }
 
     Viewers.AlbumArtSurface {

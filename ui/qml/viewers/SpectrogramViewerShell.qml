@@ -21,10 +21,9 @@ Item {
     property bool playbackPlaying: false
     // Actions whose shortcuts also work in the viewer.
     property var viewerActions: []
-    // The app's errors and palette; the viewer shows the newest error, as
-    // it hides the main window's, such as a screen it cannot keep awake.
+    // The app's errors; the viewer shows the newest error, as it hides the
+    // main window's status bar, such as a screen it cannot keep awake.
     property var errorController: null
-    property var uiPalette: null
 
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
@@ -182,8 +181,6 @@ Item {
             anchors.bottomMargin: 24
             width: Math.min(parent.width - 48, 720)
             errorController: root.errorController
-            uiPalette: root.uiPalette
-            historyAvailable: false
             active: root.viewerOpen && !root.useWholeScreenViewerMode
         }
     }
@@ -236,8 +233,6 @@ Item {
                 anchors.bottomMargin: 24
                 width: Math.min(parent.width - 48, 720)
                 errorController: root.errorController
-                uiPalette: root.uiPalette
-                historyAvailable: false
                 active: root.viewerOpen && root.useWholeScreenViewerMode
             }
         }
