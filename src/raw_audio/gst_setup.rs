@@ -24,10 +24,10 @@ pub(crate) fn configure_raw_surround_decoding() {
     ONCE.call_once(|| {
         use gst::prelude::PluginFeatureExtManual;
 
-        // Demote liba52's a52dec in favour of avdec_ac3 (FFmpeg).
-        // a52dec occasionally misparses exponent/scale-factor data in
-        // AC3 frames, producing a brief full-bandwidth noise burst
-        // (peak values millions of times above full-scale).
+        // Demote liba52's a52dec in favour of avdec_ac3 (FFmpeg). a52dec
+        // has no CRC check, so a damaged frame can decode to a brief
+        // full-bandwidth noise burst, far above full scale, and the
+        // concealment in `ac3_conceal` covers only the FFmpeg decoders.
         if let Some(factory) = gst::ElementFactory::find("a52dec") {
             factory.set_rank(gst::Rank::NONE);
         }

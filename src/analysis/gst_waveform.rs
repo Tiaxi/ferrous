@@ -12,7 +12,8 @@ use super::fft::{reduce_waveform_peaks, OverviewProgress};
 use super::track_io::stamp_of;
 use crate::playback::file_source::FileSource;
 use crate::raw_audio::{
-    audio_byte_range_of, configure_raw_surround_decoding, filter_raw_surround_source_to,
+    audio_byte_range_of, conceal_damaged_ac3_frames, configure_raw_surround_decoding,
+    filter_raw_surround_source_to,
 };
 
 pub(super) struct GstWaveformAccumulator {
@@ -98,6 +99,7 @@ pub(super) fn build_waveform_gst_pipeline(
     path: &Path,
 ) -> anyhow::Result<(gst::Pipeline, gst::Bus, gst::Element, FileSource)> {
     let pipeline = gst::Pipeline::new();
+    conceal_damaged_ac3_frames(pipeline.upcast_ref());
     let mut file = std::fs::File::open(path)
         .map_err(|err| anyhow::anyhow!("cannot open \"{}\": {err}", path.display()))?;
     let range = audio_byte_range_of(path, &mut file);
@@ -486,6 +488,45 @@ mod tests {
             // The fixture tone peaks at 1/8 of full scale.
             let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
             assert!((0.1..0.2).contains(&loudest), "{ext}: peak {loudest}");
+        }
+    }
+
+    #[test]
+    fn the_overview_decodes_no_damaged_ac3_frame() {
+        use crate::raw_audio::{
+            ac3_frame_is_damaged, configure_raw_surround_decoding, record_decoder_input,
+            with_damaged_frames, SEAMED_FRAME, TEST_AC3, TEST_AC3_FRAMES,
+        };
+
+        gst::init().expect("gst init");
+        configure_raw_surround_decoding();
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-waveform-damaged-{}.ac3",
+            std::process::id()
+        ));
+        let stream = with_damaged_frames(TEST_AC3, &[SEAMED_FRAME]);
+        std::fs::write(&path, stream).expect("write fixture");
+        let (pipeline, bus, level, _) = build_waveform_gst_pipeline(&path).expect("build pipeline");
+        let frames = record_decoder_input(pipeline.upcast_ref());
+        let shutdown = super::super::gst_lifecycle::PipelineShutdown::new(&pipeline);
+        configure_waveform_gst_pipeline(&pipeline, &level, 64).expect("start pipeline");
+        let message = bus
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(10),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("the overview reaches the end of the stream");
+        drop(shutdown);
+        std::fs::remove_file(&path).expect("remove fixture");
+        assert!(
+            matches!(message.view(), gst::MessageView::Eos(..)),
+            "{message:?}"
+        );
+
+        let frames = frames.lock().expect("frames");
+        assert_eq!(frames.len(), TEST_AC3_FRAMES);
+        for frame in frames.iter() {
+            assert!(!ac3_frame_is_damaged(&frame.bytes));
         }
     }
 
