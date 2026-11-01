@@ -22,7 +22,10 @@ use gstreamer as gst;
 #[cfg(feature = "gst")]
 use crate::raw_audio::is_raw_surround_file;
 #[cfg(feature = "gst")]
-use crate::raw_audio::{configure_raw_surround_decoding, filter_raw_surround_source, is_dts_file};
+use crate::raw_audio::{
+    conceal_damaged_ac3_frames, configure_raw_surround_decoding, filter_raw_surround_source,
+    is_dts_file,
+};
 #[cfg(feature = "gst")]
 use gstreamer_app as gst_app;
 
@@ -659,6 +662,7 @@ fn open_gstreamer_pipeline(
     pipeline: gst::Pipeline,
 ) -> Option<(AudioFrameSource, u64, usize, u32)> {
     let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
+    conceal_damaged_ac3_frames(pipeline.upcast_ref());
     let src = gst::ElementFactory::make("filesrc").build().ok()?;
     src.set_property("location", path.to_string_lossy().to_string());
     filter_raw_surround_source(&src);
@@ -1221,6 +1225,37 @@ mod tests {
             std::fs::remove_file(&path).expect("remove fixture");
             assert_eq!(decoded, expected_frames, "{ext}");
         }
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn damaged_ac3_frames_are_concealed_for_analysis() {
+        use crate::raw_audio::{
+            assert_no_burst, with_damaged_frames, SEAMED_FRAME, TEST_AC3, TEST_AC3_FRAMES,
+        };
+        use std::time::{Duration, Instant};
+
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-analysis-damaged-{}.ac3",
+            std::process::id()
+        ));
+        let stream = with_damaged_frames(TEST_AC3, &[SEAMED_FRAME]);
+        std::fs::write(&path, stream).expect("write fixture");
+        let (mut source, _, _, _) = open_audio_file(&path).expect("open");
+
+        let mut samples = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match source.next_frames().expect("decode") {
+                AudioRead::Frames(frames) => samples.extend(frames.samples),
+                AudioRead::Pending => assert!(Instant::now() < deadline, "stalled"),
+                AudioRead::Eof => break,
+            }
+        }
+        drop(source);
+        std::fs::remove_file(&path).expect("remove fixture");
+        assert_eq!(samples.len(), TEST_AC3_FRAMES * 1536);
+        assert_no_burst("analysis", &samples);
     }
 
     #[test]

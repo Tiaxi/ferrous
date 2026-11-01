@@ -3,6 +3,8 @@
 //! Raw AC3/DTS files: path classification, appended `APEv2` tags, frame
 //! parsing, and the `GStreamer` setup that playback and analysis share.
 
+#[cfg(any(feature = "gst", test))]
+mod ac3_conceal;
 mod apev2;
 #[cfg(any(feature = "gst", test))]
 mod bitstream;
@@ -14,6 +16,12 @@ mod gst_setup;
 
 use std::path::Path;
 
+#[cfg(all(test, feature = "gst"))]
+pub(crate) use ac3_conceal::{
+    ac3_frame_is_damaged, record_decoder_input, with_damaged_frames, SEAMED_FRAME, TEST_AC3_FRAMES,
+};
+#[cfg(feature = "gst")]
+pub(crate) use ac3_conceal::{conceal_and_report_damaged_ac3_frames, conceal_damaged_ac3_frames};
 #[cfg(test)]
 pub(crate) use apev2::{build_test_apev2_tag, write_test_apev2_file};
 pub(crate) use apev2::{
@@ -64,6 +72,33 @@ pub(crate) const TEST_AC3: &[u8] = include_bytes!("../analysis/fixtures/raw-tone
 /// 47 DTS frames (about 0.5 s) of a 48 kHz mono tone.
 #[cfg(test)]
 pub(crate) const TEST_DTS: &[u8] = include_bytes!("../analysis/fixtures/raw-tone.dts");
+
+/// The largest change between adjacent samples of the mono `samples`.
+#[cfg(all(test, feature = "gst"))]
+pub(crate) fn largest_step(samples: &[f32]) -> f32 {
+    samples
+        .windows(2)
+        .fold(0.0, |step, pair| step.max((pair[1] - pair[0]).abs()))
+}
+
+/// Assert that `samples` of a decoded `TEST_AC3` hold no concealment burst.
+///
+/// The tone peaks at 1/8 of full scale and is 440 Hz at 48 kHz, so it steps
+/// by at most 0.008. A burst need not be louder: what gives it away is the
+/// step at each seam of the short repeats, of up to twice the tone's level.
+/// The bounds leave room for the tone to jump in phase where a frame repeats,
+/// which the overlap of the decoder's transform spreads over a block.
+#[cfg(all(test, feature = "gst"))]
+pub(crate) fn assert_no_burst(name: &str, samples: &[f32]) {
+    const MAX_PEAK: f32 = 0.2;
+    const MAX_STEP: f32 = 0.02;
+    let peak = samples
+        .iter()
+        .fold(0.0, |peak: f32, sample| peak.max(sample.abs()));
+    assert!(peak <= MAX_PEAK, "{name}: peak {peak}");
+    let step = largest_step(samples);
+    assert!(step <= MAX_STEP, "{name}: a step of {step}");
+}
 
 /// A raw surround stream as ripped from a disc: the end of the previous
 /// track's last frame, the stream, and an appended `APEv2` tag. Returns the

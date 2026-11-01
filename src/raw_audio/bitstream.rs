@@ -13,6 +13,8 @@ const DTS_SAMPLE_RATES: [u32; 16] = [
 ];
 
 const AC3_SYNC: [u8; 2] = [0x0B, 0x77];
+/// The highest `bsid` of plain AC3; above it, a frame is E-AC3.
+const AC3_MAX_BSID: u8 = 10;
 const DTS_SYNC: [u8; 4] = [0x7F, 0xFE, 0x80, 0x01];
 
 /// The bitstream format of a raw surround file.
@@ -80,7 +82,7 @@ fn ac3_frame_len(header: &[u8]) -> Option<usize> {
         return None;
     }
     let bsid = header[5] >> 3;
-    if bsid > 10 {
+    if bsid > AC3_MAX_BSID {
         if bsid > 16 {
             return None;
         }
@@ -98,6 +100,11 @@ fn ac3_frame_len(header: &[u8]) -> Option<usize> {
         _ => return None,
     };
     Some(words * 2)
+}
+
+/// Length of the frame that `header` starts if it is plain AC3, not E-AC3.
+pub(super) fn plain_ac3_frame_len(header: &[u8]) -> Option<usize> {
+    (*header.get(5)? >> 3 <= AC3_MAX_BSID).then(|| ac3_frame_len(header))?
 }
 
 /// Length of a DTS core frame from its `FSIZE` field.

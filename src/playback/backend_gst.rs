@@ -16,8 +16,8 @@ use crate::analysis::AnalysisCommand;
 #[cfg(feature = "profiling-logs")]
 use crate::profile_logging::heartbeat_trace_enabled;
 use crate::raw_audio::{
-    configure_raw_surround_decoding, install_raw_surround_source_probe, is_dts_file,
-    is_raw_surround_file,
+    conceal_and_report_damaged_ac3_frames, configure_raw_surround_decoding,
+    install_raw_surround_source_probe, is_dts_file, is_raw_surround_file,
 };
 
 use super::clock::{self, MonotonicClock, MonotonicTime};
@@ -2644,6 +2644,7 @@ fn start_gst_engine(
     // sync-aligned audio.  Without this, the parser must scan for sync
     // words through garbage data, causing gaps during gapless transitions.
     install_raw_surround_source_probe(&playbin);
+    conceal_and_report_damaged_ac3_frames(&playbin);
 
     let stream_durations = Arc::new(Mutex::new(StreamDurations::default()));
     let stream_ends = Arc::new(Mutex::new(StreamEndHold::default()));
@@ -5033,6 +5034,10 @@ mod engine_tests {
         race_type_finding_with_activation, ActivationRace,
     };
     use crate::playback::PathRenames;
+    use crate::raw_audio::{
+        ac3_frame_is_damaged, record_decoder_input, with_damaged_frames, SEAMED_FRAME,
+        TEST_AC3_FRAMES,
+    };
 
     const TIMEOUT: Duration = Duration::from_secs(10);
     const WAV_RATE: u32 = 8_000;
@@ -5132,6 +5137,18 @@ mod engine_tests {
         fn ac3(&self, name: &str) -> PathBuf {
             let path = self.dir.join(name);
             std::fs::write(&path, crate::raw_audio::TEST_AC3).unwrap();
+            path
+        }
+    }
+
+    impl Fixtures {
+        /// About 4 s of a raw AC3 tone with one damaged frame in each second.
+        fn damaged_ac3(&self, name: &str) -> PathBuf {
+            let frames = TEST_AC3_FRAMES;
+            let damaged = [0, 1, 2, 3].map(|second| second * frames + SEAMED_FRAME);
+            let path = self.dir.join(name);
+            let stream = with_damaged_frames(&crate::raw_audio::TEST_AC3.repeat(4), &damaged);
+            std::fs::write(&path, stream).unwrap();
             path
         }
     }
@@ -9876,6 +9893,28 @@ mod engine_tests {
                 .any(|pair| pair[1].stream_time < pair[0].stream_time),
             "{buffers:?}"
         );
+    }
+
+    #[test]
+    fn no_damaged_ac3_frame_reaches_a_decoder_across_a_gapless_switch() {
+        let fixtures = Fixtures::new("damaged-ac3");
+        let a = fixtures.damaged_ac3("a.ac3");
+        let b = fixtures.damaged_ac3("b.ac3");
+        let mut engine = Engine::start();
+        let frames = record_decoder_input(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        engine.wait_until("row 1 did not reach its damaged frame", |engine| {
+            engine.snapshot.current_queue_index == Some(1)
+                && engine.snapshot.position >= millis(1_100)
+        });
+        let frames = frames.lock().unwrap();
+        // All of the first track and the second one's first damaged frame.
+        assert!(frames.len() > 4 * TEST_AC3_FRAMES + SEAMED_FRAME);
+        for frame in frames.iter() {
+            assert!(!ac3_frame_is_damaged(&frame.bytes), "{:?}", frame.pts);
+        }
     }
 
     #[test]

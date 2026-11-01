@@ -522,7 +522,10 @@ mod gst_tests {
     use crate::playback::source_activation::SourceActivation;
     use crate::playback::InputSwitches;
     use crate::raw_audio::{build_test_apev2_tag, test_path, TEST_AC3, TEST_DTS};
-    use crate::raw_audio::{configure_raw_surround_decoding, ripped_surround_bytes_after_junk};
+    use crate::raw_audio::{
+        conceal_damaged_ac3_frames, configure_raw_surround_decoding,
+        ripped_surround_bytes_after_junk, with_damaged_frames, SEAMED_FRAME,
+    };
     use gst::prelude::*;
     use gstreamer as gst;
     use std::collections::VecDeque;
@@ -643,6 +646,7 @@ mod gst_tests {
                 .build()
                 .expect("playbin3");
             install_raw_surround_source_probe(&playbin);
+            conceal_damaged_ac3_frames(&playbin);
             let activation = SourceActivation::connect(&playbin);
             let switches = Arc::<InputSwitches>::default();
             switches.connect(&playbin);
@@ -1211,6 +1215,29 @@ mod gst_tests {
     #[test]
     fn ripped_ac3_plays_every_frame_through_gapless_and_repeated_tracks() {
         assert_gapless_queue_plays_every_frame(&AC3);
+    }
+
+    #[test]
+    fn damaged_frames_take_no_time_from_gapless_and_repeated_tracks() {
+        require_elements(AC3.elements);
+        let queue = |damage: [&[usize]; 2]| {
+            let [first, second] = damage.map(|frames| {
+                let path = test_path("damaged", AC3.name);
+                let stream = with_damaged_frames(&AC3.fixture.repeat(2), frames);
+                std::fs::write(&path, stream).expect("write fixture");
+                path
+            });
+            // The second track twice, as Repeat-One queues it.
+            let run = play_gapless(&[first.clone(), second.clone(), second.clone()]);
+            let _ = std::fs::remove_file(&first);
+            let _ = std::fs::remove_file(&second);
+            run
+        };
+
+        let clean = queue([&[], &[]]);
+        let damaged = queue([&[SEAMED_FRAME, 40], &[0, SEAMED_FRAME, 63]]);
+        assert_eq!(damaged.total_decoded(), clean.total_decoded());
+        assert_eq!(damaged.decoded, clean.decoded);
     }
 
     #[test]
