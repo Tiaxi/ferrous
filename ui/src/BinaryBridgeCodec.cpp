@@ -672,7 +672,7 @@ bool decodeQueueUndoSection(const QByteArray &payload, DecodedQueueUndo *out) {
     quint32 rangeCount = 0;
     if (!reader.readU64(&out->offerId)
         || !reader.readU8(&kind)
-        || kind > QueueUndoReplaced
+        || kind > QueueUndoLast
         || !reader.readU64(&out->restoredId)
         || !reader.readU64(&out->restoredRevision)
         || !reader.readU32(&rangeCount)

@@ -1386,6 +1386,7 @@ private slots:
     void queueChangesShowNoNoticeAndEditUndoRestoresThem();
     void removingALibraryRootAsksFirstAndNamesIt();
     void libraryKeysReachBothEndsAndOpenTheContextMenu();
+    void editMenuNamesTheUndoOfAMoveAndItSelectsTheMovedRows();
 };
 
 // Playback controls, keyboard and wheel input, and fullscreen viewers.
@@ -17161,6 +17162,44 @@ void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
     QTRY_VERIFY(queueView->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
     QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 10"));
+}
+
+void LibraryQueueSmokeTest::editMenuNamesTheUndoOfAMoveAndItSelectsTheMovedRows() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("queueRows", sampleQueueRows(5));
+    bridge->setProperty("queueLength", 5);
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QObject *undoAction = window->findChild<QObject *>(QStringLiteral("undoQueueChangeAction"));
+    QVERIFY(controller != nullptr && undoAction != nullptr);
+    QObject *undoMenuItem = nullptr;
+    for (QObject *object : window->findChildren<QObject *>()) {
+        if (object->inherits("QQuickMenuItem")
+            && qvariant_cast<QObject *>(object->property("action")) == undoAction) {
+            undoMenuItem = object;
+            break;
+        }
+    }
+    QVERIFY(undoMenuItem != nullptr);
+
+    bridge->setProperty("queueUndoKind", int(BinaryBridgeCodec::QueueUndoMoved));
+    bridge->setProperty("queueUndoId", 10.0);
+    QVERIFY(undoMenuItem->property("enabled").toBool());
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Move Tracks"));
+    QVERIFY(QMetaObject::invokeMethod(undoAction, "trigger"));
+    QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 10"));
+
+    // The rows are back where they were, and selected.
+    bridge->setProperty("queueUndoKind", int(BinaryBridgeCodec::QueueUndoNone));
+    bridge->setProperty("queueUndoId", 0.0);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "queueUndoRestored",
+        Q_ARG(QVariant, QVariant(QVariantList{0, 2}))));
+    QCOMPARE(controller->property("selectedIndices").toList(), (QVariantList{0, 2}));
+    QVERIFY(!undoMenuItem->property("enabled").toBool());
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo"));
 }
 
 void LibraryQueueSmokeTest::removingALibraryRootAsksFirstAndNamesIt() {
