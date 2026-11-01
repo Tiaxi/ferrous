@@ -28,6 +28,13 @@ Item {
     property alias popupHost: spectrogramPopupHost
     property alias windowHost: spectrogramWindowHost
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
+    // What the visualization keeps clear of in its top right corner: the
+    // close button, the switch beside it and the gap beside that. Both
+    // viewers lay them out alike, and it does not change as they auto-hide.
+    readonly property size reservedCorner: Qt.size(
+        popupCloseButton.anchors.rightMargin + popupCloseButton.width
+            + 2 * popupModeSwitch.anchors.rightMargin + popupModeSwitch.width,
+        popupCloseButton.anchors.topMargin + popupCloseButton.height)
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
     readonly property bool fullscreenDisplayActive:
         root.viewerOpen
@@ -125,6 +132,7 @@ Item {
         }
 
         Components.ViewerCloseButton {
+            id: popupCloseButton
             objectName: "spectrogramPopupCloseButton"
             z: 20
             anchors.top: parent.top
@@ -142,9 +150,10 @@ Item {
         }
 
         Components.VisualizationModeSwitch {
+            id: popupModeSwitch
             z: 20
             anchors.top: parent.top
-            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.right: popupCloseButton.left
             anchors.margins: 12
             controlsVisible: root.fullscreenControlsVisible
             selectedMode: root.visualizationMode
@@ -245,6 +254,7 @@ Item {
         }
 
         Components.ViewerCloseButton {
+            id: fullscreenCloseButton
             objectName: "spectrogramFullscreenCloseButton"
             z: 20
             anchors.top: parent.top
@@ -265,7 +275,7 @@ Item {
         Components.VisualizationModeSwitch {
             z: 20
             anchors.top: parent.top
-            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.right: fullscreenCloseButton.left
             anchors.margins: 12
             controlsVisible: root.fullscreenControlsVisible
             selectedMode: root.visualizationMode

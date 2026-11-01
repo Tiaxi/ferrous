@@ -1144,6 +1144,7 @@ private slots:
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void spectrogramFpsOverlayToggleKeepsSceneNode();
+    void spectrogramOverlaysKeepClearOfTheReservedCorner();
     void spectrogramStillFramesLeaveTextureNodesAlone();
     void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data();
     void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel();
@@ -1304,6 +1305,7 @@ private slots:
     void waveformEditorSeeksMoveAtOnce();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
     void waveformEditorCrosshairLabelsMatchSpectrogramMargins();
+    void waveformOverlaysKeepClearOfTheReservedCorner();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
     void waveformEditorSampleViewUsesSmoothInterpolation();
     void waveformEditorSampleViewDoesNotFillLaterChannels();
@@ -1406,6 +1408,8 @@ private slots:
     void playbackShortcutsWorkInTheViewers();
     void viewerShortcutsOpenAndCloseTheViewers();
     void visualizationModeSwitchTakesKeyboardFocus();
+    void visualizationModeSwitchStaysClearOfTheCornerOverlays();
+    void visualizationModeSwitchLeavesTheCornerToTheView();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
 };
 
@@ -1578,17 +1582,17 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
     QVERIFY2(modeSwitch != nullptr, "Visualization mode switch was not created");
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
     QVERIFY(modeSwitch->property("width").toDouble() <= 50.0);
-    QCOMPARE(modeSwitch->property("proximityHovered").toBool(), false);
-    // Visible without hovering, dimmed until the pointer comes close.
+    QCOMPARE(modeSwitch->property("pointerHovered").toBool(), false);
+    // Visible without hovering, dimmed until the pointer is on it.
     const double idleOpacity = modeSwitch->property("idleOpacity").toDouble();
     QVERIFY(idleOpacity >= 0.5 && idleOpacity < 0.95);
     QCOMPARE(modeSwitch->property("opacity").toDouble(), idleOpacity);
     auto *modeSwitchItem = qobject_cast<QQuickItem *>(modeSwitch);
     QVERIFY(modeSwitchItem != nullptr);
-    QVERIFY(modeSwitch->setProperty("proximityHovered", true));
+    QVERIFY(modeSwitch->setProperty("pointerHovered", true));
     QTRY_VERIFY(modeSwitch->property("opacity").toDouble() > 0.95);
     QVERIFY(modeSwitch->setProperty("controlsVisible", false));
-    QCOMPARE(modeSwitch->property("proximityHovered").toBool(), false);
+    QCOMPARE(modeSwitch->property("pointerHovered").toBool(), false);
     QVERIFY(modeSwitch->setProperty("controlsVisible", true));
     QTRY_COMPARE(modeSwitch->property("opacity").toDouble(), idleOpacity);
     QJSValue setMode = qvariant_cast<QJSValue>(modeSwitch->property("setMode"));
@@ -8882,6 +8886,69 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
     QCOMPARE(timeRect.size(), QSize(timeWidth + 6, textHeight + 6));
 }
 
+void WaveformSmokeTest::waveformOverlaysKeepClearOfTheReservedCorner() {
+    constexpr int width = 400;
+    constexpr int height = 180;
+    const QSizeF reserved(120.0, 40.0);
+    const QRect corner(width - 120, 0, 120, 40);
+
+    // The readout leaves the corner, only while it would be under it.
+    const auto [topValue, topTime] = WaveformEditorItem::crosshairLabelRects(
+        width, height, 100, 5, 42, 48, 12, reserved);
+    QVERIFY(!topValue.intersects(corner));
+    QCOMPARE(topValue.right(), corner.left() - 1);
+    const auto [lowValue, lowTime] = WaveformEditorItem::crosshairLabelRects(
+        width, height, 100, 100, 42, 48, 12, reserved);
+    QCOMPARE(lowValue.right(), width - 3);
+    QCOMPARE(lowTime, topTime);
+
+    WaveformEditorItem item;
+    item.setWidth(width);
+    item.setHeight(height);
+    item.setDurationSeconds(10.0);
+    item.setGridEnabled(true);
+    const auto paint = [&]() {
+        QImage image(width, height, QImage::Format_RGB32);
+        image.fill(Qt::black);
+        QPainter painter(&image);
+        item.paint(&painter);
+        painter.end();
+        return image;
+    };
+    const auto difference = [](const QImage &a, const QImage &b) {
+        QRect changed;
+        for (int y = 0; y < a.height(); ++y) {
+            for (int x = 0; x < a.width(); ++x) {
+                if (a.pixel(x, y) != b.pixel(x, y)) {
+                    changed |= QRect(x, y, 1, 1);
+                }
+            }
+        }
+        return changed;
+    };
+
+    // The scale's labels at the corner move out from under it.
+    const QImage edgeLabels = paint();
+    item.setReservedCorner(reserved);
+    const QImage movedLabels = paint();
+    const QRect moved = difference(edgeLabels, movedLabels);
+    QVERIFY(moved.intersects(corner));
+    QVERIFY(moved.left() < corner.left());
+
+    // The counter is drawn where it says it is, beside the corner.
+    item.setShowFpsOverlay(true);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_fpsValue = 60;
+    }
+    const QRectF counter = item.fpsCounterRect();
+    QVERIFY(!counter.isEmpty());
+    QVERIFY(!counter.intersects(QRectF(corner)));
+    const QRect drawn = difference(movedLabels, paint());
+    QVERIFY(!drawn.isEmpty());
+    QVERIFY(counter.adjusted(-1, -1, 1, 1).contains(QRectF(drawn)));
+}
+
 void WaveformSmokeTest::waveformEditorSampleViewRepaintsCrosshairCleanly() {
     WaveformEditorItem item;
     item.setWidth(400);
@@ -11306,6 +11373,75 @@ void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
         QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
         auto *overlay = static_cast<QSGSimpleTextureNode *>(node->lastChild());
         QCOMPARE(!overlay->rect().isEmpty(), shown);
+    }
+    delete node;
+}
+
+void SpectrogramSmokeTest::spectrogramOverlaysKeepClearOfTheReservedCorner() {
+    QQuickWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareWholeTrackPlayback(item, 50.0);
+    item.setPlaying(false);
+    item.setGridEnabled(true);
+    item.setCrosshairEnabled(true);
+    item.setShowFpsOverlay(true);
+    QSGNode *node = paintSettled(item, nullptr);
+    const int width = static_cast<int>(item.width());
+    const int height = static_cast<int>(item.height());
+    const QSizeF reserved(120.0, 40.0);
+    const QRect corner(width - 120, 0, 120, 40);
+    const auto layOut = [&](double pointerY) {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(height);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(20.0, pointerY);
+        item.updateFreqGridOverlayLocked(width, height);
+        item.updateCrosshairOverlayLocked(width, height, 0, false, 46.875, 0.0);
+    };
+
+    // Without a reserved corner, the labels are on the right edge.
+    layOut(5.0);
+    QVERIFY(item.m_crosshairFreqLabelRect.intersects(corner));
+    bool gridLabelInCorner = false;
+    for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {
+        gridLabelInCorner = gridLabelInCorner || image.rect.toRect().intersects(corner);
+    }
+    QVERIFY(gridLabelInCorner);
+    const QRect edgeLabel = item.m_crosshairFreqLabelRect;
+
+    item.setReservedCorner(reserved);
+    layOut(5.0);
+    QVERIFY(!item.m_crosshairFreqLabelRect.isEmpty());
+    QVERIFY(!item.m_crosshairFreqLabelRect.intersects(corner));
+    QCOMPARE(item.m_crosshairFreqLabelRect.y(), edgeLabel.y());
+    for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {
+        QVERIFY(!image.rect.toRect().intersects(corner));
+    }
+    // Below the corner, the readout is on the edge again.
+    layOut(70.0);
+    QCOMPARE(item.m_crosshairFreqLabelRect.right(), edgeLabel.right());
+
+    // The counter ends beside the corner, wherever its text starts.
+    double counterRight = -1.0;
+    for (const int fps : {9, 60, 999}) {
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_fpsValue = fps;
+            item.m_overlayDirty = true;
+        }
+        const QRectF counter = item.fpsCounterRect();
+        QVERIFY(!counter.isEmpty());
+        QVERIFY(!counter.intersects(QRectF(corner)));
+        QVERIFY(counterRight < 0.0 || qFuzzyCompare(counter.right(), counterRight));
+        counterRight = counter.right();
+        QCOMPARE(item.updatePaintNode(node, nullptr), node);
+        auto *overlay = static_cast<QSGSimpleTextureNode *>(node->lastChild());
+        QVERIFY(qAbs(overlay->rect().right() - counter.right()) < 1.0);
+        QVERIFY(!overlay->rect().intersects(QRectF(corner)));
     }
     delete node;
 }
@@ -16335,6 +16471,306 @@ void TransportInputSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {
     QTRY_VERIFY(spectrogramButton->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Return);
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
+}
+
+namespace {
+
+QRectF sceneRectOf(const QQuickItem *item) {
+    return item->mapRectToScene(item->boundingRect());
+}
+
+// Every visible item named `objectName` under `root`.
+QList<QQuickItem *> visibleItemsNamed(QQuickItem *root, const QString &objectName) {
+    QList<QQuickItem *> found;
+    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+        if (item->objectName() == objectName && item->isVisible()) {
+            found.push_back(item);
+        }
+        for (QQuickItem *child : item->childItems()) {
+            visit(child);
+        }
+    };
+    visit(root);
+    return found;
+}
+
+// The first visible item named `objectName` under `root`.
+QQuickItem *firstVisibleItemNamed(QQuickItem *root, const QString &objectName) {
+    const QList<QQuickItem *> found = visibleItemsNamed(root, objectName);
+    return found.isEmpty() ? nullptr : found.constFirst();
+}
+
+void setChannelCount(QObject *bridge, QQuickItem *spectrogramSurface, int channels) {
+    bridge->setProperty("currentTrackChannels", channels);
+    QVariant descriptors;
+    QMetaObject::invokeMethod(
+        spectrogramSurface, "descriptorsForChannelCount",
+        Q_RETURN_ARG(QVariant, descriptors), Q_ARG(QVariant, QVariant(channels)));
+    spectrogramSurface->setProperty("channelDescriptors", descriptors);
+}
+
+} // namespace
+
+void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverlays() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    window->resize(window->minimumWidth(), window->minimumHeight());
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide =
+        window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    auto *spectrogramSurface =
+        window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && autoHide != nullptr && popup != nullptr
+            && spectrogramSurface != nullptr && waveformSurface != nullptr);
+    bridge->setProperty("spectrogramViewMode", 1);
+    bridge->setProperty("channelButtonsVisibility", 2);
+    // Stays shown while the layouts are checked, until the test hides it.
+    autoHide->setProperty("hideDelay", 600000);
+
+    const auto checkLayouts = [&](QQuickItem *controlsRoot, const QString &closeButtonName) {
+        QQuickItem *modeSwitchItem =
+            firstVisibleItemNamed(controlsRoot, QStringLiteral("visualizationModeSwitch"));
+        QVERIFY(modeSwitchItem != nullptr);
+        QQuickItem *closeButton = closeButtonName.isEmpty()
+            ? nullptr : firstVisibleItemNamed(controlsRoot, closeButtonName);
+        QCOMPARE(closeButton != nullptr, !closeButtonName.isEmpty());
+        for (const int displayMode : {0, 1}) {
+            bridge->setProperty("spectrogramDisplayMode", displayMode);
+            for (const int visualizationMode : {0, 1}) {
+                viewer->setProperty("visualizationMode", visualizationMode);
+                for (const int channels : {1, 2, 8}) {
+                    setChannelCount(bridge, spectrogramSurface, channels);
+                    QQuickItem *surface =
+                        visualizationMode == 0 ? spectrogramSurface : waveformSurface;
+                    QTRY_VERIFY(surface->isVisible());
+                    QCoreApplication::processEvents();
+
+                    const QRectF view = sceneRectOf(surface);
+                    const QRectF modeSwitch = sceneRectOf(modeSwitchItem);
+                    const double margin = modeSwitch.height();
+                    // In the top right corner, off the centre line.
+                    QVERIFY(view.contains(modeSwitch));
+                    QVERIFY(modeSwitch.left() > view.center().x());
+                    QVERIFY(modeSwitch.top() - view.top() < margin);
+                    if (closeButton != nullptr) {
+                        const QRectF close = sceneRectOf(closeButton);
+                        QVERIFY(close.right() <= view.right());
+                        QVERIFY(view.right() - close.right() < margin);
+                        QVERIFY(modeSwitch.right() <= close.left());
+                        QVERIFY(close.left() - modeSwitch.right() < margin);
+                    } else {
+                        QVERIFY(view.right() - modeSwitch.right() < margin);
+                    }
+
+                    // Beside the channels' labels and buttons, not over them.
+                    QList<QQuickItem *> strips;
+                    for (QQuickItem *marker : visibleItemsNamed(
+                             surface, QStringLiteral("spectrogramChannelMarker"))) {
+                        strips.push_back(marker->parentItem());
+                    }
+                    for (QQuickItem *mute : visibleItemsNamed(
+                             surface, QStringLiteral("waveformChannelMuteButton"))) {
+                        strips.push_back(mute->parentItem());
+                    }
+                    QCOMPARE(strips.size(), channels);
+                    QVERIFY(sceneRectOf(strips.constFirst()).width() > 0.0);
+
+                    QObject *painted = visualizationMode == 0
+                        ? static_cast<QObject *>(firstVisibleItemNamed(
+                              surface, QStringLiteral("spectrogramPaneItem")))
+                        : surface->property("waveformItem").value<QObject *>();
+                    QVERIFY(painted != nullptr);
+                    // The layout sizes the panes it was just given as it polishes.
+                    for (QQuickItem *pane : visibleItemsNamed(
+                             surface, QStringLiteral("spectrogramPaneItem"))) {
+                        QTRY_COMPARE(pane->width(), surface->width());
+                    }
+                    const auto counterRect = [&]() {
+                        auto *spectrogram = qobject_cast<SpectrogramItem *>(painted);
+                        auto *waveform = qobject_cast<WaveformEditorItem *>(painted);
+                        const QRectF local = spectrogram != nullptr
+                            ? spectrogram->fpsCounterRect() : waveform->fpsCounterRect();
+                        return qobject_cast<QQuickItem *>(painted)->mapRectToScene(local);
+                    };
+                    const auto setFps = [&](int fps) {
+                        if (auto *spectrogram = qobject_cast<SpectrogramItem *>(painted)) {
+                            QMutexLocker lock(&spectrogram->m_stateMutex);
+                            spectrogram->m_fpsValue = fps;
+                        } else {
+                            auto *waveform = qobject_cast<WaveformEditorItem *>(painted);
+                            QMutexLocker lock(&waveform->m_stateMutex);
+                            waveform->m_fpsValue = fps;
+                        }
+                    };
+
+                    // The counter sits beside the switch at any width, and
+                    // neither moves the other.
+                    bridge->setProperty("showFps", true);
+                    QTRY_COMPARE(painted->property("showFpsOverlay").toBool(), true);
+                    double counterRight = -1.0;
+                    for (const int fps : {9, 999}) {
+                        setFps(fps);
+                        const QRectF counter = counterRect();
+                        QVERIFY(!counter.isEmpty());
+                        QVERIFY(view.contains(counter));
+                        QVERIFY(!counter.intersects(modeSwitch));
+                        QVERIFY(counter.right() <= modeSwitch.left());
+                        QVERIFY(modeSwitch.left() - counter.right() < margin);
+                        if (closeButton != nullptr) {
+                            QVERIFY(!counter.intersects(sceneRectOf(closeButton)));
+                        }
+                        for (QQuickItem *strip : strips) {
+                            QVERIFY(!sceneRectOf(strip).intersects(modeSwitch));
+                            QVERIFY(!sceneRectOf(strip).intersects(counter));
+                        }
+                        QVERIFY(counterRight < 0.0 || qFuzzyCompare(counter.right(), counterRight));
+                        counterRight = counter.right();
+                        QCOMPARE(sceneRectOf(modeSwitchItem), modeSwitch);
+                    }
+                    bridge->setProperty("showFps", false);
+                    QTRY_COMPARE(painted->property("showFpsOverlay").toBool(), false);
+                    setFps(0);
+                    QVERIFY(counterRect().isEmpty());
+                    QCOMPARE(sceneRectOf(modeSwitchItem), modeSwitch);
+                    for (QQuickItem *strip : strips) {
+                        QVERIFY(!sceneRectOf(strip).intersects(modeSwitch));
+                    }
+                }
+            }
+        }
+    };
+
+    // Docked, at the narrowest the window lets the pane be.
+    QTRY_VERIFY(spectrogramSurface->width() > 0.0);
+    checkLayouts(window->contentItem(), QString());
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    checkLayouts(qvariant_cast<QQuickItem *>(popup->property("contentItem")),
+                 QStringLiteral("spectrogramPopupCloseButton"));
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    QTRY_VERIFY(!popup->property("visible").toBool());
+
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(spectrogramSurface->window() != nullptr && spectrogramSurface->window() != window);
+    QQuickWindow *fullscreen = spectrogramSurface->window();
+    QVERIFY(QTest::qWaitForWindowExposed(fullscreen));
+    QTRY_VERIFY(qFuzzyCompare(spectrogramSurface->width(), fullscreen->contentItem()->width()));
+    checkLayouts(fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenCloseButton"));
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    // The controls hiding leave the counter where it is.
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveformSurface->isVisible());
+    bridge->setProperty("showFps", true);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    QTRY_VERIFY(waveform->showFpsOverlay());
+    {
+        QMutexLocker lock(&waveform->m_stateMutex);
+        waveform->m_fpsValue = 60;
+    }
+    const QRectF shownControlsCounter = waveform->fpsCounterRect();
+    QVERIFY(!shownControlsCounter.isEmpty());
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    {
+        QMutexLocker lock(&waveform->m_stateMutex);
+        waveform->m_fpsValue = 60;
+    }
+    QCOMPARE(waveform->fpsCounterRect(), shownControlsCounter);
+    autoHide->setProperty("hideDelay", 5000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && popup != nullptr
+            && waveformSurface != nullptr);
+    QQuickItem *modeSwitch =
+        firstVisibleItemNamed(window->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("durationSeconds", 100.0);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveformSurface->isVisible());
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    QTRY_VERIFY(waveform->crosshairEnabled());
+
+    // On the switch, the pointer brings it up.
+    const QRectF switchRect = sceneRectOf(modeSwitch);
+    QTest::mouseMove(window, switchRect.center().toPoint());
+    QTRY_VERIFY(modeSwitch->property("pointerHovered").toBool());
+
+    // Beside it, the view has the pointer: the crosshair follows it,
+    const QPoint nearSwitch(static_cast<int>(switchRect.left()) - 12,
+                            static_cast<int>(switchRect.center().y()));
+    QVERIFY(!switchRect.contains(nearSwitch));
+    QTest::mouseMove(window, nearSwitch);
+    QTRY_VERIFY(!modeSwitch->property("pointerHovered").toBool());
+    QTRY_VERIFY(waveform->m_hoverActive);
+    QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), nearSwitch);
+
+    // in the spectrogram too,
+    viewer->setProperty("visualizationMode", 0);
+    auto *spectrogramSurface =
+        window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QVERIFY(spectrogramSurface != nullptr);
+    QTRY_VERIFY(spectrogramSurface->isVisible());
+    auto *spectrogram = qobject_cast<SpectrogramItem *>(firstVisibleItemNamed(
+        spectrogramSurface, QStringLiteral("spectrogramPaneItem")));
+    QVERIFY(spectrogram != nullptr);
+    QTest::mouseMove(window, nearSwitch + QPoint(1, 1));
+    QTRY_VERIFY(spectrogram->m_hoverActive);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveformSurface->isVisible());
+    QTest::mouseMove(window, nearSwitch);
+
+    // and its seek and the double-click that opens the viewer work there.
+    QSignalSpy seeks(waveform, &WaveformEditorItem::seekRequested);
+    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, nearSwitch);
+    QTRY_COMPARE(seeks.count(), 1);
+    QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, nearSwitch);
+    QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    QTRY_VERIFY(popup->property("opened").toBool());
+
+    // In the viewer, a double-click there closes it, as it does elsewhere.
+    QQuickItem *viewerSwitch = firstVisibleItemNamed(
+        qvariant_cast<QQuickItem *>(popup->property("contentItem")),
+        QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(viewerSwitch != nullptr);
+    const QRectF viewerSwitchRect = sceneRectOf(viewerSwitch);
+    const QPoint nearViewerSwitch(static_cast<int>(viewerSwitchRect.left()) - 12,
+                                  static_cast<int>(viewerSwitchRect.center().y()));
+    QTest::mouseMove(window, nearViewerSwitch);
+    QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, nearViewerSwitch);
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
 
 void TransportInputSmokeTest::menuMnemonicsOpenTheMenusAndShowShortcuts() {

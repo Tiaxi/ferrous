@@ -14,6 +14,7 @@ Item {
     property var seekCommitted: null
     property bool interactiveOverlaysVisible: true
     property var pointerActivity: null
+    property size reservedCorner: Qt.size(0, 0)
     readonly property alias waveformItem: waveform
 
     Accessible.role: Accessible.Graphic
@@ -46,6 +47,7 @@ Item {
         crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
             && root.interactiveOverlaysVisible
         showFpsOverlay: root.uiBridge.showFps
+        reservedCorner: root.reservedCorner
         viewMode: root.uiBridge.spectrogramViewMode
         channelCountHint: Math.max(1, root.uiBridge.currentTrackChannels)
         // Per channel: a 64-bit mask loses its low bits as a QML number.

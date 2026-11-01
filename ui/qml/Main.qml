@@ -1364,6 +1364,9 @@ ApplicationWindow {
             : spectrogramPane.hostItem
         visible: parent !== null
         anchors.fill: parent
+        readonly property size reservedCorner: viewerController.spectrogramViewerOpen
+            ? spectrogramViewerShell.reservedCorner
+            : spectrogramPane.reservedCorner
 
         Viewers.SpectrogramSurface {
             id: spectrogramSurface
@@ -1377,6 +1380,7 @@ ApplicationWindow {
             viewerMode: viewerController.spectrogramViewerOpen
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
+            reservedCorner: visualizationSurface.reservedCorner
             uiBridge: root.uiBridge
             clock: playbackController.playbackClock
             seekCommitted: playbackController.seekCommitted
@@ -1390,6 +1394,7 @@ ApplicationWindow {
             visible: viewerController.visualizationMode === 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
+            reservedCorner: visualizationSurface.reservedCorner
             uiBridge: root.uiBridge
             clock: playbackController.playbackClock
             seekCommitted: playbackController.seekCommitted
