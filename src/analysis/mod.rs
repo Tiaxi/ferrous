@@ -1499,6 +1499,9 @@ impl AnalysisRuntimeState {
                     self.apply_track_format(format);
                 }
             }
+            SessionReport::Repositioned { start_seconds, .. } => {
+                self.spectrogram_session_start = start_seconds;
+            }
             SessionReport::ContinuationRejected {
                 path,
                 stamp,
@@ -1673,7 +1676,7 @@ impl AnalysisRuntimeState {
     ) -> f64 {
         centered_view::visible_left_edge_seconds(
             position_seconds,
-            (full_margin - 2.0).max(0.0),
+            (full_margin - centered_view::WARMUP_SECONDS).max(0.0),
             Self::centered_track_duration_seconds(ctx),
         )
     }
@@ -1692,7 +1695,8 @@ impl AnalysisRuntimeState {
             return position_seconds;
         }
         let full_margin = self.centered_margin_seconds();
-        (Self::centered_visible_left_edge_seconds(position_seconds, full_margin, ctx) - 2.0)
+        (Self::centered_visible_left_edge_seconds(position_seconds, full_margin, ctx)
+            - centered_view::WARMUP_SECONDS)
             .max(0.0)
     }
 
@@ -1789,21 +1793,16 @@ impl AnalysisRuntimeState {
             // largest width seen so far, so using only the current width here
             // can misclassify in-window seeks as restart-worthy after a
             // narrow-pane layout change.
-            let width = f64::from(
-                self.spectrogram_widget_width
-                    .max(self.spectrogram_max_widget_width),
-            );
-            #[allow(clippy::cast_precision_loss)]
-            let effective_zoom =
-                f64::from(self.zoom_level) * effective_hop as f64 / REFERENCE_HOP as f64;
-            let visible_cols = width / effective_zoom.max(0.01);
+            let width = self
+                .spectrogram_widget_width
+                .max(self.spectrogram_max_widget_width);
             // Full screen width in seconds plus 2 s for STFT warmup.
             // A full width (not half) is needed because near the end of
             // a track the playhead detaches from center and moves right,
             // making the visible left edge up to one full screen width
             // behind the playhead position.
-            let full_screen = visible_cols / cols_per_second;
-            full_screen + 2.0
+            centered_view::window_seconds(width, self.zoom_level, effective_hop, cols_per_second)
+                + centered_view::WARMUP_SECONDS
         } else {
             // No rate info yet (first track load) — use generous fallback.
             30.0
@@ -5339,6 +5338,232 @@ mod tests {
             let opened = assert_successor_continued(&channels, mode);
             assert!(opened.iter().all(|path| path == a), "{mode:?}: {opened:?}");
         }
+    }
+
+    #[test]
+    fn a_session_that_seeked_itself_moves_the_window_a_seek_may_reuse() {
+        let channels = TestChannels::new();
+        let mut state = playing_state(SpectrogramDisplayMode::Centered, Path::new("/music/a.ac3"));
+        state.active_session_effective_rate = 48_000;
+        state.spectrogram_widget_width = 1185;
+        state.spectrogram_session_start = 100.0;
+        channels.generation.store(4, Ordering::Relaxed);
+
+        // A report of a superseded session changes nothing.
+        state.handle_session_report(
+            SessionReport::Repositioned {
+                generation: 3,
+                start_seconds: 300.0,
+            },
+            &channels.ctx(),
+        );
+        assert!((state.spectrogram_session_start - 100.0).abs() < f64::EPSILON);
+
+        state.handle_session_report(
+            SessionReport::Repositioned {
+                generation: 4,
+                start_seconds: 300.0,
+            },
+            &channels.ctx(),
+        );
+        assert!((state.spectrogram_session_start - 300.0).abs() < f64::EPSILON);
+
+        // The columns the session started with are gone, so a seek back
+        // among them restarts it instead of expecting them on screen.
+        state.handle_command(AnalysisCommand::SeekPosition(120.0), &channels.ctx());
+        assert!(
+            channels
+                .spectrogram_cmd_rx
+                .try_iter()
+                .any(|cmd| matches!(cmd, SpectrogramWorkerCommand::NewTrack { .. })),
+            "the seek must restart the session"
+        );
+    }
+
+    /// The columns the UI holds of the last session: its ring, as far as
+    /// the chunks tell.
+    #[cfg(feature = "gst")]
+    #[derive(Default)]
+    struct ModelRing {
+        /// The first column and the end of the columns since the last reset.
+        columns: Option<(u64, u64)>,
+        reset_pending: bool,
+        /// Whether the session behind the columns reached the end.
+        complete: bool,
+    }
+
+    #[cfg(feature = "gst")]
+    impl ModelRing {
+        fn take(&mut self, chunk: &PrecomputedSpectrogramChunk) {
+            if chunk.buffer_reset && chunk.bins_per_column > 0 {
+                self.reset_pending = true;
+                self.complete = false;
+            }
+            self.complete |= chunk.complete;
+            if chunk.column_count == 0 {
+                return;
+            }
+            let start = u64::from(chunk.start_column_index);
+            let end = start + u64::from(chunk.column_count);
+            self.columns = match self.columns {
+                Some((first, last)) if !self.reset_pending => {
+                    assert_eq!(start, last, "a gap in the columns of a session");
+                    Some((first, end))
+                }
+                _ => Some((start, end)),
+            };
+            self.reset_pending = false;
+        }
+
+        /// Whether the columns run from `left` past `right` without a gap.
+        fn covers(&self, left: u64, right: u64) -> bool {
+            self.columns
+                .is_some_and(|(first, last)| first <= left && last > right)
+        }
+    }
+
+    /// Wait until `done` holds of the ring fed by `engine`'s output.
+    #[cfg(feature = "gst")]
+    #[track_caller]
+    fn fill_ring_until(
+        events: &Receiver<AnalysisEvent>,
+        ring: &mut ModelRing,
+        what: &str,
+        mut done: impl FnMut(&ModelRing) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !done(ring) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match events.recv_timeout(left) {
+                Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) => ring.take(&chunk),
+                Ok(AnalysisEvent::WorkerFailed(error)) => panic!("{what}: {error}"),
+                Ok(AnalysisEvent::Snapshot(_)) => {}
+                Err(error) => panic!("{what}: {error}; columns {:?}", ring.columns),
+            }
+        }
+    }
+
+    #[cfg(feature = "gst")]
+    const BURST_VIEW_WIDTH: u32 = 1185;
+    #[cfg(feature = "gst")]
+    /// Columns a second, at the reference hop and 48 kHz.
+    const BURST_COLUMNS_PER_SECOND: f64 = 46.875;
+    #[cfg(feature = "gst")]
+    /// The seconds of a view of [`BURST_VIEW_WIDTH`] columns.
+    const BURST_WINDOW_SECONDS: f64 = 25.28;
+    #[cfg(feature = "gst")]
+    /// The length of the stream, of 720 repeats of 1.024 s: longer than the
+    /// 300 s assumed of a file that does not tell its length.
+    const BURST_STREAM_SECONDS: f64 = 737.28;
+
+    #[cfg(feature = "gst")]
+    fn burst_column(seconds: f64) -> u64 {
+        f64_to_u64_saturating(seconds * BURST_COLUMNS_PER_SECOND)
+    }
+
+    /// An engine in `mode` that plays a raw AC3 stream, with its ring.
+    #[cfg(feature = "gst")]
+    fn engine_on_raw_stream(
+        name: &str,
+        mode: SpectrogramDisplayMode,
+    ) -> (AnalysisEngine, Receiver<AnalysisEvent>, ModelRing, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-seek-burst-{name}-{mode:?}-{}.ac3",
+            std::process::id()
+        ));
+        std::fs::write(&path, crate::raw_audio::TEST_AC3.repeat(720)).expect("write fixture");
+        let (engine, events) = AnalysisEngine::new();
+        engine.command(AnalysisCommand::SetSpectrogramActive(true));
+        engine.command(AnalysisCommand::SetSpectrogramDisplayMode(mode));
+        engine.command(AnalysisCommand::SetSpectrogramWidgetWidth(BURST_VIEW_WIDTH));
+        engine.command(AnalysisCommand::SetTrack {
+            path: path.clone(),
+            reset_spectrogram: true,
+            track_token: 1,
+            gapless: false,
+        });
+        engine.command(AnalysisCommand::PositionUpdate(0.0));
+        let mut ring = ModelRing::default();
+        fill_ring_until(&events, &mut ring, "the track did not start", |ring| {
+            ring.columns.is_some()
+        });
+        (engine, events, ring, path)
+    }
+
+    /// Seek through `targets`, each reported as the engine reports it: a
+    /// seek, the position it landed at, and the next heartbeat. Returns the
+    /// last one.
+    #[cfg(feature = "gst")]
+    fn seek_burst(engine: &AnalysisEngine, targets: &[f64]) -> f64 {
+        for &target in targets {
+            engine.command(AnalysisCommand::SeekPosition(target));
+            engine.command(AnalysisCommand::PositionUpdate(target));
+            engine.command(AnalysisCommand::PositionUpdate(target + 0.04));
+        }
+        targets[targets.len() - 1]
+    }
+
+    /// A burst of seeks in a raw file, whose parser tells its length only
+    /// after some frames, must leave the view around the last target
+    /// covered, and the columns following playback.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_burst_of_seeks_in_a_raw_file_leaves_the_view_covered_and_following_playback() {
+        for (mode, seconds_played) in [
+            (SpectrogramDisplayMode::Centered, 120),
+            (SpectrogramDisplayMode::Rolling, 15),
+        ] {
+            let (engine, events, mut ring, path) = engine_on_raw_stream("mid", mode);
+            let target = seek_burst(&engine, &[692.3, 21.0, 609.7, 53.9, 544.6, 610.2]);
+            let left = match mode {
+                SpectrogramDisplayMode::Centered => {
+                    burst_column(target - BURST_WINDOW_SECONDS / 2.0)
+                }
+                SpectrogramDisplayMode::Rolling => burst_column(target),
+            };
+
+            let what = format!("{mode:?}: the view at {left} was not covered");
+            fill_ring_until(&events, &mut ring, &what, |ring| {
+                ring.covers(left, burst_column(target))
+            });
+
+            // Playback goes on past what the session decoded at first.
+            for second in 1..=seconds_played {
+                let position = target + f64::from(second);
+                engine.command(AnalysisCommand::PositionUpdate(position));
+                let what = format!("{mode:?}: the columns stopped at {position} s");
+                fill_ring_until(&events, &mut ring, &what, |ring| {
+                    ring.covers(left, burst_column(position))
+                });
+            }
+            drop(engine);
+            std::fs::remove_file(&path).expect("remove fixture");
+        }
+    }
+
+    /// Near the end of the file the view stops following the playhead: it
+    /// ends with the track, and the session reaches the end soon after it
+    /// starts, so no later column would cover its left edge.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_seek_near_the_end_of_a_raw_file_covers_the_view_of_its_end() {
+        let (engine, events, mut ring, path) =
+            engine_on_raw_stream("end", SpectrogramDisplayMode::Centered);
+        let target = seek_burst(&engine, &[60.0, 21.0, BURST_STREAM_SECONDS - 5.0]);
+        fill_ring_until(&events, &mut ring, "the session did not end", |ring| {
+            ring.complete
+                && ring
+                    .columns
+                    .is_some_and(|(first, _)| first > burst_column(target - 60.0))
+        });
+        let left = burst_column(BURST_STREAM_SECONDS - BURST_WINDOW_SECONDS);
+        assert!(
+            ring.covers(left, burst_column(target)),
+            "{:?}",
+            ring.columns
+        );
+        drop(engine);
+        std::fs::remove_file(&path).expect("remove fixture");
     }
 
     #[test]

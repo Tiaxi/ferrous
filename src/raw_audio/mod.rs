@@ -33,6 +33,8 @@ pub(crate) use byte_filter::{
     audio_byte_range_of, filter_raw_surround_source, filter_raw_surround_source_to,
     install_raw_surround_source_probe,
 };
+#[cfg(feature = "gst")]
+pub(crate) use discover::estimate_duration_from_bitstream;
 pub(crate) use discover::probe_raw_surround_technical_details;
 #[cfg(feature = "gst")]
 pub(crate) use gst_setup::configure_raw_surround_decoding;

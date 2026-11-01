@@ -126,7 +126,7 @@ pub(crate) fn probe_raw_surround_technical_details(
 // Duration estimate from byte count — f64 precision loss is negligible.
 #[allow(clippy::cast_precision_loss)]
 #[cfg(any(feature = "gst", test))]
-fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
+pub(crate) fn estimate_duration_from_bitstream(path: &Path) -> Option<f32> {
     let layout = read_audio_layout(path)?;
     let first_frame = layout.first_frame?;
     let header = layout.head.get(usize::try_from(first_frame).ok()?..)?;

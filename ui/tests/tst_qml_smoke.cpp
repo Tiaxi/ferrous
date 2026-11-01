@@ -1123,6 +1123,7 @@ private slots:
     void spectrogramFullscreenRefillAfterSeekCoversLeftEdge();
     void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
     void spectrogramEndSeekReleasesCanvasOnFinalize();
+    void spectrogramSeekFreezeEndsWithTheSession();
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
     void spectrogramSameHopEstimateIncreaseUpdatesZoomOutLimit();
     void spectrogramCenteredClampsRightEdgeToMaxColNearEof();
@@ -10126,6 +10127,57 @@ void SpectrogramSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() 
          col <= item.m_precomputedCanvasDisplayRight; ++col) {
         QVERIFY(item.ringSlotForDisplayIndexLocked(col, false) >= 0);
     }
+}
+
+void SpectrogramSmokeTest::spectrogramSeekFreezeEndsWithTheSession() {
+    // A session that started right of the view's left edge reached the end
+    // of the track, so no column will ever cover that edge. The freeze must
+    // not wait for one, or the image of the position before the seek stays
+    // on screen while playback goes on.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1);
+    constexpr int bins = 4;
+    constexpr int end = 5000;
+    constexpr quint64 token = 7;
+    item.feedPrecomputedChunk(QByteArray(640 * bins, '\x30'), bins, 0, 640,
+        0, end, 44100, 1024, false, true, token, true, 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(180);
+        rebuildCanvasNow(item, 320, 180, 0, 319, false);
+    }
+    QVERIFY(!item.m_canvas.isNull());
+    testClock(item).holdAt(4900.0 * 1024.0 / 44100.0);
+
+    item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0,
+        false, true, token, true, 2);
+    QVERIFY(item.m_zoomFillActive);
+    item.feedPrecomputedChunk({}, bins, 0, 0, 4900, end, 44100, 1024,
+        false, true, token, true, 2);
+    item.feedPrecomputedChunk(QByteArray(100 * bins, '\x60'), bins, 0, 100,
+        4900, end, 44100, 1024, false, false, token, false, 2);
+    QVERIFY2(item.m_zoomFillActive, "the left of the view may still arrive");
+
+    // Another session's end says nothing of this one's.
+    item.feedPrecomputedChunk({}, bins, 0, 0, end, end, 44100, 1024,
+        true, false, token - 1, false, 2);
+    QVERIFY(item.m_zoomFillActive);
+
+    // The estimate was right: only the end of the session has news.
+    item.feedPrecomputedChunk({}, bins, 0, 0, end, end, 44100, 1024,
+        true, false, token, false, 2);
+    QVERIFY2(!item.m_zoomFillActive, "nothing more arrives to end the freeze");
+    QVERIFY(item.m_precomputedCanvasDirty);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, end);
+
+    // A zoom waits for the session of its own hop.
+    item.m_zoomFillActive = true;
+    item.m_awaitingZoomData = true;
+    item.feedPrecomputedChunk({}, bins, 0, 0, end, end, 44100, 1024,
+        true, false, token, false, 2);
+    QVERIFY(item.m_zoomFillActive);
 }
 
 void SpectrogramSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
