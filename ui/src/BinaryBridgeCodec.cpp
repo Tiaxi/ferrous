@@ -669,12 +669,10 @@ bool decodeQueueUndoSection(const QByteArray &payload, DecodedQueueUndo *out) {
     }
     Reader reader(payload);
     quint8 kind = 0;
-    quint32 trackCount = 0;
     quint32 rangeCount = 0;
     if (!reader.readU64(&out->offerId)
         || !reader.readU8(&kind)
         || kind > QueueUndoReplaced
-        || !reader.readU32(&trackCount)
         || !reader.readU64(&out->restoredId)
         || !reader.readU64(&out->restoredRevision)
         || !reader.readU32(&rangeCount)
@@ -697,8 +695,6 @@ bool decodeQueueUndoSection(const QByteArray &payload, DecodedQueueUndo *out) {
     }
     out->present = true;
     out->kind = kind;
-    out->trackCount = static_cast<int>(
-        std::min<quint32>(trackCount, std::numeric_limits<int>::max()));
     return true;
 }
 

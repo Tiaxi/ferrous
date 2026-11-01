@@ -59,11 +59,11 @@ pub(super) struct Change {
 }
 
 impl Change {
-    fn track_count(&self) -> usize {
+    fn is_empty(&self) -> bool {
         match &self.before {
-            Before::Queue(paths) => paths.len(),
-            Before::Rows(rows) => rows.len(),
-            Before::Order { moved, .. } => moved.len(),
+            Before::Queue(paths) => paths.is_empty(),
+            Before::Rows(rows) => rows.is_empty(),
+            Before::Order { moved, .. } => moved.is_empty(),
         }
     }
 }
@@ -74,8 +74,6 @@ pub struct QueueUndoState {
     /// 0 when there is nothing to undo.
     pub offer_id: u64,
     pub kind: Option<QueueUndoKind>,
-    /// The tracks the change took from the queue.
-    pub track_count: usize,
     pub restored: Option<QueueUndoRestored>,
 }
 
@@ -105,12 +103,10 @@ impl QueueUndo {
     /// the undo.
     pub(super) fn record(&mut self, change: Option<Change>) {
         self.restored = None;
-        self.offered = change
-            .filter(|change| change.track_count() > 0)
-            .map(|change| {
-                self.last_id += 1;
-                (self.last_id, change)
-            });
+        self.offered = change.filter(|change| !change.is_empty()).map(|change| {
+            self.last_id += 1;
+            (self.last_id, change)
+        });
     }
 
     /// The change offered under `id`, which is no longer offered.
@@ -173,14 +169,13 @@ impl QueueUndo {
     }
 
     pub(super) fn state(&self) -> QueueUndoState {
-        let (offer_id, kind, track_count) =
-            self.offered.as_ref().map_or((0, None, 0), |(id, change)| {
-                (*id, Some(change.kind), change.track_count())
-            });
+        let (offer_id, kind) = self
+            .offered
+            .as_ref()
+            .map_or((0, None), |(id, change)| (*id, Some(change.kind)));
         QueueUndoState {
             offer_id,
             kind,
-            track_count,
             restored: self.restored.clone(),
         }
     }
@@ -211,14 +206,15 @@ mod tests {
         let first = undo.state().offer_id;
         assert_ne!(first, 0);
         assert_eq!(undo.state().kind, Some(QueueUndoKind::Cleared));
-        assert_eq!(undo.state().track_count, 1);
 
         undo.record(Some(cleared(&["/b.flac", "/c.flac"])));
         let second = undo.state().offer_id;
         assert_ne!(second, first);
         assert_eq!(undo.take(first), None, "an older change is not offered");
-        assert_eq!(undo.state().track_count, 2);
-        assert!(undo.take(second).is_some());
+        assert_eq!(
+            undo.take(second).map(|change| change.before),
+            Some(Before::Queue(vec![p("/b.flac"), p("/c.flac")]))
+        );
         assert_eq!(undo.take(second), None, "an undo applies once");
         assert_eq!(undo.state().offer_id, 0);
     }

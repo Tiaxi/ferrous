@@ -1876,10 +1876,6 @@ int BridgeClient::queueUndoKind() const {
     return m_queueUndoKind;
 }
 
-int BridgeClient::queueUndoTrackCount() const {
-    return m_queueUndoTrackCount;
-}
-
 QString BridgeClient::queueDurationText() const {
     return m_queueDurationText;
 }
@@ -6132,11 +6128,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 }
 
 void BridgeClient::applyQueueUndo(const BinaryBridgeCodec::DecodedQueueUndo &undo) {
-    if (m_queueUndoId != undo.offerId || m_queueUndoKind != undo.kind
-        || m_queueUndoTrackCount != undo.trackCount) {
+    if (m_queueUndoId != undo.offerId || m_queueUndoKind != undo.kind) {
         m_queueUndoId = undo.offerId;
         m_queueUndoKind = undo.kind;
-        m_queueUndoTrackCount = undo.trackCount;
         emit queueUndoChanged();
     }
     // Each undo's rows are selected once, and only while the rows are the

@@ -110,11 +110,10 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     // The queue change the user can undo: an ID that changes with each new
-    // change (0 for none), its kind (BinaryBridgeCodec::QueueUndoKind) and
-    // the tracks it took from the queue.
+    // change (0 for none) and its kind (BinaryBridgeCodec::QueueUndoKind),
+    // which names it in the Edit menu.
     Q_PROPERTY(double queueUndoId READ queueUndoId NOTIFY queueUndoChanged)
     Q_PROPERTY(int queueUndoKind READ queueUndoKind NOTIFY queueUndoChanged)
-    Q_PROPERTY(int queueUndoTrackCount READ queueUndoTrackCount NOTIFY queueUndoChanged)
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackIdentityChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackIdentityChanged)
     Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY trackMetadataChanged)
@@ -234,7 +233,6 @@ public:
     int queueLength() const;
     double queueUndoId() const;
     int queueUndoKind() const;
-    int queueUndoTrackCount() const;
     QString queueDurationText() const;
     QObject *queueRows() const;
     int selectedQueueIndex() const;
@@ -749,7 +747,6 @@ private:
     bool m_queueResyncRequested{false};
     quint64 m_queueUndoId{0};
     int m_queueUndoKind{0};
-    int m_queueUndoTrackCount{0};
     // The undo whose restored rows were last selected.
     quint64 m_queueUndoRestoredId{0};
     // The first row of each path, built when needed after the rows change.
