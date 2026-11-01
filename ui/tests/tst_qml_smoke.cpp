@@ -1469,6 +1469,7 @@ private slots:
     void quitActionClosesTheWindowThroughItsCloseHandler();
     void failedSaveBeforeQuitShowsTheErrorAndRetrySaves();
     void quitAnywayClosesAfterAFailedSave();
+    void aFailedSaveBeforeQuitIsNotHiddenByRecentErrors();
     void saveAnsweredAfterItsTimeoutStillClosesTheWindow();
     void answerToAnEarlierSaveAttemptDoesNotSettleARetry();
     void escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerComesLate();
@@ -2842,14 +2843,8 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QQuickItem *historyList = itemNamed(content, QStringLiteral("errorHistoryList"));
     QVERIFY(historyList != nullptr);
 
-    // With no errors the indicator stays in place, shows zero, and has
-    // nothing to open.
-    QVERIFY(statusButton->isVisible());
-    QVERIFY(!statusButton->isEnabled());
-    QCOMPARE(statusButton->property("text").toString(), QStringLiteral("0 errors"));
-    QVERIFY(!highlight->isVisible());
-    const QRectF indicatorBefore =
-        statusButton->mapRectToScene(QRectF(0, 0, statusButton->width(), statusButton->height()));
+    // With no errors there is no indicator.
+    QVERIFY(!statusButton->isVisible());
     const qreal transportBefore = transport->mapToScene(QPointF(0, 0)).y();
     const qreal splitBefore = mainSplit->mapToScene(QPointF(0, 0)).y();
 
@@ -2865,15 +2860,12 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     // changes, as the main window has no banner.
     QCOMPARE(errorHistoryMessages(errors), (QStringList{scan, skipped}));
     QTRY_COMPARE(statusButton->property("text").toString(), QStringLiteral("2 errors"));
-    QVERIFY(statusButton->isEnabled());
+    QVERIFY(statusButton->isVisible());
     QTRY_VERIFY(highlight->isVisible());
     QVERIFY(window->findChild<QObject *>(QStringLiteral("mainErrorBanner")) == nullptr);
     QVERIFY(!dialog->property("visible").toBool());
     QCOMPARE(transport->mapToScene(QPointF(0, 0)).y(), transportBefore);
     QCOMPARE(mainSplit->mapToScene(QPointF(0, 0)).y(), splitBefore);
-    QCOMPARE(statusButton->mapRectToScene(QRectF(0, 0, statusButton->width(), statusButton->height()))
-                 .bottom(),
-             indicatorBefore.bottom());
     // Both are in the diagnostics log, with their category.
     QCOMPARE(takeCapturedMessagesText(),
              QStringLiteral("error [Playback]: ") + skipped + QStringLiteral(" (/music/bad.flac)\n")
@@ -2912,15 +2904,13 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QVERIFY(dialog->property("visible").toBool());
 
     // Clear All empties the list, which closes the dialog: the last entry
-    // has gone. The indicator is back at zero.
+    // has gone, and so does the indicator.
     QQuickItem *clearAll = itemNamed(content, QStringLiteral("errorHistoryClearButton"));
     QVERIFY(clearAll != nullptr);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(clearAll));
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(errorHistoryMessages(errors).isEmpty());
-    QTRY_COMPARE(statusButton->property("text").toString(), QStringLiteral("0 errors"));
-    QVERIFY(!statusButton->isEnabled());
-    QVERIFY(!highlight->isVisible());
+    QTRY_VERIFY(!statusButton->isVisible());
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
@@ -3877,6 +3867,33 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
 
     QTRY_VERIFY(!window->isVisible());
     QVERIFY(!dialog->property("visible").toBool());
+}
+
+void ErrorsSmokeTest::aFailedSaveBeforeQuitIsNotHiddenByRecentErrors() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QObject *recent = window->findChild<QObject *>(QStringLiteral("recentErrorsDialog"));
+    QObject *failed = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(bridge != nullptr && errors != nullptr && recent != nullptr && failed != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play it."), 1, 1));
+    QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
+    QTRY_VERIFY(recent->property("opened").toBool());
+    QVERIFY(bridge->setProperty("stateSaveError", QStringLiteral("No space left on device")));
+
+    // Quitting from outside the window, past the modal dialog.
+    window->close();
+
+    QTRY_VERIFY(failed->property("visible").toBool());
+    QTRY_VERIFY(!recent->property("visible").toBool());
+    QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedQuitButton")));
+    QTRY_VERIFY(!window->isVisible());
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
 void ErrorsSmokeTest::quitAnywayClosesAfterAFailedSave() {
@@ -16591,6 +16608,23 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
                 <= 1.0);
     QTest::keyClick(window, Qt::Key_Home);
     QTRY_COMPARE(flickable->property("contentY").toReal(), 0.0);
+
+    // Closing counts as having seen what arrived, so an error that arrives,
+    // repeated or not, comes into view; so does the newest on opening.
+    QTest::keyClick(window, Qt::Key_End);
+    QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
+    QVERIFY(sendBridgeError(
+        bridge, QStringLiteral("Couldn't play track 0 of an album with quite a long name"), 1, 1,
+        QStringLiteral("/music/track 0.flac")));
+    QTRY_COMPARE(flickable->property("contentY").toReal(), 0.0);
+    QTest::keyClick(window, Qt::Key_End);
+    QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QCOMPARE(flickable->property("contentY").toReal(), 0.0);
+    QTRY_VERIFY(view->hasActiveFocus());
 
     // Everything has a name.
     QAccessibleInterface *popupAccessible = QAccessible::queryAccessibleInterface(content->parentItem());

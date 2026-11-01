@@ -29,6 +29,8 @@ QtObject {
 
     // Asks for the history to open.
     signal historyRequested()
+    // An error arrived or repeated, and is the newest entry now.
+    signal reported()
 
     function report(category, severity, subject, message) {
         const text = String(message || "").trim()
@@ -55,6 +57,7 @@ QtObject {
                 }
                 root.latestUnseen = true
                 root.revision++
+                root.reported()
                 return
             }
         }
@@ -72,6 +75,7 @@ QtObject {
         }
         root.latestUnseen = true
         root.revision++
+        root.reported()
     }
 
     // Hide the banners until the next error; the history keeps it.

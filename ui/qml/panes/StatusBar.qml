@@ -194,11 +194,10 @@ ToolBar {
             Layout.fillWidth: true
         }
 
-        // Opens the recent errors. It stays in place at zero, so that an
-        // error moves nothing: only its count and colours change.
+        // Opens the recent errors. With none there is nothing to show.
         ToolButton {
             objectName: "statusBarErrorsButton"
-            enabled: root.errorCount > 0
+            visible: root.errorCount > 0
             Layout.preferredHeight: 20
             padding: 0
             leftPadding: 6
@@ -208,21 +207,14 @@ ToolBar {
             icon.height: 16
             text: I18n.i18ncp("@action:button", "%1 error", "%1 errors", root.errorCount)
             display: AbstractButton.TextBesideIcon
-            palette.buttonText: {
-                if (root.hasUnseenError) {
-                    return Kirigami.Theme.highlightedTextColor
-                }
-                return root.errorCount > 0
-                    ? ColorUtils.mixColor(
-                        Kirigami.Theme.negativeTextColor,
-                        root.uiPalette.uiTextColor,
-                        root.themeIsDark ? 0.18 : 0.08)
-                    : root.uiPalette.uiMutedTextColor
-            }
-            Accessible.name: root.errorCount > 0
-                ? I18n.i18ncp("@action:button",
-                    "%1 error: show recent errors", "%1 errors: show recent errors", root.errorCount)
-                : text
+            palette.buttonText: root.hasUnseenError
+                ? Kirigami.Theme.highlightedTextColor
+                : ColorUtils.mixColor(
+                    Kirigami.Theme.negativeTextColor,
+                    root.uiPalette.uiTextColor,
+                    root.themeIsDark ? 0.18 : 0.08)
+            Accessible.name: I18n.i18ncp("@action:button",
+                "%1 error: show recent errors", "%1 errors: show recent errors", root.errorCount)
             // The status bar's only word on an error it has not shown yet.
             Accessible.description: root.hasUnseenError
                 ? ErrorUtils.describe(root.errorController.latest)

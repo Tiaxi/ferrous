@@ -38,7 +38,10 @@ Dialog {
     enter: Components.PopupTransition { duration: root.popupTransitionMs }
     exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
-    onAboutToShow: root.errorController.dismissLatest()
+    onAboutToShow: {
+        root.errorController.dismissLatest()
+        root.showNewest()
+    }
     // Over a viewer the keyboard would otherwise stay with the viewer.
     onOpened: historyView.forceActiveFocus(Qt.PopupFocusReason)
     // Errors that arrived while it was open have been seen too.
@@ -47,6 +50,21 @@ Dialog {
         if (root.errorCount === 0) {
             root.close()
         }
+    }
+
+    // Closing counts as having seen what arrived, so it must not arrive out
+    // of view.
+    Connections {
+        target: root.errorController
+        function onReported() {
+            if (root.visible) {
+                root.showNewest()
+            }
+        }
+    }
+
+    function showNewest() {
+        historyView.contentItem.contentY = 0
     }
 
     // Keyboard focus moves on to the next row: the focused one is going.

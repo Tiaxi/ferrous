@@ -1552,6 +1552,8 @@ ApplicationWindow {
     }
 
     function showQuitSaveFailedDialog(message) {
+        // It is drawn above this dialog, which would hide the choice.
+        recentErrorsDialog.close()
         quitSaveFailedDialog.message = message
         quitSaveFailedDialog.open()
         root.bringWindowForward()
