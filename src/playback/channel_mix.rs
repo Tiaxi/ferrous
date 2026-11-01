@@ -80,13 +80,15 @@ impl ChannelMix {
     /// Apply to a stream with fewer channels than the one before it. Mutes
     /// that silence all of it were made for other channels: a solo of a
     /// channel it lacks, turned into mutes, or a mute of its left channel on
-    /// a stereo track before a mono one. They are dropped, as nothing else
-    /// tells the user why the track is silent. The mock backend's streams
+    /// a stereo track before a mono one. Those of its channels are dropped,
+    /// as nothing else tells the user why the track is silent; mutes of
+    /// channels it lacks stay for a later stream. The mock backend's streams
     /// have no channel count, so only `GStreamer` streams narrow.
     #[cfg(any(feature = "gst", test))]
     pub(crate) fn fit_narrower_stream(&mut self, channels: u32) {
-        if self.silenced(channels) == stream_channels(channels) {
-            self.muted = 0;
+        let present = stream_channels(channels);
+        if self.silenced(channels) == present {
+            self.muted &= !present;
         }
     }
 }
@@ -169,6 +171,17 @@ mod tests {
                 soloed: 0
             }
         );
+    }
+
+    #[test]
+    fn a_narrower_stream_keeps_the_mutes_of_channels_it_lacks() {
+        let mut mix = ChannelMix::default();
+        for channel in [0, 1, 5] {
+            mix.toggle_mute(channel, 6);
+        }
+        mix.fit_narrower_stream(2);
+        assert_eq!(mix.silenced(2), 0);
+        assert_eq!(mix.silenced(6), 0b10_0000);
     }
 
     #[test]

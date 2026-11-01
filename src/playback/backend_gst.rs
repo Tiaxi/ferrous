@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError,
 };
 use std::time::{Duration, Instant};
@@ -3705,6 +3705,10 @@ fn seek_flags_for_path(path: Option<&Path>) -> gst::SeekFlags {
 /// The channel mix that the streaming thread applies, shared with the engine.
 #[derive(Default)]
 struct OutputMix {
+    /// Odd while the engine stores a mix: a sequence lock, as the two masks
+    /// only mean something together. New mutes with the solos of the old
+    /// mix would let a buffer through that neither mix hears.
+    version: AtomicU64,
     muted: AtomicU64,
     soloed: AtomicU64,
     /// The channels of the stream that reaches the output, or 0 before any.
@@ -3712,19 +3716,32 @@ struct OutputMix {
 }
 
 impl OutputMix {
+    /// The latest mix. A store takes a few instructions, so the streaming
+    /// thread retries for no longer than the engine thread is held up in
+    /// one.
     fn load(&self) -> ChannelMix {
-        ChannelMix {
-            muted: self.muted.load(Ordering::Relaxed),
-            soloed: self.soloed.load(Ordering::Relaxed),
+        loop {
+            let version = self.version.load(Ordering::Acquire);
+            let mix = ChannelMix {
+                muted: self.muted.load(Ordering::Relaxed),
+                soloed: self.soloed.load(Ordering::Relaxed),
+            };
+            fence(Ordering::Acquire);
+            if version.is_multiple_of(2) && self.version.load(Ordering::Relaxed) == version {
+                return mix;
+            }
+            std::thread::yield_now();
         }
     }
 
-    /// A buffer read between the two stores sees the solos that were in
-    /// force with the new mutes, and still sounds as it did: solos win, and
-    /// turning them into mutes stores what they silenced.
+    /// Only the engine thread stores.
     fn store(&self, mix: ChannelMix) {
+        let version = self.version.load(Ordering::Relaxed);
+        self.version.store(version + 1, Ordering::Relaxed);
+        fence(Ordering::Release);
         self.muted.store(mix.muted, Ordering::Relaxed);
         self.soloed.store(mix.soloed, Ordering::Relaxed);
+        self.version.store(version + 2, Ordering::Release);
     }
 }
 
@@ -4006,6 +4023,36 @@ mod tests {
     use super::*;
     use crate::playback::PathRenames;
     use std::sync::TryLockError;
+
+    #[test]
+    fn a_mix_is_read_whole_while_the_engine_stores_another() {
+        let solo = ChannelMix {
+            muted: 0,
+            soloed: 0b0001,
+        };
+        let mutes = ChannelMix {
+            muted: 0b1100,
+            soloed: 0,
+        };
+        let mix = Arc::new(OutputMix::default());
+        mix.store(solo);
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let mix = Arc::clone(&mix);
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    let read = mix.load();
+                    assert!(read == solo || read == mutes, "{read:?}");
+                }
+            })
+        };
+        for round in 0..200_000 {
+            mix.store(if round % 2 == 0 { mutes } else { solo });
+        }
+        done.store(true, Ordering::Relaxed);
+        reader.join().expect("every read was a whole mix");
+    }
 
     #[test]
     fn positions_beyond_any_seek_become_the_latest_one() {
