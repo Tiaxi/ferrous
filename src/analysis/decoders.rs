@@ -24,8 +24,7 @@ use crate::raw_audio::is_raw_surround_file;
 #[cfg(feature = "gst")]
 use crate::raw_audio::{
     conceal_damaged_ac3_frames, configure_raw_surround_decoding, estimate_duration_from_bitstream,
-    filter_raw_surround_source,
-    is_dts_file,
+    filter_raw_surround_source, is_dts_file,
 };
 #[cfg(feature = "gst")]
 use gstreamer_app as gst_app;

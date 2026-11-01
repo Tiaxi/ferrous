@@ -1708,7 +1708,7 @@ fn session_decode_loop(
         //    files where GStreamer cannot query duration from the headerless
         //    bitstream.  Without this, the UI ring buffer is undersized and
         //    early columns get evicted, causing the spectrogram to go black.
-        maybe_update_columns_estimate(session, source, track_duration_ms_out);
+        maybe_update_columns_estimate(session, source, generation, track_duration_ms_out);
 
         // Yield periodically to avoid starving UI.
         if session.packet_counter.is_multiple_of(64) {
@@ -2269,13 +2269,18 @@ fn duration_requery_estimate_for_session(effective_frames: u64, effective_hop: u
 
 /// Tell the analysis thread, which starts every other session of the file,
 /// the length a re-query found: each of them opens the file anew, without
-/// it.
+/// it. The query can outlast the session, whose length then is not that of
+/// the track that the analysis thread has moved on to.
 #[cfg(any(feature = "gst", test))]
 fn publish_requeried_duration(
     session: &mut SpectrogramSessionState,
     total_frames: u64,
+    generation: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
 ) {
+    if generation.load(Ordering::Relaxed) != session.gen {
+        return;
+    }
     publish_track_duration_ms(
         duration_requery_estimate_for_session(total_frames, REFERENCE_HOP),
         session.effective_rate,
@@ -2287,6 +2292,7 @@ fn publish_requeried_duration(
 fn maybe_update_columns_estimate(
     session: &mut SpectrogramSessionState,
     source: &AudioFrameSource,
+    generation: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
 ) {
     let estimate = u64::from(session.total_columns_estimate);
@@ -2300,7 +2306,7 @@ fn maybe_update_columns_estimate(
             let rate = u64::from(session.effective_rate);
             let total_frames = ns * rate / 1_000_000_000;
             let effective = total_frames;
-            publish_requeried_duration(session, effective, track_duration_ms_out);
+            publish_requeried_duration(session, effective, generation, track_duration_ms_out);
             let new_est = duration_requery_estimate_for_session(effective, session.effective_hop);
             if new_est > session.total_columns_estimate {
                 profile_eprintln!(
@@ -2316,7 +2322,7 @@ fn maybe_update_columns_estimate(
     }
 
     // Suppress the unused-variable warnings when GStreamer is disabled.
-    let _ = (source, track_duration_ms_out);
+    let _ = (source, generation, track_duration_ms_out);
 
     // Safety net for sources without a trustworthy duration (the
     // 300-second fallback in decoders.rs): if the decoder has actually
@@ -3446,11 +3452,31 @@ mod tests {
     fn a_requeried_duration_reaches_the_analysis_thread_and_the_session() {
         let mut session = make_test_session();
         let published_duration_ms = AtomicU64::new(0);
-        publish_requeried_duration(&mut session, 751 * 48_000, &published_duration_ms);
+        let generation = AtomicU64::new(session.gen);
+        publish_requeried_duration(
+            &mut session,
+            751 * 48_000,
+            &generation,
+            &published_duration_ms,
+        );
         // The published length includes the STFT-edge allowance.
         let published = published_duration_ms.load(Ordering::Relaxed);
         assert!(published.abs_diff(752_365) <= 5, "{published}");
         assert!((session.track_duration_seconds - 752.365).abs() < 0.005);
+    }
+
+    #[test]
+    fn a_superseded_session_does_not_publish_its_requeried_duration() {
+        let mut session = make_test_session();
+        let published_duration_ms = AtomicU64::new(0);
+        let generation = AtomicU64::new(session.gen + 1);
+        publish_requeried_duration(
+            &mut session,
+            751 * 48_000,
+            &generation,
+            &published_duration_ms,
+        );
+        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 0);
     }
 
     /// A centered session decoding at 258 s, further behind
@@ -4433,21 +4459,24 @@ mod tests {
         session.columns_produced = 600;
         let source = make_dummy_source();
 
-        maybe_update_columns_estimate(&mut session, &source, &AtomicU64::new(0));
+        let generation = AtomicU64::new(session.gen);
+        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
         assert_eq!(
             session.total_columns_estimate, 1000,
             "should not grow below estimate"
         );
 
         session.columns_produced = 750;
-        maybe_update_columns_estimate(&mut session, &source, &AtomicU64::new(0));
+        let generation = AtomicU64::new(session.gen);
+        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
         assert_eq!(
             session.total_columns_estimate, 1000,
             "75% threshold no longer triggers doubling"
         );
 
         session.columns_produced = 1000;
-        maybe_update_columns_estimate(&mut session, &source, &AtomicU64::new(0));
+        let generation = AtomicU64::new(session.gen);
+        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
         assert_eq!(
             session.total_columns_estimate, 1000,
             "AT the estimate must not trigger doubling — bounded \
@@ -4467,7 +4496,8 @@ mod tests {
         let source = make_dummy_source();
 
         session.columns_produced = 1001;
-        maybe_update_columns_estimate(&mut session, &source, &AtomicU64::new(0));
+        let generation = AtomicU64::new(session.gen);
+        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
         assert_eq!(
             session.total_columns_estimate, 2000,
             "overshoot by 1 col must double"
@@ -4476,7 +4506,8 @@ mod tests {
         // Cross the next estimate too — safety net keeps firing until
         // it catches up with the real length.
         session.columns_produced = 2500;
-        maybe_update_columns_estimate(&mut session, &source, &AtomicU64::new(0));
+        let generation = AtomicU64::new(session.gen);
+        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
         assert_eq!(session.total_columns_estimate, 4000);
     }
 
