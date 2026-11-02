@@ -35,6 +35,7 @@
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
+#include "../src/PlaybackClock.h"
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
@@ -290,6 +291,8 @@ private slots:
     void seekClickSeeksToTheTimeUnderThePointer();
     void playbackMovesTheSeekBarByWholePixels();
     void seekBarStepsByTheWindowsDevicePixels();
+    void playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds();
+    void seekBarStepsFromThePositionBetweenItsPixels();
     void transportBarHasNoWarnings();
     void transportBarHasNoWarningsUnderTheBasicStyle();
     void clicksLeaveSpaceToPlayOrPause();
@@ -774,9 +777,35 @@ QString describeValues(const QList<double> &values) {
     return QStringLiteral("[") + parts.join(QStringLiteral(", ")) + QStringLiteral("]");
 }
 
+// The transport harness with the position of `testClock`, a PlaybackClock
+// in the engine's root context, which moves by the seek bar's pixels.
+QByteArray clockTransportHarnessQml() {
+    QByteArray source = transportHarnessQml();
+    const auto replace = [&source](const char *from, const char *to) {
+        if (source.count(from) != 1) {
+            qFatal("transport harness: no single \"%s\"", from);
+        }
+        source.replace(from, to);
+    };
+    replace("displayedPositionSeconds: harness.positionSeconds",
+            "displayedPositionSeconds: testClock.positionSeconds\n"
+            "            currentPositionSeconds: function() { return testClock.currentPositionSeconds() }");
+    replace("positionText: harness.positionText", "positionText: testClock.positionText");
+    replace("        Panes.TransportBar {\n", "        Panes.TransportBar {\n            id: transportBar\n");
+    replace("    Components.UiPalette {",
+            "    Binding {\n"
+            "        target: testClock\n"
+            "        property: \"positionStepSeconds\"\n"
+            "        value: transportBar.positionStepSeconds\n"
+            "    }\n\n"
+            "    Components.UiPalette {");
+    return source;
+}
+
 // Loads the transport harness with the focus on its start button.
-QQuickWindow *loadTransportHarness(QQmlEngine &engine, QScopedPointer<QObject> &root, QString *errorText) {
-    root.reset(createQml(engine, transportHarnessQml(), errorText));
+QQuickWindow *loadTransportHarness(QQmlEngine &engine, QScopedPointer<QObject> &root, QString *errorText,
+                                   const QByteArray &source = transportHarnessQml()) {
+    root.reset(createQml(engine, source, errorText));
     auto *window = qobject_cast<QQuickWindow *>(root.data());
     if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
         return nullptr;
@@ -1355,6 +1384,133 @@ void AccessibilityTest::seekBarStepsByTheWindowsDevicePixels() {
     QEvent changed(QEvent::DevicePixelRatioChange);
     QCoreApplication::sendEvent(&window, &changed);
     checkSteps(60.0);
+}
+
+void AccessibilityTest::playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds() {
+    PlaybackClock clock;
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testClock"), &clock);
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText, clockTransportHarnessQml());
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QQuickItem *handle = visibleItemNamed(window, QStringLiteral("seekHandle"));
+    QVERIFY(bridge != nullptr && seek != nullptr && handle != nullptr);
+    // A 20 s track: the bar moves by about 30 device pixels a second.
+    constexpr double kDuration = 20.0;
+    bridge->setProperty("durationSeconds", kDuration);
+    const double barPixels = seek->property("barDevicePixels").toDouble();
+    QVERIFY(barPixels > 300.0);
+    QCOMPARE(clock.positionStepSeconds(), kDuration / barPixels);
+
+    QAccessibleInterface *seekInterface = QAccessible::queryAccessibleInterface(seek);
+    QVERIFY(seekInterface != nullptr);
+    int handleMoves = 0;
+    int positionChanges = 0;
+    int descriptionChanges = 0;
+    qreal handleX = handle->x();
+    QString description = seekInterface->text(QAccessible::Description);
+    connect(&clock, &PlaybackClock::positionChanged, window, [&]() {
+        ++positionChanges;
+        if (handle->x() != handleX) {
+            ++handleMoves;
+            handleX = handle->x();
+        }
+        const QString now = seekInterface->text(QAccessible::Description);
+        if (now != description) {
+            ++descriptionChanges;
+            description = now;
+        }
+    });
+    QSignalSpy values(seek, SIGNAL(valueChanged()));
+    QSignalSpy seconds(seek, SIGNAL(valueSecondChanged()));
+    QSignalSpy texts(&clock, &PlaybackClock::positionTextChanged);
+
+    // Two seconds of real playback from 1.1 s.
+    PlaybackSample sample;
+    sample.positionSeconds = 1.1;
+    sample.sampledAtNs = monotonicNowNs();
+    sample.advancing = true;
+    sample.durationSeconds = kDuration;
+    sample.trackToken = 1;
+    clock.applySample(sample, true);
+    positionChanges = 0;
+    handleMoves = 0;
+    descriptionChanges = 0;
+    values.clear();
+    seconds.clear();
+    texts.clear();
+    QTest::qWait(2000);
+    clock.applySample(PlaybackSample{clock.currentPositionSeconds(), 0, false, kDuration, 1}, false);
+    const double end = clock.positionSeconds();
+    QVERIFY(end > 2.6);
+
+    // The position, the slider's value and the handle move together, by
+    // the bar's pixels, and only then.
+    const QString counts = QStringLiteral("%1 position changes, %2 values, %3 handle moves, %4 seconds, "
+                                          "%5 texts, %6 descriptions over %7 s")
+                               .arg(positionChanges).arg(values.count()).arg(handleMoves)
+                               .arg(seconds.count()).arg(texts.count()).arg(descriptionChanges)
+                               .arg(end - 1.1);
+    qInfo("seek bar from the clock: %s", qPrintable(counts));
+    const int pixels = static_cast<int>(std::floor((end - 1.1) / kDuration * barPixels));
+    QVERIFY2(handleMoves >= pixels - 1 && handleMoves <= pixels + 2, qPrintable(counts));
+    QVERIFY2(positionChanges <= handleMoves + 2 && values.count() <= handleMoves + 2, qPrintable(counts));
+    // The texts change with the seconds: the time label's at 1.5, 2.5 s and
+    // perhaps 3.5 s, the value's at 2, 3 s and perhaps 4 s.
+    QVERIFY2(texts.count() >= 2 && texts.count() <= 3, qPrintable(counts));
+    QVERIFY2(seconds.count() >= 2 && seconds.count() <= 3, qPrintable(counts));
+    QVERIFY2(descriptionChanges == seconds.count(), qPrintable(counts));
+    // Paused, the clock has no more to show.
+    positionChanges = 0;
+    QTest::qWait(200);
+    QCOMPARE(positionChanges, 0);
+}
+
+void AccessibilityTest::seekBarStepsFromThePositionBetweenItsPixels() {
+    PlaybackClock clock;
+    qint64 now = 5'000'000'000'000LL;
+    clock.setTimeSource([&now]() { return now; });
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testClock"), &clock);
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText, clockTransportHarnessQml());
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QVERIFY(bridge != nullptr && seek != nullptr);
+    // An hour-long track: a pixel of the bar is seconds long.
+    constexpr double kDuration = 3600.0;
+    bridge->setProperty("durationSeconds", kDuration);
+    const double step = clock.positionStepSeconds();
+    QVERIFY2(step > 2.5, qPrintable(QString::number(step)));
+    const auto seeks = [&root]() { return recordedValues(root.data(), "seeks"); };
+
+    // Playing from just past a pixel's boundary, then two seconds on: the
+    // bar still shows the start.
+    const double start = (std::floor(1000.0 / step) + 0.5) * step + 0.01;
+    clock.applySample(PlaybackSample{start, now, true, kDuration, 1}, true);
+    QVERIFY(fuzzyEqual(seek->property("value").toDouble(), start));
+    now += 2'000'000'000LL;
+    QVERIFY(fuzzyEqual(clock.currentPositionSeconds(), start + 2.0));
+    QVERIFY(fuzzyEqual(seek->property("value").toDouble(), start));
+
+    // An arrow key steps from where playback is.
+    QVERIFY(tabTo(window, seek));
+    QTest::keyClick(window, Qt::Key_Right);
+    QList<double> sent = seeks();
+    QVERIFY2(sameValues(sent, {start + 7.0}), qPrintable(describeValues(sent)));
+
+    // So does the wheel, from where playback is by then.
+    now += 1'000'000'000LL;
+    seek->setProperty("wheelEnabled", true);
+    QVERIFY(sendWheel(window, seek->mapToScene(QPointF(seek->width() / 2, seek->height() / 2)),
+                      QPoint(0, 120)));
+    sent = seeks();
+    QVERIFY2(sameValues(sent, {start + 7.0, start + 8.0}), qPrintable(describeValues(sent)));
 }
 
 void AccessibilityTest::transportBarHasNoWarnings() {

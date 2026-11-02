@@ -126,6 +126,7 @@ ApplicationWindow {
         objectName: "playbackController"
         uiBridge: root.uiBridge
         visualFeedsEnabled: root.visualFeedsEnabled
+        positionStepSeconds: transportBar.positionStepSeconds
     }
 
     Controllers.LibraryController {
@@ -1258,6 +1259,7 @@ ApplicationWindow {
             volumeMuted: playbackController.volumeMuted
             keyboardSeekStepSeconds: root.keyboardSeekStepSeconds
             displayedPositionSeconds: playbackController.positionSeconds
+            currentPositionSeconds: playbackController.currentPositionSeconds
             positionText: playbackController.positionText
             toggleMutedVolume: playbackController.toggleMutedVolume
             setAppVolume: playbackController.setAppVolume

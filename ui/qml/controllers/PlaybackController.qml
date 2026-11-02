@@ -20,14 +20,31 @@ QtObject {
     readonly property var playbackClock: root.uiBridge && root.uiBridge.playbackClock
         ? root.uiBridge.playbackClock
         : null
+    // The position as shown: it moves by positionStepSeconds.
     readonly property real positionSeconds: root.playbackClock ? root.playbackClock.positionSeconds : 0
+    // Changes once a second.
     readonly property string positionText: root.playbackClock ? root.playbackClock.positionText : "00:00"
+    // The smallest move of the position that is shown, such as a device
+    // pixel of the seek bar.
+    property real positionStepSeconds: 0
+
+    // The position now, for what starts from it, such as a relative seek.
+    function currentPositionSeconds() {
+        return root.playbackClock ? root.playbackClock.currentPositionSeconds() : root.positionSeconds
+    }
 
     // Nothing shows the position frame by frame in a hidden window.
     readonly property Binding clockFrameUpdates: Binding {
         target: root.playbackClock
         property: "frameUpdatesEnabled"
         value: root.visualFeedsEnabled
+        when: root.playbackClock !== null
+    }
+
+    readonly property Binding clockPositionStep: Binding {
+        target: root.playbackClock
+        property: "positionStepSeconds"
+        value: root.positionStepSeconds
         when: root.playbackClock !== null
     }
 
@@ -123,7 +140,7 @@ QtObject {
             return
         }
         const duration = root.uiBridge.durationSeconds || 0
-        root.seekCommitted(Math.max(0, Math.min(duration, root.positionSeconds + deltaSeconds)))
+        root.seekCommitted(Math.max(0, Math.min(duration, root.currentPositionSeconds() + deltaSeconds)))
     }
 
     function changeVolumeBy(delta) {
