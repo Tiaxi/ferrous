@@ -104,9 +104,9 @@ pub struct PlaybackSnapshot {
     pub volume: f32,
     pub repeat_mode: RepeatMode,
     pub shuffle_enabled: bool,
-    /// The channels of the current stream that are not heard, whether muted
-    /// or left out by a solo. Before the engine knows how many channels the
-    /// stream has, this covers all 64 bits.
+    /// The channels of the current stream that are muted. Solos do not
+    /// change this; a channel left out by a solo is silent without being
+    /// muted.
     pub muted_channels_mask: u64,
     /// The channels of the current stream that are soloed.
     pub soloed_channels_mask: u64,
@@ -193,8 +193,7 @@ pub enum PlaybackCommand {
     SetVolume(f32),
     SetRepeatMode(RepeatMode),
     SetShuffle(bool),
-    /// Mute or unmute a channel. The `channel_mix` module has what this does
-    /// to active solos.
+    /// Mute or unmute a channel.
     ToggleChannelMute(u8),
     /// Add a channel to the soloed channels, or remove it.
     SoloChannel(u8),
@@ -1512,34 +1511,17 @@ mod tests {
     }
 
     #[test]
-    fn solo_channel_mutes_all_others() {
+    fn a_solo_mutes_no_channel() {
         let (engine, rx) = make_test_engine();
         engine.command(PlaybackCommand::SoloChannel(1));
         engine.command(PlaybackCommand::Poll);
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        assert_eq!(snap.muted_channels_mask, u64::MAX ^ (1 << 1));
+        assert_eq!(snap.soloed_channels_mask, 1 << 1);
+        assert_eq!(snap.muted_channels_mask, 0);
     }
 
     #[test]
-    fn unsolo_restores_previous_mask() {
-        let (engine, rx) = make_test_engine();
-        // Mute channel 0 first.
-        engine.command(PlaybackCommand::ToggleChannelMute(0));
-        engine.command(PlaybackCommand::Poll);
-        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        // Solo channel 2 — should save mask with bit 0 set.
-        engine.command(PlaybackCommand::SoloChannel(2));
-        engine.command(PlaybackCommand::Poll);
-        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        // Un-solo channel 2 — should restore: only bit 0 set.
-        engine.command(PlaybackCommand::SoloChannel(2));
-        engine.command(PlaybackCommand::Poll);
-        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        assert_eq!(snap.muted_channels_mask, 1 << 0);
-    }
-
-    #[test]
-    fn solos_add_up_and_the_last_one_restores_the_mask_before_the_first() {
+    fn solos_add_up_and_leave_the_mutes_as_they_are() {
         let (engine, rx) = make_test_engine();
         // Mute channel 3.
         engine.command(PlaybackCommand::ToggleChannelMute(3));
@@ -1552,14 +1534,14 @@ mod tests {
         engine.command(PlaybackCommand::Poll);
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap.soloed_channels_mask, 0b1011);
-        assert_eq!(snap.muted_channels_mask, !0b1011);
+        assert_eq!(snap.muted_channels_mask, 1 << 3);
         // Un-soloing one leaves the others.
         engine.command(PlaybackCommand::SoloChannel(0));
         engine.command(PlaybackCommand::Poll);
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap.soloed_channels_mask, 0b1010);
-        assert_eq!(snap.muted_channels_mask, !0b1010);
-        // The last one restores the original mask (bit 3 set).
+        assert_eq!(snap.muted_channels_mask, 1 << 3);
+        // The last one leaves them too.
         engine.command(PlaybackCommand::SoloChannel(1));
         engine.command(PlaybackCommand::SoloChannel(3));
         engine.command(PlaybackCommand::Poll);
@@ -1579,71 +1561,23 @@ mod tests {
     }
 
     #[test]
-    fn manual_toggle_clears_solo_state() {
-        let (engine, rx) = make_test_engine();
-        // Solo channel 0.
-        engine.command(PlaybackCommand::SoloChannel(0));
-        engine.command(PlaybackCommand::Poll);
-        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        // Manual toggle channel 2 — should clear solo, XOR bit 2 into current mask.
-        engine.command(PlaybackCommand::ToggleChannelMute(2));
-        engine.command(PlaybackCommand::Poll);
-        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        // Mask was all-except-0; toggling bit 2 clears it.
-        let expected = (u64::MAX ^ (1 << 0)) ^ (1 << 2);
-        assert_eq!(snap.muted_channels_mask, expected);
-        // Now "solo channel 0 again" should act as a fresh solo (no restore).
-        engine.command(PlaybackCommand::SoloChannel(0));
-        engine.command(PlaybackCommand::Poll);
-        let snap2 = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        assert_eq!(snap2.muted_channels_mask, u64::MAX ^ (1 << 0));
-        // Un-solo should restore the post-toggle mask, not the original.
-        engine.command(PlaybackCommand::SoloChannel(0));
-        engine.command(PlaybackCommand::Poll);
-        let snap3 = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        assert_eq!(snap3.muted_channels_mask, expected);
-    }
-
-    #[test]
-    fn manual_toggle_keeps_what_several_solos_let_through() {
-        let (engine, rx) = make_test_engine();
-        engine.command(PlaybackCommand::ToggleChannelMute(0));
-        engine.command(PlaybackCommand::SoloChannel(1));
-        engine.command(PlaybackCommand::SoloChannel(2));
-        // Channel 3 is left out by the solos: it joins them as a plain mix.
-        engine.command(PlaybackCommand::ToggleChannelMute(3));
-        engine.command(PlaybackCommand::Poll);
-        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        assert_eq!(snap.soloed_channels_mask, 0);
-        assert_eq!(snap.muted_channels_mask, !0b1110);
-    }
-
-    #[test]
-    fn muting_one_of_several_soloed_channels_unsolos_it() {
+    fn a_mute_during_solos_keeps_them() {
         let (engine, rx) = make_test_engine();
         engine.command(PlaybackCommand::SoloChannel(1));
         engine.command(PlaybackCommand::SoloChannel(2));
-        engine.command(PlaybackCommand::ToggleChannelMute(1));
-        engine.command(PlaybackCommand::Poll);
-        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        assert_eq!(snap.soloed_channels_mask, 1 << 2);
-        assert_eq!(snap.muted_channels_mask, !(1 << 2));
-    }
-
-    #[test]
-    fn toggle_soloed_channel_unsolos() {
-        let (engine, rx) = make_test_engine();
-        // Mute channel 1 first, then solo channel 0.
-        engine.command(PlaybackCommand::ToggleChannelMute(1));
-        engine.command(PlaybackCommand::SoloChannel(0));
-        engine.command(PlaybackCommand::Poll);
-        let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        // Single-click (toggle) the soloed channel — should unsolo,
-        // restoring the pre-solo mask (bit 1 set).
-        engine.command(PlaybackCommand::ToggleChannelMute(0));
-        engine.command(PlaybackCommand::Poll);
-        let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        assert_eq!(snap.muted_channels_mask, 1 << 1);
+        // A soloed channel, and one the solos leave out.
+        for channel in [1, 3] {
+            engine.command(PlaybackCommand::ToggleChannelMute(channel));
+            engine.command(PlaybackCommand::Poll);
+            let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+            assert_eq!(snap.soloed_channels_mask, 0b0110);
+            assert_eq!(snap.muted_channels_mask, 1 << channel);
+            engine.command(PlaybackCommand::ToggleChannelMute(channel));
+            engine.command(PlaybackCommand::Poll);
+            let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
+            assert_eq!(snap.soloed_channels_mask, 0b0110);
+            assert_eq!(snap.muted_channels_mask, 0);
+        }
     }
 
     #[test]
@@ -1654,11 +1588,12 @@ mod tests {
         engine.command(PlaybackCommand::LoadQueue(vec![a, b]));
         engine.command(PlaybackCommand::Poll);
         let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        // Solo channel 1.
+        // Mute channel 0 and solo channel 1.
+        engine.command(PlaybackCommand::ToggleChannelMute(0));
         engine.command(PlaybackCommand::SoloChannel(1));
         engine.command(PlaybackCommand::Poll);
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        assert_ne!(snap.muted_channels_mask, 0);
+        assert_eq!(snap.muted_channels_mask, 1 << 0);
         assert_eq!(snap.soloed_channels_mask, 1 << 1);
         // Switch to track B via Next.
         engine.command(PlaybackCommand::Next);
@@ -1689,20 +1624,21 @@ mod tests {
         engine.command(PlaybackCommand::LoadQueue(vec![a]));
         engine.command(PlaybackCommand::Poll);
         let _ = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
-        // Solo channels 2 and 4.
+        // Mute channel 0 and solo channels 2 and 4.
+        engine.command(PlaybackCommand::ToggleChannelMute(0));
         engine.command(PlaybackCommand::SoloChannel(2));
         engine.command(PlaybackCommand::SoloChannel(4));
         engine.command(PlaybackCommand::Poll);
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap.soloed_channels_mask, 0b1_0100);
-        assert_ne!(snap.muted_channels_mask, 0);
+        assert_eq!(snap.muted_channels_mask, 1 << 0);
         // Pause and resume — mute/solo must survive.
         engine.command(PlaybackCommand::Pause);
         engine.command(PlaybackCommand::Play);
         engine.command(PlaybackCommand::Poll);
         let snap = recv_snapshot(&rx, Duration::from_millis(300)).expect("snapshot");
         assert_eq!(snap.soloed_channels_mask, 0b1_0100);
-        assert_ne!(snap.muted_channels_mask, 0);
+        assert_eq!(snap.muted_channels_mask, 1 << 0);
     }
 }
 

@@ -347,7 +347,7 @@ public:
     Q_INVOKABLE void toggleChannelMute(int channelIndex);
     Q_INVOKABLE void soloChannel(int channelIndex);
     Q_INVOKABLE void setChannelButtonsVisibility(int value);
-    Q_INVOKABLE bool isChannelMuted(int channelIndex) const;
+    Q_INVOKABLE bool isChannelSilent(int channelIndex) const;
     Q_INVOKABLE void setShowFps(bool value);
     Q_INVOKABLE void setShowLevelMeter(bool value);
     Q_INVOKABLE void setShowSpectrogramCrosshair(bool value);

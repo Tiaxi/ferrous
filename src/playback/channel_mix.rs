@@ -2,15 +2,11 @@
 
 //! Which channels of a stream are heard.
 //!
-//! - While at least one channel of the stream is soloed, exactly the soloed
-//!   channels are heard, also those muted by hand.
-//! - Clearing the last solo brings back the mutes from before the first one.
-//! - Toggling the mute of a soloed channel clears its solo, as its solo
-//!   button does.
-//! - Toggling the mute of any other channel while solos are active turns
-//!   them into plain mutes: the solos go out, what is heard stays, and the
-//!   toggled channel is heard too. The mutes from before the first solo are
-//!   gone.
+//! Mutes and solos are independent, and neither changes the other.
+//!
+//! - A muted channel is silent, also while it is soloed.
+//! - While at least one channel of the stream is soloed, the channels that
+//!   are not soloed are silent too.
 //! - Mutes and solos of channels a stream does not have do nothing for it,
 //!   and apply again to a later stream that has them.
 //! - A stream with fewer channels than the last one never starts silenced by
@@ -37,21 +33,24 @@ fn stream_channels(channels: u32) -> u64 {
 /// describe that stream; see the module's rules.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChannelMix {
-    /// Muted by hand. Solos leave this as it is.
     pub(crate) muted: u64,
     pub(crate) soloed: u64,
 }
 
 impl ChannelMix {
-    /// The channels of the stream that are not heard.
+    /// The channels of the stream that are not heard. The mock backend
+    /// plays no channels.
+    #[cfg(any(feature = "gst", test))]
     pub(crate) fn silenced(self, channels: u32) -> u64 {
         let present = stream_channels(channels);
         let soloed = self.soloed & present;
-        if soloed == 0 {
-            self.muted & present
-        } else {
-            !soloed & present
-        }
+        let left_out = if soloed == 0 { 0 } else { !soloed };
+        (self.muted | left_out) & present
+    }
+
+    /// The channels of the stream that are muted.
+    pub(crate) fn muted_in(self, channels: u32) -> u64 {
+        self.muted & stream_channels(channels)
     }
 
     /// The channels of the stream that are soloed.
@@ -63,27 +62,17 @@ impl ChannelMix {
         self.soloed ^= channel_bit(channel);
     }
 
-    pub(crate) fn toggle_mute(&mut self, channel: u8, channels: u32) {
-        let bit = channel_bit(channel);
-        let soloed = self.soloed_in(channels);
-        if soloed & bit != 0 {
-            self.soloed ^= bit;
-            return;
-        }
-        if soloed != 0 {
-            self.muted = self.silenced(channels);
-            self.soloed = 0;
-        }
-        self.muted ^= bit;
+    pub(crate) fn toggle_mute(&mut self, channel: u8) {
+        self.muted ^= channel_bit(channel);
     }
 
     /// Apply to a stream with fewer channels than the one before it. Mutes
-    /// that silence all of it were made for other channels: a solo of a
-    /// channel it lacks, turned into mutes, or a mute of its left channel on
-    /// a stereo track before a mono one. Those of its channels are dropped,
-    /// as nothing else tells the user why the track is silent; mutes of
-    /// channels it lacks stay for a later stream. The mock backend's streams
-    /// have no channel count, so only `GStreamer` streams narrow.
+    /// that silence all of it were made for other channels, like a mute of
+    /// its left channel on a stereo track before a mono one. Those of its
+    /// channels are dropped, as nothing else tells the user why the track is
+    /// silent; mutes of channels it lacks stay for a later stream. The mock
+    /// backend's streams have no channel count, so only `GStreamer` streams
+    /// narrow.
     #[cfg(any(feature = "gst", test))]
     pub(crate) fn fit_narrower_stream(&mut self, channels: u32) {
         let present = stream_channels(channels);
@@ -120,20 +109,22 @@ mod tests {
     }
 
     #[test]
-    fn a_solo_wins_over_a_mute_of_its_channel() {
-        let mut mix = ChannelMix::default();
-        mix.toggle_mute(1, 4);
-        mix.toggle_solo(1);
-        assert_eq!(mix.silenced(4), 0b1101);
+    fn a_channel_can_be_muted_and_soloed_and_is_silent() {
+        let mut mix = soloed(&[0, 1]);
+        mix.toggle_mute(1);
+        assert_eq!(mix.muted_in(4), 0b0010);
+        assert_eq!(mix.soloed_in(4), 0b0011);
+        assert_eq!(mix.silenced(4), 0b1110);
     }
 
     #[test]
-    fn clearing_the_last_solo_restores_the_mutes() {
+    fn solos_leave_the_mutes_as_they_are() {
         let mut mix = ChannelMix::default();
-        mix.toggle_mute(3, 4);
+        mix.toggle_mute(3);
         mix.toggle_solo(0);
         mix.toggle_solo(1);
         mix.toggle_solo(0);
+        assert_eq!(mix.muted_in(4), 0b1000);
         assert_eq!(mix.silenced(4), 0b1101);
         mix.toggle_solo(1);
         assert_eq!(
@@ -146,38 +137,48 @@ mod tests {
     }
 
     #[test]
-    fn muting_a_soloed_channel_clears_only_its_solo() {
-        let mut mix = soloed(&[0, 2]);
-        mix.toggle_mute(0, 4);
-        assert_eq!(mix.soloed_in(4), 0b0100);
+    fn muting_and_unmuting_a_soloed_channel_keeps_the_solos() {
+        let before = soloed(&[0, 2]);
+        let mut mix = before;
+        mix.toggle_mute(0);
+        assert_eq!(mix.soloed_in(4), 0b0101);
         assert_eq!(mix.silenced(4), 0b1011);
-        // The last one brings the mutes back, here none.
-        mix.toggle_mute(2, 4);
-        assert_eq!(mix, ChannelMix::default());
+        mix.toggle_mute(0);
+        assert_eq!(mix, before);
     }
 
     #[test]
-    fn muting_another_channel_turns_the_solos_into_mutes() {
-        let mut mix = ChannelMix::default();
-        mix.toggle_mute(0, 4);
+    fn muting_and_unmuting_another_channel_keeps_the_solos() {
+        let before = soloed(&[1, 2]);
+        let mut mix = before;
+        mix.toggle_mute(3);
+        assert_eq!(mix.soloed_in(4), 0b0110);
+        assert_eq!(mix.muted_in(4), 0b1000);
+        assert_eq!(mix.silenced(4), 0b1001);
+        mix.toggle_mute(3);
+        assert_eq!(mix, before);
+    }
+
+    #[test]
+    fn a_mute_made_during_solos_outlasts_them() {
+        let mut mix = soloed(&[1]);
+        mix.toggle_mute(3);
         mix.toggle_solo(1);
-        mix.toggle_solo(2);
-        // Channel 3 was silent, and is heard with what was heard.
-        mix.toggle_mute(3, 4);
-        assert_eq!(
-            mix,
-            ChannelMix {
-                muted: 0b0001,
-                soloed: 0
-            }
-        );
+        assert_eq!(mix.silenced(4), 0b1000);
+    }
+
+    #[test]
+    fn muting_every_soloed_channel_silences_the_stream() {
+        let mut mix = soloed(&[1]);
+        mix.toggle_mute(1);
+        assert_eq!(mix.silenced(4), 0b1111);
     }
 
     #[test]
     fn a_narrower_stream_keeps_the_mutes_of_channels_it_lacks() {
         let mut mix = ChannelMix::default();
         for channel in [0, 1, 5] {
-            mix.toggle_mute(channel, 6);
+            mix.toggle_mute(channel);
         }
         mix.fit_narrower_stream(2);
         assert_eq!(mix.silenced(2), 0);
@@ -196,15 +197,6 @@ mod tests {
         let mut mix = soloed(&[3]);
         mix.muted = 0b01;
         assert_eq!(mix.silenced(2), 0b01);
-        // And a mute there does not end them: they are not active.
-        mix.toggle_mute(1, 2);
-        assert_eq!(
-            mix,
-            ChannelMix {
-                muted: 0b11,
-                soloed: 0b1000
-            }
-        );
         // They apply again to a stream that has their channel.
         assert_eq!(mix.silenced(6), 0b11_0111);
     }
@@ -252,19 +244,20 @@ mod tests {
     }
 
     #[test]
-    fn solos_keep_a_narrower_stream_audible_with_every_channel_muted() {
+    fn a_narrower_stream_does_not_start_silenced_by_a_mute_of_its_soloed_channel() {
         let mut mix = ChannelMix {
-            muted: 0b11,
+            muted: 0b01,
             soloed: 0b01,
         };
         mix.fit_narrower_stream(2);
         assert_eq!(
             mix,
             ChannelMix {
-                muted: 0b11,
+                muted: 0,
                 soloed: 0b01
             }
         );
+        assert_eq!(mix.silenced(2), 0b10);
     }
 
     #[test]

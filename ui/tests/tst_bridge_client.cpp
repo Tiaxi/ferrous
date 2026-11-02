@@ -307,6 +307,7 @@ private slots:
     void testMutedChannelsMaskDecoding();
     void currentTrackChannelsExposesDecodedMetadata();
     void mutedChannelsKeepEveryBitOfTheMask();
+    void channelsAreSilentWhenMutedOrLeftOutBySolos();
     void soloedChannelsKeepEveryBitOfTheMask();
     void metadataChannelLabelsDecodeOptionalTail();
     void channelLayoutFollowsMatchingMetadataAcrossTracks();
@@ -5372,26 +5373,48 @@ void BridgeClientTest::channelLayoutFollowsMatchingMetadataAcrossTracks()
 
 void BridgeClientTest::mutedChannelsKeepEveryBitOfTheMask()
 {
-    // Soloing channel 0 mutes all the others: before the engine knows the
-    // stream's channels its mask has the high bits set, which a QML number
-    // would round away.
+    // Bits above the 53 a QML number keeps would be rounded away.
     BridgeClient client;
     isolateBridgeClient(client);
     BinaryBridgeCodec::DecodedSnapshot snapshot;
     snapshot.playback.present = true;
     snapshot.playback.state = 1;
     snapshot.playback.currentPath = QStringLiteral("/fixture/surround.wav");
-    for (const int soloed : {0, 5}) {
-        snapshot.playback.mutedChannelsMask = ~(quint64{1} << soloed);
-        snapshot.playback.soloedChannelsMask = quint64{1} << soloed;
+    for (const int unmuted : {0, 5}) {
+        snapshot.playback.mutedChannelsMask = ~(quint64{1} << unmuted);
         QVERIFY(client.processBinarySnapshot(snapshot));
         const QList<bool> muted = client.property("mutedChannels").value<QList<bool>>();
         QCOMPARE(muted.size(), 64);
         for (int channel = 0; channel < 64; ++channel) {
-            QCOMPARE(muted.at(channel), channel != soloed);
-            QCOMPARE(client.isChannelMuted(channel), channel != soloed);
+            QCOMPARE(muted.at(channel), channel != unmuted);
+            QCOMPARE(client.isChannelSilent(channel), channel != unmuted);
         }
     }
+}
+
+void BridgeClientTest::channelsAreSilentWhenMutedOrLeftOutBySolos()
+{
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/fixture/surround.wav");
+    // Channels 0 and 1 are soloed, and 1 and 2 muted.
+    snapshot.playback.mutedChannelsMask = 0b0110;
+    snapshot.playback.soloedChannelsMask = 0b0011;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(!client.isChannelSilent(0));
+    QVERIFY(client.isChannelSilent(1));
+    QVERIFY(client.isChannelSilent(2));
+    QVERIFY(client.isChannelSilent(3));
+
+    snapshot.playback.soloedChannelsMask = 0;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(!client.isChannelSilent(0));
+    QVERIFY(client.isChannelSilent(1));
+    QVERIFY(client.isChannelSilent(2));
+    QVERIFY(!client.isChannelSilent(3));
 }
 
 void BridgeClientTest::soloedChannelsKeepEveryBitOfTheMask()

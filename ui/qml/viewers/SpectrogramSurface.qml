@@ -82,7 +82,7 @@ Item {
         let result = []
         for (let i = 0; i < Math.max(count, 1); ++i) {
             const lbl = ChannelLabels.label(count, i)
-            const muted = root.uiBridge.isChannelMuted(i)
+            const muted = root.uiBridge.isChannelSilent(i)
             result.push({
                 label: lbl,
                 showLabel: showLabels && lbl.length > 0,
@@ -130,7 +130,7 @@ Item {
             const showLabels = root.uiBridge.spectrogramViewMode === 1
             for (let i = 0; i < channels.length; ++i) {
                 const labelText = (channels[i].label || "").trim()
-                const muted = root.uiBridge.isChannelMuted(i)
+                const muted = root.uiBridge.isChannelSilent(i)
                 next.push({
                     label: labelText,
                     showLabel: showLabels && labelText.length > 0,
@@ -217,7 +217,7 @@ Item {
             for (let i = 0; i < spectrogramRepeater.count; ++i) {
                 const pane = spectrogramRepeater.itemAt(i)
                 if (pane && pane.spectrogramItem) {
-                    pane.spectrogramItem.channelMuted = root.uiBridge.isChannelMuted(i)
+                    pane.spectrogramItem.channelMuted = root.uiBridge.isChannelSilent(i)
                 }
             }
         }
@@ -391,7 +391,8 @@ Item {
                     // M (mute) button.
                     Rectangle {
                         objectName: "spectrogramMuteButton"
-                        property bool active: spectrogramPaneItem.channelMuted
+                        // The pane also greys out when a solo leaves it out.
+                        property bool active: (root.uiBridge.mutedChannels || [])[modelData.channelIndex] === true
                         visible: root.channelButtonsVisible(
                             paneHover.hovered, channelControlsHover.hovered)
                         width: muteText.implicitWidth + 10
