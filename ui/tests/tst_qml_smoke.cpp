@@ -47,6 +47,8 @@
 #include <QtEndian>
 #include <QtTest/QtTest>
 #include <qqml.h>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 
 #include <algorithm>
 #include <array>
@@ -356,10 +358,10 @@ QSGNode *paintSettled(SpectrogramItem &item, QSGNode *node) {
             break;
         }
         {
-            // Its window may have painted it meanwhile, uploading its tiles
-            // to the window's own nodes: this node needs them too.
+            // Its window may have painted it meanwhile, taking what changed
+            // of its canvas for the window's own node: this node needs it too.
             QMutexLocker lock(&item.m_stateMutex);
-            item.markAllTilesDirtyLocked();
+            item.markCanvasDirtyLocked();
         }
         node = item.updatePaintNode(node, nullptr);
     }
@@ -1210,6 +1212,9 @@ private slots:
     void spectrogramDrawsAtDevicePixels_data();
     void spectrogramDrawsAtDevicePixels();
     void spectrogramWideCanvasDrawsEveryTile();
+    void spectrogramCanvasTexturesSurviveSceneGraphChanges();
+    void spectrogramSceneGraphDrawsTheCanvas_data();
+    void spectrogramSceneGraphDrawsTheCanvas();
     void spectrogramClickToSeekMatchesCrosshairAtDevicePixels();
     void spectrogramOverlaysDrawNoPaneSizedImages();
     void spectrogramScaleChangeKeepsAnUnalignedCanvasCovering_data();
@@ -11531,7 +11536,7 @@ void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
     prepareWholeTrackPlayback(item, 50.0);
     item.setPlaying(false);
     QSGNode *node = paintSettled(item, nullptr);
-    QVERIFY(SpectrogramItem::sceneStatistics(node).canvasTextures > 0);
+    QVERIFY(SpectrogramItem::sceneStatistics(node).canvasTextureBytes > 0);
     for (const bool shown : {true, false}) {
         item.setShowFpsOverlay(shown);
         {
@@ -11543,6 +11548,7 @@ void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
         QSGNode *next = item.updatePaintNode(node, nullptr);
         QCOMPARE(next, node);
         QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
+        QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasUploads, 0);
         auto *overlay = static_cast<QSGSimpleTextureNode *>(node->lastChild());
         QCOMPARE(!overlay->rect().isEmpty(), shown);
     }
@@ -11645,6 +11651,7 @@ void SpectrogramSmokeTest::spectrogramStillFramesLeaveTextureNodesAlone() {
         QVERIFY(drawnCanvasFragments(node) > 0);
         QCOMPARE(SpectrogramItem::sceneStatistics(node).textureNodeChanges, 0);
         QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
+        QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasUploads, 0);
         auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
         const QRectF before = playhead->rect();
         setTestPosition(item, 50.0 + 1.5 / kWholeTrackColumnsPerSecond);
@@ -11652,6 +11659,7 @@ void SpectrogramSmokeTest::spectrogramStillFramesLeaveTextureNodesAlone() {
         QVERIFY(playhead->rect().left() > before.left());
         QCOMPARE(SpectrogramItem::sceneStatistics(node).textureNodeChanges, 0);
         QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
+        QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasUploads, 0);
         delete node;
     }
 }
@@ -11847,6 +11855,7 @@ void SpectrogramSmokeTest::spectrogramScrollingViewWaitsForTheNextPixel() {
             node = item.updatePaintNode(node, nullptr);
             QCOMPARE(SpectrogramItem::sceneStatistics(node).textureNodeChanges, 0);
             QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
+            QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasUploads, 0);
             QCOMPARE(playhead->rect(), shownPlayhead);
         }
         // Then it is another.
@@ -11854,7 +11863,8 @@ void SpectrogramSmokeTest::spectrogramScrollingViewWaitsForTheNextPixel() {
         node = item.updatePaintNode(node, nullptr);
         ++frames;
         QVERIFY(SpectrogramItem::sceneStatistics(node).textureNodeChanges > 0
-            || SpectrogramItem::sceneStatistics(node).canvasTextures > 0);
+            || SpectrogramItem::sceneStatistics(node).canvasTextures > 0
+            || SpectrogramItem::sceneStatistics(node).canvasUploads > 0);
         QVERIFY(canvasOnWholePixels());
     }
     // About a frame for each pixel the view scrolls, and one for each
@@ -11877,6 +11887,9 @@ void SpectrogramSmokeTest::spectrogramScrollingFramesMoveAPixelAtATime() {
     QFETCH(int, mode);
     QFETCH(double, scale);
     QQuickWindow window;
+    if (window.rendererInterface()->graphicsApi() == QSGRendererInterface::Null) {
+        QSKIP("The null renderer draws no pixels");
+    }
     window.resize(400, 100);
     if (scale != 1.0) {
         QScreen *screen = hiDpiTestScreen(scale);
@@ -13461,6 +13474,7 @@ void SpectrogramSmokeTest::spectrogramPlaybackBenchmark() {
         constexpr int iterations = 120;
         std::vector<double> ms;
         qint64 textures = 0;
+        qint64 uploads = 0;
         qint64 bytes = 0;
         qint64 nodeChanges = 0;
         qint64 overlayTextures = 0;
@@ -13477,6 +13491,7 @@ void SpectrogramSmokeTest::spectrogramPlaybackBenchmark() {
             ms.push_back(static_cast<double>(elapsed.nsecsElapsed()) / 1e6);
             const SpectrogramSceneStatistics frame = SpectrogramItem::sceneStatistics(node);
             textures += frame.canvasTextures;
+            uploads += frame.canvasUploads;
             bytes += frame.canvasTextureBytes;
             nodeChanges += frame.textureNodeChanges;
             overlayTextures += frame.overlayTextures;
@@ -13484,11 +13499,12 @@ void SpectrogramSmokeTest::spectrogramPlaybackBenchmark() {
             QVERIFY(QTest::qWaitFor([item]() { return !spectrogramRasterPending(*item); }, 5000));
         }
         qInfo("playback %s scale=%g frames_per_s=%.1f render_mean_ms=%.3f textures_per_frame=%.2f "
-              "texture_kib_per_frame=%.1f overlay_textures_per_frame=%.2f "
+              "uploads_per_frame=%.2f texture_kib_per_frame=%.1f overlay_textures_per_frame=%.2f "
               "overlay_kib_per_frame=%.2f node_changes_per_frame=%.1f sync_mean_ms=%.3f "
               "sync_worst_ms=%.3f",
             scenario.name, window.effectiveDevicePixelRatio(), framesPerSecond, renderMean,
             static_cast<double>(textures) / iterations,
+            static_cast<double>(uploads) / iterations,
             static_cast<double>(bytes) / 1024.0 / iterations,
             static_cast<double>(overlayTextures) / iterations,
             static_cast<double>(overlayBytes) / 1024.0 / iterations,
@@ -19314,7 +19330,8 @@ void SpectrogramSmokeTest::spectrogramWideCanvasDrawsEveryTile() {
     const int widestSeen = SpectrogramItem::s_maxWidgetWidthSeen;
     const auto restoreWidest = qScopeGuard(
         [widestSeen]() { SpectrogramItem::s_maxWidgetWidthSeen = widestSeen; });
-    // 7000 pixels are 110 tiles, more than the scene node starts with.
+    // 7000 pixels are 110 tiles, more than the scene node starts with, and
+    // as many OpenGL textures as its size limit takes.
     QQuickWindow window;
     window.resize(240, 160);
     window.show();
@@ -19333,11 +19350,354 @@ void SpectrogramSmokeTest::spectrogramWideCanvasDrawsEveryTile() {
     QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
     item.update();
     QTRY_VERIFY(!frames.isEmpty());
-    QVERIFY(drawnCanvasFragments(node) >= 110);
+    const QVector<QPair<int, QSGTexture *>> textures = SpectrogramItem::canvasTextures(node);
+    if (SpectrogramItem::sceneStatistics(node).canvasInPlace) {
+        GLint limit = 0;
+        QOpenGLContext::currentContext()->functions()->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &limit);
+        QCOMPARE(textures.size(), (7000 + limit - 1) / limit);
+    } else {
+        QCOMPARE(textures.size(), 110);
+    }
+    QCOMPARE(drawnCanvasFragments(node), static_cast<int>(textures.size()));
     const QPair<double, double> extent = drawnCanvasExtent(node);
     QCOMPARE(extent.first, 0.0);
     QCOMPARE(extent.second, 7000.0);
     delete node;
+}
+
+namespace {
+
+// Feeds the stripes again for another hop, around the playhead at `seconds`,
+// as the decoder sends a zoom's data.
+void feedZoomStripes(SpectrogramItem &item, double seconds, int hop, bool rolling) {
+    constexpr int columns = 1200;
+    const int nowColumn = static_cast<int>(seconds * 48'000.0 / hop);
+    QByteArray data(kStripeBins * columns, Qt::Uninitialized);
+    for (int column = 0; column < columns; ++column) {
+        std::fill_n(data.data() + static_cast<qsizetype>(column) * kStripeBins, kStripeBins,
+            static_cast<char>(60 + (column * 37) % 170));
+    }
+    item.feedPrecomputedChunk(data, kStripeBins, 0, columns,
+        rolling ? nowColumn : nowColumn - columns / 2, kStripeColumns * 1024 / hop, 48'000, hop,
+        false, true, 1, true, 2);
+}
+
+void saveForInspection(const QImage &image, const QString &name) {
+    if (qEnvironmentVariableIsSet("FERROUS_TEST_IMAGE_DIR")) {
+        image.save(qEnvironmentVariable("FERROUS_TEST_IMAGE_DIR") + QLatin1Char('/') + name + QStringLiteral(".png"));
+    }
+}
+
+// What a window shows of a spectrogram's canvas: where `node`, a scene node
+// of the item drawn at the same time, places its spans, each device pixel
+// sampled at its centre as Nearest filtering does, over black. The pixels
+// under the centered playhead, which blends over them, are left out of
+// `mask`.
+QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSize &size, double scale,
+    QImage *mask) {
+    QHash<QSGTexture *, int> bandX;
+    for (const auto &[x, texture] : SpectrogramItem::canvasTextures(node)) {
+        bandX.insert(texture, x);
+    }
+    QImage expected(size, QImage::Format_RGB32);
+    expected.fill(Qt::black);
+    *mask = QImage(size, QImage::Format_Grayscale8);
+    mask->fill(255);
+    const auto draw = [&](const QSGSimpleTextureNode *span) {
+        if (span->rect().isEmpty() || !bandX.contains(span->texture())) {
+            return;
+        }
+        const QRectF target(span->rect().topLeft() * scale, span->rect().size() * scale);
+        const QRectF source = span->sourceRect();
+        const int x0 = bandX.value(span->texture());
+        for (int y = 0; y < expected.height(); ++y) {
+            if (y + 0.5 < target.top() || y + 0.5 >= target.bottom()) {
+                continue;
+            }
+            const int sy = static_cast<int>(std::floor(
+                source.top() + (y + 0.5 - target.top()) * source.height() / target.height()));
+            for (int x = 0; x < expected.width(); ++x) {
+                if (x + 0.5 < target.left() || x + 0.5 >= target.right()) {
+                    continue;
+                }
+                const int sx = static_cast<int>(std::floor(
+                    source.left() + (x + 0.5 - target.left()) * source.width() / target.width()));
+                expected.setPixel(x, y, item.m_canvas.pixel(x0 + sx, sy));
+            }
+        }
+    };
+    QSGNode *tiles = node->childAtIndex(1);
+    for (int i = 0; i < tiles->childCount(); ++i) {
+        draw(static_cast<QSGSimpleTextureNode *>(tiles->childAtIndex(i)));
+    }
+    draw(static_cast<QSGSimpleTextureNode *>(node->childAtIndex(2)));
+    const QRectF playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3))->rect();
+    if (!playhead.isEmpty()) {
+        const int left = std::max(0, static_cast<int>(std::floor(playhead.left() * scale)) - 1);
+        const int right = std::min(size.width() - 1, static_cast<int>(std::ceil(playhead.right() * scale)) + 1);
+        for (int y = 0; y < size.height(); ++y) {
+            for (int x = left; x <= right; ++x) {
+                mask->setPixel(x, y, 0);
+            }
+        }
+    }
+    return expected;
+}
+
+} // namespace
+
+void SpectrogramSmokeTest::spectrogramCanvasTexturesSurviveSceneGraphChanges() {
+    // A new scene graph, as when the window's is released, and another
+    // window, as when the fullscreen viewer takes the pane, both start a
+    // scene node of their own, which takes the whole canvas. The windows
+    // are shown, so that renderers on the RHI can make their textures.
+    QQuickWindow window;
+    window.resize(400, 100);
+    QQuickWindow other;
+    other.resize(400, 100);
+    window.show();
+    other.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(QTest::qWaitForWindowExposed(&other));
+    TestTime time;
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareScrollingPlayback(item, time, 1);
+    QSGNode *node = paintSettled(item, nullptr);
+    const auto guard = qScopeGuard([&node]() { delete node; });
+    const qint64 canvasBytes = static_cast<qint64>(400) * 100 * 4;
+    QVERIFY(SpectrogramItem::sceneStatistics(node).canvasTextureBytes >= canvasBytes);
+    time.advance(0.5);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(SpectrogramItem::sceneStatistics(node).canvasTextureBytes < canvasBytes);
+
+    item.releaseResources();
+    // The window's scene graph deletes the nodes it had.
+    delete node;
+    node = item.updatePaintNode(nullptr, nullptr);
+    QVERIFY(SpectrogramItem::sceneStatistics(node).canvasTextureBytes >= canvasBytes);
+    QVERIFY(!SpectrogramItem::canvasTextures(node).isEmpty());
+
+    item.setParentItem(other.contentItem());
+    time.advance(0.5);
+    // The old window's node makes way for one of the new window's.
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(SpectrogramItem::sceneStatistics(node).canvasTextureBytes >= canvasBytes);
+    QVERIFY(!SpectrogramItem::canvasTextures(node).isEmpty());
+}
+
+void SpectrogramSmokeTest::spectrogramSceneGraphDrawsTheCanvas_data() {
+    addScrollingRows();
+}
+
+void SpectrogramSmokeTest::spectrogramSceneGraphDrawsTheCanvas() {
+    // What the window shows of the canvas, one texel to a device pixel, is
+    // the canvas where its scene node places it: through playback past the
+    // ring's wrap and its textures' edges, a seek whose rasterization has
+    // columns drawn over it, a zoom preview and its data, a resize, a
+    // canvas taller than the textures may be, a new scene graph and another
+    // window. With OpenGL the window keeps the canvas in its own textures,
+    // updated in place; with other renderers in tiles. Rows at other scales
+    // run on the offscreen platform's HiDPI test screens, or where the
+    // window has that scale, as with QT_SCALE_FACTOR.
+    QFETCH(int, mode);
+    QFETCH(double, scale);
+    QQuickWindow window;
+    if (window.rendererInterface()->graphicsApi() == QSGRendererInterface::Null) {
+        QSKIP("The null renderer draws no pixels");
+    }
+    const bool openGl = window.rendererInterface()->graphicsApi() == QSGRendererInterface::OpenGL;
+    QQuickWindow other;
+    window.resize(400, 100);
+    other.resize(400, 100);
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen") && scale != 1.0) {
+        QScreen *screen = hiDpiTestScreen(scale);
+        if (screen == nullptr) {
+            QSKIP("Needs the offscreen platform's HiDPI test screen at that scale");
+        }
+        QVERIFY(moveWindowToScreen(window, screen));
+        QVERIFY(moveWindowToScreen(other, screen));
+    }
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    if (std::abs(window.effectiveDevicePixelRatio() - scale) > 1e-9) {
+        QSKIP("The window is at another scale");
+    }
+    TestTime time;
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    // Textures narrower than the canvas, so that the ring wraps across
+    // their edges too.
+    item.m_canvasTextureSizeLimit = 256;
+    prepareScrollingPlayback(item, time, mode);
+    QQuickWindow *shownIn = &window;
+    const auto grab = [&]() {
+        item.update();
+        return shownIn->grabWindow().convertToFormat(QImage::Format_RGB32);
+    };
+    // A window shown again, whose scene graph the threaded render loop
+    // makes anew, draws nothing to grab until its first frame.
+    const auto firstFrame = [](QQuickWindow &shown) {
+        return QTest::qWaitFor([&shown]() { return !shown.grabWindow().isNull(); }, 5000);
+    };
+    const auto settle = [&]() {
+        grab();
+        for (int round = 0; round < 8 && spectrogramRasterPending(item); ++round) {
+            if (!QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000)) {
+                return false;
+            }
+            grab();
+        }
+        return !spectrogramRasterPending(item);
+    };
+    QSGNode *node = nullptr;
+    const auto guard = qScopeGuard([&node]() { delete node; });
+    // What the window's node did in the frame shows() compared last: the
+    // test's own node, which it then makes, is not the window's.
+    SpectrogramSceneStatistics windowFrame;
+    // Compares what the window shows now with the canvas; `inPlace` is
+    // what the window's node should keep it in, with OpenGL.
+    const auto shows = [&](const QString &when, bool inPlace) {
+        const QImage shown = grab();
+        if (shown.isNull()) {
+            qWarning("%s: the window drew no frame", qPrintable(when));
+            return false;
+        }
+        if (spectrogramRasterPending(item)) {
+            qWarning("%s: a rasterization is pending", qPrintable(when));
+            return false;
+        }
+        SpectrogramSceneStatistics drawn;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            drawn = item.m_lastSceneStatistics;
+        }
+        windowFrame = drawn;
+        if (drawn.canvasInPlace != (openGl && inPlace)) {
+            qWarning("%s: the window's canvas is %sin place", qPrintable(when),
+                drawn.canvasInPlace ? "" : "not ");
+            return false;
+        }
+        // The node the window drew, placed alike: the frames of one time
+        // are all the same.
+        delete node;
+        node = paintSettled(item, nullptr);
+        QMutexLocker lock(&item.m_stateMutex);
+        QImage mask;
+        const QImage expected = expectedCanvasImage(item, node, shown.size(), scale, &mask);
+        int differing = 0;
+        QPoint first;
+        // The item's pixels; the window's beyond it are its own.
+        const int itemPixels = std::min(expected.width(),
+            static_cast<int>(std::floor(item.width() * scale + 1e-6)));
+        for (int y = 0; y < expected.height(); ++y) {
+            for (int x = 0; x < itemPixels; ++x) {
+                if (mask.constScanLine(y)[x] != 0 && shown.pixel(x, y) != expected.pixel(x, y)) {
+                    if (differing++ == 0) {
+                        first = QPoint(x, y);
+                    }
+                }
+            }
+        }
+        if (differing > 0) {
+            saveForInspection(shown, QStringLiteral("shown"));
+            saveForInspection(expected, QStringLiteral("expected"));
+            qWarning("%s: %d pixels differ, first at (%d, %d)", qPrintable(when), differing,
+                first.x(), first.y());
+        }
+        return differing == 0;
+    };
+    const auto play = [&](int frames, double step, const QString &what, bool inPlace) {
+        for (int frame = 0; frame < frames; ++frame) {
+            time.advance(step);
+            if (!shows(QStringLiteral("%1, frame %2").arg(what).arg(frame), inPlace)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    QVERIFY(settle());
+    QVERIFY(shows(QStringLiteral("first frame"), true));
+    if (openGl) {
+        // Bands of at most 256 columns.
+        QCOMPARE(windowFrame.canvasTextureCount,
+            (static_cast<int>(std::floor(400 * scale + 1e-6)) + 255) / 256);
+    }
+
+    // Playback past the ring's wrap, then a frame's worth of columns at a
+    // time: each frame uploads only what it drew.
+    QVERIFY(play(20, 0.7, QStringLiteral("wrap"), true));
+    QVERIFY(play(20, 1.0 / 30.0, QStringLiteral("playback"), true));
+    if (openGl) {
+        time.advance(1.0 / 30.0);
+        grab();
+        // The window's frame, not the test's.
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_lastSceneStatistics.canvasTextures, 0);
+        QVERIFY(item.m_lastSceneStatistics.canvasUploads <= 2);
+    }
+
+    // A seek far away rasterizes the canvas again; columns played while
+    // that runs are uploaded after its copy.
+    setTestPosition(item, 70.0);
+    grab();
+    QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
+    time.advance(0.25);
+    QVERIFY(shows(QStringLiteral("after a seek"), true));
+    QVERIFY(play(10, 1.0 / 30.0, QStringLiteral("after a seek"), true));
+
+    // A zoom shows the canvas scaled until its data and its rasterization
+    // come.
+    item.setZoomLevel(2.0);
+    QVERIFY(sendPendingBackendZoom(item));
+    QVERIFY(play(10, 1.0 / 30.0, QStringLiteral("zoom preview"), true));
+    feedZoomStripes(item, testClock(item).positionAt(time.nowNs), 512, mode == 0);
+    QVERIFY(settle());
+    QVERIFY(play(10, 1.0 / 30.0, QStringLiteral("zoomed"), true));
+
+    // A resize lays out new textures.
+    item.setWidth(300);
+    QVERIFY(settle());
+    QVERIFY(play(10, 1.0 / 30.0, QStringLiteral("resized"), true));
+
+    // A canvas taller than the textures may be goes in tiles.
+    const auto limitTextures = [&item](int size) {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_canvasTextureSizeLimit = size;
+    };
+    limitTextures(static_cast<int>(std::floor(100 * scale + 1e-6)) - 1);
+    QVERIFY(play(5, 1.0 / 30.0, QStringLiteral("too tall"), false));
+    limitTextures(256);
+    QVERIFY(play(5, 1.0 / 30.0, QStringLiteral("fits again"), true));
+
+    // A new scene graph makes new textures.
+    window.setPersistentGraphics(false);
+    window.setPersistentSceneGraph(false);
+    window.hide();
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(firstFrame(window));
+    QVERIFY(settle());
+    QVERIFY(play(10, 1.0 / 30.0, QStringLiteral("new scene graph"), true));
+
+    // Another window, with a context of its own, takes the pane, as the
+    // fullscreen viewer does; the old window lets its textures go.
+    other.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&other));
+    QVERIFY(firstFrame(other));
+    item.setParentItem(other.contentItem());
+    shownIn = &other;
+    QVERIFY(settle());
+    QVERIFY(play(10, 1.0 / 30.0, QStringLiteral("another window"), true));
+    window.hide();
+    QVERIFY(play(5, 1.0 / 30.0, QStringLiteral("the old window hidden"), true));
+
+    // And back, as when the fullscreen viewer closes.
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(firstFrame(window));
+    item.setParentItem(window.contentItem());
+    shownIn = &window;
+    QVERIFY(settle());
+    QVERIFY(play(5, 1.0 / 30.0, QStringLiteral("back in the first window"), true));
 }
 
 void SpectrogramSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {
@@ -19471,7 +19831,7 @@ void SpectrogramSmokeTest::spectrogramScaleChangeKeepsAnUnalignedCanvasCovering(
     QVERIFY(moveWindowToScreen(window, screen));
     {
         QMutexLocker lock(&item.m_stateMutex);
-        item.markAllTilesDirtyLocked();
+        item.markCanvasDirtyLocked();
     }
     node = item.updatePaintNode(node, nullptr);
     // The screen change reaches the item at once, and this is its first
@@ -19607,7 +19967,7 @@ void SpectrogramSmokeTest::spectrogramScaleChangeRebuildsOnceAndDropsStaleRaster
             // The window paints the item too, uploading its tiles to its
             // own nodes: this node needs them as well.
             QMutexLocker lock(&item.m_stateMutex);
-            item.markAllTilesDirtyLocked();
+            item.markCanvasDirtyLocked();
         }
         node = item.updatePaintNode(node, nullptr);
         QVERIFY2(drawnCanvasFragments(node) > 0,
@@ -19627,7 +19987,7 @@ void SpectrogramSmokeTest::spectrogramScaleChangeRebuildsOnceAndDropsStaleRaster
         QTest::qWait(16);
         {
             QMutexLocker lock(&item.m_stateMutex);
-            item.markAllTilesDirtyLocked();
+            item.markCanvasDirtyLocked();
         }
         node = item.updatePaintNode(node, nullptr);
         QMutexLocker lock(&item.m_stateMutex);

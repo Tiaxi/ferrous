@@ -20,11 +20,18 @@
 #include <QSGNode>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
+#include <QSGRendererInterface>
 #include <QSGTexture>
 #include <QSet>
 #include <QString>
 #include <QThread>
 #include <QThreadPool>
+#include <QOpenGLContext>
+#include <QOpenGLExtraFunctions>
+#include <QOpenGLFunctions>
+#include <QPointer>
+#include <QRunnable>
+#include <QtQuick/qsgtexture_platform.h>
 
 #include <algorithm>
 #include <array>
@@ -91,8 +98,12 @@ constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
 // data-driven release always wins, while still being short enough to
 // recover if the backend never sends a reset (e.g. stream interruption).
 constexpr double kPositionJumpHoldTimeoutSeconds = 2.0;
-// Canvas spans the scene node starts with; a wider canvas adds more.
-constexpr int kInitialTileFragments = 96;
+// Canvas spans the scene node starts with: two for a canvas in one texture,
+// whose ring wraps inside it. Tiles add more.
+constexpr int kInitialTileFragments = 2;
+// The widest canvas texture to make when the renderer does not tell: the
+// least that OpenGL ES 3 allows.
+constexpr int kFallbackMaxTextureSize = 2048;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 constexpr qint64 kSeekTraceWindowMs = 1800;
 constexpr qint64 kSmoothnessWindowMs = 2000;
@@ -267,6 +278,170 @@ struct SpectrogramOverlayLayer {
     }
 };
 
+#ifndef GL_BGRA
+#define GL_BGRA 0x80E1
+#endif
+#ifndef GL_RGBA8
+#define GL_RGBA8 0x8058
+#endif
+#ifndef GL_PIXEL_UNPACK_BUFFER
+#define GL_PIXEL_UNPACK_BUFFER 0x88EC
+#endif
+#ifndef GL_PIXEL_UNPACK_BUFFER_BINDING
+#define GL_PIXEL_UNPACK_BUFFER_BINDING 0x88EF
+#endif
+
+// The OpenGL context the window's scene graph renders with, when it is
+// current on this thread: as it is on the render thread while the scene
+// graph synchronizes. Null otherwise.
+QOpenGLContext *currentSceneGraphContext(QQuickWindow *window) {
+    if (window == nullptr
+        || window->rendererInterface()->graphicsApi() != QSGRendererInterface::OpenGL) {
+        return nullptr;
+    }
+    auto *context = static_cast<QOpenGLContext *>(window->rendererInterface()->getResource(
+        window, QSGRendererInterface::OpenGLContextResource));
+    return context != nullptr && context == QOpenGLContext::currentContext() ? context : nullptr;
+}
+
+// Deletes an OpenGL texture with its context: now, if that is current, or
+// else on its window's render thread, where it is. A texture whose context
+// is gone went with it.
+void deleteGlTexture(GLuint texture, QOpenGLContext *context, const QPointer<QQuickWindow> &window) {
+    if (texture == 0) {
+        return;
+    }
+    if (QOpenGLContext::currentContext() == context) {
+        context->functions()->glDeleteTextures(1, &texture);
+        return;
+    }
+    if (window) {
+        window->scheduleRenderJob(QRunnable::create([texture, context]() {
+            // Compared, not dereferenced: only a live context is current.
+            if (QOpenGLContext *current = QOpenGLContext::currentContext(); current == context) {
+                current->functions()->glDeleteTextures(1, &texture);
+            }
+        }), QQuickWindow::NoStage);
+    }
+}
+
+// A texture of canvas columns kept from frame to frame, with the OpenGL
+// renderer: an OpenGL texture of the item's own, into which the columns that
+// change are uploaded in place while the scene graph synchronizes, with its
+// context current. The scene graph sees it through the texture wrapping it,
+// to which this one hands everything on.
+class SpectrogramGlCanvasTexture final : public QSGTexture {
+public:
+    // Makes the texture with the window's context, current on this thread.
+    static SpectrogramGlCanvasTexture *create(QQuickWindow *window, QOpenGLContext *context, const QSize &size) {
+        QOpenGLFunctions *gl = context->functions();
+        GLuint id = 0;
+        gl->glGenTextures(1, &id);
+        if (id == 0) {
+            return nullptr;
+        }
+        auto *texture = new SpectrogramGlCanvasTexture(window, context, id, size);
+        GLint bound = 0;
+        gl->glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+        gl->glBindTexture(GL_TEXTURE_2D, id);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        gl->glTexImage2D(GL_TEXTURE_2D, 0, texture->m_rgba ? GL_RGBA : GL_RGBA8,
+            size.width(), size.height(), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        gl->glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(bound));
+        texture->m_shown = QNativeInterface::QSGOpenGLTexture::fromNative(
+            id, window, size, QQuickWindow::TextureIsOpaque);
+        if (texture->m_shown == nullptr) {
+            delete texture;
+            return nullptr;
+        }
+        return texture;
+    }
+
+    ~SpectrogramGlCanvasTexture() override {
+        delete m_shown;
+        deleteGlTexture(m_id, m_context, m_window);
+    }
+
+    qint64 comparisonKey() const override { return m_shown->comparisonKey(); }
+    QRhiTexture *rhiTexture() const override { return m_shown->rhiTexture(); }
+    QSize textureSize() const override { return m_size; }
+    bool hasAlphaChannel() const override { return false; }
+    bool hasMipmaps() const override { return false; }
+    void commitTextureOperations(QRhi *rhi, QRhiResourceUpdateBatch *resourceUpdates) override {
+        m_shown->setFiltering(filtering());
+        m_shown->setHorizontalWrapMode(horizontalWrapMode());
+        m_shown->setVerticalWrapMode(verticalWrapMode());
+        m_shown->commitTextureOperations(rhi, resourceUpdates);
+    }
+
+    // Uploads `source` of `image` (RGB32) to `to`. False, uploading
+    // nothing, when the texture's context is not current.
+    bool upload(const QImage &image, const QRect &source, const QPoint &to) {
+        if (QOpenGLContext::currentContext() != m_context) {
+            return false;
+        }
+        QOpenGLFunctions *gl = m_context->functions();
+        // Rows of whole pixels, packed: copy a part narrower than the image.
+        QImage pixels = source == image.rect() ? image : image.copy(source);
+        if (m_rgba) {
+            pixels = pixels.convertToFormat(QImage::Format_RGBX8888);
+        }
+        // The scene graph's own state, which it expects as it left it.
+        GLint bound = 0;
+        GLint alignment = 4;
+        GLint unpackBuffer = 0;
+        gl->glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+        gl->glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+        if (m_unpackBuffers) {
+            gl->glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
+            if (unpackBuffer != 0) {
+                m_context->extraFunctions()->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            }
+        }
+        gl->glBindTexture(GL_TEXTURE_2D, m_id);
+        gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        gl->glTexSubImage2D(GL_TEXTURE_2D, 0, to.x(), to.y(), pixels.width(), pixels.height(),
+            m_rgba ? GL_RGBA : GL_BGRA, GL_UNSIGNED_BYTE, pixels.constBits());
+        gl->glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+        gl->glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(bound));
+        if (unpackBuffer != 0) {
+            m_context->extraFunctions()->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpackBuffer));
+        }
+        return true;
+    }
+
+private:
+    SpectrogramGlCanvasTexture(QQuickWindow *window, QOpenGLContext *context, GLuint id, const QSize &size)
+        : m_window(window)
+        , m_context(context)
+        , m_id(id)
+        , m_size(size) {
+        // The canvas is RGB32, BGRA in memory, which desktop OpenGL takes
+        // as it is; OpenGL ES gets it as RGBA.
+        m_rgba = context->isOpenGLES();
+        const QSurfaceFormat format = context->format();
+        m_unpackBuffers = format.version() >= (context->isOpenGLES() ? qMakePair(3, 0) : qMakePair(2, 1));
+    }
+
+    QPointer<QQuickWindow> m_window;
+    QOpenGLContext *m_context{nullptr};
+    GLuint m_id{0};
+    QSize m_size;
+    QSGTexture *m_shown{nullptr};
+    bool m_rgba{false};
+    bool m_unpackBuffers{false};
+};
+
+// Canvas columns [x, x + width) and the texture they are drawn from.
+struct SpectrogramCanvasBand {
+    int x{0};
+    int width{0};
+    QSGTexture *texture{nullptr};
+};
+
 struct SpectrogramSceneNode final : public QSGNode {
     SpectrogramSceneNode() {
         background = new QSGSimpleRectNode();
@@ -358,6 +533,105 @@ struct SpectrogramSceneNode final : public QSGNode {
         statistics.textureNodeChanges += changed ? 1 : 0;
     }
 
+    // Divides a canvas of `size` into bands of at most `bandWidth` columns,
+    // unless they are its already, and returns whether they hold none of
+    // it yet. A band kept in place gets its texture now, with the window's
+    // context current; a tile gets one made of its image when that comes.
+    // Without a texture kept in place, the node goes on in tiles.
+    bool layOutCanvas(QQuickWindow *window, const QSize &size, int maxTextureSize) {
+        // In place only with the window's context current, which it is not
+        // in every synchronization: a frame without it, as the first after a
+        // new scene graph may be, goes in tiles, and the next with it goes
+        // back. A canvas taller than OpenGL's textures goes in tiles too,
+        // which Qt scales down to fit.
+        const bool inPlace = glCapable && currentSceneGraphContext(window) != nullptr
+            && size.height() <= maxTextureSize;
+        const int bandWidth = inPlace ? maxTextureSize : tileWidth;
+        if (size == canvasSize && inPlace == canvasInPlace && bandWidth == canvasBandWidth
+            && !bands.isEmpty() && !canvasLost) {
+            return std::any_of(bands.begin(), bands.end(),
+                [](const SpectrogramCanvasBand &band) { return band.texture == nullptr; });
+        }
+        canvasLost = false;
+        canvasInPlace = inPlace;
+        for (const SpectrogramCanvasBand &band : bands) {
+            if (band.texture != nullptr) {
+                retiredTextures.push_back(band.texture);
+            }
+        }
+        bands.clear();
+        canvasSize = size;
+        canvasBandWidth = std::max(1, bandWidth);
+        for (int x = 0; x < size.width(); x += canvasBandWidth) {
+            SpectrogramCanvasBand band{x, std::min(canvasBandWidth, size.width() - x), nullptr};
+            if (canvasInPlace) {
+                QOpenGLContext *context = currentSceneGraphContext(window);
+                band.texture = context != nullptr
+                    ? SpectrogramGlCanvasTexture::create(window, context, QSize(band.width, size.height()))
+                    : nullptr;
+                if (band.texture == nullptr) {
+                    qWarning("Spectrogram: cannot make a %dx%d canvas texture; drawing the canvas in tiles",
+                        band.width, size.height());
+                    for (const SpectrogramCanvasBand &made : bands) {
+                        retiredTextures.push_back(made.texture);
+                    }
+                    bands.clear();
+                    glCapable = false;
+                    return layOutCanvas(window, size, maxTextureSize);
+                }
+                band.texture->setFiltering(QSGTexture::Nearest);
+                statistics.canvasTextures += 1;
+            }
+            bands.push_back(band);
+        }
+        return true;
+    }
+
+    // Passes canvas pixels on to the bands' textures: uploads into the ones
+    // kept in place, or new textures of tiles.
+    void uploadCanvas(QQuickWindow *window, const SpectrogramCanvasUpload &upload) {
+        for (const SpectrogramCanvasUpload::Part &part : upload.parts) {
+            if (part.image.isNull()) {
+                continue;
+            }
+            if (!canvasInPlace) {
+                const int index = part.x / canvasBandWidth;
+                if (index < 0 || index >= bands.size()) {
+                    continue;
+                }
+                QSGTexture *texture = createCanvasTexture(window, part.image);
+                if (bands[index].texture != nullptr) {
+                    retiredTextures.push_back(bands[index].texture);
+                }
+                bands[index].texture = texture;
+                continue;
+            }
+            const QRect partRect(part.x, 0, part.image.width(), part.image.height());
+            for (const SpectrogramCanvasBand &band : bands) {
+                const QRect overlap = partRect & QRect(band.x, 0, band.width, canvasSize.height());
+                if (overlap.isEmpty()) {
+                    continue;
+                }
+                // Not uploaded: the next frame lays out new textures and
+                // takes the whole canvas.
+                if (!static_cast<SpectrogramGlCanvasTexture *>(band.texture)->upload(
+                        part.image, overlap.translated(-part.x, 0), QPoint(overlap.x() - band.x, 0))) {
+                    canvasLost = true;
+                    return;
+                }
+                statistics.canvasUploads += 1;
+                statistics.canvasTextureBytes +=
+                    static_cast<qint64>(overlap.width()) * overlap.height() * 4;
+            }
+        }
+    }
+
+    // What a canvas span shows while it shows nothing: in place, the
+    // texture the others show, so that the renderer can draw them together.
+    QSGTexture *canvasPlaceholder() const {
+        return canvasInPlace && !bands.isEmpty() ? bands.first().texture : placeholderTexture;
+    }
+
     // Makes a texture of a canvas tile, or part of one.
     QSGTexture *createCanvasTexture(QQuickWindow *window, const QImage &image) {
         if (image.isNull() || window == nullptr) {
@@ -388,7 +662,10 @@ struct SpectrogramSceneNode final : public QSGNode {
     }
 
     ~SpectrogramSceneNode() override {
-        qDeleteAll(tileTextures);
+        for (const SpectrogramCanvasBand &band : bands) {
+            delete band.texture;
+        }
+        qDeleteAll(retiredTextures);
         qDeleteAll(overlayTextures);
         delete overlayTexture;
         delete placeholderTexture;
@@ -403,7 +680,27 @@ struct SpectrogramSceneNode final : public QSGNode {
     SpectrogramOverlayLayer crosshairLayer;
     QSGSimpleTextureNode *overlay{nullptr};
     QVector<QSGSimpleTextureNode *> tileFragments;
-    QVector<QSGTexture *> tileTextures;
+    // How the canvas reaches the GPU: with the OpenGL renderer, in textures
+    // of the node's own kept from frame to frame, a band each as wide as
+    // OpenGL allows, into which the columns that change are uploaded; with
+    // any other renderer, whose textures Qt's public API cannot update, in
+    // tiles of kCanvasTileWidth columns, each made again when one of its
+    // columns changes.
+    bool canvasInPlace{false};
+    // Whether the window renders with OpenGL, and the largest texture its
+    // context takes, once known.
+    bool glCapable{false};
+    int glMaxTextureSize{0};
+    // The tiles' width.
+    int tileWidth{1};
+    int canvasBandWidth{1};
+    // An upload found the textures' context not current: they miss it.
+    bool canvasLost{false};
+    // The canvas its bands are of.
+    QSize canvasSize;
+    QVector<SpectrogramCanvasBand> bands;
+    // Textures no node shows once this frame's nodes are set.
+    QVector<QSGTexture *> retiredTextures;
     QSGTexture *overlayTexture{nullptr};
     // The overlays' small images' textures, by their keys, and the ones
     // shown this frame.
@@ -1224,6 +1521,36 @@ SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
 }
 
 int SpectrogramItem::s_maxWidgetWidthSeen = 0;
+
+void SpectrogramCanvasDamage::reset(int width) {
+    m_columns.assign(static_cast<size_t>(std::max(0, width)), 0);
+    m_count = 0;
+    m_all = true;
+}
+
+void SpectrogramCanvasDamage::markColumn(int x) {
+    if (x < 0 || x >= width()) {
+        return;
+    }
+    unsigned char &column = m_columns[static_cast<size_t>(x)];
+    m_count += column == 0 ? 1 : 0;
+    column = 1;
+}
+
+bool SpectrogramCanvasDamage::anyIn(int first, int end) const {
+    if (m_count == 0) {
+        return false;
+    }
+    const auto begin = m_columns.begin() + std::clamp(first, 0, width());
+    const auto stop = m_columns.begin() + std::clamp(end, 0, width());
+    return std::find(begin, stop, 1) != stop;
+}
+
+void SpectrogramCanvasDamage::clear() {
+    std::fill(m_columns.begin(), m_columns.end(), 0);
+    m_count = 0;
+    m_all = false;
+}
 
 void SpectrogramRingStorage::clear() {
     m_blocks.clear();
@@ -3417,8 +3744,24 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         node = new SpectrogramSceneNode();
         node->ownerWindowId = windowId;
         node->generation = m_sceneGraphGeneration;
+        node->tileWidth = kCanvasTileWidth;
+        // With OpenGL, the scene graph's context is current while it
+        // synchronizes, which lets the node keep textures of its own.
+        node->glCapable = currentWindow != nullptr
+            && currentWindow->rendererInterface()->graphicsApi() == QSGRendererInterface::OpenGL;
     }
     node->statistics = {};
+    // The largest canvas texture OpenGL takes.
+    if (node->glCapable && node->glMaxTextureSize == 0) {
+        if (QOpenGLContext *context = currentSceneGraphContext(currentWindow)) {
+            GLint maxSize = 0;
+            context->functions()->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxSize);
+            node->glMaxTextureSize = maxSize > 0
+                ? std::max(kCanvasTileWidth, static_cast<int>(maxSize)) : kFallbackMaxTextureSize;
+        }
+    }
+    const int maxCanvasTextureSize =
+        node->glMaxTextureSize > 0 ? node->glMaxTextureSize : kFallbackMaxTextureSize;
     if (node->placeholderTexture == nullptr && currentWindow != nullptr) {
         node->placeholderTexture = currentWindow->createTextureFromImage(placeholderImage());
         if (node->placeholderTexture != nullptr) {
@@ -3457,9 +3800,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     bool showPlayhead = false;
     QRectF playheadRect;
     SpectrogramZoomPreview preview;
-    QVector<QImage> tileImages;
-    QVector<int> tileDirtyIndexes;
-    int tileCount = 0;
+    SpectrogramCanvasUpload canvasUpload;
     bool showOverlay = false;
     bool overlayChanged = false;
     QImage overlayImage;
@@ -3477,6 +3818,16 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
     {
         QMutexLocker lock(&m_stateMutex);
+        // Lays the node's canvas textures out for the canvas, and takes what
+        // they are to be given of it.
+        const auto takeCanvasUpload = [&]() {
+            const int maxTextureSize = m_canvasTextureSizeLimit > 0
+                ? std::min(m_canvasTextureSizeLimit, maxCanvasTextureSize)
+                : maxCanvasTextureSize;
+            const bool refill = node->layOutCanvas(currentWindow, m_canvas.size(), maxTextureSize);
+            m_sceneTileWidth = node->canvasInPlace ? 0 : kCanvasTileWidth;
+            canvasUpload = takeCanvasUploadLocked(m_sceneTileWidth, refill);
+        };
         // The window's scale changes reach the item first; this catches up
         // with a window it has not heard from.
         applyCanvasScaleLocked(windowDevicePixelRatio());
@@ -3775,33 +4126,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     preview.toX = preview.fromX;
                 }
                 latestX = (m_canvasWriteX - 1 + canvasSize.width()) % canvasSize.width();
-                tileCount = static_cast<int>(m_dirtyTiles.size());
-                const bool refreshAllTiles = node->tileTextures.size() != tileCount;
-                tileImages.reserve(tileCount);
-                tileDirtyIndexes.reserve(tileCount);
-                for (int tileIndex = 0; tileIndex < tileCount; ++tileIndex) {
-                    if (!refreshAllTiles
-                        && !m_dirtyTiles[static_cast<size_t>(tileIndex)]
-                        && node->tileTextures.value(tileIndex) != nullptr) {
-                        continue;
-                    }
-                    const int tileStart = tileIndex * kCanvasTileWidth;
-                    const int tileWidth = std::min(kCanvasTileWidth, canvasSize.width() - tileStart);
-                    if (tileWidth <= 0) {
-                        continue;
-                    }
-                    tileDirtyIndexes.push_back(tileIndex);
-                    // The rasterization's copy, if no column changed since.
-                    QImage rasterTile;
-                    if (tileIndex < m_rasterTiles.size()) {
-                        rasterTile = std::exchange(m_rasterTiles[tileIndex], QImage());
-                    }
-                    tileImages.push_back(
-                        rasterTile.size() == QSize(tileWidth, canvasSize.height())
-                            ? std::move(rasterTile)
-                            : m_canvas.copy(tileStart, 0, tileWidth, canvasSize.height()));
-                    m_dirtyTiles[static_cast<size_t>(tileIndex)] = 0;
-                }
+                takeCanvasUpload();
             }
 
             // A view that scrolls moves by whole device pixels: the canvas
@@ -4016,7 +4341,6 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 rebuildCanvasFromColumns();
             }
             if (!m_canvas.isNull()) {
-                resizeDirtyTilesLocked();
                 drawCols = std::min(m_canvasFilledCols, m_canvas.width());
                 if (drawCols > 0) {
                     hasCanvas = true;
@@ -4026,25 +4350,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     drawX = static_cast<double>(w - drawCols) - scrollOffset;
                     canvasDrawX = drawX;
                     latestX = (m_canvasWriteX - 1 + m_canvas.width()) % m_canvas.width();
-                    tileCount = static_cast<int>(m_dirtyTiles.size());
-                    const bool refreshAllTiles = node->tileTextures.size() != tileCount;
-                    tileImages.reserve(tileCount);
-                    tileDirtyIndexes.reserve(tileCount);
-                    for (int tileIndex = 0; tileIndex < tileCount; ++tileIndex) {
-                        if (!refreshAllTiles
-                            && !m_dirtyTiles[static_cast<size_t>(tileIndex)]
-                            && node->tileTextures.value(tileIndex) != nullptr) {
-                            continue;
-                        }
-                        const int tileStart = tileIndex * kCanvasTileWidth;
-                        const int tileWidth = std::min(kCanvasTileWidth, m_canvas.width() - tileStart);
-                        if (tileWidth <= 0) {
-                            continue;
-                        }
-                        tileDirtyIndexes.push_back(tileIndex);
-                        tileImages.push_back(m_canvas.copy(tileStart, 0, tileWidth, m_canvas.height()));
-                        m_dirtyTiles[static_cast<size_t>(tileIndex)] = 0;
-                    }
+                    takeCanvasUpload();
                 }
             }
         }
@@ -4068,30 +4374,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #endif
     }
 
-    QVector<QSGTexture *> retiredTileTextures;
-    retiredTileTextures.reserve(std::max(tileCount, static_cast<int>(node->tileTextures.size())));
     QSGTexture *oldOverlayTexture = nullptr;
-
-    if (node->tileTextures.size() > tileCount) {
-        for (int i = tileCount; i < node->tileTextures.size(); ++i) {
-            if (node->tileTextures[i] != nullptr) {
-                retiredTileTextures.push_back(node->tileTextures[i]);
-            }
-        }
-    }
-    node->tileTextures.resize(tileCount);
-
-    for (int i = 0; i < tileDirtyIndexes.size(); ++i) {
-        const int tileIndex = tileDirtyIndexes[i];
-        if (tileIndex < 0 || tileIndex >= node->tileTextures.size()) {
-            continue;
-        }
-        QSGTexture *newTexture = node->createCanvasTexture(currentWindow, tileImages[i]);
-        if (node->tileTextures[tileIndex] != nullptr) {
-            retiredTileTextures.push_back(node->tileTextures[tileIndex]);
-        }
-        node->tileTextures[tileIndex] = newTexture;
-    }
+    node->uploadCanvas(currentWindow, canvasUpload);
+    node->statistics.canvasInPlace = node->canvasInPlace;
+    node->statistics.canvasTextureCount = static_cast<int>(node->bands.size());
     if (overlayChanged) {
         oldOverlayTexture = node->overlayTexture;
         node->overlayTexture = nullptr;
@@ -4104,31 +4390,31 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     }
 
     // Each fragment is set once, to what it shows this frame, so that the
-    // ones that show the same as before stay untouched.
-    node->ensureTileFragments(tileCount + 1);
+    // ones that show the same as before stay untouched. The ring wraps
+    // inside one band at most, which takes two.
+    node->ensureTileFragments(static_cast<int>(node->bands.size()) + 1);
+    QSGTexture *canvasPlaceholder = node->canvasPlaceholder();
     int fragmentCursor = 0;
-    if (hasCanvas) {
+    if (hasCanvas && node->canvasSize == canvasSize) {
         auto configureSegment = [&](int canvasOffset, int length, double targetX) {
             int remainingLength = length;
             int segmentOffset = canvasOffset;
             double segmentTargetX = targetX;
             while (remainingLength > 0) {
-                const int tileIndex = segmentOffset / kCanvasTileWidth;
-                if (tileIndex < 0
-                    || tileIndex >= node->tileTextures.size()
+                const int bandIndex = segmentOffset / node->canvasBandWidth;
+                if (bandIndex < 0
+                    || bandIndex >= node->bands.size()
                     || fragmentCursor >= node->tileFragments.size()) {
                     break;
                 }
-                const int tileStart = tileIndex * kCanvasTileWidth;
-                const int tileWidth = std::min(kCanvasTileWidth, canvasSize.width() - tileStart);
-                const int withinTile = segmentOffset - tileStart;
-                const int span = std::min(remainingLength, tileWidth - withinTile);
-                QSGTexture *tileTexture = node->tileTextures[tileIndex];
+                const SpectrogramCanvasBand &band = node->bands[bandIndex];
+                const int withinTile = segmentOffset - band.x;
+                const int span = std::min(remainingLength, band.width - withinTile);
                 // A canvas awaiting its rasterization for another height
                 // is stretched to this one.
                 node->noteTextureNode(configurePreviewTextureNode(
                     node->tileFragments[fragmentCursor++],
-                    tileTexture,
+                    band.texture,
                     QRectF(
                         segmentTargetX,
                         0.0,
@@ -4138,7 +4424,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     preview,
                     static_cast<double>(cw),
                     canvasScale,
-                    node->placeholderTexture));
+                    canvasPlaceholder));
                 segmentOffset += span;
                 segmentTargetX += static_cast<double>(span);
                 remainingLength -= span;
@@ -4156,15 +4442,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         const double latestWidth = scrollOnPixels
             ? std::max(0.0, std::round(scrollOffset + canvasEndGap))
             : scrollOffset + canvasEndGap;
-        int latestTileIndex = latestX / kCanvasTileWidth;
+        const int latestBandIndex = latestX / node->canvasBandWidth;
         if (latestWidth > 0.0
-            && latestTileIndex >= 0
-            && latestTileIndex < node->tileTextures.size()) {
-            QSGTexture *latestTexture = node->tileTextures[latestTileIndex];
-            const int latestWithinTile = latestX - (latestTileIndex * kCanvasTileWidth);
+            && latestBandIndex >= 0
+            && latestBandIndex < node->bands.size()) {
+            const SpectrogramCanvasBand &latestBand = node->bands[latestBandIndex];
+            const int latestWithinTile = latestX - latestBand.x;
             node->noteTextureNode(configurePreviewTextureNode(
                 node->latest,
-                latestTexture,
+                latestBand.texture,
                 QRectF(
                     canvasDrawX + static_cast<double>(drawCols),
                     0.0,
@@ -4174,18 +4460,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 preview,
                 static_cast<double>(cw),
                 canvasScale,
-                node->placeholderTexture));
+                canvasPlaceholder));
         } else {
             node->noteTextureNode(configureTextureNode(
-                node->latest, nullptr, QRectF(), QRect(), node->placeholderTexture));
+                node->latest, nullptr, QRectF(), QRect(), canvasPlaceholder));
         }
     } else {
         node->noteTextureNode(configureTextureNode(
-            node->latest, nullptr, QRectF(), QRect(), node->placeholderTexture));
+            node->latest, nullptr, QRectF(), QRect(), canvasPlaceholder));
     }
     for (int i = fragmentCursor; i < node->tileFragments.size(); ++i) {
         node->noteTextureNode(configureTextureNode(
-            node->tileFragments[i], nullptr, QRectF(), QRect(), node->placeholderTexture));
+            node->tileFragments[i], nullptr, QRectF(), QRect(), canvasPlaceholder));
     }
 
     if (showPlayhead) {
@@ -4219,7 +4505,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
     delete oldOverlayTexture;
     qDeleteAll(unusedOverlayTextures);
-    qDeleteAll(retiredTileTextures);
+    qDeleteAll(node->retiredTextures);
+    node->retiredTextures.clear();
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_lastSceneStatistics = node->statistics;
+    }
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileEnabled) {
@@ -4268,10 +4559,20 @@ SpectrogramSceneStatistics SpectrogramItem::sceneStatistics(const QSGNode *node)
         : SpectrogramSceneStatistics{};
 }
 
+QVector<QPair<int, QSGTexture *>> SpectrogramItem::canvasTextures(const QSGNode *node) {
+    QVector<QPair<int, QSGTexture *>> textures;
+    if (node != nullptr) {
+        for (const SpectrogramCanvasBand &band : static_cast<const SpectrogramSceneNode *>(node)->bands) {
+            textures.push_back({band.x, band.texture});
+        }
+    }
+    return textures;
+}
+
 void SpectrogramItem::releaseResources() {
     QMutexLocker lock(&m_stateMutex);
     m_sceneGraphGeneration += 1;
-    markAllTilesDirtyLocked();
+    markCanvasDirtyLocked();
     m_overlayDirty = true;
     m_freqGridDirty = true;
     m_timeGridDirty = true;
@@ -4866,7 +5167,7 @@ void SpectrogramItem::invalidateCanvas() {
     m_precomputedCanvasRolling = false;
     m_precomputedCanvasDirty = true;
     m_precomputedCanvasSubpixelOffset = 0.0;
-    m_dirtyTiles.clear();
+    m_canvasDamage.reset(0);
 }
 
 void SpectrogramItem::markCanvasStaleLocked() {
@@ -4947,33 +5248,93 @@ SpectrogramZoomPreview SpectrogramItem::staleCanvasAlignmentLocked(
     return alignment;
 }
 
-void SpectrogramItem::resizeDirtyTilesLocked() {
-    if (m_canvas.isNull() || m_canvas.width() <= 0) {
-        m_dirtyTiles.clear();
-        return;
-    }
-    const int tileCount = std::max(1, (m_canvas.width() + kCanvasTileWidth - 1) / kCanvasTileWidth);
-    if (static_cast<int>(m_dirtyTiles.size()) != tileCount) {
-        m_dirtyTiles.assign(static_cast<size_t>(tileCount), 1);
+void SpectrogramItem::resizeCanvasDamageLocked() {
+    const int width = m_canvas.isNull() ? 0 : m_canvas.width();
+    if (m_canvasDamage.width() != width) {
+        m_canvasDamage.reset(width);
     }
 }
 
-void SpectrogramItem::markTileDirtyLocked(int x) {
-    if (m_canvas.isNull() || m_canvas.width() <= 0) {
+void SpectrogramItem::markCanvasColumnDirtyLocked(int x) {
+    if (m_canvas.isNull() || x < 0 || x >= m_canvas.width()) {
         return;
     }
-    resizeDirtyTilesLocked();
-    const int tileIndex = std::clamp(x / kCanvasTileWidth, 0, static_cast<int>(m_dirtyTiles.size()) - 1);
-    m_dirtyTiles[static_cast<size_t>(tileIndex)] = 1;
-    // The rasterization's copy of this tile misses what is drawn now.
-    if (tileIndex < m_rasterTiles.size()) {
-        m_rasterTiles[tileIndex] = QImage();
+    resizeCanvasDamageLocked();
+    m_canvasDamage.markColumn(x);
+    // The rasterization's copy of this tile misses what is drawn now. A
+    // copy of the whole canvas gets the column uploaded over it.
+    if (m_rasterTileWidth > 0) {
+        const int tileIndex = x / m_rasterTileWidth;
+        if (tileIndex < m_rasterTiles.size()) {
+            m_rasterTiles[tileIndex] = QImage();
+        }
     }
 }
 
-void SpectrogramItem::markAllTilesDirtyLocked() {
-    resizeDirtyTilesLocked();
-    std::fill(m_dirtyTiles.begin(), m_dirtyTiles.end(), 1);
+void SpectrogramItem::markCanvasDirtyLocked() {
+    resizeCanvasDamageLocked();
+    m_canvasDamage.markAll();
+}
+
+SpectrogramCanvasUpload SpectrogramItem::takeCanvasUploadLocked(int tileWidth, bool all) {
+    SpectrogramCanvasUpload upload;
+    if (m_canvas.isNull() || m_canvas.width() <= 0) {
+        return upload;
+    }
+    resizeCanvasDamageLocked();
+    const int width = m_canvas.width();
+    const int height = m_canvas.height();
+    all = all || m_canvasDamage.all();
+    if (tileWidth > 0) {
+        const bool tileCopies = m_rasterTileWidth == tileWidth;
+        for (int tileStart = 0; tileStart < width; tileStart += tileWidth) {
+            const int tileEnd = std::min(width, tileStart + tileWidth);
+            if (!all && !m_canvasDamage.anyIn(tileStart, tileEnd)) {
+                continue;
+            }
+            // The rasterization's copy, if no column changed since.
+            const int tileIndex = tileStart / tileWidth;
+            QImage copy;
+            if (tileCopies && tileIndex < m_rasterTiles.size()) {
+                copy = std::exchange(m_rasterTiles[tileIndex], QImage());
+            }
+            if (copy.size() != QSize(tileEnd - tileStart, height)) {
+                copy = m_canvas.copy(tileStart, 0, tileEnd - tileStart, height);
+            }
+            upload.parts.push_back({tileStart, std::move(copy)});
+        }
+        if (all) {
+            m_rasterTiles.clear();
+        }
+    } else {
+        const auto addChangedColumns = [&]() {
+            m_canvasDamage.forEachRun([&](int first, int end) {
+                upload.parts.push_back({first, m_canvas.copy(first, 0, end - first, height)});
+            });
+        };
+        // Changes that would take more than one copy of the canvas take one.
+        if (all || m_canvasDamage.columnCount() * 2 > width) {
+            QImage whole;
+            const bool rasterCopy = m_rasterTileWidth == 0
+                && m_rasterTiles.size() == 1
+                && m_rasterTiles.first().size() == m_canvas.size();
+            if (rasterCopy) {
+                whole = std::exchange(m_rasterTiles.first(), QImage());
+            } else {
+                whole = m_canvas.copy();
+            }
+            upload.parts.push_back({0, std::move(whole)});
+            // The rasterization's copy misses the columns drawn since.
+            if (rasterCopy) {
+                addChangedColumns();
+            }
+            m_rasterTiles.clear();
+        } else {
+            addChangedColumns();
+        }
+    }
+    m_canvasDamage.clear();
+    return upload;
 }
 
 void SpectrogramItem::ensureMapping(int height) {
@@ -5024,8 +5385,7 @@ void SpectrogramItem::ensureCanvas(int width, int height) {
         m_canvas.fill(Qt::black);
         m_rasterTiles.clear();
         m_canvasDirty = true;
-        resizeDirtyTilesLocked();
-        markAllTilesDirtyLocked();
+        markCanvasDirtyLocked();
     }
     if (m_canvasDirty) {
         rebuildCanvasFromColumns();
@@ -5043,7 +5403,7 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
     const int cols = m_canvas.width();
     if (m_columns.empty() || cols <= 0) {
         m_canvasDirty = false;
-        markAllTilesDirtyLocked();
+        markCanvasDirtyLocked();
         return;
     }
     const int available = static_cast<int>(m_columns.size());
@@ -5055,7 +5415,7 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
         m_canvasFilledCols = std::min(cols, m_canvasFilledCols + 1);
     }
     m_canvasDirty = false;
-    markAllTilesDirtyLocked();
+    markCanvasDirtyLocked();
 }
 
 void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
@@ -5063,7 +5423,7 @@ void SpectrogramItem::drawColumnAt(int x, const std::vector<quint8> &col) {
         return;
     }
 
-    markTileDirtyLocked(x);
+    markCanvasColumnDirtyLocked(x);
 
     const int height = m_canvas.height();
     const int srcBins = std::max(1, m_binsPerColumn);
@@ -5234,7 +5594,7 @@ void SpectrogramItem::drawPrecomputedColumnAtLocked(
     if (!canvasColumnDrawable(m_canvas, x, projection) || m_precomputedBinsPerColumn <= 0) {
         return;
     }
-    markTileDirtyLocked(x);
+    markCanvasColumnDirtyLocked(x);
     const auto source = spectrogramColumns([this, rollingMode](qint64 index) {
         return ringColumnLocked(index, rollingMode);
     });
@@ -5302,7 +5662,7 @@ void SpectrogramItem::drawPrecomputedPixelsLocked(
     SpectrogramRowMaxima maxima(source, projection, canvasZoom > 1.001);
     for (int pixel = firstPixel; pixel < endPixel; ++pixel) {
         const int canvasX = ((firstCanvasX + pixel - firstPixel) % width + width) % width;
-        markTileDirtyLocked(canvasX);
+        markCanvasColumnDirtyLocked(canvasX);
         rasterPixel(m_canvas, canvasX, static_cast<double>(pixel) - subpixelOffset,
             displayLeft, displayRight, canvasZoom, maxima);
     }
@@ -5340,6 +5700,7 @@ std::shared_ptr<SpectrogramRasterJob> SpectrogramItem::makeRasterJobLocked(
     // Copying the ring shares its blocks; only the slot lookup, one per
     // display column, costs anything here.
     job->ring = m_ring;
+    job->tileWidth = m_sceneTileWidth;
     const qint64 columnCount = displayRight - displayLeft + 1;
     job->columnSlots.resize(static_cast<size_t>(columnCount));
     for (qint64 i = 0; i < columnCount; ++i) {
@@ -5397,12 +5758,17 @@ std::shared_ptr<SpectrogramRasterResult> SpectrogramItem::rasterize(
     result->target = target;
     result->drawPixels = drawPixels;
     result->columnSlots = job.columnSlots;
-    const int tileCount = std::max(1, (target.width + kCanvasTileWidth - 1) / kCanvasTileWidth);
-    result->tiles.reserve(tileCount);
-    for (int tile = 0; tile < tileCount; ++tile) {
-        const int tileStart = tile * kCanvasTileWidth;
-        result->tiles.push_back(canvas.copy(
-            tileStart, 0, std::min(kCanvasTileWidth, target.width - tileStart), target.height));
+    result->tileWidth = job.tileWidth;
+    if (job.tileWidth > 0) {
+        const int tileCount = (target.width + job.tileWidth - 1) / job.tileWidth;
+        result->tiles.reserve(tileCount);
+        for (int tile = 0; tile < tileCount; ++tile) {
+            const int tileStart = tile * job.tileWidth;
+            result->tiles.push_back(canvas.copy(
+                tileStart, 0, std::min(job.tileWidth, target.width - tileStart), target.height));
+        }
+    } else {
+        result->tiles.push_back(canvas.copy());
     }
     result->canvas = std::move(canvas);
     return result;
@@ -5526,13 +5892,14 @@ bool SpectrogramItem::installRasterResultLocked(const SpectrogramRasterResult &r
     // Freeing the canvas it replaces takes a millisecond: a worker does it.
     QImage replacedCanvas = std::exchange(m_canvas, result.canvas);
     QVector<QImage> replacedTiles = std::exchange(m_rasterTiles, result.tiles);
+    m_rasterTileWidth = result.tileWidth;
     if (!replacedCanvas.isNull() || !replacedTiles.isEmpty()) {
         spectrogramRasterPool().start(
             [replacedCanvas = std::move(replacedCanvas),
              replacedTiles = std::move(replacedTiles)]() {});
     }
-    resizeDirtyTilesLocked();
-    markAllTilesDirtyLocked();
+    // The copies are of all of it.
+    m_canvasDamage.reset(m_canvas.width());
     m_canvasWriteX = result.drawPixels % target.width;
     m_canvasFilledCols = result.drawPixels;
     m_precomputedCanvasDisplayLeft = target.displayLeft;
@@ -5878,7 +6245,7 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     {
         QMutexLocker lock(&m_stateMutex);
         m_sceneGraphGeneration += 1;
-        markAllTilesDirtyLocked();
+        markCanvasDirtyLocked();
         resetFpsEstimateLocked();
         m_animationTickInitialized = false;
     }
@@ -5909,7 +6276,7 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
             }
             {
                 QMutexLocker lock(&m_stateMutex);
-                markAllTilesDirtyLocked();
+                markCanvasDirtyLocked();
                 m_overlayDirty = true;
                 m_animationTickInitialized = false;
             }
