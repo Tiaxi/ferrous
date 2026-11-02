@@ -13,6 +13,8 @@ mod byte_filter;
 mod discover;
 #[cfg(feature = "gst")]
 mod gst_setup;
+#[cfg(any(feature = "gst", test))]
+mod seek_index;
 
 use std::path::Path;
 
@@ -38,6 +40,10 @@ pub(crate) use discover::estimate_duration_from_bitstream;
 pub(crate) use discover::probe_raw_surround_technical_details;
 #[cfg(feature = "gst")]
 pub(crate) use gst_setup::configure_raw_surround_decoding;
+#[cfg(feature = "gst")]
+pub(crate) use seek_index::index_raw_ac3_frames;
+#[cfg(all(test, feature = "gst"))]
+pub(crate) use seek_index::test_hooks::wait_until_indexed;
 
 pub(crate) fn is_raw_surround_file(path: &Path) -> bool {
     matches!(raw_surround_extension(path).as_deref(), Some("ac3" | "dts"))
