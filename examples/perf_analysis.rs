@@ -798,7 +798,8 @@ fn run_window(options: &Options) -> Result<Fields, String> {
     let mut results = Vec::new();
     // A cold window at 30 s, the same again (cached), the next window as
     // playback would ask for it, and windows after seeks.
-    // With --duration, the whole track first and again (summaries cached).
+    // With --duration, the whole track first and again (summaries cached),
+    // and once more after the 10 s windows.
     let mut windows: Vec<(f64, f64)> = [
         30.0,
         30.0,
@@ -813,6 +814,7 @@ fn run_window(options: &Options) -> Result<Fields, String> {
     if options.duration > 0.0 {
         windows.insert(0, (0.0, options.duration));
         windows.insert(1, (0.0, options.duration));
+        windows.push((0.0, options.duration));
     }
     for (index, &(start, end)) in windows.iter().enumerate() {
         let (elapsed, len) = decode_window(&path, start, end, options.points);

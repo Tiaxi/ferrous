@@ -46,7 +46,8 @@ thread of the process (thread names with digits folded to `#`).
   `--settle` set the waits.
 - `window FILE`: waveform detail windows through
   `ferrous_ffi_waveform_window_cancellable`, as the waveform editor asks for
-  them: with `--duration`, the whole track twice, then 10 s windows.
+  them: with `--duration`, the whole track twice, then 10 s windows, then
+  the whole track again.
 
 ## Scripts
 

@@ -10,11 +10,17 @@ use std::time::{Duration, SystemTime};
 
 use super::decoders::{open_audio_file, AudioFrameSource, AudioFrames, AudioRead};
 use super::usize_to_u64;
-use super::waveform_pyramid::PyramidTile;
+use super::waveform_pyramid::{PyramidTile, COARSE_SUMMARY_FRAMES};
 
 pub(super) const TILE_FRAMES: u64 = 16_384;
 const PCM_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const SUMMARY_CACHE_BYTES: usize = 16 * 1024 * 1024;
+/// Coarse summaries, kept for the session outside the LRU: a whole-track or
+/// zoomed-out window reads every tile of the track, and the fine levels of a
+/// hi-res surround track exceed the LRU's budget. This holds ~26 minutes of
+/// 96 kHz 5.1 audio, ~13 of 192 kHz 5.1, or about two hours of 44.1 kHz
+/// stereo.
+const COARSE_SUMMARY_BYTES: usize = 16 * 1024 * 1024;
 
 // Calls originate on the Qt worker pool: the level meter and the waveform
 // detail view share one active-track decoder and cache across those threads
@@ -126,6 +132,39 @@ impl<T> TileCache<T> {
     }
 }
 
+/// Tiles kept until the session ends, up to a byte budget; once it is full,
+/// no more are added. A least-recently-used policy would evict every tile of
+/// a whole-track pass that does not fit before the next pass reads it.
+struct RetainedTiles<T> {
+    tiles: HashMap<u64, Arc<T>>,
+    bytes: usize,
+    budget: usize,
+}
+
+impl<T> RetainedTiles<T> {
+    fn new(budget: usize) -> Self {
+        Self {
+            tiles: HashMap::new(),
+            bytes: 0,
+            budget,
+        }
+    }
+
+    fn get(&self, index: u64) -> Option<Arc<T>> {
+        self.tiles.get(&index).map(Arc::clone)
+    }
+
+    fn insert(&mut self, index: u64, tile: Arc<T>, bytes: usize) {
+        // The map's entry, the `Arc`'s counts and the tile itself.
+        let bytes = bytes + std::mem::size_of::<(u64, Arc<T>)>() + 2 * std::mem::size_of::<usize>();
+        if self.tiles.contains_key(&index) || self.bytes + bytes > self.budget {
+            return;
+        }
+        self.tiles.insert(index, tile);
+        self.bytes += bytes;
+    }
+}
+
 /// What the decoder reads next. Held while one tile decodes.
 struct Decoder {
     source: AudioFrameSource,
@@ -136,8 +175,37 @@ struct Decoder {
 /// Decoded tiles, shared by every request. Held only to look up or store.
 struct Caches {
     pcm: TileCache<PcmTile>,
+    /// Summary levels finer than `COARSE_SUMMARY_FRAMES`.
     summaries: TileCache<PyramidTile>,
+    coarse_summaries: RetainedTiles<PyramidTile>,
     eof_frame: Option<u64>,
+    /// The tile holding the last frame of the file. A whole-track window
+    /// whose end falls short of the end of the file reads it as PCM, so it
+    /// is kept outside the LRU, which zoomed windows cycle through.
+    last_tile: Option<(u64, Arc<PcmTile>)>,
+}
+
+impl Caches {
+    fn pcm(&mut self, index: u64) -> Option<Arc<PcmTile>> {
+        let tile = self.pcm.get(index).or_else(|| {
+            self.last_tile
+                .as_ref()
+                .filter(|(last, _)| *last == index)
+                .map(|(_, tile)| Arc::clone(tile))
+        })?;
+        self.keep_if_last(index, &tile);
+        Some(tile)
+    }
+
+    fn keep_if_last(&mut self, index: u64, tile: &Arc<PcmTile>) {
+        let last = self
+            .eof_frame
+            .and_then(|eof| eof.checked_sub(1))
+            .map(|frame| frame / TILE_FRAMES);
+        if last == Some(index) && !tile.segments.is_empty() {
+            self.last_tile = Some((index, Arc::clone(tile)));
+        }
+    }
 }
 
 pub(super) struct WaveformSession {
@@ -170,7 +238,9 @@ impl WaveformSession {
             caches: Mutex::new(Caches {
                 pcm: TileCache::new(PCM_CACHE_BYTES),
                 summaries: TileCache::new(SUMMARY_CACHE_BYTES),
+                coarse_summaries: RetainedTiles::new(COARSE_SUMMARY_BYTES),
                 eof_frame: None,
+                last_tile: None,
             }),
             decoder: Mutex::new(Decoder {
                 source,
@@ -195,7 +265,7 @@ impl WaveformSession {
         cancelled: &impl Fn() -> bool,
     ) -> anyhow::Result<Arc<PcmTile>> {
         anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-        if let Some(tile) = self.caches().pcm.get(index) {
+        if let Some(tile) = self.caches().pcm(index) {
             return Ok(tile);
         }
         let tile = {
@@ -205,7 +275,7 @@ impl WaveformSession {
             };
             // Another request may have decoded it while this one waited,
             // or this one may have been cancelled meanwhile.
-            if let Some(tile) = self.caches().pcm.get(index) {
+            if let Some(tile) = self.caches().pcm(index) {
                 return Ok(tile);
             }
             anyhow::ensure!(!cancelled(), "waveform decode cancelled");
@@ -222,6 +292,7 @@ impl WaveformSession {
             if !tile.segments.is_empty() {
                 caches.pcm.insert(index, Arc::clone(&tile), tile.bytes());
             }
+            caches.keep_if_last(index, &tile);
             tile
         };
         #[cfg(test)]
@@ -229,28 +300,71 @@ impl WaveformSession {
         Ok(tile)
     }
 
+    /// The summary levels of tile `index` for `frames_per_point`: the
+    /// coarse ones from `COARSE_SUMMARY_FRAMES` on, otherwise the fine ones.
     pub(super) fn summary(
         &self,
         index: u64,
+        frames_per_point: u64,
         cancelled: &impl Fn() -> bool,
     ) -> anyhow::Result<Arc<PyramidTile>> {
         anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-        if let Some(tile) = self.caches().summaries.get(index) {
+        let coarse = frames_per_point >= COARSE_SUMMARY_FRAMES;
+        let hit = {
+            let mut caches = self.caches();
+            if coarse {
+                caches.coarse_summaries.get(index)
+            } else {
+                caches.summaries.get(index)
+            }
+        };
+        if let Some(tile) = hit {
             return Ok(tile);
         }
         let pcm = self.tile(index, cancelled)?;
-        let summary = Arc::new(PyramidTile::new(&pcm, index, self.channels));
+        let (fine, coarse_levels) = PyramidTile::build(&pcm, index, self.channels);
+        let (fine, coarse_levels) = (Arc::new(fine), Arc::new(coarse_levels));
         if !pcm.segments.is_empty() {
-            self.caches()
+            let mut caches = self.caches();
+            caches
                 .summaries
-                .insert(index, Arc::clone(&summary), summary.bytes());
+                .insert(index, Arc::clone(&fine), fine.bytes());
+            caches.coarse_summaries.insert(
+                index,
+                Arc::clone(&coarse_levels),
+                coarse_levels.bytes(),
+            );
         }
-        Ok(summary)
+        Ok(if coarse { coarse_levels } else { fine })
+    }
+
+    /// Whether every frame of tile `index` lies before `end_frame`: the
+    /// tile ends by then, or the file does.
+    pub(super) fn tile_ends_by(&self, index: u64, end_frame: u64) -> bool {
+        index.saturating_add(1).saturating_mul(TILE_FRAMES) <= end_frame
+            || self.caches().eof_frame.is_some_and(|eof| eof <= end_frame)
     }
 
     #[cfg(test)]
     pub(super) fn discard_pcm(&self) {
         self.caches().pcm = TileCache::new(0);
+    }
+
+    #[cfg(test)]
+    pub(super) fn limit_fine_caches(&self, pcm_bytes: usize, summary_bytes: usize) {
+        let mut caches = self.caches();
+        caches.pcm.budget = pcm_bytes;
+        caches.summaries.budget = summary_bytes;
+    }
+
+    /// The bytes the coarse summaries hold, and their budget.
+    #[cfg(test)]
+    pub(super) fn coarse_summary_bytes(&self) -> (usize, usize) {
+        let caches = self.caches();
+        (
+            caches.coarse_summaries.bytes,
+            caches.coarse_summaries.budget,
+        )
     }
 
     #[cfg(test)]
@@ -431,6 +545,7 @@ pub(super) mod test_hooks {
 
 #[cfg(test)]
 mod tests {
+    use super::super::waveform_pyramid::COARSE_SUMMARY_FRAMES;
     use super::super::waveform_window::decode_waveform_window;
     use super::super::waveform_window::tests::write_test_wave;
     use super::*;
@@ -513,17 +628,54 @@ mod tests {
     fn summary_cache_obeys_its_own_byte_budget() {
         let path = write_test_wave(&vec![8_192; 70_009], 48_000, 1);
         let session = WaveformSession::open(&path).expect("open fixture");
-        let first = session.summary(0, &|| false).expect("summary");
+        let first = session.summary(0, 64, &|| false).expect("summary");
         session.caches().summaries.budget = first.bytes();
         for index in [1, 2, 3, 0] {
             let summary = session
-                .summary(index, &|| false)
+                .summary(index, 64, &|| false)
                 .expect("summary after eviction");
-            assert_eq!(summary.rows(TILE_FRAMES).0, &[[0.25, 0.25], [0.25, 0.25]]);
+            assert!(summary.rows(64).0.iter().all(|row| *row == [0.25, 0.25]));
             let caches = session.caches();
             assert!(caches.summaries.bytes <= caches.summaries.budget);
             assert_eq!(caches.summaries.tiles.len(), 1);
         }
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn coarse_summaries_stop_growing_at_their_budget_and_keep_what_they_hold() {
+        let path = write_test_wave(&vec![-4_096; 10 * 16_384 + 11], 48_000, 1);
+        let session = WaveformSession::open(&path).expect("open fixture");
+        session
+            .summary(0, COARSE_SUMMARY_FRAMES, &|| false)
+            .expect("summary");
+        {
+            let mut caches = session.caches();
+            caches.coarse_summaries.budget = caches.coarse_summaries.bytes * 3;
+            caches.pcm = TileCache::new(0);
+            caches.summaries = TileCache::new(0);
+        }
+        // A whole-track pass in order, as a window reads it, twice.
+        for _ in 0..2 {
+            for index in 0..10 {
+                let summary = session
+                    .summary(index, COARSE_SUMMARY_FRAMES, &|| false)
+                    .expect("coarse summary");
+                let (rows, span) = summary.rows(COARSE_SUMMARY_FRAMES);
+                assert_eq!(span, COARSE_SUMMARY_FRAMES);
+                assert!(rows.iter().all(|row| *row == [-0.125, -0.125]));
+            }
+            let caches = session.caches();
+            assert!(caches.coarse_summaries.bytes <= caches.coarse_summaries.budget);
+            let mut kept: Vec<_> = caches.coarse_summaries.tiles.keys().copied().collect();
+            kept.sort_unstable();
+            assert_eq!(kept, [0, 1, 2], "the first tiles stay");
+        }
+        assert_eq!(
+            session.decoded_tiles(),
+            10 + 7,
+            "only the tiles beyond the budget decode again"
+        );
         std::fs::remove_file(path).expect("remove fixture");
     }
 
