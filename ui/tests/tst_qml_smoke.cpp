@@ -2492,7 +2492,13 @@ Item {
         property var soloedChannels: []
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
         signal playbackChanged()
-        function isChannelSilent(channelIndex) { return false }
+        onMutedChannelsChanged: playbackChanged()
+        onSoloedChannelsChanged: playbackChanged()
+        function isChannelSilent(channelIndex) {
+            const soloing = soloedChannels.indexOf(true) >= 0
+            return mutedChannels[channelIndex] === true
+                || (soloing && soloedChannels[channelIndex] !== true)
+        }
         function setSpectrogramZoomLevel(level) {}
         function registerSpectrogramItem(item, channelIndex) {}
         function unregisterSpectrogramItem(item) {}
@@ -2546,6 +2552,21 @@ Item {
         collect(surface, QStringLiteral("spectrogramMuteButton"), &shown);
         return shown;
     };
+    // Whether each pane is greyed out, in pane order.
+    const std::function<void(QQuickItem *, QList<bool> *)> collectGrey =
+        [&collectGrey](QQuickItem *item, QList<bool> *grey) {
+            if (item->objectName() == QStringLiteral("spectrogramPaneItem")) {
+                grey->push_back(item->property("channelMuted").toBool());
+            }
+            for (QQuickItem *child : item->childItems()) {
+                collectGrey(child, grey);
+            }
+        };
+    const auto greyShown = [&]() {
+        QList<bool> grey;
+        collectGrey(surface, &grey);
+        return grey;
+    };
     QTRY_COMPARE(soloShown(), (QList<bool>{true, false, true}));
     bridge->setProperty("soloedChannels", QVariantList{false, false, true});
     QTRY_COMPARE(soloShown(), (QList<bool>{false, false, true}));
@@ -2557,6 +2578,15 @@ Item {
     bridge->setProperty("mutedChannels", QVariantList{true, false, false});
     QTRY_COMPARE(soloShown(), (QList<bool>{true, false, false}));
     QTRY_COMPARE(muteShown(), (QList<bool>{true, false, false}));
+    QTRY_COMPARE(greyShown(), (QList<bool>{true, true, true}));
+
+    // A change of the solos alone greys out the panes they leave out.
+    bridge->setProperty("mutedChannels", QVariantList{});
+    QTRY_COMPARE(greyShown(), (QList<bool>{false, true, true}));
+    bridge->setProperty("soloedChannels", QVariantList{false, true, false});
+    QTRY_COMPARE(greyShown(), (QList<bool>{true, false, true}));
+    bridge->setProperty("soloedChannels", QVariantList{});
+    QTRY_COMPARE(greyShown(), (QList<bool>{false, false, false}));
 }
 
 void WaveformSmokeTest::waveformSurfaceFollowsSharedChannelAndOverlaySettings() {
