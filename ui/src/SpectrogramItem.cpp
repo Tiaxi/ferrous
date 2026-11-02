@@ -2223,6 +2223,9 @@ void SpectrogramItem::feedPrecomputedChunk(
         clearHistoryOnReset ? 1 : 0, m_awaitingWorkerReset ? 1 : 0,
         complete ? 1 : 0);
 
+    const ShownDataState shownBefore = shownDataStateLocked();
+    const qint64 firstWrittenSeq = m_ringWriteSeq;
+
     const bool hasGeneration = generation != 0;
     if (hasGeneration
         && m_precomputedCommittedGeneration != 0
@@ -2990,6 +2993,14 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     const bool readyChanged = m_precomputedReady && !wasReady;
+    // Columns the decoder sends ahead of the playhead show only once
+    // playback reaches them, in frames the last one has already asked for.
+    const bool leavesLastFrame = !bufferReset
+        && !appliedReset
+        && !appliedImplicitReset
+        && !needsZoomReset
+        && !readyChanged
+        && chunkLeavesLastFrameLocked(shownBefore, firstWrittenSeq, startIndex);
 
     // Unlock before emitting signals — the QML handlers may call
     // setZoomLevel which re-acquires the mutex.
@@ -3008,7 +3019,50 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (readyChanged) {
         emit precomputedReadyChanged();
     }
-    update();
+    if (!leavesLastFrame) {
+        ++m_dataFrameRequests;
+        update();
+    }
+}
+
+SpectrogramItem::ShownDataState SpectrogramItem::shownDataStateLocked() const {
+    ShownDataState state;
+    state.totalColumnsEstimate = m_precomputedTotalColumnsEstimate;
+    const double columnsPerSecond = m_precomputedHopSize > 0
+        ? static_cast<double>(m_precomputedSampleRateHz) / static_cast<double>(m_precomputedHopSize)
+        : 0.0;
+    state.tailLooksFinal = centeredDecodedTailLooksFinal(
+        static_cast<qint64>(m_precomputedMaxColumnIndex) + 1,
+        m_precomputedTotalColumnsEstimate,
+        columnsPerSecond);
+    state.ready = m_precomputedReady;
+    state.canvasDirty = m_precomputedCanvasDirty;
+    state.trackToken = m_precomputedTrackToken;
+    state.ringGeneration = m_ringGeneration;
+    state.rollingEpoch = m_rollingEpoch;
+    state.hopSize = m_precomputedHopSize;
+    state.sampleRateHz = m_precomputedSampleRateHz;
+    state.binsPerColumn = m_precomputedBinsPerColumn;
+    state.zoomFillActive = m_zoomFillActive;
+    state.awaitingZoomData = m_awaitingZoomData;
+    state.resetPending = m_precomputedResetPending;
+    return state;
+}
+
+bool SpectrogramItem::chunkLeavesLastFrameLocked(
+    const ShownDataState &before, qint64 firstSeq, qint64 firstColumn) const {
+    // Only while the last frame has asked for its next one itself, and
+    // only when the chunk changes nothing but columns after it.
+    if (!m_playing || !m_idleView.valid || m_precomputedCanvasDirty
+        || m_idleView.rolling != (m_displayMode == 0)
+        || !(shownDataStateLocked() == before)) {
+        return false;
+    }
+    if (m_idleView.rolling) {
+        // The ring drops its oldest columns as it takes new ones.
+        return firstSeq > m_idleView.shownRight && m_ringOldestSeq <= m_idleView.shownLeft;
+    }
+    return firstColumn > m_idleView.shownRight;
 }
 
 void SpectrogramItem::clearPrecomputed() {
@@ -3784,6 +3838,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && !preview.active
                 && visibleCols > 0
                 && !positionHeldLocked(monotonicNs(renderNow));
+            if (viewSettled) {
+                // Rolling, data up to the playhead's column shows, also
+                // where the ring has not reached it yet.
+                m_idleView.rolling = rollingMode;
+                m_idleView.shownLeft = displayLeft;
+                m_idleView.shownRight = rollingMode
+                    ? std::max(displayRight, m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0)))
+                    : displayRight;
+            }
             if (viewSettled && scrolls) {
                 // The phase stops short of the next column; a step after
                 // that is the next column's.

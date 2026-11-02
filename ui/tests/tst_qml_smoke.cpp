@@ -1159,6 +1159,7 @@ private slots:
     void spectrogramScrollingFramesMoveAPixelAtATime_data();
     void spectrogramScrollingFramesMoveAPixelAtATime();
     void spectrogramZoomPreviewRequestsEveryFrame();
+    void spectrogramDataAheadOfTheShownFrameAsksForNoFrame();
     void spectrogramFrameSchedulerWakesDueFramesTogether();
     void spectrogramPanesShareTheirWindowsFrameSchedule();
     void spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce();
@@ -11966,6 +11967,49 @@ void SpectrogramSmokeTest::spectrogramZoomPreviewRequestsEveryFrame() {
             QCOMPARE(item.m_playbackFrameRequests, requested + frame);
             QVERIFY(!playbackFrameScheduled(item));
         }
+        delete node;
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramDataAheadOfTheShownFrameAsksForNoFrame() {
+    // The decoder sends columns ahead of the playhead. While a view plays
+    // and has asked for its next frame, columns after the ones it shows
+    // change nothing on screen until playback reaches them, in frames it
+    // asks for anyway. Columns it shows, and any while paused, ask for one.
+    for (const int mode : {0, 1}) {
+        TestTime time;
+        SpectrogramItem item;
+        time.drive(item);
+        item.setWidth(400);
+        item.setHeight(100);
+        item.setDisplayMode(mode);
+        constexpr int bins = 64;
+        const auto feed = [&item](int start, int columns, char value, bool reset = false) {
+            item.feedPrecomputedChunk(QByteArray(bins * columns, value), bins, 0, columns,
+                start, 4000, 48'000, 1024, false, reset, 1, reset, 1);
+        };
+        feed(0, 3000, '\x50', true);
+        setTestPosition(item, 40.0);
+        item.setPlaying(true);
+        setTestPosition(item, 40.0);
+        QSGNode *node = paintSettled(item, nullptr);
+        node = item.updatePaintNode(node, nullptr);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY(item.m_idleView.valid);
+            QVERIFY(item.m_idleView.shownRight < item.m_ringWriteSeq);
+        }
+        quint64 requested = item.m_dataFrameRequests;
+        feed(3000, 100, '\x60');
+        QCOMPARE(item.m_dataFrameRequests, requested);
+        if (mode == 1) {
+            // A column under the playhead.
+            feed(1880, 1, '\x70');
+            QCOMPARE(item.m_dataFrameRequests, ++requested);
+        }
+        item.setPlaying(false);
+        feed(3100, 100, '\x60');
+        QCOMPARE(item.m_dataFrameRequests, ++requested);
         delete node;
     }
 }

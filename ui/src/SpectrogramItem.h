@@ -491,6 +491,29 @@ private:
     void schedulePlaybackFrame();
     void requestPlaybackFrame();
     void cancelPlaybackFrame();
+    // What a data chunk could change of a frame besides its columns.
+    struct ShownDataState {
+        int totalColumnsEstimate{0};
+        bool tailLooksFinal{false};
+        bool ready{false};
+        bool canvasDirty{false};
+        quint64 trackToken{0};
+        quint64 ringGeneration{0};
+        qint64 rollingEpoch{0};
+        int hopSize{0};
+        int sampleRateHz{0};
+        int binsPerColumn{0};
+        bool zoomFillActive{false};
+        bool awaitingZoomData{false};
+        bool resetPending{false};
+        bool operator==(const ShownDataState &) const = default;
+    };
+    ShownDataState shownDataStateLocked() const;
+    // Whether columns written from ring sequence firstSeq, track columns
+    // from firstColumn, leave the last frame as it is, so that it need not
+    // be drawn again before its own next change.
+    bool chunkLeavesLastFrameLocked(
+        const ShownDataState &before, qint64 firstSeq, qint64 firstColumn) const;
     // The window's scheduler, or the item's own outside a window.
     SpectrogramFrameScheduler *frameScheduler();
     // How long until the last frame would change, in nanoseconds from
@@ -703,15 +726,23 @@ private:
     // changeSeconds, if valid: when a centered view that does not scroll
     // moves its playhead to the next pixel or starts to scroll, and when a
     // view that scrolls reaches its next pixel or column.
+    // Columns arriving after the last ones it shows, shownRight (a ring
+    // sequence when rolling, a track column when centered), do not change
+    // it either.
     struct IdleView {
         bool valid{false};
         double changeSeconds{0.0};
+        bool rolling{false};
+        qint64 shownLeft{0};
+        qint64 shownRight{-1};
     };
     IdleView m_idleView;
     // Wakes playback frames until then; see schedulePlaybackFrame.
     QPointer<SpectrogramFrameScheduler> m_frameScheduler;
     // How many playback frames the item has asked for, for tests.
     quint64 m_playbackFrameRequests{0};
+    // How many frames steady data chunks have asked for, for tests.
+    quint64 m_dataFrameRequests{0};
     double m_zoomPreviewAnchorSeconds{0.0};
     double m_zoomPreviewAnchorX{0.0};
     double m_zoomPreviewPixelsPerSecond{0.0};
