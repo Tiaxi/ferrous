@@ -101,9 +101,11 @@ const MAX_NICE: libc::c_int = 19;
 /// UI, render and playback threads when the machine is busy.
 ///
 /// Linux keeps a nice value per thread, so only the calling thread and the
-/// threads it starts later run lower. Elsewhere this does nothing. A thread
-/// that cannot lower its priority runs on at its own, as nothing depends
-/// on it.
+/// threads it starts later run lower. The level is ten below the main
+/// thread's, so a thread started by one already lowered, like a helper of
+/// the spectrogram worker, runs at the same level rather than ten lower
+/// still. Elsewhere this does nothing. A thread that cannot lower its
+/// priority runs on at its own, as nothing depends on it.
 pub(crate) fn lower_current_thread_priority() {
     #[cfg(target_os = "linux")]
     if let Err(error) = lower_linux_thread_priority() {
@@ -111,24 +113,30 @@ pub(crate) fn lower_current_thread_priority() {
     }
 }
 
+/// The nice value of the thread `tid`, 0 for the calling thread. Linux
+/// applies `PRIO_PROCESS` to the thread whose ID it is given, not to the
+/// whole process; the process ID is the main thread's.
 #[cfg(target_os = "linux")]
-fn lower_linux_thread_priority() -> std::io::Result<()> {
-    // `who` 0 is the calling thread: Linux applies `PRIO_PROCESS` to the
-    // thread whose ID it is given, not to the whole process.
+fn linux_thread_nice(tid: libc::id_t) -> std::io::Result<libc::c_int> {
     // SAFETY: errno is the calling thread's own; clearing it tells the
     // nice value -1 from a failed call.
     unsafe { *libc::__errno_location() = 0 };
-    // SAFETY: plain system call on the calling thread, no pointers.
-    let current = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
-    if current == -1 {
+    // SAFETY: plain system call, no pointers.
+    let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, tid) };
+    if nice == -1 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() != Some(0) {
             return Err(error);
         }
     }
-    let lower = current
-        .saturating_add(BACKGROUND_NICE_INCREMENT)
-        .min(MAX_NICE);
+    Ok(nice)
+}
+
+#[cfg(target_os = "linux")]
+fn lower_linux_thread_priority() -> std::io::Result<()> {
+    let app = linux_thread_nice(std::process::id())?;
+    let current = linux_thread_nice(0)?;
+    let lower = app.saturating_add(BACKGROUND_NICE_INCREMENT).min(MAX_NICE);
     if lower <= current {
         return Ok(());
     }
@@ -208,8 +216,8 @@ mod tests {
         .expect("thread");
         assert_eq!(after, (before + BACKGROUND_NICE_INCREMENT).min(MAX_NICE));
         assert_eq!(thread_nice(), own);
-        // Threads it starts later inherit it; lowering again stops at the
-        // lowest priority without failing.
+        // Threads it starts later inherit it, and lowering one of them
+        // again keeps it at the same level.
         let nested = std::thread::spawn(|| {
             lower_current_thread_priority();
             std::thread::spawn(|| {
@@ -221,6 +229,6 @@ mod tests {
         })
         .join()
         .expect("thread");
-        assert_eq!(nested, (own + 2 * BACKGROUND_NICE_INCREMENT).min(MAX_NICE));
+        assert_eq!(nested, (own + BACKGROUND_NICE_INCREMENT).min(MAX_NICE));
     }
 }
