@@ -255,7 +255,22 @@ pub(super) enum AudioFrameSource {
         seek_frame: u64,
         /// Stored for seek-flag selection (DTS needs `KEY_UNIT`).
         path: std::path::PathBuf,
+        on_failure: GstFailure,
     },
+}
+
+/// What a `GStreamer` source does once its pipeline reports an error.
+#[cfg(feature = "gst")]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) enum GstFailure {
+    /// Fail at once, without reading what the decoder queued before it.
+    #[default]
+    Immediate,
+    /// First read what the decoder queued before the error, without waiting
+    /// for more, then fail.
+    AfterQueuedAudio,
+    /// The pipeline failed with this error; reading what it queued before.
+    Draining(String),
 }
 
 /// What a Symphonia source needs to read its file with `GStreamer` instead.
@@ -301,9 +316,16 @@ impl AudioFrameSource {
                 native_channels,
                 sample_rate,
                 seek_frame,
+                on_failure,
                 ..
             } => (
-                read_gstreamer_frames(pipeline, appsink, *native_channels, *sample_rate)?,
+                read_gstreamer_frames(
+                    pipeline,
+                    appsink,
+                    *native_channels,
+                    *sample_rate,
+                    on_failure,
+                )?,
                 *seek_frame,
             ),
         };
@@ -317,6 +339,15 @@ impl AudioFrameSource {
                 })
             }
             other => Ok(other),
+        }
+    }
+
+    /// Let a `GStreamer` source read the audio its decoder queued before a
+    /// failure, before it reports the failure.
+    #[cfg(feature = "gst")]
+    pub(super) fn read_queued_audio_on_failure(&mut self) {
+        if let Self::Gst { on_failure, .. } = self {
+            *on_failure = GstFailure::AfterQueuedAudio;
         }
     }
 
@@ -439,27 +470,54 @@ pub(super) fn interleave_f32(audio: &AudioBufferRef) -> Vec<f32> {
     }
 }
 
+/// The error that `pipeline` reported, if any.
+#[cfg(feature = "gst")]
+fn pipeline_failure(pipeline: &gst::Pipeline) -> Option<String> {
+    let message = pipeline.bus()?.pop_filtered(&[gst::MessageType::Error])?;
+    match message.view() {
+        gst::MessageView::Error(error) => {
+            Some(format!("analysis decoder failed: {}", error.error()))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(feature = "gst")]
 fn read_gstreamer_frames(
     pipeline: &gst::Pipeline,
     appsink: &gst_app::AppSink,
     native_channels: usize,
     sample_rate: u32,
+    on_failure: &mut GstFailure,
 ) -> anyhow::Result<AudioRead> {
-    if let Some(message) = pipeline
-        .bus()
-        .and_then(|bus| bus.pop_filtered(&[gst::MessageType::Error]))
-    {
-        if let gst::MessageView::Error(error) = message.view() {
-            anyhow::bail!("analysis decoder failed: {}", error.error());
+    if !matches!(on_failure, GstFailure::Draining(_)) {
+        if let Some(failure) = pipeline_failure(pipeline) {
+            if *on_failure == GstFailure::Immediate {
+                anyhow::bail!(failure);
+            }
+            *on_failure = GstFailure::Draining(failure);
         }
     }
-    let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(50)) else {
-        return Ok(if appsink.is_eos() {
-            AudioRead::Eof
-        } else {
-            AudioRead::Pending
-        });
+    // A failed pipeline produces no more; read only what it has queued.
+    let wait = if matches!(on_failure, GstFailure::Draining(_)) {
+        gst::ClockTime::ZERO
+    } else {
+        gst::ClockTime::from_mseconds(50)
+    };
+    let Some(sample) = appsink.try_pull_sample(wait) else {
+        if let GstFailure::Draining(failure) = on_failure {
+            anyhow::bail!("{failure}");
+        }
+        if !appsink.is_eos() {
+            return Ok(AudioRead::Pending);
+        }
+        // A pipeline that fails ends its stream after it reports the
+        // failure, maybe while this read waited: then the stream did not
+        // reach the end of the file. Nothing is left in the queue to read.
+        if let Some(failure) = pipeline_failure(pipeline) {
+            anyhow::bail!(failure);
+        }
+        return Ok(AudioRead::Eof);
     };
     // The decoder may change its output mid-stream, as an MP3 that goes
     // from stereo to mono does; each buffer has the format of its caps.
@@ -664,10 +722,7 @@ fn spectrogram_seek_flags_for_path(path: &Path) -> gst::SeekFlags {
 /// Open an audio file with a `GStreamer` pipeline for the spectrogram worker.
 /// Returns `(source, native_sample_rate, native_channels, length)`.
 ///
-/// Pipeline: `filesrc → decodebin → audioconvert → capsfilter(F32LE) → appsink(sync=false)`
-///
-/// Unlike the waveform pipeline, no `audioresample` — the spectrogram needs
-/// native sample rate for correct frequency resolution.
+/// The pipeline is that of [`start_gstreamer_decode`], from a `filesrc`.
 #[cfg(feature = "gst")]
 pub(super) fn open_gstreamer_file(
     path: &Path,
@@ -683,7 +738,6 @@ fn open_gstreamer_pipeline(
     path: &Path,
     pipeline: gst::Pipeline,
 ) -> Option<(AudioFrameSource, u64, usize, TrackLength)> {
-    let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     conceal_damaged_ac3_frames(pipeline.upcast_ref());
     // Seeks in a raw AC3 file read from the second before their target
     // rather than from the last frame read.
@@ -692,9 +746,66 @@ fn open_gstreamer_pipeline(
     src.set_property("location", path.to_string_lossy().to_string());
     filter_raw_surround_source(&src);
 
-    let decodebin = gst::ElementFactory::make("decodebin").build().ok()?;
-    let conv = gst::ElementFactory::make("audioconvert").build().ok()?;
-    let capsfilter = gst::ElementFactory::make("capsfilter").build().ok()?;
+    let decode = start_gstreamer_decode(path, pipeline, &src, RateChanges::Report).ok()?;
+    // The parser of a raw AC3/DTS file has seen too few frames to tell its
+    // duration yet.
+    let duration_ns = decode
+        .duration_ns
+        .or_else(|| raw_surround_duration_ns(path));
+    let total_frames = duration_ns.map(|ns| ns * decode.sample_rate / 1_000_000_000);
+    let length = TrackLength::of_frames(total_frames, decode.sample_rate);
+    Some((decode.source, decode.sample_rate, decode.channels, length))
+}
+
+/// What a `GStreamer` decode does where the sample rate of its stream
+/// changes mid-stream, as a DTS 96/24 stream's does where its decoder falls
+/// back to the 48 kHz core of a damaged frame.
+#[cfg(feature = "gst")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RateChanges {
+    /// Pass the audio on at its new rate, which the reader reports as an
+    /// error: analysis lays out its columns at one rate.
+    Report,
+    /// Resample the audio at another rate to the rate the stream started
+    /// at. The resampler passes audio at that rate through untouched.
+    ResampleToFirst,
+}
+
+/// A `GStreamer` decode that [`start_gstreamer_decode`] started.
+#[cfg(feature = "gst")]
+pub(super) struct GstDecode {
+    pub(super) source: AudioFrameSource,
+    pub(super) sample_rate: u64,
+    pub(super) channels: usize,
+    /// The duration the pipeline tells, if it knows it already.
+    pub(super) duration_ns: Option<u64>,
+}
+
+/// Start decoding what `src`, a source of the file at `path`, reads, at the
+/// stream's own rate:
+/// `src → decodebin → audioconvert → capsfilter(F32LE) → appsink(sync=false)`.
+///
+/// Nothing is resampled at the stream's own rate: the spectrogram needs it
+/// for its frequency resolution, and the overview every sample for its
+/// peaks. `rate_changes` tells what happens where that rate changes.
+/// Connect what `pipeline` needs before it starts, such as the AC3
+/// concealment, before calling this. On failure, the pipeline is stopped.
+#[cfg(feature = "gst")]
+pub(super) fn start_gstreamer_decode(
+    path: &Path,
+    pipeline: gst::Pipeline,
+    src: &gst::Element,
+    rate_changes: RateChanges,
+) -> anyhow::Result<GstDecode> {
+    let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
+    let element = |name: &str| {
+        gst::ElementFactory::make(name)
+            .build()
+            .map_err(|_| anyhow::anyhow!("missing {name} element"))
+    };
+    let decodebin = element("decodebin")?;
+    let conv = element("audioconvert")?;
+    let capsfilter = element("capsfilter")?;
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
         .field("layout", "interleaved")
@@ -703,14 +814,20 @@ fn open_gstreamer_pipeline(
 
     let appsink = analysis_decode_sink();
 
-    pipeline
-        .add_many([&src, &decodebin, &conv, &capsfilter, appsink.upcast_ref()])
-        .ok()?;
-    src.link(&decodebin).ok()?;
-    gst::Element::link_many([&conv, &capsfilter, appsink.upcast_ref()]).ok()?;
+    pipeline.add_many([src, &decodebin, &conv, &capsfilter, appsink.upcast_ref()])?;
+    src.link(&decodebin)?;
+    if rate_changes == RateChanges::ResampleToFirst {
+        let resample = element("audioresample")?;
+        pipeline.add(&resample)?;
+        gst::Element::link_many([&conv, &resample, &capsfilter, appsink.upcast_ref()])?;
+    } else {
+        gst::Element::link_many([&conv, &capsfilter, appsink.upcast_ref()])?;
+    }
 
     // Dynamic pad linking for decodebin → audioconvert.
-    let conv_sink_pad = conv.static_pad("sink")?;
+    let conv_sink_pad = conv
+        .static_pad("sink")
+        .ok_or_else(|| anyhow::anyhow!("missing audioconvert sink pad"))?;
     decodebin.connect_pad_added(move |_dbin, src_pad| {
         if conv_sink_pad.is_linked() {
             return;
@@ -731,47 +848,68 @@ fn open_gstreamer_pipeline(
     });
 
     // Transition to PAUSED so decodebin can negotiate.
-    pipeline.set_state(gst::State::Paused).ok()?;
+    pipeline.set_state(gst::State::Paused)?;
     let _ = pipeline.state(gst::ClockTime::from_seconds(5));
 
     // Read negotiated format from the appsink pad.
-    let pad = appsink.static_pad("sink")?;
-    let negotiated_caps = pad.current_caps()?;
-    let structure = negotiated_caps.structure(0)?;
-    let rate =
-        u64::from(u32::try_from(structure.get::<i32>("rate").ok().filter(|&r| r > 0)?).ok()?);
-    let channels =
-        usize::try_from(structure.get::<i32>("channels").ok().filter(|&c| c > 0)?).ok()?;
-
-    // Query duration for column estimate. The parser of a raw AC3/DTS file
-    // has seen too few frames to tell it yet.
+    let negotiated = appsink
+        .static_pad("sink")
+        .and_then(|pad| pad.current_caps())
+        .ok_or_else(|| anyhow::anyhow!("no audio could be decoded from \"{}\"", path.display()))?;
+    let structure = negotiated
+        .structure(0)
+        .ok_or_else(|| anyhow::anyhow!("empty audio caps"))?;
+    let sample_rate = structure
+        .get::<i32>("rate")
+        .ok()
+        .and_then(|rate| u32::try_from(rate).ok())
+        .filter(|&rate| rate > 0)
+        .ok_or_else(|| anyhow::anyhow!("no sample rate in the audio caps"))?;
+    let channels = structure
+        .get::<i32>("channels")
+        .ok()
+        .and_then(|channels| usize::try_from(channels).ok())
+        .filter(|&channels| channels > 0)
+        .ok_or_else(|| anyhow::anyhow!("no channel count in the audio caps"))?;
     let duration_ns = pipeline
         .query_duration::<gst::ClockTime>()
-        .map(gst::ClockTime::nseconds)
-        .or_else(|| raw_surround_duration_ns(path));
-    let total_frames = duration_ns.map(|ns| ns * rate / 1_000_000_000);
-    let length = TrackLength::of_frames(total_frames, rate);
+        .map(gst::ClockTime::nseconds);
+    if rate_changes == RateChanges::ResampleToFirst {
+        // Keep the rate the stream starts at, which it negotiated already.
+        let caps = gst::Caps::builder("audio/x-raw")
+            .field("format", "F32LE")
+            .field("layout", "interleaved")
+            .field("rate", i32::try_from(sample_rate)?)
+            .build();
+        capsfilter.set_property("caps", &caps);
+    }
 
     // Transition to PLAYING so the pipeline starts streaming.
-    pipeline.set_state(gst::State::Playing).ok()?;
+    pipeline.set_state(gst::State::Playing)?;
 
     let source = AudioFrameSource::Gst {
         pipeline,
         appsink,
         native_channels: channels,
-        sample_rate: u32::try_from(rate).ok()?,
+        sample_rate,
         seek_frame: 0,
         path: path.to_path_buf(),
+        on_failure: GstFailure::Immediate,
     };
 
     shutdown.disarm(); // AudioFrameSource::drop now owns pipeline shutdown.
-    Some((source, rate, channels, length))
+    Ok(GstDecode {
+        source,
+        sample_rate: u64::from(sample_rate),
+        channels,
+        duration_ns,
+    })
 }
 
 /// The duration of a raw AC3/DTS file, from its first frame header and the
 /// length of its frames.
 #[cfg(feature = "gst")]
-fn raw_surround_duration_ns(path: &Path) -> Option<u64> {
+pub(super) fn raw_surround_duration_ns(path: &Path) -> Option<u64> {
     if !is_raw_surround_file(path) {
         return None;
     }
@@ -1128,6 +1266,7 @@ mod tests {
             sample_rate: 48000,
             seek_frame: 48_001,
             path: Path::new("fixture.wav").to_owned(),
+            on_failure: GstFailure::Immediate,
         };
         let AudioFrameSource::Gst { pipeline, .. } = &source else {
             unreachable!()
@@ -1163,6 +1302,66 @@ mod tests {
             source.next_frames().expect("final read"),
             AudioRead::Eof
         ));
+    }
+
+    /// A pipeline that fails ends its stream after it reports the failure.
+    /// A read that waits for audio while both come reports the failure, not
+    /// the end of the file, whether the source reads what is queued first.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_stream_that_ends_after_a_failure_reports_the_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        gst::init().expect("gstreamer initialization");
+        for on_failure in [GstFailure::Immediate, GstFailure::AfterQueuedAudio] {
+            let pipeline = gst::Pipeline::new();
+            let producer = gst_app::AppSrc::builder().build();
+            let sink = analysis_decode_sink();
+            pipeline
+                .add_many([producer.upcast_ref::<gst::Element>(), sink.upcast_ref()])
+                .expect("add elements");
+            producer.link(&sink).expect("link");
+            pipeline.set_state(gst::State::Playing).expect("start");
+            let mut source = AudioFrameSource::Gst {
+                pipeline,
+                appsink: sink,
+                native_channels: 1,
+                sample_rate: 48_000,
+                seek_frame: 0,
+                path: Path::new("fixture.wav").to_owned(),
+                on_failure,
+            };
+            let reads = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&reads);
+            let reader = std::thread::spawn(move || loop {
+                let read = source.next_frames();
+                if !matches!(read, Ok(AudioRead::Pending)) {
+                    return read.map(|read| matches!(read, AudioRead::Eof));
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+            });
+            // Once the reader waits for audio, mostly: a read checks for a
+            // failure and then waits 50 ms.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while reads.load(Ordering::SeqCst) == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the reader never waited"
+                );
+                std::thread::yield_now();
+            }
+            let error = gst::message::Error::builder(gst::CoreError::Failed, "injected failure")
+                .src(&producer)
+                .build();
+            producer.post_message(error).expect("post the failure");
+            producer.end_of_stream().expect("end the stream");
+            let read = reader.join().expect("reader");
+            assert!(
+                read.is_err(),
+                "the failed stream read as complete: {read:?}"
+            );
+        }
     }
 
     #[test]

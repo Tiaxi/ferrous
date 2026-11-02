@@ -2,13 +2,16 @@
 
 use std::cell::Cell;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use gst::prelude::*;
 use gstreamer as gst;
 
-use super::cache::{usize_to_u64, WaveformSourceStamp};
-use super::fft::{reduce_waveform_peaks, OverviewProgress, PreviewThrottle, MIN_PREVIEW_PEAKS};
+use super::cache::WaveformSourceStamp;
+use super::decoders::{
+    raw_surround_duration_ns, start_gstreamer_decode, AudioRead, AudioTimeline, GstDecode,
+    RateChanges,
+};
+use super::fft::{OverviewProgress, WaveformAccumulator};
 use super::track_io::stamp_of;
 use crate::playback::file_source::FileSource;
 use crate::raw_audio::{
@@ -16,120 +19,24 @@ use crate::raw_audio::{
     filter_raw_surround_source_to,
 };
 
-pub(super) struct GstWaveformAccumulator {
-    observed_span_ns: u64,
-    /// The end of the audio that timed level messages have covered.
-    decoded_end_ns: u64,
-    peak_events: Vec<(u64, f32)>,
-    fallback_peaks: Vec<f32>,
-    preview: PreviewThrottle,
-    max_points: usize,
-}
+/// The frames assumed for a file that tells no duration, which only sizes
+/// the overview's bins: 240 s.
+const UNKNOWN_DURATION_SECONDS: u64 = 240;
 
-impl GstWaveformAccumulator {
-    pub(super) fn new(max_points: usize, duration_ns: Option<u64>) -> Self {
-        Self {
-            observed_span_ns: duration_ns.unwrap_or(0),
-            peak_events: Vec::with_capacity(max_points.saturating_mul(2)),
-            decoded_end_ns: 0,
-            fallback_peaks: Vec::with_capacity(max_points),
-            preview: PreviewThrottle::default(),
-            max_points,
-        }
-    }
-
-    pub(super) fn record_peak(&mut self, structure: &gst::StructureRef, peak: f32) {
-        if let Some((time_ns, end_ns)) = level_message_time_range_ns(structure) {
-            self.observed_span_ns = self.observed_span_ns.max(end_ns);
-            self.decoded_end_ns = self.decoded_end_ns.max(end_ns);
-            self.peak_events.push((time_ns, peak));
-            return;
-        }
-
-        self.fallback_peaks.push(peak);
-        if self.fallback_peaks.len() > self.max_points {
-            self.fallback_peaks = reduce_waveform_peaks(&self.fallback_peaks, self.max_points);
-        }
-    }
-
-    fn has_timed_peaks(&self) -> bool {
-        self.observed_span_ns > 0 && !self.peak_events.is_empty()
-    }
-
-    /// The bins of the overview, `max_points` over the observed span, that
-    /// the decoded audio reaches.
-    fn covered_bins(&self) -> usize {
-        let bins = usize_to_u64(self.max_points);
-        let covered = self
-            .decoded_end_ns
-            .saturating_mul(bins)
-            .div_ceil(self.observed_span_ns.max(1))
-            .min(bins);
-        usize::try_from(covered).unwrap_or(self.max_points)
-    }
-
-    /// Whether a preview is due at `now`: one of enough peaks to show.
-    pub(super) fn preview_ready(&self, now: Instant) -> bool {
-        let peaks = if self.has_timed_peaks() {
-            self.covered_bins().min(self.peak_events.len())
-        } else {
-            self.fallback_peaks.len()
-        };
-        peaks >= MIN_PREVIEW_PEAKS && self.preview.is_due(now)
-    }
-
-    /// The peaks of a preview sent at `now`, and the seconds they cover.
-    /// With timed peaks, the preview ends at the last bin the decode has
-    /// reached, so that the bins it has not are not shown as silence.
-    pub(super) fn take_preview(&mut self, now: Instant) -> (Vec<f32>, f32) {
-        self.preview.sent(now);
-        if self.has_timed_peaks() {
-            let bins = self.covered_bins();
-            let mut peaks = materialize_waveform_peaks(
-                &self.peak_events,
-                self.observed_span_ns,
-                self.max_points,
-            );
-            peaks.truncate(bins);
-            let coverage_ns = self.observed_span_ns.saturating_mul(usize_to_u64(bins))
-                / usize_to_u64(self.max_points.max(1));
-            return (peaks, Duration::from_nanos(coverage_ns).as_secs_f32());
-        }
-        (self.fallback_peaks.clone(), self.coverage_seconds())
-    }
-
-    pub(super) fn coverage_seconds(&self) -> f32 {
-        Duration::from_nanos(self.observed_span_ns).as_secs_f32()
-    }
-
-    pub(super) fn finish(self) -> Vec<f32> {
-        if self.observed_span_ns > 0 && !self.peak_events.is_empty() {
-            return materialize_waveform_peaks(
-                &self.peak_events,
-                self.observed_span_ns,
-                self.max_points,
-            );
-        }
-        if self.fallback_peaks.len() > self.max_points {
-            return reduce_waveform_peaks(&self.fallback_peaks, self.max_points);
-        }
-        self.fallback_peaks
-    }
-}
-
-/// The overview pipeline of the file at `path`, its bus, its `level`, and
-/// its source, the playback's `ferrousfilesrc`, which tells the metadata of
-/// the file it opened.
+/// Start the overview decode of the file at `path` in `pipeline`, from the
+/// playback's `ferrousfilesrc`, which tells the metadata of the file it
+/// opened. The decode is that of the analysis, at the stream's own rate;
+/// where that rate changes mid-stream, the audio is resampled to the rate
+/// the stream started at.
 ///
 /// The file is opened once, here: the audio range of a raw surround file is
 /// read from that handle, and the source reads it, so that the range, the
 /// audio and the stamp are all of one file, even if another one replaces
 /// it at the path meanwhile.
-pub(super) fn build_waveform_gst_pipeline(
+fn start_overview_decode(
     path: &Path,
-) -> anyhow::Result<(gst::Pipeline, gst::Bus, gst::Element, FileSource)> {
-    let pipeline = gst::Pipeline::new();
-    conceal_damaged_ac3_frames(pipeline.upcast_ref());
+    pipeline: gst::Pipeline,
+) -> anyhow::Result<(GstDecode, FileSource)> {
     let mut file = std::fs::File::open(path)
         .map_err(|err| anyhow::anyhow!("cannot open \"{}\": {err}", path.display()))?;
     let range = audio_byte_range_of(path, &mut file);
@@ -141,102 +48,26 @@ pub(super) fn build_waveform_gst_pipeline(
     filter_raw_surround_source_to(&src, range);
     #[cfg(test)]
     test_hooks::source_built();
-
-    let decodebin = gst::ElementFactory::make("decodebin")
-        .build()
-        .map_err(|_| anyhow::anyhow!("missing decodebin element"))?;
-    let conv = gst::ElementFactory::make("audioconvert")
-        .build()
-        .map_err(|_| anyhow::anyhow!("missing audioconvert element"))?;
-    let resample = gst::ElementFactory::make("audioresample")
-        .build()
-        .map_err(|_| anyhow::anyhow!("missing audioresample element"))?;
-    let capsfilter = gst::ElementFactory::make("capsfilter")
-        .build()
-        .map_err(|_| anyhow::anyhow!("missing capsfilter element"))?;
-    let caps = gst::Caps::builder("audio/x-raw")
-        .field("format", "F32LE")
-        .field("layout", "interleaved")
-        .field("rate", 44_100i32)
-        .build();
-    capsfilter.set_property("caps", &caps);
-    let level = gst::ElementFactory::make("level")
-        .build()
-        .map_err(|_| anyhow::anyhow!("missing level element"))?;
-    let fakesink = gst::ElementFactory::make("fakesink")
-        .build()
-        .map_err(|_| anyhow::anyhow!("missing fakesink element"))?;
-    fakesink.set_property("sync", false);
-
-    pipeline.add_many([
-        &src,
-        &decodebin,
-        &conv,
-        &resample,
-        &capsfilter,
-        &level,
-        &fakesink,
-    ])?;
-    src.link(&decodebin)?;
-    gst::Element::link_many([&conv, &resample, &capsfilter, &level, &fakesink])?;
-
-    let conv_sink_pad = conv
-        .static_pad("sink")
-        .ok_or_else(|| anyhow::anyhow!("missing audioconvert sink pad"))?;
-    decodebin.connect_pad_added(move |_dbin, src_pad| {
-        if conv_sink_pad.is_linked() {
-            return;
-        }
-        let Some(caps) = src_pad
-            .current_caps()
-            .or_else(|| Some(src_pad.query_caps(None)))
-        else {
-            return;
-        };
-        let Some(structure) = caps.structure(0) else {
-            return;
-        };
-        if !structure.name().starts_with("audio/") {
-            return;
-        }
-        let _ = src_pad.link(&conv_sink_pad);
-    });
-
-    let bus = pipeline
-        .bus()
-        .ok_or_else(|| anyhow::anyhow!("waveform pipeline has no bus"))?;
-    Ok((pipeline, bus, level, file_source))
-}
-
-pub(super) fn configure_waveform_gst_pipeline(
-    pipeline: &gst::Pipeline,
-    level: &gst::Element,
-    max_points: usize,
-) -> anyhow::Result<Option<u64>> {
-    pipeline.set_state(gst::State::Paused)?;
-    let _ = pipeline.state(gst::ClockTime::from_seconds(2));
-
-    let duration_ns = pipeline
-        .query_duration::<gst::ClockTime>()
-        .map(gst::ClockTime::nseconds);
-    level.set_property(
-        "interval",
-        level_message_interval_ns(max_points, duration_ns),
-    );
-    level.set_property("post-messages", true);
-    pipeline.set_state(gst::State::Playing)?;
-    Ok(duration_ns)
+    // The peaks of a stream whose rate changes mid-stream stay on one time
+    // line, and are exact where the rate is the one it started at.
+    let decode = start_gstreamer_decode(path, pipeline, &src, RateChanges::ResampleToFirst)?;
+    Ok((decode, file_source))
 }
 
 /// Decode the overview of the file at `path` with `GStreamer`. `source`
 /// tells, for each update, the stamp of the file the decode reads, taken
 /// from the handle its source opened, as another file may be at the path
 /// before the source opens it, or by the time the decode ends.
+///
+/// The last update is [`OverviewProgress::Complete`] only if the decode
+/// reached the end of the file. An error that stops it after it decoded
+/// audio ends it with [`OverviewProgress::Truncated`] and the peaks of the
+/// audio before the error.
 pub(super) fn decode_waveform_peaks_stream_gst<F, C>(
     path: &Path,
     max_points: usize,
     source: &Cell<Option<WaveformSourceStamp>>,
-    mut on_update: F,
+    on_update: F,
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
 where
@@ -250,187 +81,183 @@ where
 
     gst::init()?;
     configure_raw_surround_decoding();
-    let (pipeline, bus, level, file_source) = build_waveform_gst_pipeline(path)?;
-    let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
-    let duration_ns = configure_waveform_gst_pipeline(&pipeline, &level, max_points)?;
+    let pipeline = gst::Pipeline::new();
+    conceal_damaged_ac3_frames(pipeline.upcast_ref());
+    decode_overview_in(path, pipeline, max_points, source, on_update, is_cancelled)
+}
+
+/// [`decode_waveform_peaks_stream_gst`] in `pipeline`, which has what it
+/// needs connected.
+fn decode_overview_in<F, C>(
+    path: &Path,
+    pipeline: gst::Pipeline,
+    max_points: usize,
+    source: &Cell<Option<WaveformSourceStamp>>,
+    on_update: F,
+    is_cancelled: C,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
+    C: FnMut() -> bool,
+{
+    let (decode, file_source) = start_overview_decode(path, pipeline)?;
     // The source opened the file when the pipeline started.
     source.set(file_source.opened_metadata().as_ref().and_then(stamp_of));
-    let mut waveform = GstWaveformAccumulator::new(max_points, duration_ns);
-    loop {
+    read_overview(path, decode, max_points, on_update, is_cancelled)
+}
+
+/// Read the overview of the file at `path` from `decode`, its started
+/// decode, and send its updates.
+fn read_overview<F, C>(
+    path: &Path,
+    decode: GstDecode,
+    max_points: usize,
+    mut on_update: F,
+    mut is_cancelled: C,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
+    C: FnMut() -> bool,
+{
+    let GstDecode {
+        source: mut frames,
+        sample_rate,
+        duration_ns,
+        ..
+    } = decode;
+    // A failure ends the overview with the audio decoded before it, also
+    // the audio still queued when the pipeline reported it.
+    frames.read_queued_audio_on_failure();
+    // The duration only sizes the bins; the peaks and the seconds they
+    // cover are those of the audio decoded.
+    let estimated_frames = duration_ns
+        .or_else(|| raw_surround_duration_ns(path))
+        .map_or(sample_rate * UNKNOWN_DURATION_SECONDS, |ns| {
+            ns.saturating_mul(sample_rate) / 1_000_000_000
+        });
+    let mut waveform = WaveformAccumulator::new(max_points, estimated_frames, sample_rate);
+    // Missing audio counts as silence and overlaps once, so the peaks stay
+    // at the times they play.
+    let mut timeline = AudioTimeline::new(0);
+    let mut decoded_any = false;
+    let reached_end = loop {
         if is_cancelled() {
             return Ok(());
         }
-
-        if let Some(msg) = bus.timed_pop_filtered(
-            gst::ClockTime::from_mseconds(50),
-            &[
-                gst::MessageType::Element,
-                gst::MessageType::Eos,
-                gst::MessageType::Error,
-            ],
-        ) {
-            match msg.view() {
-                gst::MessageView::Element(element) => {
-                    if let Some(structure) = element.message().structure() {
-                        if let Some(peak) = level_message_peak(structure) {
-                            waveform.record_peak(structure, peak);
-                        }
-                        let now = Instant::now();
-                        if waveform.preview_ready(now) {
-                            let (peaks, coverage_seconds) = waveform.take_preview(now);
-                            if !on_update(peaks, coverage_seconds, OverviewProgress::Partial) {
-                                return Ok(());
-                            }
-                        }
-                    }
+        match timeline.read(|| frames.next_frames()) {
+            Ok(AudioRead::Frames(audio)) => {
+                decoded_any = true;
+                let samples = &audio.samples[..audio.analysis_frames() * audio.channels];
+                if !waveform.push_frames(samples, audio.channels, &mut on_update, &mut is_cancelled)
+                {
+                    return Ok(());
                 }
-                gst::MessageView::Eos(..) => break,
-                gst::MessageView::Error(err) => {
-                    return Err(anyhow::anyhow!(
-                        "gstreamer waveform decode failed: {} ({:?})",
-                        err.error(),
-                        err.debug()
-                    ));
-                }
-                _ => {}
             }
+            Ok(AudioRead::Pending) => {}
+            Ok(AudioRead::Eof) => break true,
+            Err(_) if decoded_any => break false,
+            Err(err) => return Err(err.context("gstreamer waveform decode failed")),
         }
+    };
+    drop(frames);
+
+    if !decoded_any {
+        anyhow::bail!("no audio could be decoded");
     }
-
-    let coverage_seconds = waveform.coverage_seconds();
-    let peaks = waveform.finish();
-
-    drop(shutdown);
-
     if !is_cancelled() {
-        let _ = on_update(peaks, coverage_seconds, OverviewProgress::Complete);
+        let progress = if reached_end {
+            OverviewProgress::Complete
+        } else {
+            OverviewProgress::Truncated
+        };
+        let coverage_seconds = waveform.coverage_seconds();
+        let _ = on_update(waveform.finish(), coverage_seconds, progress);
     }
     Ok(())
 }
 
-fn level_message_interval_ns(max_points: usize, duration_ns: Option<u64>) -> u64 {
-    let fallback_duration_ns = 240u64 * 1_000_000_000;
-    (duration_ns.unwrap_or(fallback_duration_ns) / usize_to_u64(max_points.max(1)))
-        .clamp(20_000_000, 500_000_000)
-}
+/// An overview update: its peaks, the seconds they cover and its progress.
+#[cfg(test)]
+pub(super) type OverviewUpdate = (Vec<f32>, f32, OverviewProgress);
 
-fn level_message_bin_index(time_ns: u64, duration_ns: u64, max_points: usize) -> Option<usize> {
-    if duration_ns == 0 || max_points == 0 {
-        return None;
-    }
+/// The updates of the overview decode of `path` into 64 peaks, whose
+/// pipeline fails once `buffers` buffers of audio have reached the decode,
+/// and the seconds those buffers end at. With `before_first_read`, the
+/// decode reads nothing before the failure: the audio waits in its queue.
+#[cfg(test)]
+pub(super) fn overview_failing_after(
+    path: &Path,
+    buffers: usize,
+    before_first_read: bool,
+) -> (Vec<OverviewUpdate>, f32) {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
-    let max_points_u64 = usize_to_u64(max_points);
-    let raw_index = (time_ns.saturating_mul(max_points_u64) / duration_ns)
-        .min(max_points_u64.saturating_sub(1));
-    usize::try_from(raw_index).ok()
-}
-
-fn level_message_time_range_ns(structure: &gst::StructureRef) -> Option<(u64, u64)> {
-    let start = structure
-        .get::<u64>("running-time")
-        .ok()
-        .or_else(|| structure.get::<u64>("stream-time").ok())
-        .or_else(|| structure.get::<u64>("timestamp").ok())
-        .or_else(|| {
-            let end = structure.get::<u64>("endtime").ok()?;
-            let duration = structure.get::<u64>("duration").ok().unwrap_or(0);
-            Some(end.saturating_sub(duration))
-        })?;
-    let duration = structure.get::<u64>("duration").ok().unwrap_or(0);
-    let end = structure
-        .get::<u64>("endtime")
-        .ok()
-        .unwrap_or_else(|| start.saturating_add(duration));
-    let center = start.saturating_add(duration / 2);
-    Some((center, end.max(center)))
-}
-
-fn level_message_peak(structure: &gst::StructureRef) -> Option<f32> {
-    if structure.name() != "level" {
-        return None;
-    }
-
-    let peaks = structure.value("peak").ok()?;
-    collapse_level_peak_value(peaks)
-}
-
-fn collapse_level_db_peaks(values: &[gst::glib::SendValue]) -> Option<f32> {
-    let mut peak = 0.0f32;
-    let mut seen_any = false;
-
-    for value in values {
-        let db = level_db_value(value)?;
-        let linear = dbfs_peak_to_linear(db);
-        if linear > peak {
-            peak = linear;
+    gst::init().expect("gstreamer initialization");
+    configure_raw_surround_decoding();
+    let pipeline = gst::Pipeline::new();
+    conceal_damaged_ac3_frames(pipeline.upcast_ref());
+    let end_ns = Arc::new(AtomicU64::new(0));
+    let (failed_tx, failed_rx) = crossbeam_channel::bounded(1);
+    let passed_end_ns = Arc::clone(&end_ns);
+    pipeline.connect_element_added(move |_, element| {
+        // The decode's sink, which its builder makes without a factory.
+        if !element.is::<gstreamer_app::AppSink>() {
+            return;
         }
-        seen_any = true;
-    }
-
-    seen_any.then_some(peak)
-}
-
-fn collapse_level_peak_value(value: &gst::glib::SendValue) -> Option<f32> {
-    if let Ok(peaks) = value.get::<gst::Array>() {
-        return collapse_level_db_peaks(peaks.as_slice());
-    }
-    if let Ok(peaks) = value.get::<gst::List>() {
-        return collapse_level_db_peaks(peaks.as_slice());
-    }
-    if let Ok(peaks) = value.get::<gst::glib::ValueArray>() {
-        return collapse_level_db_values(peaks.as_slice());
-    }
-    level_db_value(value).map(dbfs_peak_to_linear)
-}
-
-fn collapse_level_db_values(values: &[gst::glib::Value]) -> Option<f32> {
-    let mut peak = 0.0f32;
-    let mut seen_any = false;
-
-    for value in values {
-        let db = value
-            .get::<f64>()
-            .ok()
-            .or_else(|| value.get::<f32>().ok().map(f64::from))?;
-        let linear = dbfs_peak_to_linear(db);
-        if linear > peak {
-            peak = linear;
-        }
-        seen_any = true;
-    }
-
-    seen_any.then_some(peak)
-}
-
-fn level_db_value(value: &gst::glib::SendValue) -> Option<f64> {
-    value
-        .get::<f64>()
-        .ok()
-        .or_else(|| value.get::<f32>().ok().map(f64::from))
-}
-
-fn dbfs_peak_to_linear(db: f64) -> f32 {
-    if !db.is_finite() || db <= -120.0 {
-        return 0.0;
-    }
-    let linear = 10f64.powf(db / 20.0).clamp(0.0, 1.0);
-    linear.to_string().parse::<f32>().unwrap_or(1.0)
-}
-
-fn materialize_waveform_peaks(events: &[(u64, f32)], span_ns: u64, max_points: usize) -> Vec<f32> {
-    if span_ns == 0 || max_points == 0 || events.is_empty() {
-        return Vec::new();
-    }
-
-    let mut peaks = vec![0.0f32; max_points];
-    for &(time_ns, peak) in events {
-        if let Some(bin_index) = level_message_bin_index(time_ns, span_ns, max_points) {
-            if peak > peaks[bin_index] {
-                peaks[bin_index] = peak;
+        let Some(pad) = element.static_pad("sink") else {
+            return;
+        };
+        let reached = AtomicUsize::new(0);
+        let end_ns = Arc::clone(&passed_end_ns);
+        let failed_tx = failed_tx.clone();
+        pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let count = reached.fetch_add(1, Ordering::SeqCst) + 1;
+            if count <= buffers {
+                if let Some(buffer) = info.buffer() {
+                    let end = buffer
+                        .pts()
+                        .zip(buffer.duration())
+                        .map(|(pts, duration)| pts + duration);
+                    end_ns.fetch_max(end.map_or(0, gst::ClockTime::nseconds), Ordering::SeqCst);
+                }
+                return gst::PadProbeReturn::Ok;
             }
-        }
+            if count == buffers + 1 {
+                // The buffers before this one are in the sink's queue.
+                if let Some(element) = pad.parent_element() {
+                    let error =
+                        gst::message::Error::builder(gst::CoreError::Failed, "injected failure")
+                            .src(&element)
+                            .build();
+                    let _ = element.post_message(error);
+                }
+                let _ = failed_tx.try_send(());
+            }
+            gst::PadProbeReturn::Drop
+        });
+    });
+
+    let (decode, _) = start_overview_decode(path, pipeline).expect("start the decode");
+    if before_first_read {
+        failed_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the pipeline fails");
     }
-    peaks
+    let mut updates = Vec::new();
+    read_overview(
+        path,
+        decode,
+        64,
+        |peaks, coverage, progress| {
+            updates.push((peaks, coverage, progress));
+            true
+        },
+        || false,
+    )
+    .expect("an overview of the audio before the failure");
+    let seconds = std::time::Duration::from_nanos(end_ns.load(Ordering::SeqCst)).as_secs_f32();
+    (updates, seconds)
 }
 
 /// Swap files where a decode has read the audio range of its file but its
@@ -466,17 +293,62 @@ pub(super) mod test_hooks {
 mod tests {
     use super::*;
 
+    /// The updates of the overview decode of `path` into `max_points`
+    /// peaks: their peaks, the seconds they cover and their progress.
+    fn overview_updates(path: &Path, max_points: usize) -> Vec<(Vec<f32>, f32, OverviewProgress)> {
+        let mut updates = Vec::new();
+        decode_waveform_peaks_stream_gst(
+            path,
+            max_points,
+            &Cell::new(None),
+            |peaks, coverage, progress| {
+                updates.push((peaks, coverage, progress));
+                true
+            },
+            || false,
+        )
+        .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        updates
+    }
+
+    /// The complete overview of `path` in `updates`, after checking that
+    /// every preview before it covers only audio it decoded, more of it each
+    /// time.
+    fn complete_overview(updates: Vec<(Vec<f32>, f32, OverviewProgress)>) -> (Vec<f32>, f32) {
+        let ((peaks, coverage, progress), previews) =
+            updates.split_last().expect("an overview update");
+        assert_eq!(*progress, OverviewProgress::Complete);
+        let mut covered = 0.0;
+        for (_, preview_coverage, preview_progress) in previews {
+            assert_eq!(*preview_progress, OverviewProgress::Partial);
+            assert!(
+                covered < *preview_coverage && *preview_coverage <= *coverage,
+                "a preview covers {preview_coverage} s after {covered} s, of {coverage} s"
+            );
+            covered = *preview_coverage;
+        }
+        (peaks.clone(), *coverage)
+    }
+
+    /// A WAV file of `samples`, interleaved in `channels` channels at
+    /// `rate`, named `name` in the test folder.
+    fn test_wave(name: &str, samples: &[i16], rate: u32, channels: u16) -> std::path::PathBuf {
+        let written =
+            super::super::waveform_window::tests::write_test_wave(samples, rate, channels);
+        let path = crate::paths::test_root().join(name);
+        std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        std::fs::rename(&written, &path).expect("move fixture");
+        path
+    }
+
     #[test]
-    fn failed_waveform_configuration_releases_the_started_pipeline() {
+    fn a_failed_overview_start_releases_the_started_pipeline() {
         gst::init().expect("gstreamer initialization");
         // A directory opens, but its source cannot read it.
         let folder = crate::paths::test_root().join("waveform-startup");
         std::fs::create_dir_all(&folder).expect("folder");
-        let (pipeline, _, level, _) = build_waveform_gst_pipeline(&folder).expect("build pipeline");
-        {
-            let _shutdown = super::super::gst_lifecycle::PipelineShutdown::new(&pipeline);
-            assert!(configure_waveform_gst_pipeline(&pipeline, &level, 100).is_err());
-        }
+        let pipeline = gst::Pipeline::new();
+        assert!(start_overview_decode(&folder, pipeline.clone()).is_err());
         assert_eq!(pipeline.current_state(), gst::State::Null);
     }
 
@@ -491,24 +363,10 @@ mod tests {
                 std::process::id()
             ));
             std::fs::write(&path, ripped_surround_bytes(stream).0).expect("write fixture");
-            let mut finished = None;
-            let source = Cell::new(None);
-            let result = decode_waveform_peaks_stream_gst(
-                &path,
-                64,
-                &source,
-                |peaks, coverage, progress| {
-                    if progress == OverviewProgress::Complete {
-                        finished = Some((peaks, coverage));
-                    }
-                    true
-                },
-                || false,
-            );
+            let updates = overview_updates(&path, 64);
             std::fs::remove_file(&path).expect("remove fixture");
-            result.unwrap_or_else(|err| panic!("{ext}: {err}"));
 
-            let (peaks, coverage) = finished.expect("finished waveform");
+            let (peaks, coverage) = complete_overview(updates);
             assert!(
                 (coverage - length).abs() < 0.05,
                 "{ext}: covers {coverage} s"
@@ -526,24 +384,10 @@ mod tests {
         let path = crate::paths::test_root().join("waveform-dts-cd.dts");
         std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
         std::fs::write(&path, ripped_dts_cd_bytes(TEST_DTS_44K).0).expect("write fixture");
-        let mut finished = None;
-        let source = Cell::new(None);
-        let result = decode_waveform_peaks_stream_gst(
-            &path,
-            64,
-            &source,
-            |peaks, coverage, progress| {
-                if progress == OverviewProgress::Complete {
-                    finished = Some((peaks, coverage));
-                }
-                true
-            },
-            || false,
-        );
+        let updates = overview_updates(&path, 64);
         std::fs::remove_file(&path).expect("remove fixture");
-        result.expect("decode");
 
-        let (peaks, coverage) = finished.expect("finished waveform");
+        let (peaks, coverage) = complete_overview(updates);
         assert!((coverage - 0.511).abs() < 0.05, "covers {coverage} s");
         // The tone peaks at 1/8 of full scale; the 14-bit words, read as
         // PCM, at 1/4.
@@ -554,8 +398,8 @@ mod tests {
     #[test]
     fn the_overview_decodes_no_damaged_ac3_frame() {
         use crate::raw_audio::{
-            ac3_frame_is_damaged, configure_raw_surround_decoding, record_decoder_input,
-            with_damaged_frames, SEAMED_FRAME, TEST_AC3, TEST_AC3_FRAMES,
+            ac3_frame_is_damaged, record_decoder_input, with_damaged_frames, SEAMED_FRAME,
+            TEST_AC3, TEST_AC3_FRAMES,
         };
 
         gst::init().expect("gst init");
@@ -566,22 +410,24 @@ mod tests {
         ));
         let stream = with_damaged_frames(TEST_AC3, &[SEAMED_FRAME]);
         std::fs::write(&path, stream).expect("write fixture");
-        let (pipeline, bus, level, _) = build_waveform_gst_pipeline(&path).expect("build pipeline");
+        let pipeline = gst::Pipeline::new();
+        conceal_damaged_ac3_frames(pipeline.upcast_ref());
         let frames = record_decoder_input(pipeline.upcast_ref());
-        let shutdown = super::super::gst_lifecycle::PipelineShutdown::new(&pipeline);
-        configure_waveform_gst_pipeline(&pipeline, &level, 64).expect("start pipeline");
-        let message = bus
-            .timed_pop_filtered(
-                gst::ClockTime::from_seconds(10),
-                &[gst::MessageType::Eos, gst::MessageType::Error],
-            )
-            .expect("the overview reaches the end of the stream");
-        drop(shutdown);
-        std::fs::remove_file(&path).expect("remove fixture");
-        assert!(
-            matches!(message.view(), gst::MessageView::Eos(..)),
-            "{message:?}"
+        let mut complete = false;
+        let result = decode_overview_in(
+            &path,
+            pipeline,
+            64,
+            &Cell::new(None),
+            |_, _, progress| {
+                complete |= progress == OverviewProgress::Complete;
+                true
+            },
+            || false,
         );
+        std::fs::remove_file(&path).expect("remove fixture");
+        result.expect("decode");
+        assert!(complete, "the overview reaches the end of the stream");
 
         let frames = frames.lock().expect("frames");
         assert_eq!(frames.len(), TEST_AC3_FRAMES);
@@ -590,132 +436,137 @@ mod tests {
         }
     }
 
-    /// Records `count` level messages of 10 ms, at -6 dB, from `*next` on.
-    fn record_level_messages(waveform: &mut GstWaveformAccumulator, next: &mut u64, count: u64) {
-        for _ in 0..count {
-            let structure = gst::Structure::builder("level")
-                .field("running-time", *next * 10_000_000)
-                .field("duration", 10_000_000u64)
-                .field("peak", gst::Array::new([-6.0f64]))
-                .build();
-            let peak = level_message_peak(structure.as_ref()).expect("peak");
-            waveform.record_peak(structure.as_ref(), peak);
-            *next += 1;
+    /// The overview has the peak of every sample the decoder gave, at the
+    /// stream's own rate: no resampling rounds a transient off or overshoots
+    /// it, and the peaks are those of the Symphonia overview of the same
+    /// audio.
+    #[test]
+    fn the_overview_has_the_exact_peaks_of_the_decoded_samples() {
+        // 1.5 s of 48 kHz 5.1 silence, with a one-sample transient in a
+        // different channel at each of a few offsets, and a quiet tone in one.
+        let rate = 48_000_u32;
+        let channels = 6_usize;
+        let frames = 1_024 * 70 + 512;
+        let mut samples = vec![0_i16; frames * channels];
+        for frame in 0..frames {
+            let t = f64::from(u32::try_from(frame).expect("frame")) / f64::from(rate);
+            samples[frame * channels + 1] =
+                ((t * 997.0 * std::f64::consts::TAU).sin() * 3_000.0) as i16;
         }
-    }
+        for (index, frame) in [1_usize, 4_099, 30_001, 71_999].into_iter().enumerate() {
+            samples[frame * channels + index % channels] =
+                30_000 - i16::try_from(index).expect("index") * 1_000;
+        }
+        let path = test_wave("waveform-exact-peaks.wav", &samples, rate, 6);
 
-    #[test]
-    fn the_first_overview_preview_does_not_wait_for_the_interval() {
-        let _ = gst::init();
-        // A bin every 10 ms of a 10.24 s file.
-        let mut waveform = GstWaveformAccumulator::new(1_024, Some(10_240_000_000));
-        let start = Instant::now();
-        let mut next = 0;
-        let enough = usize_to_u64(MIN_PREVIEW_PEAKS);
+        let (peaks, coverage) = complete_overview(overview_updates(&path, 1_024));
+        let mut symphonia = None;
+        super::super::decode_waveform_peaks_stream(
+            &path,
+            1_024,
+            &Cell::new(None),
+            |peaks, _, progress| {
+                if progress == OverviewProgress::Complete {
+                    symphonia = Some(peaks);
+                }
+                true
+            },
+            || false,
+        )
+        .expect("Symphonia overview");
+        std::fs::remove_file(&path).expect("remove fixture");
 
-        record_level_messages(&mut waveform, &mut next, enough - 1);
-        assert!(!waveform.preview_ready(start));
-        // The first preview goes as soon as it has enough peaks, at the time
-        // the decode started. It covers only the decoded bins, not the file.
-        record_level_messages(&mut waveform, &mut next, 1);
-        assert!(waveform.preview_ready(start));
-        let (peaks, coverage) = waveform.take_preview(start);
-        assert_eq!(peaks.len(), MIN_PREVIEW_PEAKS);
+        let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+        assert_eq!(loudest, 30_000.0 / 32_768.0);
+        let expected_seconds = frames as f32 / rate as f32;
         assert!(
-            peaks.iter().all(|peak| (peak - 0.5).abs() < 0.01),
-            "{peaks:?}"
+            (coverage - expected_seconds).abs() < 1e-4,
+            "covers {coverage} s"
         );
-        assert!((coverage - 0.24).abs() < 1e-6, "covers {coverage} s");
-
-        // Later ones wait for the interval.
-        let interval = Duration::from_millis(240);
-        record_level_messages(&mut waveform, &mut next, 11);
-        assert!(!waveform.preview_ready(start + interval - Duration::from_millis(1)));
-        assert!(waveform.preview_ready(start + interval));
-        let (peaks, coverage) = waveform.take_preview(start + interval);
-        assert_eq!(peaks.len(), MIN_PREVIEW_PEAKS + 11);
-        assert!((coverage - 0.35).abs() < 1e-6, "covers {coverage} s");
-        assert!(!waveform.preview_ready(start + interval * 2 - Duration::from_millis(1)));
-        assert!(waveform.preview_ready(start + interval * 2));
-
-        // The final overview spans the whole file.
-        assert!((waveform.coverage_seconds() - 10.24).abs() < 1e-6);
-        assert_eq!(waveform.finish().len(), 1_024);
+        assert_eq!(Some(peaks), symphonia);
     }
 
     #[test]
-    fn collapse_level_message_peaks_uses_loudest_channel() {
-        let _ = gst::init();
-        let structure = gst::Structure::builder("level")
-            .field("peak", gst::Array::new([-18.0f64, -6.0, -12.0]))
-            .build();
-
-        let peak = level_message_peak(structure.as_ref()).expect("peak");
-
-        assert!((peak - 10f32.powf(-6.0 / 20.0)).abs() < 0.0001);
-    }
-
-    #[test]
-    fn collapse_level_message_peaks_treats_floor_as_silence() {
-        let _ = gst::init();
-        let structure = gst::Structure::builder("level")
-            .field("peak", gst::Array::new([-150.0f64, f64::NEG_INFINITY]))
-            .build();
-
-        assert_eq!(level_message_peak(structure.as_ref()), Some(0.0));
-    }
-
-    #[test]
-    fn collapse_level_message_peaks_accepts_list_values_too() {
-        let _ = gst::init();
-        let structure = gst::Structure::builder("level")
-            .field("peak", gst::List::new([-9.0f64, -3.0]))
-            .build();
-
-        let peak = level_message_peak(structure.as_ref()).expect("peak");
-
-        assert!((peak - 10f32.powf(-3.0 / 20.0)).abs() < 0.0001);
-    }
-
-    #[test]
-    fn collapse_level_message_peaks_accepts_value_array_too() {
-        let _ = gst::init();
-        let peaks = gst::glib::ValueArray::new([-15.0f64, -4.0]);
-        let peak = collapse_level_db_values(peaks.as_slice()).expect("peak");
-
-        assert!((peak - 10f32.powf(-4.0 / 20.0)).abs() < 0.0001);
-    }
-
-    #[test]
-    fn level_message_bin_index_uses_running_time_when_present() {
-        let _ = gst::init();
-        let structure = gst::Structure::builder("level")
-            .field("running-time", 5_000_000_000u64)
-            .field("duration", 1_000_000_000u64)
-            .field("peak", gst::Array::new([-9.0f64]))
-            .build();
-
-        let (time_ns, _) = level_message_time_range_ns(structure.as_ref()).expect("time");
-        assert_eq!(
-            level_message_bin_index(time_ns, 10_000_000_000, 100),
-            Some(55)
+    fn a_cancelled_overview_stops_without_a_final_update() {
+        let path = test_wave(
+            "waveform-cancelled.wav",
+            &vec![8_000_i16; 48_000 * 4],
+            48_000,
+            2,
         );
+        let mut updates = Vec::new();
+        let cancelled = Cell::new(false);
+        let result = decode_waveform_peaks_stream_gst(
+            &path,
+            1_024,
+            &Cell::new(None),
+            |_, _, progress| {
+                assert!(!cancelled.get(), "an update after the cancel");
+                updates.push(progress);
+                // The first preview cancels the decode.
+                cancelled.set(true);
+                true
+            },
+            || cancelled.get(),
+        );
+        std::fs::remove_file(&path).expect("remove fixture");
+        result.expect("a cancelled decode is no error");
+        assert_eq!(updates, [OverviewProgress::Partial]);
     }
 
+    /// A stream whose sample rate changes mid-stream, as a DTS 96/24
+    /// stream's does where its decoder falls back to the 48 kHz core of a
+    /// damaged frame, gets a complete overview of all of it, at the times
+    /// its audio plays.
     #[test]
-    fn level_message_bin_index_falls_back_to_end_minus_duration() {
-        let _ = gst::init();
-        let structure = gst::Structure::builder("level")
-            .field("endtime", 8_000_000_000u64)
-            .field("duration", 2_000_000_000u64)
-            .field("peak", gst::Array::new([-9.0f64]))
-            .build();
+    fn a_stream_whose_rate_changes_mid_stream_gets_a_complete_overview() {
+        use crate::raw_audio::{TEST_DTS, TEST_DTS_44K};
 
-        let (time_ns, end_ns) = level_message_time_range_ns(structure.as_ref()).expect("time");
-        assert_eq!(end_ns, 8_000_000_000);
-        assert_eq!(
-            level_message_bin_index(time_ns, 10_000_000_000, 100),
-            Some(70)
-        );
+        let path = crate::paths::test_root().join("waveform-rate-change.dts");
+        std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        // 0.50 s at 48 kHz, then 0.51 s at 44.1 kHz, of which the parser
+        // reads only part, and the other way round.
+        for (name, stream, first_part) in [
+            ("48 kHz first", [TEST_DTS, TEST_DTS_44K].concat(), 0.501),
+            ("44.1 kHz first", [TEST_DTS_44K, TEST_DTS].concat(), 0.511),
+        ] {
+            std::fs::write(&path, stream).expect("write fixture");
+            let (peaks, coverage) = complete_overview(overview_updates(&path, 64));
+            assert!(
+                coverage > first_part + 0.1 && coverage < 1.05,
+                "{name}: covers {coverage} s"
+            );
+            // The tone peaks at 1/8 of full scale in both parts.
+            let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+            assert!((0.1..0.2).contains(&loudest), "{name}: peak {loudest}");
+        }
+        std::fs::remove_file(&path).expect("remove fixture");
+    }
+
+    /// A failing pipeline still gives the overview of the audio it decoded
+    /// before: also what its decoder queued, unread, when it reported the
+    /// failure, whether the decode read none of its audio yet or much.
+    #[test]
+    fn a_failed_overview_keeps_the_audio_queued_before_the_failure() {
+        use crate::raw_audio::TEST_DTS;
+
+        let path = crate::paths::test_root().join("waveform-failing.dts");
+        std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        std::fs::write(&path, TEST_DTS).expect("write fixture");
+        // More buffers than the sink queues: the decode has read some.
+        for (buffers, before_first_read) in [(5, true), (20, false)] {
+            let (updates, decoded) = overview_failing_after(&path, buffers, before_first_read);
+            let (peaks, coverage, progress) = updates.last().expect("a last update");
+            assert_eq!(*progress, OverviewProgress::Truncated, "{buffers} buffers");
+            assert!(decoded > 0.0);
+            assert!(
+                (coverage - decoded).abs() < 1e-3,
+                "{buffers} buffers: covers {coverage} s of {decoded} s decoded"
+            );
+            // The fixture tone peaks at 1/8 of full scale.
+            let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+            assert!((0.1..0.2).contains(&loudest), "peak {loudest}");
+        }
+        std::fs::remove_file(&path).expect("remove fixture");
     }
 }
