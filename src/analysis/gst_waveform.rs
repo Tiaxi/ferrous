@@ -492,6 +492,38 @@ mod tests {
     }
 
     #[test]
+    fn a_dts_cd_rip_gets_the_overview_of_its_dts() {
+        use crate::raw_audio::{ripped_dts_cd_bytes, TEST_DTS_44K};
+
+        let path = crate::paths::test_root().join("waveform-dts-cd.dts");
+        std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        std::fs::write(&path, ripped_dts_cd_bytes(TEST_DTS_44K).0).expect("write fixture");
+        let mut finished = None;
+        let source = Cell::new(None);
+        let result = decode_waveform_peaks_stream_gst(
+            &path,
+            64,
+            &source,
+            |peaks, coverage, progress| {
+                if progress == OverviewProgress::Complete {
+                    finished = Some((peaks, coverage));
+                }
+                true
+            },
+            || false,
+        );
+        std::fs::remove_file(&path).expect("remove fixture");
+        result.expect("decode");
+
+        let (peaks, coverage) = finished.expect("finished waveform");
+        assert!((coverage - 0.511).abs() < 0.05, "covers {coverage} s");
+        // The tone peaks at 1/8 of full scale; the 14-bit words, read as
+        // PCM, at 1/4.
+        let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+        assert!((0.1..0.2).contains(&loudest), "peak {loudest}");
+    }
+
+    #[test]
     fn the_overview_decodes_no_damaged_ac3_frame() {
         use crate::raw_audio::{
             ac3_frame_is_damaged, configure_raw_surround_decoding, record_decoder_input,

@@ -12,6 +12,16 @@ ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5 -ac 1 \
   -c:a dca -strict -2 -b:a 192k -f dts -bitexact raw-tone.dts
 ```
 
+`raw-tone-44k.dts` is the same tone at 44.1 kHz in 44 DTS frames of 224 bytes
+(about 0.51 s). That bitrate makes each frame fill whole 14-bit words. Tests
+pack the frames into the low 14 bits of 16-bit words and put them in a WAV
+file, as DTS-CD rips hold them:
+
+```bash
+ffmpeg -f lavfi -i sine=frequency=440:sample_rate=44100:duration=0.5 -ac 1 \
+  -c:a dca -strict -2 -b:a 154350 -f dts -bitexact raw-tone-44k.dts
+```
+
 `tag-tone.m4a`, `tag-tone.ogg`, `tag-tone.opus`, and `tag-tone.wv` are 0.1 s
 mono 440 Hz tones in ALAC (MP4), Ogg Vorbis, Opus, and WavPack. Tag writing tests replace the tags
 of copies of them. They were made with FFmpeg 8.1, whose `-bitexact`

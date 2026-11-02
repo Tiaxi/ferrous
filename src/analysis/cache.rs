@@ -9,6 +9,7 @@ use rusqlite::{params, Connection};
 use crate::file_identity::FileId;
 use crate::library::{file_id_columns, file_id_from_columns, identity_changed};
 use crate::playback::{remap_path, PathRenames};
+use crate::raw_audio::is_dts_file;
 
 pub(super) const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 pub(super) const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
@@ -16,8 +17,17 @@ pub(super) const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 // Version 2 preserves every sample peak; version 1 could omit transients.
 // Version 3 cuts an MP3's encoder delay and padding. A build before it
 // writes version 2 into a version 3 table without updating `complete`, so
-// its waveforms, untrimmed, are never taken for complete ones.
-const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 3;
+// its waveforms, untrimmed, are never taken for complete ones. Version 4
+// decodes the DTS of DTS-CD rips, which earlier versions read as the PCM
+// their WAV header tells; see `is_current_format`.
+const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 4;
+
+/// Whether a waveform of `path` saved in format `version` is that of the
+/// current one. Version 4 changed only the waveforms of DTS files, so the
+/// others of version 3 are kept.
+fn is_current_format(version: i64, path: &Path) -> bool {
+    version == WAVEFORM_CACHE_FORMAT_VERSION || (version == 3 && !is_dts_file(path))
+}
 
 /// What tells whether a file changed since its waveform was decoded: that
 /// of the file the decode read. In memory, every field must match; see
@@ -119,7 +129,7 @@ pub(super) fn load_waveform_from_db(
             },
         )
         .ok()?;
-    if row.0 != WAVEFORM_CACHE_FORMAT_VERSION {
+    if !is_current_format(row.0, Path::new(&path)) {
         return None;
     }
     if identity_changed(row.3, stamp.file_id)
@@ -409,6 +419,36 @@ mod tests {
         conn.execute("UPDATE waveform_cache SET format_version = 1", [])
             .expect("legacy version");
         assert!(load_waveform_from_db(&conn, path, stamp).is_none());
+    }
+
+    #[test]
+    fn only_dts_waveforms_of_the_previous_format_are_decoded_again() {
+        let conn = Connection::open_in_memory().expect("database");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let stamp = WaveformSourceStamp {
+            size_bytes: 10,
+            modified_secs: 1,
+            modified_nanos: 0,
+            file_id: None,
+        };
+        for (name, kept) in [("a.flac", true), ("b.dts", false), ("c.DTS", false)] {
+            let path = Path::new(name);
+            persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("save");
+            assert!(
+                load_waveform_from_db(&conn, path, stamp).is_some(),
+                "{name}"
+            );
+            conn.execute(
+                "UPDATE waveform_cache SET format_version = 3 WHERE path = ?1",
+                params![name],
+            )
+            .expect("previous version");
+            assert_eq!(
+                load_waveform_from_db(&conn, path, stamp).is_some(),
+                kept,
+                "{name}"
+            );
+        }
     }
 
     #[test]

@@ -38,7 +38,8 @@ pub(crate) fn configure_raw_surround_decoding() {
 mod tests {
     use super::configure_raw_surround_decoding;
     use crate::raw_audio::{
-        filter_raw_surround_source, ripped_surround_bytes, test_path, TEST_AC3, TEST_DTS,
+        filter_raw_surround_source, ripped_dts_cd_bytes, ripped_surround_bytes, test_path,
+        TEST_AC3, TEST_DTS, TEST_DTS_44K,
     };
     use gst::prelude::*;
     use gstreamer as gst;
@@ -213,6 +214,17 @@ mod tests {
                 "ripped .{ext}: {detected:?}"
             );
         }
+    }
+
+    #[test]
+    fn dts_cd_rips_are_detected_as_dts_through_the_byte_filter() {
+        let (bytes, _) = ripped_dts_cd_bytes(TEST_DTS_44K);
+        let detected = detect("dts-cd", "dts", &bytes, true);
+        assert_eq!(
+            detected.as_ref().map(|(media_type, _)| media_type.as_str()),
+            Some("audio/x-dts"),
+            "{detected:?}"
+        );
     }
 
     #[test]
