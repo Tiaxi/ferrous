@@ -217,6 +217,13 @@ qt_add_qml_module(ferrous_ui_qml
 )
 
 ferrous_enable_strict_warnings(ferrous_ui_qml)
+# Compile the QML to bytecode only. Ahead-of-time compiled bindings are C++
+# that calls Qt's private API, whose symbols carry the exact Qt minor version
+# (Qt_6.11_PRIVATE_API), so the package would need a rebuild for every Qt
+# minor update. Bytecode needs no such symbols, and when a newer Qt no longer
+# reads it, the engine compiles the QML from the source kept beside it.
+# ferrous_no_private_qt_api checks the binaries.
+set_target_properties(ferrous_ui_qml PROPERTIES QT_QMLCACHEGEN_ARGUMENTS --only-bytecode)
 
 set_target_properties(ferrous PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
 target_link_libraries(ferrous PRIVATE
@@ -863,6 +870,41 @@ if(BUILD_TESTING)
             TIMEOUT 60
         )
         set_tests_properties(ferrous_qml_cache_check_rejects_unreadable_binary PROPERTIES
+            PASS_REGULAR_EXPRESSION "could[ \t\r\n]+not[ \t\r\n]+read"
+            TIMEOUT 60
+        )
+    endif()
+
+    # No binary refers to Qt's private API, whose symbols would tie it, and
+    # the package through RPM's automatic dependencies, to the exact Qt minor
+    # version it was built with. This covers every executable defined above.
+    add_test(NAME ferrous_private_qt_api_patterns
+        COMMAND "${CMAKE_COMMAND}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_private_qt_api_patterns.cmake"
+    )
+    set_tests_properties(ferrous_private_qt_api_patterns PROPERTIES TIMEOUT 60)
+    if(CMAKE_OBJDUMP)
+        get_property(ferrous_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(target IN LISTS ferrous_targets)
+            get_target_property(target_type ${target} TYPE)
+            if(NOT target_type STREQUAL "EXECUTABLE")
+                continue()
+            endif()
+            add_test(NAME ${target}_no_private_qt_api
+                COMMAND "${CMAKE_COMMAND}"
+                    -DOBJDUMP=${CMAKE_OBJDUMP}
+                    -DBINARY=$<TARGET_FILE:${target}>
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_no_private_qt_api.cmake"
+            )
+            set_tests_properties(${target}_no_private_qt_api PROPERTIES TIMEOUT 60)
+        endforeach()
+        add_test(NAME ferrous_private_qt_api_check_rejects_unreadable_binary
+            COMMAND "${CMAKE_COMMAND}"
+                -DOBJDUMP=${CMAKE_OBJDUMP}
+                -DBINARY=${CMAKE_CURRENT_SOURCE_DIR}/tests/QtPrivateApiReferences.cmake
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_no_private_qt_api.cmake"
+        )
+        set_tests_properties(ferrous_private_qt_api_check_rejects_unreadable_binary PROPERTIES
             PASS_REGULAR_EXPRESSION "could[ \t\r\n]+not[ \t\r\n]+read"
             TIMEOUT 60
         )
