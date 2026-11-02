@@ -313,7 +313,16 @@ impl WaveformSession {
         let hit = {
             let mut caches = self.caches();
             if coarse {
-                caches.coarse_summaries.get(index)
+                caches.coarse_summaries.get(index).or_else(|| {
+                    // The store may be full. Fine rows aggregate exactly
+                    // into coarse ones, so the LRU spares a decode.
+                    let fine = caches.summaries.get(index)?;
+                    let coarse = Arc::new(PyramidTile::coarse_from(&fine));
+                    caches
+                        .coarse_summaries
+                        .insert(index, Arc::clone(&coarse), coarse.bytes());
+                    Some(coarse)
+                })
             } else {
                 caches.summaries.get(index)
             }
@@ -347,7 +356,9 @@ impl WaveformSession {
 
     #[cfg(test)]
     pub(super) fn discard_pcm(&self) {
-        self.caches().pcm = TileCache::new(0);
+        let mut caches = self.caches();
+        caches.pcm = TileCache::new(0);
+        caches.last_tile = None;
     }
 
     #[cfg(test)]
@@ -355,6 +366,11 @@ impl WaveformSession {
         let mut caches = self.caches();
         caches.pcm.budget = pcm_bytes;
         caches.summaries.budget = summary_bytes;
+    }
+
+    #[cfg(test)]
+    pub(super) fn limit_coarse_summaries(&self, bytes: usize) {
+        self.caches().coarse_summaries.budget = bytes;
     }
 
     /// The bytes the coarse summaries hold, and their budget.
@@ -435,6 +451,21 @@ impl Decoder {
             self.next_frame = packet_end.min(end).max(self.next_frame);
             if packet_end > end {
                 self.pending = Some(frames);
+            }
+        }
+        // A tile that ends where a packet does has not seen whether the
+        // file ends there too, and a whole-track window needs to know which
+        // tile is the last. Read the packet the next tile starts with.
+        while reached_eof.is_none() && self.pending.is_none() && !cancelled() {
+            match self.source.next_frames() {
+                Ok(AudioRead::Frames(frames)) => self.pending = Some(frames),
+                Ok(AudioRead::Pending) => {}
+                Ok(AudioRead::Eof) => reached_eof = Some(self.next_frame),
+                // The tile is complete; the next one seeks and reports it.
+                Err(_) => {
+                    self.next_frame = u64::MAX;
+                    break;
+                }
             }
         }
         Ok((tile, reached_eof))

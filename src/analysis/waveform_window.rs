@@ -345,11 +345,20 @@ pub(super) mod tests {
 
     #[test]
     fn surround_whole_track_windows_after_zoomed_ones_do_not_decode_again() {
+        // Twenty tiles and part of another.
+        assert_whole_track_windows_after_zoomed_ones_do_not_decode(20 * 16_384 + 4_321);
+    }
+
+    #[test]
+    fn whole_track_windows_of_a_file_ending_on_a_tile_edge_do_not_decode_again() {
+        // Its last packet ends where its last tile does.
+        assert_whole_track_windows_after_zoomed_ones_do_not_decode(20 * 16_384);
+    }
+
+    fn assert_whole_track_windows_after_zoomed_ones_do_not_decode(frames: u32) {
         const CHANNELS: usize = 6;
         const RATE: u32 = 96_000;
-        // Twenty tiles and part of another.
-        const FRAMES: u32 = 20 * 16_384 + 4_321;
-        let mut samples: Vec<i16> = (0..i64::from(FRAMES) * 6)
+        let mut samples: Vec<i16> = (0..i64::from(frames) * 6)
             .map(|sample| i16::try_from((sample * 7_919) % 50_000 - 25_000).unwrap())
             .collect();
         // Single-sample peaks on both sides of a tile edge.
@@ -364,7 +373,7 @@ pub(super) mod tests {
         // The fine caches hold a few tiles, as the real ones hold seconds of
         // a hi-res surround track.
         session.limit_fine_caches(3 * 16_384 * CHANNELS * 4 + 4_096, 60_000);
-        let duration = f64::from(FRAMES) / f64::from(RATE);
+        let duration = f64::from(frames) / f64::from(RATE);
         let whole_track = |end_seconds: f64| {
             let window =
                 decode_window(&session, 0.0, end_seconds, 300, &|| false).expect("whole track");
@@ -377,14 +386,15 @@ pub(super) mod tests {
             assert_eq!(window.downmix_extrema, expected.downmix_extrema);
         };
         whole_track(duration);
-        assert_eq!(session.decoded_tiles(), 21);
+        let tiles = usize::try_from(frames.div_ceil(16_384)).unwrap();
+        assert_eq!(session.decoded_tiles(), tiles);
 
         // Zoomed windows read PCM and fine summaries, and cycle both caches.
         for (start, end, points) in [(0.5, 1.0, 3_440), (1.5, 3.0, 300), (0.1, 0.4, 3_440)] {
             decode_window(&session, start, end, points, &|| false).expect("zoomed window");
         }
         let decoded = session.decoded_tiles();
-        assert!(decoded > 21, "the zoomed windows decoded");
+        assert!(decoded > tiles, "the zoomed windows decoded");
 
         // Also a window ending short of the file, which reads its last tile
         // as PCM.
@@ -398,6 +408,41 @@ pub(super) mod tests {
         );
         let (bytes, budget) = session.coarse_summary_bytes();
         assert!(bytes > 0 && bytes <= budget);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn coarse_windows_beyond_a_full_store_reuse_cached_fine_summaries() {
+        // One tile a second, so that windows on whole seconds are on tile
+        // edges.
+        const RATE: u32 = 16_384;
+        let samples: Vec<i16> = (0..i64::from(12 * 16_384 + 100) * 2)
+            .map(|sample| i16::try_from((sample * 7_919) % 50_000 - 25_000).unwrap())
+            .collect();
+        let path = write_test_wave(&samples, RATE, 2);
+        let floats: Vec<_> = samples
+            .iter()
+            .map(|&sample| f32::from(sample) / 32768.0)
+            .collect();
+        let session = WaveformSession::open(&path).expect("open fixture");
+        // The store is full, as for the later minutes of a long recording;
+        // the fine summaries fit, and their PCM does not.
+        session.limit_coarse_summaries(0);
+        session.limit_fine_caches(0, 16 * 1024 * 1024);
+        let fine = decode_window(&session, 2.0, 10.0, 256, &|| false).expect("fine window");
+        assert_eq!(fine.frames_per_point, 512);
+        assert_eq!(session.decoded_tiles(), 8);
+        for _ in 0..2 {
+            let window = decode_window(&session, 2.0, 10.0, 64, &|| false).expect("coarse window");
+            assert_eq!(window.frames_per_point, 2_048);
+            let mut expected = WindowAccumulator::new(2 * 16_384, 10 * 16_384, 64, 2);
+            expected.push_interleaved(0, &floats, 2);
+            let expected = expected.finish(RATE);
+            assert_eq!(window.extrema, expected.extrema);
+            assert_eq!(window.downmix_extrema, expected.downmix_extrema);
+        }
+        assert_eq!(session.decoded_tiles(), 8, "coarse windows decoded again");
+        assert_eq!(session.coarse_summary_bytes().0, 0);
         std::fs::remove_file(path).expect("remove fixture");
     }
 

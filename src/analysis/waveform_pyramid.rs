@@ -59,17 +59,7 @@ impl PyramidTile {
         let mut coarse = Self::with_levels(coarse_level, top_level, channels);
         for number in 0..=top_level {
             if number > 0 {
-                level = level
-                    .chunks_exact(width * 2)
-                    .flat_map(|pair| {
-                        (0..width).map(move |channel| {
-                            [
-                                pair[channel][0].min(pair[channel + width][0]),
-                                pair[channel][1].max(pair[channel + width][1]),
-                            ]
-                        })
-                    })
-                    .collect();
+                level = halve(&level, width);
             }
             let part = if number < coarse_level {
                 &mut fine
@@ -79,6 +69,18 @@ impl PyramidTile {
             part.rows.extend_from_slice(&level);
         }
         (fine, coarse)
+    }
+
+    /// The coarse levels of the tile whose fine levels are `fine`.
+    pub(super) fn coarse_from(fine: &Self) -> Self {
+        let width = fine.row_width();
+        let mut level = fine.rows(SUMMARY_FRAMES << fine.last_level).0.to_vec();
+        let mut coarse = Self::with_levels(fine.last_level + 1, tile_rows().ilog2(), fine.channels);
+        for _ in coarse.first_level..=coarse.last_level {
+            level = halve(&level, width);
+            coarse.rows.extend_from_slice(&level);
+        }
+        coarse
     }
 
     fn with_levels(first_level: u32, last_level: u32, channels: usize) -> Self {
@@ -118,6 +120,21 @@ impl PyramidTile {
     pub(super) fn bytes(&self) -> usize {
         self.rows.capacity() * std::mem::size_of::<[f32; 2]>() + std::mem::size_of::<Self>()
     }
+}
+
+/// The level above `level`: each row the extrema of two.
+fn halve(level: &[[f32; 2]], width: usize) -> Vec<[f32; 2]> {
+    level
+        .chunks_exact(width * 2)
+        .flat_map(|pair| {
+            (0..width).map(move |channel| {
+                [
+                    pair[channel][0].min(pair[channel + width][0]),
+                    pair[channel][1].max(pair[channel + width][1]),
+                ]
+            })
+        })
+        .collect()
 }
 
 /// Rows of the finest level of a tile.
@@ -190,6 +207,15 @@ mod tests {
                 assert_eq!(row[column][1], pair[column][1].max(pair[column + 3][1]));
             }
         }
+        let derived = PyramidTile::coarse_from(&fine);
+        assert_eq!(
+            derived.rows, coarse.rows,
+            "coarse levels from the fine ones"
+        );
+        assert_eq!(
+            (derived.first_level, derived.last_level),
+            (coarse.first_level, coarse.last_level)
+        );
         let (whole, span) = coarse.rows(TILE_FRAMES * 4);
         assert_eq!(span, TILE_FRAMES);
         for (channel, extrema) in whole.iter().take(channels).enumerate() {
