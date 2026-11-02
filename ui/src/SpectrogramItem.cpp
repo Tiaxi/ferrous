@@ -1227,24 +1227,29 @@ int SpectrogramItem::s_maxWidgetWidthSeen = 0;
 
 void SpectrogramRingStorage::clear() {
     m_blocks.clear();
+    m_capacity = 0;
     m_bins = 0;
 }
 
 void SpectrogramRingStorage::allocate(int capacity, int bins) {
     m_blocks.clear();
     m_bins = std::max(0, bins);
-    if (capacity <= 0 || m_bins <= 0) {
-        return;
-    }
-    const int blockCount = (capacity + kColumnsPerBlock - 1) / kColumnsPerBlock;
-    m_blocks.reserve(static_cast<size_t>(blockCount));
-    for (int block = 0; block < blockCount; ++block) {
-        const int columns = std::min(kColumnsPerBlock, capacity - block * kColumnsPerBlock);
-        m_blocks.emplace_back(static_cast<qsizetype>(columns) * m_bins, '\0');
-    }
+    m_capacity = m_bins > 0 ? std::max(0, capacity) : 0;
+    // Null blocks: their memory comes with their first write.
+    m_blocks.resize(static_cast<size_t>(
+        (m_capacity + kColumnsPerBlock - 1) / kColumnsPerBlock));
+}
+
+int SpectrogramRingStorage::blockColumns(size_t block) const {
+    return std::min(kColumnsPerBlock,
+        m_capacity - static_cast<int>(block) * kColumnsPerBlock);
 }
 
 qint64 SpectrogramRingStorage::byteSize() const {
+    return static_cast<qint64>(m_capacity) * m_bins;
+}
+
+qint64 SpectrogramRingStorage::committedBytes() const {
     qint64 bytes = 0;
     for (const QByteArray &block : m_blocks) {
         bytes += block.size();
@@ -1269,12 +1274,16 @@ quint8 *SpectrogramRingStorage::writableColumn(int slot) {
     if (slot < 0 || block >= m_blocks.size()) {
         return nullptr;
     }
+    QByteArray &bytes = m_blocks[block];
+    if (bytes.isNull()) {
+        bytes = QByteArray(static_cast<qsizetype>(blockColumns(block)) * m_bins, '\0');
+    }
     const qsizetype offset = static_cast<qsizetype>(slot % kColumnsPerBlock) * m_bins;
-    if (offset + m_bins > m_blocks[block].size()) {
+    if (offset + m_bins > bytes.size()) {
         return nullptr;
     }
     // data() copies the block first while a rasterization still holds it.
-    return reinterpret_cast<quint8 *>(m_blocks[block].data()) + offset;
+    return reinterpret_cast<quint8 *>(bytes.data()) + offset;
 }
 
 SpectrogramItem::SpectrogramItem(QQuickItem *parent)

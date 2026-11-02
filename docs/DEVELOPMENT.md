@@ -126,6 +126,8 @@ The canvas is drawn at device pixels. Add `FERROUS_BENCHMARK_SPECTROGRAM_SCALE=2
 
 `spectrogramPlaybackBenchmark` takes them too. It plays a 1720×719 pane rolling, centered and scrolling, centered with the whole track in view, and centered with both grids, time labels and the pointer over it. For each, it reports the frames the window draws a second of real playback (`frames_per_s`) and the renderer's mean time for them, then, over 120 frames 1/60 s apart, the canvas and overlay textures made a frame and their size, the texture nodes changed a frame, and the render sync's time.
 
+`spectrogramRingChangeBenchmark` times the first data of a track change and of an FFT size switch for a 3440-pixel stereo pane, rolling and centered, each making room for a new ring at the lookahead budget, as `first_chunk_ms` and `fft_switch_ms` (median and worst).
+
 To compare waveform CPU painting with scene graph preparation using synthetic resident data:
 
 ```bash
