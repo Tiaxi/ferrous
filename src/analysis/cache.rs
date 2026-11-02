@@ -9,7 +9,7 @@ use rusqlite::{params, Connection};
 use crate::file_identity::FileId;
 use crate::library::{file_id_columns, file_id_from_columns, identity_changed};
 use crate::playback::{remap_path, PathRenames};
-use crate::raw_audio::is_dts_file;
+use crate::raw_audio::is_raw_surround_file;
 
 pub(super) const MAX_WAVEFORM_CACHE_TRACKS: usize = 256;
 pub(super) const PERSISTENT_WAVEFORM_CACHE_MAX_ROWS: usize = 4096;
@@ -19,14 +19,29 @@ pub(super) const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 // writes version 2 into a version 3 table without updating `complete`, so
 // its waveforms, untrimmed, are never taken for complete ones. Version 4
 // decodes the DTS of DTS-CD rips, which earlier versions read as the PCM
-// their WAV header tells; see `is_current_format`.
-const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 4;
+// their WAV header tells. Version 5 takes the peaks of what GStreamer
+// decodes at the stream's own rate, where earlier versions resampled it to
+// 44.1 kHz; see `is_current_format`.
+const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 5;
 
 /// Whether a waveform of `path` saved in format `version` is that of the
-/// current one. Version 4 changed only the waveforms of DTS files, so the
-/// others of version 3 are kept.
+/// current one. Versions 4 and 5 changed only the waveforms that `GStreamer`
+/// decodes, so those of versions 3 and 4 of other files are kept. That
+/// tells by the extension: raw AC3 and DTS files, and Opus, which Symphonia
+/// cannot read. The resampled overview of another file that only `GStreamer`
+/// reads, such as Opus in an `.ogg` file, is kept.
 fn is_current_format(version: i64, path: &Path) -> bool {
-    version == WAVEFORM_CACHE_FORMAT_VERSION || (version == 3 && !is_dts_file(path))
+    version == WAVEFORM_CACHE_FORMAT_VERSION
+        || (matches!(version, 3 | 4) && !gstreamer_decodes(path))
+}
+
+/// Whether the overview of `path` is one that `GStreamer` decodes, as far as
+/// its extension tells.
+fn gstreamer_decodes(path: &Path) -> bool {
+    is_raw_surround_file(path)
+        || path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("opus"))
 }
 
 /// What tells whether a file changed since its waveform was decoded: that
@@ -422,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn only_dts_waveforms_of_the_previous_format_are_decoded_again() {
+    fn only_waveforms_gstreamer_decodes_of_previous_formats_are_decoded_again() {
         let conn = Connection::open_in_memory().expect("database");
         init_waveform_cache_schema(&conn).expect("schema");
         let stamp = WaveformSourceStamp {
@@ -431,23 +446,32 @@ mod tests {
             modified_nanos: 0,
             file_id: None,
         };
-        for (name, kept) in [("a.flac", true), ("b.dts", false), ("c.DTS", false)] {
-            let path = Path::new(name);
-            persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("save");
-            assert!(
-                load_waveform_from_db(&conn, path, stamp).is_some(),
-                "{name}"
-            );
-            conn.execute(
-                "UPDATE waveform_cache SET format_version = 3 WHERE path = ?1",
-                params![name],
-            )
-            .expect("previous version");
-            assert_eq!(
-                load_waveform_from_db(&conn, path, stamp).is_some(),
-                kept,
-                "{name}"
-            );
+        for (name, kept) in [
+            ("a.flac", true),
+            ("b.mp3", true),
+            ("c.dts", false),
+            ("d.DTS", false),
+            ("e.ac3", false),
+            ("f.Opus", false),
+        ] {
+            for version in [3, 4] {
+                let path = Path::new(name);
+                persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("save");
+                assert!(
+                    load_waveform_from_db(&conn, path, stamp).is_some(),
+                    "{name}"
+                );
+                conn.execute(
+                    "UPDATE waveform_cache SET format_version = ?2 WHERE path = ?1",
+                    params![name, version],
+                )
+                .expect("previous version");
+                assert_eq!(
+                    load_waveform_from_db(&conn, path, stamp).is_some(),
+                    kept,
+                    "{name}, version {version}"
+                );
+            }
         }
     }
 

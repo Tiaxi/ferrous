@@ -37,10 +37,7 @@ use symphonia::core::audio::SampleBuffer;
 
 use cache::{usize_to_u64, WaveformSourceStamp};
 use decoders::analysis_format_options;
-use fft::{
-    ensure_sample_buffer, peak_across_channels, OverviewProgress, WaveformAccumulator,
-    MIN_PREVIEW_PEAKS,
-};
+use fft::{ensure_sample_buffer, OverviewProgress, WaveformAccumulator, MIN_PREVIEW_PEAKS};
 #[cfg(feature = "gst")]
 use gst_waveform::decode_waveform_peaks_stream_gst;
 use session::{
@@ -2355,15 +2352,8 @@ where
 
         let samples = buf.samples();
         decoded_any |= !samples.is_empty();
-        let frame_width = channels;
-        for base in (0..samples.len()).step_by(frame_width) {
-            if base.is_multiple_of(4096) && is_cancelled() {
-                return Ok(true);
-            }
-            let peak = peak_across_channels(samples, base, channels);
-            if !waveform.push_sample(peak, 1, on_update) {
-                return Ok(true);
-            }
+        if !waveform.push_frames(samples, channels, on_update, is_cancelled) {
+            return Ok(true);
         }
 
         // Keep this worker from starving UI/render threads on heavy FLAC decode.

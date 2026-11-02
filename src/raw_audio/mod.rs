@@ -49,6 +49,7 @@ pub(crate) fn is_raw_surround_file(path: &Path) -> bool {
     matches!(raw_surround_extension(path).as_deref(), Some("ac3" | "dts"))
 }
 
+#[cfg(any(feature = "gst", test))]
 pub(crate) fn is_dts_file(path: &Path) -> bool {
     matches!(raw_surround_extension(path).as_deref(), Some("dts"))
 }

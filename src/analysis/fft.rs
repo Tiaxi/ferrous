@@ -286,27 +286,43 @@ impl WaveformAccumulator {
         }
     }
 
-    pub(super) fn push_sample<F>(
+    /// Push the frames of `samples`, interleaved in `channels` channels, each
+    /// as the peak of its loudest channel. Returns `false` once `on_update`
+    /// or `is_cancelled` ends the decode.
+    pub(super) fn push_frames<F, C>(
         &mut self,
-        amp: f32,
-        sample_stride: usize,
+        samples: &[f32],
+        channels: usize,
         on_update: &mut F,
+        is_cancelled: &mut C,
     ) -> bool
     where
         F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
+        C: FnMut() -> bool,
     {
-        self.push_sample_at(amp, sample_stride, Instant::now, on_update)
+        let channels = channels.max(1);
+        for base in (0..samples.len()).step_by(channels) {
+            if base.is_multiple_of(4096) && is_cancelled() {
+                return false;
+            }
+            let peak = peak_across_channels(samples, base, channels);
+            if !self.push_sample(peak, on_update) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn push_sample<F>(&mut self, amp: f32, on_update: &mut F) -> bool
+    where
+        F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
+    {
+        self.push_sample_at(amp, Instant::now, on_update)
     }
 
     /// [`Self::push_sample`], reading the time from `now` only when a
     /// preview could be due.
-    fn push_sample_at<F, N>(
-        &mut self,
-        amp: f32,
-        sample_stride: usize,
-        now: N,
-        on_update: &mut F,
-    ) -> bool
+    fn push_sample_at<F, N>(&mut self, amp: f32, now: N, on_update: &mut F) -> bool
     where
         F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
         N: FnOnce() -> Instant,
@@ -314,9 +330,8 @@ impl WaveformAccumulator {
         if amp > self.bucket_peak {
             self.bucket_peak = amp;
         }
-        let sample_stride = usize_to_u64(sample_stride);
-        self.bucket_count = self.bucket_count.saturating_add(sample_stride);
-        self.covered_frames = self.covered_frames.saturating_add(sample_stride);
+        self.bucket_count = self.bucket_count.saturating_add(1);
+        self.covered_frames = self.covered_frames.saturating_add(1);
 
         if self.bucket_count < self.block_size {
             return true;
@@ -379,7 +394,7 @@ pub(super) fn ensure_sample_buffer(
 /// Return the maximum absolute sample value across `channels` interleaved
 /// channels starting at `base` in `samples`.  Used by the waveform decoder
 /// so the seekbar peak represents the loudest channel, not just channel 0.
-pub(super) fn peak_across_channels(samples: &[f32], base: usize, channels: usize) -> f32 {
+fn peak_across_channels(samples: &[f32], base: usize, channels: usize) -> f32 {
     (0..channels)
         .map(|ch| samples.get(base + ch).map_or(0.0, |s| s.abs()))
         .fold(0.0_f32, f32::max)
@@ -430,7 +445,7 @@ mod tests {
                 updates.push((peaks.len(), coverage, progress));
                 true
             };
-            assert!(waveform.push_sample_at(0.5, 1, || at, &mut on_update));
+            assert!(waveform.push_sample_at(0.5, || at, &mut on_update));
         }
         updates
     }

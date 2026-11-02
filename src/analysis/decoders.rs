@@ -664,10 +664,7 @@ fn spectrogram_seek_flags_for_path(path: &Path) -> gst::SeekFlags {
 /// Open an audio file with a `GStreamer` pipeline for the spectrogram worker.
 /// Returns `(source, native_sample_rate, native_channels, length)`.
 ///
-/// Pipeline: `filesrc → decodebin → audioconvert → capsfilter(F32LE) → appsink(sync=false)`
-///
-/// Unlike the waveform pipeline, no `audioresample` — the spectrogram needs
-/// native sample rate for correct frequency resolution.
+/// The pipeline is that of [`start_gstreamer_decode`], from a `filesrc`.
 #[cfg(feature = "gst")]
 pub(super) fn open_gstreamer_file(
     path: &Path,
@@ -683,7 +680,6 @@ fn open_gstreamer_pipeline(
     path: &Path,
     pipeline: gst::Pipeline,
 ) -> Option<(AudioFrameSource, u64, usize, TrackLength)> {
-    let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     conceal_damaged_ac3_frames(pipeline.upcast_ref());
     // Seeks in a raw AC3 file read from the second before their target
     // rather than from the last frame read.
@@ -692,9 +688,50 @@ fn open_gstreamer_pipeline(
     src.set_property("location", path.to_string_lossy().to_string());
     filter_raw_surround_source(&src);
 
-    let decodebin = gst::ElementFactory::make("decodebin").build().ok()?;
-    let conv = gst::ElementFactory::make("audioconvert").build().ok()?;
-    let capsfilter = gst::ElementFactory::make("capsfilter").build().ok()?;
+    let decode = start_gstreamer_decode(path, pipeline, &src).ok()?;
+    // The parser of a raw AC3/DTS file has seen too few frames to tell its
+    // duration yet.
+    let duration_ns = decode
+        .duration_ns
+        .or_else(|| raw_surround_duration_ns(path));
+    let total_frames = duration_ns.map(|ns| ns * decode.sample_rate / 1_000_000_000);
+    let length = TrackLength::of_frames(total_frames, decode.sample_rate);
+    Some((decode.source, decode.sample_rate, decode.channels, length))
+}
+
+/// A `GStreamer` decode that [`start_gstreamer_decode`] started.
+#[cfg(feature = "gst")]
+pub(super) struct GstDecode {
+    pub(super) source: AudioFrameSource,
+    pub(super) sample_rate: u64,
+    pub(super) channels: usize,
+    /// The duration the pipeline tells, if it knows it already.
+    pub(super) duration_ns: Option<u64>,
+}
+
+/// Start decoding what `src`, a source of the file at `path`, reads, at the
+/// stream's own rate:
+/// `src → decodebin → audioconvert → capsfilter(F32LE) → appsink(sync=false)`.
+///
+/// No `audioresample`: the spectrogram needs the native sample rate for its
+/// frequency resolution, and the overview every sample for its peaks.
+/// Connect what `pipeline` needs before it starts, such as the AC3
+/// concealment, before calling this. On failure, the pipeline is stopped.
+#[cfg(feature = "gst")]
+pub(super) fn start_gstreamer_decode(
+    path: &Path,
+    pipeline: gst::Pipeline,
+    src: &gst::Element,
+) -> anyhow::Result<GstDecode> {
+    let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
+    let element = |name: &str| {
+        gst::ElementFactory::make(name)
+            .build()
+            .map_err(|_| anyhow::anyhow!("missing {name} element"))
+    };
+    let decodebin = element("decodebin")?;
+    let conv = element("audioconvert")?;
+    let capsfilter = element("capsfilter")?;
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
         .field("layout", "interleaved")
@@ -703,14 +740,14 @@ fn open_gstreamer_pipeline(
 
     let appsink = analysis_decode_sink();
 
-    pipeline
-        .add_many([&src, &decodebin, &conv, &capsfilter, appsink.upcast_ref()])
-        .ok()?;
-    src.link(&decodebin).ok()?;
-    gst::Element::link_many([&conv, &capsfilter, appsink.upcast_ref()]).ok()?;
+    pipeline.add_many([src, &decodebin, &conv, &capsfilter, appsink.upcast_ref()])?;
+    src.link(&decodebin)?;
+    gst::Element::link_many([&conv, &capsfilter, appsink.upcast_ref()])?;
 
     // Dynamic pad linking for decodebin → audioconvert.
-    let conv_sink_pad = conv.static_pad("sink")?;
+    let conv_sink_pad = conv
+        .static_pad("sink")
+        .ok_or_else(|| anyhow::anyhow!("missing audioconvert sink pad"))?;
     decodebin.connect_pad_added(move |_dbin, src_pad| {
         if conv_sink_pad.is_linked() {
             return;
@@ -731,47 +768,58 @@ fn open_gstreamer_pipeline(
     });
 
     // Transition to PAUSED so decodebin can negotiate.
-    pipeline.set_state(gst::State::Paused).ok()?;
+    pipeline.set_state(gst::State::Paused)?;
     let _ = pipeline.state(gst::ClockTime::from_seconds(5));
 
     // Read negotiated format from the appsink pad.
-    let pad = appsink.static_pad("sink")?;
-    let negotiated_caps = pad.current_caps()?;
-    let structure = negotiated_caps.structure(0)?;
-    let rate =
-        u64::from(u32::try_from(structure.get::<i32>("rate").ok().filter(|&r| r > 0)?).ok()?);
-    let channels =
-        usize::try_from(structure.get::<i32>("channels").ok().filter(|&c| c > 0)?).ok()?;
-
-    // Query duration for column estimate. The parser of a raw AC3/DTS file
-    // has seen too few frames to tell it yet.
+    let negotiated = appsink
+        .static_pad("sink")
+        .and_then(|pad| pad.current_caps())
+        .ok_or_else(|| anyhow::anyhow!("no audio could be decoded from \"{}\"", path.display()))?;
+    let structure = negotiated
+        .structure(0)
+        .ok_or_else(|| anyhow::anyhow!("empty audio caps"))?;
+    let sample_rate = structure
+        .get::<i32>("rate")
+        .ok()
+        .and_then(|rate| u32::try_from(rate).ok())
+        .filter(|&rate| rate > 0)
+        .ok_or_else(|| anyhow::anyhow!("no sample rate in the audio caps"))?;
+    let channels = structure
+        .get::<i32>("channels")
+        .ok()
+        .and_then(|channels| usize::try_from(channels).ok())
+        .filter(|&channels| channels > 0)
+        .ok_or_else(|| anyhow::anyhow!("no channel count in the audio caps"))?;
     let duration_ns = pipeline
         .query_duration::<gst::ClockTime>()
-        .map(gst::ClockTime::nseconds)
-        .or_else(|| raw_surround_duration_ns(path));
-    let total_frames = duration_ns.map(|ns| ns * rate / 1_000_000_000);
-    let length = TrackLength::of_frames(total_frames, rate);
+        .map(gst::ClockTime::nseconds);
 
     // Transition to PLAYING so the pipeline starts streaming.
-    pipeline.set_state(gst::State::Playing).ok()?;
+    pipeline.set_state(gst::State::Playing)?;
 
     let source = AudioFrameSource::Gst {
         pipeline,
         appsink,
         native_channels: channels,
-        sample_rate: u32::try_from(rate).ok()?,
+        sample_rate,
         seek_frame: 0,
         path: path.to_path_buf(),
     };
 
     shutdown.disarm(); // AudioFrameSource::drop now owns pipeline shutdown.
-    Some((source, rate, channels, length))
+    Ok(GstDecode {
+        source,
+        sample_rate: u64::from(sample_rate),
+        channels,
+        duration_ns,
+    })
 }
 
 /// The duration of a raw AC3/DTS file, from its first frame header and the
 /// length of its frames.
 #[cfg(feature = "gst")]
-fn raw_surround_duration_ns(path: &Path) -> Option<u64> {
+pub(super) fn raw_surround_duration_ns(path: &Path) -> Option<u64> {
     if !is_raw_surround_file(path) {
         return None;
     }
