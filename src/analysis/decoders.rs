@@ -746,7 +746,7 @@ fn open_gstreamer_pipeline(
     src.set_property("location", path.to_string_lossy().to_string());
     filter_raw_surround_source(&src);
 
-    let decode = start_gstreamer_decode(path, pipeline, &src).ok()?;
+    let decode = start_gstreamer_decode(path, pipeline, &src, RateChanges::Report).ok()?;
     // The parser of a raw AC3/DTS file has seen too few frames to tell its
     // duration yet.
     let duration_ns = decode
@@ -755,6 +755,20 @@ fn open_gstreamer_pipeline(
     let total_frames = duration_ns.map(|ns| ns * decode.sample_rate / 1_000_000_000);
     let length = TrackLength::of_frames(total_frames, decode.sample_rate);
     Some((decode.source, decode.sample_rate, decode.channels, length))
+}
+
+/// What a `GStreamer` decode does where the sample rate of its stream
+/// changes mid-stream, as a DTS 96/24 stream's does where its decoder falls
+/// back to the 48 kHz core of a damaged frame.
+#[cfg(feature = "gst")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RateChanges {
+    /// Pass the audio on at its new rate, which the reader reports as an
+    /// error: analysis lays out its columns at one rate.
+    Report,
+    /// Resample the audio at another rate to the rate the stream started
+    /// at. The resampler passes audio at that rate through untouched.
+    ResampleToFirst,
 }
 
 /// A `GStreamer` decode that [`start_gstreamer_decode`] started.
@@ -771,8 +785,9 @@ pub(super) struct GstDecode {
 /// stream's own rate:
 /// `src → decodebin → audioconvert → capsfilter(F32LE) → appsink(sync=false)`.
 ///
-/// No `audioresample`: the spectrogram needs the native sample rate for its
-/// frequency resolution, and the overview every sample for its peaks.
+/// Nothing is resampled at the stream's own rate: the spectrogram needs it
+/// for its frequency resolution, and the overview every sample for its
+/// peaks. `rate_changes` tells what happens where that rate changes.
 /// Connect what `pipeline` needs before it starts, such as the AC3
 /// concealment, before calling this. On failure, the pipeline is stopped.
 #[cfg(feature = "gst")]
@@ -780,6 +795,7 @@ pub(super) fn start_gstreamer_decode(
     path: &Path,
     pipeline: gst::Pipeline,
     src: &gst::Element,
+    rate_changes: RateChanges,
 ) -> anyhow::Result<GstDecode> {
     let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     let element = |name: &str| {
@@ -800,7 +816,13 @@ pub(super) fn start_gstreamer_decode(
 
     pipeline.add_many([src, &decodebin, &conv, &capsfilter, appsink.upcast_ref()])?;
     src.link(&decodebin)?;
-    gst::Element::link_many([&conv, &capsfilter, appsink.upcast_ref()])?;
+    if rate_changes == RateChanges::ResampleToFirst {
+        let resample = element("audioresample")?;
+        pipeline.add(&resample)?;
+        gst::Element::link_many([&conv, &resample, &capsfilter, appsink.upcast_ref()])?;
+    } else {
+        gst::Element::link_many([&conv, &capsfilter, appsink.upcast_ref()])?;
+    }
 
     // Dynamic pad linking for decodebin → audioconvert.
     let conv_sink_pad = conv
@@ -852,6 +874,15 @@ pub(super) fn start_gstreamer_decode(
     let duration_ns = pipeline
         .query_duration::<gst::ClockTime>()
         .map(gst::ClockTime::nseconds);
+    if rate_changes == RateChanges::ResampleToFirst {
+        // Keep the rate the stream starts at, which it negotiated already.
+        let caps = gst::Caps::builder("audio/x-raw")
+            .field("format", "F32LE")
+            .field("layout", "interleaved")
+            .field("rate", i32::try_from(sample_rate)?)
+            .build();
+        capsfilter.set_property("caps", &caps);
+    }
 
     // Transition to PLAYING so the pipeline starts streaming.
     pipeline.set_state(gst::State::Playing)?;

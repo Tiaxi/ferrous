@@ -9,6 +9,7 @@ use gstreamer as gst;
 use super::cache::WaveformSourceStamp;
 use super::decoders::{
     raw_surround_duration_ns, start_gstreamer_decode, AudioRead, AudioTimeline, GstDecode,
+    RateChanges,
 };
 use super::fft::{OverviewProgress, WaveformAccumulator};
 use super::track_io::stamp_of;
@@ -24,7 +25,9 @@ const UNKNOWN_DURATION_SECONDS: u64 = 240;
 
 /// Start the overview decode of the file at `path` in `pipeline`, from the
 /// playback's `ferrousfilesrc`, which tells the metadata of the file it
-/// opened. The decode is that of the analysis, at the stream's own rate.
+/// opened. The decode is that of the analysis, at the stream's own rate;
+/// where that rate changes mid-stream, the audio is resampled to the rate
+/// the stream started at.
 ///
 /// The file is opened once, here: the audio range of a raw surround file is
 /// read from that handle, and the source reads it, so that the range, the
@@ -45,7 +48,9 @@ fn start_overview_decode(
     filter_raw_surround_source_to(&src, range);
     #[cfg(test)]
     test_hooks::source_built();
-    let decode = start_gstreamer_decode(path, pipeline, &src)?;
+    // The peaks of a stream whose rate changes mid-stream stay on one time
+    // line, and are exact where the rate is the one it started at.
+    let decode = start_gstreamer_decode(path, pipeline, &src, RateChanges::ResampleToFirst)?;
     Ok((decode, file_source))
 }
 
@@ -150,7 +155,6 @@ where
             }
             Ok(AudioRead::Pending) => {}
             Ok(AudioRead::Eof) => break true,
-            // A decoder error, or a sample rate that changes mid-stream.
             Err(_) if decoded_any => break false,
             Err(err) => return Err(err.context("gstreamer waveform decode failed")),
         }
@@ -508,6 +512,35 @@ mod tests {
         std::fs::remove_file(&path).expect("remove fixture");
         result.expect("a cancelled decode is no error");
         assert_eq!(updates, [OverviewProgress::Partial]);
+    }
+
+    /// A stream whose sample rate changes mid-stream, as a DTS 96/24
+    /// stream's does where its decoder falls back to the 48 kHz core of a
+    /// damaged frame, gets a complete overview of all of it, at the times
+    /// its audio plays.
+    #[test]
+    fn a_stream_whose_rate_changes_mid_stream_gets_a_complete_overview() {
+        use crate::raw_audio::{TEST_DTS, TEST_DTS_44K};
+
+        let path = crate::paths::test_root().join("waveform-rate-change.dts");
+        std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        // 0.50 s at 48 kHz, then 0.51 s at 44.1 kHz, of which the parser
+        // reads only part, and the other way round.
+        for (name, stream, first_part) in [
+            ("48 kHz first", [TEST_DTS, TEST_DTS_44K].concat(), 0.501),
+            ("44.1 kHz first", [TEST_DTS_44K, TEST_DTS].concat(), 0.511),
+        ] {
+            std::fs::write(&path, stream).expect("write fixture");
+            let (peaks, coverage) = complete_overview(overview_updates(&path, 64));
+            assert!(
+                coverage > first_part + 0.1 && coverage < 1.05,
+                "{name}: covers {coverage} s"
+            );
+            // The tone peaks at 1/8 of full scale in both parts.
+            let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+            assert!((0.1..0.2).contains(&loudest), "{name}: peak {loudest}");
+        }
+        std::fs::remove_file(&path).expect("remove fixture");
     }
 
     /// A failing pipeline still gives the overview of the audio it decoded
