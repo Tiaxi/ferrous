@@ -883,30 +883,35 @@ if(BUILD_TESTING)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_private_qt_api_patterns.cmake"
     )
     set_tests_properties(ferrous_private_qt_api_patterns PROPERTIES TIMEOUT 60)
+    # Without objdump no binary would be checked, so the tests require it.
     if(CMAKE_OBJDUMP)
-        get_property(ferrous_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-        foreach(target IN LISTS ferrous_targets)
-            get_target_property(target_type ${target} TYPE)
-            if(NOT target_type STREQUAL "EXECUTABLE")
-                continue()
-            endif()
-            add_test(NAME ${target}_no_private_qt_api
-                COMMAND "${CMAKE_COMMAND}"
-                    -DOBJDUMP=${CMAKE_OBJDUMP}
-                    -DBINARY=$<TARGET_FILE:${target}>
-                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_no_private_qt_api.cmake"
-            )
-            set_tests_properties(${target}_no_private_qt_api PROPERTIES TIMEOUT 60)
-        endforeach()
-        add_test(NAME ferrous_private_qt_api_check_rejects_unreadable_binary
+        set(ferrous_objdump "${CMAKE_OBJDUMP}")
+    else()
+        find_program(FERROUS_OBJDUMP objdump REQUIRED)
+        set(ferrous_objdump "${FERROUS_OBJDUMP}")
+    endif()
+    get_property(ferrous_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS ferrous_targets)
+        get_target_property(target_type ${target} TYPE)
+        if(NOT target_type STREQUAL "EXECUTABLE")
+            continue()
+        endif()
+        add_test(NAME ${target}_no_private_qt_api
             COMMAND "${CMAKE_COMMAND}"
-                -DOBJDUMP=${CMAKE_OBJDUMP}
-                -DBINARY=${CMAKE_CURRENT_SOURCE_DIR}/tests/QtPrivateApiReferences.cmake
+                -DOBJDUMP=${ferrous_objdump}
+                -DBINARY=$<TARGET_FILE:${target}>
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_no_private_qt_api.cmake"
         )
-        set_tests_properties(ferrous_private_qt_api_check_rejects_unreadable_binary PROPERTIES
-            PASS_REGULAR_EXPRESSION "could[ \t\r\n]+not[ \t\r\n]+read"
-            TIMEOUT 60
-        )
-    endif()
+        set_tests_properties(${target}_no_private_qt_api PROPERTIES TIMEOUT 60)
+    endforeach()
+    add_test(NAME ferrous_private_qt_api_check_rejects_unreadable_binary
+        COMMAND "${CMAKE_COMMAND}"
+            -DOBJDUMP=${ferrous_objdump}
+            -DBINARY=${CMAKE_CURRENT_SOURCE_DIR}/tests/QtPrivateApiReferences.cmake
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_no_private_qt_api.cmake"
+    )
+    set_tests_properties(ferrous_private_qt_api_check_rejects_unreadable_binary PROPERTIES
+        PASS_REGULAR_EXPRESSION "could[ \t\r\n]+not[ \t\r\n]+read"
+        TIMEOUT 60
+    )
 endif()
