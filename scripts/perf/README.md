@@ -36,6 +36,8 @@ thread of the process (thread names with digits folded to `#`).
   `--fft`, `--view per-channel|downmix`, `--mode centered|rolling`,
   `--width`. `FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS=100000` lets a centered
   session decode up to the 64 MiB lookahead budget, the whole track for most.
+  `spectral_hash` is an FNV-1a hash of every chunk's start column, column
+  count and levels, in order, to check that a change leaves the output alone.
 - `seek FILE`: plays the file through `FrontendBridgeHandle` with the
   GStreamer backend and audio output, then seeks to `--seeks` fractions of
   the track. For each seek: when the engine reported it applied

@@ -61,12 +61,22 @@ const BUCKETS: usize = 1 << (8 + BUCKET_MANTISSA_BITS);
 /// the least `f32` with that level or more, which [`Self::new`] finds by
 /// bisecting over the bit patterns of positive `f32`s, as they sort in the
 /// order of their values.
+///
+/// A bucket holds at most one threshold, so a power's level is its bucket's
+/// level, plus one if the power reaches the next threshold: a table lookup
+/// and one comparison, with no branch on the power.
 struct SpectrumQuantizer {
     fft_size: usize,
-    /// `thresholds[k - 1]` is the least power encoded as level `k` or more.
+    /// `thresholds[k - 1]` is the least power encoded as level `k` or more;
+    /// the tests check the tables against them.
+    #[cfg(test)]
     thresholds: [f32; 255],
     /// The level of the least power of each bucket of `f32` bit patterns.
     bucket_levels: Box<[u8; BUCKETS]>,
+    /// The bit pattern of the threshold after each bucket's level, or
+    /// `u32::MAX` past level 255. Positive `f32`s order as their bit
+    /// patterns do, so comparing those compares the powers.
+    bucket_thresholds: Box<[u32; BUCKETS]>,
 }
 
 impl SpectrumQuantizer {
@@ -91,38 +101,51 @@ impl SpectrumQuantizer {
             *threshold = f32::from_bits(low);
         }
         let mut bucket_levels = Box::new([0; BUCKETS]);
-        for (bucket, bucket_level) in (0_u32..).zip(bucket_levels.iter_mut()) {
+        let mut bucket_thresholds = Box::new([u32::MAX; BUCKETS]);
+        for ((bucket, bucket_level), bucket_threshold) in (0_u32..)
+            .zip(bucket_levels.iter_mut())
+            .zip(bucket_thresholds.iter_mut())
+        {
             let least = f32::from_bits(bucket << BUCKET_SHIFT);
             let count = thresholds.partition_point(|&threshold| threshold <= least);
             *bucket_level = u8::try_from(count).unwrap_or(u8::MAX);
+            if let Some(next) = thresholds.get(count) {
+                *bucket_threshold = next.to_bits();
+            }
         }
         Self {
             fft_size,
+            #[cfg(test)]
             thresholds,
             bucket_levels,
+            bucket_thresholds,
         }
     }
 
     fn level(&self, power: f32) -> u8 {
-        if power.is_nan() || power <= 0.0 {
-            return 0;
+        let bits = power.to_bits();
+        // Zero, negative powers and NaNs have level zero: those are the bit
+        // patterns outside 1 (the least positive `f32`) to infinity.
+        let positive = bits.wrapping_sub(1) < f32::INFINITY.to_bits();
+        // The mask drops the sign bit, so every bit pattern has a bucket.
+        let bucket = (bits >> BUCKET_SHIFT) as usize & (BUCKETS - 1);
+        // Below 255 only: level 255 has no next threshold, and `u32::MAX`
+        // is a NaN's bit pattern, whose bucket is at level zero.
+        let level = self.bucket_levels[bucket] + u8::from(bits >= self.bucket_thresholds[bucket]);
+        if positive {
+            level
+        } else {
+            0
         }
-        // A positive power's sign bit is clear, so its bucket is in range.
-        let bucket = (power.to_bits() >> BUCKET_SHIFT) as usize & (BUCKETS - 1);
-        let mut level = self.bucket_levels[bucket];
-        while let Some(&threshold) = self.thresholds.get(usize::from(level)) {
-            if threshold > power {
-                break;
-            }
-            level += 1;
-        }
-        level
     }
 
     /// Append the levels of a row's first `bins` bins, zero past its end.
     fn append_row(&self, out: &mut Vec<u8>, row: &[f32], bins: usize) {
-        out.extend(row.iter().take(bins).map(|&power| self.level(power)));
-        out.extend(std::iter::repeat_n(0, bins.saturating_sub(row.len())));
+        let start = out.len();
+        out.resize(start + bins, 0);
+        for (level, &power) in out[start..].iter_mut().zip(row) {
+            *level = self.level(power);
+        }
     }
 }
 
@@ -216,6 +239,20 @@ mod tests {
                 f32::from_bits(0xffff_ffff),
             ] {
                 assert_matches(&quantizer, fft_size, special);
+            }
+        }
+    }
+
+    #[test]
+    fn no_bucket_holds_two_thresholds() {
+        // The single comparison in `level` relies on it.
+        for fft_size in FFT_SIZES {
+            let quantizer = SpectrumQuantizer::new(fft_size);
+            for pair in quantizer.thresholds.windows(2) {
+                let (low, high) = (pair[0].to_bits(), pair[1].to_bits());
+                if high != f32::INFINITY.to_bits() {
+                    assert_ne!(low >> BUCKET_SHIFT, high >> BUCKET_SHIFT, "FFT {fft_size}");
+                }
             }
         }
     }

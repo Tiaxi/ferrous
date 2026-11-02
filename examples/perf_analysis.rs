@@ -386,6 +386,19 @@ struct AnalysisTally {
     rate: u32,
     channels: u8,
     bins: u16,
+    /// FNV-1a over every chunk's start column, column count and levels,
+    /// in arrival order, to check that a change leaves the output alone.
+    columns_hash: u64,
+}
+
+/// The FNV-1a 64-bit offset basis.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// Fold `bytes` into an FNV-1a 64-bit hash.
+fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 impl AnalysisTally {
@@ -415,6 +428,14 @@ impl AnalysisTally {
                 self.chunks += 1;
                 self.chunk_bytes += usize_u64(chunk.columns_u8.len());
                 if chunk.column_count > 0 {
+                    let hash = if self.columns_hash == 0 {
+                        FNV_OFFSET
+                    } else {
+                        self.columns_hash
+                    };
+                    let hash = fnv1a(hash, &chunk.start_column_index.to_le_bytes());
+                    let hash = fnv1a(hash, &chunk.column_count.to_le_bytes());
+                    self.columns_hash = fnv1a(hash, &chunk.columns_u8);
                     self.first_columns.get_or_insert(at);
                     self.last_columns = Some(at);
                     self.columns += u64::from(chunk.column_count);
@@ -478,6 +499,11 @@ impl AnalysisTally {
         field(&mut fields, "spectral_columns", self.columns);
         field(&mut fields, "spectral_chunks", self.chunks);
         field(&mut fields, "spectral_bytes", self.chunk_bytes);
+        field(
+            &mut fields,
+            "spectral_hash",
+            format!("\"{:016x}\"", self.columns_hash),
+        );
         field(
             &mut fields,
             "spectral_audio_s",

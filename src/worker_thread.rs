@@ -85,6 +85,68 @@ pub(crate) fn spawn_worker(
         .ok()
 }
 
+/// How many nice levels below the rest of the app background analysis
+/// runs. Under contention a thread ten levels lower gets about a tenth of
+/// the CPU time of one at the app's level, which still decodes a
+/// spectrogram many times faster than playback needs it.
+#[cfg(target_os = "linux")]
+const BACKGROUND_NICE_INCREMENT: libc::c_int = 10;
+
+/// The highest nice value, the lowest priority.
+#[cfg(target_os = "linux")]
+const MAX_NICE: libc::c_int = 19;
+
+/// Run the calling thread at a lower scheduling priority than the rest of
+/// the app, for background analysis that must not take CPU time from the
+/// UI, render and playback threads when the machine is busy.
+///
+/// Linux keeps a nice value per thread, so only the calling thread and the
+/// threads it starts later run lower. The level is ten below the main
+/// thread's, so a thread started by one already lowered, like a helper of
+/// the spectrogram worker, runs at the same level rather than ten lower
+/// still. Elsewhere this does nothing. A thread that cannot lower its
+/// priority runs on at its own, as nothing depends on it.
+pub(crate) fn lower_current_thread_priority() {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = lower_linux_thread_priority() {
+        eprintln!("[ferrous] could not lower a background thread's priority: {error}");
+    }
+}
+
+/// The nice value of the thread `tid`, 0 for the calling thread. Linux
+/// applies `PRIO_PROCESS` to the thread whose ID it is given, not to the
+/// whole process; the process ID is the main thread's.
+#[cfg(target_os = "linux")]
+fn linux_thread_nice(tid: libc::id_t) -> std::io::Result<libc::c_int> {
+    // SAFETY: errno is the calling thread's own; clearing it tells the
+    // nice value -1 from a failed call.
+    unsafe { *libc::__errno_location() = 0 };
+    // SAFETY: plain system call, no pointers.
+    let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, tid) };
+    if nice == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(0) {
+            return Err(error);
+        }
+    }
+    Ok(nice)
+}
+
+#[cfg(target_os = "linux")]
+fn lower_linux_thread_priority() -> std::io::Result<()> {
+    let app = linux_thread_nice(std::process::id())?;
+    let current = linux_thread_nice(0)?;
+    let lower = app.saturating_add(BACKGROUND_NICE_INCREMENT).min(MAX_NICE);
+    if lower <= current {
+        return Ok(());
+    }
+    // SAFETY: plain system call on the calling thread, no pointers.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, lower) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +194,41 @@ mod tests {
             owned_rx.try_recv(),
             Err(crossbeam_channel::TryRecvError::Disconnected)
         );
+    }
+
+    /// The calling thread's nice value.
+    #[cfg(target_os = "linux")]
+    fn thread_nice() -> libc::c_int {
+        // SAFETY: plain system call on the calling thread, no pointers.
+        unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn lowering_a_threads_priority_leaves_the_other_threads_alone() {
+        let own = thread_nice();
+        let (before, after) = std::thread::spawn(|| {
+            let before = thread_nice();
+            lower_current_thread_priority();
+            (before, thread_nice())
+        })
+        .join()
+        .expect("thread");
+        assert_eq!(after, (before + BACKGROUND_NICE_INCREMENT).min(MAX_NICE));
+        assert_eq!(thread_nice(), own);
+        // Threads it starts later inherit it, and lowering one of them
+        // again keeps it at the same level.
+        let nested = std::thread::spawn(|| {
+            lower_current_thread_priority();
+            std::thread::spawn(|| {
+                lower_current_thread_priority();
+                thread_nice()
+            })
+            .join()
+            .expect("inner thread")
+        })
+        .join()
+        .expect("thread");
+        assert_eq!(nested, (own + BACKGROUND_NICE_INCREMENT).min(MAX_NICE));
     }
 }
