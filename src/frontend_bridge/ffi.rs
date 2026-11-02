@@ -1970,15 +1970,22 @@ fn parse_queue_command(
         return Ok(None);
     }
     let revision = reader.read_u64()?;
+    if cmd_id == 9 {
+        // The u64 serial the snapshots echo, then the i32 row, -1 for none.
+        let serial = reader.read_u64()?;
+        let selected = match reader.read_i32()? {
+            index if index < 0 => None,
+            index => Some(usize_from_i32(index)?),
+        };
+        reader.expect_done()?;
+        return Ok(Some(BridgeCommand::SelectQueueAt {
+            revision,
+            serial,
+            selected,
+        }));
+    }
     let command = match cmd_id {
         8 => BridgeQueueCommand::PlayAt(usize_from_u32(reader.read_u32()?)),
-        9 => {
-            let selected = match reader.read_i32()? {
-                index if index < 0 => None,
-                index => Some(usize_from_i32(index)?),
-            };
-            BridgeQueueCommand::Select(selected)
-        }
         63 => {
             let count = reader.read_count(4)?;
             let mut indices = Vec::with_capacity(count);
@@ -3325,6 +3332,7 @@ mod tests {
             queue_revision: 1,
             queue_update: Some(QueueUpdate::Full(vec![PathBuf::from("/music/a.flac")])),
             selected_queue_index: Some(0),
+            queue_selection_serial: 9,
             queue_undo: QueueUndoState::default(),
             settings: super::super::BridgeSettings {
                 volume: 0.75,
@@ -3595,13 +3603,27 @@ mod tests {
                 command: BridgeQueueCommand::PlayAt(3)
             }
         ));
+        let select = |row: i32| {
+            let mut payload = Vec::new();
+            push_u64(&mut payload, 7);
+            push_u64(&mut payload, u64::MAX - 1);
+            push_i32(&mut payload, row);
+            payload
+        };
         assert!(matches!(
-            parse(9, &with_revision(&[u32::MAX])),
-            BridgeCommand::QueueAt {
+            parse(9, &select(2)),
+            BridgeCommand::SelectQueueAt {
                 revision: 7,
-                command: BridgeQueueCommand::Select(None)
-            }
+                serial,
+                selected: Some(2)
+            } if serial == u64::MAX - 1
         ));
+        assert!(matches!(
+            parse(9, &select(-1)),
+            BridgeCommand::SelectQueueAt { selected: None, .. }
+        ));
+        // A command without its serial could never be answered.
+        assert!(parse_binary_command(&encode_command(9, &with_revision(&[2]))).is_err());
         assert!(matches!(
             parse(10, &with_revision(&[2])),
             BridgeCommand::QueueAt {
@@ -4435,6 +4457,7 @@ mod tests {
         revision: u64,
         len: u32,
         selected: i32,
+        selection_serial: u64,
         total_seconds: f64,
         unknown: u32,
         base_revision: u64,
@@ -4462,6 +4485,7 @@ mod tests {
             revision: read_u64(section, &mut offset),
             len: read_u32(section, &mut offset),
             selected: read_i32(section, &mut offset),
+            selection_serial: read_u64(section, &mut offset),
             total_seconds: read_f64(section, &mut offset),
             unknown: read_u32(section, &mut offset),
             ..TestQueueSection::default()
@@ -4507,6 +4531,44 @@ mod tests {
         }
         assert_eq!(offset, section.len(), "the whole section is read");
         decoded
+    }
+
+    #[test]
+    fn selection_updates_echo_the_serial_and_merge_to_the_newest() {
+        let selection = |row, serial| {
+            let mut snapshot = snapshot_with_update(edits(1, Vec::new()), 1);
+            snapshot.selected_queue_index = Some(row);
+            snapshot.queue_selection_serial = serial;
+            snapshot
+        };
+        let mut relay = QueueRelay::default();
+        let full = queue_sections(
+            &mut relay,
+            [&snapshot_with_update(
+                QueueUpdate::Full(vec![PathBuf::from("/a"), PathBuf::from("/b")]),
+                1,
+            )],
+        )
+        .unwrap();
+
+        let older = queue_sections(&mut relay, [&selection(0, 1)]).unwrap();
+        let decoded = decode_queue_section(&older);
+        assert_eq!(decoded.kind, QUEUE_DELTA);
+        assert_eq!(decoded.base_revision, 1);
+        assert_eq!(decoded.revision, 1);
+        assert!(decoded.ops.is_empty());
+        assert_eq!((decoded.selected, decoded.selection_serial), (0, 1));
+        assert_eq!(&older[17..25], &1u64.to_le_bytes());
+
+        // A snapshot that replaces one the UI has not taken answers for both.
+        let newer = queue_sections(&mut relay, [&selection(1, 2)]).unwrap();
+        let merged = decode_queue_section(&relay.merge(&newer, &older));
+        assert_eq!(merged.kind, QUEUE_DELTA);
+        assert_eq!((merged.selected, merged.selection_serial), (1, 2));
+        let merged = decode_queue_section(&relay.merge(&newer, &full));
+        assert_eq!(merged.kind, QUEUE_FULL);
+        assert_eq!(merged.rows.len(), 2);
+        assert_eq!((merged.selected, merged.selection_serial), (1, 2));
     }
 
     /// The UI's queue, which applies queue sections as the Qt client does.
@@ -4580,6 +4642,7 @@ mod tests {
         assert_eq!(read_u64(&encoded, &mut offset), 1);
         assert_eq!(read_u32(&encoded, &mut offset), 1);
         assert_eq!(read_i32(&encoded, &mut offset), 0);
+        assert_eq!(read_u64(&encoded, &mut offset), 9);
         assert!((read_f64(&encoded, &mut offset) - 180.0).abs() < 0.001);
         assert_eq!(read_u32(&encoded, &mut offset), 0);
         assert_eq!(read_string(&encoded, &mut offset), "Sample Track");
@@ -4750,10 +4813,10 @@ mod tests {
         };
 
         // The header, the operation count, and one operation of no rows.
-        assert_eq!(send(&mut snapshot, QueueEdit::Remove(vec![5_000])), (50, 1));
+        assert_eq!(send(&mut snapshot, QueueEdit::Remove(vec![5_000])), (58, 1));
         assert_eq!(
             send(&mut snapshot, QueueEdit::Move { from: 9_000, to: 2 }),
-            (50, 1)
+            (58, 1)
         );
         // One new row, and the details of one row.
         let (bytes, ops) = send(

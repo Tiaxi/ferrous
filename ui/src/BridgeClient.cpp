@@ -2872,8 +2872,6 @@ void BridgeClient::playAt(int index) {
                 .arg(m_selectedQueueIndex));
     }
 #endif
-    m_pendingQueueSelection = index;
-    m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandQueueRow(
         BinaryBridgeCodec::CmdPlayAt,
         m_queueRevision,
@@ -2889,11 +2887,13 @@ void BridgeClient::selectQueueIndex(int index) {
     }
     m_selectedQueueIndex = index;
     scheduleSnapshotChanged();
-    m_pendingQueueSelection = index;
-    m_pendingQueueSelectionUntilMs = QDateTime::currentMSecsSinceEpoch() + 700;
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandSelectQueue(
-        m_queueRevision,
-        static_cast<qint32>(index)));
+    const quint64 serial = m_queueSelectionsSent + 1;
+    if (sendBinaryCommand(BinaryBridgeCodec::encodeCommandSelectQueue(
+            m_queueRevision,
+            serial,
+            static_cast<qint32>(index)))) {
+        m_queueSelectionsSent = serial;
+    }
 }
 
 void BridgeClient::removeIndices(const QVariantList &indices) {
@@ -5234,8 +5234,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         && (queue.kind == BinaryBridgeCodec::QueueFull
             || (queue.kind == BinaryBridgeCodec::QueueDelta && m_queueRevision != 0
                 && queue.baseRevision == m_queueRevision));
-    const int qlen = queueFits ? queue.len : m_queueLength;
-    const int selected = queueFits ? queue.selectedIndex : m_selectedQueueIndex;
+    const int selected = queueFits && queue.selectionSerial >= m_queueSelectionsSent
+        ? queue.selectedIndex
+        : m_selectedQueueIndex;
 
     const QString metadataSourcePath = snapshot.metadata.present ? snapshot.metadata.sourcePath : QString{};
     const QString metadataCoverPath = snapshot.metadata.present ? snapshot.metadata.coverPath : QString{};
@@ -5411,25 +5412,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         snapshotSignalChanged = true;
     }
 
-    if (m_pendingQueueSelection >= qlen) {
-        m_pendingQueueSelection = -1;
-        m_pendingQueueSelectionUntilMs = 0;
-    }
     finishSnapshotSection(snapshotPlaybackMs);
 
     // The selection the rows come with is in place before the rows change,
     // so handlers of the row signals see it.
-    if (m_pendingQueueSelection >= 0) {
-        if (selected == m_pendingQueueSelection || nowMs >= m_pendingQueueSelectionUntilMs) {
-            m_pendingQueueSelection = -1;
-            m_pendingQueueSelectionUntilMs = 0;
-            if (m_selectedQueueIndex != selected) {
-                m_selectedQueueIndex = selected;
-                changed = true;
-                snapshotSignalChanged = true;
-            }
-        }
-    } else if (m_selectedQueueIndex != selected) {
+    if (m_selectedQueueIndex != selected) {
         m_selectedQueueIndex = selected;
         changed = true;
         snapshotSignalChanged = true;

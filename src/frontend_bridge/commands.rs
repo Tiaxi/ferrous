@@ -68,6 +68,7 @@ pub(super) fn handle_bridge_command(
         // before commands get here.
         BridgeCommand::SaveState(_)
         | BridgeCommand::QueueAt { .. }
+        | BridgeCommand::SelectQueueAt { .. }
         | BridgeCommand::Library(BridgeLibraryCommand::RefreshEditedPaths(_)) => false,
         BridgeCommand::Playback(cmd) => {
             handle_playback_bridge_command(&cmd, state, context);

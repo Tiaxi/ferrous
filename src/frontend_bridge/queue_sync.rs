@@ -8,6 +8,9 @@
 //! smaller or the UI needs it. The UI sends index-based commands with the
 //! revision its rows show; [`QueueSync::resolve`] carries them across the
 //! edits made since, so they act on the rows the user saw.
+//!
+//! The selected row travels with queue updates. A change to it, or a
+//! selection command answered with no change, sends an update without edits.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -244,6 +247,11 @@ pub(super) struct QueueSync {
     journal_indices: usize,
     /// Commands issued at a revision below this predate the journal.
     journal_floor: u64,
+    /// The serial of the last selection command the UI sent that the bridge
+    /// has handled.
+    selection_serial: u64,
+    /// The selected row and the serial the last update sent to the UI had.
+    sent_selection: (Option<usize>, u64),
 }
 
 impl Default for QueueSync {
@@ -257,6 +265,8 @@ impl Default for QueueSync {
             journal: VecDeque::new(),
             journal_indices: 0,
             journal_floor: 1,
+            selection_serial: 0,
+            sent_selection: (None, 0),
         }
     }
 }
@@ -264,6 +274,17 @@ impl Default for QueueSync {
 impl QueueSync {
     pub(super) fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub(super) fn selection_serial(&self) -> u64 {
+        self.selection_serial
+    }
+
+    /// Note that the bridge handled the selection command numbered `serial`,
+    /// whatever became of it. The UI holds the row it chose until it hears
+    /// so.
+    pub(super) fn answer_selection(&mut self, serial: u64) {
+        self.selection_serial = serial;
     }
 
     /// Note `edit`, which left `queue_len` rows in the queue.
@@ -334,10 +355,18 @@ impl QueueSync {
         self.pending != Pending::None
     }
 
-    /// The update the next snapshot carries, if the UI's queue is behind.
-    pub(super) fn update(&self, queue: &[PathBuf]) -> Option<QueueUpdate> {
+    /// The update the next snapshot carries, if the UI's queue, or its
+    /// selection given that `selected` is the selected row, is behind.
+    pub(super) fn update(&self, queue: &[PathBuf], selected: Option<usize>) -> Option<QueueUpdate> {
         match &self.pending {
-            Pending::None => None,
+            Pending::None => {
+                (self.sent_selection != (selected, self.selection_serial)).then(|| {
+                    QueueUpdate::Edits {
+                        base_revision: self.sent_revision,
+                        edits: Vec::new(),
+                    }
+                })
+            }
             Pending::Full => Some(QueueUpdate::Full(queue.to_vec())),
             Pending::Edits { edits, .. } => Some(QueueUpdate::Edits {
                 base_revision: self.sent_revision,
@@ -346,9 +375,11 @@ impl QueueSync {
         }
     }
 
-    /// Note that a snapshot with [`Self::update`] reached the relay.
-    pub(super) fn mark_sent(&mut self) {
+    /// Note that a snapshot with [`Self::update`] and the selected row
+    /// `selected` reached the relay.
+    pub(super) fn mark_sent(&mut self, selected: Option<usize>) {
         self.sent_revision = self.revision;
+        self.sent_selection = (selected, self.selection_serial);
         self.pending = Pending::None;
     }
 
@@ -488,8 +519,33 @@ mod tests {
 
     fn sent() -> QueueSync {
         let mut sync = QueueSync::default();
-        sync.mark_sent();
+        sync.mark_sent(None);
         sync
+    }
+
+    #[test]
+    fn a_selection_goes_out_as_an_update_without_edits() {
+        let mut sync = sent();
+        let no_edits = Some(QueueUpdate::Edits {
+            base_revision: 1,
+            edits: Vec::new(),
+        });
+        assert_eq!(sync.update(&[], None), None);
+
+        // Another row is selected.
+        assert_eq!(sync.update(&[], Some(1)), no_edits);
+        sync.mark_sent(Some(1));
+        assert_eq!(sync.update(&[], Some(1)), None);
+
+        // A selection command changed nothing, and the UI waits for it.
+        sync.answer_selection(1);
+        assert_eq!(sync.selection_serial(), 1);
+        assert_eq!(sync.update(&[], Some(1)), no_edits);
+        sync.mark_sent(Some(1));
+        assert_eq!(sync.update(&[], Some(1)), None);
+
+        // The queue's revision stays, so no command needs carrying across.
+        assert_eq!(sync.revision(), 1);
     }
 
     #[test]
@@ -497,10 +553,10 @@ mod tests {
         let mut sync = QueueSync::default();
         assert_eq!(sync.revision(), 1);
         let queue = vec![p("/a.flac")];
-        assert_eq!(sync.update(&queue), Some(QueueUpdate::Full(queue)));
-        sync.mark_sent();
+        assert_eq!(sync.update(&queue, None), Some(QueueUpdate::Full(queue)));
+        sync.mark_sent(None);
         assert!(!sync.has_pending());
-        assert_eq!(sync.update(&[]), None);
+        assert_eq!(sync.update(&[], None), None);
     }
 
     #[test]
@@ -514,16 +570,16 @@ mod tests {
         sync.record(QueueEdit::Move { from: 0, to: 1 }, 2);
         assert_eq!(sync.revision(), 3);
         assert_eq!(
-            sync.update(&[]),
+            sync.update(&[], None),
             Some(QueueUpdate::Edits {
                 base_revision: 1,
                 edits: vec![insert, QueueEdit::Move { from: 0, to: 1 }],
             })
         );
-        sync.mark_sent();
+        sync.mark_sent(None);
         sync.record(QueueEdit::Remove(vec![1]), 1);
         assert_eq!(
-            sync.update(&[]),
+            sync.update(&[], None),
             Some(QueueUpdate::Edits {
                 base_revision: 3,
                 edits: vec![QueueEdit::Remove(vec![1])],
@@ -538,7 +594,7 @@ mod tests {
         sync.record(QueueEdit::Refresh, 3);
         assert_eq!(sync.revision(), 3);
         assert_eq!(
-            sync.update(&[]),
+            sync.update(&[], None),
             Some(QueueUpdate::Edits {
                 base_revision: 1,
                 edits: vec![QueueEdit::Refresh],
@@ -559,18 +615,18 @@ mod tests {
         );
         // One edit as large as the queue still travels as an edit.
         assert!(matches!(
-            sync.update(&queue),
+            sync.update(&queue, None),
             Some(QueueUpdate::Edits { .. })
         ));
         sync.record(QueueEdit::Remove((0..999).collect()), 1);
         assert_eq!(
-            sync.update(&queue[999..]),
+            sync.update(&queue[999..], None),
             Some(QueueUpdate::Full(queue[999..].to_vec()))
         );
         // A reset always sends the whole queue.
-        sync.mark_sent();
+        sync.mark_sent(None);
         sync.reset();
-        assert_eq!(sync.update(&[]), Some(QueueUpdate::Full(Vec::new())));
+        assert_eq!(sync.update(&[], None), Some(QueueUpdate::Full(Vec::new())));
     }
 
     #[test]
@@ -579,7 +635,7 @@ mod tests {
         sync.request_full();
         assert_eq!(sync.revision(), 1);
         assert_eq!(
-            sync.update(&[p("/a.flac")]),
+            sync.update(&[p("/a.flac")], None),
             Some(QueueUpdate::Full(vec![p("/a.flac")]))
         );
     }
