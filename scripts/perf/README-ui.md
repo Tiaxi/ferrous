@@ -52,7 +52,8 @@ Loaded with `LD_PRELOAD` and `FERROUS_PROBE_OUT=<dir>`, it writes
 - Control: `mark TEXT`, `eval JS` (in the main window's QML context),
   `click X Y`, `drag X0 Y0 X1 Y1 MS`, `move`, `wheel X Y DY`, `key CODE`,
   `type TEXT`, `resize W H`, `minimize`, `restore`, `maximize`,
-  `cover [off]` (an opaque window over the app), `winstate`, `dump FILE`
+  `cover [off]` (an opaque window over the app), `setprop NAME PROP NUMBER`
+  (on items with that objectName), `winstate`, `dump FILE`
   (item tree with scene geometry), `quit`.
 
 ## Scripts
@@ -67,6 +68,7 @@ Loaded with `LD_PRELOAD` and `FERROUS_PROBE_OUT=<dir>`, it writes
 | `ui_startup.py OUT REP DB [WATCH]` | time to the first frame and GUI stalls in the first 30 s with a large library |
 | `ui_flame.py OUT FILE NAME [JS...]` | a flame graph of a steady state (`perf record -e cpu-clock:u --call-graph fp`) |
 | `ui_batches.py OUT FILE` | draw calls per frame per state |
+| `ui_waveform_zoom.py OUT FILE` | the waveform view whole-track and zoomed in, with a dirty-item census |
 | `ui_summarize.py probe.log` | per marked interval: fps, frame times, uploads, draws, stalls |
 | `hold_display.py [S]` | holds a screensaver inhibitor; with the display off the compositor sends no frame callbacks and nothing renders |
 

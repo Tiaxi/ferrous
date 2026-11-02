@@ -601,6 +601,19 @@ private:
                 }
                 reply("dirty off");
             }
+        } else if (cmd == "setprop" && w != nullptr) {
+            // setprop <objectName> <property> <number>: on every item so named.
+            int n = 0;
+            QList<QQuickItem *> stack{w->contentItem()};
+            while (!stack.isEmpty()) {
+                QQuickItem *item = stack.takeLast();
+                if (item->objectName() == a.value(1)) {
+                    item->setProperty(a.value(2).toUtf8().constData(), a.value(3).toDouble());
+                    ++n;
+                }
+                stack.append(item->childItems());
+            }
+            reply("setprop " + std::to_string(n));
         } else if (cmd == "winstate") {
             std::string out = "winstate";
             QList<QWindow *> wins;
