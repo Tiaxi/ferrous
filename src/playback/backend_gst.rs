@@ -3902,10 +3902,15 @@ impl SeekMethod {
     }
 }
 
-/// The flags of the first seek of a [`SeekMethod::Located`] seek.
+/// The flags of the first seek of a [`SeekMethod::Located`] seek. Where
+/// the parser has indexed a frame up to 20 s before the target, it reads
+/// from there instead of bisecting, and the audio of this seek is never
+/// heard: in trick mode without audio, the decoder does not decode it.
 const LOCATE_FLAGS: gst::SeekFlags = gst::SeekFlags::FLUSH
     .union(gst::SeekFlags::KEY_UNIT)
-    .union(gst::SeekFlags::SNAP_BEFORE);
+    .union(gst::SeekFlags::SNAP_BEFORE)
+    .union(gst::SeekFlags::TRICKMODE)
+    .union(gst::SeekFlags::TRICKMODE_NO_AUDIO);
 
 /// How far before its target the first seek of a located seek goes, so
 /// that the stream has audio after where it lands, which the pipeline
@@ -4681,6 +4686,7 @@ mod tests {
         assert_eq!(SeekMethod::Located.flags(), accurate);
         assert!(LOCATE_FLAGS.contains(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT));
         assert!(!LOCATE_FLAGS.contains(gst::SeekFlags::ACCURATE));
+        assert!(LOCATE_FLAGS.contains(gst::SeekFlags::TRICKMODE_NO_AUDIO));
     }
 
     #[test]
@@ -5635,6 +5641,41 @@ mod engine_tests {
             None
         });
         bytes
+    }
+
+    /// Record the flags and start of every seek that the elements made by
+    /// `factory` in `playbin` receive.
+    fn record_seeks(
+        playbin: &gst::Element,
+        factory: &'static str,
+    ) -> Arc<Mutex<Vec<(gst::SeekFlags, Duration)>>> {
+        let seeks = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seeks);
+        playbin.connect("deep-element-added", false, move |values| {
+            let element = values.get(2)?.get::<gst::Element>().ok()?;
+            if element.factory().is_some_and(|f| f.name() == factory) {
+                let recorded = Arc::clone(&recorded);
+                element.static_pad("src")?.add_probe(
+                    gst::PadProbeType::EVENT_UPSTREAM,
+                    move |_, info| {
+                        if let Some(gst::EventView::Seek(seek)) =
+                            info.event().map(|event| event.view())
+                        {
+                            let (_, flags, _, start, _, _) = seek.get();
+                            if let gst::GenericFormattedValue::Time(Some(start)) = start {
+                                recorded
+                                    .lock()
+                                    .unwrap()
+                                    .push((flags, Duration::from_nanos(start.nseconds())));
+                            }
+                        }
+                        gst::PadProbeReturn::Ok
+                    },
+                );
+            }
+            None
+        });
+        seeks
     }
 
     /// A buffer that the output rendered.
@@ -7180,6 +7221,7 @@ mod engine_tests {
         let file_len = std::fs::metadata(&track).unwrap().len();
         let mut engine = Engine::start();
         let received = count_received_bytes(&engine.playbin, "flacparse");
+        let seeks = record_seeks(&engine.playbin, "flacparse");
         let rendered = record_rendered(&engine.playbin);
         engine.send(PlaybackCommand::LoadQueue(vec![track]));
         engine.send(PlaybackCommand::Play);
@@ -7192,6 +7234,7 @@ mod engine_tests {
         let target = MARKED_FLAC_CLICK - millis(200);
         let read_before = received.load(Ordering::Relaxed);
         let rendered_before = rendered.lock().unwrap().len();
+        seeks.lock().unwrap().clear();
         engine.send(PlaybackCommand::Seek(target));
         engine.wait_until("the seek did not land", |engine| {
             engine.snapshot.seek_landed_serial == 1
@@ -7202,6 +7245,16 @@ mod engine_tests {
         assert!(
             read < up_to_target / 4,
             "the seek read {read} bytes; the file holds {up_to_target} up to the target"
+        );
+
+        // A key-unit seek short of the target, whose audio the decoder
+        // skips, then an accurate one to the target.
+        assert_eq!(
+            *seeks.lock().unwrap(),
+            [
+                (LOCATE_FLAGS, target - LOCATE_LEAD),
+                (gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, target)
+            ]
         );
 
         // One landing, at the target, which no snapshot preceded.
