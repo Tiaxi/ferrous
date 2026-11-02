@@ -16,6 +16,11 @@ Item {
     property var pointerActivity: null
     property size reservedCorner: Qt.size(0, 0)
     readonly property alias waveformItem: waveform
+    // The channel row the pointer is on, or -1.
+    readonly property int hoveredChannel: waveformHover.hovered
+        ? Math.floor(waveformHover.point.position.y * waveform.channelCount
+                     / Math.max(1, root.height))
+        : -1
 
     Accessible.role: Accessible.Graphic
     Accessible.name: I18n.i18nc("@label", "Waveform")
@@ -58,20 +63,21 @@ Item {
                 root.seekCommitted(seconds)
             }
         }
-    }
 
-    HoverHandler {
-        id: waveformHover
-        objectName: "waveformSurfaceHoverHandler"
-        cursorShape: root.interactiveOverlaysVisible ? Qt.ArrowCursor : Qt.BlankCursor
-        onPointChanged: {
-            waveform.setHoverPosition(point.position.x, point.position.y, hovered)
-            if (root.pointerActivity) {
-                root.pointerActivity(point.scenePosition.x, point.scenePosition.y)
+        // The only hover handler over the waveform, and on the item itself.
+        // The item takes hover for its crosshair, so a handler on a parent
+        // never hears of the pointer. A hovered handler on an item above,
+        // even one that lets hover through, keeps it from the item instead.
+        HoverHandler {
+            id: waveformHover
+            objectName: "waveformSurfaceHoverHandler"
+            cursorShape: root.interactiveOverlaysVisible ? Qt.ArrowCursor : Qt.BlankCursor
+            onPointChanged: {
+                if (root.pointerActivity) {
+                    root.pointerActivity(point.scenePosition.x, point.scenePosition.y)
+                }
             }
         }
-        onHoveredChanged: waveform.setHoverPosition(
-            point.position.x, point.position.y, hovered)
     }
 
     Repeater {
@@ -83,10 +89,6 @@ Item {
             height: root.height / Math.max(1, waveform.channelCount)
             y: index * height
 
-            HoverHandler {
-                id: channelHover
-            }
-
             Row {
                 anchors.left: parent.left
                 anchors.top: parent.top
@@ -94,6 +96,7 @@ Item {
                 spacing: 4
 
                 Rectangle {
+                    objectName: "waveformChannelLabel"
                     width: channelText.implicitWidth + 8
                     height: channelText.implicitHeight + 2
                     radius: 3
@@ -116,7 +119,7 @@ Item {
                     visible: root.interactiveOverlaysVisible
                         && (root.uiBridge.channelButtonsVisibility === 2
                             || (root.uiBridge.channelButtonsVisibility === 1
-                                && channelHover.hovered))
+                                && root.hoveredChannel === index))
                     width: Math.max(muteText.implicitWidth + 10, height * 4 / 3)
                     height: muteText.implicitHeight + 4
                     radius: 3
@@ -148,7 +151,7 @@ Item {
                     visible: root.interactiveOverlaysVisible
                         && (root.uiBridge.channelButtonsVisibility === 2
                             || (root.uiBridge.channelButtonsVisibility === 1
-                                && channelHover.hovered))
+                                && root.hoveredChannel === index))
                     width: Math.max(soloText.implicitWidth + 10, height * 4 / 3)
                     height: soloText.implicitHeight + 4
                     radius: 3

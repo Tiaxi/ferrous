@@ -1256,6 +1256,8 @@ public:
 private slots:
     void waveformSurfaceFollowsSharedChannelAndOverlaySettings();
     void waveformSurfaceMuteButtonsFollowTheMutedChannels();
+    void waveformPointerBringsTheControlsBackOverItsOverlays();
+    void pointerOverTheViewBringsTheViewerControlsBack();
     void levelMeterKeepsVisualizationHeightAndFollowsModes();
     void waveformProgressInvalidatesOnlyTailSpan();
     void waveformPeakUpdatesInvalidateChangedSuffix();
@@ -2631,7 +2633,7 @@ Item {
     QObject *hoverHandler = root->findChild<QObject *>(
         QStringLiteral("waveformSurfaceHoverHandler"));
     QVERIFY(hoverHandler != nullptr);
-    QCOMPARE(hoverHandler->parent(), surface);
+    QCOMPARE(hoverHandler->parent(), waveform);
 
     QObject *bridge = root->findChild<QObject *>(QStringLiteral("waveformBridge"));
     QVERIFY(bridge != nullptr);
@@ -16876,6 +16878,339 @@ void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() 
     QTest::mouseMove(window, nearViewerSwitch);
     QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, nearViewerSwitch);
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void WaveformSmokeTest::waveformPointerBringsTheControlsBackOverItsOverlays() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    width: 640
+    height: 320
+    visible: true
+    property int pointerMoves: 0
+
+    QtObject {
+        id: bridge
+        objectName: "waveformBridge"
+        property string playbackState: "Stopped"
+        property string currentTrackPath: ""
+        property var waveformPeaksPacked: ""
+        property real waveformCoverageSeconds: 0
+        property bool waveformComplete: false
+        property real durationSeconds: 100
+        property int spectrogramViewMode: 1
+        property bool spectrogramZoomEnabled: true
+        property bool showSpectrogramScale: false
+        property bool showSpectrogramCrosshair: true
+        property bool showFps: false
+        property int currentTrackChannels: 2
+        property var currentTrackChannelLabels: []
+        property var soloedChannels: []
+        property int channelButtonsVisibility: 2
+        property int muteCalls: 0
+        property int soloCalls: 0
+        function isChannelMuted(channelIndex) { return false }
+        function toggleChannelMute(channelIndex) { ++muteCalls }
+        function soloChannel(channelIndex) { ++soloCalls }
+    }
+
+    Components.FullscreenControlsAutoHide {
+        id: autoHide
+        objectName: "autoHide"
+        active: true
+    }
+
+    Viewers.WaveformSurface {
+        anchors.fill: parent
+        uiBridge: bridge
+        interactiveOverlaysVisible: autoHide.controlsVisible
+        pointerActivity: function(x, y) {
+            ++pointerMoves
+            autoHide.pointerMoved(x, y)
+        }
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QObject *autoHide = root->findChild<QObject *>(QStringLiteral("autoHide"));
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("waveformBridge"));
+    auto *waveform = root->findChild<WaveformEditorItem *>(QStringLiteral("waveformEditorItem"));
+    QVERIFY(autoHide != nullptr && bridge != nullptr && waveform != nullptr);
+    QTRY_COMPARE(waveform->channelCount(), 2);
+    QVERIFY(waveform->crosshairEnabled());
+    QObject *hoverHandler = root->findChild<QObject *>(
+        QStringLiteral("waveformSurfaceHoverHandler"));
+    QVERIFY(hoverHandler != nullptr);
+
+    const auto keepControlsShown = [&]() {
+        autoHide->setProperty("hideDelay", 5000);
+        QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    };
+    // Hides the controls, then moves the pointer to `at` and sees them return.
+    const auto hideThenMoveTo = [&](QPoint at) {
+        autoHide->setProperty("hideDelay", 1);
+        QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+        QTRY_VERIFY(!waveform->crosshairEnabled());
+        QSignalSpy controlsChanged(autoHide, SIGNAL(controlsVisibleChanged()));
+        QTest::mouseMove(window, at);
+        QTRY_VERIFY(!controlsChanged.isEmpty());
+        keepControlsShown();
+        QTRY_VERIFY(waveform->crosshairEnabled());
+        QTRY_VERIFY(waveform->m_hoverActive);
+        QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), at);
+        QVERIFY(hoverHandler->property("hovered").toBool());
+    };
+    const auto center = [](const QQuickItem *item) { return sceneRectOf(item).center().toPoint(); };
+    // The row resizes for its returned buttons as it next polishes, and a
+    // click outside the row does not reach them.
+    const auto waitForRowLaidOut = [&](QQuickItem *mute, QQuickItem *solo) {
+        QTRY_VERIFY(mute->isVisible() && solo->isVisible());
+        QTRY_VERIFY(sceneRectOf(solo->parentItem()).contains(sceneRectOf(mute))
+                    && sceneRectOf(solo->parentItem()).contains(sceneRectOf(solo)));
+    };
+
+    // Over the waveform, on every channel's row.
+    const QRectF view = sceneRectOf(waveform);
+    for (const int row : {0, 1}) {
+        const QRectF rowRect(view.x(), view.y() + row * view.height() / 2,
+                             view.width(), view.height() / 2);
+        hideThenMoveTo(rowRect.center().toPoint() + QPoint(row, 0));
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+    }
+
+    // What the crosshair draws goes away with the controls and returns with them.
+    const auto painted = [&]() {
+        QImage image(waveform->size().toSize(), QImage::Format_RGB32);
+        image.fill(Qt::black);
+        QPainter painter(&image);
+        waveform->paint(&painter);
+        return image;
+    };
+    const QImage withCrosshair = painted();
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!waveform->crosshairEnabled());
+    QVERIFY(painted() != withCrosshair);
+    keepControlsShown();
+    QTRY_VERIFY(waveform->crosshairEnabled());
+    QTRY_COMPARE(painted(), withCrosshair);
+
+    // On a channel's label, which stays while the controls are hidden.
+    QQuickItem *label = firstVisibleItemNamed(
+        window->contentItem(), QStringLiteral("waveformChannelLabel"));
+    QVERIFY(label != nullptr);
+    hideThenMoveTo(center(label));
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    // Where a button shows when the controls return, and then on it: the
+    // pointer keeps the controls up, and the button still takes the click.
+    QQuickItem *solo = firstVisibleItemNamed(
+        window->contentItem(), QStringLiteral("waveformChannelSoloButton"));
+    QQuickItem *mute = firstVisibleItemNamed(
+        window->contentItem(), QStringLiteral("waveformChannelMuteButton"));
+    QVERIFY(solo != nullptr && mute != nullptr);
+    waitForRowLaidOut(mute, solo);
+    const QPoint onSolo = center(solo);
+    const QPoint onMute = center(mute);
+    hideThenMoveTo(onSolo);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    waitForRowLaidOut(mute, solo);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, onSolo);
+    QTRY_COMPARE(bridge->property("soloCalls").toInt(), 1);
+    hideThenMoveTo(onMute);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    waitForRowLaidOut(mute, solo);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, onMute);
+    QTRY_COMPARE(bridge->property("muteCalls").toInt(), 1);
+    QCOMPARE(bridge->property("soloCalls").toInt(), 1);
+
+    // A pointer moving on a button still counts as moving.
+    const int movesBefore = root->property("pointerMoves").toInt();
+    QTest::mouseMove(window, onSolo + QPoint(1, 0));
+    QTRY_VERIFY(root->property("pointerMoves").toInt() > movesBefore);
+
+    // Shown on hover, a row's buttons follow the pointer from row to row,
+    // and stay for the click while the pointer is on them.
+    bridge->setProperty("channelButtonsVisibility", 1);
+    const QList<QQuickItem *> solos = visibleItemsNamed(
+        window->contentItem(), QStringLiteral("waveformChannelSoloButton"));
+    QCOMPARE(solos.size(), 1);
+    QCOMPARE(solos.constFirst(), solo);
+    QTest::mouseMove(window, QPoint(onSolo.x(), static_cast<int>(view.bottom()) - 2));
+    QTRY_VERIFY(!solo->isVisible());
+    QTRY_COMPARE(visibleItemsNamed(window->contentItem(),
+                                   QStringLiteral("waveformChannelSoloButton")).size(), 1);
+    QTest::mouseMove(window, QPoint(onSolo.x(), static_cast<int>(view.top()) + 2));
+    QTRY_VERIFY(solo->isVisible());
+    waitForRowLaidOut(mute, solo);
+    QTest::mouseMove(window, onSolo);
+    QVERIFY(solo->isVisible());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, onSolo);
+    QTRY_COMPARE(bridge->property("soloCalls").toInt(), 2);
+    QVERIFY(solo->isVisible());
+    bridge->setProperty("channelButtonsVisibility", 2);
+
+    // The controls do not depend on the crosshair being on.
+    bridge->setProperty("showSpectrogramCrosshair", false);
+    QTRY_VERIFY(!waveform->crosshairEnabled());
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QSignalSpy controlsChanged(autoHide, SIGNAL(controlsVisibleChanged()));
+    QTest::mouseMove(window, view.center().toPoint() + QPoint(7, 0));
+    QTRY_VERIFY(!controlsChanged.isEmpty());
+    keepControlsShown();
+
+    // Mixed, there are no channel rows over the waveform.
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("spectrogramViewMode", 0);
+    QTRY_COMPARE(waveform->channelCount(), 1);
+    QTRY_VERIFY(firstVisibleItemNamed(
+                    window->contentItem(), QStringLiteral("waveformChannelLabel")) == nullptr);
+    hideThenMoveTo(view.center().toPoint() + QPoint(9, 0));
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    // The pointer goes with the controls and returns with them.
+    QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QTRY_COMPARE(window->cursor().shape(), Qt::BlankCursor);
+    QTest::mouseMove(window, view.center().toPoint() + QPoint(11, 0));
+    keepControlsShown();
+    QTRY_COMPARE(window->cursor().shape(), Qt::ArrowCursor);
+}
+
+void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide =
+        window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *spectrogramSurface =
+        window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && autoHide != nullptr
+            && waveformSurface != nullptr && spectrogramSurface != nullptr);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    QObject *hoverHandler = waveformSurface->findChild<QObject *>(
+        QStringLiteral("waveformSurfaceHoverHandler"));
+    QVERIFY(hoverHandler != nullptr);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("durationSeconds", 100.0);
+    bridge->setProperty("channelButtonsVisibility", 2);
+
+    // Docked, nothing hides, and the crosshair and seek work as ever, up to
+    // the pointer leaving the view.
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveformSurface->isVisible());
+    QTRY_VERIFY(waveform->crosshairEnabled());
+    QVERIFY(!autoHide->property("active").toBool());
+    int nudge = 0;
+    for (const int viewMode : {0, 1}) {
+        bridge->setProperty("spectrogramViewMode", viewMode);
+        QTRY_COMPARE(waveform->viewMode(), viewMode);
+        const QRectF view = sceneRectOf(waveform);
+        const QPoint docked = view.center().toPoint() + QPoint(++nudge, 0);
+        QTest::mouseMove(window, docked);
+        QTRY_VERIFY(waveform->m_hoverActive);
+        QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), docked);
+        QVERIFY(autoHide->property("controlsVisible").toBool());
+        QSignalSpy dockedSeeks(waveform, &WaveformEditorItem::seekRequested);
+        QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, docked);
+        QTRY_COMPARE(dockedSeeks.count(), 1);
+        const QPoint outside(docked.x(), static_cast<int>(view.top()) - 4);
+        QVERIFY(!view.contains(outside));
+        QTest::mouseMove(window, outside);
+        QTRY_VERIFY(!waveform->m_hoverActive);
+    }
+
+    for (const int fullscreen : {1, 0}) {
+        bridge->setProperty("viewerFullscreenMode", fullscreen);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+        QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+        QQuickWindow *host = window;
+        if (fullscreen == 1) {
+            QTRY_VERIFY(waveformSurface->window() != nullptr
+                        && waveformSurface->window() != window);
+            host = waveformSurface->window();
+            QVERIFY(QTest::qWaitForWindowExposed(host));
+        } else {
+            QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+            QVERIFY(popup != nullptr);
+            QTRY_VERIFY(popup->property("opened").toBool());
+        }
+        QTRY_VERIFY(qFuzzyCompare(waveformSurface->height(), host->contentItem()->height()));
+        QVERIFY(autoHide->property("active").toBool());
+
+        for (const int visualization : {1, 0}) {
+            viewer->setProperty("visualizationMode", visualization);
+            QQuickItem *surface = visualization == 1 ? waveformSurface : spectrogramSurface;
+            QTRY_VERIFY(surface->isVisible());
+            for (const int viewMode : {0, 1}) {
+                bridge->setProperty("spectrogramViewMode", viewMode);
+                const QString where = QStringLiteral("fullscreen %1, visualization %2, layout %3")
+                                          .arg(fullscreen).arg(visualization).arg(viewMode);
+                autoHide->setProperty("hideDelay", 1);
+                QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+                QTRY_VERIFY(!waveform->crosshairEnabled());
+
+                QSignalSpy controlsChanged(autoHide, SIGNAL(controlsVisibleChanged()));
+                const QPoint at = sceneRectOf(surface).center().toPoint() + QPoint(++nudge, 0);
+                QTest::mouseMove(host, at);
+                QTRY_VERIFY2(!controlsChanged.isEmpty(), qPrintable(where));
+                autoHide->setProperty("hideDelay", 5000);
+                QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+                QTRY_VERIFY(waveform->crosshairEnabled());
+
+                if (visualization == 1) {
+                    QTRY_VERIFY(waveform->m_hoverActive);
+                    QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), at);
+                    QVERIFY(hoverHandler->property("hovered").toBool());
+                    QSignalSpy seeks(waveform, &WaveformEditorItem::seekRequested);
+                    QTest::mouseClick(host, Qt::RightButton, Qt::NoModifier, at);
+                    QTRY_COMPARE(seeks.count(), 1);
+                } else {
+                    auto *spectrogram = qobject_cast<SpectrogramItem *>(firstVisibleItemNamed(
+                        spectrogramSurface, QStringLiteral("spectrogramPaneItem")));
+                    QVERIFY(spectrogram != nullptr);
+                    QTRY_VERIFY(spectrogram->m_hoverActive);
+                }
+            }
+        }
+
+        // The double-click on the view that closes the viewer still gets there.
+        viewer->setProperty("visualizationMode", 1);
+        QTRY_VERIFY(waveformSurface->isVisible());
+        const QPoint at = sceneRectOf(waveformSurface).center().toPoint();
+        QTest::mouseMove(host, at);
+        QTest::mouseDClick(host, Qt::LeftButton, Qt::NoModifier, at);
+        QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+        QTRY_VERIFY(waveformSurface->window() == window);
+    }
 }
 
 void TransportInputSmokeTest::menuMnemonicsOpenTheMenusAndShowShortcuts() {
