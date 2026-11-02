@@ -158,6 +158,8 @@ private:
     void arm(qint64 nowNs);
     void fire();
 
+    // Now on the monotonic clock; tests set their own.
+    std::function<qint64()> m_nowNs;
     QTimer m_timer;
     QHash<SpectrogramItem *, qint64> m_dueMs;
     // The millisecond the timer fires for.
@@ -511,9 +513,12 @@ private:
     ShownDataState shownDataStateLocked() const;
     // Whether columns written from ring sequence firstSeq, track columns
     // from firstColumn, leave the last frame as it is, so that it need not
-    // be drawn again before its own next change.
-    bool chunkLeavesLastFrameLocked(
-        const ShownDataState &before, qint64 firstSeq, qint64 firstColumn) const;
+    // be drawn again before its own next change. maxColumnBefore is the
+    // last decoded column before them.
+    bool chunkLeavesLastFrameLocked(const ShownDataState &before,
+        qint64 firstSeq,
+        qint64 firstColumn,
+        qint64 maxColumnBefore) const;
     // The window's scheduler, or the item's own outside a window.
     SpectrogramFrameScheduler *frameScheduler();
     // How long until the last frame would change, in nanoseconds from

@@ -2225,6 +2225,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     const ShownDataState shownBefore = shownDataStateLocked();
     const qint64 firstWrittenSeq = m_ringWriteSeq;
+    const qint64 maxColumnBefore = m_precomputedMaxColumnIndex;
 
     const bool hasGeneration = generation != 0;
     if (hasGeneration
@@ -3000,7 +3001,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         && !appliedImplicitReset
         && !needsZoomReset
         && !readyChanged
-        && chunkLeavesLastFrameLocked(shownBefore, firstWrittenSeq, startIndex);
+        && chunkLeavesLastFrameLocked(shownBefore, firstWrittenSeq, startIndex, maxColumnBefore);
 
     // Unlock before emitting signals — the QML handlers may call
     // setZoomLevel which re-acquires the mutex.
@@ -3049,8 +3050,10 @@ SpectrogramItem::ShownDataState SpectrogramItem::shownDataStateLocked() const {
     return state;
 }
 
-bool SpectrogramItem::chunkLeavesLastFrameLocked(
-    const ShownDataState &before, qint64 firstSeq, qint64 firstColumn) const {
+bool SpectrogramItem::chunkLeavesLastFrameLocked(const ShownDataState &before,
+    qint64 firstSeq,
+    qint64 firstColumn,
+    qint64 maxColumnBefore) const {
     // Only while the last frame has asked for its next one itself, and
     // only when the chunk changes nothing but columns after it.
     if (!m_playing || !m_idleView.valid || m_precomputedCanvasDirty
@@ -3061,6 +3064,11 @@ bool SpectrogramItem::chunkLeavesLastFrameLocked(
     if (m_idleView.rolling) {
         // The ring drops its oldest columns as it takes new ones.
         return firstSeq > m_idleView.shownRight && m_ringOldestSeq <= m_idleView.shownLeft;
+    }
+    // Near the end of the track, a centered view ends where the decoding
+    // does: any column further moves it.
+    if (before.tailLooksFinal && m_precomputedMaxColumnIndex != maxColumnBefore) {
+        return false;
     }
     return firstColumn > m_idleView.shownRight;
 }
@@ -6033,7 +6041,8 @@ SpectrogramFrameScheduler *SpectrogramItem::frameScheduler() {
 }
 
 SpectrogramFrameScheduler::SpectrogramFrameScheduler(QObject *parent)
-    : QObject(parent) {
+    : QObject(parent),
+      m_nowNs(monotonicNowNs) {
     m_timer.setSingleShot(true);
     m_timer.setTimerType(Qt::PreciseTimer);
     connect(&m_timer, &QTimer::timeout, this, &SpectrogramFrameScheduler::fire);
@@ -6080,19 +6089,21 @@ void SpectrogramFrameScheduler::arm(qint64 nowNs) {
 }
 
 void SpectrogramFrameScheduler::fire() {
-    // The timer fires at that millisecond or after it: every frame due
-    // by then is asked for now, in the same frame of the window.
-    const qint64 firedMs = m_armedMs;
+    // The timer fires at the millisecond it was armed for or after it, as
+    // late as the event loop lets it: every frame due by then is asked for
+    // now, in the same frame of the window.
+    const qint64 nowNs = std::max(m_nowNs(), m_armedMs * 1'000'000);
+    const qint64 reachedMs = nowNs / 1'000'000;
     QVector<SpectrogramItem *> due;
     for (auto it = m_dueMs.begin(); it != m_dueMs.end();) {
-        if (it.value() <= firedMs) {
+        if (it.value() <= reachedMs) {
             due.push_back(it.key());
             it = m_dueMs.erase(it);
         } else {
             ++it;
         }
     }
-    arm(firedMs * 1'000'000);
+    arm(nowNs);
     for (SpectrogramItem *item : due) {
         item->requestPlaybackFrame();
     }

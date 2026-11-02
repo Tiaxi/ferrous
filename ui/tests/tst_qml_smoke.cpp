@@ -1161,6 +1161,8 @@ private slots:
     void spectrogramZoomPreviewRequestsEveryFrame();
     void spectrogramDataAheadOfTheShownFrameAsksForNoFrame();
     void spectrogramFrameSchedulerWakesDueFramesTogether();
+    void spectrogramFrameSchedulerWakesEveryFrameDueByALateTimer();
+    void spectrogramDecodedEndMovesTheCenteredViewAtOnce();
     void spectrogramPanesShareTheirWindowsFrameSchedule();
     void spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce();
     void spectrogramIdleViewDrawsOnlyFramesThatDiffer();
@@ -12023,6 +12025,8 @@ void SpectrogramSmokeTest::spectrogramFrameSchedulerWakesDueFramesTogether() {
     SpectrogramItem third;
     const qint64 nowNs = monotonicNowNs();
     const qint64 baseMs = nowNs / 1'000'000 + 10;
+    qint64 schedulerNowNs = nowNs;
+    scheduler.m_nowNs = [&schedulerNowNs]() { return schedulerNowNs; };
     scheduler.schedule(&first, baseMs * 1'000'000 + 200'000, nowNs);
     scheduler.schedule(&second, baseMs * 1'000'000 + 900'000, nowNs);
     scheduler.schedule(&third, baseMs * 1'000'000 + 1'000'001, nowNs);
@@ -12031,6 +12035,7 @@ void SpectrogramSmokeTest::spectrogramFrameSchedulerWakesDueFramesTogether() {
     QCOMPARE(scheduler.dueNs(&third), (baseMs + 2) * 1'000'000);
     QVERIFY(scheduler.timerActive());
     QCOMPARE(scheduler.m_armedMs, baseMs + 1);
+    schedulerNowNs = (baseMs + 1) * 1'000'000 + 100'000;
     scheduler.fire();
     QCOMPARE(first.m_playbackFrameRequests, quint64(1));
     QCOMPARE(second.m_playbackFrameRequests, quint64(1));
@@ -12050,6 +12055,76 @@ void SpectrogramSmokeTest::spectrogramFrameSchedulerWakesDueFramesTogether() {
     }
     QVERIFY(scheduler.m_dueMs.isEmpty());
     QVERIFY(!scheduler.timerActive());
+}
+
+void SpectrogramSmokeTest::spectrogramFrameSchedulerWakesEveryFrameDueByALateTimer() {
+    // Frames due at 100 and 110 ms, and a timer the event loop delivers at
+    // 125 ms: both are due, and come in one frame of the window. One due
+    // at 140 ms waits for its own, 15 ms from then.
+    SpectrogramFrameScheduler scheduler;
+    const qint64 startNs = monotonicNowNs() / 1'000'000 * 1'000'000;
+    qint64 nowNs = startNs;
+    scheduler.m_nowNs = [&nowNs]() { return nowNs; };
+    SpectrogramItem first;
+    SpectrogramItem second;
+    SpectrogramItem third;
+    scheduler.schedule(&first, startNs + 100'000'000, nowNs);
+    scheduler.schedule(&second, startNs + 110'000'000, nowNs);
+    scheduler.schedule(&third, startNs + 140'000'000, nowNs);
+    QCOMPARE(scheduler.m_armedMs, startNs / 1'000'000 + 100);
+    nowNs = startNs + 125'000'000;
+    scheduler.fire();
+    QCOMPARE(first.m_playbackFrameRequests, quint64(1));
+    QCOMPARE(second.m_playbackFrameRequests, quint64(1));
+    QCOMPARE(third.m_playbackFrameRequests, quint64(0));
+    QCOMPARE(scheduler.m_armedMs, startNs / 1'000'000 + 140);
+    QVERIFY(scheduler.timerActive());
+    QVERIFY(scheduler.m_timer.remainingTime() <= 15);
+    scheduler.cancel(&third);
+}
+
+void SpectrogramSmokeTest::spectrogramDecodedEndMovesTheCenteredViewAtOnce() {
+    // Near the end of a track, a centered view ends at the last decoded
+    // column. With 3906 of an estimated 4000 columns decoded and the
+    // playhead at column 3900, a 400-column view shows columns 3506 to
+    // 3905; each chunk the decoder sends after them moves it on, at once.
+    TestTime time;
+    SpectrogramItem item;
+    time.drive(item);
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    constexpr int bins = 64;
+    const auto feed = [&item](int start, int columns, bool reset = false) {
+        item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+            start, 4000, 48'000, 1024, false, reset, 1, reset, 1);
+    };
+    feed(0, 3906, true);
+    const double position = 3900.2 / kStripeColumnsPerSecond;
+    setTestPosition(item, position);
+    item.setPlaying(true);
+    setTestPosition(item, position);
+    QSGNode *node = paintSettled(item, nullptr);
+    node = item.updatePaintNode(node, nullptr);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_idleView.valid);
+        QCOMPARE(item.m_idleView.shownLeft, qint64(3506));
+        QCOMPARE(item.m_idleView.shownRight, qint64(3905));
+    }
+    qint64 right = 3905;
+    for (int chunk = 0; chunk < 2; ++chunk) {
+        const quint64 requested = item.m_dataFrameRequests;
+        feed(static_cast<int>(right) + 1, 32);
+        QCOMPARE(item.m_dataFrameRequests, requested + 1);
+        node = paintSettled(item, node);
+        right += 32;
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_idleView.valid);
+        QCOMPARE(item.m_idleView.shownRight, right);
+        QCOMPARE(item.m_idleView.shownLeft, right - 399);
+    }
+    delete node;
 }
 
 void SpectrogramSmokeTest::spectrogramPanesShareTheirWindowsFrameSchedule() {
