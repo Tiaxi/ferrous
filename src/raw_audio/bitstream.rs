@@ -74,12 +74,15 @@ impl DtsWords {
         }
     }
 
-    /// Bytes of the file that hold `len` bytes of the stream. Whole words
-    /// only, as `GStreamer`'s `dcaparse` and `FFmpeg` count them.
+    /// Bytes of the file that hold a frame of `len` bytes of the stream:
+    /// whole words, the last padded, which is where `FFmpeg` finds the next
+    /// frame. (`GStreamer`'s `dcaparse` takes `len * 16 / 14` bytes, short
+    /// of a padded word, and loses most of the frames of such a stream;
+    /// the frames of DTS-CDs, of 3584 bytes, fill whole words.)
     fn file_len(self, len: usize) -> usize {
         match self {
             Self::BigEndian16 | Self::LittleEndian16 => len,
-            Self::BigEndian14 | Self::LittleEndian14 => len * 8 / 14 * 2,
+            Self::BigEndian14 | Self::LittleEndian14 => (len * 8).div_ceil(14) * 2,
         }
     }
 }
@@ -246,38 +249,53 @@ pub(super) fn parse_dts_bitrate(data: &[u8]) -> Option<u32> {
 }
 
 /// `stream`, a DTS stream in 16-bit big-endian words, in the words of
-/// `layout`. A 14-bit layout needs a stream of whole 14-bit words.
+/// `layout`: each frame in whole words, the last padded with zeros.
 #[cfg(test)]
 pub(super) fn repack_dts(stream: &[u8], layout: DtsWords) -> Vec<u8> {
+    let mut packed = Vec::new();
+    let mut rest = stream;
+    while !rest.is_empty() {
+        let len = dts_frame_len(rest).expect("a frame").min(rest.len());
+        repack_dts_frame(&rest[..len], layout, &mut packed);
+        rest = &rest[len..];
+    }
+    packed
+}
+
+#[cfg(test)]
+fn repack_dts_frame(frame: &[u8], layout: DtsWords, packed: &mut Vec<u8>) {
     let bits = layout.bits_per_word();
     let mask = (1_u32 << bits) - 1;
-    assert_eq!(stream.len() * 8 % bits, 0, "whole words");
-    let mut packed = Vec::with_capacity(stream.len() * 16 / bits);
+    let mut push = |word: u32| {
+        let mut word = u16::try_from(word & mask).expect("a word");
+        if bits == 14 && word & 0x2000 != 0 {
+            word |= 0xC000;
+        }
+        packed.extend_from_slice(&match layout {
+            DtsWords::BigEndian16 | DtsWords::BigEndian14 => word.to_be_bytes(),
+            DtsWords::LittleEndian16 | DtsWords::LittleEndian14 => word.to_le_bytes(),
+        });
+    };
     let (mut pending, mut pending_bits) = (0_u32, 0);
-    for byte in stream {
+    for byte in frame {
         pending = (pending << 8) | u32::from(*byte);
         pending_bits += 8;
         if pending_bits >= bits {
             pending_bits -= bits;
-            let mut word = u16::try_from((pending >> pending_bits) & mask).expect("a word");
+            push(pending >> pending_bits);
             pending &= (1 << pending_bits) - 1;
-            if bits == 14 && word & 0x2000 != 0 {
-                word |= 0xC000;
-            }
-            packed.extend_from_slice(&match layout {
-                DtsWords::BigEndian16 | DtsWords::BigEndian14 => word.to_be_bytes(),
-                DtsWords::LittleEndian16 | DtsWords::LittleEndian14 => word.to_le_bytes(),
-            });
         }
     }
-    packed
+    if pending_bits > 0 {
+        push(pending << (bits - pending_bits));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{dts_frame_len, first_frame_offset, parse_dts_bitrate, repack_dts};
     use super::{Codec, DtsWords};
-    use crate::raw_audio::TEST_DTS_44K;
+    use crate::raw_audio::{TEST_DTS, TEST_DTS_44K};
 
     #[test]
     fn ac3_bitrate_parses_standard_header() {
@@ -347,57 +365,89 @@ mod tests {
         assert_eq!(super::parse_dts_bitrate(&header), None);
     }
 
-    /// The layouts, and the length of a 224-byte frame of
-    /// `TEST_DTS_44K` in each.
-    const LAYOUTS: [(DtsWords, usize); 4] = [
-        (DtsWords::BigEndian16, 224),
-        (DtsWords::LittleEndian16, 224),
-        (DtsWords::BigEndian14, 256),
-        (DtsWords::LittleEndian14, 256),
-    ];
+    /// A DTS stream in one layout.
+    struct Case {
+        stream: Vec<u8>,
+        layout: DtsWords,
+        frames: usize,
+        frame_len: usize,
+        sample_rate: usize,
+    }
+
+    /// Both fixtures in every layout. The 224-byte frames of
+    /// `TEST_DTS_44K` fill whole 14-bit words; the 256-byte frames of
+    /// `TEST_DTS` end in a padded one.
+    fn cases() -> Vec<Case> {
+        let fixtures = [
+            (TEST_DTS_44K, 44, 44_100, [224, 256]),
+            (TEST_DTS, 47, 48_000, [256, 294]),
+        ];
+        let layouts = [
+            (DtsWords::BigEndian16, 0),
+            (DtsWords::LittleEndian16, 0),
+            (DtsWords::BigEndian14, 1),
+            (DtsWords::LittleEndian14, 1),
+        ];
+        fixtures
+            .into_iter()
+            .flat_map(|(fixture, frames, sample_rate, lengths)| {
+                layouts.map(|(layout, length)| Case {
+                    stream: repack_dts(fixture, layout),
+                    layout,
+                    frames,
+                    frame_len: lengths[length],
+                    sample_rate,
+                })
+            })
+            .collect()
+    }
 
     #[test]
     fn dts_frames_are_found_in_every_word_layout() {
-        for (layout, frame_len) in LAYOUTS {
-            let stream = repack_dts(TEST_DTS_44K, layout);
-            assert_eq!(stream.len(), 44 * frame_len, "{layout:?}");
-            assert_eq!(dts_frame_len(&stream), Some(frame_len), "{layout:?}");
+        for case in cases() {
+            let (stream, name) = (&case.stream, (case.layout, case.frame_len));
+            assert_eq!(stream.len(), case.frames * case.frame_len, "{name:?}");
+            assert_eq!(dts_frame_len(stream), Some(case.frame_len), "{name:?}");
             // After a WAV header and digital silence, as in a DTS-CD rip.
             let mut file = vec![0; 1000];
             file[..4].copy_from_slice(b"RIFF");
-            file.extend_from_slice(&stream);
+            file.extend_from_slice(stream);
             assert_eq!(
                 first_frame_offset(&file, Codec::Dts),
                 Some(1000),
-                "{layout:?}"
+                "{name:?}"
             );
         }
     }
 
     #[test]
     fn a_dts_sync_word_needs_its_frame_header() {
-        for (layout, _) in LAYOUTS {
-            let stream = repack_dts(TEST_DTS_44K, layout);
+        for case in cases() {
+            let (stream, name) = (&case.stream, (case.layout, case.frame_len));
             let mut sync_only = stream[..4].to_vec();
             sync_only.resize(64, 0);
-            assert_eq!(dts_frame_len(&sync_only), None, "{layout:?}");
+            assert_eq!(dts_frame_len(&sync_only), None, "{name:?}");
             // Its next frame, cut short, is not taken for a frame of
             // another layout.
             assert_eq!(
                 first_frame_offset(&stream[1..], Codec::Dts),
-                Some(stream.len() / 44 - 1),
-                "{layout:?}"
+                Some(case.frame_len - 1),
+                "{name:?}"
             );
         }
     }
 
     #[test]
     fn dts_bitrates_count_the_words_of_the_file() {
-        // 512 samples a frame at 44.1 kHz.
-        for (layout, frame_len) in LAYOUTS {
-            let stream = repack_dts(TEST_DTS_44K, layout);
-            let expected = u32::try_from(frame_len * 8 * 44_100 / 512).expect("bitrate");
-            assert_eq!(parse_dts_bitrate(&stream), Some(expected), "{layout:?}");
+        // 512 samples a frame.
+        for case in cases() {
+            let expected = case.frame_len * 8 * case.sample_rate / 512;
+            assert_eq!(
+                parse_dts_bitrate(&case.stream),
+                Some(u32::try_from(expected).expect("bitrate")),
+                "{:?}",
+                (case.layout, case.frame_len)
+            );
         }
     }
 }

@@ -155,8 +155,10 @@ fn kbps_from_bits_per_second(bits_per_second: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use crate::raw_audio::bitstream::DtsWords;
     use crate::raw_audio::{
-        ripped_dts_cd_bytes, ripped_surround_bytes, test_path, TEST_AC3, TEST_DTS, TEST_DTS_44K,
+        ripped_dts_cd_bytes, ripped_dts_cd_bytes_in, ripped_surround_bytes, test_path, TEST_AC3,
+        TEST_DTS, TEST_DTS_44K,
     };
 
     /// Ripped files of each format: 32 AC3 frames of 1536 samples at 48
@@ -182,6 +184,21 @@ mod tests {
                 "{ext} at {rate} Hz: expected {expected} s, got {duration} s"
             );
             let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn duration_estimate_counts_padded_14_bit_words() {
+        // 47 frames of 512 samples at 48 kHz, whose 256 bytes end in a
+        // padded 14-bit word.
+        for layout in [DtsWords::LittleEndian14, DtsWords::BigEndian14] {
+            let path = test_path("duration-padded", "dts");
+            std::fs::write(&path, ripped_dts_cd_bytes_in(TEST_DTS, layout).0)
+                .expect("write test file");
+
+            let duration = super::estimate_duration_from_bitstream(&path).expect("duration");
+            let _ = std::fs::remove_file(path);
+            assert!((duration - 0.501).abs() < 0.01, "{layout:?}: {duration} s");
         }
     }
 

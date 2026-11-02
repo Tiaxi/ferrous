@@ -13,9 +13,10 @@ ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5 -ac 1 \
 ```
 
 `raw-tone-44k.dts` is the same tone at 44.1 kHz in 44 DTS frames of 224 bytes
-(about 0.51 s). That bitrate makes each frame fill whole 14-bit words. Tests
-pack the frames into the low 14 bits of 16-bit words and put them in a WAV
-file, as DTS-CD rips hold them:
+(about 0.51 s). That bitrate makes each frame fill whole 14-bit words, as the
+frames of DTS-CDs do; GStreamer's parser loses most frames of a stream whose
+frames end in a padded word. Tests pack the frames into the low 14 bits of 16-bit words and put
+them in a WAV file, as DTS-CD rips hold them:
 
 ```bash
 ffmpeg -f lavfi -i sine=frequency=440:sample_rate=44100:duration=0.5 -ac 1 \

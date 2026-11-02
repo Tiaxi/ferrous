@@ -390,8 +390,10 @@ pub(crate) fn install_raw_surround_source_probe(playbin: &gst::Element) {
 #[cfg(test)]
 mod tests {
     use super::{audio_byte_range, audio_position, file_position, trim, Trim};
+    use crate::raw_audio::bitstream::DtsWords;
     use crate::raw_audio::{
-        ripped_dts_cd_bytes, ripped_surround_bytes, test_path, TEST_AC3, TEST_DTS, TEST_DTS_44K,
+        ripped_dts_cd_bytes, ripped_dts_cd_bytes_in, ripped_surround_bytes, test_path, TEST_AC3,
+        TEST_DTS, TEST_DTS_44K,
     };
     use std::path::Path;
 
@@ -442,6 +444,24 @@ mod tests {
             Some((audio.start as u64, audio.end as u64))
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn audio_byte_range_of_a_dts_cd_rip_counts_padded_words() {
+        // The 256-byte frames of `TEST_DTS` end in a padded 14-bit word.
+        for layout in [DtsWords::LittleEndian14, DtsWords::BigEndian14] {
+            let path = test_path("audio-byte-range-dts-cd-padded", "dts");
+            let (bytes, audio) = ripped_dts_cd_bytes_in(TEST_DTS, layout);
+            assert_eq!(audio.len(), 47 * 294, "{layout:?}");
+            std::fs::write(&path, &bytes).expect("write test file");
+
+            assert_eq!(
+                audio_byte_range(&path),
+                Some((audio.start as u64, audio.end as u64)),
+                "{layout:?}"
+            );
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

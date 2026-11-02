@@ -74,7 +74,8 @@ pub(crate) const TEST_AC3: &[u8] = include_bytes!("../analysis/fixtures/raw-tone
 #[cfg(test)]
 pub(crate) const TEST_DTS: &[u8] = include_bytes!("../analysis/fixtures/raw-tone.dts");
 /// 44 DTS frames of 512 samples (about 0.51 s) of a 44.1 kHz mono tone,
-/// whose frames fill whole 14-bit words.
+/// whose frames fill whole 14-bit words, as those of DTS-CDs do:
+/// `GStreamer`'s parser loses most frames that end in a padded word.
 #[cfg(test)]
 pub(crate) const TEST_DTS_44K: &[u8] = include_bytes!("../analysis/fixtures/raw-tone-44k.dts");
 /// The samples of [`TEST_DTS_44K`].
@@ -91,8 +92,17 @@ pub(crate) const TEST_DTS_44K_FRAMES: usize = 44 * 512;
 /// format detection then takes the file for WAV.
 #[cfg(test)]
 pub(crate) fn ripped_dts_cd_bytes(stream: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
+    ripped_dts_cd_bytes_in(stream, bitstream::DtsWords::LittleEndian14)
+}
+
+/// [`ripped_dts_cd_bytes`] with the stream in the words of `layout`.
+#[cfg(test)]
+fn ripped_dts_cd_bytes_in(
+    stream: &[u8],
+    layout: bitstream::DtsWords,
+) -> (Vec<u8>, std::ops::Range<usize>) {
     const SILENCE: usize = 3900;
-    let stream = bitstream::repack_dts(stream, bitstream::DtsWords::LittleEndian14);
+    let stream = bitstream::repack_dts(stream, layout);
     let data_len = u32::try_from(SILENCE + stream.len()).expect("data length");
     let mut bytes = b"RIFF".to_vec();
     bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
