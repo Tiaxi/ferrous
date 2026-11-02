@@ -1066,8 +1066,6 @@ struct BridgeLoopRuntime {
     quit_save: QuitSave,
     playing_poll_interval: Duration,
     last_playing_poll: Instant,
-    paused_poll_interval: Duration,
-    last_paused_poll: Instant,
     diagnostics: BridgeLoopDiagnostics,
     analysis_snapshot_interval: Duration,
     playing_snapshot_interval: Duration,
@@ -1278,8 +1276,6 @@ impl BridgeLoopRuntime {
         library.set_watching(watching);
 
         let playing_poll_interval = env_duration_ms("FERROUS_PLAYBACK_POLL_MS", 40, 8, 500);
-        let paused_poll_interval =
-            env_duration_ms("FERROUS_PLAYBACK_PAUSED_POLL_MS", 333, 125, 1000);
         let playing_snapshot_interval =
             env_duration_ms("FERROUS_BRIDGE_PLAYING_HEARTBEAT_MS", 40, 16, 1000);
         let analysis_snapshot_interval =
@@ -1325,10 +1321,6 @@ impl BridgeLoopRuntime {
             playing_poll_interval,
             last_playing_poll: Instant::now()
                 .checked_sub(playing_poll_interval)
-                .unwrap_or_else(Instant::now),
-            paused_poll_interval,
-            last_paused_poll: Instant::now()
-                .checked_sub(paused_poll_interval)
                 .unwrap_or_else(Instant::now),
             diagnostics: BridgeLoopDiagnostics {
                 profile_enabled: cfg!(feature = "profiling-logs")
@@ -1405,22 +1397,14 @@ impl BridgeLoopRuntime {
         }
     }
 
+    /// Playback is polled for its position only while it plays. Paused or
+    /// stopped, the engine reports each change itself, so the bridge sleeps
+    /// until an event or a command wakes it.
     fn next_playback_poll_delay(&self) -> Option<Duration> {
-        if self.state.playback.state == PlaybackState::Playing {
-            return Some(
-                self.playing_poll_interval
-                    .saturating_sub(self.last_playing_poll.elapsed()),
-            );
-        }
-        if self.state.playback.state == PlaybackState::Paused
-            && self.state.playback.current.is_some()
-        {
-            return Some(
-                self.paused_poll_interval
-                    .saturating_sub(self.last_paused_poll.elapsed()),
-            );
-        }
-        None
+        (self.state.playback.state == PlaybackState::Playing).then(|| {
+            self.playing_poll_interval
+                .saturating_sub(self.last_playing_poll.elapsed())
+        })
     }
 
     fn next_snapshot_emit_delay(&self) -> Option<Duration> {
@@ -2197,19 +2181,11 @@ impl BridgeLoopRuntime {
     }
 
     fn poll_playback_if_due(&mut self) {
-        if self.state.playback.state == PlaybackState::Playing {
-            if self.last_playing_poll.elapsed() >= self.playing_poll_interval {
-                self.playback.command(PlaybackCommand::Poll);
-                self.last_playing_poll = Instant::now();
-            }
-            return;
-        }
-        if self.state.playback.state == PlaybackState::Paused
-            && self.state.playback.current.is_some()
-            && self.last_paused_poll.elapsed() >= self.paused_poll_interval
+        if self.state.playback.state == PlaybackState::Playing
+            && self.last_playing_poll.elapsed() >= self.playing_poll_interval
         {
             self.playback.command(PlaybackCommand::Poll);
-            self.last_paused_poll = Instant::now();
+            self.last_playing_poll = Instant::now();
         }
     }
 
@@ -6751,6 +6727,53 @@ mod tests {
             Ok(BridgeEvent::Snapshot(_)) => {}
             other => panic!("expected heartbeat snapshot, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn paused_or_stopped_playback_sets_no_timer_on_the_bridge() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        runtime.state.playback.current = Some(p("/tmp/ferrous_idle_bridge.flac"));
+        // Saves and snapshots have timers of their own.
+        runtime.flags.session_dirty = false;
+        runtime.flags.settings_dirty = false;
+
+        runtime.state.playback.state = PlaybackState::Playing;
+        assert!(runtime.next_wake_delay() <= runtime.playing_poll_interval);
+        for state in [PlaybackState::Paused, PlaybackState::Stopped] {
+            runtime.state.playback.state = state;
+            assert_eq!(runtime.next_playback_poll_delay(), None, "{state:?}");
+            assert!(
+                runtime.next_wake_delay() > Duration::from_secs(60),
+                "a timer wakes the {state:?} bridge"
+            );
+        }
+
+        // A paused position change still reaches the UI, at the paused
+        // heartbeat's pace.
+        runtime.state.playback.state = PlaybackState::Paused;
+        let mut moved = runtime.state.playback.clone();
+        moved.position = Duration::from_secs(3);
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(PlaybackEvent::Snapshot(moved)),
+            &event_tx,
+        );
+        assert_eq!(runtime.flags.pending_snapshot, SnapshotUrgency::Heartbeat);
+        assert!(runtime.next_wake_delay() <= runtime.paused_snapshot_interval);
+        runtime.last_snapshot_emit = Instant::now()
+            .checked_sub(runtime.paused_snapshot_interval)
+            .unwrap_or_else(Instant::now);
+        runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
+        match event_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(BridgeEvent::Snapshot(snapshot)) => {
+                assert_eq!(snapshot.playback.position, Duration::from_secs(3));
+            }
+            other => panic!("expected a paused snapshot, got {other:?}"),
+        }
+        runtime.flags.session_dirty = false;
+        assert!(runtime.next_wake_delay() > Duration::from_secs(60));
     }
 
     #[cfg(not(feature = "gst"))]

@@ -435,8 +435,14 @@ struct GstPlaybackRuntime {
     /// How long such a file may stay open before the user is told:
     /// `RELEASE_REPORT_AFTER`, which tests shorten.
     release_report_after: Duration,
+    /// The messages the engine loop's bus handler has seen and those the
+    /// engine took; `None` without the loop.
+    bus_count: Option<BusCount>,
     #[cfg(test)]
     about_to_finish: Arc<AboutToFinishCalls>,
+    /// How often the engine loop has woken.
+    #[cfg(test)]
+    wakes: Arc<AtomicU64>,
 }
 
 /// How long the file of a file source that stopped may stay open, behind a
@@ -456,6 +462,24 @@ const RELEASE_REPORT_AFTER: Duration = Duration::from_secs(15);
 /// read and a close that the storage answers take milliseconds; this only
 /// keeps them from counting, within the bounded shutdown of the bridge.
 const EXIT_RELEASE_WAIT: Duration = Duration::from_millis(200);
+
+/// How long the engine waits for a message its bus handler has seen to
+/// reach the bus's queue. The posting thread queues it right after the
+/// handler returns, so this bound only keeps a miscount from stalling the
+/// engine for longer.
+const BUS_QUEUE_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(1);
+
+/// What the engine loop knows of the messages on its bus. The bus calls its
+/// sync handler, which wakes the loop, before it queues the message, so the
+/// loop can wake to an empty bus while the message is on its way into the
+/// queue. With nothing else to wake it, a paused or stopped engine would
+/// sleep with the message queued, so it waits for every message counted.
+struct BusCount {
+    /// The messages the sync handler has seen.
+    posted: Arc<AtomicU64>,
+    /// The messages the engine took off the bus.
+    taken: u64,
+}
 
 pub fn spawn_engine(
     analysis_tx: Sender<AnalysisCommand>,
@@ -532,18 +556,20 @@ fn spawn_engine_with_output(
 }
 
 impl GstPlaybackRuntime {
-    fn command_wait_timeout(&self) -> Duration {
+    /// How long the engine waits for a command, a bus message, or a seek
+    /// location before it has timed work to do at `now`: a volume fade,
+    /// the cadence of playback, or a file whose release is due to be
+    /// reported. `None` while nothing is due; paused or stopped, the engine
+    /// then sleeps until something wakes it.
+    fn command_wait_timeout(&self, now: Instant) -> Option<Duration> {
         if self.volume_ramp_pending() {
-            VOLUME_RAMP_TICK
-        } else if self.snapshot.state == PlaybackState::Playing
-            || self.buffering_active
-            || self.startup_gain_ramp
-        {
-            Duration::from_millis(20)
-        } else if self.snapshot.state == PlaybackState::Paused {
-            Duration::from_millis(80)
+            Some(VOLUME_RAMP_TICK)
+        } else if self.snapshot.state == PlaybackState::Playing || self.buffering_active {
+            Some(Duration::from_millis(20))
         } else {
-            Duration::from_millis(250)
+            self.releases
+                .next_due(self.release_report_after)
+                .map(|due| due.saturating_duration_since(now))
         }
     }
 
@@ -612,8 +638,11 @@ impl GstPlaybackRuntime {
             source_activation,
             releases,
             release_report_after: RELEASE_REPORT_AFTER,
+            bus_count: None,
             #[cfg(test)]
             about_to_finish: Arc::default(),
+            #[cfg(test)]
+            wakes: Arc::default(),
         }
     }
 
@@ -1836,8 +1865,10 @@ impl GstPlaybackRuntime {
     /// also drop the seeks that wait.
     fn begin_pipeline_run(&mut self, current_continues: bool) {
         if let Some(bus) = self.playbin.bus() {
-            bus.set_flushing(true);
-            bus.set_flushing(false);
+            // Taken rather than flushed, to count them; see `BusCount`.
+            while bus.pop().is_some() {
+                self.count_bus_message_taken();
+            }
         }
         if !current_continues {
             self.abandon_seeks();
@@ -2500,8 +2531,40 @@ impl GstPlaybackRuntime {
     }
 
     fn drain_bus(&mut self, bus: &gst::Bus) {
-        while let Some(msg) = bus.pop() {
+        while let Some(msg) = self.take_bus_message(bus) {
             self.handle_bus_message(&msg);
+        }
+    }
+
+    /// The next message on `bus`, also one its handler has seen that is not
+    /// queued yet (see `BusCount`), or `None` once there is none.
+    fn take_bus_message(&mut self, bus: &gst::Bus) -> Option<gst::Message> {
+        let message = bus.pop().or_else(|| {
+            let count = self.bus_count.as_mut()?;
+            let posted = count.posted.load(Ordering::Acquire);
+            if posted <= count.taken {
+                return None;
+            }
+            let message = bus.timed_pop(BUS_QUEUE_WAIT);
+            if message.is_none() {
+                eprintln!(
+                    "[ferrous] {} bus message(s) were not queued within {} s",
+                    posted - count.taken,
+                    BUS_QUEUE_WAIT.seconds()
+                );
+                count.taken = posted;
+            }
+            message
+        });
+        if message.is_some() {
+            self.count_bus_message_taken();
+        }
+        message
+    }
+
+    fn count_bus_message_taken(&mut self) {
+        if let Some(count) = &mut self.bus_count {
+            count.taken += 1;
         }
     }
 
@@ -2589,10 +2652,19 @@ impl GstPlaybackRuntime {
                     }
                     // Whether the position advances follows the pipeline's
                     // state; a seek reports its own position once it lands.
-                    if self.snapshot.state != PlaybackState::Stopped
+                    let mut changed = self.snapshot.state != PlaybackState::Stopped
                         && !self.seek_pending()
-                        && self.sample_pipeline_position()
+                        && self.sample_pipeline_position();
+                    // The bridge polls only while playback plays, so what a
+                    // run that prerolls paused has learned, its duration
+                    // and its channels, is read here.
+                    if self.snapshot.state != PlaybackState::Stopped
+                        || self.snapshot.duration == Duration::ZERO
                     {
+                        changed |= self.refresh_duration();
+                    }
+                    changed |= self.follow_output_mix();
+                    if changed {
                         self.emit_snapshot();
                     }
                 }
@@ -2722,6 +2794,9 @@ fn start_gst_engine(
         anyhow!("GStreamer's playbin3 element is missing; install the GStreamer base plugins")
     })?;
     configure_playbin_buffering(&playbin);
+    // The engine discards the messages of a run that ended itself, counting
+    // them; see `BusCount`.
+    playbin.set_property("auto-flush-bus", false);
 
     let output_mix = Arc::new(OutputMix::default());
 
@@ -2819,14 +2894,31 @@ fn run_gst_engine(
     cmd_rx: &Receiver<PlaybackCommand>,
 ) -> EngineExit {
     // Wake for bus messages, such as the async-done that tells where a seek
-    // landed, instead of finding them at the next timeout.
-    let (bus_wake_tx, bus_wake_rx) = bounded::<()>(1);
+    // landed or the end of a stream, and for files that become pending
+    // release, instead of finding them at the next timeout: paused or
+    // stopped, there is none.
+    let (wake_tx, wake_rx) = bounded::<()>(1);
     let located_rx = runtime.located_rx.clone();
+    runtime.releases.wake_with(wake_tx.clone());
+    // Nothing posts on the bus of the stopped pipeline meanwhile, so every
+    // message from here on is counted.
+    runtime.drain_bus(bus);
+    let posted = Arc::new(AtomicU64::new(0));
+    runtime.bus_count = Some(BusCount {
+        posted: Arc::clone(&posted),
+        taken: 0,
+    });
     bus.set_sync_handler(move |_, _| {
-        let _ = bus_wake_tx.try_send(());
+        posted.fetch_add(1, Ordering::Release);
+        let _ = wake_tx.try_send(());
         gst::BusSyncReply::Pass
     });
     loop {
+        #[cfg(test)]
+        runtime.wakes.fetch_add(1, Ordering::Relaxed);
+        let timer = runtime
+            .command_wait_timeout(Instant::now())
+            .map_or_else(crossbeam_channel::never, crossbeam_channel::after);
         crossbeam_channel::select! {
             recv(cmd_rx) -> cmd => {
                 let Ok(cmd) = cmd else {
@@ -2842,14 +2934,14 @@ fn run_gst_engine(
                     runtime.apply_step(step);
                 }
             }
-            recv(bus_wake_rx) -> _ => {}
+            recv(wake_rx) -> _ => {}
             recv(located_rx) -> located => {
                 if let Ok(located) = located {
                     runtime.drain_bus(bus);
                     runtime.handle_located(located);
                 }
             }
-            default(runtime.command_wait_timeout()) => {}
+            recv(timer) -> _ => {}
         }
         runtime.drain_bus(bus);
         let now = Instant::now();
@@ -2858,6 +2950,7 @@ fn run_gst_engine(
     }
 
     bus.unset_sync_handler();
+    runtime.bus_count = None;
     let _ = runtime.set_pipeline_state(gst::State::Null);
     EngineExit {
         unreleased: runtime
@@ -4248,6 +4341,46 @@ mod tests {
         (runtime, event_rx)
     }
 
+    #[test]
+    fn a_bus_message_counted_before_it_is_queued_is_waited_for() {
+        let (mut runtime, _events) = make_volume_test_runtime();
+        let bus = runtime.playbin.bus().unwrap();
+        // The bus handler has seen a message that is not queued yet.
+        runtime.bus_count = Some(BusCount {
+            posted: Arc::new(AtomicU64::new(1)),
+            taken: 0,
+        });
+        let poster = {
+            let bus = bus.clone();
+            let playbin = runtime.playbin.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                bus.post(gst::message::Eos::builder().src(&playbin).build())
+                    .unwrap();
+            })
+        };
+        let message = runtime.take_bus_message(&bus).expect("the counted message");
+        assert!(matches!(message.view(), gst::MessageView::Eos(_)));
+        poster.join().unwrap();
+        // With every counted message taken, an empty bus is not waited on.
+        let started = Instant::now();
+        assert!(runtime.take_bus_message(&bus).is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        // The messages a new run discards count as taken.
+        bus.post(gst::message::Eos::builder().src(&runtime.playbin).build())
+            .unwrap();
+        runtime
+            .bus_count
+            .as_mut()
+            .unwrap()
+            .posted
+            .store(2, Ordering::Relaxed);
+        runtime.begin_pipeline_run(false);
+        assert_eq!(runtime.bus_count.as_ref().unwrap().taken, 2);
+        assert!(runtime.take_bus_message(&bus).is_none());
+    }
+
     fn playbin_gain(runtime: &GstPlaybackRuntime) -> f64 {
         runtime.playbin.property::<f64>("volume")
     }
@@ -4299,7 +4432,10 @@ mod tests {
             }
             other => panic!("expected volume snapshot, got {other:?}"),
         }
-        assert_eq!(runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+        assert_eq!(
+            runtime.command_wait_timeout(Instant::now()),
+            Some(VOLUME_RAMP_TICK)
+        );
 
         let start = Instant::now();
         runtime.poll_volume_ramp(start);
@@ -4313,7 +4449,10 @@ mod tests {
         runtime.poll_volume_ramp(start + Duration::from_millis(200));
         assert_gain(&runtime, 0.5);
         assert!((runtime.snapshot.volume - 0.5).abs() < f32::EPSILON);
-        assert_eq!(runtime.command_wait_timeout(), Duration::from_millis(20));
+        assert_eq!(
+            runtime.command_wait_timeout(Instant::now()),
+            Some(Duration::from_millis(20))
+        );
         assert!(
             events.try_recv().is_err(),
             "fade steps must not emit snapshots"
@@ -4333,7 +4472,8 @@ mod tests {
         runtime.snapshot.state = PlaybackState::Paused;
         runtime.poll_volume_ramp(start + Duration::from_millis(60));
         assert_gain(&runtime, 0.75);
-        assert_ne!(runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+        // Paused with nothing due, the engine sleeps until a wake.
+        assert_eq!(runtime.command_wait_timeout(Instant::now()), None);
 
         runtime.snapshot.state = PlaybackState::Playing;
         let resumed = start + Duration::from_secs(5);
@@ -4357,7 +4497,10 @@ mod tests {
         runtime.poll_volume_ramp(start);
         runtime.poll_volume_ramp(start + Duration::from_millis(40));
         assert_gain(&runtime, 0.0);
-        assert_eq!(runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+        assert_eq!(
+            runtime.command_wait_timeout(Instant::now()),
+            Some(VOLUME_RAMP_TICK)
+        );
         let hold_end = start + Duration::from_millis(80);
         runtime.poll_volume_ramp(hold_end);
         assert_gain(&runtime, 0.0);
@@ -4366,7 +4509,10 @@ mod tests {
         runtime.poll_volume_ramp(hold_end + Duration::from_millis(90));
         assert_gain(&runtime, 0.8);
         assert!(!runtime.startup_gain_ramp);
-        assert_eq!(runtime.command_wait_timeout(), Duration::from_millis(20));
+        assert_eq!(
+            runtime.command_wait_timeout(Instant::now()),
+            Some(Duration::from_millis(20))
+        );
     }
 
     #[test]
@@ -11283,7 +11429,10 @@ mod engine_tests {
                     .runtime
                     .apply_command(PlaybackCommand::SetVolume(0.5));
                 // The paused engine does not wake to step the fade.
-                assert_ne!(engine.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+                assert_ne!(
+                    engine.runtime.command_wait_timeout(Instant::now()),
+                    Some(VOLUME_RAMP_TICK)
+                );
             }
             let now = Instant::now();
             engine.runtime.poll_volume_ramp(now);
@@ -11316,7 +11465,10 @@ mod engine_tests {
             self.runtime.poll_volume_ramp(later + hold - millis(5));
             assert!(self.runtime.applied_volume.abs() < f32::EPSILON);
             assert!(self.runtime.playbin.property::<f64>("volume").abs() < f64::EPSILON);
-            assert_eq!(self.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+            assert_eq!(
+                self.runtime.command_wait_timeout(Instant::now()),
+                Some(VOLUME_RAMP_TICK)
+            );
             // The hold ends, and the 90 ms startup fade starts its clock.
             self.runtime.poll_volume_ramp(later + hold);
             assert!(self.runtime.applied_volume.abs() < f32::EPSILON);
@@ -11326,15 +11478,15 @@ mod engine_tests {
         }
 
         /// Pause, and assert that the paused engine neither wakes to step
-        /// the silence hold nor lets it run.
+        /// the silence hold, nor at all, nor lets the hold run.
         #[track_caller]
         fn pause_during_the_hold(&mut self, now: Instant) {
             self.runtime.apply_command(PlaybackCommand::Pause);
             assert_eq!(self.runtime.snapshot.state, PlaybackState::Paused);
             self.runtime.poll_volume_ramp(now);
-            assert_ne!(self.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+            assert_eq!(self.runtime.command_wait_timeout(Instant::now()), None);
             self.runtime.poll_volume_ramp(now + Duration::from_secs(3));
-            assert_ne!(self.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+            assert_eq!(self.runtime.command_wait_timeout(Instant::now()), None);
             assert!(self.runtime.applied_volume.abs() < f32::EPSILON);
             self.runtime.apply_command(PlaybackCommand::Play);
         }
@@ -11388,7 +11540,10 @@ mod engine_tests {
         engine.runtime.poll_volume_ramp(now);
         engine.runtime.poll_volume_ramp(now + millis(30));
         assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
-        assert_eq!(engine.runtime.command_wait_timeout(), VOLUME_RAMP_TICK);
+        assert_eq!(
+            engine.runtime.command_wait_timeout(Instant::now()),
+            Some(VOLUME_RAMP_TICK)
+        );
 
         engine.pause_during_the_hold(now + millis(40));
         // The rest of the hold runs once the pipeline plays again.
@@ -11461,6 +11616,138 @@ mod engine_tests {
                 .expect("the engine did not panic");
             (exit, started.elapsed())
         }
+    }
+
+    impl Engine {
+        /// Start an engine, and the count of its loop's wakes.
+        fn start_counting_wakes() -> (Self, Arc<AtomicU64>) {
+            let mut wakes = None;
+            let engine = Self::start_configured(|runtime| {
+                wakes = Some(Arc::clone(&runtime.wakes));
+            });
+            (engine, wakes.expect("the runtime was configured"))
+        }
+
+        /// Record what the engine reports until `done` holds, without
+        /// polling it, as the bridge does not while playback is paused or
+        /// stopped, or panic with a report of `what` was awaited.
+        #[track_caller]
+        fn listen_until(&mut self, what: &str, mut done: impl FnMut(&Self) -> bool) {
+            let deadline = Instant::now() + TIMEOUT;
+            while !done(self) {
+                assert!(Instant::now() < deadline, "{}", self.report(what));
+                if let Ok(event) = self.events.recv_timeout(millis(20)) {
+                    self.last_event_at = Some(Instant::now());
+                    self.record(event);
+                }
+            }
+        }
+
+        /// Assert that the engine, with nothing to do, sleeps until
+        /// something wakes it; `wakes` counts the wakes of its loop.
+        #[track_caller]
+        fn assert_sleeps(&mut self, wakes: &AtomicU64) {
+            // The messages of the last state change arrive first.
+            let settled = Instant::now() + millis(300);
+            self.listen_until("", |_| Instant::now() >= settled);
+            let before = wakes.load(Ordering::Relaxed);
+            std::thread::sleep(millis(600));
+            let woken = wakes.load(Ordering::Relaxed) - before;
+            assert!(
+                woken <= 1,
+                "the {:?} engine woke {woken} times in 600 ms",
+                self.snapshot.state
+            );
+        }
+    }
+
+    #[test]
+    fn paused_or_stopped_engine_sleeps_until_a_command_or_bus_message() {
+        let fixtures = Fixtures::new("idle-wakes");
+        let a = fixtures.wav("a.wav", 20_000);
+        let (mut engine, wakes) = Engine::start_counting_wakes();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until_row_plays(0);
+
+        engine.send(PlaybackCommand::Pause);
+        engine.listen_until("pause did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Paused && !engine.snapshot.position_advancing
+        });
+        engine.assert_sleeps(&wakes);
+        // A command wakes it.
+        engine.send(PlaybackCommand::SetVolume(0.5));
+        engine.listen_until("the volume did not change", |engine| {
+            (engine.snapshot.volume - 0.5).abs() < f32::EPSILON
+        });
+        // The bus tells where a paused seek landed.
+        engine.send(PlaybackCommand::Seek(millis(5_000)));
+        engine.listen_until("the paused seek did not land", |engine| {
+            engine.snapshot.seek_serial > 0
+                && engine.snapshot.seek_landed_serial == engine.snapshot.seek_serial
+        });
+        assert!(
+            engine.snapshot.position.abs_diff(millis(5_000)) < millis(500),
+            "{:?}",
+            engine.snapshot.position
+        );
+        assert_eq!(engine.snapshot.state, PlaybackState::Paused);
+        engine.assert_sleeps(&wakes);
+        // So does a bus message posted on another thread, such as an error.
+        engine.post_shared_error(gst::StreamError::Decode, "decoding failed");
+        engine.listen_until("the error was not handled", |engine| {
+            !engine.errors.is_empty()
+        });
+
+        engine.send(PlaybackCommand::Stop);
+        engine.listen_until("stop did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        engine.assert_sleeps(&wakes);
+        // A restored session cues the stopped track paused, and learns its
+        // duration from the bus.
+        engine.send(PlaybackCommand::Cue {
+            position: millis(2_500),
+            expected: FileStamp::of(&a).expect("stamp"),
+        });
+        engine.listen_until("the cue did not land", |engine| {
+            !engine.seeked.is_empty()
+                && engine.snapshot.state == PlaybackState::Paused
+                && engine.snapshot.duration.abs_diff(millis(20_000)) < millis(100)
+        });
+        engine.assert_sleeps(&wakes);
+        // Play resumes from the cue.
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the cued track did not play on", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+                && engine.snapshot.position >= millis(2_800)
+        });
+        let (exit, took) = engine.quit();
+        assert_eq!(exit, EngineExit::default());
+        assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn stopped_engine_reports_a_file_it_cannot_release_without_being_polled() {
+        let fixtures = Fixtures::new("held-read-stopped");
+        let a = fixtures.wav("a.wav", 20_000);
+        let mut engine = Engine::start_reporting_releases_soon();
+        let hold = engine.play_until_read_held(vec![a.clone()]);
+
+        // The stopped engine sleeps until the file is due to be reported.
+        engine.send(PlaybackCommand::Stop);
+        engine.listen_until("the read of A was not reported", |engine| {
+            !engine.not_released().is_empty()
+        });
+        assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
+        let reported = engine.not_released();
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert_eq!(reported[0].path.as_deref(), Some(a.as_path()));
+
+        hold.release();
+        wait_until_reader_ends(&a);
+        let (exit, _) = engine.quit();
+        assert_eq!(exit, EngineExit::default());
     }
 
     #[track_caller]

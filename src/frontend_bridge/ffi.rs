@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::ffi::c_uchar;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -44,7 +45,6 @@ const MAX_PENDING_PRECOMPUTED_SPECTROGRAM: usize = 64;
 const MAX_PENDING_LIBRARY_TREES: usize = 1;
 const MAX_PENDING_SEARCH_RESULTS: usize = 2;
 const MAX_PENDING_SPECTROGRAM_BYTES: usize = 16 * 1024 * 1024;
-const RELAY_RECV_TIMEOUT: Duration = Duration::from_millis(250);
 /// What the UI shows when the bridge thread ends without stopping normally.
 const BACKEND_STOPPED_MESSAGE: &str =
     "The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.";
@@ -729,16 +729,18 @@ fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Recei
             break;
         }
 
-        let first_event = match event_rx.recv_timeout(RELAY_RECV_TIMEOUT) {
-            Ok(event) => event,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                // The bridge sends `Stopped` or `Failed` before it drops the
-                // channel, so a channel closed without either means the bridge
-                // thread ended abnormally.
-                shared.lock_runtime().fail(BACKEND_STOPPED_MESSAGE);
-                break;
-            }
+        // Sleeps until the bridge has something for the UI, or until the
+        // relay is told to stop.
+        let received = crossbeam_channel::select! {
+            recv(shared.stop_rx) -> _ => break,
+            recv(event_rx) -> event => event,
+        };
+        let Ok(first_event) = received else {
+            // The bridge sends `Stopped` or `Failed` before it drops the
+            // channel, so a channel closed without either means the bridge
+            // thread ended abnormally.
+            shared.lock_runtime().fail(BACKEND_STOPPED_MESSAGE);
+            break;
         };
 
         let mut events = vec![first_event];
@@ -787,7 +789,7 @@ fn relay_spectral_events(
 ) {
     while !shared.stop_requested.load(Ordering::Relaxed) {
         let event = crossbeam_channel::select! {
-            recv(shared.spectral_stop_rx) -> _ => return,
+            recv(shared.stop_rx) -> _ => return,
             recv(event_rx) -> event => match event { Ok(event) => event, Err(_) => return },
         };
         let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = event else {
@@ -842,20 +844,22 @@ struct FfiShared {
     stop_requested: AtomicBool,
     spectral_space: Condvar,
     spectral_generation: Arc<AtomicU64>,
-    spectral_stop_tx: crossbeam_channel::Sender<()>,
-    spectral_stop_rx: crossbeam_channel::Receiver<()>,
+    /// Dropped to stop the relays, which wakes every receiver of
+    /// `stop_rx`, at once and from then on. Nothing is ever sent on it.
+    stop_tx: Mutex<Option<crossbeam_channel::Sender<Infallible>>>,
+    stop_rx: crossbeam_channel::Receiver<Infallible>,
 }
 
 impl FfiShared {
     fn new(runtime: FfiRuntime, spectral_generation: Arc<AtomicU64>) -> Self {
-        let (spectral_stop_tx, spectral_stop_rx) = crossbeam_channel::bounded(1);
+        let (stop_tx, stop_rx) = crossbeam_channel::bounded(0);
         Self {
             runtime: Mutex::new(runtime),
             stop_requested: AtomicBool::new(false),
             spectral_space: Condvar::new(),
             spectral_generation,
-            spectral_stop_tx,
-            spectral_stop_rx,
+            stop_tx: Mutex::new(Some(stop_tx)),
+            stop_rx,
         }
     }
 
@@ -872,7 +876,12 @@ impl FfiShared {
 
     fn request_stop(&self) {
         self.stop_requested.store(true, Ordering::Relaxed);
-        let _ = self.spectral_stop_tx.try_send(());
+        drop(
+            self.stop_tx
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
         self.spectral_space.notify_all();
     }
 }
@@ -6887,6 +6896,55 @@ mod tests {
         let failure = runtime.pop_binary_event().expect("the failure");
         assert_eq!(failure_message(&failure).as_deref(), Some("why"));
         assert!(runtime.pop_binary_event().is_none());
+        drop(event_tx);
+    }
+
+    /// How often the thread at `task`, `/proc/<pid>/task/<tid>`, has
+    /// given up the CPU to wait.
+    fn voluntary_switches(task: &std::path::Path) -> u64 {
+        let status = std::fs::read_to_string(task.join("status")).expect("thread status");
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+            .and_then(|count| count.trim().parse().ok())
+            .expect("voluntary context switches")
+    }
+
+    #[test]
+    fn the_idle_relay_sleeps_until_an_event_or_a_stop() {
+        let shared = relay_shared();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        let (task_tx, task_rx) = crossbeam_channel::bounded(1);
+        let relay = {
+            let shared = Arc::clone(&shared);
+            thread::spawn(move || {
+                task_tx
+                    .send(std::fs::read_link("/proc/thread-self").expect("thread-self"))
+                    .unwrap();
+                run_ffi_relay_loop(shared, event_rx);
+            })
+        };
+        let task = std::path::Path::new("/proc").join(task_rx.recv().unwrap());
+        thread::sleep(Duration::from_millis(100));
+        let before = voluntary_switches(&task);
+        thread::sleep(Duration::from_millis(600));
+        let woken = voluntary_switches(&task) - before;
+        assert!(woken <= 1, "the idle relay woke {woken} times in 600 ms");
+
+        // An event wakes it.
+        event_tx.send(BridgeEvent::Error("wake".into())).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while shared.lock_runtime().pop_binary_event().is_none() {
+            assert!(Instant::now() < deadline, "the event was not relayed");
+            thread::sleep(Duration::from_millis(1));
+        }
+        // So does a stop, while the bridge still runs.
+        shared.request_stop();
+        relay.join().unwrap();
+        assert!(
+            shared.lock_runtime().pop_binary_event().is_none(),
+            "a stop is not a failure"
+        );
         drop(event_tx);
     }
 

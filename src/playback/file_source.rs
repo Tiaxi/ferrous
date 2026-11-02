@@ -133,6 +133,9 @@ pub(crate) struct Releases {
     state: Mutex<ReleasesState>,
     /// Signalled when a file is closed.
     released: Condvar,
+    /// Wakes the engine when a file becomes pending, so that it can wait
+    /// until the file is due to be reported.
+    wake: OnceLock<crossbeam_channel::Sender<()>>,
 }
 
 #[derive(Default)]
@@ -169,6 +172,12 @@ impl Releases {
         });
     }
 
+    /// Wake the engine through `wake` whenever a file becomes pending. A
+    /// full channel already holds a wake.
+    pub(crate) fn wake_with(&self, wake: crossbeam_channel::Sender<()>) {
+        let _ = self.wake.set(wake);
+    }
+
     fn begin(self: &Arc<Self>, path: &Path) -> Release {
         let mut state = lock(&self.state);
         state.next_id += 1;
@@ -179,6 +188,10 @@ impl Releases {
             since: Instant::now(),
             reported: false,
         });
+        drop(state);
+        if let Some(wake) = self.wake.get() {
+            let _ = wake.try_send(());
+        }
         Release {
             releases: Arc::clone(self),
             id,
@@ -208,6 +221,17 @@ impl Releases {
             }
         }
         overdue
+    }
+
+    /// When the next file not yet reported will have been pending for
+    /// `after`, or `None` while there is none.
+    pub(crate) fn next_due(&self, after: Duration) -> Option<Instant> {
+        lock(&self.state)
+            .pending
+            .iter()
+            .filter(|pending| !pending.reported)
+            .map(|pending| pending.since + after)
+            .min()
     }
 
     /// Wait until no file is pending, or until `deadline`. Returns the
@@ -1360,16 +1384,31 @@ mod tests {
             .unwrap()
             .imp()
             .set_releases(Arc::clone(&releases));
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+        releases.wake_with(wake_tx);
         let _ = pipeline.set_state(gst::State::Playing);
         wait_until("a read is held", || hold.holds_a_read());
+        assert_eq!(releases.next_due(Duration::ZERO), None);
 
         // A flushing seek and the end of the run do not wait for the read.
+        let stopped_at = Instant::now();
         assert!(
             set_state_in_time(&pipeline, gst::State::Null),
             "the pipeline stopped while its read was held"
         );
         assert!(hold.holds_a_read());
         assert!(received.lock().unwrap().is_empty());
+        // The engine, which sleeps until something is due, hears of the file
+        // left behind and when it is due to be reported.
+        assert!(wake_rx.try_recv().is_ok(), "the stop woke the engine");
+        let due = releases
+            .next_due(Duration::from_secs(15))
+            .expect("the file is due to be reported");
+        assert!(
+            due >= stopped_at + Duration::from_secs(15)
+                && due <= Instant::now() + Duration::from_secs(15),
+            "{due:?}"
+        );
         // The source left its read behind.
         assert_eq!(
             releases.overdue(Instant::now(), Duration::ZERO),
@@ -1377,6 +1416,7 @@ mod tests {
         );
         // Reported once.
         assert!(releases.overdue(Instant::now(), Duration::ZERO).is_empty());
+        assert_eq!(releases.next_due(Duration::ZERO), None);
         assert_eq!(
             releases.wait_released(Instant::now() + Duration::from_millis(50)),
             vec![path.clone()]

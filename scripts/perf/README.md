@@ -48,6 +48,13 @@ thread of the process (thread names with digits folded to `#`).
   `ferrous_ffi_waveform_window_cancellable`, as the waveform editor asks for
   them: with `--duration`, the whole track twice, then 10 s windows, then
   the whole track again.
+- `idle FILE`: plays the file through the FFI bridge, as the Qt app drives
+  it, with a thread that takes its output whenever the bridge signals some,
+  then pauses and stops it. Reports each thread's voluntary context switches
+  per second over `--hold` seconds (default 10) while paused and while
+  stopped, after `--warmup` seconds of playback and `--settle` seconds in
+  each state. The driver's own `perf-sampler` thread wakes 20 times a second.
+  `FERROUS_GST_OUTPUT_SINK=fakeaudiosink` plays in real time without audio.
 
 ## Scripts
 

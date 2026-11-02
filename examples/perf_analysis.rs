@@ -12,6 +12,7 @@
 //! cargo run --release --example perf_analysis -- analysis FILE [options]
 //! cargo run --release --example perf_analysis -- seek FILE [options]
 //! cargo run --release --example perf_analysis -- window FILE [options]
+//! cargo run --release --example perf_analysis -- idle FILE [options]
 //! ```
 //!
 //! `analysis` drives an `AnalysisEngine` without playback: it loads the
@@ -28,6 +29,13 @@
 //! `window` times waveform detail windows through the FFI function the Qt
 //! waveform editor and level meter call.
 //!
+//! `idle` plays the file through the FFI bridge, as the Qt app drives it,
+//! with a thread that takes its output whenever it signals some, then
+//! pauses and stops it, and reports each thread's voluntary context
+//! switches per second while paused and while stopped. Set
+//! `FERROUS_GST_OUTPUT_SINK=fakeaudiosink` to play in real time without
+//! audio output.
+//!
 //! Every mode reports the CPU time of each thread, sampled from
 //! `/proc/self/task` while it runs.
 
@@ -39,6 +47,7 @@ use std::time::{Duration, Instant};
 use ferrous::analysis::{
     AnalysisCommand, AnalysisEngine, AnalysisEvent, SpectrogramDisplayMode, SpectrogramViewMode,
 };
+use ferrous::frontend_bridge::ffi as bridge_ffi;
 use ferrous::frontend_bridge::{
     BridgeAnalysisCommand, BridgeCommand, BridgeEvent, BridgePlaybackCommand, BridgeQueueCommand,
     BridgeSettingsCommand, FrontendBridgeHandle,
@@ -66,6 +75,8 @@ struct Options {
     points: u32,
     /// The track's duration, for a whole-track window in `window`.
     duration: f64,
+    /// Seconds to sample each state for, in `idle`.
+    hold: f64,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -84,6 +95,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         window_seconds: 10.0,
         points: 3440,
         duration: 0.0,
+        hold: 10.0,
     };
     let mut iter = args.iter();
     let mut file = None;
@@ -126,6 +138,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--duration" => {
                 options.duration = value()?.parse().map_err(|_| "bad --duration")?;
             }
+            "--hold" => options.hold = value()?.parse().map_err(|_| "bad --hold")?,
             other if !other.starts_with("--") && file.is_none() => file = Some(other.into()),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -137,7 +150,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((mode, rest)) = args.split_first() else {
-        eprintln!("usage: perf_analysis analysis|seek|window FILE [options]");
+        eprintln!("usage: perf_analysis analysis|seek|window|idle FILE [options]");
         std::process::exit(2);
     };
     let options = match parse_options(rest) {
@@ -152,6 +165,7 @@ fn main() {
         "analysis" => run_analysis(&options),
         "seek" => run_seek(&options),
         "window" => run_window(&options),
+        "idle" => run_idle(&options),
         _ => Err(format!("unknown mode {mode}")),
     };
     let threads = sampler.finish();
@@ -825,4 +839,210 @@ fn run_window(options: &Options) -> Result<Fields, String> {
     }
     field(&mut fields, "windows", format!("[{}]", results.join(",")));
     Ok(fields)
+}
+
+// ---------------------------------------------------------------------------
+// idle: wakeups while paused and stopped, through the FFI bridge
+// ---------------------------------------------------------------------------
+
+/// The FFI bridge, which the Qt app drives from its UI thread. Its
+/// functions lock what they share, so the drain thread takes the output
+/// while the main thread sends commands.
+#[derive(Clone, Copy)]
+struct FfiHandle(*mut bridge_ffi::FerrousFfiBridge);
+
+// SAFETY: The bridge's functions may be called from any thread; they lock
+// the state they share. The handle outlives the drain thread, which is
+// joined before the bridge is destroyed.
+unsafe impl Send for FfiHandle {}
+
+impl FfiHandle {
+    /// Send command `id` with `payload`, encoded as the UI encodes it.
+    fn send(self, id: u16, payload: &[u8]) -> Result<(), String> {
+        let mut command = Vec::with_capacity(6 + payload.len());
+        command.extend_from_slice(&id.to_le_bytes());
+        command.extend_from_slice(
+            &u32::try_from(payload.len())
+                .map_err(|_| "command too long")?
+                .to_le_bytes(),
+        );
+        command.extend_from_slice(payload);
+        // SAFETY: The handle is live, and `command` is valid for its length.
+        if unsafe {
+            bridge_ffi::ferrous_ffi_bridge_send_binary(self.0, command.as_ptr(), command.len())
+        } {
+            Ok(())
+        } else {
+            Err(format!("the bridge refused command {id}"))
+        }
+    }
+
+    /// Take and free everything the bridge has queued for the UI.
+    fn drain(self) {
+        type Pop = unsafe extern "C" fn(*mut bridge_ffi::FerrousFfiBridge, *mut usize) -> *mut u8;
+        type Free = unsafe extern "C" fn(*mut u8, usize);
+        let queues: [(Pop, Free); 3] = [
+            (
+                bridge_ffi::ferrous_ffi_bridge_pop_binary_event,
+                bridge_ffi::ferrous_ffi_bridge_free_binary_event,
+            ),
+            (
+                bridge_ffi::ferrous_ffi_bridge_pop_analysis_frame,
+                bridge_ffi::ferrous_ffi_bridge_free_analysis_frame,
+            ),
+            (
+                bridge_ffi::ferrous_ffi_bridge_pop_precomputed_spectrogram,
+                bridge_ffi::ferrous_ffi_bridge_free_precomputed_spectrogram,
+            ),
+        ];
+        for (pop, free) in queues {
+            loop {
+                let mut len = 0usize;
+                // SAFETY: The handle is live and `len` is writable.
+                let buffer = unsafe { pop(self.0, &raw mut len) };
+                if buffer.is_null() {
+                    break;
+                }
+                // SAFETY: The buffer and its length came from the pop above.
+                unsafe { free(buffer, len) };
+            }
+        }
+    }
+}
+
+/// Path lists are a u32 count, then each path as a u32 length and UTF-8.
+fn path_list_payload(paths: &[&Path]) -> Result<Vec<u8>, String> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(
+        &u32::try_from(paths.len())
+            .map_err(|_| "too many paths")?
+            .to_le_bytes(),
+    );
+    for path in paths {
+        let text = path.to_str().ok_or("the path is not UTF-8")?;
+        payload.extend_from_slice(
+            &u32::try_from(text.len())
+                .map_err(|_| "path too long")?
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(text.as_bytes());
+    }
+    Ok(payload)
+}
+
+/// Each thread's name and voluntary context switches, by thread id.
+fn voluntary_switches() -> BTreeMap<u32, (String, u64)> {
+    let mut threads = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc/self/task") else {
+        return threads;
+    };
+    for entry in entries.flatten() {
+        let Ok(tid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let dir = entry.path();
+        let Some(switches) = std::fs::read_to_string(dir.join("status"))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+                    .and_then(|count| count.trim().parse().ok())
+            })
+        else {
+            continue;
+        };
+        let name = std::fs::read_to_string(dir.join("comm"))
+            .map(|name| normalize_thread_name(name.trim()))
+            .unwrap_or_default();
+        threads.insert(tid, (name, switches));
+    }
+    threads
+}
+
+/// Voluntary context switches per second of each thread name over `hold`,
+/// as a JSON object, with their sum as `_total`.
+fn wakeups_over(hold: Duration) -> String {
+    let before = voluntary_switches();
+    let started = Instant::now();
+    std::thread::sleep(hold);
+    let after = voluntary_switches();
+    let seconds = started.elapsed().as_secs_f64();
+    let mut by_name: BTreeMap<String, u64> = BTreeMap::new();
+    for (tid, (name, switches)) in &after {
+        let earlier = before.get(tid).map_or(0, |(_, switches)| *switches);
+        *by_name.entry(name.clone()).or_default() += switches - earlier;
+    }
+    let total: u64 = by_name.values().sum();
+    let mut out = String::from("{");
+    for (name, switches) in &by_name {
+        let _ = write!(
+            out,
+            "\"{}\":{:.2},",
+            name.replace('"', "'"),
+            approx_f64(*switches) / seconds
+        );
+    }
+    let _ = write!(out, "\"_total\":{:.2}}}", approx_f64(total) / seconds);
+    out
+}
+
+fn run_idle(options: &Options) -> Result<Fields, String> {
+    let handle = FfiHandle(bridge_ffi::ferrous_ffi_bridge_create());
+    if handle.0.is_null() {
+        return Err("the FFI bridge did not start".to_string());
+    }
+    // SAFETY: The handle is live.
+    let wake_fd = unsafe { bridge_ffi::ferrous_ffi_bridge_wakeup_fd(handle.0) };
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drain = {
+        let stop = std::sync::Arc::clone(&stop);
+        std::thread::Builder::new()
+            .name("perf-ui-drain".to_string())
+            .spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let mut poll = libc::pollfd {
+                        fd: wake_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: `poll` is one valid pollfd. The timeout only
+                    // lets the thread see `stop`.
+                    unsafe { libc::poll(&raw mut poll, 1, 1000) };
+                    handle.drain();
+                    // SAFETY: The handle is live.
+                    unsafe { bridge_ffi::ferrous_ffi_bridge_ack_wakeup(handle.0) };
+                    handle.drain();
+                }
+            })
+            .map_err(|error| error.to_string())?
+    };
+    let result = (|| {
+        // Replace the queue with the file, then play, pause and stop it.
+        handle.send(15, &path_list_payload(&[options.file.as_path()])?)?;
+        handle.send(1, &[])?;
+        std::thread::sleep(Duration::from_secs_f64(options.warmup));
+        let hold = Duration::from_secs_f64(options.hold);
+        let settle = Duration::from_secs_f64(options.settle);
+        let mut fields = Fields::new();
+        field(&mut fields, "mode", "\"idle\"");
+        field(
+            &mut fields,
+            "file",
+            format!("\"{}\"", file_label(&options.file)),
+        );
+        field(&mut fields, "hold_s", options.hold);
+        handle.send(2, &[])?;
+        std::thread::sleep(settle);
+        field(&mut fields, "paused_wakeups_per_s", wakeups_over(hold));
+        handle.send(3, &[])?;
+        std::thread::sleep(settle);
+        field(&mut fields, "stopped_wakeups_per_s", wakeups_over(hold));
+        Ok(fields)
+    })();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = drain.join();
+    // SAFETY: The handle is live and destroyed once; the drain thread ended.
+    unsafe { bridge_ffi::ferrous_ffi_bridge_destroy(handle.0) };
+    result
 }
