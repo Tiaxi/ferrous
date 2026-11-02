@@ -3994,7 +3994,10 @@ void ErrorsSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
     QVERIFY(dialog != nullptr);
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
-    QSignalSpy closing(window, &QQuickWindow::closing);
+    // By its signature: the member pointer would import a symbol of Qt's
+    // private API (its argument is private), which no binary may.
+    QSignalSpy closing(window, SIGNAL(closing(QQuickCloseEvent*)));
+    QVERIFY(closing.isValid());
     QSignalSpy quit(&engine, &QQmlEngine::quit);
 
     // Ctrl+Q triggers this action. The offscreen platform binds no key to
@@ -4199,7 +4202,10 @@ void ErrorsSmokeTest::mprisQuitSavesBeforeClosingTheWindow() {
     QVERIFY(bridge != nullptr);
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
     const auto restoreMainWindow = useAsMainWindow(window);
-    QSignalSpy closing(window, &QQuickWindow::closing);
+    // By its signature: the member pointer would import a symbol of Qt's
+    // private API (its argument is private), which no binary may.
+    QSignalSpy closing(window, SIGNAL(closing(QQuickCloseEvent*)));
+    QVERIFY(closing.isValid());
     QSignalSpy quit(&engine, &QQmlEngine::quit);
 
     callMprisQuit();
