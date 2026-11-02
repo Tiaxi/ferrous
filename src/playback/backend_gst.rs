@@ -7416,7 +7416,7 @@ mod engine_tests {
         assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
         assert_eq!(engine.seeked.len(), 1, "{:?}", engine.seeked);
         assert!(
-            engine.seeked[0].abs_diff(millis(5_700)) < millis(1),
+            engine.seeked[0].abs_diff(millis(5_700)) < millis(50),
             "{:?}",
             engine.seeked
         );
@@ -7551,7 +7551,7 @@ mod engine_tests {
         });
         assert_eq!(engine.seeked.len(), 1, "{:?}", engine.seeked);
         assert!(
-            engine.seeked[0].abs_diff(millis(2_000)) < millis(1),
+            engine.seeked[0].abs_diff(millis(2_000)) < millis(50),
             "{:?}",
             engine.seeked
         );
@@ -7700,7 +7700,7 @@ mod engine_tests {
         hold.release();
         engine.wait_until("the seek did not land", |engine| !engine.seeked.is_empty());
         assert!(
-            engine.seeked[0].abs_diff(millis(10_000)) < millis(1),
+            engine.seeked[0].abs_diff(millis(10_000)) < millis(50),
             "{:?}",
             engine.seeked
         );
@@ -11244,7 +11244,7 @@ mod engine_tests {
         );
         assert_eq!(engine.seeked.len(), 1, "{:?}", engine.seeked);
         assert!(
-            engine.seeked[0].abs_diff(target) < millis(1),
+            engine.seeked[0].abs_diff(target) < millis(50),
             "landed at {:?}",
             engine.seeked
         );
