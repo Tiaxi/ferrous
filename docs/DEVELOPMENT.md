@@ -140,6 +140,8 @@ With the same variable, `waveformEditorPlaybackBenchmark` reports the frames a w
 
 The waveform editor retains image tiles in the scene graph and moves their source coordinates during playback. Native sample curves use antialiased geometry; labels use a bounded raster cache and are laid out only when first drawn. The software renderer keeps a single raster pass at sample zoom. Texture resources belong to the render node and are recreated with the window's scene graph. CI compares the native output with the shared raster reference at 1× and 2× scaling, including rulers, crosshairs, split channels, and texture tile boundaries.
 
+For backend measurements (analysis throughput per file, seek latency, waveform detail windows, and the app's per-thread CPU and wakeups), see the harness in [`scripts/perf`](../scripts/perf/README.md).
+
 Other useful runtime controls:
 
 | Variable | Purpose / default |
