@@ -17,14 +17,15 @@ Spectral batches travel through a dedicated bounded channel to an FFI relay. Sna
 | Serialized FFI spectral queue | 16 MiB |
 | Centered next-track staging | At most an 8 MiB prefix |
 | Speculative spectral lookahead | 64 MiB across channels, subject to the minimum visible window |
-| Waveform PCM cache | 32 MiB LRU, 16,384-frame tiles |
-| Waveform summary cache | Separate 16 MiB LRU |
+| Waveform PCM cache | 32 MiB LRU, 16,384-frame tiles, plus the tile holding the end of the file |
+| Waveform summary cache, 64–512-frame levels | Separate 16 MiB LRU |
+| Waveform summary cache, 1,024–16,384-frame levels | 16 MiB for the open file, filled in order and never evicted |
 
 The lookahead policy is shared by Rust and Qt through `ferrous_ffi_spectrogram_ring_capacity`. It preserves one viewport of history in centered mode and two in rolling mode, in addition to lookahead. Visible-window requirements can exceed the speculative budget; this is not a hard process-memory ceiling. Decoder storage, render images, metadata, and allocations in flight are additional costs.
 
 ## Waveform queries
 
-Detail requests run on Qt worker threads. A shared Rust service gives them one persistent decoder, held for one tile at a time, and caches PCM and min/max summaries; the level meter decodes between the tiles of a detail window. File identity includes path, length, and modification time, and one file is opened at a time. A cancelled request does not wait for the service; incomplete cancelled tiles are not cached. The summary pyramid starts at 64-frame blocks and supports coarser power-of-two queries without decoding again. Clipped endpoints use PCM to avoid including samples outside the requested interval.
+Detail requests run on Qt worker threads. A shared Rust service gives them one persistent decoder, held for one tile at a time, and caches PCM and min/max summaries; the level meter decodes between the tiles of a detail window. File identity includes path, length, and modification time, and one file is opened at a time. A cancelled request does not wait for the service; incomplete cancelled tiles are not cached. The summary pyramid starts at 64-frame blocks and supports coarser power-of-two queries without decoding again. Its levels from 1,024 frames up, about 6% of it, are kept for the whole file outside the LRU: whole-track and zoomed-out windows read every tile, and the full pyramid of a hi-res surround track (about 43 MB for five minutes of 96 kHz 5.1) does not fit the LRU, so they would decode the whole file each time. Once a window has read part of the file, a later window over that part at 1,024 frames a point or more decodes at most the two tiles its ends clip, and a whole-track window decodes nothing. The coarse budget holds about 26 minutes of 96 kHz 5.1, 13 of 192 kHz 5.1, or two hours of 44.1 kHz stereo; coarse windows over the rest of a longer file aggregate its fine levels if the LRU holds them, and otherwise decode it again. Clipped endpoints use PCM to avoid including samples outside the requested interval; a window that reaches the end of the file uses summaries for its last tile, and the PCM of that tile stays cached for windows that end just short of it.
 
 The waveform editor has at most one detail request in flight. While playback moves the view on, that request stays as long as it covers part of the view, and its arrival asks for what it misses. A zoom, a resize, another track, or a seek to a view it does not cover cancels it.
 
