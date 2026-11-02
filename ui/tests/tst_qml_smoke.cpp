@@ -56,6 +56,7 @@
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <utility>
 
 #include "../src/BridgeClient.h"
@@ -15612,40 +15613,65 @@ void SpectrogramSmokeTest::spectrogramUnwrittenRingColumnsDrawAsBackground() {
 }
 
 void SpectrogramSmokeTest::spectrogramRingGrowthKeepsRollingHistory() {
-    SpectrogramItem item;
-    item.setWidth(1920);
-    item.setHeight(100);
-    item.setDisplayMode(0);
-    constexpr int bins = 1025;
-    constexpr int columns = 300;
-    QByteArray chunk(bins * columns, '\0');
-    for (int column = 0; column < columns; ++column) {
-        std::fill_n(chunk.data() + column * bins, bins, static_cast<char>(column % 251 + 1));
-    }
-    item.feedPrecomputedChunk(chunk, bins, 0, columns, 0, 100'000,
-        48'000, 1024, false, true, 1, true, 1);
-    const int capacityBefore = item.m_ringCapacity;
-    QCOMPARE(item.m_ringWriteSeq, qint64(columns));
+    // Grows the ring before it wraps, and after it has wrapped and dropped
+    // its oldest columns.
+    for (bool wrapped : {false, true}) {
+        SpectrogramItem item;
+        item.setWidth(1920);
+        item.setHeight(100);
+        item.setDisplayMode(0);
+        constexpr int bins = 1025;
+        constexpr int firstColumns = 300;
+        const auto columnByte = [](qint64 seq) { return static_cast<quint8>(seq % 251 + 1); };
+        const auto feed = [&](int start, int columns, bool reset) {
+            QByteArray chunk(qsizetype(bins) * columns, '\0');
+            for (int column = 0; column < columns; ++column) {
+                std::fill_n(chunk.data() + qsizetype(column) * bins, bins,
+                    static_cast<char>(columnByte(start + column)));
+            }
+            item.feedPrecomputedChunk(chunk, bins, 0, columns, start, 1'000'000,
+                48'000, 1024, false, reset, 1, reset, 1);
+        };
+        feed(0, firstColumns, true);
+        const int capacityBefore = item.m_ringCapacity;
+        const int written = wrapped ? capacityBefore + 500 : firstColumns;
+        if (written > firstColumns) {
+            feed(firstColumns, written - firstColumns, false);
+        }
+        QCOMPARE(item.m_ringCapacity, capacityBefore);
+        QCOMPARE(item.m_ringWriteSeq, qint64(written));
+        const qint64 oldestKept = std::max(0, written - capacityBefore);
+        QCOMPARE(item.m_ringOldestSeq, oldestKept);
+        QCOMPARE(oldestKept > 0, wrapped);
 
-    // Zooming out widens the view, so the ring grows with the next data.
-    item.setZoomLevel(0.25);
-    QByteArray next(bins, static_cast<char>(columns % 251 + 1));
-    item.feedPrecomputedChunk(next, bins, 0, 1, columns, 100'000,
-        48'000, 1024, false, false, 1, false, 1);
-    QVERIFY(item.m_ringCapacity > capacityBefore);
-    QCOMPARE(item.m_ringOldestSeq, qint64(0));
-    QCOMPARE(item.m_ringWriteSeq, qint64(columns + 1));
-    for (int seq = 0; seq <= columns; ++seq) {
-        const quint8 *bytes = item.ringColumnLocked(seq, true);
-        QVERIFY2(bytes != nullptr, qPrintable(QStringLiteral("column %1").arg(seq)));
-        QCOMPARE(bytes[0], quint8(seq % 251 + 1));
-        QCOMPARE(bytes[bins - 1], quint8(seq % 251 + 1));
+        // Zooming out widens the view, so the ring grows with the next data.
+        item.setZoomLevel(0.25);
+        feed(written, 1, false);
+        const int capacity = item.m_ringCapacity;
+        QVERIFY(capacity > capacityBefore);
+        QCOMPARE(item.m_ringWriteSeq, qint64(written + 1));
+        std::set<int> blocks;
+        for (qint64 seq = oldestKept; seq <= written; ++seq) {
+            const quint8 *bytes = item.ringColumnLocked(seq, true);
+            QVERIFY2(bytes != nullptr, qPrintable(QStringLiteral("column %1").arg(seq)));
+            QCOMPARE(bytes[0], columnByte(seq));
+            QCOMPARE(bytes[bins - 1], columnByte(seq));
+            blocks.insert(static_cast<int>(seq % capacity)
+                / SpectrogramRingStorage::kColumnsPerBlock);
+        }
+        // The columns the ring dropped before it grew stay missing.
+        for (qint64 seq = 0; seq < oldestKept; ++seq) {
+            QVERIFY2(item.ringColumnLocked(seq, true) == nullptr,
+                qPrintable(QStringLiteral("dropped column %1").arg(seq)));
+        }
+        // The copy wrote only the columns it kept.
+        qint64 blockBytes = 0;
+        for (int block : blocks) {
+            blockBytes += qint64(std::min(SpectrogramRingStorage::kColumnsPerBlock,
+                capacity - block * SpectrogramRingStorage::kColumnsPerBlock)) * bins;
+        }
+        QCOMPARE(item.m_ring.committedBytes(), blockBytes);
     }
-    // The copy wrote only the columns it kept.
-    const int blocks = (columns + SpectrogramRingStorage::kColumnsPerBlock)
-        / SpectrogramRingStorage::kColumnsPerBlock;
-    QCOMPARE(item.m_ring.committedBytes(),
-        qint64(blocks) * SpectrogramRingStorage::kColumnsPerBlock * bins);
 }
 
 void SpectrogramSmokeTest::spectrogramRingChangeBenchmark() {
