@@ -27,6 +27,7 @@
 
 class QQuickWindow;
 class QSGNode;
+class QSGTexture;
 class QWheelEvent;
 struct SpectrogramProjection;
 struct SpectrogramRasterMailbox;
@@ -66,6 +67,53 @@ private:
     int m_bins{0};
 };
 
+// Which columns of a canvas have changed since the scene graph last took
+// them, or that all of it has.
+class SpectrogramCanvasDamage {
+public:
+    // A canvas `width` columns wide, all of it changed.
+    void reset(int width);
+    int width() const { return static_cast<int>(m_columns.size()); }
+    void markColumn(int x);
+    void markAll() { m_all = true; }
+    bool all() const { return m_all; }
+    int columnCount() const { return m_count; }
+    bool anyIn(int first, int end) const;
+    // Calls `visit(first, end)` for each run of changed columns, in order.
+    template <typename Visit>
+    void forEachRun(Visit &&visit) const {
+        const int columns = width();
+        for (int x = 0; x < columns;) {
+            if (m_columns[static_cast<size_t>(x)] == 0) {
+                ++x;
+                continue;
+            }
+            const int first = x;
+            while (x < columns && m_columns[static_cast<size_t>(x)] != 0) {
+                ++x;
+            }
+            visit(first, x);
+        }
+    }
+    // Nothing has changed.
+    void clear();
+
+private:
+    std::vector<unsigned char> m_columns;
+    int m_count{0};
+    bool m_all{true};
+};
+
+// Canvas pixels for the scene graph to upload, in order: images of the
+// canvas columns from x on.
+struct SpectrogramCanvasUpload {
+    struct Part {
+        int x{0};
+        QImage image;
+    };
+    QVector<Part> parts;
+};
+
 // What a rasterization draws: the canvas's size in device pixels and the
 // display columns it shows, and what they are drawn from.
 struct SpectrogramRasterTarget {
@@ -97,6 +145,9 @@ struct SpectrogramRasterJob {
     SpectrogramRingStorage ring;
     // The slot of display column target.displayLeft + i, or -1 without it.
     std::vector<int> columnSlots;
+    // The columns of each copy of the canvas to make for upload: the scene
+    // graph's texture tiles, or 0 for one copy of all of it.
+    int tileWidth{0};
 };
 
 // A small image an overlay places on the pane: a label, or a crosshair's
@@ -128,18 +179,26 @@ struct SpectrogramRasterResult {
     quint64 serial{0};
     SpectrogramRasterTarget target;
     QImage canvas;
-    // Copies of the canvas's tiles, ready to upload.
+    // Copies of the canvas, ready to upload: of its tiles, tileWidth
+    // columns each, or one of all of it for a tileWidth of 0.
     QVector<QImage> tiles;
+    int tileWidth{0};
     int drawPixels{0};
     // The job's slots, which tell the columns it had to draw without.
     std::vector<int> columnSlots;
 };
 
 // What a spectrogram's scene node did in its last frame: the canvas
-// textures it made and their pixels' bytes, and how many of its texture
-// nodes it changed. For tests and benchmarks.
+// textures it made, the uploads into canvas textures it kept, the canvas
+// pixels' bytes it passed on for both, and how many of its texture nodes it
+// changed. For tests and benchmarks.
 struct SpectrogramSceneStatistics {
+    // Whether its canvas textures are kept and updated in place, and how
+    // many it has.
+    bool canvasInPlace{false};
+    int canvasTextureCount{0};
     int canvasTextures{0};
+    int canvasUploads{0};
     qint64 canvasTextureBytes{0};
     int textureNodeChanges{0};
     // The grids' and the crosshair's label and line textures made.
@@ -279,6 +338,9 @@ public:
     Q_INVOKABLE double minimumZoomLevel() const;
 
     static SpectrogramSceneStatistics sceneStatistics(const QSGNode *node);
+    // The canvas textures of a scene node, with the canvas column each
+    // starts at. For tests.
+    static QVector<QPair<int, QSGTexture *>> canvasTextures(const QSGNode *node);
 
 signals:
     void dbRangeChanged();
@@ -321,6 +383,9 @@ private:
     friend class SpectrogramFrameScheduler;
 
     static constexpr int kGradientTableSize = 2048;
+    // The columns of a canvas texture tile for the software renderer, whose
+    // textures cannot be updated in place: each is made again when one of
+    // its columns changes.
     static constexpr int kCanvasTileWidth = 64;
 
     // The track columns that centered mode shows: the playhead in the
@@ -461,9 +526,13 @@ private:
     mutable std::shared_ptr<const SpectrogramProjection> m_precomputedProjection;
     void rebuildCanvasFromColumns();
     void drawColumnAt(int x, const std::vector<quint8> &col);
-    void resizeDirtyTilesLocked();
-    void markTileDirtyLocked(int x);
-    void markAllTilesDirtyLocked();
+    void resizeCanvasDamageLocked();
+    void markCanvasColumnDirtyLocked(int x);
+    void markCanvasDirtyLocked();
+    // What of the canvas the scene node is to upload: the columns changed
+    // since the last frame took them, or all of it. With a tileWidth, the
+    // whole tiles of that many columns they are in; with 0, those columns.
+    SpectrogramCanvasUpload takeCanvasUploadLocked(int tileWidth, bool all);
     void updateOverlayImageLocked();
     void updateCrosshairOverlayLocked(
         int width, int height,
@@ -580,11 +649,22 @@ private:
     int m_canvasWriteX{0};
     int m_canvasFilledCols{0};
     std::deque<std::vector<quint8>> m_columns;
-    std::vector<unsigned char> m_dirtyTiles;
-    // Tile copies a rasterization made of the canvas it delivered, for the
-    // render thread to upload instead of copying them itself. A tile drawn
-    // into since then is copied again.
+    SpectrogramCanvasDamage m_canvasDamage;
+    // Copies a rasterization made of the canvas it delivered, for the render
+    // thread to upload instead of copying the canvas itself: of tiles
+    // m_rasterTileWidth columns wide, a tile drawn into since then being
+    // copied again; or, for a width of 0, one copy of all of it, which the
+    // columns drawn into since then are uploaded over.
     QVector<QImage> m_rasterTiles;
+    int m_rasterTileWidth{0};
+    // The columns of the scene graph's canvas texture tiles, for the copies
+    // rasterizations make: 0 when it updates one texture in place.
+    int m_sceneTileWidth{0};
+    // The largest canvas texture to make, below OpenGL's limit; for tests,
+    // 0 for that limit.
+    int m_canvasTextureSizeLimit{0};
+    // What the scene node drawn last did, for tests of windows that draw it.
+    SpectrogramSceneStatistics m_lastSceneStatistics;
     // The rasterization that will replace the canvas: its target, and its
     // serial, which only its result carries. The canvas stays on screen,
     // aligned to the view, until the result arrives.
