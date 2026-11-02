@@ -2658,10 +2658,7 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_i32(&mut out, current_queue_index);
     push_string(&mut out, &current_path);
     push_u64(&mut out, snapshot.playback.muted_channels_mask);
-    push_u8(
-        &mut out,
-        snapshot.playback.soloed_channel.map_or(0xFF, |ch| ch),
-    );
+    push_u64(&mut out, snapshot.playback.soloed_channels_mask);
     push_u64(&mut out, snapshot.playback.track_token);
     push_u64(&mut out, snapshot.playback.seek_serial);
     push_u64(&mut out, snapshot.playback.seek_landed_serial);
@@ -3257,7 +3254,7 @@ mod tests {
                 repeat_mode: RepeatMode::Off,
                 shuffle_enabled: false,
                 muted_channels_mask: 0,
-                soloed_channel: None,
+                soloed_channels_mask: 0,
                 track_token: 7,
                 seek_serial: 3,
                 seek_landed_serial: 2,
@@ -6924,7 +6921,7 @@ mod tests {
 
     struct DecodedSnapshotForTest {
         playback_muted_channels_mask: u64,
-        playback_soloed_channel: Option<u8>,
+        playback_soloed_channels_mask: u64,
         playback_track_token: u64,
         playback_seek_serial: u64,
         playback_seek_landed_serial: u64,
@@ -6937,7 +6934,7 @@ mod tests {
     fn decode_binary_snapshot_for_test(data: &[u8]) -> DecodedSnapshotForTest {
         let mut result = DecodedSnapshotForTest {
             playback_muted_channels_mask: 0,
-            playback_soloed_channel: None,
+            playback_soloed_channels_mask: 0,
             playback_track_token: 0,
             playback_seek_serial: 0,
             playback_seek_landed_serial: 0,
@@ -6969,13 +6966,9 @@ mod tests {
             result.playback_muted_channels_mask =
                 u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
             p += 8;
-            let soloed_raw = s[p];
-            result.playback_soloed_channel = if soloed_raw == 0xFF {
-                None
-            } else {
-                Some(soloed_raw)
-            };
-            p += 1;
+            result.playback_soloed_channels_mask =
+                u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
+            p += 8;
             result.playback_track_token = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
             p += 8;
             result.playback_seek_serial = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
@@ -7038,21 +7031,23 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_encodes_soloed_channel() {
+    fn snapshot_encodes_every_soloed_channel() {
+        // Bits past 8 channels, and the last one of the mask.
+        let mask = (1 << 63) | (1 << 9) | 0b101;
         let mut snapshot = sample_snapshot();
-        snapshot.playback.soloed_channel = Some(3);
+        snapshot.playback.soloed_channels_mask = mask;
         let encoded = encode_binary_snapshot(&snapshot, None);
         let decoded = decode_binary_snapshot_for_test(&encoded);
-        assert_eq!(decoded.playback_soloed_channel, Some(3));
+        assert_eq!(decoded.playback_soloed_channels_mask, mask);
     }
 
     #[test]
-    fn snapshot_encodes_soloed_channel_none() {
+    fn snapshot_encodes_no_soloed_channels() {
         let mut snapshot = sample_snapshot();
-        snapshot.playback.soloed_channel = None;
+        snapshot.playback.soloed_channels_mask = 0;
         let encoded = encode_binary_snapshot(&snapshot, None);
         let decoded = decode_binary_snapshot_for_test(&encoded);
-        assert_eq!(decoded.playback_soloed_channel, None);
+        assert_eq!(decoded.playback_soloed_channels_mask, 0);
     }
 
     #[test]
@@ -7062,7 +7057,7 @@ mod tests {
         let encoded = encode_binary_snapshot(&snapshot, None);
         let decoded = decode_binary_snapshot_for_test(&encoded);
         assert_eq!(decoded.playback_track_token, u64::MAX - 1);
-        assert_eq!(decoded.playback_soloed_channel, None);
+        assert_eq!(decoded.playback_soloed_channels_mask, 0);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use super::channel_mix::ChannelMix;
 use super::queue::{same_audio_extension, CancelledAdvance, GaplessQueue, Handoff};
 use super::{
     EngineExit, FileStamp, PlaybackCommand, PlaybackError, PlaybackErrorOutcome, PlaybackEvent,
@@ -90,8 +91,7 @@ fn spawn_with_clock(
             queue: GaplessQueue::new(),
             about_to_finish_fired: false,
             track_token_counter: 0,
-            solo_pre_mask: None,
-            soloed_channel: None,
+            channel_mix: ChannelMix::default(),
             event_tx,
             analysis_tx,
         };
@@ -129,18 +129,20 @@ struct MockPlaybackRuntime {
     /// stream. It asks again only for a restarted or new stream.
     about_to_finish_fired: bool,
     track_token_counter: u64,
-    solo_pre_mask: Option<u64>,
-    soloed_channel: Option<u8>,
+    channel_mix: ChannelMix,
     event_tx: Sender<PlaybackEvent>,
     analysis_tx: Sender<AnalysisCommand>,
 }
 
 impl MockPlaybackRuntime {
     fn reset_mute(&mut self) {
-        self.snapshot.muted_channels_mask = 0;
-        self.snapshot.soloed_channel = None;
-        self.solo_pre_mask = None;
-        self.soloed_channel = None;
+        self.channel_mix = ChannelMix::default();
+        self.publish_channel_mix();
+    }
+    /// The simulated streams have no channel count.
+    fn publish_channel_mix(&mut self) {
+        self.snapshot.muted_channels_mask = self.channel_mix.silenced(0);
+        self.snapshot.soloed_channels_mask = self.channel_mix.soloed_in(0);
     }
     fn handle_command(&mut self, cmd: PlaybackCommand) {
         match cmd {
@@ -380,35 +382,12 @@ impl MockPlaybackRuntime {
         }
     }
     fn toggle_channel_mute(&mut self, ch: u8) {
-        let ch = ch.min(63);
-        if self.soloed_channel == Some(ch) {
-            if let Some(pre) = self.solo_pre_mask.take() {
-                self.snapshot.muted_channels_mask = pre;
-            }
-            self.soloed_channel = None;
-        } else {
-            self.snapshot.muted_channels_mask ^= 1u64 << ch;
-            self.solo_pre_mask = None;
-            self.soloed_channel = None;
-        }
-        self.snapshot.soloed_channel = self.soloed_channel;
+        self.channel_mix.toggle_mute(ch, 0);
+        self.publish_channel_mix();
     }
     fn solo_channel(&mut self, ch: u8) {
-        let ch = ch.min(63);
-        if self.soloed_channel == Some(ch) {
-            // self.solo_pre_mask is always Some when self.soloed_channel is Some.
-            if let Some(pre) = self.solo_pre_mask.take() {
-                self.snapshot.muted_channels_mask = pre;
-            }
-            self.soloed_channel = None;
-        } else {
-            if self.soloed_channel.is_none() {
-                self.solo_pre_mask = Some(self.snapshot.muted_channels_mask);
-            }
-            self.snapshot.muted_channels_mask = u64::MAX ^ (1u64 << ch);
-            self.soloed_channel = Some(ch);
-        }
-        self.snapshot.soloed_channel = self.soloed_channel;
+        self.channel_mix.toggle_solo(ch);
+        self.publish_channel_mix();
     }
     fn poll(&mut self) {
         if self.snapshot.state != PlaybackState::Playing {

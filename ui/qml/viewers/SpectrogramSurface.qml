@@ -430,7 +430,7 @@ Item {
                     // S (solo) button.
                     Rectangle {
                         objectName: "spectrogramSoloButton"
-                        property bool active: root.uiBridge.soloedChannel === modelData.channelIndex
+                        property bool active: (root.uiBridge.soloedChannels || [])[modelData.channelIndex] === true
                         visible: root.channelButtonsVisible(
                             paneHover.hovered, channelControlsHover.hovered)
                         width: soloText.implicitWidth + 10

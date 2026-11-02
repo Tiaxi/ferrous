@@ -300,6 +300,7 @@ private slots:
     void testMutedChannelsMaskDecoding();
     void currentTrackChannelsExposesDecodedMetadata();
     void mutedChannelsKeepEveryBitOfTheMask();
+    void soloedChannelsKeepEveryBitOfTheMask();
     void metadataChannelLabelsDecodeOptionalTail();
     void channelLayoutFollowsMatchingMetadataAcrossTracks();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
@@ -337,8 +338,8 @@ private slots:
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
-    void testSoloedChannelDecoding();
-    void testSoloedChannelDecodingNone();
+    void testSoloedChannelsDecoding();
+    void testSoloedChannelsDecodingNone();
     void testPlaybackTrackTokenDecoding();
     void testChannelButtonsVisibilityDecoding();
     void libraryViewStateAvailabilityFollowsSnapshot();
@@ -5178,8 +5179,9 @@ void BridgeClientTest::channelLayoutFollowsMatchingMetadataAcrossTracks()
 
 void BridgeClientTest::mutedChannelsKeepEveryBitOfTheMask()
 {
-    // Soloing channel 0 mutes all the others: the engine's mask has its
-    // high bits set, which a QML number would round away.
+    // Soloing channel 0 mutes all the others: before the engine knows the
+    // stream's channels its mask has the high bits set, which a QML number
+    // would round away.
     BridgeClient client;
     isolateBridgeClient(client);
     BinaryBridgeCodec::DecodedSnapshot snapshot;
@@ -5188,7 +5190,7 @@ void BridgeClientTest::mutedChannelsKeepEveryBitOfTheMask()
     snapshot.playback.currentPath = QStringLiteral("/fixture/surround.wav");
     for (const int soloed : {0, 5}) {
         snapshot.playback.mutedChannelsMask = ~(quint64{1} << soloed);
-        snapshot.playback.soloedChannel = soloed;
+        snapshot.playback.soloedChannelsMask = quint64{1} << soloed;
         QVERIFY(client.processBinarySnapshot(snapshot));
         const QList<bool> muted = client.property("mutedChannels").value<QList<bool>>();
         QCOMPARE(muted.size(), 64);
@@ -5197,6 +5199,35 @@ void BridgeClientTest::mutedChannelsKeepEveryBitOfTheMask()
             QCOMPARE(client.isChannelMuted(channel), channel != soloed);
         }
     }
+}
+
+void BridgeClientTest::soloedChannelsKeepEveryBitOfTheMask()
+{
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/fixture/surround.wav");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    client.m_pollPlaybackChanged = false;
+
+    const quint64 mask = (quint64{1} << 63) | (quint64{1} << 9) | 0b101;
+    snapshot.playback.soloedChannelsMask = mask;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    // The panes follow playbackChanged, which the next poll emits.
+    QVERIFY(client.m_pollPlaybackChanged);
+    QCOMPARE(client.soloedChannelsMask(), mask);
+    const QList<bool> soloed = client.property("soloedChannels").value<QList<bool>>();
+    QCOMPARE(soloed.size(), 64);
+    for (int channel = 0; channel < 64; ++channel) {
+        QCOMPARE(soloed.at(channel), ((mask >> channel) & 1U) != 0);
+    }
+
+    snapshot.playback.soloedChannelsMask = 0;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.soloedChannelsMask(), quint64(0));
+    QVERIFY(!client.property("soloedChannels").value<QList<bool>>().contains(true));
 }
 
 void BridgeClientTest::testSoloChannelCommandEncoding()
@@ -5215,7 +5246,7 @@ void BridgeClientTest::testSoloChannelCommandEncoding()
     QCOMPARE(channel, quint8(3));
 }
 
-void BridgeClientTest::testSoloedChannelDecoding()
+void BridgeClientTest::testSoloedChannelsDecoding()
 {
     QByteArray payload;
     auto appendLe = [&payload](auto value) {
@@ -5234,7 +5265,8 @@ void BridgeClientTest::testSoloedChannelDecoding()
     appendLe(quint32(pathUtf8.size()));
     payload.append(pathUtf8);
     appendLe(quint64(0));         // mutedChannelsMask
-    payload.append(static_cast<char>(3)); // soloedChannel = 3
+    const quint64 soloedMask = (quint64{1} << 63) | (quint64{1} << 9) | 0b1000;
+    appendLe(soloedMask);
 
     QByteArray packet;
     QDataStream ps(&packet, QIODevice::WriteOnly);
@@ -5251,10 +5283,10 @@ void BridgeClientTest::testSoloedChannelDecoding()
     QString error;
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
              qPrintable(error));
-    QCOMPARE(decoded.playback.soloedChannel, 3);
+    QCOMPARE(decoded.playback.soloedChannelsMask, soloedMask);
 }
 
-void BridgeClientTest::testSoloedChannelDecodingNone()
+void BridgeClientTest::testSoloedChannelsDecodingNone()
 {
     QByteArray payload;
     auto appendLe = [&payload](auto value) {
@@ -5273,7 +5305,7 @@ void BridgeClientTest::testSoloedChannelDecodingNone()
     appendLe(quint32(pathUtf8.size()));
     payload.append(pathUtf8);
     appendLe(quint64(0));
-    payload.append(static_cast<char>(0xFF)); // no solo
+    appendLe(quint64(0)); // no solo
 
     QByteArray packet;
     QDataStream ps(&packet, QIODevice::WriteOnly);
@@ -5290,7 +5322,7 @@ void BridgeClientTest::testSoloedChannelDecodingNone()
     QString error;
     QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &error),
              qPrintable(error));
-    QCOMPARE(decoded.playback.soloedChannel, -1);
+    QCOMPARE(decoded.playback.soloedChannelsMask, quint64(0));
 }
 
 void BridgeClientTest::testPlaybackTrackTokenDecoding()
@@ -5312,7 +5344,7 @@ void BridgeClientTest::testPlaybackTrackTokenDecoding()
     appendLe(quint32(pathUtf8.size()));
     payload.append(pathUtf8);
     appendLe(quint64(0));
-    payload.append(static_cast<char>(0xFF));
+    appendLe(quint64(0));
     appendLe(quint64(0xFFFF'FFFF'0000'0007ULL)); // trackToken
 
     auto decode = [](const QByteArray &body, BinaryBridgeCodec::DecodedSnapshot *decoded) {
@@ -5332,7 +5364,7 @@ void BridgeClientTest::testPlaybackTrackTokenDecoding()
     BinaryBridgeCodec::DecodedSnapshot decoded;
     QVERIFY(decode(payload, &decoded));
     QCOMPARE(decoded.playback.trackToken, quint64(0xFFFF'FFFF'0000'0007ULL));
-    QCOMPARE(decoded.playback.soloedChannel, -1);
+    QCOMPARE(decoded.playback.soloedChannelsMask, quint64(0));
     QCOMPARE(decoded.playback.seekSerial, quint64(0));
     QCOMPARE(decoded.playback.seekLandedSerial, quint64(0));
 

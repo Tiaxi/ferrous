@@ -57,7 +57,7 @@ class WaveformEditorItem : public QQuickItem {
     // Whether each channel, 0 to 63, is muted: a 64-bit mask would lose its
     // low bits as a QML number.
     Q_PROPERTY(QList<bool> mutedChannels READ mutedChannels WRITE setMutedChannels NOTIFY mutedChannelsChanged)
-    Q_PROPERTY(int soloedChannel READ soloedChannel WRITE setSoloedChannel NOTIFY soloedChannelChanged)
+    Q_PROPERTY(QList<bool> soloedChannels READ soloedChannels WRITE setSoloedChannels NOTIFY soloedChannelsChanged)
     Q_PROPERTY(int channelCountHint READ channelCountHint WRITE setChannelCountHint NOTIFY channelCountHintChanged)
     Q_PROPERTY(int channelCount READ channelCount NOTIFY channelCountChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY sampleRateHzChanged)
@@ -102,8 +102,12 @@ public:
     void setMutedChannelsMask(qulonglong value);
     QList<bool> mutedChannels() const;
     void setMutedChannels(const QList<bool> &value);
-    int soloedChannel() const;
-    void setSoloedChannel(int value);
+    // Whether the channel is drawn as one that is not heard.
+    bool channelDrawnMuted(int channel) const;
+    qulonglong soloedChannelsMask() const;
+    void setSoloedChannelsMask(qulonglong value);
+    QList<bool> soloedChannels() const;
+    void setSoloedChannels(const QList<bool> &value);
     int channelCountHint() const;
     void setChannelCountHint(int value);
     int channelCount() const;
@@ -134,7 +138,7 @@ signals:
     void reservedCornerChanged();
     void viewModeChanged();
     void mutedChannelsChanged();
-    void soloedChannelChanged();
+    void soloedChannelsChanged();
     void channelCountHintChanged();
     void channelCountChanged();
     void sampleRateHzChanged();
@@ -360,7 +364,7 @@ private:
     QSizeF m_reservedCorner;
     int m_viewMode{0};
     qulonglong m_mutedChannelsMask{0};
-    int m_soloedChannel{-1};
+    qulonglong m_soloedChannelsMask{0};
     int m_channelCountHint{1};
     int m_channelCount{0};
     int m_sampleRateHz{0};

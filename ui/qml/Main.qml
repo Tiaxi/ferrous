@@ -264,7 +264,7 @@ ApplicationWindow {
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
         property bool spectrogramZoomEnabled: true
-        property int soloedChannel: -1
+        property var soloedChannels: []
         property double mutedChannelsMask: 0
         property int channelButtonsVisibility: 1
         property bool systemMediaControlsEnabled: true
