@@ -1,0 +1,14 @@
+Qt_@QT_VERSION_MAJOR@.@QT_VERSION_MINOR@_PRIVATE_API {
+    global:
+        _ZN23QRhiResourceUpdateBatch13uploadTextureEP11QRhiTextureRK28QRhiTextureUploadDescription;
+        _ZN23QRhiResourceUpdateBatch13uploadTextureEP11QRhiTextureRK6QImage;
+        _ZN23QRhiResourceUpdateBatch19updateDynamicBufferEP10QRhiBufferj10QByteArray;
+        _ZN23QRhiResourceUpdateBatch19updateDynamicBufferEP10QRhiBufferjjPKv;
+        _ZN23QRhiResourceUpdateBatch18uploadStaticBufferEP10QRhiBufferjjPKv;
+        _ZN23QRhiResourceUpdateBatch18uploadStaticBufferEP10QRhiBufferPKv;
+        _ZN23QRhiResourceUpdateBatch18uploadStaticBufferEP10QRhiBufferj10QByteArray;
+        _ZN23QRhiResourceUpdateBatch18uploadStaticBufferEP10QRhiBuffer10QByteArray;
+        _ZN17QRhiCommandBuffer4drawEjjjj;
+        _ZN17QRhiCommandBuffer11drawIndexedEjjjij;
+        _ZN4QRhi10newTextureEN11QRhiTexture6FormatERK5QSizei6QFlagsINS0_4FlagEE;
+};
