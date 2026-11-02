@@ -9,18 +9,18 @@
 //! parser estimates where the target is from the bitrate and labels the
 //! frame it finds there with the target time.
 //!
-//! At 48 and 32 kHz, every frame of a stream with one bitrate has the same
-//! length, so the frame that holds a time lies at a known byte position.
-//! Once the middle and the last frame of a file lie where that length puts
-//! them, its parser gets an index entry every second, and an accurate seek
-//! starts from the one before its target. Other streams, such as those at
-//! 44.1 kHz, whose frames alternate between two lengths, are not indexed.
+//! Every AC3 frame holds 1,536 samples, and its header tells its length and
+//! sample rate. Walking the frame headers of a file from its first frame
+//! gives the position and time of every frame, as the parser counts them,
+//! and its parser gets an index entry for the first frame of every second.
+//! The walk stops where no frame of the stream's sample rate starts, as at
+//! damage or an E-AC3 frame; the frames after it are not indexed.
 //!
 //! Positions count from the first frame, as the parser sees them behind
 //! the byte filter (see `byte_filter`).
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 #[cfg(feature = "gst")]
@@ -37,89 +37,78 @@ use super::byte_filter::read_audio_layout;
 
 /// Samples in an AC3 frame.
 const SAMPLES_PER_FRAME: u64 = 1_536;
-/// Bytes of the frame header that every frame of an indexed stream shares:
-/// the sync word, the CRC, which differs, and the sample rate, bitrate and
-/// stream version.
+/// Bytes of a frame header that tell its length and sample rate.
 const HEADER_LEN: usize = 6;
 
-/// The frames of a raw AC3 file whose frames all have the same length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct FrameGrid {
-    /// File offset of the first frame.
-    first_frame: u64,
-    frame_len: u64,
-    sample_rate: u64,
-    /// Whole frames from the first frame to the end of the audio.
-    frames: u64,
+/// An index entry: the position of a frame, counted from the first frame,
+/// and the time of its first sample in nanoseconds.
+pub(super) type Entry = (u64, u64);
+
+/// The rate of the samples of the plain AC3 frame whose header `header`
+/// starts with: its sample rate code, halved for `bsid` 9 and quartered for
+/// 10, as `ac3parse` takes them.
+fn ac3_sample_rate(header: &[u8]) -> Option<u64> {
+    let rate = match header.get(4)? >> 6 {
+        0 => 48_000,
+        1 => 44_100,
+        2 => 32_000,
+        _ => return None,
+    };
+    match header.get(5)? >> 3 {
+        0..=8 => Some(rate),
+        9 => Some(rate / 2),
+        10 => Some(rate / 4),
+        _ => None,
+    }
 }
 
-impl FrameGrid {
-    /// The grid of `header`, the first frame of a stream whose audio is
-    /// `audio_len` bytes long from it, if the frames of such a stream all
-    /// have one length.
-    fn of_header(header: &[u8], first_frame: u64, audio_len: u64) -> Option<Self> {
-        let sample_rate = match header.get(4)? >> 6 {
-            0 => 48_000,
-            2 => 32_000,
-            // 44.1 kHz frames alternate between two lengths.
-            _ => return None,
+/// The index entries of the frames that `reader` reads, from the first
+/// frame of a stream whose audio is `audio_len` bytes long.
+pub(super) fn index_entries<R: Read + Seek>(
+    reader: &mut BufReader<R>,
+    audio_len: u64,
+) -> Vec<Entry> {
+    let mut entries = Vec::new();
+    let mut position = 0;
+    let mut samples = 0;
+    let mut stream_rate = None;
+    let mut next_entry = 0;
+    let mut header = [0; HEADER_LEN];
+    while position < audio_len && reader.read_exact(&mut header).is_ok() {
+        let Some((rate, len)) = ac3_sample_rate(&header).zip(plain_ac3_frame_len(&header)) else {
+            break;
         };
-        let frame_len = u64::try_from(plain_ac3_frame_len(header)?).ok()?;
-        let frames = audio_len / frame_len;
-        (frames > 0).then_some(Self {
-            first_frame,
-            frame_len,
-            sample_rate,
-            frames,
-        })
-    }
-
-    /// File offsets of the frames that must lie on the grid for it to hold:
-    /// the middle and the last frame.
-    fn checked_frames(&self) -> [u64; 2] {
-        [self.frames / 2, self.frames - 1].map(|frame| self.first_frame + frame * self.frame_len)
-    }
-
-    /// The index entries of the grid: the position of every frame that
-    /// starts a second, counted from the first frame, and its time in
-    /// nanoseconds.
-    pub(super) fn entries(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        let frames_per_second = (self.sample_rate / SAMPLES_PER_FRAME).max(1);
-        (0..self.frames)
-            .step_by(usize::try_from(frames_per_second).unwrap_or(1))
-            .map(|frame| {
-                let nanos = u128::from(frame) * u128::from(SAMPLES_PER_FRAME) * 1_000_000_000
-                    / u128::from(self.sample_rate);
-                (
-                    frame * self.frame_len,
-                    u64::try_from(nanos).unwrap_or(u64::MAX),
-                )
-            })
-    }
-}
-
-/// The frame grid of the raw AC3 file at `path`, if its frames all have the
-/// length of the first: the middle and the last frame are checked.
-pub(super) fn ac3_frame_grid(path: &Path) -> Option<FrameGrid> {
-    let layout = read_audio_layout(path)?;
-    let first_frame = layout.first_frame?;
-    let header = layout
-        .head
-        .get(usize::try_from(first_frame).ok()?..)?
-        .get(..HEADER_LEN)?;
-    let grid = FrameGrid::of_header(header, first_frame, layout.audio_end - first_frame)?;
-    let mut file = File::open(path).ok()?;
-    for offset in grid.checked_frames() {
-        let mut other = [0; HEADER_LEN];
-        file.seek(SeekFrom::Start(offset)).ok()?;
-        file.read_exact(&mut other).ok()?;
-        // The CRC (bytes 2 and 3) differs from frame to frame.
-        let same = other[..2] == header[..2] && other[4..] == header[4..];
-        if !same {
-            return None;
+        let len = len as u64;
+        if *stream_rate.get_or_insert(rate) != rate || position + len > audio_len {
+            break;
+        }
+        if samples >= next_entry {
+            let nanos = u128::from(samples) * 1_000_000_000 / u128::from(rate);
+            entries.push((position, u64::try_from(nanos).unwrap_or(u64::MAX)));
+            next_entry = samples + rate;
+        }
+        samples += SAMPLES_PER_FRAME;
+        position += len;
+        let Ok(rest) = i64::try_from(len - HEADER_LEN as u64) else {
+            break;
+        };
+        if reader.seek_relative(rest).is_err() {
+            break;
         }
     }
-    Some(grid)
+    entries
+}
+
+/// The index entries of the raw AC3 file at `path`, which this reads from
+/// its first frame to the end of its audio.
+pub(super) fn ac3_index(path: &Path) -> Option<Vec<Entry>> {
+    let layout = read_audio_layout(path)?;
+    let first_frame = layout.first_frame?;
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::Start(first_frame)).ok()?;
+    let mut reader = BufReader::with_capacity(256 * 1024, file);
+    let entries = index_entries(&mut reader, layout.audio_end - first_frame);
+    (!entries.is_empty()).then_some(entries)
 }
 
 /// Give the AC3 parsers of `bin` an index of the frames of the raw AC3
@@ -170,7 +159,7 @@ fn index_once_parsing(parser: &gst::Element) {
                     .spawn(move || {
                         #[cfg(test)]
                         let _indexing = indexing;
-                        let Some(grid) = ac3_frame_grid(&path) else {
+                        let Some(entries) = ac3_index(&path) else {
                             return;
                         };
                         let Some(parser) = parser
@@ -179,7 +168,7 @@ fn index_once_parsing(parser: &gst::Element) {
                         else {
                             return;
                         };
-                        for (offset, nanos) in grid.entries() {
+                        for (offset, nanos) in entries {
                             parser.add_index_entry(
                                 offset,
                                 gst::ClockTime::from_nseconds(nanos),
@@ -248,70 +237,133 @@ pub(crate) mod test_hooks {
 
 #[cfg(test)]
 mod tests {
-    use super::{ac3_frame_grid, FrameGrid};
+    use super::{ac3_index, index_entries, Entry};
     use crate::raw_audio::{ripped_surround_bytes, test_path, TEST_AC3};
+    use std::io::{BufReader, Cursor};
 
     /// The length of the frames of `TEST_AC3`: 32 kbit/s at 48 kHz.
     const FRAME_LEN: u64 = 128;
 
-    fn written(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let path = test_path(name, "ac3");
-        std::fs::write(&path, bytes).expect("write fixture");
-        path
+    /// The entries of `bytes`, a stream that starts with a frame.
+    fn entries_of(bytes: &[u8]) -> Vec<Entry> {
+        index_entries(&mut BufReader::new(Cursor::new(bytes)), bytes.len() as u64)
+    }
+
+    /// A plain AC3 frame of `frmsizecod` at `fscod` with `bsid`, silent but
+    /// for its header, whose CRC the walk does not check.
+    fn frame(fscod: u8, frmsizecod: u8, bsid: u8) -> Vec<u8> {
+        let header = [0x0B, 0x77, 0, 0, (fscod << 6) | frmsizecod, bsid << 3];
+        let len = super::plain_ac3_frame_len(&header).expect("frame length");
+        let mut frame = header.to_vec();
+        frame.resize(len, 0);
+        frame
+    }
+
+    /// The entries of a stream of `frames`: the first frame of each second,
+    /// at `rate`.
+    fn expected(frames: &[Vec<u8>], rate: u64) -> Vec<Entry> {
+        let (mut position, mut samples, mut next) = (0, 0, 0);
+        let mut entries = Vec::new();
+        for frame in frames {
+            if samples >= next {
+                entries.push((position, samples * 1_000_000_000 / rate));
+                next = samples + rate;
+            }
+            position += frame.len() as u64;
+            samples += 1_536;
+        }
+        entries
     }
 
     #[test]
-    fn a_stream_of_one_frame_length_is_indexed_every_second_from_its_first_frame() {
+    fn a_stream_is_indexed_every_second_from_its_first_frame() {
         let stream = TEST_AC3.repeat(3);
-        let (bytes, audio) = ripped_surround_bytes(&stream);
-        let path = written("grid-ripped", &bytes);
-        let grid = ac3_frame_grid(&path).expect("grid");
+        let (bytes, _) = ripped_surround_bytes(&stream);
+        let path = test_path("index-ripped", "ac3");
+        std::fs::write(&path, &bytes).expect("write fixture");
+        let entries = ac3_index(&path).expect("entries");
         let _ = std::fs::remove_file(&path);
-        assert_eq!(
-            grid,
-            FrameGrid {
-                first_frame: audio.start as u64,
-                frame_len: FRAME_LEN,
-                sample_rate: 48_000,
-                frames: stream.len() as u64 / FRAME_LEN,
-            }
-        );
-        // 31 frames of 32 ms make the first 0.992 s.
-        let entries: Vec<_> = grid.entries().collect();
+        // 32 frames of 32 ms make the first 1.024 s; the tag is not read.
         assert_eq!(
             entries,
             [
                 (0, 0),
-                (31 * FRAME_LEN, 992_000_000),
-                (62 * FRAME_LEN, 1_984_000_000),
-                (93 * FRAME_LEN, 2_976_000_000),
+                (32 * FRAME_LEN, 1_024_000_000),
+                (64 * FRAME_LEN, 2_048_000_000),
             ]
         );
     }
 
     #[test]
-    fn a_stream_whose_frames_move_off_the_grid_is_not_indexed() {
-        // A frame cut short in the middle moves every frame after it.
-        let mut bytes = TEST_AC3.repeat(3);
-        bytes.drain(40 * FRAME_LEN as usize..40 * FRAME_LEN as usize + 10);
-        let path = written("grid-cut", &bytes);
-        assert_eq!(ac3_frame_grid(&path), None);
-        let _ = std::fs::remove_file(&path);
-
-        // A stream that is not AC3 at all.
-        let path = written("grid-noise", &[0x55; 4_096]);
-        assert_eq!(ac3_frame_grid(&path), None);
-        let _ = std::fs::remove_file(&path);
+    fn a_stream_whose_bitrate_changes_is_indexed_by_its_frames() {
+        // 32 kbit/s, then 64 kbit/s frames twice as long, then 32 kbit/s:
+        // the first, middle and last frames all are 32 kbit/s frames that
+        // lie where 32 kbit/s frames throughout would put them.
+        let mut frames = vec![frame(0, 0, 8); 320];
+        frames.extend(vec![frame(0, 8, 8); 160]);
+        frames.extend(vec![frame(0, 0, 8); 1_280]);
+        let bytes = frames.concat();
+        let units = bytes.len() as u64 / FRAME_LEN;
+        assert_eq!(
+            &bytes[(units / 2 * FRAME_LEN) as usize..][..6],
+            &frames[0][..6]
+        );
+        let entries = entries_of(&bytes);
+        assert_eq!(entries, expected(&frames, 48_000));
+        // An entry in the last section is 5.12 s earlier than a single
+        // bitrate would place it.
+        let (position, nanos) = entries[40];
+        assert_eq!(position / FRAME_LEN * 32_000_000, nanos + 5_120_000_000);
     }
 
     #[test]
-    fn a_stream_at_44_1_khz_is_not_indexed() {
-        let mut bytes = TEST_AC3.to_vec();
-        // fscod 1: 44.1 kHz, whose frames alternate between two lengths.
-        for frame in bytes.chunks_exact_mut(FRAME_LEN as usize) {
-            frame[4] = (frame[4] & 0x3F) | 0x40;
+    fn half_and_quarter_rate_streams_are_timed_at_their_own_rates() {
+        for (bsid, rate) in [(9, 24_000), (10, 12_000)] {
+            let frames = vec![frame(0, 0, bsid); 100];
+            let entries = entries_of(&frames.concat());
+            assert_eq!(entries, expected(&frames, rate), "bsid {bsid}");
+            // 1,536 samples at the lower rate last 64 or 128 ms.
+            let frames_to_second = rate.div_ceil(1_536);
+            assert_eq!(
+                entries[1].1,
+                frames_to_second * 1_536 * 1_000_000_000 / rate,
+                "bsid {bsid}"
+            );
         }
-        let header = &bytes[..6];
-        assert_eq!(FrameGrid::of_header(header, 0, bytes.len() as u64), None);
+    }
+
+    #[test]
+    fn a_stream_at_44_1_khz_is_indexed_through_frames_of_two_lengths() {
+        let frames: Vec<_> = (0..200)
+            .map(|index| frame(1, if index % 3 == 0 { 1 } else { 0 }, 8))
+            .collect();
+        assert_ne!(frames[0].len(), frames[1].len());
+        let entries = entries_of(&frames.concat());
+        assert_eq!(entries, expected(&frames, 44_100));
+    }
+
+    #[test]
+    fn the_walk_stops_where_the_frames_do() {
+        let stream = TEST_AC3.repeat(3);
+        // A frame cut short at 40: no frame starts where the next should.
+        let mut cut = stream.clone();
+        cut.drain(40 * FRAME_LEN as usize..40 * FRAME_LEN as usize + 10);
+        assert_eq!(entries_of(&cut), entries_of(&stream)[..2]);
+
+        // A change of sample rate, and an E-AC3 frame of 256 bytes.
+        let mut eac3 = vec![0x0B, 0x77, 0x00, 0x7F, 0x00, 16 << 3];
+        eac3.resize(256, 0);
+        for other in [frame(2, 0, 8), eac3] {
+            let mut frames = vec![frame(0, 0, 8); 40];
+            frames.push(other);
+            frames.extend(vec![frame(0, 0, 8); 40]);
+            assert_eq!(
+                entries_of(&frames.concat()),
+                expected(&frames[..40], 48_000)
+            );
+        }
+
+        // A stream that is not AC3 at all.
+        assert!(entries_of(&[0x55; 4_096]).is_empty());
     }
 }

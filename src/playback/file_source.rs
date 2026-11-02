@@ -952,6 +952,8 @@ pub(crate) mod test_support {
         Read,
         /// The reader, about to close a file.
         Close,
+        /// The seek locator, about to read a file (see `seek_locate`).
+        Locate,
     }
 
     /// Holds the threads that reach `point` for a file, from its creation
@@ -1023,7 +1025,7 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(super) fn wait_if_held(path: &Path, point: Point) {
+    pub(crate) fn wait_if_held(path: &Path, point: Point) {
         let holds: Vec<_> = lock(&HOLDS)
             .iter()
             .filter(|hold| hold.point == point && hold.path == path)

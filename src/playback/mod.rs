@@ -1653,6 +1653,8 @@ pub(crate) mod parsebin_stall;
 pub(crate) mod pipeline_trace;
 mod queue;
 #[cfg(feature = "gst")]
+mod seek_locate;
+#[cfg(feature = "gst")]
 pub(crate) mod source_activation;
 
 #[cfg(not(feature = "gst"))]
