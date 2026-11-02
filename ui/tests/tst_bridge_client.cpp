@@ -6354,8 +6354,8 @@ void BridgeClientTest::coverImageProviderUrlForPathFormat() {
     QCOMPARE(CoverImageProvider::urlForPath(QStringLiteral("")), QString());
 
     const QString url = CoverImageProvider::urlForPath(
-        QStringLiteral("/mnt/nassikka/Music/cover.jpg"));
-    QCOMPARE(url, QStringLiteral("image://covers//mnt/nassikka/Music/cover.jpg"));
+        QStringLiteral("/srv/music/cover.jpg"));
+    QCOMPARE(url, QStringLiteral("image://covers//srv/music/cover.jpg"));
     QCOMPARE(CoverImageProvider::urlForPath(QStringLiteral("/music/cover.jpg"), 42),
              QStringLiteral("image://covers//music/cover.jpg#v=42"));
 
