@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::time::{Duration, Instant};
+
 use realfft::{num_complex::Complex32, RealFftPlanner, RealToComplex};
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 
@@ -233,6 +235,32 @@ pub(super) enum OverviewProgress {
     Complete,
 }
 
+/// The fewest peaks an overview preview has: the analysis thread shows
+/// previews from this many on.
+pub(super) const MIN_PREVIEW_PEAKS: usize = 24;
+
+/// The least time between two overview previews after the first.
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(240);
+
+/// When an overview decode sends its next preview: the first as soon as it
+/// has enough peaks to show, later ones once [`PREVIEW_INTERVAL`] has passed
+/// since the last.
+#[derive(Debug, Default)]
+pub(super) struct PreviewThrottle {
+    last_sent: Option<Instant>,
+}
+
+impl PreviewThrottle {
+    pub(super) fn is_due(&self, now: Instant) -> bool {
+        self.last_sent
+            .is_none_or(|last| now.saturating_duration_since(last) >= PREVIEW_INTERVAL)
+    }
+
+    pub(super) fn sent(&mut self, now: Instant) {
+        self.last_sent = Some(now);
+    }
+}
+
 pub(super) struct WaveformAccumulator {
     peaks: Vec<f32>,
     bucket_peak: f32,
@@ -241,7 +269,7 @@ pub(super) struct WaveformAccumulator {
     block_size: u64,
     max_points: usize,
     sample_rate_hz: u64,
-    last_preview_emit: std::time::Instant,
+    preview: PreviewThrottle,
 }
 
 impl WaveformAccumulator {
@@ -254,7 +282,7 @@ impl WaveformAccumulator {
             block_size: (estimated_frames / usize_to_u64(max_points.max(1))).max(1),
             max_points,
             sample_rate_hz,
-            last_preview_emit: std::time::Instant::now(),
+            preview: PreviewThrottle::default(),
         }
     }
 
@@ -266,6 +294,22 @@ impl WaveformAccumulator {
     ) -> bool
     where
         F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
+    {
+        self.push_sample_at(amp, sample_stride, Instant::now, on_update)
+    }
+
+    /// [`Self::push_sample`], reading the time from `now` only when a
+    /// preview could be due.
+    fn push_sample_at<F, N>(
+        &mut self,
+        amp: f32,
+        sample_stride: usize,
+        now: N,
+        on_update: &mut F,
+    ) -> bool
+    where
+        F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
+        N: FnOnce() -> Instant,
     {
         if amp > self.bucket_peak {
             self.bucket_peak = amp;
@@ -285,13 +329,15 @@ impl WaveformAccumulator {
             self.peaks = fold_waveform_peaks(&self.peaks);
             self.block_size = self.block_size.saturating_mul(2).max(1);
         }
-        if self.peaks.len() < 12
-            || self.last_preview_emit.elapsed() < std::time::Duration::from_millis(240)
-        {
+        if self.peaks.len() < MIN_PREVIEW_PEAKS {
+            return true;
+        }
+        let now = now();
+        if !self.preview.is_due(now) {
             return true;
         }
 
-        self.last_preview_emit = std::time::Instant::now();
+        self.preview.sent(now);
         on_update(
             self.peaks.clone(),
             self.coverage_seconds(),
@@ -370,6 +416,52 @@ pub(super) fn reduce_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The previews of `frames` frames pushed into `waveform` at `at`: their
+    /// lengths, the seconds they cover and their progress.
+    fn push_at(
+        waveform: &mut WaveformAccumulator,
+        frames: usize,
+        at: Instant,
+    ) -> Vec<(usize, f32, OverviewProgress)> {
+        let mut updates = Vec::new();
+        for _ in 0..frames {
+            let mut on_update = |peaks: Vec<f32>, coverage, progress| {
+                updates.push((peaks.len(), coverage, progress));
+                true
+            };
+            assert!(waveform.push_sample_at(0.5, 1, || at, &mut on_update));
+        }
+        updates
+    }
+
+    #[test]
+    fn the_first_overview_preview_does_not_wait_for_the_interval() {
+        // A peak every 10 frames of a 1 kHz stream.
+        let mut waveform = WaveformAccumulator::new(1_024, 10_240, 1_000);
+        let start = Instant::now();
+
+        assert!(push_at(&mut waveform, MIN_PREVIEW_PEAKS * 10 - 1, start).is_empty());
+        // The first preview goes as soon as it has enough peaks, at the time
+        // the decode started, and is not complete.
+        let [(peaks, coverage, progress)] =
+            <[_; 1]>::try_from(push_at(&mut waveform, 1, start)).expect("one preview");
+        assert_eq!(peaks, MIN_PREVIEW_PEAKS);
+        assert!((coverage - 0.24).abs() < 1e-6, "covers {coverage} s");
+        assert_eq!(progress, OverviewProgress::Partial);
+
+        // Later ones wait for the interval.
+        let interval = Duration::from_millis(240);
+        let almost = start + interval - Duration::from_millis(1);
+        assert!(push_at(&mut waveform, 100, almost).is_empty());
+        let [(peaks, coverage, progress)] =
+            <[_; 1]>::try_from(push_at(&mut waveform, 10, start + interval)).expect("one preview");
+        assert_eq!(peaks, MIN_PREVIEW_PEAKS + 11);
+        assert!((coverage - 0.35).abs() < 1e-6, "covers {coverage} s");
+        assert_eq!(progress, OverviewProgress::Partial);
+        assert!(push_at(&mut waveform, 100, almost + interval).is_empty());
+        assert_eq!(push_at(&mut waveform, 10, start + interval * 2).len(), 1);
+    }
 
     #[test]
     fn waveform_reduction_preserves_peaks_between_bins_and_at_tail() {

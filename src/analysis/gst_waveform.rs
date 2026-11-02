@@ -2,13 +2,13 @@
 
 use std::cell::Cell;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gst::prelude::*;
 use gstreamer as gst;
 
 use super::cache::{usize_to_u64, WaveformSourceStamp};
-use super::fft::{reduce_waveform_peaks, OverviewProgress};
+use super::fft::{reduce_waveform_peaks, OverviewProgress, PreviewThrottle, MIN_PREVIEW_PEAKS};
 use super::track_io::stamp_of;
 use crate::playback::file_source::FileSource;
 use crate::raw_audio::{
@@ -18,10 +18,11 @@ use crate::raw_audio::{
 
 pub(super) struct GstWaveformAccumulator {
     observed_span_ns: u64,
+    /// The end of the audio that timed level messages have covered.
+    decoded_end_ns: u64,
     peak_events: Vec<(u64, f32)>,
     fallback_peaks: Vec<f32>,
-    level_messages_seen: usize,
-    last_preview_emit: std::time::Instant,
+    preview: PreviewThrottle,
     max_points: usize,
 }
 
@@ -30,17 +31,17 @@ impl GstWaveformAccumulator {
         Self {
             observed_span_ns: duration_ns.unwrap_or(0),
             peak_events: Vec::with_capacity(max_points.saturating_mul(2)),
+            decoded_end_ns: 0,
             fallback_peaks: Vec::with_capacity(max_points),
-            level_messages_seen: 0,
-            last_preview_emit: std::time::Instant::now(),
+            preview: PreviewThrottle::default(),
             max_points,
         }
     }
 
     pub(super) fn record_peak(&mut self, structure: &gst::StructureRef, peak: f32) {
-        self.level_messages_seen = self.level_messages_seen.saturating_add(1);
         if let Some((time_ns, end_ns)) = level_message_time_range_ns(structure) {
             self.observed_span_ns = self.observed_span_ns.max(end_ns);
+            self.decoded_end_ns = self.decoded_end_ns.max(end_ns);
             self.peak_events.push((time_ns, peak));
             return;
         }
@@ -51,21 +52,50 @@ impl GstWaveformAccumulator {
         }
     }
 
-    pub(super) fn preview_ready(&self) -> bool {
-        self.level_messages_seen >= 12
-            && self.last_preview_emit.elapsed() >= Duration::from_millis(240)
+    fn has_timed_peaks(&self) -> bool {
+        self.observed_span_ns > 0 && !self.peak_events.is_empty()
     }
 
-    pub(super) fn take_preview(&mut self) -> Vec<f32> {
-        self.last_preview_emit = std::time::Instant::now();
-        if self.observed_span_ns > 0 && !self.peak_events.is_empty() {
-            return materialize_waveform_peaks(
+    /// The bins of the overview, `max_points` over the observed span, that
+    /// the decoded audio reaches.
+    fn covered_bins(&self) -> usize {
+        let bins = usize_to_u64(self.max_points);
+        let covered = self
+            .decoded_end_ns
+            .saturating_mul(bins)
+            .div_ceil(self.observed_span_ns.max(1))
+            .min(bins);
+        usize::try_from(covered).unwrap_or(self.max_points)
+    }
+
+    /// Whether a preview is due at `now`: one of enough peaks to show.
+    pub(super) fn preview_ready(&self, now: Instant) -> bool {
+        let peaks = if self.has_timed_peaks() {
+            self.covered_bins().min(self.peak_events.len())
+        } else {
+            self.fallback_peaks.len()
+        };
+        peaks >= MIN_PREVIEW_PEAKS && self.preview.is_due(now)
+    }
+
+    /// The peaks of a preview sent at `now`, and the seconds they cover.
+    /// With timed peaks, the preview ends at the last bin the decode has
+    /// reached, so that the bins it has not are not shown as silence.
+    pub(super) fn take_preview(&mut self, now: Instant) -> (Vec<f32>, f32) {
+        self.preview.sent(now);
+        if self.has_timed_peaks() {
+            let bins = self.covered_bins();
+            let mut peaks = materialize_waveform_peaks(
                 &self.peak_events,
                 self.observed_span_ns,
                 self.max_points,
             );
+            peaks.truncate(bins);
+            let coverage_ns = self.observed_span_ns.saturating_mul(usize_to_u64(bins))
+                / usize_to_u64(self.max_points.max(1));
+            return (peaks, Duration::from_nanos(coverage_ns).as_secs_f32());
         }
-        self.fallback_peaks.clone()
+        (self.fallback_peaks.clone(), self.coverage_seconds())
     }
 
     pub(super) fn coverage_seconds(&self) -> f32 {
@@ -245,14 +275,12 @@ where
                         if let Some(peak) = level_message_peak(structure) {
                             waveform.record_peak(structure, peak);
                         }
-                        if waveform.preview_ready()
-                            && !on_update(
-                                waveform.take_preview(),
-                                waveform.coverage_seconds(),
-                                OverviewProgress::Partial,
-                            )
-                        {
-                            return Ok(());
+                        let now = Instant::now();
+                        if waveform.preview_ready(now) {
+                            let (peaks, coverage_seconds) = waveform.take_preview(now);
+                            if !on_update(peaks, coverage_seconds, OverviewProgress::Partial) {
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -560,6 +588,59 @@ mod tests {
         for frame in frames.iter() {
             assert!(!ac3_frame_is_damaged(&frame.bytes));
         }
+    }
+
+    /// Records `count` level messages of 10 ms, at -6 dB, from `*next` on.
+    fn record_level_messages(waveform: &mut GstWaveformAccumulator, next: &mut u64, count: u64) {
+        for _ in 0..count {
+            let structure = gst::Structure::builder("level")
+                .field("running-time", *next * 10_000_000)
+                .field("duration", 10_000_000u64)
+                .field("peak", gst::Array::new([-6.0f64]))
+                .build();
+            let peak = level_message_peak(structure.as_ref()).expect("peak");
+            waveform.record_peak(structure.as_ref(), peak);
+            *next += 1;
+        }
+    }
+
+    #[test]
+    fn the_first_overview_preview_does_not_wait_for_the_interval() {
+        let _ = gst::init();
+        // A bin every 10 ms of a 10.24 s file.
+        let mut waveform = GstWaveformAccumulator::new(1_024, Some(10_240_000_000));
+        let start = Instant::now();
+        let mut next = 0;
+        let enough = usize_to_u64(MIN_PREVIEW_PEAKS);
+
+        record_level_messages(&mut waveform, &mut next, enough - 1);
+        assert!(!waveform.preview_ready(start));
+        // The first preview goes as soon as it has enough peaks, at the time
+        // the decode started. It covers only the decoded bins, not the file.
+        record_level_messages(&mut waveform, &mut next, 1);
+        assert!(waveform.preview_ready(start));
+        let (peaks, coverage) = waveform.take_preview(start);
+        assert_eq!(peaks.len(), MIN_PREVIEW_PEAKS);
+        assert!(
+            peaks.iter().all(|peak| (peak - 0.5).abs() < 0.01),
+            "{peaks:?}"
+        );
+        assert!((coverage - 0.24).abs() < 1e-6, "covers {coverage} s");
+
+        // Later ones wait for the interval.
+        let interval = Duration::from_millis(240);
+        record_level_messages(&mut waveform, &mut next, 11);
+        assert!(!waveform.preview_ready(start + interval - Duration::from_millis(1)));
+        assert!(waveform.preview_ready(start + interval));
+        let (peaks, coverage) = waveform.take_preview(start + interval);
+        assert_eq!(peaks.len(), MIN_PREVIEW_PEAKS + 11);
+        assert!((coverage - 0.35).abs() < 1e-6, "covers {coverage} s");
+        assert!(!waveform.preview_ready(start + interval * 2 - Duration::from_millis(1)));
+        assert!(waveform.preview_ready(start + interval * 2));
+
+        // The final overview spans the whole file.
+        assert!((waveform.coverage_seconds() - 10.24).abs() < 1e-6);
+        assert_eq!(waveform.finish().len(), 1_024);
     }
 
     #[test]

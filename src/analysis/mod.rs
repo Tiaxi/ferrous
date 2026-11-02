@@ -37,7 +37,10 @@ use symphonia::core::audio::SampleBuffer;
 
 use cache::{usize_to_u64, WaveformSourceStamp};
 use decoders::analysis_format_options;
-use fft::{ensure_sample_buffer, peak_across_channels, OverviewProgress, WaveformAccumulator};
+use fft::{
+    ensure_sample_buffer, peak_across_channels, OverviewProgress, WaveformAccumulator,
+    MIN_PREVIEW_PEAKS,
+};
 #[cfg(feature = "gst")]
 use gst_waveform::decode_waveform_peaks_stream_gst;
 use session::{
@@ -1970,7 +1973,7 @@ impl AnalysisRuntimeState {
             self.save_active_waveform(source);
         }
         self.waveform_dirty = true;
-        if done || self.snapshot.waveform_peaks.len() >= 24 {
+        if done || self.snapshot.waveform_peaks.len() >= MIN_PREVIEW_PEAKS {
             self.emit_snapshot(event_tx, true);
         }
     }
@@ -6076,6 +6079,59 @@ mod tests {
         assert!(updates
             .iter()
             .all(|(_, _, progress)| *progress != OverviewProgress::Complete));
+    }
+
+    #[test]
+    fn an_overview_decode_sends_its_first_preview_without_waiting() {
+        let wave = write_engine_test_wave(8, 8_000);
+        let bytes = std::fs::read(&wave).expect("read fixture");
+        std::fs::remove_file(wave).expect("remove fixture");
+
+        // The decode takes far less than the preview interval.
+        let updates = symphonia_overview(Box::new(std::io::Cursor::new(bytes)), "wav");
+        let [(first, coverage, progress), .., (_, _, last)] = updates.as_slice() else {
+            panic!("{} updates", updates.len());
+        };
+        assert_eq!(*progress, OverviewProgress::Partial);
+        assert_eq!(first.len(), MIN_PREVIEW_PEAKS);
+        assert!(*coverage < 0.5, "covers {coverage} s");
+        assert_eq!(*last, OverviewProgress::Complete);
+    }
+
+    #[test]
+    fn the_first_overview_preview_is_shown_at_once_and_not_as_complete() {
+        let path = Path::new("/music/a.flac");
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = AnalysisRuntimeState::new();
+        state.handle_track_change(path.to_path_buf(), true, false, 4, &ctx);
+        state.track_io_requests.try_iter().for_each(drop);
+        channels.event_rx.try_iter().for_each(drop);
+
+        let preview = WaveformUpdate {
+            peaks: vec![0.5; MIN_PREVIEW_PEAKS],
+            coverage_seconds: 0.5,
+            complete: false,
+            done: false,
+            source: Some(decoded_stamp()),
+        };
+        state.handle_waveform_progress(4, preview, ctx.event_tx);
+
+        assert!(state.track_io_requests.try_iter().next().is_none());
+        let snapshots: Vec<_> = channels
+            .event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                AnalysisEvent::Snapshot(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .collect();
+        let [snapshot] = snapshots.as_slice() else {
+            panic!("{} snapshots", snapshots.len());
+        };
+        assert!(!snapshot.waveform_complete);
+        assert_eq!(snapshot.waveform_peaks.len(), MIN_PREVIEW_PEAKS);
+        assert!((snapshot.waveform_coverage_seconds - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
