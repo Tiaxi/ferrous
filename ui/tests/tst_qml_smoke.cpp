@@ -1154,7 +1154,16 @@ private slots:
     void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data();
     void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel();
     void spectrogramLateFrameCallbackDrawsAtOnce();
-    void spectrogramMovingViewsRequestEveryFrame();
+    void spectrogramScrollingViewWaitsForTheNextPixel_data();
+    void spectrogramScrollingViewWaitsForTheNextPixel();
+    void spectrogramScrollingFramesMoveAPixelAtATime_data();
+    void spectrogramScrollingFramesMoveAPixelAtATime();
+    void spectrogramZoomPreviewRequestsEveryFrame();
+    void spectrogramDataAheadOfTheShownFrameAsksForNoFrame();
+    void spectrogramFrameSchedulerWakesDueFramesTogether();
+    void spectrogramFrameSchedulerWakesEveryFrameDueByALateTimer();
+    void spectrogramDecodedEndMovesTheCenteredViewAtOnce();
+    void spectrogramPanesShareTheirWindowsFrameSchedule();
     void spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce();
     void spectrogramIdleViewDrawsOnlyFramesThatDiffer();
     void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
@@ -11495,6 +11504,17 @@ void prepareWholeTrackPlayback(SpectrogramItem &item, double position) {
 
 constexpr double kWholeTrackColumnsPerSecond = 48'000.0 / 20'480.0;
 
+// Whether the item waits for its next playback frame.
+bool playbackFrameScheduled(const SpectrogramItem &item) {
+    return item.m_frameScheduler != nullptr && item.m_frameScheduler->dueNs(&item) >= 0;
+}
+
+// How long until the item's next playback frame is due, in milliseconds
+// from `nowNs`.
+double playbackFrameDueInMs(const SpectrogramItem &item, qint64 nowNs = monotonicNowNs()) {
+    return static_cast<double>(item.m_frameScheduler->dueNs(&item) - nowNs) / 1e6;
+}
+
 } // namespace
 
 void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
@@ -11663,12 +11683,14 @@ void SpectrogramSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPi
     item.handleWindowAfterAnimating();
     // No frame until then: it would be the same.
     QCOMPARE(item.m_playbackFrameRequests, requested);
-    QVERIFY(item.m_playbackFrameTimer->isActive());
+    QVERIFY(playbackFrameScheduled(item));
+    // The window's scheduler wakes it.
+    QCOMPARE(item.m_frameScheduler->parent(), &window);
     const double untilChangeMs = (118.0 / kWholeTrackColumnsPerSecond
         - testClock(item).positionAt(monotonicNowNs())) * 1000.0;
-    QVERIFY2(std::abs(item.m_playbackFrameTimer->remainingTime() - untilChangeMs) <= 3.0,
+    QVERIFY2(std::abs(playbackFrameDueInMs(item) - untilChangeMs) <= 3.0,
         qPrintable(QStringLiteral("%1 ms for %2 ms")
-            .arg(item.m_playbackFrameTimer->remainingTime()).arg(untilChangeMs)));
+            .arg(playbackFrameDueInMs(item)).arg(untilChangeMs)));
     // Then the frame comes, with the playhead on its next pixel, and the
     // next one waits for the column after.
     QTRY_COMPARE_WITH_TIMEOUT(item.m_playbackFrameRequests, requested + 1, 1000);
@@ -11683,10 +11705,11 @@ void SpectrogramSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPi
     }
     item.handleWindowAfterAnimating();
     QCOMPARE(item.m_playbackFrameRequests, requested + 1);
-    QVERIFY(item.m_playbackFrameTimer->remainingTime() > 300);
+    QVERIFY(playbackFrameDueInMs(item) > 300);
     // Paused, it waits for the clock.
     item.setPlaying(false);
-    QVERIFY(!item.m_playbackFrameTimer->isActive());
+    QVERIFY(!playbackFrameScheduled(item));
+    QVERIFY(!item.m_frameScheduler->timerActive());
     delete node;
 }
 
@@ -11704,21 +11727,270 @@ void SpectrogramSmokeTest::spectrogramLateFrameCallbackDrawsAtOnce() {
     const quint64 requested = item.m_playbackFrameRequests;
     item.handleWindowAfterAnimating();
     QCOMPARE(item.m_playbackFrameRequests, requested + 1);
-    QVERIFY(!item.m_playbackFrameTimer->isActive());
+    QVERIFY(!playbackFrameScheduled(item));
     delete node;
 }
 
-void SpectrogramSmokeTest::spectrogramMovingViewsRequestEveryFrame() {
-    // Rolling views, and centered ones while they scroll, move every frame.
-    for (const bool rolling : {false, true}) {
+namespace {
+
+// 4000 columns at 48 kHz and a hop of 1024, 46.875 columns a second, each
+// column of another colour than its neighbours.
+constexpr int kStripeBins = 64;
+constexpr int kStripeColumns = 4000;
+constexpr double kStripeColumnsPerSecond = 48'000.0 / 1024.0;
+
+void feedColumnStripes(SpectrogramItem &item) {
+    QByteArray data(kStripeBins * kStripeColumns, Qt::Uninitialized);
+    for (int column = 0; column < kStripeColumns; ++column) {
+        std::fill_n(data.data() + static_cast<qsizetype>(column) * kStripeBins, kStripeBins,
+            static_cast<char>(40 + (column * 53) % 180));
+    }
+    item.feedPrecomputedChunk(data, kStripeBins, 0, kStripeColumns, 0, kStripeColumns,
+        48'000, 1024, true, true, 1, true, 1);
+}
+
+// A pane on `time` playing from 40 s, rolling (mode 0) or centered and
+// scrolling (mode 1).
+void prepareScrollingPlayback(SpectrogramItem &item, TestTime &time, int mode, double height = 100.0) {
+    time.drive(item);
+    item.setWidth(400);
+    item.setHeight(height);
+    item.setDisplayMode(mode);
+    feedColumnStripes(item);
+    setTestPosition(item, 40.0);
+    item.setPlaying(true);
+    setTestPosition(item, 40.0);
+}
+
+void addScrollingRows() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<double>("scale");
+    for (const double scale : {1.0, 1.25, 1.5, 2.0}) {
+        QTest::addRow("rolling %gx", scale) << 0 << scale;
+        QTest::addRow("centered %gx", scale) << 1 << scale;
+    }
+}
+
+} // namespace
+
+void SpectrogramSmokeTest::spectrogramScrollingViewWaitsForTheNextPixel_data() {
+    addScrollingRows();
+}
+
+void SpectrogramSmokeTest::spectrogramScrollingViewWaitsForTheNextPixel() {
+    // A view that scrolls moves its canvas by whole device pixels, `scale`
+    // of them a column. Its frame changes only when the scroll reaches the
+    // next pixel or playback the next column, and it asks for no frame
+    // before then: a frame drawn before is the same, and changes no node.
+    QFETCH(int, mode);
+    QFETCH(double, scale);
+    QQuickWindow window;
+    window.resize(400, 100);
+    if (scale != 1.0) {
+        QScreen *screen = hiDpiTestScreen(scale);
+        if (screen == nullptr) {
+            QSKIP("Needs the offscreen platform's HiDPI test screen at that scale");
+        }
+        QVERIFY(moveWindowToScreen(window, screen));
+    }
+    TestTime time;
+    // The window does not draw it; the test does.
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareScrollingPlayback(item, time, mode);
+    QSGNode *node = paintSettled(item, nullptr);
+    node = item.updatePaintNode(node, nullptr);
+    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+    const auto canvasOnWholePixels = [&]() {
+        QSGNode *tiles = node->childAtIndex(1);
+        for (int i = 0; i < tiles->childCount(); ++i) {
+            const QRectF rect = static_cast<QSGSimpleTextureNode *>(tiles->childAtIndex(i))->rect();
+            if (!rect.isEmpty()
+                && (std::abs(rect.left() * scale - std::round(rect.left() * scale)) > 1e-6
+                    || std::abs(rect.right() * scale - std::round(rect.right() * scale)) > 1e-6)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    QVERIFY(canvasOnWholePixels());
+    PlaybackClock &clock = testClock(item);
+    const double start = clock.positionAt(time.nowNs);
+    int frames = 0;
+    while (clock.positionAt(time.nowNs) < start + 1.0) {
+        double changeSeconds = 0.0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY(item.m_idleView.valid);
+            changeSeconds = item.m_idleView.changeSeconds;
+        }
+        const double position = clock.positionAt(time.nowNs);
+        QVERIFY(changeSeconds > position);
+        // At most a pixel's scroll and a column ahead.
+        QVERIFY((changeSeconds - position) * kStripeColumnsPerSecond * scale <= 1.0 + 1e-6);
+        QVERIFY((changeSeconds - position) * kStripeColumnsPerSecond <= 1.0 + 1e-6);
+        const quint64 requested = item.m_playbackFrameRequests;
+        item.handleWindowAfterAnimating();
+        QCOMPARE(item.m_playbackFrameRequests, requested);
+        QVERIFY(playbackFrameScheduled(item));
+        const qint64 changeNs = *clock.state().reachesAt(changeSeconds);
+        const qint64 dueNs = item.m_frameScheduler->dueNs(&item);
+        QVERIFY(dueNs >= changeNs && dueNs < changeNs + 1'000'000);
+        // Just before then, the frame is this one.
+        const QRectF shownPlayhead = playhead->rect();
+        if (changeNs - 50'000 > time.nowNs) {
+            time.nowNs = changeNs - 50'000;
+            node = item.updatePaintNode(node, nullptr);
+            QCOMPARE(SpectrogramItem::sceneStatistics(node).textureNodeChanges, 0);
+            QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
+            QCOMPARE(playhead->rect(), shownPlayhead);
+        }
+        // Then it is another.
+        time.nowNs = dueNs;
+        node = item.updatePaintNode(node, nullptr);
+        ++frames;
+        QVERIFY(SpectrogramItem::sceneStatistics(node).textureNodeChanges > 0
+            || SpectrogramItem::sceneStatistics(node).canvasTextures > 0);
+        QVERIFY(canvasOnWholePixels());
+    }
+    // About a frame for each pixel the view scrolls, and one for each
+    // column that does not start on a pixel.
+    const double pixels = kStripeColumnsPerSecond * std::max(scale, 1.0);
+    QVERIFY2(frames >= pixels - 2.0 && frames <= kStripeColumnsPerSecond * (scale + 1.0) + 2.0,
+        qPrintable(QStringLiteral("%1 frames for %2 pixels").arg(frames).arg(pixels)));
+    delete node;
+}
+
+void SpectrogramSmokeTest::spectrogramScrollingFramesMoveAPixelAtATime_data() {
+    addScrollingRows();
+}
+
+void SpectrogramSmokeTest::spectrogramScrollingFramesMoveAPixelAtATime() {
+    // In a window: what the window shows of a view that scrolls stays the
+    // same until the frame the item asks for, which moves it on by no more
+    // than a device pixel. Over a second those frames move it as far as
+    // playback goes: no step is skipped.
+    QFETCH(int, mode);
+    QFETCH(double, scale);
+    QQuickWindow window;
+    window.resize(400, 100);
+    if (scale != 1.0) {
+        QScreen *screen = hiDpiTestScreen(scale);
+        if (screen == nullptr) {
+            QSKIP("Needs the offscreen platform's HiDPI test screen at that scale");
+        }
+        QVERIFY(moveWindowToScreen(window, screen));
+    }
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    TestTime time;
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareScrollingPlayback(item, time, mode);
+    const auto grab = [&]() {
+        item.update();
+        return window.grabWindow().convertToFormat(QImage::Format_RGB32);
+    };
+    QImage shown = grab();
+    for (int round = 0; round < 8 && spectrogramRasterPending(item); ++round) {
+        QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
+        shown = grab();
+    }
+    QVERIFY(!spectrogramRasterPending(item));
+    const int width = shown.width();
+    QCOMPARE(width, static_cast<int>(std::round(400 * scale)));
+    // The centered playhead stays in the middle, over what scrolls; the
+    // newest column comes in at the right edge.
+    const int playheadLeft = width / 2 - 2;
+    const int playheadRight = width / 2 + static_cast<int>(std::ceil(2.0 * scale)) + 1;
+    const int edge = width - static_cast<int>(std::ceil(scale)) - 2;
+    const auto shiftedBy = [&](const QImage &next, int shift) {
+        for (int x = 0; x + shift < edge; ++x) {
+            if (mode == 1 && x + shift >= playheadLeft && x <= playheadRight) {
+                continue;
+            }
+            for (int y = 0; y < next.height(); ++y) {
+                if (next.pixel(x, y) != shown.pixel(x + shift, y)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    PlaybackClock &clock = testClock(item);
+    const double start = clock.positionAt(time.nowNs);
+    int shifts = 0;
+    int frames = 0;
+    while (clock.positionAt(time.nowNs) < start + 1.0) {
+        item.handleWindowAfterAnimating();
+        QVERIFY(playbackFrameScheduled(item));
+        const qint64 dueNs = item.m_frameScheduler->dueNs(&item);
+        // Frames drawn before then would be the same.
+        const qint64 shownAt = time.nowNs;
+        for (const double part : {0.3, 0.8}) {
+            const qint64 at = shownAt + static_cast<qint64>(
+                static_cast<double>(dueNs - 1'000'000 - shownAt) * part);
+            if (at > time.nowNs) {
+                time.nowNs = at;
+                QVERIFY(grab() == shown);
+            }
+        }
+        time.nowNs = dueNs;
+        const QImage next = grab();
+        const bool still = shiftedBy(next, 0);
+        const bool moved = shiftedBy(next, 1);
+        QVERIFY2(still != moved,
+            qPrintable(QStringLiteral("frame %1 at %2 s").arg(frames).arg(clock.positionAt(time.nowNs))));
+        shifts += moved ? 1 : 0;
+        ++frames;
+        shown = next;
+    }
+    const double travelled = (clock.positionAt(time.nowNs) - start) * kStripeColumnsPerSecond * scale;
+    QVERIFY2(std::abs(shifts - travelled) <= 1.0,
+        qPrintable(QStringLiteral("%1 steps for %2 pixels").arg(shifts).arg(travelled)));
+}
+
+void SpectrogramSmokeTest::spectrogramZoomPreviewRequestsEveryFrame() {
+    // While the canvas on screen is shown scaled to a zoom whose data has
+    // not arrived, the frames follow playback one by one.
+    for (const int mode : {0, 1}) {
+        TestTime time;
         SpectrogramItem item;
+        prepareScrollingPlayback(item, time, mode);
+        QSGNode *node = paintSettled(item, nullptr);
+        item.setZoomLevel(2.0);
+        node = item.updatePaintNode(node, nullptr);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY(item.m_zoomPreviewShown);
+            QVERIFY(!item.m_idleView.valid);
+        }
+        const quint64 requested = item.m_playbackFrameRequests;
+        for (int frame = 1; frame <= 3; ++frame) {
+            item.handleWindowAfterAnimating();
+            QCOMPARE(item.m_playbackFrameRequests, requested + frame);
+            QVERIFY(!playbackFrameScheduled(item));
+        }
+        delete node;
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramDataAheadOfTheShownFrameAsksForNoFrame() {
+    // The decoder sends columns ahead of the playhead. While a view plays
+    // and has asked for its next frame, columns after the ones it shows
+    // change nothing on screen until playback reaches them, in frames it
+    // asks for anyway. Columns it shows, and any while paused, ask for one.
+    for (const int mode : {0, 1}) {
+        TestTime time;
+        SpectrogramItem item;
+        time.drive(item);
         item.setWidth(400);
         item.setHeight(100);
-        item.setDisplayMode(rolling ? 0 : 1);
+        item.setDisplayMode(mode);
         constexpr int bins = 64;
-        constexpr int columns = 4000;
-        item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
-            0, columns, 48'000, 1024, true, true, 1, true, 1);
+        const auto feed = [&item](int start, int columns, char value, bool reset = false) {
+            item.feedPrecomputedChunk(QByteArray(bins * columns, value), bins, 0, columns,
+                start, 4000, 48'000, 1024, false, reset, 1, reset, 1);
+        };
+        feed(0, 3000, '\x50', true);
         setTestPosition(item, 40.0);
         item.setPlaying(true);
         setTestPosition(item, 40.0);
@@ -11726,16 +11998,184 @@ void SpectrogramSmokeTest::spectrogramMovingViewsRequestEveryFrame() {
         node = item.updatePaintNode(node, nullptr);
         {
             QMutexLocker lock(&item.m_stateMutex);
-            QVERIFY(!item.m_idleView.valid);
+            QVERIFY(item.m_idleView.valid);
+            QVERIFY(item.m_idleView.shownRight < item.m_ringWriteSeq);
         }
-        const quint64 requested = item.m_playbackFrameRequests;
-        for (int frame = 1; frame <= 3; ++frame) {
-            item.handleWindowAfterAnimating();
-            QCOMPARE(item.m_playbackFrameRequests, requested + frame);
-            QVERIFY(!item.m_playbackFrameTimer->isActive());
+        quint64 requested = item.m_dataFrameRequests;
+        feed(3000, 100, '\x60');
+        QCOMPARE(item.m_dataFrameRequests, requested);
+        if (mode == 1) {
+            // A column under the playhead.
+            feed(1880, 1, '\x70');
+            QCOMPARE(item.m_dataFrameRequests, ++requested);
         }
+        item.setPlaying(false);
+        feed(3100, 100, '\x60');
+        QCOMPARE(item.m_dataFrameRequests, ++requested);
         delete node;
     }
+}
+
+void SpectrogramSmokeTest::spectrogramFrameSchedulerWakesDueFramesTogether() {
+    // Frames due within the same millisecond come together, from one
+    // timer; a later one waits for its own.
+    SpectrogramFrameScheduler scheduler;
+    SpectrogramItem first;
+    SpectrogramItem second;
+    SpectrogramItem third;
+    const qint64 nowNs = monotonicNowNs();
+    const qint64 baseMs = nowNs / 1'000'000 + 10;
+    qint64 schedulerNowNs = nowNs;
+    scheduler.m_nowNs = [&schedulerNowNs]() { return schedulerNowNs; };
+    scheduler.schedule(&first, baseMs * 1'000'000 + 200'000, nowNs);
+    scheduler.schedule(&second, baseMs * 1'000'000 + 900'000, nowNs);
+    scheduler.schedule(&third, baseMs * 1'000'000 + 1'000'001, nowNs);
+    QCOMPARE(scheduler.dueNs(&first), (baseMs + 1) * 1'000'000);
+    QCOMPARE(scheduler.dueNs(&second), (baseMs + 1) * 1'000'000);
+    QCOMPARE(scheduler.dueNs(&third), (baseMs + 2) * 1'000'000);
+    QVERIFY(scheduler.timerActive());
+    QCOMPARE(scheduler.m_armedMs, baseMs + 1);
+    schedulerNowNs = (baseMs + 1) * 1'000'000 + 100'000;
+    scheduler.fire();
+    QCOMPARE(first.m_playbackFrameRequests, quint64(1));
+    QCOMPARE(second.m_playbackFrameRequests, quint64(1));
+    QCOMPARE(third.m_playbackFrameRequests, quint64(0));
+    QCOMPARE(scheduler.dueNs(&first), qint64(-1));
+    QVERIFY(scheduler.timerActive());
+    QCOMPARE(scheduler.m_armedMs, baseMs + 2);
+    // Cancelled, nothing is left to wake.
+    scheduler.cancel(&third);
+    QVERIFY(!scheduler.timerActive());
+    // An item that goes away takes its frame with it.
+    {
+        SpectrogramItem gone;
+        gone.m_frameScheduler = &scheduler;
+        scheduler.schedule(&gone, nowNs + 5'000'000, nowNs);
+        QVERIFY(scheduler.dueNs(&gone) >= 0);
+    }
+    QVERIFY(scheduler.m_dueMs.isEmpty());
+    QVERIFY(!scheduler.timerActive());
+}
+
+void SpectrogramSmokeTest::spectrogramFrameSchedulerWakesEveryFrameDueByALateTimer() {
+    // Frames due at 100 and 110 ms, and a timer the event loop delivers at
+    // 125 ms: both are due, and come in one frame of the window. One due
+    // at 140 ms waits for its own, 15 ms from then.
+    SpectrogramFrameScheduler scheduler;
+    const qint64 startNs = monotonicNowNs() / 1'000'000 * 1'000'000;
+    qint64 nowNs = startNs;
+    scheduler.m_nowNs = [&nowNs]() { return nowNs; };
+    SpectrogramItem first;
+    SpectrogramItem second;
+    SpectrogramItem third;
+    scheduler.schedule(&first, startNs + 100'000'000, nowNs);
+    scheduler.schedule(&second, startNs + 110'000'000, nowNs);
+    scheduler.schedule(&third, startNs + 140'000'000, nowNs);
+    QCOMPARE(scheduler.m_armedMs, startNs / 1'000'000 + 100);
+    nowNs = startNs + 125'000'000;
+    scheduler.fire();
+    QCOMPARE(first.m_playbackFrameRequests, quint64(1));
+    QCOMPARE(second.m_playbackFrameRequests, quint64(1));
+    QCOMPARE(third.m_playbackFrameRequests, quint64(0));
+    QCOMPARE(scheduler.m_armedMs, startNs / 1'000'000 + 140);
+    QVERIFY(scheduler.timerActive());
+    QVERIFY(scheduler.m_timer.remainingTime() <= 15);
+    scheduler.cancel(&third);
+}
+
+void SpectrogramSmokeTest::spectrogramDecodedEndMovesTheCenteredViewAtOnce() {
+    // Near the end of a track, a centered view ends at the last decoded
+    // column. With 3906 of an estimated 4000 columns decoded and the
+    // playhead at column 3900, a 400-column view shows columns 3506 to
+    // 3905; each chunk the decoder sends after them moves it on, at once.
+    TestTime time;
+    SpectrogramItem item;
+    time.drive(item);
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    constexpr int bins = 64;
+    const auto feed = [&item](int start, int columns, bool reset = false) {
+        item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+            start, 4000, 48'000, 1024, false, reset, 1, reset, 1);
+    };
+    feed(0, 3906, true);
+    const double position = 3900.2 / kStripeColumnsPerSecond;
+    setTestPosition(item, position);
+    item.setPlaying(true);
+    setTestPosition(item, position);
+    QSGNode *node = paintSettled(item, nullptr);
+    node = item.updatePaintNode(node, nullptr);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_idleView.valid);
+        QCOMPARE(item.m_idleView.shownLeft, qint64(3506));
+        QCOMPARE(item.m_idleView.shownRight, qint64(3905));
+    }
+    qint64 right = 3905;
+    for (int chunk = 0; chunk < 2; ++chunk) {
+        const quint64 requested = item.m_dataFrameRequests;
+        feed(static_cast<int>(right) + 1, 32);
+        QCOMPARE(item.m_dataFrameRequests, requested + 1);
+        node = paintSettled(item, node);
+        right += 32;
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_idleView.valid);
+        QCOMPARE(item.m_idleView.shownRight, right);
+        QCOMPARE(item.m_idleView.shownLeft, right - 399);
+    }
+    delete node;
+}
+
+void SpectrogramSmokeTest::spectrogramPanesShareTheirWindowsFrameSchedule() {
+    // The channels' panes of a window scroll alike: they wait for the same
+    // frame, which one timer asks for for both. A pane in another window,
+    // such as the fullscreen viewer, waits on that window's schedule.
+    QQuickWindow window;
+    window.resize(400, 100);
+    TestTime time;
+    std::array<SpectrogramItem *, 2> panes{};
+    for (int i = 0; i < 2; ++i) {
+        panes[i] = new SpectrogramItem(window.contentItem());
+        panes[i]->setY(50.0 * i);
+        prepareScrollingPlayback(*panes[i], time, 1, 50.0);
+    }
+    std::array<QSGNode *, 2> nodes{};
+    for (int i = 0; i < 2; ++i) {
+        nodes[i] = paintSettled(*panes[i], nullptr);
+        nodes[i] = panes[i]->updatePaintNode(nodes[i], nullptr);
+    }
+    for (SpectrogramItem *pane : panes) {
+        pane->handleWindowAfterAnimating();
+    }
+    SpectrogramFrameScheduler *scheduler = panes[0]->m_frameScheduler;
+    QVERIFY(scheduler != nullptr);
+    QCOMPARE(scheduler->parent(), &window);
+    QCOMPARE(panes[1]->m_frameScheduler.data(), scheduler);
+    QVERIFY(scheduler->dueNs(panes[0]) >= 0);
+    QCOMPARE(scheduler->dueNs(panes[1]), scheduler->dueNs(panes[0]));
+    const quint64 first = panes[0]->m_playbackFrameRequests;
+    const quint64 second = panes[1]->m_playbackFrameRequests;
+    QTRY_VERIFY_WITH_TIMEOUT(panes[0]->m_playbackFrameRequests > first, 1000);
+    QCOMPARE(panes[0]->m_playbackFrameRequests, first + 1);
+    QCOMPARE(panes[1]->m_playbackFrameRequests, second + 1);
+
+    QQuickWindow viewer;
+    viewer.resize(400, 100);
+    panes[1]->handleWindowAfterAnimating();
+    QVERIFY(scheduler->dueNs(panes[1]) >= 0);
+    panes[1]->setParentItem(viewer.contentItem());
+    QCOMPARE(scheduler->dueNs(panes[1]), qint64(-1));
+    delete nodes[1];
+    nodes[1] = paintSettled(*panes[1], nullptr);
+    nodes[1] = panes[1]->updatePaintNode(nodes[1], nullptr);
+    panes[1]->handleWindowAfterAnimating();
+    QVERIFY(panes[1]->m_frameScheduler != scheduler);
+    QCOMPARE(panes[1]->m_frameScheduler->parent(), &viewer);
+    QVERIFY(panes[1]->m_frameScheduler->dueNs(panes[1]) >= 0);
+    delete panes[1];
+    delete nodes[0];
+    delete nodes[1];
 }
 
 void SpectrogramSmokeTest::spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce() {
@@ -11743,7 +12183,7 @@ void SpectrogramSmokeTest::spectrogramClockCourseCorrectionWaitsButJumpsShowAtOn
     prepareWholeTrackPlayback(item, 50.0);
     QSGNode *node = paintSettled(item, nullptr);
     item.handleWindowAfterAnimating();
-    QVERIFY(item.m_playbackFrameTimer->isActive());
+    QVERIFY(playbackFrameScheduled(item));
     quint64 requested = item.m_playbackFrameRequests;
     PlaybackClock &clock = testClock(item);
     const auto sampleAt = [&clock](double position, quint64 token, bool advancing) {
@@ -11759,7 +12199,7 @@ void SpectrogramSmokeTest::spectrogramClockCourseCorrectionWaitsButJumpsShowAtOn
     const double now = clock.positionAt(monotonicNowNs());
     clock.applySample(sampleAt(now + 0.02, clock.state().trackToken, true), false);
     QCOMPARE(item.m_playbackFrameRequests, requested);
-    QVERIFY(item.m_playbackFrameTimer->isActive());
+    QVERIFY(playbackFrameScheduled(item));
     // A seek shows at once.
     clock.applySample(sampleAt(80.0, clock.state().trackToken, true), true);
     QCOMPARE(item.m_playbackFrameRequests, ++requested);
@@ -11775,14 +12215,14 @@ void SpectrogramSmokeTest::spectrogramClockCourseCorrectionWaitsButJumpsShowAtOn
     // Paused, nothing moves until the clock does.
     item.handleWindowAfterAnimating();
     QCOMPARE(item.m_playbackFrameRequests, requested);
-    QVERIFY(!item.m_playbackFrameTimer->isActive());
+    QVERIFY(!playbackFrameScheduled(item));
     delete node;
 }
 
 void SpectrogramSmokeTest::spectrogramIdleViewDrawsOnlyFramesThatDiffer() {
     // In a window: the whole track in view moves its playhead a pixel
     // 2.34 times a second, and the window draws about that often. A view
-    // that scrolls draws every frame.
+    // that scrolls draws a frame for each pixel it scrolls.
     QQuickWindow window;
     window.resize(400, 100);
     window.show();
@@ -11812,7 +12252,10 @@ void SpectrogramSmokeTest::spectrogramIdleViewDrawsOnlyFramesThatDiffer() {
     QTest::qWait(300);
     frames = 0;
     QTest::qWait(1000);
-    QVERIFY2(frames >= 4 * std::max(idleFrames, 5), qPrintable(QString::number(frames)));
+    // It scrolls a pixel with each of its 46.875 columns a second, and
+    // draws a frame for each.
+    QVERIFY2(frames >= std::max(4 * idleFrames, 20) && frames <= 60,
+        qPrintable(QString::number(frames)));
 }
 
 void TransportInputSmokeTest::mainWindowStopsPositionFramesWhileHidden() {
@@ -18870,8 +19313,9 @@ void SpectrogramSmokeTest::spectrogramClickToSeekMatchesCrosshairAtDevicePixels(
     constexpr int columns = 2000;
     item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
         0, columns, 48000, 1024, true, true, 1, false, 1);
-    // Between columns, so that the centered view scrolls by part of one.
-    setTestPosition(item, 10.31);
+    // Three quarters into column 483, so that the centered view has
+    // scrolled by part of a column, and a whole device pixel of it.
+    setTestPosition(item, 10.32);
     const QPointF pointer(73.75, 30.0);
     QHoverEvent hover(QEvent::HoverEnter, pointer, pointer, QPointF());
     item.hoverEnterEvent(&hover);

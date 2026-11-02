@@ -133,6 +133,39 @@ struct SpectrogramSceneStatistics {
     qint64 overlayTextureBytes{0};
 };
 
+class SpectrogramItem;
+
+// Wakes the spectrogram panes of a window for their next playback frames,
+// with one timer for all of them. Frames are due on a grid of whole
+// milliseconds of the monotonic clock, rounded up, so panes whose pixels
+// change at the same time ask for the same frame of the window.
+class SpectrogramFrameScheduler : public QObject {
+    Q_OBJECT
+
+public:
+    explicit SpectrogramFrameScheduler(QObject *parent = nullptr);
+
+    // Asks for `item`'s frame at dueNs, nowNs being now, in place of the
+    // one it asked for before.
+    void schedule(SpectrogramItem *item, qint64 dueNs, qint64 nowNs);
+    void cancel(const SpectrogramItem *item);
+    // The time `item`'s frame is due at, rounded up to its millisecond,
+    // or -1 for none.
+    qint64 dueNs(const SpectrogramItem *item) const;
+    bool timerActive() const { return m_timer.isActive(); }
+
+private:
+    void arm(qint64 nowNs);
+    void fire();
+
+    // Now on the monotonic clock; tests set their own.
+    std::function<qint64()> m_nowNs;
+    QTimer m_timer;
+    QHash<SpectrogramItem *, qint64> m_dueMs;
+    // The millisecond the timer fires for.
+    qint64 m_armedMs{0};
+};
+
 class SpectrogramItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY dbRangeChanged)
@@ -271,6 +304,8 @@ protected:
     void releaseResources() override;
 
 private:
+    friend class SpectrogramFrameScheduler;
+
     static constexpr int kGradientTableSize = 2048;
     static constexpr int kCanvasTileWidth = 64;
 
@@ -457,6 +492,35 @@ private:
     // from the last one.
     void schedulePlaybackFrame();
     void requestPlaybackFrame();
+    void cancelPlaybackFrame();
+    // What a data chunk could change of a frame besides its columns.
+    struct ShownDataState {
+        int totalColumnsEstimate{0};
+        bool tailLooksFinal{false};
+        bool ready{false};
+        bool canvasDirty{false};
+        quint64 trackToken{0};
+        quint64 ringGeneration{0};
+        qint64 rollingEpoch{0};
+        int hopSize{0};
+        int sampleRateHz{0};
+        int binsPerColumn{0};
+        bool zoomFillActive{false};
+        bool awaitingZoomData{false};
+        bool resetPending{false};
+        bool operator==(const ShownDataState &) const = default;
+    };
+    ShownDataState shownDataStateLocked() const;
+    // Whether columns written from ring sequence firstSeq, track columns
+    // from firstColumn, leave the last frame as it is, so that it need not
+    // be drawn again before its own next change. maxColumnBefore is the
+    // last decoded column before them.
+    bool chunkLeavesLastFrameLocked(const ShownDataState &before,
+        qint64 firstSeq,
+        qint64 firstColumn,
+        qint64 maxColumnBefore) const;
+    // The window's scheduler, or the item's own outside a window.
+    SpectrogramFrameScheduler *frameScheduler();
     // How long until the last frame would change, in nanoseconds from
     // nowNs: zero for now, or -1 for not while the clock keeps its course.
     qint64 playbackFrameDelayNsLocked(qint64 nowNs) const;
@@ -664,16 +728,26 @@ private:
     // the track time at anchor X, and pixels per second.
     bool m_zoomPreviewShown{false};
     // The last frame stays as it is until the playhead reaches
-    // changeSeconds, if valid: a centered view that does not scroll.
+    // changeSeconds, if valid: when a centered view that does not scroll
+    // moves its playhead to the next pixel or starts to scroll, and when a
+    // view that scrolls reaches its next pixel or column.
+    // Columns arriving after the last ones it shows, shownRight (a ring
+    // sequence when rolling, a track column when centered), do not change
+    // it either.
     struct IdleView {
         bool valid{false};
         double changeSeconds{0.0};
+        bool rolling{false};
+        qint64 shownLeft{0};
+        qint64 shownRight{-1};
     };
     IdleView m_idleView;
-    // Wakes playback frames for an idle view; see schedulePlaybackFrame.
-    QTimer *m_playbackFrameTimer{nullptr};
+    // Wakes playback frames until then; see schedulePlaybackFrame.
+    QPointer<SpectrogramFrameScheduler> m_frameScheduler;
     // How many playback frames the item has asked for, for tests.
     quint64 m_playbackFrameRequests{0};
+    // How many frames steady data chunks have asked for, for tests.
+    quint64 m_dataFrameRequests{0};
     double m_zoomPreviewAnchorSeconds{0.0};
     double m_zoomPreviewAnchorX{0.0};
     double m_zoomPreviewPixelsPerSecond{0.0};
