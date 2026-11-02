@@ -558,18 +558,24 @@ fn spawn_engine_with_output(
 impl GstPlaybackRuntime {
     /// How long the engine waits for a command, a bus message, or a seek
     /// location before it has timed work to do at `now`: a volume fade,
-    /// the cadence of playback, or a file whose release is due to be
-    /// reported. `None` while nothing is due; paused or stopped, the engine
-    /// then sleeps until something wakes it.
+    /// the cadence of playback, a run that has not reached its state in
+    /// time, or a file whose release is due to be reported. `None` while
+    /// nothing is due; paused or stopped, the engine then sleeps until
+    /// something wakes it.
     fn command_wait_timeout(&self, now: Instant) -> Option<Duration> {
         if self.volume_ramp_pending() {
             Some(VOLUME_RAMP_TICK)
         } else if self.snapshot.state == PlaybackState::Playing || self.buffering_active {
             Some(Duration::from_millis(20))
         } else {
-            self.releases
-                .next_due(self.release_report_after)
-                .map(|due| due.saturating_duration_since(now))
+            [
+                self.stuck_state_change_due(),
+                self.releases.next_due(self.release_report_after),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|due| due.saturating_duration_since(now))
         }
     }
 
@@ -2159,18 +2165,25 @@ impl GstPlaybackRuntime {
     /// we advance to the next track.
     const PLAYING_STATE_TIMEOUT: Duration = Duration::from_secs(5);
 
-    /// Returns `true` if the pipeline was stuck and recovery was attempted.
-    fn check_stuck_state_change(&mut self) -> bool {
-        let Some(requested_at) = self.playing_state_requested_at else {
-            return false;
-        };
+    /// When the run asked to play, or to preroll for a seek, counts as
+    /// stuck unless it has got there; see `check_stuck_state_change`.
+    fn stuck_state_change_due(&self) -> Option<Instant> {
         // A seek can take long, such as an accurate seek in a long file
         // without an index, and the pipeline plays only once it has landed.
         // A seek that fails posts an error.
-        // So can finding the frame a FLAC seek starts from.
-        if self.seek_in_flight.is_some()
-            || self.locating.is_some()
-            || requested_at.elapsed() < self.playing_state_timeout
+        // So can finding the frame a FLAC seek starts from. Either ends
+        // with a bus message or a location, which wake the engine.
+        if self.seek_in_flight.is_some() || self.locating.is_some() {
+            return None;
+        }
+        Some(self.playing_state_requested_at? + self.playing_state_timeout)
+    }
+
+    /// Returns `true` if the pipeline was stuck and recovery was attempted.
+    fn check_stuck_state_change(&mut self) -> bool {
+        if self
+            .stuck_state_change_due()
+            .is_none_or(|due| Instant::now() < due)
         {
             return false;
         }
@@ -2944,6 +2957,9 @@ fn run_gst_engine(
             recv(timer) -> _ => {}
         }
         runtime.drain_bus(bus);
+        // Paused, as for a cue, the bridge does not poll, so a run that
+        // never prerolls is caught here.
+        runtime.check_stuck_state_change();
         let now = Instant::now();
         runtime.poll_volume_ramp(now);
         runtime.report_unreleased(now);
@@ -2952,6 +2968,10 @@ fn run_gst_engine(
     bus.unset_sync_handler();
     runtime.bus_count = None;
     let _ = runtime.set_pipeline_state(gst::State::Null);
+    // The pipeline does not flush its bus itself (see `start_gst_engine`),
+    // and a message on it holds its source, such as the pipeline, which
+    // holds the bus: without this, the pipeline would never be freed.
+    bus.set_flushing(true);
     EngineExit {
         unreleased: runtime
             .releases
@@ -11647,15 +11667,21 @@ mod engine_tests {
         /// something wakes it; `wakes` counts the wakes of its loop.
         #[track_caller]
         fn assert_sleeps(&mut self, wakes: &AtomicU64) {
-            // The messages of the last state change arrive first.
-            let settled = Instant::now() + millis(300);
-            self.listen_until("", |_| Instant::now() >= settled);
+            // The pipeline has reached its state and the engine has taken
+            // the messages of the change. A wake for the last of them may
+            // still be on its way, and one more for a message it took in
+            // the same drain; with a timer, it would wake far more often.
+            let bus = self.playbin.bus().unwrap();
+            self.listen_until("the pipeline did not settle", |engine| {
+                let (result, _, pending) = engine.playbin.state(gst::ClockTime::ZERO);
+                result.is_ok() && pending == gst::State::VoidPending && !bus.have_pending()
+            });
             let before = wakes.load(Ordering::Relaxed);
-            std::thread::sleep(millis(600));
+            std::thread::sleep(millis(1_000));
             let woken = wakes.load(Ordering::Relaxed) - before;
             assert!(
-                woken <= 1,
-                "the {:?} engine woke {woken} times in 600 ms",
+                woken <= 2,
+                "the {:?} engine woke {woken} times in 1 s",
                 self.snapshot.state
             );
         }
@@ -11725,6 +11751,77 @@ mod engine_tests {
         let (exit, took) = engine.quit();
         assert_eq!(exit, EngineExit::default());
         assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn a_paused_cue_that_never_prerolls_fails_without_being_polled() {
+        let fixtures = Fixtures::new("cue-stalled");
+        let a = fixtures.wav("a.wav", 20_000);
+        let mut engine = Engine::start_configured(|runtime| {
+            runtime.playing_state_timeout = millis(1_000);
+        });
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        // As a restored session on a share that stopped answering: the
+        // first read of the cued run does not return, and nothing fails.
+        let hold = hold_reads(&a);
+        engine.send(PlaybackCommand::Cue {
+            position: millis(2_500),
+            expected: FileStamp::of(&a).expect("stamp"),
+        });
+        engine.listen_until("no read of the cued run was held", |_| hold.holds_a_read());
+        engine.listen_until("the stalled cue was not reported", |engine| {
+            !engine.errors.is_empty() && engine.snapshot.state == PlaybackState::Stopped
+        });
+        let error = &engine.errors[0];
+        assert_eq!(error.path.as_deref(), Some(a.as_path()));
+        assert_eq!(error.outcome, PlaybackErrorOutcome::Stopped);
+        assert_eq!(error.detail, "playback did not start within 1 s");
+
+        hold.release();
+        wait_until_reader_ends(&a);
+        let (exit, _) = engine.quit();
+        assert_eq!(exit, EngineExit::default());
+    }
+
+    #[test]
+    fn a_stopped_engine_frees_its_pipeline() {
+        let fixtures = Fixtures::new("engine-freed");
+        let a = fixtures.wav("a.wav", 20_000);
+        let (analysis_tx, _analysis) = unbounded();
+        let (event_tx, events) = unbounded();
+        let (runtime, bus) =
+            start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
+        let playbin = runtime.playbin.downgrade();
+        let (commands, command_rx) = unbounded();
+        let thread = std::thread::spawn(move || run_gst_engine(runtime, &bus, &command_rx));
+        commands.send(PlaybackCommand::LoadQueue(vec![a])).unwrap();
+        commands.send(PlaybackCommand::Play).unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            assert!(Instant::now() < deadline, "the track did not play");
+            commands.send(PlaybackCommand::Poll).unwrap();
+            if let Ok(PlaybackEvent::Snapshot(snapshot)) = events.recv_timeout(millis(20)) {
+                if snapshot.state == PlaybackState::Playing && snapshot.position >= millis(300) {
+                    break;
+                }
+            }
+        }
+
+        drop(commands);
+        assert_eq!(
+            thread.join().expect("the engine stopped"),
+            EngineExit::default()
+        );
+        // The messages of the pipeline's last state changes, which hold it,
+        // do not keep it alive.
+        let deadline = Instant::now() + TIMEOUT;
+        while playbin.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "the stopped engine's pipeline was not freed"
+            );
+            std::thread::sleep(millis(10));
+        }
     }
 
     #[test]
