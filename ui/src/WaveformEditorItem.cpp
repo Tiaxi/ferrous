@@ -1611,8 +1611,8 @@ int WaveformEditorItem::displayedChannelCountLocked() const {
 bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
     if (m_viewMode == 0 || channel >= 64) return false;
     const qulonglong bit = qulonglong{1} << channel;
-    if (m_soloedChannelsMask != 0) return (m_soloedChannelsMask & bit) == 0;
-    return (m_mutedChannelsMask & bit) != 0;
+    return (m_mutedChannelsMask & bit) != 0
+        || (m_soloedChannelsMask != 0 && (m_soloedChannelsMask & bit) == 0);
 }
 
 QSGNode *WaveformEditorItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) {

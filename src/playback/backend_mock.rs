@@ -141,7 +141,7 @@ impl MockPlaybackRuntime {
     }
     /// The simulated streams have no channel count.
     fn publish_channel_mix(&mut self) {
-        self.snapshot.muted_channels_mask = self.channel_mix.silenced(0);
+        self.snapshot.muted_channels_mask = self.channel_mix.muted_in(0);
         self.snapshot.soloed_channels_mask = self.channel_mix.soloed_in(0);
     }
     fn handle_command(&mut self, cmd: PlaybackCommand) {
@@ -382,7 +382,7 @@ impl MockPlaybackRuntime {
         }
     }
     fn toggle_channel_mute(&mut self, ch: u8) {
-        self.channel_mix.toggle_mute(ch, 0);
+        self.channel_mix.toggle_mute(ch);
         self.publish_channel_mix();
     }
     fn solo_channel(&mut self, ch: u8) {

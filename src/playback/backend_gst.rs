@@ -927,7 +927,7 @@ impl GstPlaybackRuntime {
             self.output_mix.store(mix);
         }
         self.mix_channels = channels;
-        let (muted, soloed) = (mix.silenced(channels), mix.soloed_in(channels));
+        let (muted, soloed) = (mix.muted_in(channels), mix.soloed_in(channels));
         let changed = self.snapshot.muted_channels_mask != muted
             || self.snapshot.soloed_channels_mask != soloed;
         self.snapshot.muted_channels_mask = muted;
@@ -2376,9 +2376,8 @@ impl GstPlaybackRuntime {
             PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(mode),
             PlaybackCommand::SetShuffle(enabled) => self.set_shuffle(enabled),
             PlaybackCommand::ToggleChannelMute(ch) => {
-                let channels = self.output_mix.channels.load(Ordering::Relaxed);
                 let mut mix = self.output_mix.load();
-                mix.toggle_mute(ch, channels);
+                mix.toggle_mute(ch);
                 self.output_mix.store(mix);
                 self.follow_output_mix();
                 self.emit_snapshot();
@@ -6156,37 +6155,56 @@ mod engine_tests {
         engine.send(PlaybackCommand::Play);
         engine.wait_for_mix(&peaks, 0, 0, &[true; 4]);
 
+        engine.send(PlaybackCommand::SoloChannel(1));
+        engine.send(PlaybackCommand::SoloChannel(3));
+        engine.wait_for_mix(&peaks, 0b1010, 0, &[false, true, false, true]);
+
+        engine.send(PlaybackCommand::SoloChannel(3));
+        engine.wait_for_mix(&peaks, 0b0010, 0, &[false, true, false, false]);
+
+        engine.send(PlaybackCommand::SoloChannel(1));
+        engine.wait_for_mix(&peaks, 0, 0, &[true; 4]);
+    }
+
+    #[test]
+    fn a_muted_channel_stays_silent_while_it_is_soloed() {
+        let fixtures = Fixtures::new("mute-and-solo");
+        let track = fixtures.wav_of("four.wav", 4_000, WAV_RATE, 4);
+        let mut engine = Engine::start();
+        let peaks = record_channel_peaks(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![track]));
+        engine.send(PlaybackCommand::Play);
         engine.send(PlaybackCommand::ToggleChannelMute(1));
-        engine.wait_for_mix(&peaks, 0, 0b0010, &[true, false, true, true]);
-
-        // A muted channel that is soloed is heard.
         engine.send(PlaybackCommand::SoloChannel(1));
         engine.send(PlaybackCommand::SoloChannel(3));
-        engine.wait_for_mix(&peaks, 0b1010, 0b0101, &[false, true, false, true]);
+        engine.wait_for_mix(&peaks, 0b1010, 0b0010, &[false, false, false, true]);
 
-        engine.send(PlaybackCommand::SoloChannel(3));
-        engine.wait_for_mix(&peaks, 0b0010, 0b1101, &[false, true, false, false]);
-
-        // The last solo brings back the mute.
         engine.send(PlaybackCommand::SoloChannel(1));
+        engine.send(PlaybackCommand::SoloChannel(3));
         engine.wait_for_mix(&peaks, 0, 0b0010, &[true, false, true, true]);
     }
 
     #[test]
-    fn muting_another_channel_turns_solos_into_what_the_output_plays() {
+    fn a_mute_during_solos_changes_only_its_channel() {
         let fixtures = Fixtures::new("solo-then-mute");
         let track = fixtures.wav_of("four.wav", 4_000, WAV_RATE, 4);
         let mut engine = Engine::start();
         let peaks = record_channel_peaks(&engine.playbin);
         engine.send(PlaybackCommand::LoadQueue(vec![track]));
         engine.send(PlaybackCommand::Play);
-        engine.send(PlaybackCommand::ToggleChannelMute(2));
         engine.send(PlaybackCommand::SoloChannel(0));
         engine.send(PlaybackCommand::SoloChannel(1));
-        engine.wait_for_mix(&peaks, 0b0011, 0b1100, &[true, true, false, false]);
+        engine.wait_for_mix(&peaks, 0b0011, 0, &[true, true, false, false]);
+
+        engine.send(PlaybackCommand::ToggleChannelMute(1));
+        engine.wait_for_mix(&peaks, 0b0011, 0b0010, &[true, false, false, false]);
+        engine.send(PlaybackCommand::ToggleChannelMute(1));
+        engine.wait_for_mix(&peaks, 0b0011, 0, &[true, true, false, false]);
 
         engine.send(PlaybackCommand::ToggleChannelMute(3));
-        engine.wait_for_mix(&peaks, 0, 0b0100, &[true, true, false, true]);
+        engine.wait_for_mix(&peaks, 0b0011, 0b1000, &[true, true, false, false]);
+        engine.send(PlaybackCommand::ToggleChannelMute(3));
+        engine.wait_for_mix(&peaks, 0b0011, 0, &[true, true, false, false]);
     }
 
     #[test]
@@ -6199,7 +6217,7 @@ mod engine_tests {
         engine.send(PlaybackCommand::LoadQueue(vec![wide, narrow.clone()]));
         engine.send(PlaybackCommand::Play);
         engine.send(PlaybackCommand::SoloChannel(3));
-        engine.wait_for_mix(&peaks, 0b1000, 0b0111, &[false, false, false, true]);
+        engine.wait_for_mix(&peaks, 0b1000, 0, &[false, false, false, true]);
 
         assert_change(&engine.wait_for_changes(2), &narrow, 1, Expect::Gapless);
         engine.wait_for_mix(&peaks, 0, 0, &[true, true]);
@@ -6216,10 +6234,10 @@ mod engine_tests {
         engine.send(PlaybackCommand::Play);
         engine.send(PlaybackCommand::SoloChannel(1));
         engine.send(PlaybackCommand::SoloChannel(3));
-        engine.wait_for_mix(&peaks, 0b1010, 0b0101, &[false, true, false, true]);
+        engine.wait_for_mix(&peaks, 0b1010, 0, &[false, true, false, true]);
 
         assert_change(&engine.wait_for_changes(2), &narrow, 1, Expect::Gapless);
-        engine.wait_for_mix(&peaks, 0b0010, 0b0001, &[false, true]);
+        engine.wait_for_mix(&peaks, 0b0010, 0, &[false, true]);
     }
 
     #[test]
@@ -6250,10 +6268,10 @@ mod engine_tests {
         engine.send(PlaybackCommand::Play);
         engine.send(PlaybackCommand::SoloChannel(0));
         engine.send(PlaybackCommand::SoloChannel(2));
-        engine.wait_for_mix(&peaks, 0b0101, 0b1010, &[true, false, true, false]);
+        engine.wait_for_mix(&peaks, 0b0101, 0, &[true, false, true, false]);
 
         assert_change(&engine.wait_for_changes(2), &track, 0, Expect::Gapless);
-        engine.wait_for_mix(&peaks, 0b0101, 0b1010, &[true, false, true, false]);
+        engine.wait_for_mix(&peaks, 0b0101, 0, &[true, false, true, false]);
     }
 
     #[test]

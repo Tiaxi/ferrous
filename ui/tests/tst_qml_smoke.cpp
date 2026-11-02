@@ -954,7 +954,7 @@ QVector<double> verticalLinesIn(const LineAndTextRecordingPaintEngine &engine, Q
 }
 
 // The bridge a waveform surface reads, with the real one's types: its mute
-// mask has 64 bits, and isChannelMuted() is no binding dependency.
+// mask has 64 bits.
 class WaveformSurfaceTestBridge final : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString playbackState MEMBER m_playbackState CONSTANT)
@@ -979,7 +979,7 @@ public:
     QList<bool> mutedChannels() const {
         QList<bool> muted(64);
         for (int channel = 0; channel < 64; ++channel) {
-            muted[channel] = isChannelMuted(channel);
+            muted[channel] = (m_mutedChannelsMask & (1ULL << channel)) != 0;
         }
         return muted;
     }
@@ -989,9 +989,6 @@ public:
             soloed[channel] = (m_soloedChannelsMask & (1ULL << channel)) != 0;
         }
         return soloed;
-    }
-    Q_INVOKABLE bool isChannelMuted(int channel) const {
-        return channel >= 0 && channel < 64 && (m_mutedChannelsMask & (1ULL << channel)) != 0;
     }
     Q_INVOKABLE void toggleChannelMute(int) {}
     Q_INVOKABLE void soloChannel(int) {}
@@ -1731,7 +1728,7 @@ Item {
         function setVolume(value) {}
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
-        function isChannelMuted(channelIndex) { return false }
+        function isChannelSilent(channelIndex) { return false }
         function setChannelButtonsVisibility(value) {}
         function setLibrarySortMode(mode) {}
         function rescanAllLibraryRoots() {}
@@ -2265,7 +2262,7 @@ Item {
         property var soloedChannels: []
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
         signal playbackChanged()
-        function isChannelMuted(channelIndex) { return false }
+        function isChannelSilent(channelIndex) { return false }
         function setSpectrogramZoomLevel(level) {}
         function registerSpectrogramItem(item, channelIndex) {}
         function unregisterSpectrogramItem(item) {}
@@ -2388,7 +2385,7 @@ Window {
         property int soloCalls: 0
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
         signal playbackChanged()
-        function isChannelMuted(channelIndex) { return false }
+        function isChannelSilent(channelIndex) { return false }
         function setSpectrogramZoomLevel(level) {}
         function registerSpectrogramItem(item, channelIndex) {}
         function unregisterSpectrogramItem(item) {}
@@ -2481,6 +2478,7 @@ Item {
         id: bridge
         objectName: "soloBridge"
         property string playbackState: "Stopped"
+        property var mutedChannels: []
         property int spectrogramViewMode: 1
         property int spectrogramDisplayMode: 0
         property real dbRange: 90
@@ -2494,7 +2492,7 @@ Item {
         property var soloedChannels: []
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
         signal playbackChanged()
-        function isChannelMuted(channelIndex) { return false }
+        function isChannelSilent(channelIndex) { return false }
         function setSpectrogramZoomLevel(level) {}
         function registerSpectrogramItem(item, channelIndex) {}
         function unregisterSpectrogramItem(item) {}
@@ -2528,19 +2526,24 @@ Item {
     surface->setProperty("channelDescriptors", descriptors);
     bridge->setProperty("soloedChannels", QVariantList{true, false, true});
 
-    // Whether each channel's solo button shows it soloed, in pane order.
-    const std::function<void(QQuickItem *, QList<bool> *)> collect =
-        [&collect](QQuickItem *item, QList<bool> *shown) {
-            if (item->objectName() == QStringLiteral("spectrogramSoloButton")) {
+    // Whether each channel's button shows it active, in pane order.
+    const std::function<void(QQuickItem *, const QString &, QList<bool> *)> collect =
+        [&collect](QQuickItem *item, const QString &button, QList<bool> *shown) {
+            if (item->objectName() == button) {
                 shown->push_back(item->property("active").toBool());
             }
             for (QQuickItem *child : item->childItems()) {
-                collect(child, shown);
+                collect(child, button, shown);
             }
         };
     const auto soloShown = [&]() {
         QList<bool> shown;
-        collect(surface, &shown);
+        collect(surface, QStringLiteral("spectrogramSoloButton"), &shown);
+        return shown;
+    };
+    const auto muteShown = [&]() {
+        QList<bool> shown;
+        collect(surface, QStringLiteral("spectrogramMuteButton"), &shown);
         return shown;
     };
     QTRY_COMPARE(soloShown(), (QList<bool>{true, false, true}));
@@ -2548,6 +2551,12 @@ Item {
     QTRY_COMPARE(soloShown(), (QList<bool>{false, false, true}));
     bridge->setProperty("soloedChannels", QVariantList{});
     QTRY_COMPARE(soloShown(), (QList<bool>{false, false, false}));
+
+    // A channel can show both, and a solo lights no mute button.
+    bridge->setProperty("soloedChannels", QVariantList{true, false, false});
+    bridge->setProperty("mutedChannels", QVariantList{true, false, false});
+    QTRY_COMPARE(soloShown(), (QList<bool>{true, false, false}));
+    QTRY_COMPARE(muteShown(), (QList<bool>{true, false, false}));
 }
 
 void WaveformSmokeTest::waveformSurfaceFollowsSharedChannelAndOverlaySettings() {
@@ -2582,7 +2591,7 @@ Item {
         property var mutedChannelsMask: 0
         property var soloedChannels: []
         property int channelButtonsVisibility: 2
-        function isChannelMuted(channelIndex) { return false }
+        function isChannelSilent(channelIndex) { return false }
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
     }
@@ -2727,19 +2736,20 @@ Item {
     for (const int channels : {2, 6}) {
         bridge.setChannels(channels);
         QTRY_COMPARE(waveform->channelCount(), channels);
-        // Muting some channels, then soloing each one, which mutes all the
-        // others, and soloing two: before the engine knows the stream's
-        // channels its mask has the high bits set too.
+        // Muting some channels, then soloing each one, then soloing two with
+        // one of them muted too, and a mute above the 53 bits a QML number
+        // keeps.
         QList<QPair<quint64, quint64>> states{{0b10, 0}, {0, 0}};
         for (int soloed = 0; soloed < channels; ++soloed) {
-            const quint64 bit = quint64{1} << soloed;
-            states.push_back({~bit, bit});
+            states.push_back({0, quint64{1} << soloed});
         }
-        states.push_back({~quint64{0b11}, 0b11});
+        states.push_back({0b10, 0b11});
+        states.push_back({quint64{1} << 63, 0b01});
         for (const auto &[mask, soloed] : states) {
             bridge.setMutes(mask, soloed);
             for (int channel = 0; channel < channels; ++channel) {
                 const bool muted = ((mask >> channel) & 1U) != 0;
+                const bool leftOut = soloed != 0 && ((soloed >> channel) & 1U) == 0;
                 QVERIFY2(shownIn(rootItem, muteButton, channel) == (muted ? 1 : 0),
                     qPrintable(QStringLiteral("%1 channels, mask %2: channel %3 shows %4")
                         .arg(channels).arg(mask, 16, 16, QLatin1Char('0')).arg(channel)
@@ -2748,8 +2758,8 @@ Item {
                     qPrintable(QStringLiteral("%1 channels, solos %2: channel %3 shows %4")
                         .arg(channels).arg(soloed, 16, 16, QLatin1Char('0')).arg(channel)
                         .arg(shownIn(rootItem, soloButton, channel))));
-                // The waveform greys out the same channels.
-                QCOMPARE(waveform->channelDrawnMuted(channel), muted);
+                // The waveform also greys out what the solos leave out.
+                QCOMPARE(waveform->channelDrawnMuted(channel), muted || leftOut);
             }
             QCOMPARE(waveform->mutedChannelsMask(), mask);
             QCOMPARE(waveform->soloedChannelsMask(), soloed);
@@ -14786,7 +14796,7 @@ Window {
         property var soloedChannels: []
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
         signal playbackChanged()
-        function isChannelMuted(channelIndex) { return false }
+        function isChannelSilent(channelIndex) { return false }
         function setSpectrogramZoomLevel(level) { calls = calls.concat(["zoom"]) }
         function registerSpectrogramItem(item, channelIndex) {}
         function unregisterSpectrogramItem(item) {}
@@ -16917,7 +16927,7 @@ Window {
         property int channelButtonsVisibility: 2
         property int muteCalls: 0
         property int soloCalls: 0
-        function isChannelMuted(channelIndex) { return false }
+        function isChannelSilent(channelIndex) { return false }
         function toggleChannelMute(channelIndex) { ++muteCalls }
         function soloChannel(channelIndex) { ++soloCalls }
     }

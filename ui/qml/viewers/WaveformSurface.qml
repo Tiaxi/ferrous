@@ -119,8 +119,7 @@ Item {
                 Rectangle {
                     objectName: "waveformChannelMuteButton"
                     readonly property int channelIndex: index
-                    // mutedChannels notifies when it changes;
-                    // isChannelMuted() does not.
+                    // mutedChannels notifies when it changes.
                     property bool active: waveform.mutedChannels[index] === true
                     visible: root.interactiveOverlaysVisible
                         && (root.uiBridge.channelButtonsVisibility === 2

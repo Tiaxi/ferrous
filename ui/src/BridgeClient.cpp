@@ -2517,11 +2517,13 @@ void BridgeClient::setChannelButtonsVisibility(int value) {
         static_cast<quint8>(clamped)));
 }
 
-bool BridgeClient::isChannelMuted(int channelIndex) const {
+bool BridgeClient::isChannelSilent(int channelIndex) const {
     if (channelIndex < 0 || channelIndex > 63) {
         return false;
     }
-    return (m_mutedChannelsMask & (1ULL << channelIndex)) != 0;
+    const quint64 bit = 1ULL << channelIndex;
+    return (m_mutedChannelsMask & bit) != 0
+        || (m_soloedChannelsMask != 0 && (m_soloedChannelsMask & bit) == 0);
 }
 
 void BridgeClient::setShowLevelMeter(bool value) {

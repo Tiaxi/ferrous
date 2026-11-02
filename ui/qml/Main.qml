@@ -462,7 +462,7 @@ ApplicationWindow {
         function reloadDiagnosticsFromDisk() {}
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
-        function isChannelMuted(channelIndex) { return false }
+        function isChannelSilent(channelIndex) { return false }
         function setChannelButtonsVisibility(value) {}
     }
 
