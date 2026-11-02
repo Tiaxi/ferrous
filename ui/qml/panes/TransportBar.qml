@@ -159,9 +159,27 @@ ToolBar {
                 : Math.round(visualPosition * barDevicePixels) / barDevicePixels
 
             enabled: seekAllowed
-            // The arrow keys' step; a drag does not snap to it.
-            stepSize: root.keyboardSeekStepSeconds
+            // The arrow keys', the wheel's and assistive technology's step.
+            // The slider rounds a pointer's value to its step whatever the
+            // snap mode, so a press by the pointer alone has none: a drag or
+            // a click shows and seeks to the time under the pointer.
+            stepSize: pressed && heldKeys.length === 0 ? 0 : root.keyboardSeekStepSeconds
             snapMode: Slider.NoSnap
+
+            // The time at `x`, in the slider's coordinates, where a press
+            // there moves the slider; the slider's own mapping, without its
+            // step.
+            function secondsAtX(x) {
+                const handleWidth = handle ? handle.width : 0
+                const extent = availableWidth - handleWidth
+                if (Math.abs(extent) < 1e-12) {
+                    return from
+                }
+                const offset = mirrored
+                    ? width - x - rightPadding - handleWidth / 2
+                    : x - leftPadding - handleWidth / 2
+                return from + Math.max(0, Math.min(1, offset / extent)) * (to - from)
+            }
 
             Accessible.name: I18n.i18nc("@label", "Seek")
             Accessible.description: seekAllowed
@@ -288,6 +306,7 @@ ToolBar {
 
                     Label {
                         id: dragTimeLabel
+                        objectName: "seekDragTime"
                         anchors.centerIn: parent
                         text: FormatUtils.formatSeekTime(seekSlider.value)
                         color: root.uiPalette.uiAccentTextColor
