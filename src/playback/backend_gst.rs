@@ -10,23 +10,26 @@ use anyhow::{anyhow, Context};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use gst::prelude::*;
 use gstreamer as gst;
+use gstreamer_base as gst_base;
+use gstreamer_base::prelude::BaseParseExt;
 use gstreamer_pbutils as gst_pbutils;
 
 use crate::analysis::AnalysisCommand;
 #[cfg(feature = "profiling-logs")]
 use crate::profile_logging::heartbeat_trace_enabled;
 use crate::raw_audio::{
-    conceal_and_report_damaged_ac3_frames, configure_raw_surround_decoding,
+    conceal_and_report_damaged_ac3_frames, configure_raw_surround_decoding, index_raw_ac3_frames,
     install_raw_surround_source_probe, is_dts_file, is_raw_surround_file,
 };
 
 use super::channel_mix::ChannelMix;
 use super::clock::{self, MonotonicClock, MonotonicTime};
-use super::file_source::Releases;
+use super::file_source::{opened_file_upstream, Releases};
 use super::parsebin_stall;
 use super::queue::{
     same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff, ManualMove,
 };
+use super::seek_locate::{Located, LocatedFrame, SeekLocator};
 use super::source_activation::SourceActivation;
 use super::{
     EngineExit, FileStamp, PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome,
@@ -359,6 +362,19 @@ struct GstPlaybackRuntime {
     queued_seek: Option<SeekTarget>,
     /// The seek the pipeline was given, until it reports `async-done`.
     seek_in_flight: Option<SeekTarget>,
+    /// Finds the frames that FLAC seeks start from.
+    locator: SeekLocator,
+    /// Numbers the locator's requests and cancellations.
+    locate_generation: u64,
+    /// The request for the frame of the queued seek's target that waits
+    /// for its answer, and that target.
+    locating: Option<(u64, Duration)>,
+    /// The frame found for a target, or `None` within if none was found.
+    located: Option<(Duration, Option<LocatedFrame>)>,
+    /// The locator's answers.
+    located_rx: Receiver<Located>,
+    /// The FLAC parsers of the pipeline, which a located frame is added to.
+    flac_parsers: Arc<Mutex<Vec<gst::glib::WeakRef<gst::Element>>>>,
     /// A new pipeline run for the queued seek. The run prerolls in Paused
     /// and plays once the seek has landed, if playback is playing then.
     restart: Option<RunRestart>,
@@ -545,6 +561,8 @@ impl GstPlaybackRuntime {
         // `set_pipeline_state`, which orders it against the type finding.
         let source_activation = SourceActivation::connect(&playbin);
         let releases = Arc::new(Releases::default());
+        let (located_tx, located_rx) = unbounded();
+        let flac_parsers = track_flac_parsers(&playbin);
         releases.track(&playbin);
         Self {
             playbin,
@@ -566,6 +584,12 @@ impl GstPlaybackRuntime {
             seek_requests: 0,
             queued_seek: None,
             seek_in_flight: None,
+            locator: SeekLocator::new(located_tx),
+            locate_generation: 0,
+            locating: None,
+            located: None,
+            located_rx,
+            flac_parsers,
             restart: None,
             stream_ends,
             last_seek_issued_at: None,
@@ -1435,13 +1459,25 @@ impl GstPlaybackRuntime {
             self.restart_for_seek();
             return;
         }
+        let method = seek_method_for_path(self.snapshot.current.as_deref());
+        if method == SeekMethod::Located
+            && self
+                .located
+                .is_none_or(|(target, _)| target != seek.position)
+        {
+            // Given once the locator has answered. Until then, successors
+            // and stream ends stay held, so the track plays on to its end
+            // and no further.
+            self.locate_frame(seek.position);
+            return;
+        }
         self.queued_seek = None;
+        if let Some((_, Some(frame))) = self.located.take() {
+            self.index_located_frame(frame);
+        }
         let applied = self
             .playbin
-            .seek_simple(
-                seek_flags_for_path(self.snapshot.current.as_deref()),
-                clock_time(seek.position),
-            )
+            .seek_simple(method.flags(), clock_time(seek.position))
             .is_ok();
         self.release_handoffs();
         self.release_stream_ends();
@@ -1454,6 +1490,67 @@ impl GstPlaybackRuntime {
             self.seek_in_flight = Some(seek);
         } else {
             self.finish_seek(seek, None);
+        }
+    }
+
+    /// Ask the locator for the frame of the current FLAC file that a seek
+    /// to `target` starts from, unless it is asked already.
+    fn locate_frame(&mut self, target: Duration) {
+        if self.locating.is_some_and(|(_, located)| located == target) {
+            return;
+        }
+        let Some(path) = self.snapshot.current.clone() else {
+            return;
+        };
+        self.locate_generation += 1;
+        self.locating = Some((self.locate_generation, target));
+        self.locator.request(&path, self.locate_generation, target);
+    }
+
+    /// The locator answered: the queued seek, if the answer is for it, can
+    /// be given now.
+    fn handle_located(&mut self, located: Located) {
+        let Some((generation, target)) = self.locating else {
+            return;
+        };
+        if generation != located.generation {
+            return;
+        }
+        self.locating = None;
+        self.located = Some((target, located.frame));
+        self.issue_queued_seek();
+    }
+
+    /// Add `frame` to the index of the parsers that read its file, so an
+    /// accurate seek starts from it rather than from the last frame they
+    /// parsed. A file that replaced the one the pipeline reads, as a save
+    /// does, has its frames elsewhere. Adding an entry reads nothing.
+    fn index_located_frame(&self, frame: LocatedFrame) {
+        let parsers: Vec<gst::Element> = {
+            let Ok(mut parsers) = self.flac_parsers.lock() else {
+                return;
+            };
+            parsers.retain(|parser| parser.upgrade().is_some());
+            parsers
+                .iter()
+                .filter_map(gst::glib::WeakRef::upgrade)
+                .collect()
+        };
+        for parser in parsers {
+            let file = parser
+                .static_pad("sink")
+                .and_then(|pad| opened_file_upstream(&pad));
+            if file != Some(frame.file) {
+                continue;
+            }
+            if let Ok(parser) = parser.downcast::<gst_base::BaseParse>() {
+                parser.add_index_entry(
+                    frame.offset,
+                    gst::ClockTime::from_nseconds(frame.nanos),
+                    true,
+                    true,
+                );
+            }
         }
     }
 
@@ -1541,6 +1638,11 @@ impl GstPlaybackRuntime {
     fn abandon_seeks(&mut self) {
         self.queued_seek = None;
         self.seek_in_flight = None;
+        if self.locating.take().is_some() {
+            self.locate_generation += 1;
+            self.locator.cancel(self.locate_generation);
+        }
+        self.located = None;
         self.restart = None;
         self.release_handoffs();
         self.release_stream_ends();
@@ -2034,7 +2136,11 @@ impl GstPlaybackRuntime {
         // A seek can take long, such as an accurate seek in a long file
         // without an index, and the pipeline plays only once it has landed.
         // A seek that fails posts an error.
-        if self.seek_in_flight.is_some() || requested_at.elapsed() < self.playing_state_timeout {
+        // So can finding the frame a FLAC seek starts from.
+        if self.seek_in_flight.is_some()
+            || self.locating.is_some()
+            || requested_at.elapsed() < self.playing_state_timeout
+        {
             return false;
         }
         let current_path = self.snapshot.current.as_ref().map_or("?", |p| {
@@ -2630,6 +2736,9 @@ fn start_gst_engine(
     // words through garbage data, causing gaps during gapless transitions.
     install_raw_surround_source_probe(&playbin);
     conceal_and_report_damaged_ac3_frames(&playbin);
+    // Accurate seeks in a raw AC3 file read from the second before their
+    // target rather than from the last frame played.
+    index_raw_ac3_frames(&playbin);
 
     let stream_durations = Arc::new(Mutex::new(StreamDurations::default()));
     let stream_ends = Arc::new(Mutex::new(StreamEndHold::default()));
@@ -2712,6 +2821,7 @@ fn run_gst_engine(
     // Wake for bus messages, such as the async-done that tells where a seek
     // landed, instead of finding them at the next timeout.
     let (bus_wake_tx, bus_wake_rx) = bounded::<()>(1);
+    let located_rx = runtime.located_rx.clone();
     bus.set_sync_handler(move |_, _| {
         let _ = bus_wake_tx.try_send(());
         gst::BusSyncReply::Pass
@@ -2733,6 +2843,12 @@ fn run_gst_engine(
                 }
             }
             recv(bus_wake_rx) -> _ => {}
+            recv(located_rx) -> located => {
+                if let Ok(located) = located {
+                    runtime.drain_bus(bus);
+                    runtime.handle_located(located);
+                }
+            }
             default(runtime.command_wait_timeout()) => {}
         }
         runtime.drain_bus(bus);
@@ -3560,6 +3676,27 @@ impl StreamEndHold {
     }
 }
 
+/// Keep track of the FLAC parsers that `playbin` plugs, which the engine
+/// adds located frames to.
+fn track_flac_parsers(playbin: &gst::Element) -> Arc<Mutex<Vec<gst::glib::WeakRef<gst::Element>>>> {
+    let parsers = Arc::new(Mutex::new(Vec::<gst::glib::WeakRef<gst::Element>>::new()));
+    let tracked = Arc::clone(&parsers);
+    playbin.connect("deep-element-added", false, move |values| {
+        let element = values.get(2)?.get::<gst::Element>().ok()?;
+        if element
+            .factory()
+            .is_some_and(|factory| factory.name() == "flacparse")
+        {
+            if let Ok(mut parsers) = tracked.lock() {
+                parsers.retain(|parser| parser.upgrade().is_some());
+                parsers.push(element.downgrade());
+            }
+        }
+        None
+    });
+    parsers
+}
+
 /// Install the probes on the source pads of every parser of the pipeline:
 /// they record each stream's duration and hold its end during a seek. See
 /// `install_stream_duration_probe` and `StreamEndHold`. Lock order: the
@@ -3685,19 +3822,47 @@ fn configure_playbin_buffering(playbin: &gst::Element) {
     playbin.set_property_from_value("flags", &tuned_flags);
 }
 
-/// Seek flags for the track at `path`. Seeks are accurate: without the
-/// flag, parsers such as those of MP3 and ADTS AAC estimate where the target
-/// is from the bitrate and label the audio found there with the target time,
-/// so the pipeline itself cannot tell where the seek landed, and playback
-/// is offset from the spectrogram, which seeks accurately. An accurate seek
-/// can make a parser scan, but bursts of seeks are merged, so scrubbing
-/// pays for one. DTS seeks to the key frame before the target; its
-/// position is reported as where the seek landed.
-fn seek_flags_for_path(path: Option<&Path>) -> gst::SeekFlags {
-    if path.is_some_and(is_dts_file) {
-        gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
-    } else {
-        gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+/// How the engine seeks a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeekMethod {
+    /// One accurate seek. Without the flag, parsers such as those of MP3
+    /// and ADTS AAC estimate where the target is from the bitrate and label
+    /// the audio found there with the target time, so the pipeline itself
+    /// cannot tell where the seek landed, and playback is offset from the
+    /// spectrogram, which seeks accurately. An accurate seek can make a
+    /// parser scan, but bursts of seeks are merged, so scrubbing pays for
+    /// one.
+    Accurate,
+    /// An accurate seek from a frame shortly before the target, which the
+    /// seek locator finds and the engine adds to the parser's index first.
+    /// Without it, an accurate seek in a FLAC file without a seek table
+    /// parses every frame from the furthest point the parser has parsed to
+    /// the target; see `seek_locate`.
+    Located,
+    /// DTS seeks to the key frame before the target; its position is
+    /// reported as where the seek landed.
+    KeyUnit,
+}
+
+impl SeekMethod {
+    /// The flags of the seek.
+    fn flags(self) -> gst::SeekFlags {
+        match self {
+            Self::Accurate | Self::Located => gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+            Self::KeyUnit => gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+        }
+    }
+}
+
+/// How the engine seeks the track at `path`.
+fn seek_method_for_path(path: Option<&Path>) -> SeekMethod {
+    let extension = path
+        .and_then(Path::extension)
+        .and_then(|extension| extension.to_str());
+    match extension {
+        Some(extension) if extension.eq_ignore_ascii_case("flac") => SeekMethod::Located,
+        _ if path.is_some_and(is_dts_file) => SeekMethod::KeyUnit,
+        _ => SeekMethod::Accurate,
     }
 }
 
@@ -4426,23 +4591,41 @@ mod tests {
     }
 
     #[test]
-    fn seeks_are_accurate_except_for_dts() {
+    fn seeks_are_accurate_except_for_dts_and_located_for_flac() {
         for path in [
-            "/tmp/test.flac",
             "/tmp/test.mp3",
             "/tmp/test.aac",
             "/tmp/test.ogg",
+            "/tmp/test.ac3",
         ] {
-            let flags = seek_flags_for_path(Some(Path::new(path)));
-            assert!(flags.contains(gst::SeekFlags::FLUSH), "{path}");
-            assert!(flags.contains(gst::SeekFlags::ACCURATE), "{path}");
-            assert!(!flags.contains(gst::SeekFlags::KEY_UNIT), "{path}");
+            assert_eq!(
+                seek_method_for_path(Some(Path::new(path))),
+                SeekMethod::Accurate,
+                "{path}"
+            );
         }
+        for path in ["/tmp/test.flac", "/tmp/TEST.FLAC"] {
+            assert_eq!(
+                seek_method_for_path(Some(Path::new(path))),
+                SeekMethod::Located,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            seek_method_for_path(Some(Path::new("/tmp/test.dts"))),
+            SeekMethod::KeyUnit
+        );
+        assert_eq!(seek_method_for_path(None), SeekMethod::Accurate);
+
+        let accurate = SeekMethod::Accurate.flags();
+        assert_eq!(accurate, gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE);
+        // A located seek is an accurate one.
+        assert_eq!(SeekMethod::Located.flags(), accurate);
     }
 
     #[test]
     fn dts_seek_stays_key_unit_based() {
-        let flags = seek_flags_for_path(Some(Path::new("/tmp/test.dts")));
+        let flags = SeekMethod::KeyUnit.flags();
         assert!(flags.contains(gst::SeekFlags::FLUSH));
         assert!(flags.contains(gst::SeekFlags::KEY_UNIT));
         assert!(!flags.contains(gst::SeekFlags::ACCURATE));
@@ -5159,30 +5342,8 @@ mod engine_tests {
 
         /// Like [`Self::wav_at`], with the same audio on `channels` channels.
         fn wav_of(&self, name: &str, millis: u32, rate: u32, channels: u16) -> PathBuf {
-            let frames = rate * millis / 1_000;
-            let frame_size = 2 * u32::from(channels);
-            let data_len = frames * frame_size;
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(b"RIFF");
-            bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
-            bytes.extend_from_slice(b"WAVEfmt ");
-            bytes.extend_from_slice(&16u32.to_le_bytes());
-            bytes.extend_from_slice(&1u16.to_le_bytes());
-            bytes.extend_from_slice(&channels.to_le_bytes());
-            bytes.extend_from_slice(&rate.to_le_bytes());
-            bytes.extend_from_slice(&(rate * frame_size).to_le_bytes());
-            bytes.extend_from_slice(&(2 * channels).to_le_bytes());
-            bytes.extend_from_slice(&16u16.to_le_bytes());
-            bytes.extend_from_slice(b"data");
-            bytes.extend_from_slice(&data_len.to_le_bytes());
-            for frame in 0..frames {
-                let sample = i16::try_from(frame % 40).unwrap() * 400 - 8_000;
-                for _ in 0..channels {
-                    bytes.extend_from_slice(&sample.to_le_bytes());
-                }
-            }
             let path = self.dir.join(name);
-            std::fs::write(&path, bytes).unwrap();
+            std::fs::write(&path, wav_bytes(rate, channels, &sawtooth(rate, millis))).unwrap();
             path
         }
 
@@ -5295,7 +5456,207 @@ mod engine_tests {
         }
     }
 
-    /// Where the tone of `marked_mp3` starts: after 1,250 frames of 24 ms.
+    /// The samples of the WAV fixtures: a sawtooth of `millis` milliseconds
+    /// at `rate` Hz.
+    fn sawtooth(rate: u32, millis: u32) -> Vec<i16> {
+        (0..rate * millis / 1_000)
+            .map(|frame| i16::try_from(frame % 40).unwrap() * 400 - 8_000)
+            .collect()
+    }
+
+    /// A 16-bit PCM WAV file of the mono `samples` at `rate` Hz, the same on
+    /// each of `channels` channels.
+    fn wav_bytes(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+        let frame_size = 2 * u32::from(channels);
+        let data_len = u32::try_from(samples.len()).unwrap() * frame_size;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * frame_size).to_le_bytes());
+        bytes.extend_from_slice(&(2 * channels).to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in samples {
+            for _ in 0..channels {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    impl Fixtures {
+        /// FLAC without a seek table of the mono `samples` at `rate` Hz.
+        fn flac_of(&self, name: &str, rate: u32, samples: &[i16]) -> PathBuf {
+            let wav = self.dir.join(format!("{name}.wav"));
+            std::fs::write(&wav, wav_bytes(rate, 1, samples)).unwrap();
+            let path = self.dir.join(name);
+            gst::init().unwrap();
+            let pipeline = gst::parse::launch(&format!(
+                "filesrc location=\"{}\" ! wavparse ! audioconvert ! flacenc seekpoints=0 \
+                 ! filesink location=\"{}\"",
+                wav.display(),
+                path.display()
+            ))
+            .expect("FLAC encoder pipeline");
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let message = pipeline.bus().unwrap().timed_pop_filtered(
+                gst::ClockTime::from_seconds(30),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
+            pipeline.set_state(gst::State::Null).unwrap();
+            assert!(
+                matches!(
+                    message.as_ref().map(|message| message.view()),
+                    Some(gst::MessageView::Eos(_))
+                ),
+                "{message:?}"
+            );
+            std::fs::remove_file(wav).unwrap();
+            path
+        }
+
+        /// The sawtooth of [`Self::wav`] at 48 kHz as FLAC without a seek
+        /// table. (At the rate of the WAV fixtures, a FLAC frame would last
+        /// over half a second.)
+        fn flac(&self, name: &str, millis: u32) -> PathBuf {
+            self.flac_of(name, 48_000, &sawtooth(48_000, millis))
+        }
+
+        /// [`MARKED_FLAC_LENGTH_SECONDS`] of quiet noise at
+        /// [`MARKED_FLAC_RATE`] Hz as FLAC
+        /// without a seek table, with one click at [`MARKED_FLAC_CLICK`].
+        /// The noise does not compress, so reading up to a time reads a
+        /// share of the file in proportion.
+        fn marked_flac(&self, name: &str) -> PathBuf {
+            let mut state = 0x1234_5678_u32;
+            let mut samples: Vec<i16> = (0..MARKED_FLAC_RATE * MARKED_FLAC_LENGTH_SECONDS)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    i16::from_be_bytes([state.to_be_bytes()[0], state.to_be_bytes()[1]]) / 16
+                })
+                .collect();
+            samples[usize::try_from(MARKED_FLAC_CLICK_FRAME).unwrap()] = 30_000;
+            self.flac_of(name, MARKED_FLAC_RATE, &samples)
+        }
+    }
+
+    const MARKED_FLAC_LENGTH_SECONDS: u32 = 120;
+    /// Enough for a file of several megabytes, of which the parser reads
+    /// some 64 KiB wherever it looks.
+    const MARKED_FLAC_RATE: u32 = 48_000;
+    /// The frame of the click of `marked_flac`, at 100.3 s.
+    const MARKED_FLAC_CLICK_FRAME: u64 = 4_814_400;
+    const MARKED_FLAC_CLICK: Duration = Duration::from_millis(100_300);
+
+    /// Count the bytes that the elements made by `factory` in `playbin`
+    /// receive, pushed or pulled.
+    fn count_received_bytes(playbin: &gst::Element, factory: &'static str) -> Arc<AtomicU64> {
+        let bytes = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&bytes);
+        playbin.connect("deep-element-added", false, move |values| {
+            let element = values.get(2)?.get::<gst::Element>().ok()?;
+            if element.factory().is_some_and(|f| f.name() == factory) {
+                let counted = Arc::clone(&counted);
+                element
+                    .static_pad("sink")?
+                    .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                        if let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data {
+                            counted.fetch_add(buffer.size() as u64, Ordering::Relaxed);
+                        }
+                        gst::PadProbeReturn::Ok
+                    });
+            }
+            None
+        });
+        bytes
+    }
+
+    /// Record the flags and start of every seek that the elements made by
+    /// `factory` in `playbin` receive.
+    fn record_seeks(
+        playbin: &gst::Element,
+        factory: &'static str,
+    ) -> Arc<Mutex<Vec<(gst::SeekFlags, Duration)>>> {
+        let seeks = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seeks);
+        playbin.connect("deep-element-added", false, move |values| {
+            let element = values.get(2)?.get::<gst::Element>().ok()?;
+            if element.factory().is_some_and(|f| f.name() == factory) {
+                let recorded = Arc::clone(&recorded);
+                element.static_pad("src")?.add_probe(
+                    gst::PadProbeType::EVENT_UPSTREAM,
+                    move |_, info| {
+                        if let Some(gst::EventView::Seek(seek)) =
+                            info.event().map(|event| event.view())
+                        {
+                            let (_, flags, _, start, _, _) = seek.get();
+                            if let gst::GenericFormattedValue::Time(Some(start)) = start {
+                                recorded
+                                    .lock()
+                                    .unwrap()
+                                    .push((flags, Duration::from_nanos(start.nseconds())));
+                            }
+                        }
+                        gst::PadProbeReturn::Ok
+                    },
+                );
+            }
+            None
+        });
+        seeks
+    }
+
+    /// A buffer that the output rendered.
+    #[derive(Debug, Clone, Copy)]
+    struct Rendered {
+        stream_time: Duration,
+        /// The stream time of its first sample louder than half of full
+        /// scale.
+        loud_at: Option<Duration>,
+    }
+
+    /// Record every buffer that the output of `playbin` renders, which
+    /// leaves out a buffer it prerolls with and never plays.
+    fn record_rendered(playbin: &gst::Element) -> Arc<Mutex<Vec<Rendered>>> {
+        let rendered = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&rendered);
+        let sink = output_sink_pad(playbin).parent_element().unwrap();
+        sink.set_property("signal-handoffs", true);
+        sink.connect("handoff", false, move |values| {
+            let buffer = values.get(1)?.get::<gst::Buffer>().ok()?;
+            let pad = values.get(2)?.get::<gst::Pad>().ok()?;
+            let caps = pad.current_caps()?;
+            let structure = caps.structure(0)?;
+            let rate = u64::try_from(structure.get::<i32>("rate").ok()?).ok()?;
+            let channels = usize::try_from(structure.get::<i32>("channels").ok()?).ok()?;
+            let format = structure.get::<String>("format").ok()?;
+            let stream_time = pad
+                .sticky_event::<gst::event::Segment>(0)?
+                .segment()
+                .downcast_ref::<gst::ClockTime>()?
+                .to_stream_time(buffer.pts()?)?;
+            let stream_time = Duration::from_nanos(stream_time.nseconds());
+            let map = buffer.map_readable().ok()?;
+            let loud_at = sample_levels(&format, &map)
+                .position(|level| level > 0.5)
+                .map(|sample| {
+                    stream_time
+                        + Duration::from_nanos((sample / channels) as u64 * 1_000_000_000 / rate)
+                });
+            recorded.lock().ok()?.push(Rendered {
+                stream_time,
+                loud_at,
+            });
+            None
+        });
+        rendered
+    }
     const MARKER_AT: Duration = Duration::from_secs(30);
 
     /// The audio frames of `seek-tone.mp3`, a 48 kHz mono tone, without its
@@ -5398,31 +5759,7 @@ mod engine_tests {
             let Ok(map) = buffer.map_readable() else {
                 return gst::PadProbeReturn::Ok;
             };
-            let peak = match format.as_str() {
-                "S16LE" => map
-                    .chunks_exact(2)
-                    .map(|sample| {
-                        f64::from(i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs())
-                            / 32_768.0
-                    })
-                    .fold(0.0, f64::max),
-                "S32LE" => map
-                    .chunks_exact(4)
-                    .map(|sample| {
-                        f64::from(i32::from_le_bytes(sample.try_into().unwrap()).unsigned_abs())
-                            / 2_147_483_648.0
-                    })
-                    .fold(0.0, f64::max),
-                "F32LE" => map
-                    .chunks_exact(4)
-                    .map(|sample| f64::from(f32::from_le_bytes(sample.try_into().unwrap()).abs()))
-                    .fold(0.0, f64::max),
-                "F64LE" => map
-                    .chunks_exact(8)
-                    .map(|sample| f64::from_le_bytes(sample.try_into().unwrap()).abs())
-                    .fold(0.0, f64::max),
-                other => panic!("unexpected sample format {other:?}"),
-            };
+            let peak = sample_levels(&format, &map).fold(0.0, f64::max);
             let stream_time = pad
                 .sticky_event::<gst::event::Segment>(0)
                 .and_then(|segment| {
@@ -5439,6 +5776,29 @@ mod engine_tests {
             }
             gst::PadProbeReturn::Ok
         });
+    }
+
+    /// The level of each sample of `data` in `format`, as a fraction of
+    /// full scale.
+    fn sample_levels<'a>(format: &str, data: &'a [u8]) -> Box<dyn Iterator<Item = f64> + 'a> {
+        match format {
+            "S16LE" => Box::new(data.chunks_exact(2).map(|sample| {
+                f64::from(i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs()) / 32_768.0
+            })),
+            "S32LE" => Box::new(data.chunks_exact(4).map(|sample| {
+                f64::from(i32::from_le_bytes(sample.try_into().unwrap()).unsigned_abs())
+                    / 2_147_483_648.0
+            })),
+            "F32LE" => Box::new(
+                data.chunks_exact(4)
+                    .map(|sample| f64::from(f32::from_le_bytes(sample.try_into().unwrap()).abs())),
+            ),
+            "F64LE" => Box::new(
+                data.chunks_exact(8)
+                    .map(|sample| f64::from_le_bytes(sample.try_into().unwrap()).abs()),
+            ),
+            other => panic!("unexpected sample format {other:?}"),
+        }
     }
 
     /// The loudest sample of each channel of a buffer of 16-bit audio.
@@ -6789,6 +7149,402 @@ mod engine_tests {
     }
 
     #[test]
+    fn seek_in_flac_without_a_seek_table_lands_on_its_sample_without_reading_up_to_it() {
+        let fixtures = Fixtures::new("located-seek");
+        let track = fixtures.marked_flac("marked.flac");
+        let file_len = std::fs::metadata(&track).unwrap().len();
+        let mut engine = Engine::start();
+        let received = count_received_bytes(&engine.playbin, "flacparse");
+        let seeks = record_seeks(&engine.playbin, "flacparse");
+        let rendered = record_rendered(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![track]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 0.3 s", |engine| {
+            engine.snapshot.position >= millis(300)
+        });
+
+        // Far past what the parser has read: an accurate seek alone would
+        // read every frame up to the target.
+        let target = MARKED_FLAC_CLICK - millis(200);
+        let read_before = received.load(Ordering::Relaxed);
+        let rendered_before = rendered.lock().unwrap().len();
+        seeks.lock().unwrap().clear();
+        engine.send(PlaybackCommand::Seek(target));
+        engine.wait_until("the seek did not land", |engine| {
+            engine.snapshot.seek_landed_serial == 1
+        });
+        let read = received.load(Ordering::Relaxed) - read_before;
+        let up_to_target = file_len * u64::try_from(target.as_millis()).unwrap()
+            / u64::from(MARKED_FLAC_LENGTH_SECONDS * 1_000);
+        assert!(
+            read < up_to_target / 4,
+            "the seek read {read} bytes; the file holds {up_to_target} up to the target"
+        );
+
+        // One accurate seek, which starts from the located frame.
+        assert_eq!(
+            *seeks.lock().unwrap(),
+            [(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, target)]
+        );
+
+        // One landing, at the target, which no snapshot preceded. (The
+        // samples that play tell how accurate it is.)
+        assert_eq!(engine.seeked.len(), 1, "{:?}", engine.seeked);
+        assert!(
+            engine.seeked[0].abs_diff(target) < millis(50),
+            "landed at {:?}",
+            engine.seeked
+        );
+        for snapshot in &engine.snapshots {
+            assert!(
+                snapshot.position < millis(3_000) || snapshot.position >= engine.seeked[0],
+                "{snapshot:?}"
+            );
+        }
+
+        engine.wait_until("the click was not heard", |_| {
+            rendered.lock().unwrap()[rendered_before..]
+                .iter()
+                .any(|buffer| buffer.loud_at.is_some())
+        });
+        let rendered = rendered.lock().unwrap()[rendered_before..].to_vec();
+        // Playback goes on at the target's sample (one is 21 µs long), and
+        // nothing between the old position and the target plays.
+        let after_seek: Vec<_> = rendered
+            .iter()
+            .filter(|buffer| buffer.stream_time >= millis(3_000))
+            .collect();
+        assert!(
+            after_seek[0].stream_time.abs_diff(target) < Duration::from_micros(21),
+            "playback went on at {:?} after the seek to {target:?}",
+            after_seek[0]
+        );
+        for buffer in &after_seek {
+            assert!(
+                buffer.stream_time >= after_seek[0].stream_time,
+                "{buffer:?} played after the seek to {target:?}"
+            );
+        }
+        let heard = rendered.iter().find_map(|buffer| buffer.loud_at).unwrap();
+        // To the sample: one is 21 µs long.
+        assert!(
+            heard.abs_diff(MARKED_FLAC_CLICK) < Duration::from_micros(21),
+            "the click at {MARKED_FLAC_CLICK:?} played at {heard:?}"
+        );
+    }
+
+    #[test]
+    fn seek_near_the_end_of_a_flac_track_keeps_its_successor_gapless() {
+        let fixtures = Fixtures::new("located-end");
+        let a = fixtures.flac("a.flac", 6_000);
+        let b = fixtures.flac("b.flac", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 0.3 s", |engine| {
+            engine.snapshot.position >= millis(300)
+        });
+        // The pipeline reads to the end of the track while the seek is
+        // located, and asks for the successor only after it.
+        engine.send(PlaybackCommand::Seek(millis(5_700)));
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        assert_eq!(engine.seeked.len(), 1, "{:?}", engine.seeked);
+        assert!(
+            engine.seeked[0].abs_diff(millis(5_700)) < millis(1),
+            "{:?}",
+            engine.seeked
+        );
+        engine.wait_for_playing(1, millis(4_500));
+    }
+
+    #[test]
+    fn seek_inside_the_window_of_a_flac_track_stays_on_the_audible_track() {
+        let fixtures = Fixtures::new("located-window");
+        let a = fixtures.flac("a.flac", 4_000);
+        let b = fixtures.flac("b.flac", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_settled_window(&b);
+        // The seek restarts the track, whose new run takes it.
+        engine.send(PlaybackCommand::Seek(millis(500)));
+        let sought = Instant::now();
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        assert!(
+            sought.elapsed() >= millis(3_000),
+            "the successor became current {:?} after the seek {:?}",
+            sought.elapsed(),
+            engine.seeked
+        );
+        assert_eq!(engine.seeked.len(), 1, "{:?}", engine.seeked);
+    }
+
+    #[test]
+    fn repeat_one_replays_a_flac_track_gaplessly_after_seeks() {
+        let fixtures = Fixtures::new("located-repeat");
+        let a = fixtures.flac("a.flac", 4_000);
+        let b = fixtures.flac("b.flac", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 0.3 s", |engine| {
+            engine.snapshot.position >= millis(300)
+        });
+        engine.send(PlaybackCommand::Seek(millis(2_500)));
+        let replay = engine.wait_for_changes(2);
+        assert_change(&replay, &a, 0, Expect::Gapless);
+        engine.prepared.clear();
+        engine.wait_for_settled_window(&a);
+        engine.send(PlaybackCommand::Seek(millis(2_000)));
+        let sought = Instant::now();
+        let second = engine.wait_for_changes(3);
+        assert_change(&second, &a, 0, Expect::Gapless);
+        assert!(
+            sought.elapsed() >= millis(1_500),
+            "{:?} {:?} {:?}",
+            sought.elapsed(),
+            engine.changes,
+            engine.seeked
+        );
+        assert_ne!(second.token, replay.token);
+        assert_eq!(engine.seeked.len(), 2, "{:?}", engine.seeked);
+    }
+
+    #[test]
+    fn seek_past_the_audio_of_a_cut_flac_file_lands_and_goes_on_to_the_next_track() {
+        let fixtures = Fixtures::new("located-cut");
+        let whole = fixtures.flac("whole.flac", 8_000);
+        // Its header still says 8 s.
+        let bytes = std::fs::read(&whole).unwrap();
+        let a = fixtures.dir.join("a.flac");
+        std::fs::write(&a, &bytes[..bytes.len() / 2]).unwrap();
+        let b = fixtures.flac("b.flac", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the cut track did not start", |engine| {
+            engine.snapshot.position >= millis(300) && engine.snapshot.duration >= millis(7_000)
+        });
+        // The first step of the seek finds no audio after where it lands.
+        engine.send(PlaybackCommand::Seek(millis(7_000)));
+        engine.wait_until("the seek did not land", |engine| {
+            engine.snapshot.seek_serial == 1
+        });
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
+        engine.wait_for_playing(1, millis(4_500));
+    }
+
+    #[test]
+    fn commands_take_effect_while_the_frame_of_a_flac_seek_cannot_be_read() {
+        let fixtures = Fixtures::new("located-held");
+        let a = fixtures.flac("a.flac", 8_000);
+        let b = fixtures.flac("b.flac", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until_row_plays(0);
+
+        // The locator reads A as a network share that stopped answering
+        // would, and the seek waits for it.
+        let hold = crate::playback::file_source::test_support::hold(
+            &a,
+            crate::playback::file_source::test_support::Point::Locate,
+        );
+        engine.send(PlaybackCommand::Seek(millis(5_000)));
+        engine.wait_until("the locator did not read", |_| hold.holds());
+        engine.send(PlaybackCommand::SetVolume(0.5));
+        engine.wait_until("the volume did not change", |engine| {
+            (engine.snapshot.volume - 0.5).abs() < f32::EPSILON
+        });
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("pause did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        // A newer seek waits behind it.
+        engine.send(PlaybackCommand::Seek(millis(6_000)));
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("stop did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        engine.send(PlaybackCommand::PlayAt(1));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until_row_plays(1);
+        assert!(
+            hold.holds(),
+            "B played while the locator's read of A was held"
+        );
+        assert!(engine.seeked.is_empty(), "{:?}", engine.seeked);
+
+        // Its answer, once the read returns, is for seeks that no longer
+        // apply.
+        hold.release();
+        engine.send(PlaybackCommand::Seek(millis(2_000)));
+        engine.wait_until("the seek in B did not land", |engine| {
+            !engine.seeked.is_empty()
+        });
+        assert_eq!(engine.seeked.len(), 1, "{:?}", engine.seeked);
+        assert!(
+            engine.seeked[0].abs_diff(millis(2_000)) < millis(1),
+            "{:?}",
+            engine.seeked
+        );
+        assert_eq!(engine.snapshot.current.as_deref(), Some(b.as_path()));
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    /// `flac` with a PADDING block of `len` bytes after its STREAMINFO, as
+    /// a save that adds metadata writes it: its frames lie `len` bytes
+    /// later.
+    fn with_padding(flac: &[u8], len: usize) -> Vec<u8> {
+        // STREAMINFO, which is not the last metadata block.
+        assert_eq!(&flac[..4], b"fLaC");
+        assert_eq!(flac[4], 0);
+        let mut padded = flac[..42].to_vec();
+        padded.push(1);
+        padded.extend_from_slice(&u32::try_from(len).unwrap().to_be_bytes()[1..]);
+        padded.resize(padded.len() + len, 0);
+        padded.extend_from_slice(&flac[42..]);
+        padded
+    }
+
+    #[test]
+    fn flac_seek_after_a_save_replaced_the_playing_file_starts_in_the_file_that_plays() {
+        let fixtures = Fixtures::new("located-replaced");
+        let a = fixtures.marked_flac("a.flac");
+        let b = fixtures.flac("b.flac", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until_row_plays(0);
+
+        // A save writes the file with 1 MiB more metadata beside it and
+        // renames it over the one that plays, which the pipeline goes on
+        // reading.
+        let saved = fixtures.dir.join("a.flac.save");
+        std::fs::write(&saved, with_padding(&std::fs::read(&a).unwrap(), 1 << 20)).unwrap();
+        std::fs::rename(&saved, &a).unwrap();
+        // The saved file's frames near the end lie past the end of the file
+        // that plays.
+        let target = millis(117_000);
+        engine.send(PlaybackCommand::Seek(target));
+        engine.wait_until("the seek did not land", |engine| !engine.seeked.is_empty());
+        assert!(
+            engine.seeked[0].abs_diff(target) < millis(50),
+            "{:?}",
+            engine.seeked
+        );
+        engine.wait_until("playback did not go on after the seek", |engine| {
+            engine.snapshot.position_advancing && engine.snapshot.position >= millis(117_500)
+        });
+        assert_eq!(engine.snapshot.current_queue_index, Some(0));
+        assert_eq!(engine.changes.len(), 1, "{:?}", engine.changes);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    #[test]
+    fn flac_seek_waiting_for_its_frame_holds_the_successor_back() {
+        // Before about-to-finish, then inside its window with the successor
+        // given to the pipeline, then a Repeat-One replay given to it.
+        for (case, repeat, window) in [
+            ("before", RepeatMode::Off, false),
+            ("window", RepeatMode::Off, true),
+            ("repeat-one", RepeatMode::One, true),
+        ] {
+            let fixtures = Fixtures::new(&format!("located-held-handover-{case}"));
+            let a = fixtures.flac("a.flac", 4_000);
+            let b = fixtures.flac("b.flac", 4_500);
+            let (successor, row) = if repeat == RepeatMode::One {
+                (a.clone(), 0)
+            } else {
+                (b.clone(), 1)
+            };
+            let mut engine = Engine::start();
+            engine.send(PlaybackCommand::SetRepeatMode(repeat));
+            engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
+            engine.send(PlaybackCommand::Play);
+            if window {
+                engine.wait_for_settled_window(&successor);
+            } else {
+                engine.wait_until_row_plays(0);
+            }
+
+            let hold = crate::playback::file_source::test_support::hold(
+                &a,
+                crate::playback::file_source::test_support::Point::Locate,
+            );
+            engine.send(PlaybackCommand::Seek(millis(500)));
+            let sought = Instant::now();
+            engine.wait_until(&format!("{case}: the locator did not read"), |_| {
+                hold.holds()
+            });
+            // Long past where the track would have ended.
+            engine.wait_until(&format!("{case}: time did not pass"), |_| {
+                sought.elapsed() >= millis(4_500)
+            });
+            assert_eq!(engine.changes.len(), 1, "{case}: {:?}", engine.changes);
+            assert!(engine.seeked.is_empty(), "{case}: {:?}", engine.seeked);
+
+            hold.release();
+            engine.wait_until(&format!("{case}: the seek did not land"), |engine| {
+                !engine.seeked.is_empty()
+            });
+            let landed = Instant::now();
+            assert!(
+                engine.seeked[0].abs_diff(millis(500)) < millis(50),
+                "{case}: {:?}",
+                engine.seeked
+            );
+            assert_change(
+                &engine.wait_for_changes(2),
+                &successor,
+                row,
+                Expect::Gapless,
+            );
+            assert!(
+                landed.elapsed() >= millis(3_000),
+                "{case}: the successor started {:?} after the seek landed",
+                landed.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn flac_seek_while_a_read_does_not_return_lands_once_it_returns() {
+        let fixtures = Fixtures::new("located-held-read");
+        let a = fixtures.flac("a.flac", 20_000);
+        let mut engine = Engine::start();
+        let hold = engine.play_until_read_held(vec![a.clone()]);
+
+        // The engine locates the frame and seeks; the parser reads nothing
+        // on the engine's thread, which goes on taking commands.
+        engine.send(PlaybackCommand::Seek(millis(10_000)));
+        engine.send(PlaybackCommand::SetVolume(0.5));
+        engine.wait_until("the volume did not change", |engine| {
+            (engine.snapshot.volume - 0.5).abs() < f32::EPSILON
+        });
+        assert!(engine.seeked.is_empty(), "{:?}", engine.seeked);
+        assert!(hold.holds_a_read());
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("pause did not take effect", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        engine.send(PlaybackCommand::Play);
+
+        hold.release();
+        engine.wait_until("the seek did not land", |engine| !engine.seeked.is_empty());
+        assert!(
+            engine.seeked[0].abs_diff(millis(10_000)) < millis(1),
+            "{:?}",
+            engine.seeked
+        );
+        engine.wait_until("playback did not go on after the seek", |engine| {
+            engine.snapshot.position_advancing && engine.snapshot.position >= millis(10_300)
+        });
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    #[test]
     fn seek_before_the_pipeline_prerolls_lands_once_it_has() {
         let fixtures = Fixtures::new("seek-preroll");
         let a = fixtures.wav("a.wav", 6_000);
@@ -7875,6 +8631,9 @@ mod engine_tests {
                 assert!(Instant::now() < deadline, "{}", self.report(what));
                 if let Some(message) = self.bus.timed_pop(gst::ClockTime::from_mseconds(20)) {
                     self.runtime.handle_bus_message(&message);
+                }
+                while let Ok(located) = self.runtime.located_rx.try_recv() {
+                    self.runtime.handle_located(located);
                 }
                 self.runtime.poll();
             }
@@ -10282,6 +11041,78 @@ mod engine_tests {
         assert!(frames.len() > 4 * TEST_AC3_FRAMES + SEAMED_FRAME);
         for frame in frames.iter() {
             assert!(!ac3_frame_is_damaged(&frame.bytes), "{:?}", frame.pts);
+        }
+    }
+
+    #[test]
+    fn seek_in_raw_ac3_reads_from_the_second_before_its_target_with_exact_frame_times() {
+        // 150 repeats of the 1.024 s tone, after a partial frame and before
+        // a tag, which the parser does not see.
+        let fixtures = Fixtures::new("ac3-index");
+        let stream = crate::raw_audio::TEST_AC3.repeat(150);
+        let (bytes, audio) = crate::raw_audio::ripped_surround_bytes(&stream);
+        let track = fixtures.dir.join("long.ac3");
+        std::fs::write(&track, &bytes).unwrap();
+        let mut engine = Engine::start();
+        let received = count_received_bytes(&engine.playbin, "ac3parse");
+        let frames = record_decoder_input(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![track.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 0.5 s", |engine| {
+            engine.snapshot.position >= millis(500)
+        });
+        crate::raw_audio::wait_until_indexed(&track);
+
+        let target = Duration::from_micros(120_010_500);
+        let read_before = received.load(Ordering::Relaxed);
+        let frames_before = frames.lock().unwrap().len();
+        engine.send(PlaybackCommand::Seek(target));
+        engine.wait_until("the seek did not land", |engine| {
+            engine.snapshot.seek_landed_serial == 1
+        });
+        let read = received.load(Ordering::Relaxed) - read_before;
+        let up_to_target = (audio.len() as u64) * 120 / 154;
+        assert!(
+            read < up_to_target / 4,
+            "the seek read {read} bytes; the file holds {up_to_target} up to the target"
+        );
+        assert_eq!(engine.seeked.len(), 1, "{:?}", engine.seeked);
+        assert!(
+            engine.seeked[0].abs_diff(target) < millis(1),
+            "landed at {:?}",
+            engine.seeked
+        );
+
+        // The frames after the seek start from the index entry before the
+        // target, and each is stamped with the time of its place in the
+        // stream, so the decoder cuts the audio before the target to the
+        // sample.
+        let frame_len = crate::raw_audio::TEST_AC3.len() / TEST_AC3_FRAMES;
+        let frame_nanos = 32_000_000;
+        let target_frame = u64::try_from(target.as_nanos()).unwrap() / frame_nanos;
+        engine.wait_until("the frame of the target did not reach the decoder", |_| {
+            frames.lock().unwrap()[frames_before..].iter().any(|frame| {
+                frame
+                    .pts
+                    .is_some_and(|pts| pts.nseconds() / frame_nanos >= target_frame)
+            })
+        });
+        let frames = frames.lock().unwrap()[frames_before..].to_vec();
+        let first = frames[0].pts.expect("time stamp").nseconds();
+        assert!(
+            first <= target_frame * frame_nanos
+                && first + 1_100_000_000 > target_frame * frame_nanos,
+            "decoding started at {first} ns"
+        );
+        for frame in &frames {
+            let pts = frame.pts.expect("time stamp").nseconds();
+            assert_eq!(pts % frame_nanos, 0, "{pts}");
+            let in_tone = usize::try_from(pts / frame_nanos).unwrap() % TEST_AC3_FRAMES;
+            assert_eq!(
+                frame.bytes,
+                crate::raw_audio::TEST_AC3[in_tone * frame_len..(in_tone + 1) * frame_len],
+                "the frame stamped {pts} ns is not the one at that place in the stream"
+            );
         }
     }
 

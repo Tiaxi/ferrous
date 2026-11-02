@@ -82,6 +82,25 @@ pub(crate) fn register() {
     });
 }
 
+/// Name of the custom query that a source answers with the device and
+/// inode numbers of the file it has open.
+const OPENED_FILE_QUERY: &str = "ferrous-opened-file";
+
+/// The identity of the file that the source upstream of `pad` has open:
+/// the file it reads, whichever file is at its location by now. `None` if
+/// no source of this module answers. Asks without reading.
+pub(crate) fn opened_file_upstream(pad: &gst::Pad) -> Option<crate::file_identity::FileId> {
+    let mut query = gst::query::Custom::new(gst::Structure::new_empty(OPENED_FILE_QUERY));
+    if !pad.peer_query(&mut query) {
+        return None;
+    }
+    let structure = query.structure()?;
+    Some(crate::file_identity::FileId::from_numbers(
+        structure.get::<u64>("device").ok()?,
+        structure.get::<u64>("inode").ok()?,
+    ))
+}
+
 glib::wrapper! {
     /// A `filesrc` whose reads a flush interrupts; see the module.
     pub(crate) struct FileSource(ObjectSubclass<imp::FileSource>)
@@ -524,7 +543,7 @@ mod imp {
 
     use std::fs::File;
     use std::io;
-    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -890,6 +909,24 @@ mod imp {
             Ok(CreateSuccess::FilledBuffer)
         }
 
+        fn query(&self, query: &mut gst::QueryRef) -> bool {
+            if let gst::QueryViewMut::Custom(custom) = query.view_mut() {
+                if custom
+                    .structure()
+                    .is_some_and(|structure| structure.name() == super::OPENED_FILE_QUERY)
+                {
+                    let Some(metadata) = self.opened_metadata() else {
+                        return false;
+                    };
+                    let structure = custom.structure_mut();
+                    structure.set("device", metadata.dev());
+                    structure.set("inode", metadata.ino());
+                    return true;
+                }
+            }
+            BaseSrcImplExt::parent_query(self, query)
+        }
+
         fn unlock(&self) -> Result<(), gst::ErrorMessage> {
             lock(&self.wait.state).flushing = true;
             self.wait.changed.notify_all();
@@ -952,6 +989,8 @@ pub(crate) mod test_support {
         Read,
         /// The reader, about to close a file.
         Close,
+        /// The seek locator, about to read a file (see `seek_locate`).
+        Locate,
     }
 
     /// Holds the threads that reach `point` for a file, from its creation
@@ -1023,7 +1062,7 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(super) fn wait_if_held(path: &Path, point: Point) {
+    pub(crate) fn wait_if_held(path: &Path, point: Point) {
         let holds: Vec<_> = lock(&HOLDS)
             .iter()
             .filter(|hold| hold.point == point && hold.path == path)

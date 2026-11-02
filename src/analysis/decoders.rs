@@ -24,7 +24,7 @@ use crate::raw_audio::is_raw_surround_file;
 #[cfg(feature = "gst")]
 use crate::raw_audio::{
     conceal_damaged_ac3_frames, configure_raw_surround_decoding, estimate_duration_from_bitstream,
-    filter_raw_surround_source, is_dts_file,
+    filter_raw_surround_source, index_raw_ac3_frames, is_dts_file,
 };
 #[cfg(feature = "gst")]
 use gstreamer_app as gst_app;
@@ -649,7 +649,9 @@ fn seek_symphonia(
 }
 
 /// `GStreamer` seek flags for the spectrogram worker.  DTS files need
-/// `KEY_UNIT` to avoid decode artifacts after seeking.
+/// `KEY_UNIT` to avoid decode artifacts after seeking. An accurate seek in
+/// a raw AC3 file starts from the parser's index (see
+/// `index_raw_ac3_frames`).
 #[cfg(feature = "gst")]
 fn spectrogram_seek_flags_for_path(path: &Path) -> gst::SeekFlags {
     if is_dts_file(path) {
@@ -683,6 +685,9 @@ fn open_gstreamer_pipeline(
 ) -> Option<(AudioFrameSource, u64, usize, TrackLength)> {
     let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     conceal_damaged_ac3_frames(pipeline.upcast_ref());
+    // Seeks in a raw AC3 file read from the second before their target
+    // rather than from the last frame read.
+    index_raw_ac3_frames(pipeline.upcast_ref());
     let src = gst::ElementFactory::make("filesrc").build().ok()?;
     src.set_property("location", path.to_string_lossy().to_string());
     filter_raw_surround_source(&src);
@@ -1570,6 +1575,191 @@ mod tests {
         let (click, _) = loudest_frame(source);
         assert!(click.abs_diff(8_820) <= 4, "after a seek at frame {click}");
         std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    /// `count` frames of `source` from `first` on, reading on from where
+    /// it is.
+    #[cfg(feature = "gst")]
+    fn frames_from(source: &mut AudioFrameSource, first: u64, count: usize) -> Vec<f32> {
+        let mut samples = Vec::new();
+        for _ in 0..1_000_000 {
+            match source.next_frames().expect("decode") {
+                AudioRead::Frames(audio) => {
+                    let skip = usize::try_from(first.saturating_sub(audio.first_frame))
+                        .unwrap()
+                        .min(audio.frames);
+                    samples.extend_from_slice(&audio.samples[skip * audio.channels..]);
+                    if samples.len() >= count * audio.channels {
+                        samples.truncate(count * audio.channels);
+                        return samples;
+                    }
+                }
+                AudioRead::Pending => {}
+                AudioRead::Eof => panic!("the file ended before frame {first}"),
+            }
+        }
+        panic!("frame {first} was never decoded");
+    }
+
+    /// Seek the raw AC3 file of `bytes`, whose audio is `audio_len` bytes
+    /// long, to `target`, and assert that the seek reads less than a
+    /// quarter of the bytes up to it, `up_to_target`, and decodes there what
+    /// reading the whole file does.
+    #[cfg(feature = "gst")]
+    fn assert_far_ac3_seek_decodes_as_reading_on(
+        name: &str,
+        bytes: &[u8],
+        target: u64,
+        up_to_target: u64,
+    ) {
+        use crate::raw_audio::wait_until_indexed;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-decoders-{name}-{}.ac3",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).expect("fixture");
+        // Two frames after the target, where the decoder has the same
+        // overlap from its previous frame either way.
+        let compared = target + 2 * 1_536;
+
+        let (mut whole, rate, ..) = open_gstreamer_file(&path).expect("open");
+        assert_eq!(rate, 48_000);
+        let expected = frames_from(&mut whole, compared, 4_800);
+        drop(whole);
+
+        let (mut source, ..) = open_gstreamer_file(&path).expect("open");
+        let AudioFrameSource::Gst { pipeline, .. } = &source else {
+            panic!("not read with GStreamer");
+        };
+        let parser = pipeline
+            .iterate_recurse()
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|element| element.factory().is_some_and(|f| f.name() == "ac3parse"))
+            .expect("AC3 parser");
+        let received = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&received);
+        parser.static_pad("sink").expect("sink").add_probe(
+            gst::PadProbeType::BUFFER,
+            move |_, info| {
+                if let Some(buffer) = info.buffer() {
+                    counted.fetch_add(usize_to_u64(buffer.size()), Ordering::Relaxed);
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+        wait_until_indexed(&path);
+        let before = received.load(Ordering::Relaxed);
+        source.seek_to_frame(target, 48_000).expect("seek");
+        let after_seek = frames_from(&mut source, compared, 4_800);
+        let read = received.load(Ordering::Relaxed) - before;
+        assert!(
+            read < up_to_target / 4,
+            "{name}: the seek read {read} bytes; the file holds {up_to_target} up to the target"
+        );
+        assert_eq!(after_seek.len(), expected.len());
+        let largest_difference = after_seek
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            largest_difference < 1e-4,
+            "{name}: differs by {largest_difference}"
+        );
+        drop(source);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    /// A raw AC3 file's parser gets a seek index, so a far seek reads from
+    /// the second before its target and decodes the same audio there as
+    /// reading the whole file does.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn far_seek_in_raw_ac3_reads_little_and_decodes_the_audio_at_its_target() {
+        use crate::raw_audio::{ripped_surround_bytes, TEST_AC3};
+
+        let (bytes, audio) = ripped_surround_bytes(&TEST_AC3.repeat(150));
+        // 120.0105 s, past the frames read after the open.
+        assert_far_ac3_seek_decodes_as_reading_on(
+            "ac3-index",
+            &bytes,
+            5_760_504,
+            usize_to_u64(audio.len()) * 120 / 154,
+        );
+    }
+
+    /// `seconds` of an 880 Hz mono tone at 48 kHz as raw AC3 at `bitrate`
+    /// bit/s.
+    #[cfg(feature = "gst")]
+    fn encoded_ac3_tone(bitrate: u32, seconds: u32) -> Vec<u8> {
+        gst::init().expect("GStreamer");
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-decoders-ac3-tone-{bitrate}-{}.ac3",
+            std::process::id()
+        ));
+        let pipeline = gst::parse::launch(&format!(
+            "audiotestsrc freq=880 num-buffers={} samplesperbuffer=1536 \
+             ! audio/x-raw,rate=48000,channels=1 ! audioconvert ! avenc_ac3 bitrate={bitrate} \
+             ! filesink location=\"{}\"",
+            seconds * 48_000 / 1_536,
+            path.display()
+        ))
+        .expect("encoder");
+        pipeline.set_state(gst::State::Playing).expect("encode");
+        let message = pipeline.bus().expect("bus").timed_pop_filtered(
+            gst::ClockTime::from_seconds(30),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        pipeline.set_state(gst::State::Null).expect("stop");
+        assert!(
+            matches!(
+                message.as_ref().map(|message| message.view()),
+                Some(gst::MessageView::Eos(_))
+            ),
+            "{message:?}"
+        );
+        let bytes = std::fs::read(&path).expect("encoded tone");
+        std::fs::remove_file(path).expect("remove encoded tone");
+        bytes
+    }
+
+    /// The index of a raw AC3 file whose bitrate changes follows its frames,
+    /// though its first, middle and last frames lie where frames of one
+    /// bitrate would put them.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn far_seek_in_raw_ac3_whose_bitrate_changes_decodes_the_audio_at_its_target() {
+        use crate::raw_audio::TEST_AC3;
+
+        // 32 kbit/s frames of 128 bytes, 64 kbit/s frames of 256, then 32
+        // kbit/s ones again.
+        let doubled = encoded_ac3_tone(64_000, 5);
+        let mut bytes = TEST_AC3.repeat(10);
+        bytes.extend_from_slice(&doubled);
+        bytes.extend_from_slice(&TEST_AC3.repeat(160));
+        let doubled_frames = doubled.len() / 256;
+        assert_eq!(doubled.len() % 256, 0);
+        // The middle and last 128-byte units start 32 kbit/s frames, as
+        // they would in a file of 32 kbit/s frames throughout.
+        let units = bytes.len() / 128;
+        for unit in [units / 2, units - 1] {
+            assert_eq!(bytes[unit * 128..][..2], [0x0B, 0x77]);
+            assert_eq!(bytes[unit * 128 + 4], TEST_AC3[4]);
+        }
+        // 150.0105 s, in the last section.
+        let target = 7_200_504;
+        let target_frame = usize::try_from(target / 1_536).unwrap();
+        let up_to_target = 128 * (target_frame - doubled_frames) + doubled.len();
+        assert_far_ac3_seek_decodes_as_reading_on(
+            "ac3-index-mixed",
+            &bytes,
+            target,
+            usize_to_u64(up_to_target),
+        );
     }
 
     /// `GStreamer`, which plays the file, puts the click at the same frame.
