@@ -29,6 +29,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include "../src/BridgeClient.h"
 #include "../src/LevelMeterItem.h"
@@ -285,6 +286,8 @@ private slots:
     void seekDragOutlastsAKeyRelease();
     void seekDragOutlastsTheFocus();
     void seekClickSeeksOnce();
+    void seekDragShowsAndSeeksTheTimeUnderThePointer();
+    void seekClickSeeksToTheTimeUnderThePointer();
     void playbackMovesTheSeekBarByWholePixels();
     void seekBarStepsByTheWindowsDevicePixels();
     void transportBarHasNoWarnings();
@@ -1100,6 +1103,111 @@ void AccessibilityTest::seekClickSeeksOnce() {
     const QList<double> seeks = recordedValues(root.data(), "seeks");
     QVERIFY2(seeks.size() == 1 && seeks.constFirst() > 130.0 && seeks.constFirst() < 170.0,
              qPrintable(describeValues(seeks)));
+}
+
+namespace {
+
+// The time the seek slider maps `x`, in its coordinates, to.
+double secondsAtX(QQuickItem *seek, qreal x) {
+    QVariant result;
+    if (!QMetaObject::invokeMethod(seek, "secondsAtX", Q_RETURN_ARG(QVariant, result),
+                                   Q_ARG(QVariant, x))) {
+        return -1;
+    }
+    return result.toDouble();
+}
+
+// A point on the seek slider, in the whole pixels a mouse gives, and its time.
+struct SeekPoint {
+    QPoint scene;
+    double seconds = 0;
+};
+
+// The first point from `fraction` of the slider's width whose time is well
+// between two of the keyboard's 5-second steps.
+std::optional<SeekPoint> pointBetweenSteps(QQuickItem *seek, qreal fraction) {
+    const qreal y = seek->height() / 2;
+    for (int x = qRound(seek->width() * fraction); x < seek->width(); ++x) {
+        const QPoint scene = seek->mapToScene(QPointF(x, y)).toPoint();
+        const double seconds = secondsAtX(seek, seek->mapFromScene(QPointF(scene)).x());
+        const double intoStep = std::fmod(seconds, 5.0);
+        if (intoStep > 1.5 && intoStep < 3.5) {
+            return SeekPoint{scene, seconds};
+        }
+    }
+    return std::nullopt;
+}
+
+// `seconds` as the transport bar shows a time under an hour.
+QString minutesAndSeconds(double seconds) {
+    const int whole = static_cast<int>(std::floor(seconds));
+    return QStringLiteral("%1:%2").arg(whole / 60, 2, 10, QLatin1Char('0'))
+        .arg(whole % 60, 2, 10, QLatin1Char('0'));
+}
+
+} // namespace
+
+void AccessibilityTest::seekDragShowsAndSeeksTheTimeUnderThePointer() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QQuickItem *dragTime = itemsNamed(window->contentItem(), QStringLiteral("seekDragTime")).value(0);
+    QVERIFY(seek != nullptr && dragTime != nullptr);
+    const std::optional<SeekPoint> target = pointBetweenSteps(seek, 0.6);
+    QVERIFY(target.has_value());
+    const qreal y = seek->height() / 2;
+
+    // Between the keyboard's steps, the drag shows the second under the
+    // pointer, and its value is the time there.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier,
+                      seek->mapToScene(QPointF(seek->width() * 0.25, y)).toPoint());
+    QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.4, y)).toPoint());
+    QTest::mouseMove(window, target->scene);
+    QVERIFY(seek->property("adjusting").toBool());
+    const double dragged = seek->property("value").toDouble();
+    QVERIFY2(fuzzyEqual(dragged, target->seconds),
+             qPrintable(QStringLiteral("%1 vs %2").arg(dragged).arg(target->seconds)));
+    QCOMPARE(dragTime->property("text").toString(), minutesAndSeconds(target->seconds));
+    QCOMPARE(accessibleText(seek, QAccessible::Description),
+             QStringLiteral("%1 of 03:20").arg(minutesAndSeconds(target->seconds)));
+
+    // The release seeks there.
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, target->scene);
+    const QList<double> seeks = recordedValues(root.data(), "seeks");
+    QVERIFY2(sameValues(seeks, {target->seconds}), qPrintable(describeValues(seeks)));
+}
+
+void AccessibilityTest::seekClickSeeksToTheTimeUnderThePointer() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QVERIFY(seek != nullptr);
+    const std::optional<SeekPoint> target = pointBetweenSteps(seek, 0.3);
+    QVERIFY(target.has_value());
+    QAccessibleValueInterface *value = QAccessible::queryAccessibleInterface(seek)->valueInterface();
+    QVERIFY(value != nullptr);
+    QCOMPARE(value->minimumStepSize().toDouble(), 5.0);
+
+    // A click between the keyboard's steps seeks to the time under it.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, target->scene);
+    QList<double> seeks = recordedValues(root.data(), "seeks");
+    QVERIFY2(sameValues(seeks, {target->seconds}), qPrintable(describeValues(seeks)));
+
+    // The arrow keys still step by the keyboard's step, from the playback
+    // position.
+    QCOMPARE(value->minimumStepSize().toDouble(), 5.0);
+    QVERIFY(tabTo(window, seek));
+    QTest::keyClick(window, Qt::Key_Right);
+    root->setProperty("positionSeconds", 55.0);
+    QTest::keyClick(window, Qt::Key_Right);
+    seeks = recordedValues(root.data(), "seeks");
+    QVERIFY2(sameValues(seeks, {target->seconds, 55.0, 60.0}), qPrintable(describeValues(seeks)));
 }
 
 void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
