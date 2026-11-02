@@ -31,6 +31,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <tuple>
 #include <utility>
@@ -419,6 +420,16 @@ QImage placeholderImage() {
     QImage image(1, 1, QImage::Format_ARGB32_Premultiplied);
     image.fill(Qt::transparent);
     return image;
+}
+
+// How far short of a whole device pixel a scrolled position may be and
+// still count as on it.
+constexpr double kScrollPixelEpsilon = 1e-6;
+
+// Where a canvas that scrolls left, at `x` device pixels, is drawn: on the
+// device pixel it has reached, until it has gone a whole pixel further.
+double scrolledPixel(double x) {
+    return std::ceil(x - kScrollPixelEpsilon);
 }
 
 // Shows `source` of `texture` at `target`, or nothing. Only what differs
@@ -1302,10 +1313,6 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     });
     connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
     bindWindowFpsTracking(window());
-    m_playbackFrameTimer = new QTimer(this);
-    m_playbackFrameTimer->setSingleShot(true);
-    m_playbackFrameTimer->setTimerType(Qt::PreciseTimer);
-    connect(m_playbackFrameTimer, &QTimer::timeout, this, &SpectrogramItem::requestPlaybackFrame);
     m_zoomDebounceTimer = new QTimer(this);
     m_zoomDebounceTimer->setSingleShot(true);
     m_zoomDebounceTimer->setInterval(150);
@@ -1330,6 +1337,7 @@ SpectrogramItem::~SpectrogramItem() {
     disconnect(this, nullptr, this, nullptr);
     disconnect(m_animationTickConnection);
     disconnect(m_windowVisibilityConnection);
+    cancelPlaybackFrame();
     // A rasterization still running stops at its next check, and none
     // delivers to this item from now on.
     QMutexLocker lock(&m_rasterMailbox->mutex);
@@ -1648,7 +1656,7 @@ void SpectrogramItem::setPlaying(bool value) {
     }
     if (changed) {
         if (!value) {
-            m_playbackFrameTimer->stop();
+            cancelPlaybackFrame();
         }
         emit playingChanged();
         update();
@@ -3366,6 +3374,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     int srcStart = 0;
     int latestX = 0;
     double scrollOffset = 0.0;
+    // Whether the canvas scrolls by whole device pixels, to a view's end
+    // that is on one.
+    bool scrollOnPixels = false;
     // The part of a pixel the canvas has scrolled past its first column,
     // which leaves its end that much short of the view's.
     double canvasEndGap = 0.0;
@@ -3722,6 +3733,25 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 }
             }
 
+            // A view that scrolls moves by whole device pixels: the canvas
+            // stays on the pixel it is on until the scroll has gone a whole
+            // pixel further, and the newest column fills the rest of the
+            // view to its edge. Column nowCol is then under the playhead for
+            // as long as it plays, as in a view that stays still, and the
+            // frames until the next step are all this one.
+            const bool scrolls = rollingMode || centeredScrolling;
+            // Columns from columnPhase until the scroll's next step.
+            double columnsToNextPixel = std::numeric_limits<double>::infinity();
+            if (scrolls && !preview.active) {
+                const double unsnapped = hasCanvas ? canvasDrawX : drawX - canvasSubpixelOffset;
+                const double snapped = scrolledPixel(unsnapped);
+                drawX = snapped + (drawX - unsnapped);
+                canvasDrawX = snapped;
+                scrollOffset -= snapped - unsnapped;
+                scrollOnPixels = true;
+                columnsToNextPixel = (unsnapped - snapped + 1.0 - kScrollPixelEpsilon) / canvasZoom;
+            }
+
             if (zoomPreviewShown && !rollingMode) {
                 playheadPixel = static_cast<int>(std::round(preview.toX));
             }
@@ -3743,18 +3773,25 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     static_cast<double>(ch) / scale);
             }
 
-            // A centered view that stays still, with its canvas in place,
-            // changes only when the playhead moves to another pixel or the
-            // view starts to scroll. Until playback reaches that column the
-            // frames would all be this one.
-            if (!rollingMode
-                && !centeredScrolling
-                && canvasIsView
+            // With its canvas in place, a view that scrolls changes only
+            // when the scroll reaches its next pixel or playback the next
+            // column, and a centered view that stays still only when the
+            // playhead moves to another pixel or the view starts to scroll.
+            // Until then the frames would all be this one.
+            const bool viewSettled = canvasIsView
                 && !canvasFreeze
                 && !zoomPreviewWanted
                 && !preview.active
                 && visibleCols > 0
-                && !positionHeldLocked(monotonicNs(renderNow))) {
+                && !positionHeldLocked(monotonicNs(renderNow));
+            if (viewSettled && scrolls) {
+                // The phase stops short of the next column; a step after
+                // that is the next column's.
+                const double nextPhase = columnPhase + columnsToNextPixel;
+                m_idleView.valid = true;
+                m_idleView.changeSeconds = (static_cast<double>(nowCol)
+                    + (nextPhase < 0.999 ? nextPhase : 1.0)) / columnsPerSecond;
+            } else if (viewSettled) {
                 const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
                     ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
                     : static_cast<qint64>(0);
@@ -4036,7 +4073,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         }
 
         // The newest column fills the rest of the view to its edge.
-        const double latestWidth = scrollOffset + canvasEndGap;
+        const double latestWidth = scrollOnPixels
+            ? std::max(0.0, std::round(scrollOffset + canvasEndGap))
+            : scrollOffset + canvasEndGap;
         int latestTileIndex = latestX / kCanvasTileWidth;
         if (latestWidth > 0.0
             && latestTileIndex >= 0
@@ -4314,7 +4353,12 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
             canvasZoomLocked(),
             columnsPerSecond);
         displayLeft = view.left;
-        drawX = view.drawX / m_canvasScale;
+        // A canvas that scrolls is on the pixel it has reached.
+        const double subpixelOffset = view.scrolls ? m_precomputedCanvasSubpixelOffset : 0.0;
+        const double deviceDrawX = view.scrolls
+            ? scrolledPixel(view.drawX - subpixelOffset) + subpixelOffset
+            : view.drawX;
+        drawX = deviceDrawX / m_canvasScale;
         rollingMode = false;
     }
 
@@ -5747,6 +5791,10 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
         disconnect(m_windowVisibilityConnection);
         m_windowVisibilityConnection = QMetaObject::Connection{};
     }
+    // The new window draws a frame of its own, which schedules the next
+    // one with the new window's panes.
+    cancelPlaybackFrame();
+    m_frameScheduler = nullptr;
     {
         QMutexLocker lock(&m_stateMutex);
         m_sceneGraphGeneration += 1;
@@ -5873,30 +5921,118 @@ qint64 SpectrogramItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
 
 void SpectrogramItem::schedulePlaybackFrame() {
     qint64 delayNs = 0;
+    qint64 nowNs = 0;
     {
         QMutexLocker lock(&m_stateMutex);
         if (!m_precomputedReady || !m_playing) {
-            m_playbackFrameTimer->stop();
+            lock.unlock();
+            cancelPlaybackFrame();
             return;
         }
-        delayNs = playbackFrameDelayNsLocked(monotonicNs(m_now()));
+        nowNs = monotonicNs(m_now());
+        delayNs = playbackFrameDelayNsLocked(nowNs);
     }
     if (delayNs == 0) {
-        m_playbackFrameTimer->stop();
+        cancelPlaybackFrame();
         requestPlaybackFrame();
     } else if (delayNs < 0) {
         // Nothing moves until the clock changes course, which reschedules.
-        m_playbackFrameTimer->stop();
+        cancelPlaybackFrame();
     } else {
-        // Whole milliseconds, rounded up: the frame is not due before.
-        const qint64 delayMs = (delayNs + 999'999) / 1'000'000;
-        m_playbackFrameTimer->start(static_cast<int>(std::min<qint64>(delayMs, 3'600'000)));
+        frameScheduler()->schedule(this, nowNs + delayNs, nowNs);
     }
 }
 
 void SpectrogramItem::requestPlaybackFrame() {
     ++m_playbackFrameRequests;
     update();
+}
+
+void SpectrogramItem::cancelPlaybackFrame() {
+    if (m_frameScheduler != nullptr) {
+        m_frameScheduler->cancel(this);
+    }
+}
+
+SpectrogramFrameScheduler *SpectrogramItem::frameScheduler() {
+    if (m_frameScheduler == nullptr) {
+        QObject *owner = window();
+        if (owner == nullptr) {
+            owner = this;
+        }
+        m_frameScheduler = owner->findChild<SpectrogramFrameScheduler *>(
+            QString(), Qt::FindDirectChildrenOnly);
+        if (m_frameScheduler == nullptr) {
+            m_frameScheduler = new SpectrogramFrameScheduler(owner);
+        }
+    }
+    return m_frameScheduler;
+}
+
+SpectrogramFrameScheduler::SpectrogramFrameScheduler(QObject *parent)
+    : QObject(parent) {
+    m_timer.setSingleShot(true);
+    m_timer.setTimerType(Qt::PreciseTimer);
+    connect(&m_timer, &QTimer::timeout, this, &SpectrogramFrameScheduler::fire);
+}
+
+void SpectrogramFrameScheduler::schedule(SpectrogramItem *item, qint64 dueNs, qint64 nowNs) {
+    // Whole milliseconds, rounded up: the frame is not due before.
+    const qint64 dueMs = dueNs / 1'000'000 + (dueNs % 1'000'000 > 0 ? 1 : 0);
+    const auto it = m_dueMs.constFind(item);
+    if (it != m_dueMs.cend() && it.value() == dueMs && m_timer.isActive()) {
+        return;
+    }
+    m_dueMs.insert(item, dueMs);
+    arm(nowNs);
+}
+
+void SpectrogramFrameScheduler::cancel(const SpectrogramItem *item) {
+    if (m_dueMs.remove(const_cast<SpectrogramItem *>(item)) == 0) {
+        return;
+    }
+    if (m_dueMs.isEmpty()) {
+        m_timer.stop();
+    }
+}
+
+qint64 SpectrogramFrameScheduler::dueNs(const SpectrogramItem *item) const {
+    const auto it = m_dueMs.constFind(const_cast<SpectrogramItem *>(item));
+    return it != m_dueMs.cend() ? it.value() * 1'000'000 : -1;
+}
+
+void SpectrogramFrameScheduler::arm(qint64 nowNs) {
+    if (m_dueMs.isEmpty()) {
+        m_timer.stop();
+        return;
+    }
+    const qint64 firstMs = *std::min_element(m_dueMs.cbegin(), m_dueMs.cend());
+    if (m_timer.isActive() && m_armedMs == firstMs) {
+        return;
+    }
+    const qint64 untilNs = std::max<qint64>(0, firstMs * 1'000'000 - nowNs);
+    const qint64 untilMs = untilNs / 1'000'000 + (untilNs % 1'000'000 > 0 ? 1 : 0);
+    m_armedMs = firstMs;
+    m_timer.start(static_cast<int>(std::min<qint64>(untilMs, 3'600'000)));
+}
+
+void SpectrogramFrameScheduler::fire() {
+    // The timer fires at that millisecond or after it: every frame due
+    // by then is asked for now, in the same frame of the window.
+    const qint64 firedMs = m_armedMs;
+    QVector<SpectrogramItem *> due;
+    for (auto it = m_dueMs.begin(); it != m_dueMs.end();) {
+        if (it.value() <= firedMs) {
+            due.push_back(it.key());
+            it = m_dueMs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    arm(firedMs * 1'000'000);
+    for (SpectrogramItem *item : due) {
+        item->requestPlaybackFrame();
+    }
 }
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
