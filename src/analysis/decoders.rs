@@ -1304,6 +1304,40 @@ mod tests {
 
     #[cfg(feature = "gst")]
     #[test]
+    fn dts_cd_rips_decode_as_dts_for_analysis() {
+        use crate::raw_audio::{
+            ripped_dts_cd_bytes, tone_share, TEST_DTS_44K, TEST_DTS_44K_FRAMES,
+        };
+        use std::time::{Duration, Instant};
+
+        // Its WAV header tells 16-bit stereo PCM, which would decode the
+        // DTS stream as noise on two channels.
+        let path = crate::paths::test_root().join("analysis-dts-cd.dts");
+        std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        std::fs::write(&path, ripped_dts_cd_bytes(TEST_DTS_44K).0).expect("write fixture");
+        let (mut source, rate, channels, length) = open_audio_file(&path).expect("open");
+        assert_eq!((rate, channels), (44_100, 1));
+        assert!(length.known, "{length:?}");
+
+        let mut samples = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match source.next_frames().expect("decode") {
+                AudioRead::Frames(frames) => samples.extend(frames.samples),
+                AudioRead::Pending => assert!(Instant::now() < deadline, "stalled"),
+                AudioRead::Eof => break,
+            }
+        }
+        drop(source);
+        std::fs::remove_file(&path).expect("remove fixture");
+        assert_eq!(samples.len(), TEST_DTS_44K_FRAMES);
+        // 0.1 s, 44 whole cycles of the 440 Hz tone, from its middle.
+        let share = tone_share(&samples[8_820..13_230], 44_100, 440.0);
+        assert!(share > 0.9, "the tone has {share} of the power");
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
     fn damaged_ac3_frames_are_concealed_for_analysis() {
         use crate::raw_audio::{
             assert_no_burst, with_damaged_frames, SEAMED_FRAME, TEST_AC3, TEST_AC3_FRAMES,

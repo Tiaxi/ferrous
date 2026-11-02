@@ -155,22 +155,50 @@ fn kbps_from_bits_per_second(bits_per_second: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use crate::raw_audio::{ripped_surround_bytes, test_path, TEST_AC3, TEST_DTS};
+    use crate::raw_audio::bitstream::DtsWords;
+    use crate::raw_audio::{
+        ripped_dts_cd_bytes, ripped_dts_cd_bytes_in, ripped_surround_bytes, test_path, TEST_AC3,
+        TEST_DTS, TEST_DTS_44K,
+    };
+
+    /// Ripped files of each format: 32 AC3 frames of 1536 samples at 48
+    /// kHz, 47 DTS frames of 512, and a DTS-CD rip of 44 frames of 512 at
+    /// 44.1 kHz. Upper case gives the typefinders no extension hint.
+    fn ripped_files() -> [(Vec<u8>, &'static str, u32, f32); 3] {
+        [
+            (ripped_surround_bytes(TEST_AC3).0, "AC3", 48_000, 1.024),
+            (ripped_surround_bytes(TEST_DTS).0, "DTS", 48_000, 0.501),
+            (ripped_dts_cd_bytes(TEST_DTS_44K).0, "DTS", 44_100, 0.511),
+        ]
+    }
 
     #[test]
     fn duration_estimate_counts_only_the_frames_of_ripped_files() {
-        // 32 frames of 1536 samples at 48 kHz, and 47 frames of 512.
-        for (stream, ext, expected) in [(TEST_AC3, "ac3", 1.024), (TEST_DTS, "dts", 0.501)] {
+        for (bytes, ext, rate, expected) in ripped_files() {
             let path = test_path("duration", ext);
-            let (bytes, _) = ripped_surround_bytes(stream);
             std::fs::write(&path, bytes).expect("write test file");
 
             let duration = super::estimate_duration_from_bitstream(&path).expect("duration");
             assert!(
                 (duration - expected).abs() < 0.01,
-                "{ext}: expected {expected} s, got {duration} s"
+                "{ext} at {rate} Hz: expected {expected} s, got {duration} s"
             );
             let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn duration_estimate_counts_padded_14_bit_words() {
+        // 47 frames of 512 samples at 48 kHz, whose 256 bytes end in a
+        // padded 14-bit word.
+        for layout in [DtsWords::LittleEndian14, DtsWords::BigEndian14] {
+            let path = test_path("duration-padded", "dts");
+            std::fs::write(&path, ripped_dts_cd_bytes_in(TEST_DTS, layout).0)
+                .expect("write test file");
+
+            let duration = super::estimate_duration_from_bitstream(&path).expect("duration");
+            let _ = std::fs::remove_file(path);
+            assert!((duration - 0.501).abs() < 0.01, "{layout:?}: {duration} s");
         }
     }
 
@@ -179,15 +207,13 @@ mod tests {
     fn discoverer_reads_ripped_files() {
         use super::probe_raw_surround_technical_details;
 
-        // Upper case gives the typefinders no extension hint.
-        for (stream, ext, length) in [(TEST_AC3, "AC3", 1.024), (TEST_DTS, "DTS", 0.501)] {
+        for (bytes, ext, rate, length) in ripped_files() {
             let path = test_path("discover", ext);
-            let (bytes, _) = ripped_surround_bytes(stream);
             std::fs::write(&path, bytes).expect("write test file");
 
             let details = probe_raw_surround_technical_details(&path).expect("details");
             let _ = std::fs::remove_file(path);
-            assert_eq!(details.sample_rate_hz, Some(48_000), "{ext}: {details:?}");
+            assert_eq!(details.sample_rate_hz, Some(rate), "{ext}: {details:?}");
             assert_eq!(details.channels, Some(1), "{ext}: {details:?}");
             let duration = details.duration_secs.expect("duration");
             assert!((duration - length).abs() < 0.005, "{ext}: {details:?}");

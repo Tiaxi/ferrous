@@ -43,7 +43,6 @@ pub(crate) fn is_raw_surround_file(path: &Path) -> bool {
     matches!(raw_surround_extension(path).as_deref(), Some("ac3" | "dts"))
 }
 
-#[cfg(any(feature = "gst", test))]
 pub(crate) fn is_dts_file(path: &Path) -> bool {
     matches!(raw_surround_extension(path).as_deref(), Some("dts"))
 }
@@ -74,6 +73,69 @@ pub(crate) const TEST_AC3: &[u8] = include_bytes!("../analysis/fixtures/raw-tone
 /// 47 DTS frames (about 0.5 s) of a 48 kHz mono tone.
 #[cfg(test)]
 pub(crate) const TEST_DTS: &[u8] = include_bytes!("../analysis/fixtures/raw-tone.dts");
+/// 44 DTS frames of 512 samples (about 0.51 s) of a 44.1 kHz mono tone,
+/// whose frames fill whole 14-bit words, as those of DTS-CDs do:
+/// `GStreamer`'s parser loses most frames that end in a padded word.
+#[cfg(test)]
+pub(crate) const TEST_DTS_44K: &[u8] = include_bytes!("../analysis/fixtures/raw-tone-44k.dts");
+/// The samples of [`TEST_DTS_44K`].
+#[cfg(all(test, feature = "gst"))]
+pub(crate) const TEST_DTS_44K_FRAMES: usize = 44 * 512;
+
+/// A DTS-CD rip of `stream`, a DTS stream in 16-bit big-endian words: a WAV
+/// header that tells 16-bit stereo PCM at 44.1 kHz, digital silence, the
+/// stream in the low 14 bits of little-endian words, and an appended
+/// `APEv2` tag. Returns the bytes and the range of the stream within them.
+///
+/// The silence is long enough that the first 4 KiB the file source reads
+/// hold only one frame start, as in the rips, whose frames are 4 KiB long:
+/// format detection then takes the file for WAV.
+#[cfg(test)]
+pub(crate) fn ripped_dts_cd_bytes(stream: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
+    ripped_dts_cd_bytes_in(stream, bitstream::DtsWords::LittleEndian14)
+}
+
+/// [`ripped_dts_cd_bytes`] with the stream in the words of `layout`.
+#[cfg(test)]
+fn ripped_dts_cd_bytes_in(
+    stream: &[u8],
+    layout: bitstream::DtsWords,
+) -> (Vec<u8>, std::ops::Range<usize>) {
+    const SILENCE: usize = 3900;
+    let stream = bitstream::repack_dts(stream, layout);
+    let data_len = u32::try_from(SILENCE + stream.len()).expect("data length");
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    // PCM, 2 channels, 44.1 kHz, 176,400 bytes a second, 4 bytes a frame,
+    // 16 bits.
+    for field in [16_u32, 1 | (2 << 16), 44_100, 176_400, 4 | (16 << 16)] {
+        bytes.extend_from_slice(&field.to_le_bytes());
+    }
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    bytes.resize(bytes.len() + SILENCE, 0);
+    let audio = bytes.len()..bytes.len() + stream.len();
+    bytes.extend_from_slice(&stream);
+    bytes.extend_from_slice(&build_test_apev2_tag(&[("Title", "Tone")], true));
+    (bytes, audio)
+}
+
+/// The share of the power of the mono `samples` that a tone of `frequency`
+/// Hz at `rate` Hz carries: near 1 for the tone of a fixture, near 0 for
+/// noise. Whole cycles of the tone give the most exact share.
+#[cfg(all(test, feature = "gst"))]
+pub(crate) fn tone_share(samples: &[f32], rate: u32, frequency: f64) -> f64 {
+    let step = std::f64::consts::TAU * frequency / f64::from(rate);
+    let (mut re, mut im, mut power) = (0.0, 0.0, 0.0);
+    for (index, sample) in samples.iter().enumerate() {
+        let (sample, phase) = (f64::from(*sample), step * index as f64);
+        re += sample * phase.cos();
+        im += sample * phase.sin();
+        power += sample * sample;
+    }
+    2.0 * (re * re + im * im) / (samples.len() as f64 * power)
+}
 
 /// The largest change between adjacent samples of the mono `samples`.
 #[cfg(all(test, feature = "gst"))]

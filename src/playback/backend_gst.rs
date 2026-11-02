@@ -5231,6 +5231,16 @@ mod engine_tests {
     }
 
     impl Fixtures {
+        /// About 2 s of a 44.1 kHz mono DTS tone, as ripped from a DTS-CD:
+        /// a WAV header that tells 16-bit stereo PCM, and the DTS stream in
+        /// 14-bit words.
+        fn dts_cd(&self, name: &str) -> PathBuf {
+            let path = self.dir.join(name);
+            let stream = crate::raw_audio::TEST_DTS_44K.repeat(4);
+            std::fs::write(&path, crate::raw_audio::ripped_dts_cd_bytes(&stream).0).unwrap();
+            path
+        }
+
         /// About 4 s of a raw AC3 tone with one damaged frame in each second.
         fn damaged_ac3(&self, name: &str) -> PathBuf {
             let frames = TEST_AC3_FRAMES;
@@ -5461,6 +5471,47 @@ mod engine_tests {
             gst::PadProbeReturn::Ok
         });
         buffers
+    }
+
+    /// What reached the output: the channels and rate it last had, and the
+    /// samples of its first channel.
+    #[derive(Debug, Default)]
+    struct FirstChannel {
+        format: Option<(i32, i32)>,
+        samples: Vec<f32>,
+    }
+
+    /// Record the first channel of every buffer that reaches the output.
+    fn record_first_channel(playbin: &gst::Element) -> Arc<Mutex<FirstChannel>> {
+        let output = Arc::new(Mutex::new(FirstChannel::default()));
+        let recorded = Arc::clone(&output);
+        output_sink_pad(playbin).add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let caps = pad.current_caps().unwrap();
+            let structure = caps.structure(0).unwrap();
+            let channels = structure.get::<i32>("channels").unwrap();
+            let rate = structure.get::<i32>("rate").unwrap();
+            let format = structure.get::<&str>("format").unwrap();
+            let map = buffer.map_readable().unwrap();
+            let frame_len = usize::try_from(channels).unwrap()
+                * match format {
+                    "S16LE" => 2,
+                    "F32LE" => 4,
+                    other => panic!("unexpected sample format {other:?}"),
+                };
+            let mut output = recorded.lock().unwrap();
+            output.format = Some((channels, rate));
+            output
+                .samples
+                .extend(map.chunks_exact(frame_len).map(|frame| match format {
+                    "S16LE" => f32::from(i16::from_le_bytes([frame[0], frame[1]])) / 32_768.0,
+                    _ => f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]),
+                }));
+            gst::PadProbeReturn::Ok
+        });
+        output
     }
 
     /// Record the stream time at which the output first carries sound
@@ -6143,6 +6194,31 @@ mod engine_tests {
                 peaks.len() >= 3 && peaks.iter().rev().take(3).all(matches)
             });
         }
+    }
+
+    #[test]
+    fn a_dts_cd_rip_plays_its_dts() {
+        // Its WAV header tells 16-bit stereo PCM, which would play the DTS
+        // stream as noise on two channels.
+        let fixtures = Fixtures::new("dts-cd");
+        let track = fixtures.dts_cd("a.dts");
+        let mut engine = Engine::start();
+        let output = record_first_channel(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![track]));
+        engine.send(PlaybackCommand::Play);
+        // 1.1 s to 1.2 s: 44 whole cycles of the 440 Hz tone, past the
+        // silence of the track start and between repeats of the fixture.
+        let window = 48_510..52_920;
+        let format = (1, 44_100);
+        engine.wait_until("1.2 s of output", |_| {
+            let output = output.lock().unwrap();
+            output.samples.len() >= window.end || output.format.is_some_and(|f| f != format)
+        });
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+        let output = output.lock().unwrap();
+        assert_eq!(output.format, Some(format));
+        let share = crate::raw_audio::tone_share(&output.samples[window], 44_100, 440.0);
+        assert!(share > 0.9, "the tone has {share} of the power");
     }
 
     #[test]
