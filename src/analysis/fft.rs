@@ -77,6 +77,14 @@ impl StftComputer {
         self.pending_available() >= self.fft_size
     }
 
+    /// How many rows [`Self::take_row`] gives before it needs more audio.
+    pub(super) fn available_rows(&self) -> usize {
+        // Each row but the last advances by a whole hop.
+        self.pending_available()
+            .checked_sub(self.fft_size)
+            .map_or(0, |beyond| beyond / self.hop_size + 1)
+    }
+
     pub(super) fn take_row(&mut self) -> Option<&[f32]> {
         if !self.has_row() {
             return None;
@@ -431,6 +439,23 @@ pub(super) fn reduce_waveform_peaks(peaks: &[f32], max_points: usize) -> Vec<f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn available_rows_counts_the_rows_take_row_gives() {
+        for (fft_size, hop_size) in [(512, 128), (512, 512), (256, 1_000)] {
+            let mut stft = StftComputer::new(fft_size, hop_size);
+            for packet in [100, 700, 3_000, 37, 5_000] {
+                stft.enqueue_samples(&vec![0.5; packet]);
+                let available = stft.available_rows();
+                let mut taken = 0;
+                while stft.take_row().is_some() {
+                    taken += 1;
+                }
+                assert_eq!(available, taken, "FFT {fft_size}, hop {hop_size}");
+                assert_eq!(stft.available_rows(), 0);
+            }
+        }
+    }
 
     /// The previews of `frames` frames pushed into `waveform` at `at`: their
     /// lengths, the seconds they cover and their progress.

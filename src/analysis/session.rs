@@ -20,6 +20,7 @@ use super::fft::{PeakHoldResampler, StftComputer};
 use super::output::{AnalysisEventOutput, AnalysisOutputs};
 use super::quantize::append_quantized_row;
 use super::retention::{lookahead_seconds, SpectrogramBufferConfig};
+use super::stft_batch;
 use super::track_io::{source_stamp, TrackFormat};
 use super::{
     f64_to_u64_saturating, usize_to_u64, AnalysisEvent, PrecomputedSpectrogramChunk,
@@ -165,7 +166,9 @@ fn enqueue_leading_silence(stfts: &mut [StftComputer], frames: usize) {
 }
 
 /// The most audio an STFT may hold beyond one window: a decoded batch, of
-/// which the decode loops drain every row before reading the next.
+/// which the decode loops drain every row before reading the next, or the
+/// [`stft_batch::PARALLEL_BATCH_ROWS`] rows a session with helper threads
+/// queues, at most 64 hops of 2048 frames.
 const MAX_PENDING_FRAMES: usize = 1 << 20;
 
 /// Feed a decoded batch to the per-channel STFTs, copying it straight into
@@ -1671,8 +1674,12 @@ fn session_decode_loop(
 
         // A packet may contain more FFT rows than the lookahead budget.
         // Drain retained rows before reading another packet after resuming.
-        if !session.stfts.is_empty() && session.stfts.iter().all(StftComputer::has_row) {
-            session_drain_stft_rows(session, event_tx, columns_produced_out);
+        let helpers = may_use_helpers(source);
+        if session_has_batch(session, helpers) {
+            session_drain_stft_rows(session, event_tx, columns_produced_out, helpers);
+            if session.failure.is_some() {
+                return None;
+            }
             continue;
         }
 
@@ -1685,6 +1692,19 @@ fn session_decode_loop(
                 return None;
             }
             Ok(AudioRead::Eof) => {
+                // The rows a session kept for a larger batch.
+                if session_rows(session) > 0 {
+                    let helpers = may_use_helpers(source);
+                    session_drain_stft_rows(session, event_tx, columns_produced_out, helpers);
+                    if session.failure.is_some() {
+                        return None;
+                    }
+                    if session_rows(session) > 0 {
+                        // It parks at its lookahead, and reads the end again
+                        // once it has drained them.
+                        continue;
+                    }
+                }
                 // Real source EOF.  Publish the decoded extent while this
                 // track is still current. Waiting until the parked worker
                 // exits leaves the UI using a padded estimate.
@@ -1703,7 +1723,13 @@ fn session_decode_loop(
         }
 
         // 5. Drain STFT rows and emit chunks.
-        session_drain_stft_rows(session, event_tx, columns_produced_out);
+        let helpers = may_use_helpers(source);
+        if session_has_batch(session, helpers) {
+            session_drain_stft_rows(session, event_tx, columns_produced_out, helpers);
+            if session.failure.is_some() {
+                return None;
+            }
+        }
 
         // 6. Update total_columns_estimate when the decoder produces more
         //    columns than initially estimated.  This happens for raw DTS/AC3
@@ -2167,71 +2193,141 @@ fn throttle_wait(
 // STFT row draining / chunk emission
 // ---------------------------------------------------------------------------
 
+/// Compute and send the columns of the rows the session has queued, up to
+/// its lookahead, on helper threads too if `helpers`.
 fn session_drain_stft_rows(
     session: &mut SpectrogramSessionState,
     event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
+    helpers: bool,
 ) {
-    loop {
-        let target =
-            f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
-        if session.columns_produced.saturating_sub(target) >= session.lookahead_columns
-            && !post_reset_window_active(session)
-        {
-            break;
-        }
-
-        let Some(emitted) = append_stft_column(
+    stft_batch::with_thread_batcher(|batcher| loop {
+        let allowed = columns_before_park(session);
+        let max_columns = usize::try_from(allowed)
+            .unwrap_or(usize::MAX)
+            .min(stft_batch::MAX_BATCH_COLUMNS);
+        let columns = match batcher.compute(
             &mut session.stfts,
             &mut session.resamplers,
-            &mut session.chunk_buf,
+            max_columns,
             session.bins_per_column,
             session.fft_size,
-        ) else {
-            break;
+            helpers,
+        ) {
+            Ok(0) => break,
+            Ok(columns) => columns,
+            Err(error) => {
+                session.failure = Some(error);
+                break;
+            }
         };
-        if !emitted {
-            continue;
+        for column in 0..columns {
+            batcher.append_column(column, &mut session.chunk_buf);
+            session.chunk_columns += 1;
+            session.columns_produced += 1;
+            if session.chunk_columns >= session.target_chunk_columns {
+                session_send_full_chunk(session, event_tx, columns_produced_out);
+            }
         }
-        session.chunk_columns += 1;
-        session.columns_produced += 1;
+    });
+}
 
-        if session.chunk_columns >= session.target_chunk_columns {
-            let coverage = seconds_from_frames(
-                session.total_covered_samples,
-                u64::from(session.effective_rate),
-            );
-            let start_col_u32 = u64_to_u32_saturating(session.chunk_start_index);
-            let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
-                PrecomputedSpectrogramChunk {
-                    track_token: session.track_token,
-                    generation: session.gen,
-                    columns_u8: std::mem::take(&mut session.chunk_buf),
-                    bins_per_column: clamp_to_u16(session.bins_per_column),
-                    column_count: session.chunk_columns,
-                    channel_count: clamp_to_u8(session.channel_count),
-                    start_column_index: start_col_u32,
-                    total_columns_estimate: session.total_columns_estimate,
-                    sample_rate_hz: session.effective_rate,
-                    hop_size: clamp_to_u16(session.effective_hop),
-                    coverage_seconds: coverage,
-                    complete: false,
-                    buffer_reset: false,
-                    clear_history: false,
-                },
-            ));
-            session.chunk_start_index = session.columns_produced;
-            session.chunk_columns = 0;
-            columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
-            // Ramp up chunk size in rolling mode only to a latency-friendly cap.
-            session.target_chunk_columns = next_target_chunk_columns_for_payload(
-                session.target_chunk_columns,
-                session.display_mode,
-                session.bins_per_column,
-                session.channel_count,
-            );
-        }
-    }
+/// The rows every channel of the session has queued.
+fn session_rows(session: &SpectrogramSessionState) -> usize {
+    session
+        .stfts
+        .iter()
+        .map(StftComputer::available_rows)
+        .min()
+        .unwrap_or(0)
+}
+
+/// Whether a session reading `source` computes columns on helper threads
+/// too. A source that decodes on its own thread already runs beside the
+/// session's; the session keeps up with it alone, and batches of rows would
+/// only make the two wait for each other.
+fn may_use_helpers(source: &AudioFrameSource) -> bool {
+    !source.decodes_on_its_own_thread()
+}
+
+/// Whether the session computes the rows it has queued now, rather than
+/// decode more first. A session whose batches run on helper threads waits
+/// for [`stft_batch::PARALLEL_BATCH_ROWS`] rows, as waking the helpers for
+/// a packet's few rows costs more CPU than it saves, except in its
+/// post-reset window, which is there to show columns soon. The end of the
+/// file drains them.
+fn session_has_batch(session: &SpectrogramSessionState, helpers: bool) -> bool {
+    let rows = session_rows(session);
+    rows > 0
+        && (rows >= stft_batch::PARALLEL_BATCH_ROWS
+            || post_reset_window_active(session)
+            || !helpers
+            || !stft_batch::with_thread_batcher(|batcher| {
+                batcher.runs_in_parallel(session.stfts.len())
+            }))
+}
+
+/// How many more columns the session decodes before it parks at its
+/// lookahead: none once it leads the playback position by the lookahead,
+/// unless it is still in its post-reset window.
+fn columns_before_park(session: &SpectrogramSessionState) -> u64 {
+    let target = f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
+    let lookahead_end = if session.lookahead_columns == 0 {
+        0
+    } else {
+        target.saturating_add(session.lookahead_columns)
+    };
+    let window = u64::from(session.post_reset_unthrottled_columns);
+    let window_end = if window == 0 {
+        0
+    } else {
+        session.session_start_column.saturating_add(window)
+    };
+    lookahead_end
+        .max(window_end)
+        .saturating_sub(session.columns_produced)
+}
+
+/// Send the session's buffered columns, which have reached the target
+/// chunk size, and grow the next chunk.
+fn session_send_full_chunk(
+    session: &mut SpectrogramSessionState,
+    event_tx: &dyn AnalysisEventOutput,
+    columns_produced_out: &AtomicU64,
+) {
+    let coverage = seconds_from_frames(
+        session.total_covered_samples,
+        u64::from(session.effective_rate),
+    );
+    let start_col_u32 = u64_to_u32_saturating(session.chunk_start_index);
+    let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
+        PrecomputedSpectrogramChunk {
+            track_token: session.track_token,
+            generation: session.gen,
+            columns_u8: std::mem::take(&mut session.chunk_buf),
+            bins_per_column: clamp_to_u16(session.bins_per_column),
+            column_count: session.chunk_columns,
+            channel_count: clamp_to_u8(session.channel_count),
+            start_column_index: start_col_u32,
+            total_columns_estimate: session.total_columns_estimate,
+            sample_rate_hz: session.effective_rate,
+            hop_size: clamp_to_u16(session.effective_hop),
+            coverage_seconds: coverage,
+            complete: false,
+            buffer_reset: false,
+            clear_history: false,
+        },
+    ));
+    session.chunk_start_index = session.columns_produced;
+    session.chunk_columns = 0;
+    columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
+    // Ramp up chunk size in rolling mode only to a latency-friendly cap.
+    session.target_chunk_columns = next_target_chunk_columns_for_payload(
+        session.target_chunk_columns,
+        session.display_mode,
+        session.bins_per_column,
+        session.channel_count,
+    );
 }
 
 /// Update `total_columns_estimate` when the decoder is approaching or
@@ -4254,14 +4350,14 @@ mod tests {
             session.resamplers = vec![PeakHoldResampler::new(1.0)];
             let (tx, rx) = unbounded();
             let produced = AtomicU64::new(0);
-            session_drain_stft_rows(&mut session, &tx, &produced);
+            session_drain_stft_rows(&mut session, &tx, &produced, true);
             assert_eq!(session.columns_produced, 3);
             assert!(session.stfts[0].has_row());
             while session.stfts[0].has_row() {
                 session.target_position_seconds =
                     usize_to_f64_approx(usize::try_from(session.columns_produced).unwrap())
                         / session.cols_per_second;
-                session_drain_stft_rows(&mut session, &tx, &produced);
+                session_drain_stft_rows(&mut session, &tx, &produced, true);
             }
             session_flush_chunk(&mut session, &tx, &produced);
             let actual: Vec<_> = rx
@@ -4545,6 +4641,286 @@ mod tests {
         }
         std::fs::write(&path, bytes).expect("write fixture");
         path
+    }
+
+    /// Write a 16-bit WAV of `channels` channels, each a square wave of a
+    /// period of its own, and return its path.
+    fn write_surround_fixture(seconds: u32, rate: u32, channels: u16) -> PathBuf {
+        let samples: Vec<i16> = (0..seconds * rate)
+            .flat_map(|frame| {
+                (0..u32::from(channels)).map(move |channel| {
+                    let period = 12 * (channel + 1);
+                    if frame % period < period / 2 {
+                        6_000
+                    } else {
+                        -6_000
+                    }
+                })
+            })
+            .collect();
+        super::super::waveform_window::tests::write_test_wave(&samples, rate, channels)
+    }
+
+    /// A per-channel session of `path`'s six channels at the default FFT.
+    fn surround_session_on(
+        path: &Path,
+        track_token: u64,
+        generation: u64,
+        display_mode: SpectrogramDisplayMode,
+    ) -> SpectrogramWorkerCommand {
+        let mut command = test_new_track(&path.to_string_lossy(), generation);
+        if let SpectrogramWorkerCommand::NewTrack {
+            track_token: token,
+            channel_count,
+            view_mode,
+            display_mode: mode,
+            ..
+        } = &mut command
+        {
+            *token = track_token;
+            *channel_count = 6;
+            *view_mode = SpectrogramViewMode::PerChannel;
+            *mode = display_mode;
+        }
+        command
+    }
+
+    /// What a chunk carries, to compare the chunks of two runs.
+    fn chunk_content(chunk: &PrecomputedSpectrogramChunk) -> (u32, u16, u8, bool, bool, Vec<u8>) {
+        (
+            chunk.start_column_index,
+            chunk.column_count,
+            chunk.channel_count,
+            chunk.buffer_reset,
+            chunk.complete,
+            chunk.columns_u8.clone(),
+        )
+    }
+
+    /// Start a worker whose batches run on at most `max_groups` threads.
+    fn spawn_worker_on_threads(
+        max_groups: usize,
+        generation: Arc<AtomicU64>,
+    ) -> (
+        Sender<SpectrogramWorkerCommand>,
+        Receiver<AnalysisEvent>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (commands, command_rx) = unbounded();
+        let (events, event_rx) = unbounded();
+        let worker = std::thread::spawn(move || {
+            stft_batch::with_thread_batcher(|batcher| {
+                *batcher = stft_batch::ColumnBatcher::new(max_groups);
+            });
+            spectrogram_worker_loop(
+                &command_rx,
+                &events,
+                &generation,
+                &AtomicU64::new(0),
+                &AtomicU64::new(0),
+                &unbounded().0,
+            );
+        });
+        (commands, event_rx, worker)
+    }
+
+    /// Every chunk of a centered session of `path` on at most `max_groups`
+    /// threads, up to its end.
+    fn surround_session_chunks(
+        path: &Path,
+        max_groups: usize,
+    ) -> Vec<(u32, u16, u8, bool, bool, Vec<u8>)> {
+        let (commands, events, worker) =
+            spawn_worker_on_threads(max_groups, Arc::new(AtomicU64::new(1)));
+        commands
+            .send(surround_session_on(
+                path,
+                1,
+                1,
+                SpectrogramDisplayMode::Centered,
+            ))
+            .unwrap();
+        let mut chunks = Vec::new();
+        loop {
+            let chunk = wait_for_chunk(&events, |_| true).expect("a chunk");
+            chunks.push(chunk_content(&chunk));
+            if chunk.complete {
+                break;
+            }
+        }
+        drop(commands);
+        worker.join().expect("worker");
+        chunks
+    }
+
+    #[test]
+    fn a_surround_session_sends_the_same_chunks_on_any_number_of_threads() {
+        let path = write_surround_fixture(4, 22_050, 6);
+        let serial = surround_session_chunks(&path, 1);
+        let parallel = surround_session_chunks(&path, 3);
+        std::fs::remove_file(&path).unwrap();
+        let columns: u32 = serial.iter().map(|chunk| u32::from(chunk.1)).sum();
+        assert!(columns > 50, "{columns} columns");
+        let bins = 2_048 / 2 + 1;
+        let first = serial.iter().find(|chunk| chunk.1 > 0).expect("columns");
+        assert_eq!(first.2, 6);
+        assert_ne!(
+            first.5[..bins],
+            first.5[bins..2 * bins],
+            "the channels differ"
+        );
+        // Each chunk starts where the one before it ended.
+        let mut next = 0;
+        for chunk in serial.iter().filter(|chunk| chunk.1 > 0) {
+            assert_eq!(chunk.0, next);
+            next += u32::from(chunk.1);
+        }
+        assert_eq!(serial.len(), parallel.len());
+        for (index, (serial, parallel)) in serial.iter().zip(&parallel).enumerate() {
+            assert!(
+                serial == parallel,
+                "chunk {index} differs: {:?} against {:?}",
+                (serial.0, serial.1, serial.2, serial.3, serial.4),
+                (parallel.0, parallel.1, parallel.2, parallel.3, parallel.4),
+            );
+        }
+    }
+
+    #[test]
+    fn a_surround_session_ends_mid_decode_when_superseded() {
+        let long = write_surround_fixture(60, 8_000, 6);
+        let short = write_surround_fixture(3, 22_050, 6);
+        let expected = surround_session_chunks(&short, 1);
+        let generation = Arc::new(AtomicU64::new(1));
+        let (commands, events, worker) = spawn_worker_on_threads(3, Arc::clone(&generation));
+        // Rolling sessions decode at twice the playback rate after their
+        // first 127 columns, 16 s here, so this one is still decoding when
+        // the next starts.
+        commands
+            .send(surround_session_on(
+                &long,
+                1,
+                1,
+                SpectrogramDisplayMode::Rolling,
+            ))
+            .unwrap();
+        wait_for_chunk(&events, |chunk| {
+            chunk.track_token == 1 && chunk.column_count > 0
+        })
+        .expect("the first session's columns");
+        generation.store(2, Ordering::Relaxed);
+        commands
+            .send(surround_session_on(
+                &short,
+                2,
+                2,
+                SpectrogramDisplayMode::Centered,
+            ))
+            .unwrap();
+        let mut chunks = Vec::new();
+        loop {
+            let chunk = wait_for_chunk(&events, |_| true).expect("a chunk");
+            if chunk.track_token == 1 {
+                assert!(chunks.is_empty(), "the first session went on");
+                assert!(!chunk.complete, "the first session decoded to its end");
+                continue;
+            }
+            assert_eq!(chunk.generation, 2);
+            chunks.push(chunk_content(&chunk));
+            if chunk.complete {
+                break;
+            }
+        }
+        drop(commands);
+        worker.join().expect("worker");
+        std::fs::remove_file(&long).unwrap();
+        std::fs::remove_file(&short).unwrap();
+        // The helpers carry nothing from the session that ended.
+        assert!(chunks == expected, "the second session's chunks differ");
+    }
+
+    /// Decode `path`'s six channels with batches on at most `max_groups`
+    /// threads and a lookahead of 36 columns from the start, then move the
+    /// playback position to where it parked, and return every chunk.
+    fn chunks_parked_near_the_end(
+        path: &Path,
+        max_groups: usize,
+    ) -> Vec<(u32, u16, u8, bool, bool, Vec<u8>)> {
+        let path = path.to_path_buf();
+        let (commands, command_rx) = unbounded();
+        let (events, event_rx) = unbounded();
+        let worker = std::thread::spawn(move || {
+            stft_batch::with_thread_batcher(|batcher| {
+                *batcher = stft_batch::ColumnBatcher::new(max_groups);
+            });
+            let (mut source, rate, channels, _) = open_audio_file(&path).expect("fixture");
+            assert_eq!(channels, 6);
+            let mut session = make_test_session();
+            session.display_mode = SpectrogramDisplayMode::Centered;
+            session.view_mode = SpectrogramViewMode::PerChannel;
+            session.channel_count = 6;
+            assert_eq!(rate, 22_050);
+            session.effective_rate = 22_050;
+            session.cols_per_second = 22_050.0 / 1_024.0;
+            session.target_position_seconds = 0.0;
+            session.columns_produced = 0;
+            session.chunk_start_index = 0;
+            session.lookahead_columns = 36;
+            session.stfts = (0..6).map(|_| StftComputer::new(2_048, 256)).collect();
+            session.resamplers = (0..6).map(|_| PeakHoldResampler::new(4.0)).collect();
+            session_decode_loop(
+                &mut session,
+                &mut source,
+                &command_rx,
+                &events,
+                &AtomicU64::new(1),
+                &AtomicU64::new(0),
+                &AtomicU64::new(0),
+            );
+        });
+        let mut chunks = Vec::new();
+        let mut columns = 0;
+        loop {
+            let chunk = wait_for_chunk(&event_rx, |_| true).expect("a chunk");
+            columns += u32::from(chunk.column_count);
+            chunks.push(chunk_content(&chunk));
+            if chunk.complete {
+                break;
+            }
+            if columns == 36 {
+                // Parked: move the lookahead past the end.
+                commands
+                    .send(SpectrogramWorkerCommand::PositionUpdate {
+                        position_seconds: 1.5,
+                    })
+                    .unwrap();
+            }
+        }
+        drop(commands);
+        worker.join().expect("worker");
+        chunks
+    }
+
+    #[test]
+    fn a_batched_session_parked_in_its_last_rows_finishes_once_resumed() {
+        // 165 rows a channel: batches of 64 rows, 32 columns in two, then
+        // 37 rows at the end of the file, of which the lookahead takes 16
+        // before the session parks.
+        let path = write_surround_fixture(2, 22_050, 6);
+        let serial = chunks_parked_near_the_end(&path, 1);
+        let batched = chunks_parked_near_the_end(&path, 3);
+        std::fs::remove_file(&path).unwrap();
+        let columns: u32 = batched.iter().map(|chunk| u32::from(chunk.1)).sum();
+        // 41 whole intervals of four rows, and the last row's flushed.
+        assert_eq!(columns, 42);
+        assert!(
+            batched
+                .iter()
+                .any(|chunk| u32::from(chunk.1) + chunk.0 == 36 && !chunk.4),
+            "it parked at its lookahead"
+        );
+        assert!(batched.last().is_some_and(|chunk| chunk.4));
+        assert!(serial == batched, "the chunks differ");
     }
 
     fn session_on(path: &Path, track_token: u64, generation: u64) -> SpectrogramWorkerCommand {

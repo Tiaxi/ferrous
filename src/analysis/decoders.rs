@@ -282,6 +282,16 @@ pub(super) struct GstFallback {
 }
 
 impl AudioFrameSource {
+    /// Whether the source decodes on a thread of its own, a `GStreamer`
+    /// streaming thread, rather than on the thread that reads it.
+    pub(super) fn decodes_on_its_own_thread(&self) -> bool {
+        match self {
+            Self::Symphonia { .. } => false,
+            #[cfg(feature = "gst")]
+            Self::Gst { .. } => true,
+        }
+    }
+
     /// Read native samples with their absolute source position. Seek preroll is
     /// decoded but excluded, so callers never have to guess where a seek landed.
     pub(super) fn next_frames(&mut self) -> anyhow::Result<AudioRead> {

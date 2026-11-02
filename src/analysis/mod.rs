@@ -15,6 +15,7 @@ mod gst_lifecycle;
 #[cfg(feature = "gst")]
 mod gst_waveform;
 mod session;
+mod stft_batch;
 mod track_io;
 mod waveform_pyramid;
 mod waveform_service;
