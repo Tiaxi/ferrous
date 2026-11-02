@@ -44,7 +44,7 @@ The scale runs from −60 to 0 dBFS with a subdued green/yellow/orange gradient.
 
 ## Qt rendering and visibility
 
-Each spectrogram item owns its raw ring and rendered canvas under its state mutex. Matching panes share immutable frequency-bin projection ranges and color lookup tables through weak references. Render passes retain their projection; image updates preserve previously retained `QImage` copies. This shares reusable rendering calculations without introducing a second global owner for mutable timeline state.
+Each spectrogram item owns its raw ring and rendered canvas under its state mutex. The ring takes memory in blocks of 64 columns, each when one of its columns is first written, so making room for a ring on a track, mode or FFT size change costs the GUI thread nothing however large the ring is; columns not written yet draw as missing. Matching panes share immutable frequency-bin projection ranges and color lookup tables through weak references. Render passes retain their projection; image updates preserve previously retained `QImage` copies. This shares reusable rendering calculations without introducing a second global owner for mutable timeline state.
 
 `BridgeClient` coalesces item/window visibility changes and enables spectral analysis when at least one registered item is visible in a visible, non-minimized window. Hiding all views stops decoding, cancels staging, and advances the generation. Transport and track changes still update analysis state. Showing a view starts a fresh generation at the latest position, including a viewport of rolling history. The non-Qt analysis API defaults to enabled.
 

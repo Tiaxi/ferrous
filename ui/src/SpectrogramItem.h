@@ -35,20 +35,34 @@ struct SpectrogramZoomPreview;
 // Ring columns in fixed-size, implicitly shared blocks. A rasterization
 // keeps copies of the blocks it reads, so writing a column copies only its
 // block, and only while a rasterization still holds that block.
+//
+// A block takes memory when one of its columns is first written, so making
+// room for a ring costs nothing however large it is. Columns of a block
+// never written read as missing.
 class SpectrogramRingStorage {
 public:
     static constexpr int kColumnsPerBlock = 64;
 
     void clear();
-    // Zero-filled room for `capacity` columns of `bins` bytes.
+    // Room for `capacity` columns of `bins` bytes.
     void allocate(int capacity, int bins);
     int bins() const { return m_bins; }
+    int capacity() const { return m_capacity; }
+    // The bytes of the whole capacity.
     qint64 byteSize() const;
+    // The bytes of the blocks written so far.
+    qint64 committedBytes() const;
+    // Null for a column of a block not written yet.
     const quint8 *column(int slot) const;
+    // Zero-fills the column's block when it is the block's first write.
     quint8 *writableColumn(int slot);
 
 private:
+    int blockColumns(size_t block) const;
+
+    // Null until written.
     std::vector<QByteArray> m_blocks;
+    int m_capacity{0};
     int m_bins{0};
 };
 

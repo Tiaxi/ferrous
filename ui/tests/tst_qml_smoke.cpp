@@ -56,6 +56,7 @@
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <utility>
 
 #include "../src/BridgeClient.h"
@@ -1235,6 +1236,10 @@ private slots:
     void spectrogramMinZoomAdaptsToWidthChange();
     void spectrogramCenteredModeUsesWindowedCapacity();
     void spectrogramHighRateRetentionPreservesViewportWithinBudget();
+    void spectrogramRingCommitsOnlyTheBlocksWritten();
+    void spectrogramUnwrittenRingColumnsDrawAsBackground();
+    void spectrogramRingGrowthKeepsRollingHistory();
+    void spectrogramRingChangeBenchmark();
     void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
     void spectrogramRollingCanvasGrowsIncrementallyDuringInitialFill();
     void spectrogramRollingCanvasHandsOffToSteadyScrollIncrementally();
@@ -15536,6 +15541,191 @@ void SpectrogramSmokeTest::spectrogramHighRateRetentionPreservesViewportWithinBu
         QVERIFY(bytesAcrossChannels < 512 * 1024 * 1024);
         QCOMPARE(item.m_ringColumnId[0], 0);
         QCOMPARE(item.m_ringTrackToken[0], quint64(100));
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramRingCommitsOnlyTheBlocksWritten() {
+    // Making room for a new ring, as a track, mode or FFT size change does,
+    // takes no memory for columns not written yet.
+    for (int mode : {0, 1}) {
+        SpectrogramItem item;
+        item.setWidth(1920);
+        item.setHeight(100);
+        item.setDisplayMode(mode);
+        constexpr int channels = 2;
+        constexpr int columns = 10;
+        quint64 generation = 0;
+        for (int bins : {1025, 4097}) {
+            QByteArray chunk(bins * channels * columns, '\x40');
+            item.feedPrecomputedChunk(chunk, bins, 0, columns, 0, 100'000,
+                48'000, 1024, false, true, 1, true, ++generation);
+            QCOMPARE(item.m_ring.bins(), bins);
+            QVERIFY(item.m_ringCapacity > 4 * SpectrogramRingStorage::kColumnsPerBlock);
+            QCOMPARE(item.m_ring.capacity(), item.m_ringCapacity);
+            QCOMPARE(item.m_ring.byteSize(), qint64(item.m_ringCapacity) * bins);
+            QCOMPARE(item.m_ring.committedBytes(),
+                qint64(SpectrogramRingStorage::kColumnsPerBlock) * bins);
+            for (int column = 0; column < columns; ++column) {
+                const quint8 *bytes = item.ringColumnLocked(column, mode == 0);
+                QVERIFY(bytes != nullptr);
+                QCOMPARE(bytes[0], quint8(0x40));
+                QCOMPARE(bytes[bins - 1], quint8(0x40));
+            }
+        }
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramUnwrittenRingColumnsDrawAsBackground() {
+    // Columns 0-99 are written; 100-127 share their block, which holds
+    // zeroes there, and 128 on are in blocks never written.  Both draw as
+    // missing columns, as they did when the whole ring was zero-filled.
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(16);
+    item.setDisplayMode(1);
+    constexpr int bins = 16;
+    constexpr int written = 100;
+    QByteArray chunk(bins * written, '\xff');
+    item.feedPrecomputedChunk(chunk, bins, 0, written, 0, 100'000,
+        48'000, 1024, false, true, 1, true, 1);
+    QCOMPARE(item.m_ring.committedBytes(),
+        qint64(2 * SpectrogramRingStorage::kColumnsPerBlock) * bins);
+    QVERIFY(item.ringColumnLocked(written - 1, false) != nullptr);
+    QVERIFY(item.ringColumnLocked(written, false) == nullptr);
+    QVERIFY(item.ringColumnLocked(2 * SpectrogramRingStorage::kColumnsPerBlock, false)
+        == nullptr);
+    QVERIFY(item.m_ring.column(2 * SpectrogramRingStorage::kColumnsPerBlock) == nullptr);
+
+    const QImage canvas = freshCanvas(item, 200, 16, 0, 199, false);
+    QCOMPARE(canvas.width(), 200);
+    const QRgb background = qRgb(0, 0, 0);
+    // Each pixel may blend in its neighbour; leave out the two at the edge.
+    for (int x = 0; x < written - 1; ++x) {
+        for (int y = 0; y < canvas.height(); ++y) {
+            QVERIFY(canvas.pixel(x, y) != background);
+        }
+    }
+    for (int x = written + 1; x < canvas.width(); ++x) {
+        for (int y = 0; y < canvas.height(); ++y) {
+            QCOMPARE(canvas.pixel(x, y), background);
+        }
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramRingGrowthKeepsRollingHistory() {
+    // Grows the ring before it wraps, and after it has wrapped and dropped
+    // its oldest columns.
+    for (bool wrapped : {false, true}) {
+        SpectrogramItem item;
+        item.setWidth(1920);
+        item.setHeight(100);
+        item.setDisplayMode(0);
+        constexpr int bins = 1025;
+        constexpr int firstColumns = 300;
+        const auto columnByte = [](qint64 seq) { return static_cast<quint8>(seq % 251 + 1); };
+        const auto feed = [&](int start, int columns, bool reset) {
+            QByteArray chunk(qsizetype(bins) * columns, '\0');
+            for (int column = 0; column < columns; ++column) {
+                std::fill_n(chunk.data() + qsizetype(column) * bins, bins,
+                    static_cast<char>(columnByte(start + column)));
+            }
+            item.feedPrecomputedChunk(chunk, bins, 0, columns, start, 1'000'000,
+                48'000, 1024, false, reset, 1, reset, 1);
+        };
+        feed(0, firstColumns, true);
+        const int capacityBefore = item.m_ringCapacity;
+        const int written = wrapped ? capacityBefore + 500 : firstColumns;
+        if (written > firstColumns) {
+            feed(firstColumns, written - firstColumns, false);
+        }
+        QCOMPARE(item.m_ringCapacity, capacityBefore);
+        QCOMPARE(item.m_ringWriteSeq, qint64(written));
+        const qint64 oldestKept = std::max(0, written - capacityBefore);
+        QCOMPARE(item.m_ringOldestSeq, oldestKept);
+        QCOMPARE(oldestKept > 0, wrapped);
+
+        // Zooming out widens the view, so the ring grows with the next data.
+        item.setZoomLevel(0.25);
+        feed(written, 1, false);
+        const int capacity = item.m_ringCapacity;
+        QVERIFY(capacity > capacityBefore);
+        QCOMPARE(item.m_ringWriteSeq, qint64(written + 1));
+        std::set<int> blocks;
+        for (qint64 seq = oldestKept; seq <= written; ++seq) {
+            const quint8 *bytes = item.ringColumnLocked(seq, true);
+            QVERIFY2(bytes != nullptr, qPrintable(QStringLiteral("column %1").arg(seq)));
+            QCOMPARE(bytes[0], columnByte(seq));
+            QCOMPARE(bytes[bins - 1], columnByte(seq));
+            blocks.insert(static_cast<int>(seq % capacity)
+                / SpectrogramRingStorage::kColumnsPerBlock);
+        }
+        // The columns the ring dropped before it grew stay missing.
+        for (qint64 seq = 0; seq < oldestKept; ++seq) {
+            QVERIFY2(item.ringColumnLocked(seq, true) == nullptr,
+                qPrintable(QStringLiteral("dropped column %1").arg(seq)));
+        }
+        // The copy wrote only the columns it kept.
+        qint64 blockBytes = 0;
+        for (int block : blocks) {
+            blockBytes += qint64(std::min(SpectrogramRingStorage::kColumnsPerBlock,
+                capacity - block * SpectrogramRingStorage::kColumnsPerBlock)) * bins;
+        }
+        QCOMPARE(item.m_ring.committedBytes(), blockBytes);
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramRingChangeBenchmark() {
+    if (qEnvironmentVariableIntValue("FERROUS_BENCHMARK_SPECTROGRAM") != 1) {
+        QSKIP("Set FERROUS_BENCHMARK_SPECTROGRAM=1 to measure ring changes");
+    }
+    // A centered 3440 px pane of a stereo track: the first data of a track
+    // change, then of an FFT size switch, each making room for a new ring
+    // of up to the lookahead budget.
+    constexpr int width = 3440;
+    constexpr int channels = 2;
+    constexpr int columns = 32;
+    constexpr int iterations = 15;
+    const auto median = [](std::vector<double> values) {
+        std::sort(values.begin(), values.end());
+        return values[values.size() / 2];
+    };
+    for (int mode : {0, 1}) {
+        SpectrogramItem item;
+        item.setWidth(width);
+        item.setHeight(400);
+        item.setDisplayMode(mode);
+        quint64 generation = 0;
+        std::vector<double> trackChange;
+        std::vector<double> fftSwitch;
+        int capacity = 0;
+        for (int i = 0; i < iterations; ++i) {
+            for (int bins : {4097, 2049}) {
+                QByteArray chunk(bins * channels * columns, '\x40');
+                QElapsedTimer timer;
+                timer.start();
+                item.feedPrecomputedChunk(chunk, bins, 0, columns, 0, 400'000,
+                    44'100, 1024, false, true, 1, true, ++generation);
+                const double ms = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
+                (bins == 4097 ? trackChange : fftSwitch).push_back(ms);
+                if (bins == 4097) {
+                    capacity = item.m_ringCapacity;
+                }
+            }
+        }
+        qInfo().noquote() << QStringLiteral(
+            "spectrogram ring change: mode=%1 width=%2 capacity=%3 ring_mib=%4 "
+            "first_chunk_ms=%5 first_chunk_worst_ms=%6")
+                .arg(mode == 0 ? QStringLiteral("rolling") : QStringLiteral("centered"))
+                .arg(width)
+                .arg(capacity)
+                .arg(static_cast<double>(capacity) * 4097 / (1024.0 * 1024.0), 0, 'f', 1)
+                .arg(median(trackChange), 0, 'f', 3)
+                .arg(*std::max_element(trackChange.begin(), trackChange.end()), 0, 'f', 3);
+        qInfo().noquote() << QStringLiteral(
+            "spectrogram ring change: mode=%1 fft_switch_ms=%2 fft_switch_worst_ms=%3")
+                .arg(mode == 0 ? QStringLiteral("rolling") : QStringLiteral("centered"))
+                .arg(median(fftSwitch), 0, 'f', 3)
+                .arg(*std::max_element(fftSwitch.begin(), fftSwitch.end()), 0, 'f', 3);
     }
 }
 
