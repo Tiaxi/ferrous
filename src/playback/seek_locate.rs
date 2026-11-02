@@ -31,6 +31,8 @@ use std::time::Duration;
 
 use crossbeam_channel::Sender;
 
+use crate::file_identity::FileId;
+
 /// A frame that an accurate seek can start from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct LocatedFrame {
@@ -39,6 +41,9 @@ pub(super) struct LocatedFrame {
     /// Time of its first sample, in nanoseconds from the first frame, as
     /// the parser stamps it.
     pub(super) nanos: u64,
+    /// The file it is a frame of: a save can replace the file at the path
+    /// while the pipeline reads the one it opened.
+    pub(super) file: FileId,
 }
 
 /// The answer to a request: the frame found, or `None` if none was, when
@@ -161,6 +166,7 @@ pub(super) fn locate_frame(
     current: &dyn Fn() -> bool,
 ) -> Option<LocatedFrame> {
     let file = File::open(path).ok()?;
+    let file_id = FileId::of(&file.metadata().ok()?);
     let reader = Reader { file: &file, path };
     let stream = StreamInfo::read(&reader)?;
     let target_sample =
@@ -183,6 +189,11 @@ pub(super) fn locate_frame(
             _ => high = middle,
         }
     }
+    if target_sample.saturating_sub(best.sample) > close_enough && current() {
+        // What is left fits in a window, which can hold minutes of a quiet
+        // passage: walk its frames.
+        best = stream.last_frame_before(&reader, best, target_sample);
+    }
     if !current() {
         return None;
     }
@@ -191,6 +202,7 @@ pub(super) fn locate_frame(
     Some(LocatedFrame {
         offset: best.offset,
         nanos: u64::try_from(nanos).ok()?,
+        file: file_id,
     })
 }
 
@@ -328,6 +340,45 @@ impl StreamInfo {
                 sample: self.first_sample(&header),
             })
         })
+    }
+
+    /// The last frame at or before `target_sample` within a window from
+    /// `start`, a frame found before, following the chain of frames from it:
+    /// each the frame that the one before it numbers next.
+    fn last_frame_before(
+        &self,
+        reader: &Reader<'_>,
+        start: FoundFrame,
+        target_sample: u64,
+    ) -> FoundFrame {
+        let Some(data) = usize::try_from(self.window)
+            .ok()
+            .and_then(|window| reader.read(start.offset, window + 1024))
+        else {
+            return start;
+        };
+        let Some(mut header) = self.parse_header(&data) else {
+            return start;
+        };
+        let mut best = start;
+        let mut at = 0;
+        while let Some(next) = (at + 2..data.len()).find_map(|later| {
+            self.parse_header(&data[later..])
+                .filter(|following| following.number == header.next_number())
+                .map(|following| (later, following))
+        }) {
+            let (offset, following) = next;
+            let sample = self.first_sample(&following);
+            if sample > target_sample {
+                break;
+            }
+            best = FoundFrame {
+                offset: start.offset + offset as u64,
+                sample,
+            };
+            (at, header) = (offset, following);
+        }
+        best
     }
 
     fn first_sample(&self, header: &FrameHeader) -> u64 {
@@ -512,15 +563,28 @@ mod tests {
     /// 60 s of noise at 48 kHz in 24-bit stereo, encoded by `flacenc`
     /// without a seek table, in a file of its own.
     fn noise_flac(name: &str) -> std::path::PathBuf {
+        encoded_flac(name, "white-noise", 60, 2, "S24LE")
+    }
+
+    /// `seconds` of `wave` at 48 kHz with `channels` channels in `format`,
+    /// encoded by `flacenc` without a seek table, in a file of its own.
+    fn encoded_flac(
+        name: &str,
+        wave: &str,
+        seconds: u32,
+        channels: u32,
+        format: &str,
+    ) -> std::path::PathBuf {
         gst::init().expect("GStreamer");
         let path = std::env::temp_dir().join(format!(
             "ferrous-seek-locate-{name}-{}.flac",
             std::process::id()
         ));
         let pipeline = gst::parse::launch(&format!(
-            "audiotestsrc wave=white-noise volume=0.1 num-buffers=2813 samplesperbuffer=1024 \
-             ! audio/x-raw,rate=48000,channels=2,format=S24LE ! audioconvert \
+            "audiotestsrc wave={wave} volume=0.1 num-buffers={} samplesperbuffer=1000 \
+             ! audio/x-raw,rate=48000,channels={channels},format={format} ! audioconvert \
              ! flacenc seekpoints=0 ! filesink location=\"{}\"",
+            seconds * 48,
             path.display()
         ))
         .expect("encoder");
@@ -538,6 +602,25 @@ mod tests {
             "{message:?}"
         );
         path
+    }
+
+    #[test]
+    fn located_frames_in_a_long_silence_start_shortly_before_their_targets() {
+        // Two minutes of silent frames of a few bytes each fit in the window
+        // that the bisection reads where it looks.
+        let path = encoded_flac("silence", "silence", 120, 1, "S16LE");
+        assert!(std::fs::metadata(&path).expect("fixture").len() < 64 * 1024);
+        for seconds in [30, 61, 100, 119] {
+            let target = Duration::from_secs(seconds);
+            let frame = locate_frame(&path, target, &|| true).expect("a frame");
+            let start = Duration::from_nanos(frame.nanos);
+            // Within half a second and a frame of 4608 samples.
+            assert!(
+                start <= target && target - start <= Duration::from_millis(500 + 96),
+                "{start:?} for {target:?}"
+            );
+        }
+        std::fs::remove_file(path).expect("remove fixture");
     }
 
     #[test]

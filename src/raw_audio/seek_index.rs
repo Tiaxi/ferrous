@@ -62,11 +62,17 @@ fn ac3_sample_rate(header: &[u8]) -> Option<u64> {
     }
 }
 
+/// Frames walked between asks whether the index is still wanted.
+const FRAMES_BETWEEN_ASKS: u64 = 256;
+
 /// The index entries of the frames that `reader` reads, from the first
-/// frame of a stream whose audio is `audio_len` bytes long.
+/// frame of a stream whose audio is `audio_len` bytes long. Stops early,
+/// with no entries, once `wanted` no longer holds, as when the track was
+/// skipped before its walk was done.
 pub(super) fn index_entries<R: Read + Seek>(
     reader: &mut BufReader<R>,
     audio_len: u64,
+    wanted: &dyn Fn() -> bool,
 ) -> Vec<Entry> {
     let mut entries = Vec::new();
     let mut position = 0;
@@ -74,7 +80,12 @@ pub(super) fn index_entries<R: Read + Seek>(
     let mut stream_rate = None;
     let mut next_entry = 0;
     let mut header = [0; HEADER_LEN];
+    let mut frames = 0;
     while position < audio_len && reader.read_exact(&mut header).is_ok() {
+        frames += 1;
+        if frames % FRAMES_BETWEEN_ASKS == 0 && !wanted() {
+            return Vec::new();
+        }
         let Some((rate, len)) = ac3_sample_rate(&header).zip(plain_ac3_frame_len(&header)) else {
             break;
         };
@@ -100,14 +111,14 @@ pub(super) fn index_entries<R: Read + Seek>(
 }
 
 /// The index entries of the raw AC3 file at `path`, which this reads from
-/// its first frame to the end of its audio.
-pub(super) fn ac3_index(path: &Path) -> Option<Vec<Entry>> {
+/// its first frame to the end of its audio while `wanted` holds.
+pub(super) fn ac3_index(path: &Path, wanted: &dyn Fn() -> bool) -> Option<Vec<Entry>> {
     let layout = read_audio_layout(path)?;
     let first_frame = layout.first_frame?;
     let mut file = File::open(path).ok()?;
     file.seek(SeekFrom::Start(first_frame)).ok()?;
     let mut reader = BufReader::with_capacity(256 * 1024, file);
-    let entries = index_entries(&mut reader, layout.audio_end - first_frame);
+    let entries = index_entries(&mut reader, layout.audio_end - first_frame, wanted);
     (!entries.is_empty()).then_some(entries)
 }
 
@@ -159,7 +170,9 @@ fn index_once_parsing(parser: &gst::Element) {
                     .spawn(move || {
                         #[cfg(test)]
                         let _indexing = indexing;
-                        let Some(entries) = ac3_index(&path) else {
+                        // Not once the parser is gone.
+                        let wanted = || parser.upgrade().is_some();
+                        let Some(entries) = ac3_index(&path, &wanted) else {
                             return;
                         };
                         let Some(parser) = parser
@@ -246,7 +259,11 @@ mod tests {
 
     /// The entries of `bytes`, a stream that starts with a frame.
     fn entries_of(bytes: &[u8]) -> Vec<Entry> {
-        index_entries(&mut BufReader::new(Cursor::new(bytes)), bytes.len() as u64)
+        index_entries(
+            &mut BufReader::new(Cursor::new(bytes)),
+            bytes.len() as u64,
+            &|| true,
+        )
     }
 
     /// A plain AC3 frame of `frmsizecod` at `fscod` with `bsid`, silent but
@@ -281,7 +298,7 @@ mod tests {
         let (bytes, _) = ripped_surround_bytes(&stream);
         let path = test_path("index-ripped", "ac3");
         std::fs::write(&path, &bytes).expect("write fixture");
-        let entries = ac3_index(&path).expect("entries");
+        let entries = ac3_index(&path, &|| true).expect("entries");
         let _ = std::fs::remove_file(&path);
         // 32 frames of 32 ms make the first 1.024 s; the tag is not read.
         assert_eq!(
@@ -340,6 +357,52 @@ mod tests {
         assert_ne!(frames[0].len(), frames[1].len());
         let entries = entries_of(&frames.concat());
         assert_eq!(entries, expected(&frames, 44_100));
+    }
+
+    /// Counts the bytes read through it.
+    struct Counted<'a> {
+        inner: Cursor<&'a [u8]>,
+        read: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl std::io::Read for Counted<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.inner.read(buf)?;
+            self.read.set(self.read.get() + count);
+            Ok(count)
+        }
+    }
+
+    impl std::io::Seek for Counted<'_> {
+        fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
+
+    #[test]
+    fn the_walk_ends_before_the_end_of_the_file_once_the_index_is_not_wanted() {
+        let stream = TEST_AC3.repeat(64);
+        let read = std::rc::Rc::default();
+        let mut reader = BufReader::with_capacity(
+            4_096,
+            Counted {
+                inner: Cursor::new(&stream),
+                read: std::rc::Rc::clone(&read),
+            },
+        );
+        let asks = std::cell::Cell::new(0);
+        let entries = index_entries(&mut reader, stream.len() as u64, &|| {
+            asks.set(asks.get() + 1);
+            asks.get() < 2
+        });
+        assert!(entries.is_empty(), "{entries:?}");
+        // Two asks, 512 frames of 128 bytes, and a buffer.
+        assert!(
+            read.get() <= 512 * 128 + 4_096,
+            "read {} of {} bytes",
+            read.get(),
+            stream.len()
+        );
     }
 
     #[test]

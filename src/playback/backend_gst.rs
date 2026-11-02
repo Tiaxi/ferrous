@@ -24,7 +24,7 @@ use crate::raw_audio::{
 
 use super::channel_mix::ChannelMix;
 use super::clock::{self, MonotonicClock, MonotonicTime};
-use super::file_source::Releases;
+use super::file_source::{opened_file_upstream, Releases};
 use super::parsebin_stall;
 use super::queue::{
     same_audio_extension, CancelledAdvance, CommittedAdvance, GaplessQueue, Handoff, ManualMove,
@@ -1450,16 +1450,6 @@ impl GstPlaybackRuntime {
         // Until the seek has been applied, successors are held back and so
         // is the end of every stream, so that the pipeline asks for the
         // successor of the current track after the seek.
-        let method = seek_method_for_path(self.snapshot.current.as_deref());
-        if method == SeekMethod::Located
-            && self
-                .located
-                .is_none_or(|(target, _)| target != seek.position)
-        {
-            // Given once the locator has answered.
-            self.locate_frame(seek.position);
-            return;
-        }
         self.hold_handoffs();
         self.hold_stream_ends();
         let cancelled = self.cancel_pending_advance(true);
@@ -1467,6 +1457,18 @@ impl GstPlaybackRuntime {
             || cancelled.is_some_and(|cancelled| cancelled.handed_to_pipeline)
         {
             self.restart_for_seek();
+            return;
+        }
+        let method = seek_method_for_path(self.snapshot.current.as_deref());
+        if method == SeekMethod::Located
+            && self
+                .located
+                .is_none_or(|(target, _)| target != seek.position)
+        {
+            // Given once the locator has answered. Until then, successors
+            // and stream ends stay held, so the track plays on to its end
+            // and no further.
+            self.locate_frame(seek.position);
             return;
         }
         self.queued_seek = None;
@@ -1519,13 +1521,11 @@ impl GstPlaybackRuntime {
         self.issue_queued_seek();
     }
 
-    /// Add `frame` to the index of the parsers of the current file, so an
+    /// Add `frame` to the index of the parsers that read its file, so an
     /// accurate seek starts from it rather than from the last frame they
-    /// parsed. Adding an entry reads nothing.
+    /// parsed. A file that replaced the one the pipeline reads, as a save
+    /// does, has its frames elsewhere. Adding an entry reads nothing.
     fn index_located_frame(&self, frame: LocatedFrame) {
-        let Some(path) = self.snapshot.current.as_deref() else {
-            return;
-        };
         let parsers: Vec<gst::Element> = {
             let Ok(mut parsers) = self.flac_parsers.lock() else {
                 return;
@@ -1537,7 +1537,10 @@ impl GstPlaybackRuntime {
                 .collect()
         };
         for parser in parsers {
-            if parser_file(&parser).as_deref() != Some(path) {
+            let file = parser
+                .static_pad("sink")
+                .and_then(|pad| opened_file_upstream(&pad));
+            if file != Some(frame.file) {
                 continue;
             }
             if let Ok(parser) = parser.downcast::<gst_base::BaseParse>() {
@@ -3692,19 +3695,6 @@ fn track_flac_parsers(playbin: &gst::Element) -> Arc<Mutex<Vec<gst::glib::WeakRe
         None
     });
     parsers
-}
-
-/// The file that `parser` parses, as its source tells. Asks without
-/// reading.
-fn parser_file(parser: &gst::Element) -> Option<PathBuf> {
-    let mut query = gst::query::Uri::new();
-    if !parser.static_pad("sink")?.peer_query(&mut query) {
-        return None;
-    }
-    let uri = query.uri()?;
-    gst::glib::filename_from_uri(&uri)
-        .ok()
-        .map(|(path, _)| path)
 }
 
 /// Install the probes on the source pads of every parser of the pipeline:
@@ -7197,10 +7187,11 @@ mod engine_tests {
             [(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, target)]
         );
 
-        // One landing, at the target, which no snapshot preceded.
+        // One landing, at the target, which no snapshot preceded. (The
+        // samples that play tell how accurate it is.)
         assert_eq!(engine.seeked.len(), 1, "{:?}", engine.seeked);
         assert!(
-            engine.seeked[0].abs_diff(target) < Duration::from_micros(200),
+            engine.seeked[0].abs_diff(target) < millis(50),
             "landed at {:?}",
             engine.seeked
         );
@@ -7217,12 +7208,20 @@ mod engine_tests {
                 .any(|buffer| buffer.loud_at.is_some())
         });
         let rendered = rendered.lock().unwrap()[rendered_before..].to_vec();
-        // The first step lands short of the target; none of its audio
-        // plays.
-        for buffer in &rendered {
+        // Playback goes on at the target's sample (one is 21 µs long), and
+        // nothing between the old position and the target plays.
+        let after_seek: Vec<_> = rendered
+            .iter()
+            .filter(|buffer| buffer.stream_time >= millis(3_000))
+            .collect();
+        assert!(
+            after_seek[0].stream_time.abs_diff(target) < Duration::from_micros(21),
+            "playback went on at {:?} after the seek to {target:?}",
+            after_seek[0]
+        );
+        for buffer in &after_seek {
             assert!(
-                buffer.stream_time < millis(3_000)
-                    || buffer.stream_time + Duration::from_millis(1) >= target,
+                buffer.stream_time >= after_seek[0].stream_time,
                 "{buffer:?} played after the seek to {target:?}"
             );
         }
@@ -7392,6 +7391,122 @@ mod engine_tests {
         );
         assert_eq!(engine.snapshot.current.as_deref(), Some(b.as_path()));
         assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    /// `flac` with a PADDING block of `len` bytes after its STREAMINFO, as
+    /// a save that adds metadata writes it: its frames lie `len` bytes
+    /// later.
+    fn with_padding(flac: &[u8], len: usize) -> Vec<u8> {
+        // STREAMINFO, which is not the last metadata block.
+        assert_eq!(&flac[..4], b"fLaC");
+        assert_eq!(flac[4], 0);
+        let mut padded = flac[..42].to_vec();
+        padded.push(1);
+        padded.extend_from_slice(&u32::try_from(len).unwrap().to_be_bytes()[1..]);
+        padded.resize(padded.len() + len, 0);
+        padded.extend_from_slice(&flac[42..]);
+        padded
+    }
+
+    #[test]
+    fn flac_seek_after_a_save_replaced_the_playing_file_starts_in_the_file_that_plays() {
+        let fixtures = Fixtures::new("located-replaced");
+        let a = fixtures.marked_flac("a.flac");
+        let b = fixtures.flac("b.flac", 4_500);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until_row_plays(0);
+
+        // A save writes the file with 1 MiB more metadata beside it and
+        // renames it over the one that plays, which the pipeline goes on
+        // reading.
+        let saved = fixtures.dir.join("a.flac.save");
+        std::fs::write(&saved, with_padding(&std::fs::read(&a).unwrap(), 1 << 20)).unwrap();
+        std::fs::rename(&saved, &a).unwrap();
+        // The saved file's frames near the end lie past the end of the file
+        // that plays.
+        let target = millis(117_000);
+        engine.send(PlaybackCommand::Seek(target));
+        engine.wait_until("the seek did not land", |engine| !engine.seeked.is_empty());
+        assert!(
+            engine.seeked[0].abs_diff(target) < millis(50),
+            "{:?}",
+            engine.seeked
+        );
+        engine.wait_until("playback did not go on after the seek", |engine| {
+            engine.snapshot.position_advancing && engine.snapshot.position >= millis(117_500)
+        });
+        assert_eq!(engine.snapshot.current_queue_index, Some(0));
+        assert_eq!(engine.changes.len(), 1, "{:?}", engine.changes);
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+    }
+
+    #[test]
+    fn flac_seek_waiting_for_its_frame_holds_the_successor_back() {
+        // Before about-to-finish, then inside its window with the successor
+        // given to the pipeline, then a Repeat-One replay given to it.
+        for (case, repeat, window) in [
+            ("before", RepeatMode::Off, false),
+            ("window", RepeatMode::Off, true),
+            ("repeat-one", RepeatMode::One, true),
+        ] {
+            let fixtures = Fixtures::new(&format!("located-held-handover-{case}"));
+            let a = fixtures.flac("a.flac", 4_000);
+            let b = fixtures.flac("b.flac", 4_500);
+            let (successor, row) = if repeat == RepeatMode::One {
+                (a.clone(), 0)
+            } else {
+                (b.clone(), 1)
+            };
+            let mut engine = Engine::start();
+            engine.send(PlaybackCommand::SetRepeatMode(repeat));
+            engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
+            engine.send(PlaybackCommand::Play);
+            if window {
+                engine.wait_for_settled_window(&successor);
+            } else {
+                engine.wait_until_row_plays(0);
+            }
+
+            let hold = crate::playback::file_source::test_support::hold(
+                &a,
+                crate::playback::file_source::test_support::Point::Locate,
+            );
+            engine.send(PlaybackCommand::Seek(millis(500)));
+            let sought = Instant::now();
+            engine.wait_until(&format!("{case}: the locator did not read"), |_| {
+                hold.holds()
+            });
+            // Long past where the track would have ended.
+            engine.wait_until(&format!("{case}: time did not pass"), |_| {
+                sought.elapsed() >= millis(4_500)
+            });
+            assert_eq!(engine.changes.len(), 1, "{case}: {:?}", engine.changes);
+            assert!(engine.seeked.is_empty(), "{case}: {:?}", engine.seeked);
+
+            hold.release();
+            engine.wait_until(&format!("{case}: the seek did not land"), |engine| {
+                !engine.seeked.is_empty()
+            });
+            let landed = Instant::now();
+            assert!(
+                engine.seeked[0].abs_diff(millis(500)) < millis(50),
+                "{case}: {:?}",
+                engine.seeked
+            );
+            assert_change(
+                &engine.wait_for_changes(2),
+                &successor,
+                row,
+                Expect::Gapless,
+            );
+            assert!(
+                landed.elapsed() >= millis(3_000),
+                "{case}: the successor started {:?} after the seek landed",
+                landed.elapsed()
+            );
+        }
     }
 
     #[test]
