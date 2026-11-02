@@ -255,7 +255,22 @@ pub(super) enum AudioFrameSource {
         seek_frame: u64,
         /// Stored for seek-flag selection (DTS needs `KEY_UNIT`).
         path: std::path::PathBuf,
+        on_failure: GstFailure,
     },
+}
+
+/// What a `GStreamer` source does once its pipeline reports an error.
+#[cfg(feature = "gst")]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) enum GstFailure {
+    /// Fail at once, without reading what the decoder queued before it.
+    #[default]
+    Immediate,
+    /// First read what the decoder queued before the error, without waiting
+    /// for more, then fail.
+    AfterQueuedAudio,
+    /// The pipeline failed with this error; reading what it queued before.
+    Draining(String),
 }
 
 /// What a Symphonia source needs to read its file with `GStreamer` instead.
@@ -301,9 +316,16 @@ impl AudioFrameSource {
                 native_channels,
                 sample_rate,
                 seek_frame,
+                on_failure,
                 ..
             } => (
-                read_gstreamer_frames(pipeline, appsink, *native_channels, *sample_rate)?,
+                read_gstreamer_frames(
+                    pipeline,
+                    appsink,
+                    *native_channels,
+                    *sample_rate,
+                    on_failure,
+                )?,
                 *seek_frame,
             ),
         };
@@ -317,6 +339,15 @@ impl AudioFrameSource {
                 })
             }
             other => Ok(other),
+        }
+    }
+
+    /// Let a `GStreamer` source read the audio its decoder queued before a
+    /// failure, before it reports the failure.
+    #[cfg(feature = "gst")]
+    pub(super) fn read_queued_audio_on_failure(&mut self) {
+        if let Self::Gst { on_failure, .. } = self {
+            *on_failure = GstFailure::AfterQueuedAudio;
         }
     }
 
@@ -439,27 +470,54 @@ pub(super) fn interleave_f32(audio: &AudioBufferRef) -> Vec<f32> {
     }
 }
 
+/// The error that `pipeline` reported, if any.
+#[cfg(feature = "gst")]
+fn pipeline_failure(pipeline: &gst::Pipeline) -> Option<String> {
+    let message = pipeline.bus()?.pop_filtered(&[gst::MessageType::Error])?;
+    match message.view() {
+        gst::MessageView::Error(error) => {
+            Some(format!("analysis decoder failed: {}", error.error()))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(feature = "gst")]
 fn read_gstreamer_frames(
     pipeline: &gst::Pipeline,
     appsink: &gst_app::AppSink,
     native_channels: usize,
     sample_rate: u32,
+    on_failure: &mut GstFailure,
 ) -> anyhow::Result<AudioRead> {
-    if let Some(message) = pipeline
-        .bus()
-        .and_then(|bus| bus.pop_filtered(&[gst::MessageType::Error]))
-    {
-        if let gst::MessageView::Error(error) = message.view() {
-            anyhow::bail!("analysis decoder failed: {}", error.error());
+    if !matches!(on_failure, GstFailure::Draining(_)) {
+        if let Some(failure) = pipeline_failure(pipeline) {
+            if *on_failure == GstFailure::Immediate {
+                anyhow::bail!(failure);
+            }
+            *on_failure = GstFailure::Draining(failure);
         }
     }
-    let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(50)) else {
-        return Ok(if appsink.is_eos() {
-            AudioRead::Eof
-        } else {
-            AudioRead::Pending
-        });
+    // A failed pipeline produces no more; read only what it has queued.
+    let wait = if matches!(on_failure, GstFailure::Draining(_)) {
+        gst::ClockTime::ZERO
+    } else {
+        gst::ClockTime::from_mseconds(50)
+    };
+    let Some(sample) = appsink.try_pull_sample(wait) else {
+        if let GstFailure::Draining(failure) = on_failure {
+            anyhow::bail!("{failure}");
+        }
+        if !appsink.is_eos() {
+            return Ok(AudioRead::Pending);
+        }
+        // A pipeline that fails ends its stream after it reports the
+        // failure, maybe while this read waited: then the stream did not
+        // reach the end of the file. Nothing is left in the queue to read.
+        if let Some(failure) = pipeline_failure(pipeline) {
+            anyhow::bail!(failure);
+        }
+        return Ok(AudioRead::Eof);
     };
     // The decoder may change its output mid-stream, as an MP3 that goes
     // from stereo to mono does; each buffer has the format of its caps.
@@ -805,6 +863,7 @@ pub(super) fn start_gstreamer_decode(
         sample_rate,
         seek_frame: 0,
         path: path.to_path_buf(),
+        on_failure: GstFailure::Immediate,
     };
 
     shutdown.disarm(); // AudioFrameSource::drop now owns pipeline shutdown.
@@ -1176,6 +1235,7 @@ mod tests {
             sample_rate: 48000,
             seek_frame: 48_001,
             path: Path::new("fixture.wav").to_owned(),
+            on_failure: GstFailure::Immediate,
         };
         let AudioFrameSource::Gst { pipeline, .. } = &source else {
             unreachable!()
@@ -1211,6 +1271,66 @@ mod tests {
             source.next_frames().expect("final read"),
             AudioRead::Eof
         ));
+    }
+
+    /// A pipeline that fails ends its stream after it reports the failure.
+    /// A read that waits for audio while both come reports the failure, not
+    /// the end of the file, whether the source reads what is queued first.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_stream_that_ends_after_a_failure_reports_the_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        gst::init().expect("gstreamer initialization");
+        for on_failure in [GstFailure::Immediate, GstFailure::AfterQueuedAudio] {
+            let pipeline = gst::Pipeline::new();
+            let producer = gst_app::AppSrc::builder().build();
+            let sink = analysis_decode_sink();
+            pipeline
+                .add_many([producer.upcast_ref::<gst::Element>(), sink.upcast_ref()])
+                .expect("add elements");
+            producer.link(&sink).expect("link");
+            pipeline.set_state(gst::State::Playing).expect("start");
+            let mut source = AudioFrameSource::Gst {
+                pipeline,
+                appsink: sink,
+                native_channels: 1,
+                sample_rate: 48_000,
+                seek_frame: 0,
+                path: Path::new("fixture.wav").to_owned(),
+                on_failure,
+            };
+            let reads = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&reads);
+            let reader = std::thread::spawn(move || loop {
+                let read = source.next_frames();
+                if !matches!(read, Ok(AudioRead::Pending)) {
+                    return read.map(|read| matches!(read, AudioRead::Eof));
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+            });
+            // Once the reader waits for audio, mostly: a read checks for a
+            // failure and then waits 50 ms.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while reads.load(Ordering::SeqCst) == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the reader never waited"
+                );
+                std::thread::yield_now();
+            }
+            let error = gst::message::Error::builder(gst::CoreError::Failed, "injected failure")
+                .src(&producer)
+                .build();
+            producer.post_message(error).expect("post the failure");
+            producer.end_of_stream().expect("end the stream");
+            let read = reader.join().expect("reader");
+            assert!(
+                read.is_err(),
+                "the failed stream read as complete: {read:?}"
+            );
+        }
     }
 
     #[test]

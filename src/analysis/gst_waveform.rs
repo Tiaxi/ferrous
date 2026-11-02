@@ -88,8 +88,8 @@ fn decode_overview_in<F, C>(
     pipeline: gst::Pipeline,
     max_points: usize,
     source: &Cell<Option<WaveformSourceStamp>>,
-    mut on_update: F,
-    mut is_cancelled: C,
+    on_update: F,
+    is_cancelled: C,
 ) -> anyhow::Result<()>
 where
     F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
@@ -98,12 +98,31 @@ where
     let (decode, file_source) = start_overview_decode(path, pipeline)?;
     // The source opened the file when the pipeline started.
     source.set(file_source.opened_metadata().as_ref().and_then(stamp_of));
+    read_overview(path, decode, max_points, on_update, is_cancelled)
+}
+
+/// Read the overview of the file at `path` from `decode`, its started
+/// decode, and send its updates.
+fn read_overview<F, C>(
+    path: &Path,
+    decode: GstDecode,
+    max_points: usize,
+    mut on_update: F,
+    mut is_cancelled: C,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<f32>, f32, OverviewProgress) -> bool,
+    C: FnMut() -> bool,
+{
     let GstDecode {
         source: mut frames,
         sample_rate,
         duration_ns,
         ..
     } = decode;
+    // A failure ends the overview with the audio decoded before it, also
+    // the audio still queued when the pipeline reported it.
+    frames.read_queued_audio_on_failure();
     // The duration only sizes the bins; the peaks and the seconds they
     // cover are those of the audio decoded.
     let estimated_frames = duration_ns
@@ -151,6 +170,90 @@ where
         let _ = on_update(waveform.finish(), coverage_seconds, progress);
     }
     Ok(())
+}
+
+/// An overview update: its peaks, the seconds they cover and its progress.
+#[cfg(test)]
+pub(super) type OverviewUpdate = (Vec<f32>, f32, OverviewProgress);
+
+/// The updates of the overview decode of `path` into 64 peaks, whose
+/// pipeline fails once `buffers` buffers of audio have reached the decode,
+/// and the seconds those buffers end at. With `before_first_read`, the
+/// decode reads nothing before the failure: the audio waits in its queue.
+#[cfg(test)]
+pub(super) fn overview_failing_after(
+    path: &Path,
+    buffers: usize,
+    before_first_read: bool,
+) -> (Vec<OverviewUpdate>, f32) {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    gst::init().expect("gstreamer initialization");
+    configure_raw_surround_decoding();
+    let pipeline = gst::Pipeline::new();
+    conceal_damaged_ac3_frames(pipeline.upcast_ref());
+    let end_ns = Arc::new(AtomicU64::new(0));
+    let (failed_tx, failed_rx) = crossbeam_channel::bounded(1);
+    let passed_end_ns = Arc::clone(&end_ns);
+    pipeline.connect_element_added(move |_, element| {
+        // The decode's sink, which its builder makes without a factory.
+        if !element.is::<gstreamer_app::AppSink>() {
+            return;
+        }
+        let Some(pad) = element.static_pad("sink") else {
+            return;
+        };
+        let reached = AtomicUsize::new(0);
+        let end_ns = Arc::clone(&passed_end_ns);
+        let failed_tx = failed_tx.clone();
+        pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let count = reached.fetch_add(1, Ordering::SeqCst) + 1;
+            if count <= buffers {
+                if let Some(buffer) = info.buffer() {
+                    let end = buffer
+                        .pts()
+                        .zip(buffer.duration())
+                        .map(|(pts, duration)| pts + duration);
+                    end_ns.fetch_max(end.map_or(0, gst::ClockTime::nseconds), Ordering::SeqCst);
+                }
+                return gst::PadProbeReturn::Ok;
+            }
+            if count == buffers + 1 {
+                // The buffers before this one are in the sink's queue.
+                if let Some(element) = pad.parent_element() {
+                    let error =
+                        gst::message::Error::builder(gst::CoreError::Failed, "injected failure")
+                            .src(&element)
+                            .build();
+                    let _ = element.post_message(error);
+                }
+                let _ = failed_tx.try_send(());
+            }
+            gst::PadProbeReturn::Drop
+        });
+    });
+
+    let (decode, _) = start_overview_decode(path, pipeline).expect("start the decode");
+    if before_first_read {
+        failed_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the pipeline fails");
+    }
+    let mut updates = Vec::new();
+    read_overview(
+        path,
+        decode,
+        64,
+        |peaks, coverage, progress| {
+            updates.push((peaks, coverage, progress));
+            true
+        },
+        || false,
+    )
+    .expect("an overview of the audio before the failure");
+    let seconds = std::time::Duration::from_nanos(end_ns.load(Ordering::SeqCst)).as_secs_f32();
+    (updates, seconds)
 }
 
 /// Swap files where a decode has read the audio range of its file but its
@@ -405,5 +508,32 @@ mod tests {
         std::fs::remove_file(&path).expect("remove fixture");
         result.expect("a cancelled decode is no error");
         assert_eq!(updates, [OverviewProgress::Partial]);
+    }
+
+    /// A failing pipeline still gives the overview of the audio it decoded
+    /// before: also what its decoder queued, unread, when it reported the
+    /// failure, whether the decode read none of its audio yet or much.
+    #[test]
+    fn a_failed_overview_keeps_the_audio_queued_before_the_failure() {
+        use crate::raw_audio::TEST_DTS;
+
+        let path = crate::paths::test_root().join("waveform-failing.dts");
+        std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        std::fs::write(&path, TEST_DTS).expect("write fixture");
+        // More buffers than the sink queues: the decode has read some.
+        for (buffers, before_first_read) in [(5, true), (20, false)] {
+            let (updates, decoded) = overview_failing_after(&path, buffers, before_first_read);
+            let (peaks, coverage, progress) = updates.last().expect("a last update");
+            assert_eq!(*progress, OverviewProgress::Truncated, "{buffers} buffers");
+            assert!(decoded > 0.0);
+            assert!(
+                (coverage - decoded).abs() < 1e-3,
+                "{buffers} buffers: covers {coverage} s of {decoded} s decoded"
+            );
+            // The fixture tone peaks at 1/8 of full scale.
+            let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+            assert!((0.1..0.2).contains(&loudest), "peak {loudest}");
+        }
+        std::fs::remove_file(&path).expect("remove fixture");
     }
 }

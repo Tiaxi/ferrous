@@ -89,6 +89,24 @@ pub struct WaveformUpdate {
     source: Option<WaveformSourceStamp>,
 }
 
+impl WaveformUpdate {
+    /// The update of an overview decode of the file of stamp `source`.
+    fn of(
+        peaks: Vec<f32>,
+        coverage_seconds: f32,
+        progress: OverviewProgress,
+        source: Option<WaveformSourceStamp>,
+    ) -> Self {
+        Self {
+            peaks,
+            coverage_seconds,
+            complete: progress == OverviewProgress::Complete,
+            done: progress != OverviewProgress::Partial,
+            source,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AnalysisCommand {
     SetTrack {
@@ -2034,13 +2052,7 @@ fn spawn_waveform_decode_worker(
                     }
                     let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
                         track_token,
-                        update: WaveformUpdate {
-                            peaks,
-                            coverage_seconds,
-                            complete: progress == OverviewProgress::Complete,
-                            done: progress != OverviewProgress::Partial,
-                            source: source.get(),
-                        },
+                        update: WaveformUpdate::of(peaks, coverage_seconds, progress, source.get()),
                     });
                     true
                 },
@@ -5762,6 +5774,39 @@ mod tests {
                     && (coverage_seconds - 180.0).abs() < f32::EPSILON
                     && stamp == Some(decoded_stamp())
         ));
+    }
+
+    /// A `GStreamer` overview whose pipeline fails is shown with the audio
+    /// decoded before the failure, the audio still queued included, and is
+    /// not saved.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_gstreamer_overview_cut_short_by_a_failure_is_shown_partial_and_not_saved() {
+        use crate::raw_audio::TEST_DTS;
+
+        let path = crate::paths::test_root().join("analysis-failing-overview.dts");
+        std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        std::fs::write(&path, TEST_DTS).expect("write fixture");
+        // The pipeline fails before the decode reads any of its audio.
+        let (updates, decoded) = gst_waveform::overview_failing_after(&path, 5, true);
+        std::fs::remove_file(&path).expect("remove fixture");
+        let (peaks, coverage, progress) = updates.into_iter().last().expect("a last update");
+
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = AnalysisRuntimeState::new();
+        state.handle_track_change(path.clone(), true, false, 4, &ctx);
+        state.track_io_requests.try_iter().for_each(drop);
+        channels.event_rx.try_iter().for_each(drop);
+        let update = WaveformUpdate::of(peaks, coverage, progress, Some(decoded_stamp()));
+        state.handle_waveform_progress(4, update, ctx.event_tx);
+
+        let requests: Vec<_> = state.track_io_requests.try_iter().collect();
+        assert!(requests.is_empty(), "saved: {requests:?}");
+        assert!(channels.event_rx.try_iter().any(|event| matches!(event,
+            AnalysisEvent::Snapshot(snapshot)
+                if !snapshot.waveform_complete
+                    && (snapshot.waveform_coverage_seconds - decoded).abs() < 1e-3)));
     }
 
     fn decoded_stamp() -> WaveformSourceStamp {
