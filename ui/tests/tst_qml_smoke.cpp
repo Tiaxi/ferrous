@@ -17097,6 +17097,16 @@ Window {
     QTest::mouseMove(window, view.center().toPoint() + QPoint(11, 0));
     keepControlsShown();
     QTRY_COMPARE(window->cursor().shape(), Qt::ArrowCursor);
+
+    // A touch ends without a hover leave, and must not leave the crosshair.
+    QPointingDevice *touchScreen = QTest::createTouchDevice();
+    const QPoint touched = waveform->mapToScene(
+        QPointF(waveform->width() / 2, waveform->height() / 2)).toPoint();
+    QTest::touchEvent(window, touchScreen).press(0, touched, window);
+    QTRY_VERIFY(hoverHandler->property("hovered").toBool());
+    QTest::touchEvent(window, touchScreen).release(0, touched, window);
+    QTRY_VERIFY(!hoverHandler->property("hovered").toBool());
+    QTRY_VERIFY(!waveform->m_hoverActive);
 }
 
 void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {

@@ -72,6 +72,12 @@ Item {
             id: waveformHover
             objectName: "waveformSurfaceHoverHandler"
             cursorShape: root.interactiveOverlaysVisible ? Qt.ArrowCursor : Qt.BlankCursor
+            // A touch ends without a hover leave for the item.
+            onHoveredChanged: {
+                if (!hovered) {
+                    waveform.setHoverPosition(0, 0, false)
+                }
+            }
             onPointChanged: {
                 if (root.pointerActivity) {
                     root.pointerActivity(point.scenePosition.x, point.scenePosition.y)

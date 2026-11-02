@@ -117,7 +117,7 @@ public:
     Q_INVOKABLE void resetZoom();
     Q_INVOKABLE double maximumZoomLevel() const;
     Q_INVOKABLE QString formatViewportDuration(double seconds) const;
-    void setHoverPosition(double x, double y, bool active);
+    Q_INVOKABLE void setHoverPosition(double x, double y, bool active);
 
     // Shared drawing reference used by the scene graph adapter and raster tests.
     void paint(QPainter *painter);
