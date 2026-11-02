@@ -675,6 +675,7 @@ pub(super) fn spawn_centered_staging_worker(
 ) -> Option<(Receiver<PrecomputedSpectrogramChunk>, JoinableThread)> {
     let (tx, rx) = unbounded::<PrecomputedSpectrogramChunk>();
     let thread = crate::worker_thread::spawn_worker("ferrous-spectrogram-staging", move || {
+        crate::worker_thread::lower_current_thread_priority();
         if let Some(gate) = open_gate {
             let _ = gate.recv();
         }
@@ -735,6 +736,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
     let thread_status = status.clone();
     let work = move || {
         let _stopped = StopOnExit(thread_status);
+        crate::worker_thread::lower_current_thread_priority();
         spectrogram_worker_loop(
             &cmd_rx,
             &event_tx,
@@ -1709,11 +1711,6 @@ fn session_decode_loop(
         //    bitstream.  Without this, the UI ring buffer is undersized and
         //    early columns get evicted, causing the spectrogram to go black.
         maybe_update_columns_estimate(session, source, generation, track_duration_ms_out);
-
-        // Yield periodically to avoid starving UI.
-        if session.packet_counter.is_multiple_of(64) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
     }
 
     if let Some((path, track_token)) = session.pending_continue.take() {

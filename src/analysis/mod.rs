@@ -2032,6 +2032,7 @@ fn spawn_waveform_decode_worker(
     closed: Arc<AtomicBool>,
 ) -> Option<JoinableThread> {
     crate::worker_thread::spawn_worker("ferrous-waveform-decode", move || {
+        crate::worker_thread::lower_current_thread_priority();
         while let Ok(mut job) = waveform_job_rx.recv() {
             while let Ok(next_job) = waveform_job_rx.try_recv() {
                 job = next_job;
@@ -2324,7 +2325,6 @@ where
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
     let mut waveform = WaveformAccumulator::new(max_points, estimated_frames, sample_rate_hz);
 
-    let mut packet_counter = 0usize;
     let mut decoded_any = false;
     let reached_end = loop {
         if is_cancelled() {
@@ -2344,7 +2344,6 @@ where
         if packet.track_id() != track_id {
             continue;
         }
-        packet_counter += 1;
 
         let decoded_audio = match audio_decoder.decode(&packet) {
             Ok(decoded_audio) => decoded_audio,
@@ -2366,11 +2365,6 @@ where
         decoded_any |= !samples.is_empty();
         if !waveform.push_frames(samples, channels, on_update, is_cancelled) {
             return Ok(true);
-        }
-
-        // Keep this worker from starving UI/render threads on heavy FLAC decode.
-        if packet_counter.is_multiple_of(64) {
-            std::thread::sleep(std::time::Duration::from_millis(1));
         }
     };
 
