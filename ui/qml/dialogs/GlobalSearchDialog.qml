@@ -5,6 +5,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/SearchIcons.js" as SearchIcons
 
 Dialog {
     id: root
@@ -74,10 +75,22 @@ Dialog {
         if (row.matchDetail) parts.push(row.matchDetail)
         return parts.filter(function(value) { return value.length > 0 }).join(" · ")
     }
+    // Translated once rather than in every row.
+    readonly property var typeLabels: ({
+        album: I18n.i18nc("@label search result type", "Album"),
+        artist: I18n.i18nc("@label search result type", "Artist"),
+        track: I18n.i18nc("@label search result type", "Track")
+    })
+    // The result types' icons in the rows' two text colours, made once
+    // rather than in every row.
+    readonly property var resultIcons: SearchIcons.sources(root.uiPalette.uiTextColor)
+    readonly property var selectedResultIcons: SearchIcons.sources(root.uiPalette.uiSelectionTextColor)
+    // The result row under the pointer, whose tooltip shows.
+    property Item hoveredResultRow: null
     function typeLabel(rowType) {
-        if (rowType === "album") return I18n.i18nc("@label search result type", "Album")
-        if (rowType === "artist") return I18n.i18nc("@label search result type", "Artist")
-        return I18n.i18nc("@label search result type", "Track")
+        if (rowType === "album") return root.typeLabels.album
+        if (rowType === "artist") return root.typeLabels.artist
+        return root.typeLabels.track
     }
     // How many results of a type there are, and how many of them show.
     function countText(type, shown, total) {
@@ -207,6 +220,9 @@ Dialog {
                 clip: true
                 model: root.controller.uiBridge.globalSearchModel || []
                 reuseItems: true
+                // Each query makes only the rows in view; rows scrolled in
+                // come from the reuse pool.
+                cacheBuffer: 0
                 readonly property real resultRowHeight: Math.max(34, rowFont.height + 10)
                 currentIndex: root.controller.selectedDisplayIndex
                 highlightFollowsCurrentItem: false
@@ -226,85 +242,118 @@ Dialog {
                         event.accepted = true
                     }
                 }
+                // The rows' columns, shared by every row: the type, its
+                // icon, the cover, the name, the details and the summary.
+                readonly property real rowWidth: width - (resultScrollBar.visible ? resultScrollBar.width : 0)
+                readonly property real rowMargin: 6
+                readonly property real columnSpacing: 8
+                readonly property real typeColumnWidth: Math.max(72, rowFont.advanceWidth(root.typeLabels.artist.toUpperCase()) + 24)
+                readonly property real coverColumnX: rowMargin + typeColumnWidth + columnSpacing
+                readonly property real nameColumnX: coverColumnX + 24 + columnSpacing
+                readonly property real nameColumnWidth: rowWidth * 0.30
+                readonly property real summaryColumnWidth: Math.max(74, rowFont.advanceWidth(root.countText("track", 999, 999)),
+                    rowFont.advanceWidth(root.countText("album", 999, 999)))
+                readonly property real summaryColumnX: rowWidth - rowMargin - summaryColumnWidth
+                readonly property real contextColumnX: nameColumnX + nameColumnWidth + columnSpacing
+                readonly property real contextColumnWidth: Math.max(0, summaryColumnX - columnSpacing - contextColumnX)
+                // The rows are plain Text and Rectangles with the shared
+                // palette's colours, rather than styled controls, which
+                // each set up a Kirigami theme of their own.
                 delegate: Rectangle {
                     id: resultRow
                     readonly property bool selected: index === root.controller.selectedDisplayIndex
                     readonly property color foreground: selected ? root.uiPalette.uiSelectionTextColor : root.uiPalette.uiTextColor
+                    readonly property color mutedForeground: selected ? foreground : root.uiPalette.uiMutedTextColor
+                    readonly property string rowType: model.rowType || "track"
                     readonly property string context: root.rowContext(model, false)
-                    width: resultsView.width - (resultScrollBar.visible ? resultScrollBar.width : 0)
+                    readonly property bool hovered: rowMouse.containsMouse
+                    // Asked for only when the shared tooltip shows.
+                    function toolTipText() {
+                        return model.label + "\n" + root.rowContext(model, true)
+                    }
+                    width: resultsView.rowWidth
                     height: resultsView.resultRowHeight
                     color: selected ? root.uiPalette.uiSelectionColor
                         : (index % 2 ? root.uiPalette.uiSurfaceRaisedColor : root.uiPalette.uiSurfaceAltColor)
                     Accessible.role: Accessible.ListItem
                     Accessible.name: I18n.i18nc("@info accessible name of a search result: type, name, details",
                         "%1: %2, %3", root.typeLabel(model.rowType), model.label, root.rowContext(model, true))
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 6; anchors.rightMargin: 6
-                        anchors.topMargin: 3; anchors.bottomMargin: 3
-                        spacing: 8
-                        RowLayout {
-                            Layout.minimumWidth: Math.max(72, rowFont.advanceWidth(root.typeLabel("artist").toUpperCase()) + 24)
-                            Layout.maximumWidth: Layout.minimumWidth
-                            Layout.fillWidth: false
-                            spacing: 4
-                            Components.SearchResultIcon {
-                                Layout.preferredWidth: 16; Layout.preferredHeight: 16
-                                resultType: model.rowType || "track"
-                                foreground: resultRow.foreground
-                            }
-                            Label {
-                                objectName: "globalSearchResultType"
-                                Layout.fillWidth: true
-                                text: root.typeLabel(model.rowType)
-                                font.weight: Font.Normal
-                                color: resultRow.selected ? resultRow.foreground : root.uiPalette.uiMutedTextColor
-                            }
+                    ListView.onPooled: {
+                        if (root.hoveredResultRow === resultRow) root.hoveredResultRow = null
+                    }
+                    Components.SearchResultIcon {
+                        x: resultsView.rowMargin
+                        y: (resultRow.height - height) / 2
+                        width: 16; height: 16
+                        resultType: resultRow.rowType
+                        foreground: resultRow.foreground
+                        iconSource: (resultRow.selected ? root.selectedResultIcons : root.resultIcons)[resultRow.rowType] || ""
+                    }
+                    Text {
+                        objectName: "globalSearchResultType"
+                        x: resultsView.rowMargin + 20
+                        y: (resultRow.height - implicitHeight) / 2
+                        width: resultsView.typeColumnWidth - 20
+                        font: root.font
+                        horizontalAlignment: Text.AlignLeft
+                        text: root.typeLabel(model.rowType)
+                        color: resultRow.mutedForeground
+                    }
+                    Image {
+                        x: resultsView.coverColumnX
+                        y: (resultRow.height - height) / 2
+                        width: 24; height: 24
+                        source: model.coverUrl || ""
+                        sourceSize.width: 48; sourceSize.height: 48
+                        fillMode: Image.PreserveAspectFit
+                        asynchronous: true
+                    }
+                    Text {
+                        objectName: "globalSearchResultName"
+                        x: resultsView.nameColumnX
+                        y: (resultRow.height - implicitHeight) / 2
+                        width: resultsView.nameColumnWidth
+                        font: root.font
+                        horizontalAlignment: Text.AlignLeft
+                        text: root.highlighted(model.label)
+                        textFormat: Text.StyledText
+                        elide: Text.ElideRight
+                        color: resultRow.foreground
+                    }
+                    Text {
+                        x: resultsView.contextColumnX
+                        y: (resultRow.height - implicitHeight) / 2
+                        width: resultsView.contextColumnWidth
+                        font: root.font
+                        horizontalAlignment: Text.AlignLeft
+                        text: root.highlighted(resultRow.context)
+                        textFormat: Text.StyledText
+                        elide: Text.ElideRight
+                        color: resultRow.mutedForeground
+                    }
+                    Text {
+                        objectName: "globalSearchResultSummary"
+                        x: resultsView.summaryColumnX
+                        y: (resultRow.height - implicitHeight) / 2
+                        width: resultsView.summaryColumnWidth
+                        font: root.font
+                        horizontalAlignment: Text.AlignRight
+                        text: {
+                            if (model.rowType === "track") return model.lengthText || ""
+                            const count = model.count || 0
+                            return root.countText(model.rowType === "artist" ? "album" : "track", count, count)
                         }
-                        Image {
-                            Layout.minimumWidth: 24; Layout.maximumWidth: 24
-                            Layout.preferredHeight: 24
-                            source: model.coverUrl || ""
-                            sourceSize.width: 48; sourceSize.height: 48
-                            fillMode: Image.PreserveAspectFit
-                            asynchronous: true
-                        }
-                        Label {
-                            objectName: "globalSearchResultName"
-                            Layout.minimumWidth: resultRow.width * 0.30
-                            Layout.maximumWidth: Layout.minimumWidth
-                            text: root.highlighted(model.label)
-                            textFormat: Text.StyledText
-                            elide: Text.ElideRight
-                            color: resultRow.foreground
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            Layout.minimumWidth: 0
-                            text: root.highlighted(resultRow.context)
-                            textFormat: Text.StyledText
-                            elide: Text.ElideRight
-                            color: resultRow.selected ? resultRow.foreground : root.uiPalette.uiMutedTextColor
-                        }
-                        Label {
-                            objectName: "globalSearchResultSummary"
-                            Layout.minimumWidth: Math.max(74, rowFont.advanceWidth(root.countText("track", 999, 999)),
-                                rowFont.advanceWidth(root.countText("album", 999, 999)))
-                            Layout.maximumWidth: Layout.minimumWidth
-                            horizontalAlignment: Text.AlignRight
-                            text: {
-                                if (model.rowType === "track") return model.lengthText || ""
-                                const count = model.count || 0
-                                return root.countText(model.rowType === "artist" ? "album" : "track", count, count)
-                            }
-                            color: resultRow.foreground
-                        }
+                        color: resultRow.foreground
                     }
                     MouseArea {
                         id: rowMouse
                         anchors.fill: parent
                         hoverEnabled: true
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onContainsMouseChanged: {
+                            if (containsMouse) root.hoveredResultRow = resultRow
+                            else if (root.hoveredResultRow === resultRow) root.hoveredResultRow = null
+                        }
                         onClicked: function(mouse) {
                             root.controller.selectDisplayIndex(index)
                             if (mouse.button === Qt.RightButton) {
@@ -315,11 +364,18 @@ Dialog {
                         onDoubleClicked: function(mouse) {
                             if (mouse.button === Qt.LeftButton) root.controller.activateSelection()
                         }
-                        ToolTip.visible: containsMouse
-                        ToolTip.delay: 700
-                        ToolTip.text: model.label + "\n" + root.rowContext(model, true)
                     }
                 }
+            }
+            // One tooltip for the row under the pointer, rather than one for
+            // each row.
+            ToolTip {
+                id: resultToolTip
+                objectName: "globalSearchResultToolTip"
+                parent: root.hoveredResultRow || resultsView
+                visible: !!root.hoveredResultRow && root.hoveredResultRow.hovered
+                delay: 700
+                text: root.hoveredResultRow ? root.hoveredResultRow.toolTipText() : ""
             }
             Label {
                 anchors.centerIn: parent

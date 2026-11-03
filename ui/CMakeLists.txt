@@ -109,6 +109,7 @@ qt_add_executable(ferrous
     src/DisplaySleepInhibitor.cpp
     src/BinaryBridgeCodec.cpp
     src/BridgeClient.cpp
+    src/QueueRows.cpp
     src/GlobalSearchResultsModel.cpp
     src/LibraryTreeModel.cpp
     src/MprisController.cpp
@@ -215,6 +216,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/logic/FormatUtils.js
         qml/logic/KeyUtils.js
         qml/logic/PathUtils.js
+        qml/logic/SearchIcons.js
         qml/logic/WheelUtils.js
 )
 
@@ -421,6 +423,7 @@ if(BUILD_TESTING)
         src/QmlTypes.cpp
         src/BinaryBridgeCodec.cpp
         src/BridgeClient.cpp
+        src/QueueRows.cpp
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
         src/Localization.cpp
@@ -516,6 +519,7 @@ if(BUILD_TESTING)
         tests/tst_accessibility.cpp
         src/BinaryBridgeCodec.cpp
         src/BridgeClient.cpp
+        src/QueueRows.cpp
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
         src/Localization.cpp
@@ -620,6 +624,7 @@ if(BUILD_TESTING)
         tests/tst_bridge_client.cpp
         src/BinaryBridgeCodec.cpp
         src/BridgeClient.cpp
+        src/QueueRows.cpp
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
         src/Localization.cpp
@@ -786,6 +791,7 @@ if(BUILD_TESTING)
         src/QmlTypes.cpp
         src/BinaryBridgeCodec.cpp
         src/BridgeClient.cpp
+        src/QueueRows.cpp
         src/CoverImageProvider.cpp
         src/DiagnosticsLog.cpp
         src/Localization.cpp

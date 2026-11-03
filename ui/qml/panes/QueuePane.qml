@@ -305,6 +305,7 @@ Rectangle {
                 spacing: root.columnSpacing
 
                 Label {
+                    id: indicatorHeader
                     objectName: "queueHeader_indicator"
                     elide: Text.ElideRight
                     text: "▶"
@@ -315,6 +316,7 @@ Rectangle {
                 }
 
                 Label {
+                    id: orderHeader
                     objectName: "queueHeader_order"
                     elide: Text.ElideRight
                     text: "#"
@@ -325,6 +327,7 @@ Rectangle {
                 }
 
                 Label {
+                    id: titleHeader
                     objectName: "queueHeader_title"
                     elide: Text.ElideRight
                     text: I18n.i18nc("@title:column", "Title")
@@ -581,90 +584,98 @@ Rectangle {
                     Accessible.selectable: true
                     Accessible.selected: rowSelected
 
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: root.columnMargin
-                        anchors.rightMargin: root.columnMargin
-                        spacing: root.columnSpacing
+                    // The cells are plain Text where the header's columns
+                    // are, which the header lays out for every row; their
+                    // colours and fonts come from the shared palette.
+                    readonly property color cellTextColor: rowSelected
+                        ? root.uiPalette.uiSelectionTextColor
+                        : root.uiPalette.uiTextColor
 
-                        Label {
-                            objectName: "queueCell_indicator"
-                            elide: Text.ElideRight
-                            text: {
-                                if (!playlistRow.isCurrentQueueRow) {
-                                    return ""
-                                }
-                                if (root.uiBridge.playbackState === "Paused") {
-                                    return "⏸"
-                                }
-                                if (root.uiBridge.playbackState === "Stopped") {
-                                    return "■"
-                                }
-                                return "▶"
+                    Text {
+                        objectName: "queueCell_indicator"
+                        x: root.columnMargin + indicatorHeader.x
+                        y: (playlistRow.height - implicitHeight) / 2
+                        width: indicatorHeader.width
+                        font: root.uiPalette.boldFont
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignHCenter
+                        text: {
+                            if (!playlistRow.isCurrentQueueRow) {
+                                return ""
                             }
-                            Layout.preferredWidth: root.playlistIndicatorColumnWidth
-                            horizontalAlignment: Text.AlignHCenter
-                            font.bold: true
-                            color: playlistRow.rowSelected
-                                ? root.uiPalette.uiSelectionTextColor
-                                : (playlistRow.isCurrentQueueRow
-                                    ? (root.uiBridge.playbackState === "Playing"
-                                        ? root.uiPalette.uiActiveIndicatorColor
-                                        : root.uiPalette.uiMutedTextColor)
-                                    : root.uiPalette.uiTextColor)
+                            if (root.uiBridge.playbackState === "Paused") {
+                                return "⏸"
+                            }
+                            if (root.uiBridge.playbackState === "Stopped") {
+                                return "■"
+                            }
+                            return "▶"
                         }
+                        color: playlistRow.rowSelected || !playlistRow.isCurrentQueueRow
+                            ? playlistRow.cellTextColor
+                            : (root.uiBridge.playbackState === "Playing"
+                                ? root.uiPalette.uiActiveIndicatorColor
+                                : root.uiPalette.uiMutedTextColor)
+                    }
 
-                        Label {
-                            objectName: "queueCell_order"
-                            elide: Text.ElideRight
-                            text: root.playlistOrderText(index)
-                            Layout.preferredWidth: root.playlistOrderColumnWidth
-                            horizontalAlignment: Text.AlignRight
-                            color: playlistRow.rowSelected
-                                ? root.uiPalette.uiSelectionTextColor
-                                : root.uiPalette.uiTextColor
-                        }
+                    Text {
+                        objectName: "queueCell_order"
+                        x: root.columnMargin + orderHeader.x
+                        y: (playlistRow.height - implicitHeight) / 2
+                        width: orderHeader.width
+                        font: root.uiPalette.baseFont
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignRight
+                        text: root.playlistOrderText(index)
+                        color: playlistRow.cellTextColor
+                    }
 
-                        Label {
-                            objectName: "queueCell_title"
-                            text: titleValue
-                            Layout.fillWidth: true
-                            elide: Text.ElideRight
-                            color: playlistRow.rowSelected
-                                ? root.uiPalette.uiSelectionTextColor
-                                : root.uiPalette.uiTextColor
-                        }
+                    Text {
+                        objectName: "queueCell_title"
+                        x: root.columnMargin + titleHeader.x
+                        y: (playlistRow.height - implicitHeight) / 2
+                        width: titleHeader.width
+                        font: root.uiPalette.baseFont
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignLeft
+                        text: playlistRow.titleValue
+                        color: playlistRow.cellTextColor
+                    }
 
-                        Label {
-                            objectName: "queueCell_artist"
-                            text: artistValue
-                            Layout.preferredWidth: root.artistColumnWidth
-                            elide: Text.ElideRight
-                            color: playlistRow.rowSelected
-                                ? root.uiPalette.uiSelectionTextColor
-                                : root.uiPalette.uiTextColor
-                        }
+                    Text {
+                        objectName: "queueCell_artist"
+                        x: root.columnMargin + artistHeader.x
+                        y: (playlistRow.height - implicitHeight) / 2
+                        width: artistHeader.width
+                        font: root.uiPalette.baseFont
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignLeft
+                        text: playlistRow.artistValue
+                        color: playlistRow.cellTextColor
+                    }
 
-                        Label {
-                            objectName: "queueCell_album"
-                            text: albumValue
-                            Layout.preferredWidth: root.albumColumnWidth
-                            elide: Text.ElideRight
-                            color: playlistRow.rowSelected
-                                ? root.uiPalette.uiSelectionTextColor
-                                : root.uiPalette.uiTextColor
-                        }
+                    Text {
+                        objectName: "queueCell_album"
+                        x: root.columnMargin + albumHeader.x
+                        y: (playlistRow.height - implicitHeight) / 2
+                        width: albumHeader.width
+                        font: root.uiPalette.baseFont
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignLeft
+                        text: playlistRow.albumValue
+                        color: playlistRow.cellTextColor
+                    }
 
-                        Label {
-                            objectName: "queueCell_length"
-                            elide: Text.ElideRight
-                            text: lengthTextValue
-                            Layout.preferredWidth: root.lengthColumnWidth
-                            horizontalAlignment: Text.AlignRight
-                            color: playlistRow.rowSelected
-                                ? root.uiPalette.uiSelectionTextColor
-                                : root.uiPalette.uiTextColor
-                        }
+                    Text {
+                        objectName: "queueCell_length"
+                        x: root.columnMargin + lengthHeader.x
+                        y: (playlistRow.height - implicitHeight) / 2
+                        width: lengthHeader.width
+                        font: root.uiPalette.baseFont
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignRight
+                        text: playlistRow.lengthTextValue
+                        color: playlistRow.cellTextColor
                     }
 
                     MouseArea {
