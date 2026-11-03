@@ -1312,7 +1312,9 @@ void WaveformEditorItem::bindWindowFrameLoop(QQuickWindow *window) {
     m_windowPresenceConnection = connect(
         m_windowPresence, &WindowPresence::shownChanged,
         this, &WaveformEditorItem::shownChanged);
-    if (playing()) update();
+    // The new window may be on screen or off it already: as if it had
+    // just become so, cancel or ask for the detail and the frame.
+    shownChanged();
 }
 
 bool WaveformEditorItem::shownOnScreen() const {

@@ -1397,6 +1397,7 @@ private slots:
     void waveformEditorIdleViewWaitsForThePlayheadsNextPixel();
     void waveformEditorNoOneSeesAsksForNoPlaybackFrames();
     void waveformEditorOffScreenDecodesNoDetail();
+    void waveformEditorMovedBetweenWindowsFollowsTheirPresence();
     void waveformEditorLateFrameCallbackDrawsAtOnce();
     void waveformEditorIdleViewDrawsOnlyFramesThatDiffer();
     void waveformEditorFollowingViewDrawsOnlyAtPixelSteps_data();
@@ -10124,11 +10125,10 @@ void WaveformSmokeTest::waveformEditorNoOneSeesAsksForNoPlaybackFrames() {
     delete item;
 }
 
-void WaveformSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
-    // A zoomed waveform in a window off screen decodes no detail: the
-    // request in flight is cancelled, and the engine's samples, a seek
-    // among them, start none. The detail it has stays; back on screen, it
-    // asks for the detail of where playback is then.
+namespace {
+
+// Ten seconds of a stereo 48 kHz sawtooth, as a 16-bit WAV file.
+QByteArray syntheticTenSecondWav() {
     constexpr quint32 kFrames = 480'000;
     QByteArray wav("RIFF", 4);
     appendLe<quint32>(wav, 36 + kFrames * 4);
@@ -10147,6 +10147,31 @@ void WaveformSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
         appendLe<qint16>(wav, sample);
         appendLe<qint16>(wav, -sample);
     }
+    return wav;
+}
+
+// The real decoder for `item`, each decode held until the test releases
+// `gate`; `started` counts them.
+void holdTestDecodes(WaveformEditorItem &item, const std::shared_ptr<QSemaphore> &gate,
+                     const std::shared_ptr<std::atomic_int> &started) {
+    item.m_decodeWindow = [gate, started](const QString &path, double start, double end,
+                                          int points,
+                                          const std::shared_ptr<std::atomic_bool> &cancelled) {
+        ++*started;
+        gate->tryAcquire(1, 5000);
+        return WaveformEditorItem::decodeWindow(path, start, end, points, cancelled);
+    };
+}
+
+} // namespace
+
+void WaveformSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
+    // A zoomed waveform in a window off screen decodes no detail: the
+    // request in flight is cancelled, and the engine's samples, a seek
+    // among them, start none. The detail it has stays; back on screen, it
+    // asks for the detail of where playback is then.
+    constexpr quint32 kFrames = 480'000;
+    const QByteArray wav = syntheticTenSecondWav();
     QTemporaryFile file;
     QVERIFY(file.open());
     QCOMPARE(file.write(wav), wav.size());
@@ -10158,16 +10183,9 @@ void WaveformSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
     TestTime time;
     auto *item = new WaveformEditorItem(window.contentItem());
     time.drive(*item);
-    // The real decoder, each decode held until the test lets it go.
     auto gate = std::make_shared<QSemaphore>();
     auto started = std::make_shared<std::atomic_int>(0);
-    item->m_decodeWindow = [gate, started](const QString &path, double start, double end,
-                                           int points,
-                                           const std::shared_ptr<std::atomic_bool> &cancelled) {
-        ++*started;
-        gate->tryAcquire(1, 5000);
-        return WaveformEditorItem::decodeWindow(path, start, end, points, cancelled);
-    };
+    holdTestDecodes(*item, gate, started);
     item->setWidth(400);
     item->setHeight(100);
     item->setDurationSeconds(static_cast<double>(kFrames) / 48'000.0);
@@ -10234,6 +10252,68 @@ void WaveformSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
     QTRY_VERIFY(!item->m_decodeActive);
     QVERIFY(viewHasDetail());
     QVERIFY(item->m_detail.startSeconds <= 8.5 && item->m_detail.endSeconds >= 8.5);
+    gate->release(8);
+    delete item;
+}
+
+void WaveformSmokeTest::waveformEditorMovedBetweenWindowsFollowsTheirPresence() {
+    // A paused, zoomed waveform moved into a window already off screen
+    // cancels its detail request in flight; moved back into one on screen,
+    // it asks for the detail it misses. The windows and the view keep
+    // their size, so only the move tells it.
+    const QByteArray wav = syntheticTenSecondWav();
+    QTemporaryFile file;
+    QVERIFY(file.open());
+    QCOMPARE(file.write(wav), wav.size());
+    QVERIFY(file.flush());
+    QQuickWindow shown;
+    shown.resize(400, 100);
+    presentWithoutDrawing(shown);
+    QQuickWindow offScreen;
+    offScreen.resize(400, 100);
+    presentWithoutDrawing(offScreen);
+    setTestExposed(offScreen, false);
+    endTestUnexposedGrace(offScreen);
+    QVERIFY(WindowPresence::of(&shown)->shown());
+    QVERIFY(!WindowPresence::of(&offScreen)->shown());
+
+    TestTime time;
+    auto *item = new WaveformEditorItem(shown.contentItem());
+    time.drive(*item);
+    auto gate = std::make_shared<QSemaphore>();
+    auto started = std::make_shared<std::atomic_int>(0);
+    holdTestDecodes(*item, gate, started);
+    item->setWidth(400);
+    item->setHeight(100);
+    item->setDurationSeconds(10.0);
+    item->setZoomLevel(8.0);
+    setTestPosition(*item, 3.0);
+    item->setSourcePath(file.fileName());
+    QTRY_COMPARE(started->load(), 1);
+    const std::shared_ptr<std::atomic_bool> inFlight = item->m_decodeCancelled;
+    QVERIFY(inFlight && !inFlight->load());
+
+    item->setParentItem(offScreen.contentItem());
+    QCOMPARE(item->window(), &offScreen);
+    QVERIFY(inFlight->load());
+    QVERIFY(!item->m_requestInFlight);
+    QVERIFY(!item->m_requestTimer.isActive());
+    gate->release();
+    QTRY_VERIFY(!item->m_decodeActive);
+    QTest::qWait(100);
+    QCOMPARE(started->load(), 1);
+    QCOMPARE(item->m_detail.pointCount, 0);
+
+    item->setParentItem(shown.contentItem());
+    QCOMPARE(item->window(), &shown);
+    QTRY_COMPARE(started->load(), 2);
+    gate->release();
+    QTRY_VERIFY(!item->m_decodeActive);
+    {
+        QMutexLocker lock(&item->m_stateMutex);
+        const auto [start, end] = item->detailRequestVisibleRangeLocked();
+        QVERIFY(item->detailCoversRangeLocked(start, end));
+    }
     gate->release(8);
     delete item;
 }
