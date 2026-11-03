@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -12,6 +13,7 @@ use super::decoders::{open_audio_file, AudioFrameSource, AudioFrames, AudioRead}
 use super::usize_to_u64;
 use super::waveform_prefill::CoarsePrefill;
 use super::waveform_pyramid::{PyramidTile, COARSE_SUMMARY_FRAMES};
+use crate::file_identity::FileId;
 
 pub(super) const TILE_FRAMES: u64 = 16_384;
 const PCM_CACHE_BYTES: usize = 32 * 1024 * 1024;
@@ -53,11 +55,17 @@ fn lock_service() -> MutexGuard<'static, ServiceSlot> {
     SERVICE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The file at a path, as the service tells one from another: by its path,
+/// length and modification time, and by the file itself and the time of
+/// its last change of any kind, which tell a replacement of the same length
+/// and modification time, such as a save of other tags, from the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SourceIdentity {
     path: PathBuf,
     length: u64,
     modified: SystemTime,
+    file: FileId,
+    changed: (i64, i64),
 }
 
 impl SourceIdentity {
@@ -72,6 +80,8 @@ impl SourceIdentity {
             path: PathBuf::from(path),
             length: 0,
             modified: SystemTime::UNIX_EPOCH,
+            file: FileId::from_numbers(0, 0),
+            changed: (0, 0),
         }
     }
 
@@ -82,6 +92,8 @@ impl SourceIdentity {
             path: path.to_path_buf(),
             length: metadata.len(),
             modified: metadata.modified()?,
+            file: FileId::of(metadata),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
         })
     }
 }
@@ -277,6 +289,10 @@ pub(super) struct WaveformSession {
     pub(super) channels: usize,
     /// Whether `GStreamer` decodes the file, rather than Symphonia.
     gstreamer: bool,
+    /// Whether the file the decoder reads is known to be that of
+    /// `identity`; only then does the session take the overview's
+    /// summaries.
+    confirmed: bool,
     /// Locked after `decoder` when both are held.
     caches: Mutex<Caches>,
     decoder: Mutex<Decoder>,
@@ -291,19 +307,24 @@ pub(super) struct WaveformSession {
 }
 
 impl WaveformSession {
-    #[cfg(test)]
+    /// Open the file at `path`. Its identity is that of the file a handle
+    /// opened here reads. The decoders open the path themselves, so the
+    /// identity is confirmed only if the path still holds that file once
+    /// they have opened it.
     pub(super) fn open(path: &Path) -> anyhow::Result<Self> {
-        Self::open_identified(SourceIdentity::read(path)?)
-    }
-
-    fn open_identified(identity: SourceIdentity) -> anyhow::Result<Self> {
-        let (source, rate, channels, _) = open_audio_file(&identity.path)
-            .ok_or_else(|| anyhow::anyhow!("unsupported audio file"))?;
+        let identity = SourceIdentity::of(path, &std::fs::File::open(path)?.metadata()?)?;
+        #[cfg(test)]
+        test_hooks::identified();
+        let (mut source, rate, channels, _) =
+            open_audio_file(path).ok_or_else(|| anyhow::anyhow!("unsupported audio file"))?;
+        let pending = first_frames(&mut source)?;
+        let confirmed = SourceIdentity::read(path).is_ok_and(|now| now == identity);
         Ok(Self {
             identity,
             sample_rate: session_sample_rate(rate),
             channels: session_channels(channels),
             gstreamer: source.decodes_on_its_own_thread(),
+            confirmed,
             caches: Mutex::new(Caches {
                 pcm: TileCache::new(PCM_CACHE_BYTES),
                 summaries: TileCache::new(SUMMARY_CACHE_BYTES),
@@ -314,7 +335,7 @@ impl WaveformSession {
             decoder: Mutex::new(Decoder {
                 source,
                 next_frame: 0,
-                pending: None,
+                pending,
             }),
             broken: AtomicBool::new(false),
             #[cfg(test)]
@@ -565,6 +586,28 @@ impl<S: FrameSource> Decoder<S> {
     }
 }
 
+/// How many reads [`first_frames`] makes at most.
+const FIRST_READS: usize = 256;
+
+/// The first audio of `source`, read when it is opened if it decodes on
+/// the reading thread, for its decoder to take first. A Symphonia source
+/// that decodes no audio reads the file with `GStreamer` instead, so this
+/// tells which decoder reads the file, as the overview's summaries must
+/// come from the same one.
+fn first_frames(source: &mut AudioFrameSource) -> anyhow::Result<Option<AudioFrames>> {
+    for _ in 0..FIRST_READS {
+        if source.decodes_on_its_own_thread() {
+            break;
+        }
+        match source.next_frames()? {
+            AudioRead::Frames(frames) => return Ok(Some(frames)),
+            AudioRead::Eof => break,
+            AudioRead::Pending => {}
+        }
+    }
+    Ok(None)
+}
+
 /// Where a packet the decoder gives falls in tile `[start, end)`, as the
 /// service's decoder places it while it reads the file in order: the frames
 /// of the packet within the tile go in it at their own position, and a
@@ -655,7 +698,8 @@ impl WaveformSession {
             last_tile,
             ..
         } = prefill;
-        if identity != self.identity
+        if !self.confirmed
+            || identity != self.identity
             || (sample_rate, channels, gstreamer)
                 != (self.sample_rate, self.channels, self.gstreamer)
         {
@@ -793,7 +837,7 @@ fn shared_session(
     let opening = OpeningGuard;
     #[cfg(test)]
     test_hooks::opening();
-    let session = Arc::new(WaveformSession::open_identified(identity)?);
+    let session = Arc::new(WaveformSession::open(path)?);
     let mut service = lock_service();
     service.hand_over(&session);
     service.session = Some(Arc::clone(&session));
@@ -819,6 +863,21 @@ pub(super) mod test_hooks {
     thread_local! {
         static AFTER_TILE: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
         static BEFORE_OPEN: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        static IDENTIFIED: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `hook` when this thread has read the identity of a file it
+    /// opens a session for, before its decoder opens it.
+    pub(in super::super) fn after_each_identity(hook: impl FnMut() + 'static) {
+        IDENTIFIED.with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn identified() {
+        IDENTIFIED.with(|cell| {
+            if let Some(hook) = cell.borrow_mut().as_mut() {
+                hook();
+            }
+        });
     }
 
     /// Run `hook` when this thread starts opening a file for the service.

@@ -724,12 +724,27 @@ mod tests {
                 include_bytes!("fixtures/tag-tone.wv").to_vec(),
                 "wv",
             ),
+            // Symphonia opens it but reads no audio from it, so the
+            // service's decoder turns to GStreamer only as it reads.
+            ("WAV of unknown size", unsized_wave(), "wav"),
         ] {
             let path = fixture_path(&format!("{}.{extension}", name.replace([' ', ','], "-")));
             std::fs::write(&path, bytes).expect("write fixture");
             assert_prefill_matches_service(name, &path);
             std::fs::remove_file(path).expect("remove fixture");
         }
+    }
+
+    /// A WAV file whose data chunk tells no size, which Symphonia reads
+    /// no audio from.
+    #[cfg(feature = "gst")]
+    fn unsized_wave() -> Vec<u8> {
+        let path = fixture_path("unsized-source.wav");
+        write_test_wave_to(&path, &pcm16(40_000, 2), 48_000, 2);
+        let mut bytes = std::fs::read(&path).expect("read fixture");
+        std::fs::remove_file(path).expect("remove fixture");
+        bytes[40..44].copy_from_slice(&0_u32.to_le_bytes());
+        bytes
     }
 
     /// A 48 kHz WAV file of `samples` named `name`.
@@ -827,6 +842,73 @@ mod tests {
                 assert!(last.is_none(), "expecting {expected:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_replacement_of_the_same_length_and_time_drops_the_summaries() {
+        let tile = usize::try_from(TILE_FRAMES).unwrap();
+        let path = wave("replaced.wav", &vec![8_192; 3 * tile], 1);
+        let prefill = overview_prefill(&path, None).expect("summaries");
+        // Other samples, of the same length and modification time, saved
+        // over it as an atomic save does.
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let other = wave("replacement.wav", &vec![-8_192; 3 * tile], 1);
+        std::fs::File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        std::fs::rename(&other, &path).expect("replace");
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.modified().unwrap(), modified);
+
+        // Whether the service opens it after or has it open already.
+        let session = Arc::new(WaveformSession::open(&path).expect("open"));
+        let mut slot = ServiceSlot::holding(None);
+        assert!(slot.offer(prefill.clone()).is_none());
+        slot.hand_over(&session);
+        assert!(!session.adopted(), "the summaries of the old file");
+        assert!(slot.prefill_identity().is_none());
+        let mut slot = ServiceSlot::holding(Some(Arc::clone(&session)));
+        assert!(slot.offer(prefill).is_none());
+        assert!(!session.adopted());
+        let end = 3.0 * 16_384.0 / 48_000.0;
+        let window = decode_window(&session, 0.0, end, 4, &|| false).expect("window");
+        assert!(window.extrema.iter().all(|&value| value == -0.25));
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_file_replaced_while_the_service_opens_it_takes_no_summaries() {
+        use super::super::waveform_service::test_hooks::after_each_identity;
+
+        let tile = usize::try_from(TILE_FRAMES).unwrap();
+        let path = wave("replaced-on-open.wav", &vec![8_192; 3 * tile], 1);
+        let prefill = overview_prefill(&path, None).expect("summaries");
+        // Replaced, with a longer file, once the service has read the
+        // identity of the file at the path but before its decoder opens it.
+        let replacement = fixture_path("replacement-on-open.wav");
+        write_test_wave_to(&replacement, &vec![-8_192; 5 * tile], 48_000, 1);
+        let (from, to) = (replacement.clone(), path.clone());
+        after_each_identity(move || {
+            if from.exists() {
+                std::fs::rename(&from, &to).expect("replace");
+            }
+        });
+        let session = WaveformSession::open(&path).expect("open");
+        after_each_identity(|| {});
+        assert!(!replacement.exists(), "replaced");
+        let mut slot = ServiceSlot::holding(None);
+        assert!(slot.offer(prefill).is_none());
+        slot.hand_over(&session);
+        assert!(!session.adopted(), "the summaries of the old file");
+        // The whole new file, not cut at the old file's end.
+        let end = 5.0 * 16_384.0 / 48_000.0;
+        let window = decode_window(&session, 0.0, end, 8, &|| false).expect("window");
+        assert!(window.extrema.iter().all(|&value| value == -0.25));
+        assert_eq!(session.eof_frame(), Some(5 * TILE_FRAMES));
+        std::fs::remove_file(path).expect("remove fixture");
     }
 
     #[test]
