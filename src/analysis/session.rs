@@ -134,9 +134,15 @@ fn stft_seek_grid(
     let column = f64_to_u64_saturating(
         position_seconds * f64::from(rate) / usize_to_f64_approx(effective_hop),
     );
+    (column, column_grid_frame(column, hop, effective_hop))
+}
+
+/// The frame of the first input FFT window contributing to the absolute
+/// output column `column`.
+fn column_grid_frame(column: u64, hop: usize, effective_hop: usize) -> u64 {
     let output_frame = column.saturating_mul(usize_to_u64(effective_hop));
     let input_hop = usize_to_u64(hop.max(1));
-    (column, output_frame / input_hop * input_hop)
+    output_frame / input_hop * input_hop
 }
 
 /// Where to start reading audio for an STFT grid whose first window belongs
@@ -1030,6 +1036,9 @@ struct SpectrogramSessionState {
     /// Commands queued behind the session's `NewTrack`.  The session takes
     /// them before the channel's, so they apply in the order sent.
     queued_commands: VecDeque<SpectrogramWorkerCommand>,
+    /// The left of a centered view, while the session decodes it after the
+    /// columns at the playhead.
+    backfill: Option<Backfill>,
 }
 
 /// Action returned by command processing in the session loop.
@@ -1182,9 +1191,21 @@ fn run_spectrogram_session(
         f64::INFINITY
     };
 
-    let (start_column, grid_frame) =
-        stft_seek_grid(start_seconds, effective_rate, hop_size, effective_hop);
-    let (seek_frame, leading_silence) = centred_window_start(grid_frame, fft_size);
+    let (start_column, _) = stft_seek_grid(start_seconds, effective_rate, hop_size, effective_hop);
+    let (playhead_column, _) = stft_seek_grid(
+        target_position_seconds,
+        effective_rate,
+        hop_size,
+        effective_hop,
+    );
+    let backfill = plan_backfill(display_mode, start_column, playhead_column);
+    // A centered session that starts left of its playhead decodes the
+    // playhead's columns first.
+    let first_column = backfill.map_or(start_column, |backfill| backfill.end);
+    let (seek_frame, leading_silence) = centred_window_start(
+        column_grid_frame(first_column, hop_size, effective_hop),
+        fft_size,
+    );
     if seek_frame > 0 {
         if let Err(error) = source.seek_to_frame(seek_frame, effective_rate) {
             fail_session(
@@ -1221,7 +1242,7 @@ fn run_spectrogram_session(
         cols_per_second,
         target_position_seconds,
         suppress_backward_seek: false,
-        columns_produced: start_column,
+        columns_produced: first_column,
         session_start_column: start_column,
         stfts: (0..actual_channel_count)
             .map(|_| StftComputer::new(fft_size, hop_size))
@@ -1232,7 +1253,7 @@ fn run_spectrogram_session(
         packet_counter: 0,
         chunk_buf: Vec::new(),
         chunk_columns: 0,
-        chunk_start_index: start_column,
+        chunk_start_index: first_column,
         target_chunk_columns: 1, // Start with 1 for fastest first-pixel
         total_covered_samples: 0,
         throttle_origin: None,
@@ -1253,10 +1274,13 @@ fn run_spectrogram_session(
         rejected_continuation: None,
         failure: None,
         queued_commands,
+        backfill,
     };
     enqueue_leading_silence(&mut session.stfts, leading_silence);
 
-    // Send initial metadata chunk (0 columns, carries estimates + transition semantics).
+    // Send initial metadata chunk (0 columns, carries estimates + transition
+    // semantics). It starts the session's columns at its first, which the
+    // UI's ring counts the columns of a backfill from.
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token,
@@ -1277,7 +1301,7 @@ fn run_spectrogram_session(
     ));
 
     for resampler in &mut session.resamplers {
-        resampler.reset_at_column(start_column, hop_size, effective_hop);
+        resampler.reset_at_column(first_column, hop_size, effective_hop);
     }
 
     loop {
@@ -1399,7 +1423,11 @@ fn run_spectrogram_session(
                     SpectrogramWorkerCommand::NewTrack { handoff, .. } if handoff.finalize_previous
                 );
                 // A session parked at EOF has published its extent already.
-                if finalize && !session.source_reached_eof && session.columns_produced > 0 {
+                let published_end = session.source_reached_eof
+                    || session
+                        .backfill
+                        .is_some_and(|backfill| backfill.right_ended);
+                if finalize && !published_end && decoded_frontier(&session) > 0 {
                     session_emit_finalize_chunk(&session, event_tx);
                 }
                 profile_eprintln!(
@@ -1613,6 +1641,16 @@ fn session_decode_loop(
             }
         }
 
+        // Between the right of a centered view and its left.
+        if let Err(error) = step_backfill(session, source, event_tx, columns_produced_out) {
+            session.failure = Some(format!("seeking failed ({error})"));
+            return None;
+        }
+        if session.source_reached_eof {
+            // A backfill after the end of the file: the session parks there.
+            break;
+        }
+
         // 2. Check lead — park if sufficiently ahead (unless gapless pending).
         let target_column =
             f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
@@ -1704,6 +1742,30 @@ fn session_decode_loop(
                         // once it has drained them.
                         continue;
                     }
+                }
+                if let Some(backfill) = session.backfill {
+                    if backfill.resume.is_some() {
+                        // The file ends before the columns the left was to
+                        // end at, which its right did not reach either.
+                        session.backfill = Some(Backfill {
+                            end: session.columns_produced,
+                            ..backfill
+                        });
+                        continue;
+                    }
+                    if session.pending_continue.is_none() {
+                        // The right ends here: publish where, then fill the
+                        // left before parking.
+                        session_flush_chunk(session, event_tx, columns_produced_out);
+                        session_emit_finalize_chunk(session, event_tx);
+                        session.backfill = Some(Backfill {
+                            right_ended: true,
+                            ..backfill
+                        });
+                        continue;
+                    }
+                    // A continuation goes on from the right.
+                    session.backfill = None;
                 }
                 // Real source EOF.  Publish the decoded extent while this
                 // track is still current. Waiting until the parked worker
@@ -1912,7 +1974,7 @@ fn apply_position(
         session_seek_start_seconds(session, position_seconds) * session.cols_per_second,
     );
     // Far forward seek needed.
-    (start_col.saturating_sub(session.columns_produced) > session.lookahead_columns)
+    (start_col.saturating_sub(decoded_frontier(session)) > session.lookahead_columns)
         .then_some(SessionAction::SeekRequired { position_seconds })
 }
 
@@ -2002,31 +2064,27 @@ fn handle_session_seek(
     session.chunk_buf.clear();
     session.chunk_columns = 0;
 
-    let (new_column, grid_frame) = stft_seek_grid(
+    let (new_column, _) = stft_seek_grid(
         start_seconds,
         session.effective_rate,
         session.hop_size,
         session.effective_hop,
     );
-    let (frame, leading_silence) = centred_window_start(grid_frame, session.fft_size);
-    source.seek_to_frame(frame, session.effective_rate)?;
-    session.source_reached_eof = false;
-    session.timeline = AudioTimeline::new(frame);
-    for stft in &mut session.stfts {
-        stft.reset();
-    }
-    enqueue_leading_silence(&mut session.stfts, leading_silence);
-    for resampler in &mut session.resamplers {
-        resampler.reset_at_column(new_column, session.hop_size, session.effective_hop);
-    }
-
-    session.columns_produced = new_column;
+    let (playhead_column, _) = stft_seek_grid(
+        position_seconds,
+        session.effective_rate,
+        session.hop_size,
+        session.effective_hop,
+    );
+    let backfill = plan_backfill(session.display_mode, new_column, playhead_column);
+    reposition_decoder(
+        session,
+        source,
+        backfill.map_or(new_column, |backfill| backfill.end),
+    )?;
+    session.backfill = backfill;
     session.session_start_column = new_column;
-    session.chunk_buf.clear();
-    session.chunk_columns = 0;
-    session.chunk_start_index = new_column;
     session.target_chunk_columns = 1; // Fast first-pixel after seek
-    session.total_covered_samples = 0;
     session.throttle_origin = None;
     session.post_reset_unthrottled_columns = post_reset_unthrottled_columns(session.display_mode);
     session.target_position_seconds = position_seconds;
@@ -2056,6 +2114,208 @@ fn handle_session_seek(
     });
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Playhead first: the left of a centered view after its right
+// ---------------------------------------------------------------------------
+
+/// A centered session decodes the columns left of its playhead after the
+/// right only if there are at least this many; fewer take less time than
+/// the seeks there and back.
+const MIN_BACKFILL_COLUMNS: u64 = 64;
+
+/// How far past the right edge of the view a centered session decodes
+/// before it fills the left, and so how far playback goes on before the
+/// session leaves the left for the right again.
+const BACKFILL_RIGHT_MARGIN_SECONDS: f64 = 2.0;
+
+/// The left of a centered view, which a session that starts left of its
+/// playhead decodes after the playhead's columns: first from the playhead
+/// to past the right edge of the view, then from the start of the session
+/// up to the playhead, then on from the right. Every column lands on the
+/// absolute grid, and the UI's ring takes each where it belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Backfill {
+    /// The next column of the left to decode.
+    next: u64,
+    /// The column the session started at the playhead: the left ends
+    /// before it.
+    end: u64,
+    /// While the session decodes the left, the column after the last it
+    /// decoded on the right, where it goes on afterwards.
+    resume: Option<u64>,
+    /// The right reached the end of the file.
+    right_ended: bool,
+}
+
+/// The backfill of a session in `display_mode` whose columns start at
+/// `start_column`, with its playhead at `playhead_column`.
+fn plan_backfill(
+    display_mode: SpectrogramDisplayMode,
+    start_column: u64,
+    playhead_column: u64,
+) -> Option<Backfill> {
+    (display_mode == SpectrogramDisplayMode::Centered
+        && playhead_column >= start_column.saturating_add(MIN_BACKFILL_COLUMNS))
+    .then_some(Backfill {
+        next: start_column,
+        end: playhead_column,
+        resume: None,
+        right_ended: false,
+    })
+}
+
+/// The column after the last the session decoded on the right, where the
+/// UI's ring ends; while it decodes the left, that is not where it reads.
+fn decoded_frontier(session: &SpectrogramSessionState) -> u64 {
+    session
+        .backfill
+        .and_then(|backfill| backfill.resume)
+        .unwrap_or(session.columns_produced)
+}
+
+/// The column at the right edge of the session's centered view of its
+/// playback position.
+fn view_right_column(session: &SpectrogramSessionState) -> u64 {
+    let window = centered_view::window_seconds(
+        session.widget_width,
+        session.zoom_level,
+        session.effective_hop,
+        session.cols_per_second,
+    );
+    let left = centered_view::visible_left_edge_seconds(
+        session.target_position_seconds,
+        window,
+        session.track_duration_seconds,
+    );
+    f64_to_u64_saturating((left + window) * session.cols_per_second)
+}
+
+/// Where a session decoding the right of its view leaves it for the left:
+/// a margin past the view's right edge, or its lookahead if that is nearer.
+fn backfill_right_end(session: &SpectrogramSessionState) -> u64 {
+    let margin = f64_to_u64_saturating(BACKFILL_RIGHT_MARGIN_SECONDS * session.cols_per_second);
+    let view_end = view_right_column(session).saturating_add(margin);
+    if session.lookahead_columns == 0 {
+        return view_end;
+    }
+    let target = f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
+    view_end.min(target.saturating_add(session.lookahead_columns))
+}
+
+/// Whether the session has yet to decode its first column at the playhead,
+/// which it computes as soon as it has the rows.
+fn awaits_playhead_columns(session: &SpectrogramSessionState) -> bool {
+    session.backfill.is_some_and(|backfill| {
+        backfill.resume.is_none() && session.columns_produced == backfill.end
+    })
+}
+
+/// Point the decoder at the absolute column `column`, which it decodes
+/// next, dropping the rows and columns it has not sent.
+fn reposition_decoder(
+    session: &mut SpectrogramSessionState,
+    source: &mut AudioFrameSource,
+    column: u64,
+) -> anyhow::Result<()> {
+    let grid_frame = column_grid_frame(column, session.hop_size, session.effective_hop);
+    let (frame, leading_silence) = centred_window_start(grid_frame, session.fft_size);
+    source.seek_to_frame(frame, session.effective_rate)?;
+    session.source_reached_eof = false;
+    session.timeline = AudioTimeline::new(frame);
+    for stft in &mut session.stfts {
+        stft.reset();
+    }
+    enqueue_leading_silence(&mut session.stfts, leading_silence);
+    for resampler in &mut session.resamplers {
+        resampler.reset_at_column(column, session.hop_size, session.effective_hop);
+    }
+    session.columns_produced = column;
+    session.chunk_buf.clear();
+    session.chunk_columns = 0;
+    session.chunk_start_index = column;
+    session.total_covered_samples = 0;
+    Ok(())
+}
+
+/// Move a session that decodes its playhead's columns first between the
+/// right of its view and the left: to the left once the right reaches
+/// [`backfill_right_end`] or the end of the file, back to the right when
+/// playback gets near the right edge of what it decoded there, and on with
+/// the right once the left is done. A view that stops being centered gets
+/// the right only, as a rolling view shows columns in the order they come.
+fn step_backfill(
+    session: &mut SpectrogramSessionState,
+    source: &mut AudioFrameSource,
+    event_tx: &dyn AnalysisEventOutput,
+    columns_produced_out: &AtomicU64,
+) -> anyhow::Result<()> {
+    let Some(backfill) = session.backfill else {
+        return Ok(());
+    };
+    if session.display_mode != SpectrogramDisplayMode::Centered {
+        return end_backfill(session, source, event_tx, columns_produced_out);
+    }
+    match backfill.resume {
+        None if backfill.right_ended || session.columns_produced >= backfill_right_end(session) => {
+            session_emit_pending_chunk(session, event_tx, columns_produced_out);
+            let resume = session.columns_produced;
+            profile_eprintln!(
+                "[spect-worker] backfill {}..{} (right decoded to {resume})",
+                backfill.next,
+                backfill.end,
+            );
+            reposition_decoder(session, source, backfill.next)?;
+            session.backfill = Some(Backfill {
+                resume: Some(resume),
+                ..backfill
+            });
+        }
+        Some(_) if session.columns_produced >= backfill.end => {
+            end_backfill(session, source, event_tx, columns_produced_out)?;
+        }
+        Some(resume) if !backfill.right_ended && resume < view_right_column(session) => {
+            // Playback caught up with the right: decode it ahead again.
+            session_emit_pending_chunk(session, event_tx, columns_produced_out);
+            let next = session.columns_produced;
+            reposition_decoder(session, source, resume)?;
+            session.backfill = Some(Backfill {
+                next,
+                resume: None,
+                ..backfill
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Stop filling the left of the view, and go on with the right where the
+/// session left it, or park at its end.
+fn end_backfill(
+    session: &mut SpectrogramSessionState,
+    source: &mut AudioFrameSource,
+    event_tx: &dyn AnalysisEventOutput,
+    columns_produced_out: &AtomicU64,
+) -> anyhow::Result<()> {
+    let Some(backfill) = session.backfill else {
+        return Ok(());
+    };
+    let Some(resume) = backfill.resume else {
+        session.backfill = None;
+        return Ok(());
+    };
+    session_emit_pending_chunk(session, event_tx, columns_produced_out);
+    session.backfill = None;
+    if backfill.right_ended {
+        // The end is published, and the session parks there.
+        session.columns_produced = resume;
+        session.chunk_start_index = resume;
+        session.source_reached_eof = true;
+        return Ok(());
+    }
+    reposition_decoder(session, source, resume)
 }
 
 // ---------------------------------------------------------------------------
@@ -2261,6 +2521,7 @@ fn session_has_batch(session: &SpectrogramSessionState, helpers: bool) -> bool {
     rows > 0
         && (rows >= stft_batch::PARALLEL_BATCH_ROWS
             || post_reset_window_active(session)
+            || awaits_playhead_columns(session)
             || !helpers
             || !stft_batch::with_thread_batcher(|batcher| {
                 batcher.runs_in_parallel(session.stfts.len())
@@ -2271,6 +2532,22 @@ fn session_has_batch(session: &SpectrogramSessionState, helpers: bool) -> bool {
 /// lookahead: none once it leads the playback position by the lookahead,
 /// unless it is still in its post-reset window.
 fn columns_before_park(session: &SpectrogramSessionState) -> u64 {
+    match session.backfill {
+        // Filling the left of the view, up to the playhead's columns.
+        Some(Backfill {
+            resume: Some(_),
+            end,
+            ..
+        }) => end.saturating_sub(session.columns_produced),
+        // Decoding its right, up to where the left comes next.
+        Some(_) => columns_before_lookahead_park(session)
+            .min(backfill_right_end(session).saturating_sub(session.columns_produced)),
+        None => columns_before_lookahead_park(session),
+    }
+}
+
+/// [`columns_before_park`] for the lookahead.
+fn columns_before_lookahead_park(session: &SpectrogramSessionState) -> u64 {
     let target = f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
     let lookahead_end = if session.lookahead_columns == 0 {
         0
@@ -2320,7 +2597,7 @@ fn session_send_full_chunk(
     ));
     session.chunk_start_index = session.columns_produced;
     session.chunk_columns = 0;
-    columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
+    columns_produced_out.store(decoded_frontier(session), Ordering::Relaxed);
     // Ramp up chunk size in rolling mode only to a latency-friendly cap.
     session.target_chunk_columns = next_target_chunk_columns_for_payload(
         session.target_chunk_columns,
@@ -2389,7 +2666,7 @@ fn maybe_update_columns_estimate(
     track_duration_ms_out: &AtomicU64,
 ) {
     let estimate = u64::from(session.total_columns_estimate);
-    let produced = session.columns_produced;
+    let produced = decoded_frontier(session);
 
     // Attempt a GStreamer duration re-query early in the session.
     #[cfg(feature = "gst")]
@@ -2451,6 +2728,15 @@ fn session_flush_chunk(
     event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
 ) {
+    // The left of a view ends where its right began: a partial interval
+    // there is not the end of anything.
+    if session
+        .backfill
+        .is_some_and(|backfill| backfill.resume.is_some())
+    {
+        session_emit_pending_chunk(session, event_tx, columns_produced_out);
+        return;
+    }
     // Drain any partial resampler window at track end.
     // All channels must flush together — if any channel has no
     // partial data, skip the flush (same synchronization as the
@@ -2514,7 +2800,7 @@ fn session_emit_pending_chunk(
     }
     // Always publish the final columns_produced so the analysis runtime
     // has the exact boundary at EOF for staged-commit alignment.
-    columns_produced_out.store(session.columns_produced, Ordering::Relaxed);
+    columns_produced_out.store(decoded_frontier(session), Ordering::Relaxed);
 }
 
 /// Flush any partial chunk and emit a 0-column metadata chunk carrying
@@ -2539,7 +2825,7 @@ fn session_flush_token(
             bins_per_column: clamp_to_u16(session.bins_per_column),
             column_count: 0,
             channel_count: clamp_to_u8(session.channel_count),
-            start_column_index: u64_to_u32_saturating(session.columns_produced),
+            start_column_index: u64_to_u32_saturating(decoded_frontier(session)),
             total_columns_estimate: session.total_columns_estimate,
             sample_rate_hz: session.effective_rate,
             hop_size: clamp_to_u16(session.effective_hop),
@@ -2571,7 +2857,7 @@ fn session_emit_finalize_chunk(
     session: &SpectrogramSessionState,
     event_tx: &dyn AnalysisEventOutput,
 ) {
-    let final_cols = u64_to_u32_saturating(session.columns_produced);
+    let final_cols = u64_to_u32_saturating(decoded_frontier(session));
     let _ = event_tx.send(AnalysisEvent::PrecomputedSpectrogramChunk(
         PrecomputedSpectrogramChunk {
             track_token: session.track_token,
@@ -3309,6 +3595,7 @@ mod tests {
             rejected_continuation: None,
             failure: None,
             queued_commands: VecDeque::new(),
+            backfill: None,
         };
 
         match handle_single_command(
@@ -3424,6 +3711,7 @@ mod tests {
             rejected_continuation: None,
             failure: None,
             queued_commands: VecDeque::new(),
+            backfill: None,
         };
 
         assert!(post_reset_window_active(&session));
@@ -3478,6 +3766,7 @@ mod tests {
             rejected_continuation: None,
             failure: None,
             queued_commands: VecDeque::new(),
+            backfill: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -3542,6 +3831,7 @@ mod tests {
             rejected_continuation: None,
             failure: None,
             queued_commands: VecDeque::new(),
+            backfill: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -3598,6 +3888,7 @@ mod tests {
             rejected_continuation: None,
             failure: None,
             queued_commands: VecDeque::new(),
+            backfill: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -3685,6 +3976,7 @@ mod tests {
             rejected_continuation: None,
             failure: None,
             queued_commands: VecDeque::new(),
+            backfill: None,
         }
     }
 
@@ -6611,5 +6903,473 @@ mod tests {
         }
         let after = per_item(start, packets * frames);
         println!("packets: {before:.2} ns/frame before, {after:.2} ns/frame after");
+    }
+
+    // -----------------------------------------------------------------------
+    // Playhead first: the left of a centered view after its right
+    // -----------------------------------------------------------------------
+
+    /// Seconds of the backfill fixtures, at [`BACKFILL_RATE`].
+    const BACKFILL_SECONDS: u32 = 120;
+    /// A low rate keeps the fixtures small: 7.8 columns a second at the
+    /// reference hop, so a view of [`BACKFILL_WIDTH`] columns shows 41 s.
+    const BACKFILL_RATE: u32 = 8_000;
+    const BACKFILL_WIDTH: u32 = 320;
+    /// Where the playhead is.
+    const BACKFILL_PLAYHEAD: f64 = 60.0;
+
+    /// A 16-bit WAV of `channels` channels of noise, every channel its
+    /// own, named for the test.
+    fn write_noise_fixture(name: &str, channels: u16) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-backfill-{name}-{channels}-{}.wav",
+            std::process::id()
+        ));
+        let data_bytes = BACKFILL_SECONDS * BACKFILL_RATE * u32::from(channels) * 2;
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0");
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&BACKFILL_RATE.to_le_bytes());
+        bytes.extend_from_slice(&(BACKFILL_RATE * u32::from(channels) * 2).to_le_bytes());
+        bytes.extend_from_slice(&(channels * 2).to_le_bytes());
+        bytes.extend_from_slice(b"\x10\0data");
+        bytes.extend_from_slice(&data_bytes.to_le_bytes());
+        let mut random = 0x9e37_79b9_u32 ^ u32::from(channels);
+        for _ in 0..data_bytes / 2 {
+            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let sample = i16::try_from(random >> 18).unwrap() - 8_192;
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// A per-channel centered session of `path` with its playhead at
+    /// `target`, starting where a restart for it does.
+    fn backfill_session_on(path: &Path, channels: usize, target: f64) -> SpectrogramWorkerCommand {
+        let mut command = test_new_track(&path.to_string_lossy(), 1);
+        if let SpectrogramWorkerCommand::NewTrack {
+            channel_count,
+            view_mode,
+            display_mode,
+            widget_width,
+            start_seconds,
+            target_position_seconds,
+            ..
+        } = &mut command
+        {
+            *channel_count = channels;
+            *view_mode = SpectrogramViewMode::PerChannel;
+            *display_mode = SpectrogramDisplayMode::Centered;
+            *widget_width = BACKFILL_WIDTH;
+            *start_seconds = backfill_start_seconds(target);
+            *target_position_seconds = target;
+        }
+        command
+    }
+
+    /// Where a centered session for a playhead at `target` starts: its
+    /// view's left edge, less the warm-up.
+    fn backfill_start_seconds(target: f64) -> f64 {
+        let window = centered_view::window_seconds(
+            BACKFILL_WIDTH,
+            1.0,
+            REFERENCE_HOP,
+            f64::from(BACKFILL_RATE) / usize_to_f64_approx(REFERENCE_HOP),
+        );
+        centered_view::decode_start_seconds(target, window, 0.0)
+    }
+
+    fn backfill_column(seconds: f64) -> u64 {
+        stft_seek_grid(seconds, BACKFILL_RATE, 256, REFERENCE_HOP).0
+    }
+
+    /// Sends what a session sends, and does `on_chunk` with each chunk as
+    /// the worker sends it, so that a test acts at a point of the session.
+    struct WatchedOutput<F: Fn(&PrecomputedSpectrogramChunk) + Send + Sync> {
+        events: Sender<AnalysisEvent>,
+        on_chunk: F,
+    }
+
+    impl<F: Fn(&PrecomputedSpectrogramChunk) + Send + Sync> AnalysisEventOutput for WatchedOutput<F> {
+        fn send(&self, event: AnalysisEvent) -> Result<(), ()> {
+            if let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = &event {
+                (self.on_chunk)(chunk);
+            }
+            self.events.send(event).map_err(|_| ())
+        }
+    }
+
+    /// Run `command` as a session on at most `max_groups` threads, its
+    /// output watched by `on_chunk`, until the session ends; then return
+    /// every chunk it sent.
+    fn run_watched_session(
+        command: SpectrogramWorkerCommand,
+        max_groups: usize,
+        commands: (
+            Sender<SpectrogramWorkerCommand>,
+            Receiver<SpectrogramWorkerCommand>,
+        ),
+        generation: &Arc<AtomicU64>,
+        on_chunk: impl Fn(&PrecomputedSpectrogramChunk) + Send + Sync + 'static,
+        until: impl Fn(&[PrecomputedSpectrogramChunk]) -> bool,
+    ) -> Vec<PrecomputedSpectrogramChunk> {
+        let (events, event_rx) = unbounded();
+        let (command_tx, command_rx) = commands;
+        let generation_for_worker = Arc::clone(generation);
+        let worker = std::thread::spawn(move || {
+            stft_batch::with_thread_batcher(|batcher| {
+                *batcher = stft_batch::ColumnBatcher::new(max_groups);
+            });
+            run_spectrogram_session(
+                QueuedCommand::alone(command),
+                &command_rx,
+                &WatchedOutput { events, on_chunk },
+                &generation_for_worker,
+                &AtomicU64::new(0),
+                &AtomicU64::new(0),
+                &unbounded().0,
+            )
+        });
+        let mut chunks = Vec::new();
+        while !until(&chunks) {
+            match event_rx.recv_timeout(OUTPUT_WAIT) {
+                Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) => chunks.push(chunk),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let _ = command_tx.send(SpectrogramWorkerCommand::StopSession);
+        worker.join().expect("worker");
+        chunks.extend(event_rx.try_iter().filter_map(|event| match event {
+            AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => Some(chunk),
+            _ => None,
+        }));
+        chunks
+    }
+
+    fn ends_complete(chunks: &[PrecomputedSpectrogramChunk]) -> bool {
+        chunks.last().is_some_and(|chunk| chunk.complete)
+    }
+
+    /// The columns of `chunks` by their absolute index. Fails for a column
+    /// sent twice.
+    fn columns_of(
+        chunks: &[PrecomputedSpectrogramChunk],
+    ) -> std::collections::BTreeMap<u64, Vec<u8>> {
+        let mut columns = std::collections::BTreeMap::new();
+        for chunk in chunks.iter().filter(|chunk| chunk.column_count > 0) {
+            let width = usize::from(chunk.bins_per_column) * usize::from(chunk.channel_count);
+            for (offset, column) in chunk.columns_u8.chunks_exact(width).enumerate() {
+                let index = u64::from(chunk.start_column_index) + usize_to_u64(offset);
+                assert!(
+                    columns.insert(index, column.to_vec()).is_none(),
+                    "column {index} sent twice"
+                );
+            }
+        }
+        columns
+    }
+
+    /// The column spans of `chunks` with data, merged where they follow
+    /// each other, in the order sent.
+    fn spans_of(chunks: &[PrecomputedSpectrogramChunk]) -> Vec<(u64, u64)> {
+        let mut spans: Vec<(u64, u64)> = Vec::new();
+        for chunk in chunks.iter().filter(|chunk| chunk.column_count > 0) {
+            let start = u64::from(chunk.start_column_index);
+            let end = start + u64::from(chunk.column_count);
+            match spans.last_mut() {
+                Some(last) if last.1 == start => last.1 = end,
+                _ => spans.push((start, end)),
+            }
+        }
+        spans
+    }
+
+    /// The columns of a session that decodes from `start` on, in order.
+    fn continuous_reference(
+        path: &Path,
+        channels: usize,
+        max_groups: usize,
+    ) -> std::collections::BTreeMap<u64, Vec<u8>> {
+        let mut command = backfill_session_on(path, channels, BACKFILL_PLAYHEAD);
+        if let SpectrogramWorkerCommand::NewTrack {
+            target_position_seconds,
+            start_seconds,
+            ..
+        } = &mut command
+        {
+            // A session at the start of the file, which has nothing left of it.
+            *start_seconds = 0.0;
+            *target_position_seconds = 0.0;
+        }
+        let chunks = run_watched_session(
+            command,
+            max_groups,
+            unbounded(),
+            &Arc::new(AtomicU64::new(1)),
+            |_| {},
+            ends_complete,
+        );
+        assert_eq!(
+            spans_of(&chunks).len(),
+            1,
+            "a session from the start decodes in order"
+        );
+        columns_of(&chunks)
+    }
+
+    #[test]
+    fn a_centered_session_decodes_the_playhead_first_then_the_left_on_the_grid() {
+        // Stereo on one thread, and six channels whose batches the worker
+        // shares with helper threads.
+        for (channels, max_groups) in [(2_u16, 1), (6, 3)] {
+            let path = write_noise_fixture("order", channels);
+            let channel_count = usize::from(channels);
+            let reference = continuous_reference(&path, channel_count, max_groups);
+            let start = backfill_column(backfill_start_seconds(BACKFILL_PLAYHEAD));
+            let playhead = backfill_column(BACKFILL_PLAYHEAD);
+            assert!(
+                playhead >= start + MIN_BACKFILL_COLUMNS,
+                "{start} {playhead}"
+            );
+
+            let chunks = run_watched_session(
+                backfill_session_on(&path, channel_count, BACKFILL_PLAYHEAD),
+                max_groups,
+                unbounded(),
+                &Arc::new(AtomicU64::new(1)),
+                |_| {},
+                ends_complete,
+            );
+            // The reset starts the session's columns at its first, left of
+            // the playhead, for the UI's ring to count from.
+            let reset = &chunks[0];
+            assert!(reset.buffer_reset && reset.column_count == 0);
+            assert_eq!(u64::from(reset.start_column_index), start);
+            // The playhead's column comes first, alone.
+            let first = chunks.iter().find(|chunk| chunk.column_count > 0).unwrap();
+            assert_eq!(u64::from(first.start_column_index), playhead);
+            assert_eq!(first.column_count, 1);
+            // Then the right of the view, the left up to the playhead, and
+            // the right on from where it was left.
+            let spans = spans_of(&chunks);
+            assert_eq!(spans.len(), 3, "{channels} channels: {spans:?}");
+            let (right, left, rest) = (spans[0], spans[1], spans[2]);
+            assert_eq!(right.0, playhead);
+            let view_right = backfill_column(BACKFILL_PLAYHEAD) + u64::from(BACKFILL_WIDTH) / 2;
+            assert!(right.1 >= view_right, "{spans:?}");
+            assert_eq!(left, (start, playhead));
+            assert_eq!(rest.0, right.1);
+            // Every column is the one a session decoding in order makes.
+            let columns = columns_of(&chunks);
+            assert_eq!(columns.len(), usize::try_from(rest.1 - start).unwrap());
+            for (index, bytes) in &columns {
+                assert_eq!(
+                    Some(bytes),
+                    reference.get(index),
+                    "{channels} channels: column {index}"
+                );
+            }
+            // The end is published once, after the last column.
+            assert_eq!(chunks.iter().filter(|chunk| chunk.complete).count(), 1);
+            assert_eq!(
+                u64::from(chunks.last().unwrap().total_columns_estimate),
+                rest.1
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_seek_in_a_centered_session_decodes_the_playhead_first_and_during_the_left_starts_over() {
+        let path = write_noise_fixture("seek", 2);
+        let reference = continuous_reference(&path, 2, 1);
+        let first_target = BACKFILL_PLAYHEAD;
+        let second_target = 90.0;
+        let first_playhead = backfill_column(first_target);
+        // A seek arrives while the session decodes the left of its view.
+        let (commands, command_rx) = unbounded();
+        let seek = commands.clone();
+        let sent = AtomicBool::new(false);
+        let chunks = run_watched_session(
+            backfill_session_on(&path, 2, first_target),
+            1,
+            (commands, command_rx),
+            &Arc::new(AtomicU64::new(1)),
+            move |chunk| {
+                if chunk.column_count > 0
+                    && u64::from(chunk.start_column_index) < first_playhead
+                    && !sent.swap(true, Ordering::Relaxed)
+                {
+                    seek.send(SpectrogramWorkerCommand::Seek {
+                        position_seconds: second_target,
+                    })
+                    .unwrap();
+                }
+            },
+            ends_complete,
+        );
+        let reset = chunks
+            .iter()
+            .rposition(|chunk| chunk.buffer_reset)
+            .expect("the seek's reset");
+        assert!(reset > 0, "the seek follows the session's own reset");
+        let after = &chunks[reset..];
+        let start = backfill_column(backfill_start_seconds(second_target));
+        let playhead = backfill_column(second_target);
+        assert_eq!(u64::from(after[0].start_column_index), start);
+        // Nothing of the left before the seek follows its reset.
+        let spans = spans_of(after);
+        assert_eq!(spans.len(), 3, "{spans:?}");
+        assert_eq!(spans[0].0, playhead);
+        assert_eq!(spans[1], (start, playhead));
+        assert_eq!(spans[2].0, spans[0].1);
+        for (index, bytes) in columns_of(after) {
+            assert_eq!(Some(&bytes), reference.get(&index), "column {index}");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_superseded_centered_session_does_not_decode_the_left_of_its_view() {
+        let path = write_noise_fixture("superseded", 2);
+        let playhead = backfill_column(BACKFILL_PLAYHEAD);
+        let generation = Arc::new(AtomicU64::new(1));
+        let superseding = Arc::clone(&generation);
+        // Another session takes over once the playhead's column is out.
+        let chunks = run_watched_session(
+            backfill_session_on(&path, 2, BACKFILL_PLAYHEAD),
+            1,
+            unbounded(),
+            &generation,
+            move |chunk| {
+                if chunk.column_count > 0 {
+                    superseding.store(2, Ordering::Relaxed);
+                }
+            },
+            |_| false,
+        );
+        assert!(chunks.iter().any(|chunk| chunk.column_count > 0));
+        for chunk in chunks.iter().filter(|chunk| chunk.column_count > 0) {
+            assert!(
+                u64::from(chunk.start_column_index) >= playhead,
+                "a column of the left at {}",
+                chunk.start_column_index
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_view_that_stops_being_centered_gets_the_right_of_its_view_only() {
+        let path = write_noise_fixture("rolling", 2);
+        let reference = continuous_reference(&path, 2, 1);
+        let playhead = backfill_column(BACKFILL_PLAYHEAD);
+        let (commands, command_rx) = unbounded();
+        let switch = commands.clone();
+        let sent = AtomicBool::new(false);
+        let chunks = run_watched_session(
+            backfill_session_on(&path, 2, BACKFILL_PLAYHEAD),
+            1,
+            (commands, command_rx),
+            &Arc::new(AtomicU64::new(1)),
+            move |chunk| {
+                if chunk.column_count > 0
+                    && u64::from(chunk.start_column_index) < playhead
+                    && !sent.swap(true, Ordering::Relaxed)
+                {
+                    switch
+                        .send(SpectrogramWorkerCommand::SetDisplayMode(
+                            SpectrogramDisplayMode::Rolling,
+                        ))
+                        .unwrap();
+                    // Playback goes on, so that the rolling session's
+                    // lookahead, smaller than the centered one's, holds
+                    // more than a chunk past what it decoded.
+                    switch
+                        .send(SpectrogramWorkerCommand::PositionUpdate {
+                            position_seconds: BACKFILL_PLAYHEAD + 20.0,
+                        })
+                        .unwrap();
+                }
+            },
+            |chunks| spans_of(chunks).len() >= 3,
+        );
+        let spans = spans_of(&chunks);
+        assert_eq!(spans.len(), 3, "{spans:?}");
+        // The left stopped where the switch found it, and the right went on
+        // from where it was.
+        assert_eq!(
+            spans[1].0,
+            backfill_column(backfill_start_seconds(BACKFILL_PLAYHEAD))
+        );
+        assert!(spans[1].1 < playhead, "{spans:?}");
+        assert_eq!(spans[2].0, spans[0].1);
+        for (index, bytes) in columns_of(&chunks) {
+            assert_eq!(Some(&bytes), reference.get(&index), "column {index}");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn only_a_centered_session_left_of_its_playhead_backfills() {
+        let centered = SpectrogramDisplayMode::Centered;
+        assert_eq!(
+            plan_backfill(centered, 100, 100 + MIN_BACKFILL_COLUMNS),
+            Some(Backfill {
+                next: 100,
+                end: 100 + MIN_BACKFILL_COLUMNS,
+                resume: None,
+                right_ended: false,
+            })
+        );
+        // Rolling views show history in the order it arrives.
+        assert_eq!(
+            plan_backfill(SpectrogramDisplayMode::Rolling, 0, 5_000),
+            None
+        );
+        // A track's start, or a few columns, cost less than the seeks.
+        assert_eq!(plan_backfill(centered, 0, 0), None);
+        assert_eq!(
+            plan_backfill(centered, 100, 100 + MIN_BACKFILL_COLUMNS - 1),
+            None
+        );
+    }
+
+    #[test]
+    fn a_session_filling_its_left_reports_the_right_it_decoded() {
+        // What the UI's ring ends at, which the analysis thread judges
+        // seeks by, and a finalize for a gapless switch publishes.
+        let mut session = make_test_session();
+        session.display_mode = SpectrogramDisplayMode::Centered;
+        session.columns_produced = 300;
+        session.backfill = Some(Backfill {
+            next: 250,
+            end: 400,
+            resume: Some(900),
+            right_ended: false,
+        });
+        assert_eq!(decoded_frontier(&session), 900);
+        let (events, event_rx) = unbounded();
+        session_emit_finalize_chunk(&session, &events);
+        let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = event_rx.try_recv().unwrap() else {
+            panic!("a chunk");
+        };
+        assert!(chunk.complete);
+        assert_eq!(chunk.total_columns_estimate, 900);
+        // A position the right covers needs no seek, though the session
+        // reads further left.
+        session.target_position_seconds = 15.0;
+        session.session_start_column = 250;
+        session.lookahead_columns = 512;
+        assert!(apply_position(&mut session, 15.0).is_none());
+        // Its partial interval at the end of the left is not a column.
+        let produced = AtomicU64::new(0);
+        session.resamplers = vec![PeakHoldResampler::new(1.0)];
+        session_flush_chunk(&mut session, &events, &produced);
+        assert_eq!(session.columns_produced, 300);
+        assert_eq!(produced.load(Ordering::Relaxed), 900);
     }
 }

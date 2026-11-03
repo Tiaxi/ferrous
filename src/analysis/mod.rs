@@ -5381,12 +5381,13 @@ mod tests {
     }
 
     /// The columns the UI holds of the last session: its ring, as far as
-    /// the chunks tell.
+    /// the chunks tell. A centered session sends the left of its view after
+    /// the columns at its playhead.
     #[cfg(feature = "gst")]
     #[derive(Default)]
     struct ModelRing {
-        /// The first column and the end of the columns since the last reset.
-        columns: Option<(u64, u64)>,
+        /// The spans of columns since the last reset, in order and merged.
+        columns: Vec<(u64, u64)>,
         reset_pending: bool,
         /// Whether the session behind the columns reached the end.
         complete: bool,
@@ -5403,22 +5404,33 @@ mod tests {
             if chunk.column_count == 0 {
                 return;
             }
+            if std::mem::take(&mut self.reset_pending) {
+                self.columns.clear();
+            }
             let start = u64::from(chunk.start_column_index);
             let end = start + u64::from(chunk.column_count);
-            self.columns = match self.columns {
-                Some((first, last)) if !self.reset_pending => {
-                    assert_eq!(start, last, "a gap in the columns of a session");
-                    Some((first, end))
+            self.columns.push((start, end));
+            self.columns.sort_unstable();
+            let mut merged: Vec<(u64, u64)> = Vec::with_capacity(self.columns.len());
+            for &(first, last) in &self.columns {
+                match merged.last_mut() {
+                    Some(previous) if first <= previous.1 => previous.1 = previous.1.max(last),
+                    _ => merged.push((first, last)),
                 }
-                _ => Some((start, end)),
-            };
-            self.reset_pending = false;
+            }
+            self.columns = merged;
         }
 
         /// Whether the columns run from `left` past `right` without a gap.
         fn covers(&self, left: u64, right: u64) -> bool {
             self.columns
-                .is_some_and(|(first, last)| first <= left && last > right)
+                .iter()
+                .any(|&(first, last)| first <= left && last > right)
+        }
+
+        /// The first column since the last reset.
+        fn first(&self) -> Option<u64> {
+            self.columns.first().map(|&(first, _)| first)
         }
     }
 
@@ -5485,7 +5497,7 @@ mod tests {
         engine.command(AnalysisCommand::PositionUpdate(0.0));
         let mut ring = ModelRing::default();
         fill_ring_until(&events, &mut ring, "the track did not start", |ring| {
-            ring.columns.is_some()
+            ring.first().is_some()
         });
         (engine, events, ring, path)
     }
@@ -5550,18 +5562,17 @@ mod tests {
         let (engine, events, mut ring, path) =
             engine_on_raw_stream("end", SpectrogramDisplayMode::Centered);
         let target = seek_burst(&engine, &[60.0, 21.0, BURST_STREAM_SECONDS - 5.0]);
-        fill_ring_until(&events, &mut ring, "the session did not end", |ring| {
+        // The session publishes the end once its right reaches it, and
+        // fills the left of the view after that.
+        let left = burst_column(BURST_STREAM_SECONDS - BURST_WINDOW_SECONDS);
+        let what = "the session did not end with the view of the end covered";
+        fill_ring_until(&events, &mut ring, what, |ring| {
             ring.complete
                 && ring
-                    .columns
-                    .is_some_and(|(first, _)| first > burst_column(target - 60.0))
+                    .first()
+                    .is_some_and(|first| first > burst_column(target - 60.0))
+                && ring.covers(left, burst_column(target))
         });
-        let left = burst_column(BURST_STREAM_SECONDS - BURST_WINDOW_SECONDS);
-        assert!(
-            ring.covers(left, burst_column(target)),
-            "{:?}",
-            ring.columns
-        );
         drop(engine);
         std::fs::remove_file(&path).expect("remove fixture");
     }

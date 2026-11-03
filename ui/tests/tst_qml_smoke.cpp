@@ -1243,6 +1243,11 @@ private slots:
     void spectrogramHighRateRetentionPreservesViewportWithinBudget();
     void spectrogramRingCommitsOnlyTheBlocksWritten();
     void spectrogramUnwrittenRingColumnsDrawAsBackground();
+    void spectrogramCenteredBackfillLandsBeforeTheWriteHead();
+    void spectrogramFreshPaneTakesTheBackfillOfASessionItMissedTheResetOf();
+    void spectrogramStaleBackfillIsDropped();
+    void spectrogramSeekShowsThePlayheadFirstAndFillsTheLeftIn();
+    void spectrogramZoomFreezeWaitsForTheBackfill();
     void spectrogramRingGrowthKeepsRollingHistory();
     void spectrogramRingChangeBenchmark();
     void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
@@ -10389,9 +10394,10 @@ void SpectrogramSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() 
 
 void SpectrogramSmokeTest::spectrogramSeekFreezeEndsWithTheSession() {
     // A session that started right of the view's left edge reached the end
-    // of the track, so no column will ever cover that edge. The freeze must
-    // not wait for one, or the image of the position before the seek stays
-    // on screen while playback goes on.
+    // of the track, so no column will ever cover that edge. A zoom's freeze
+    // must not wait for one, or the image of the position before it stays
+    // on screen while playback goes on. A seek's ends with the playhead's
+    // columns.
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
@@ -10412,10 +10418,19 @@ void SpectrogramSmokeTest::spectrogramSeekFreezeEndsWithTheSession() {
     item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0,
         false, true, token, true, 2);
     QVERIFY(item.m_zoomFillActive);
+    QVERIFY(item.m_seekFillActive);
     item.feedPrecomputedChunk({}, bins, 0, 0, 4900, end, 44100, 1024,
         false, true, token, true, 2);
+    QVERIFY2(item.m_zoomFillActive, "nothing at the playhead yet");
     item.feedPrecomputedChunk(QByteArray(100 * bins, '\x60'), bins, 0, 100,
         4900, end, 44100, 1024, false, false, token, false, 2);
+    QVERIFY2(!item.m_zoomFillActive, "the playhead's columns end a seek's freeze");
+    QVERIFY(!item.m_seekFillActive);
+
+    // A zoom's freeze waits for the left of the view, which may still arrive.
+    item.m_zoomFillActive = true;
+    item.feedPrecomputedChunk(QByteArray(bins, '\x60'), bins, 0, 1,
+        4999, end, 44100, 1024, false, false, token, false, 2);
     QVERIFY2(item.m_zoomFillActive, "the left of the view may still arrive");
 
     // Another session's end says nothing of this one's.
@@ -10459,6 +10474,9 @@ void SpectrogramSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
     item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0,
         false, true, token, true);
     QVERIFY(item.m_zoomFillActive);
+    // A freeze that waits for the view, as a zoom's does: a seek's ends
+    // with the playhead's columns.
+    item.m_seekFillActive = false;
     item.feedPrecomputedChunk({}, bins, 0, 0, 3600, estimatedEnd, 44100, 1024,
         false, true, token, true, 2);
     item.feedPrecomputedChunk(QByteArray(400 * bins, '\x60'), bins, 0, 400,
@@ -15652,6 +15670,261 @@ void SpectrogramSmokeTest::spectrogramUnwrittenRingColumnsDrawAsBackground() {
     }
 }
 
+namespace {
+
+// A byte for each column, none of them black.
+char backfillColumnByte(qint64 column) {
+    return static_cast<char>(64 + column % 150);
+}
+
+// Feeds `count` columns from `start` of a centered session of `token` and
+// `generation`, each column of its own byte.
+void feedBackfillColumns(SpectrogramItem &item, qint64 start, int count, quint64 generation,
+    quint64 token = 7, int bins = 4, int hop = 1024) {
+    QByteArray data(qsizetype(bins) * count, '\0');
+    for (int column = 0; column < count; ++column) {
+        std::fill_n(data.data() + qsizetype(column) * bins, bins,
+            backfillColumnByte(start + column));
+    }
+    item.feedPrecomputedChunk(data, bins, 0, count, static_cast<int>(start), 100'000,
+        48'000, hop, false, false, token, false, generation);
+}
+
+// The worker's reset of a centered session whose columns start at `start`.
+void feedSessionReset(SpectrogramItem &item, qint64 start, quint64 generation,
+    quint64 token = 7, int bins = 4, int hop = 1024) {
+    item.feedPrecomputedChunk({}, bins, 0, 0, static_cast<int>(start), 100'000,
+        48'000, hop, false, true, token, true, generation);
+}
+
+bool ringHoldsBackfillColumn(SpectrogramItem &item, qint64 column) {
+    QMutexLocker lock(&item.m_stateMutex);
+    const quint8 *bytes = item.ringColumnLocked(column, false);
+    return bytes != nullptr && bytes[0] == static_cast<quint8>(backfillColumnByte(column));
+}
+
+} // namespace
+
+void SpectrogramSmokeTest::spectrogramCenteredBackfillLandsBeforeTheWriteHead() {
+    // After a seek, the worker sends a centered session's columns at the
+    // playhead first, then those left of it, before the ring's write head.
+    // Each lands where its column puts it, and the ring, once it wraps,
+    // drops the columns furthest left first.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(16);
+    item.setDisplayMode(1);
+    feedSessionReset(item, 1000, 2);
+    feedBackfillColumns(item, 1300, 1, 2);
+    feedBackfillColumns(item, 1301, 99, 2);
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 1399);
+    QCOMPARE(item.m_ringWriteSeq, qint64(400));
+    QVERIFY(!ringHoldsBackfillColumn(item, 1299));
+    QVERIFY(ringHoldsBackfillColumn(item, 1300));
+
+    feedBackfillColumns(item, 1000, 150, 2);
+    feedBackfillColumns(item, 1150, 150, 2);
+    QCOMPARE(item.m_ringWriteSeq, qint64(400));
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 1399);
+    for (qint64 column = 1000; column < 1400; ++column) {
+        QVERIFY2(ringHoldsBackfillColumn(item, column), qPrintable(QString::number(column)));
+    }
+
+    // The right goes on past the ring's capacity.
+    const int capacity = item.m_ringCapacity;
+    QVERIFY(capacity > 400);
+    const qint64 newest = 1099 + capacity;
+    for (qint64 start = 1400; start <= newest; start += 256) {
+        feedBackfillColumns(item, start, static_cast<int>(std::min<qint64>(256, newest + 1 - start)), 2);
+    }
+    QCOMPARE(item.m_ringCapacity, capacity);
+    QCOMPARE(item.m_ringWriteSeq, qint64(capacity) + 100);
+    QVERIFY(!ringHoldsBackfillColumn(item, 1099));
+    for (qint64 column = 1100; column <= newest; ++column) {
+        QVERIFY2(ringHoldsBackfillColumn(item, column), qPrintable(QString::number(column)));
+    }
+
+    // A column further left than the ring reaches does not take the place
+    // of the one a capacity right of it.
+    feedBackfillColumns(item, 1050, 1, 2);
+    QVERIFY(!ringHoldsBackfillColumn(item, 1050));
+    QVERIFY(ringHoldsBackfillColumn(item, 1050 + capacity));
+    QCOMPARE(item.m_ringWriteSeq, qint64(capacity) + 100);
+
+    // In rolling mode the ring is written in the order the columns come.
+    item.setDisplayMode(0);
+    const qint64 writeSeq = item.m_ringWriteSeq;
+    feedBackfillColumns(item, newest + 1, 3, 2);
+    QCOMPARE(item.m_ringWriteSeq, writeSeq + 3);
+}
+
+void SpectrogramSmokeTest::spectrogramFreshPaneTakesTheBackfillOfASessionItMissedTheResetOf() {
+    // A pane made after the session's reset, as when a track has more
+    // channels than the last, starts its ring at the first columns it gets:
+    // the playhead's. Those left of them still land before them.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(16);
+    item.setDisplayMode(1);
+    feedBackfillColumns(item, 5300, 100, 2);
+    QVERIFY(ringHoldsBackfillColumn(item, 5300));
+    feedBackfillColumns(item, 5000, 300, 2);
+    for (qint64 column = 5000; column < 5400; ++column) {
+        QVERIFY2(ringHoldsBackfillColumn(item, column), qPrintable(QString::number(column)));
+    }
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 5399);
+}
+
+void SpectrogramSmokeTest::spectrogramStaleBackfillIsDropped() {
+    // The left of a session that a seek, or another track, has superseded
+    // arrives after the new session's reset: it is not written.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(16);
+    item.setDisplayMode(1);
+    feedSessionReset(item, 1000, 2);
+    feedBackfillColumns(item, 1300, 100, 2);
+
+    // A seek starts session 3, with its playhead at 5300.
+    feedSessionReset(item, 5000, 3);
+    feedBackfillColumns(item, 5300, 10, 3);
+    feedBackfillColumns(item, 1000, 300, 2);
+    QVERIFY(!ringHoldsBackfillColumn(item, 1000));
+    QVERIFY(!ringHoldsBackfillColumn(item, 1300));
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 5309);
+    QCOMPARE(item.m_ringWriteSeq, qint64(310));
+
+    // Its own left lands before the write head.
+    feedBackfillColumns(item, 5000, 300, 3);
+    QVERIFY(ringHoldsBackfillColumn(item, 5000));
+    QVERIFY(ringHoldsBackfillColumn(item, 5299));
+    QCOMPARE(item.m_ringWriteSeq, qint64(310));
+
+    // A centered gapless switch keeps the generation: the next track's
+    // reset makes the left of the previous one stale.
+    feedSessionReset(item, 0, 3, 8);
+    feedBackfillColumns(item, 0, 10, 3, 8);
+    feedBackfillColumns(item, 5000, 50, 3, 7);
+    QCOMPARE(item.m_precomputedTrackToken, quint64(8));
+    QCOMPARE(item.m_precomputedMaxColumnIndex, 9);
+    QCOMPARE(item.m_ringWriteSeq, qint64(10));
+}
+
+void SpectrogramSmokeTest::spectrogramSeekShowsThePlayheadFirstAndFillsTheLeftIn() {
+    // A seek outside the decoded columns keeps the previous image only until
+    // the playhead's columns arrive. The view then shows the columns left
+    // of the playhead as missing, as columns not decoded yet look, and
+    // draws each in as the worker's backfill brings it.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(16);
+    item.setDisplayMode(1);
+    feedSessionReset(item, 0, 1);
+    feedBackfillColumns(item, 0, 2000, 1);
+    testClock(item).holdAt(10.0);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_binsPerColumn = 4;
+        item.ensureMapping(16);
+        rebuildCanvasNow(item, 320, 16, 469 - 160, 469 + 159, false);
+    }
+    QVERIFY(!item.m_canvas.isNull());
+
+    // The analysis thread clears the ring, and the worker resets it for a
+    // session from left of the view, its playhead at 30 s, column 1406.
+    item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0, false, true, 7, true, 2);
+    QVERIFY(item.m_zoomFillActive);
+    QVERIFY(item.m_seekFillActive);
+    // Another seek before the first one's columns came is a seek too.
+    item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0, false, true, 7, true, 2);
+    QVERIFY(item.m_seekFillActive);
+    testClock(item).holdAt(30.0);
+    constexpr qint64 playhead = 1406;
+    constexpr qint64 left = playhead - 160;
+    constexpr qint64 start = left - 94;
+    feedSessionReset(item, start, 2);
+    QVERIFY(item.m_zoomFillActive);
+    feedBackfillColumns(item, playhead, 1, 2);
+    QVERIFY(!item.m_zoomFillActive);
+    QVERIFY(!item.m_seekFillActive);
+    QVERIFY(item.m_precomputedCanvasDirty);
+    feedBackfillColumns(item, playhead + 1, 300, 2);
+
+    const QRgb missing = qRgb(0, 0, 0);
+    const auto pixelsAreMissing = [&item](int from, int to) {
+        for (int x = from; x < to; ++x) {
+            for (int y = 0; y < item.m_canvas.height(); ++y) {
+                if (item.m_canvas.pixel(x, y) != qRgb(0, 0, 0)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        // As the paint does before it draws.
+        item.m_binsPerColumn = 4;
+        item.ensureMapping(16);
+        rebuildCanvasNow(item, 320, 16, left, left + 319, false);
+    }
+    // Each pixel may blend in its neighbour; leave out those at the edge.
+    QVERIFY(pixelsAreMissing(0, 159));
+    QVERIFY(item.m_canvas.pixel(170, 8) != missing);
+
+    // The left arrives, from the start of the session, and is drawn in.
+    feedBackfillColumns(item, start, 150, 2);
+    QVERIFY(!pixelsAreMissing(0, 50));
+    QVERIFY(pixelsAreMissing(58, 159));
+    feedBackfillColumns(item, start + 150, static_cast<int>(playhead - start - 150), 2);
+    const QImage filled = item.m_canvas.copy();
+    QImage fresh;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        fresh = freshCanvas(item, 320, 16, left, left + 319, false);
+    }
+    QCOMPARE(filled.copy(0, 0, fresh.width(), fresh.height()), fresh);
+}
+
+void SpectrogramSmokeTest::spectrogramZoomFreezeWaitsForTheBackfill() {
+    // A zoom shows its data only once the view is covered: also the
+    // columns between its left edge and the playhead, which the worker
+    // decodes after those right of the playhead.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(16);
+    item.setDisplayMode(1);
+    feedSessionReset(item, 0, 1);
+    feedBackfillColumns(item, 0, 2000, 1);
+    testClock(item).holdAt(30.0);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_binsPerColumn = 4;
+        item.ensureMapping(16);
+        rebuildCanvasNow(item, 320, 16, 1406 - 160, 1406 + 159, false);
+    }
+    QVERIFY(!item.m_canvas.isNull());
+    // A finer hop's session, as for a zoom in: 93.75 columns a second, so
+    // the playhead is at column 2812, and the 320 pixels show 640 columns.
+    constexpr int hop = 512;
+    constexpr qint64 playhead = 2812;
+    constexpr qint64 left = playhead - 320;
+    constexpr qint64 start = left - 188;
+    feedSessionReset(item, start, 2, 7, 4, hop);
+    feedBackfillColumns(item, playhead, 1, 2, 7, 4, hop);
+    // As a zoom freezes the canvas until its data covers the view.
+    item.m_zoomFillActive = true;
+    item.m_seekFillActive = false;
+    feedBackfillColumns(item, playhead + 1, 399, 2, 7, 4, hop);
+    QVERIFY(item.m_zoomFillActive);
+    // The left edge, but not all of the left.
+    feedBackfillColumns(item, start, static_cast<int>(left + 10 - start), 2, 7, 4, hop);
+    QVERIFY(ringHoldsBackfillColumn(item, left));
+    QVERIFY2(item.m_zoomFillActive, "columns left of the playhead are missing");
+    feedBackfillColumns(item, left + 10, static_cast<int>(playhead - left - 10), 2, 7, 4, hop);
+    QVERIFY(!item.m_zoomFillActive);
+}
+
 void SpectrogramSmokeTest::spectrogramRingGrowthKeepsRollingHistory() {
     // Grows the ring before it wraps, and after it has wrapped and dropped
     // its oldest columns.
@@ -19667,6 +19940,38 @@ void SpectrogramSmokeTest::spectrogramSceneGraphDrawsTheCanvas() {
     time.advance(0.25);
     QVERIFY(shows(QStringLiteral("after a seek"), true));
     QVERIFY(play(10, 1.0 / 30.0, QStringLiteral("after a seek"), true));
+
+    if (mode == 1) {
+        // A seek outside the decoded columns: the worker sends the
+        // playhead's columns first, then those left of it, which are drawn
+        // into the canvas, and uploaded, as they come.
+        const auto feedStripes = [&item](qint64 first, qint64 end) {
+            const int columns = static_cast<int>(end - first);
+            QByteArray data(kStripeBins * columns, Qt::Uninitialized);
+            for (int column = 0; column < columns; ++column) {
+                std::fill_n(data.data() + static_cast<qsizetype>(column) * kStripeBins,
+                    kStripeBins, static_cast<char>(40 + ((first + column) * 53) % 180));
+            }
+            item.feedPrecomputedChunk(data, kStripeBins, 0, columns, static_cast<int>(first),
+                kStripeColumns, 48'000, 1024, false, false, 1, false, 2);
+        };
+        item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0, false, true, 1, true, 2);
+        setTestPosition(item, 20.0);
+        const qint64 playhead = static_cast<qint64>(testClock(item).positionAt(time.nowNs)
+            * kStripeColumnsPerSecond);
+        const qint64 start = playhead - 200 - 94;
+        item.feedPrecomputedChunk({}, kStripeBins, 0, 0, static_cast<int>(start), kStripeColumns,
+            48'000, 1024, false, true, 1, true, 2);
+        feedStripes(playhead, playhead + 1);
+        feedStripes(playhead + 1, playhead + 300);
+        QVERIFY(settle());
+        QVERIFY(shows(QStringLiteral("the playhead's columns"), true));
+        for (qint64 first = start; first < playhead; first += 100) {
+            feedStripes(first, std::min(first + 100, playhead));
+            QVERIFY(shows(QStringLiteral("the left from %1").arg(first), true));
+        }
+        QVERIFY(play(10, 1.0 / 30.0, QStringLiteral("after the backfill"), true));
+    }
 
     // A zoom shows the canvas scaled until its data and its rasterization
     // come.
