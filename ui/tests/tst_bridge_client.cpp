@@ -23,6 +23,7 @@
 #include <QSocketNotifier>
 #include <QFutureWatcher>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -217,6 +218,8 @@ public:
 private slots:
     void init();
     void cleanup();
+    void aQueryOverItsTimeIsStoppedWithoutAWarning();
+    void gstreamerKeepsItsRegistryOutOfTheTestsDirectories();
     void libraryViewStateKeepsOffsetsIntoTallRows();
     void savedWindowGeometryIsFittedToTheScreens();
     void windowLayoutIsSentAsTheBackendReadsIt();
@@ -1507,6 +1510,59 @@ void BridgeClientTest::queueColumnWidthsKeepTheNewestWhileAcksAreLate() {
     client.processBinarySnapshot(columnWidthsSnapshot({0, 0, 90}, 3));
     QCOMPARE(client.queueColumnWidths(), (QVariantMap{{QStringLiteral("length"), 90}}));
     QCOMPARE(changed.count(), 2);
+}
+
+namespace {
+std::atomic<int> processWarnings{0};
+QtMessageHandler handlerBeforeProcessWarnings = nullptr;
+
+void countProcessWarnings(QtMsgType type, const QMessageLogContext &context, const QString &message) {
+    if (message.contains(QLatin1String("QProcess"))) {
+        processWarnings.fetch_add(1);
+    }
+    if (handlerBeforeProcessWarnings != nullptr) {
+        handlerBeforeProcessWarnings(type, context, message);
+    }
+}
+} // namespace
+
+void BridgeClientTest::aQueryOverItsTimeIsStoppedWithoutAWarning() {
+    // The file manager's name comes from a query to xdg-mime. One that a
+    // loaded machine kept over its time was destroyed running, which
+    // warns; it is killed and waited for instead.
+    processWarnings = 0;
+    handlerBeforeProcessWarnings = qInstallMessageHandler(countProcessWarnings);
+    const QString slow = BridgeClient::runQuery(
+        QStringLiteral("sleep"), {QStringLiteral("30")}, 50);
+    const QString missing = BridgeClient::runQuery(
+        QStringLiteral("ferrous-no-such-program"), {}, 1000);
+    qInstallMessageHandler(handlerBeforeProcessWarnings);
+    handlerBeforeProcessWarnings = nullptr;
+    QCOMPARE(slow, QString());
+    QCOMPARE(missing, QString());
+    QCOMPARE(processWarnings.load(), 0);
+    // One that answers gives its answer, trimmed.
+    QCOMPARE(BridgeClient::runQuery(QStringLiteral("echo"),
+                 {QStringLiteral("org.kde.dolphin.desktop")}, 30'000),
+        QStringLiteral("org.kde.dolphin.desktop"));
+}
+
+void BridgeClientTest::gstreamerKeepsItsRegistryOutOfTheTestsDirectories() {
+    // A bridge's playback initializes GStreamer, which writes its registry
+    // into the cache directory, and took seconds to rebuild it on a busy
+    // machine: it was still writing it into the test's own directory when
+    // the test removed that. See keepGStreamerRegistryIn().
+    const QString registry = qEnvironmentVariable("GST_REGISTRY");
+    const QString cache = qEnvironmentVariable("XDG_CACHE_HOME");
+    QVERIFY(!registry.isEmpty());
+    QVERIFY(!cache.isEmpty());
+    QVERIFY(!registry.startsWith(QDir(cache).absolutePath() + QLatin1Char('/')));
+    {
+        BridgeClient client;
+        // As long as a rebuild may take a loaded machine.
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(registry), 60000);
+    }
+    QVERIFY(!QFileInfo::exists(QDir(cache).filePath(QStringLiteral("gstreamer-1.0"))));
 }
 
 void BridgeClientTest::libraryViewStateKeepsOffsetsIntoTallRows() {
@@ -6502,6 +6558,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
     qputenv("XDG_CONFIG_HOME", QFile::encodeName(testStorage.filePath("config")));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(testStorage.filePath("cache")));
+    keepGStreamerRegistryIn(testStorage.path());
     QApplication app(argc, argv);
     BridgeClientTest test(testStorage.path());
     return QTest::qExec(&test, argc, argv);

@@ -2125,6 +2125,8 @@ ApplicationWindow {
     QVERIFY(autoHide->property("active").toBool());
     QVERIFY(fullscreenCloseButton->property("visible").toBool());
 
+    auto *hideTimer = autoHide->property("hideTimer").value<QObject *>();
+    QVERIFY(hideTimer != nullptr);
     autoHide->setProperty("hideDelay", 40);
     const auto reportPointerPosition = [autoHide](double x, double y) {
         return QMetaObject::invokeMethod(
@@ -2134,19 +2136,21 @@ ApplicationWindow {
             Q_ARG(QVariant, QVariant::fromValue(y)));
     };
     QVERIFY(reportPointerPosition(100.0, 80.0));
-    QTRY_VERIFY_WITH_TIMEOUT(!fullscreenCloseButton->property("visible").toBool(), 500);
+    QTRY_VERIFY(!fullscreenCloseButton->property("visible").toBool());
 
     // Hover ownership can change when a control disappears, producing a
     // duplicate point notification without physical cursor movement. It must
     // not wake the controls or restart the timer.
     QVERIFY(reportPointerPosition(100.0, 80.0));
     QVERIFY(!fullscreenCloseButton->property("visible").toBool());
+    QVERIFY(!hideTimer->property("running").toBool());
 
+    // A move shows them, and hides them again after the delay.
     QVERIFY(reportPointerPosition(101.0, 80.0));
     QVERIFY(fullscreenCloseButton->property("visible").toBool());
-    QTest::qWait(20);
-    QVERIFY(fullscreenCloseButton->property("visible").toBool());
-    QTRY_VERIFY_WITH_TIMEOUT(!fullscreenCloseButton->property("visible").toBool(), 500);
+    QVERIFY(hideTimer->property("running").toBool());
+    QCOMPARE(hideTimer->property("interval").toInt(), 40);
+    QTRY_VERIFY(!fullscreenCloseButton->property("visible").toBool());
 
     shell->setProperty("viewerOpen", false);
     QVERIFY(!autoHide->property("active").toBool());
@@ -9814,8 +9818,11 @@ void WaveformSmokeTest::waveformSceneGraphLaysOutEachLabelOnce() {
 }
 
 void WaveformSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
-    // 100 s over 1000 pixels: the playhead moves a pixel every 0.1 s.
+    // 100 s over 1000 pixels: the playhead moves a pixel every 0.1 s. On
+    // the test's time, so that a loaded machine moves nothing.
+    TestTime time;
     WaveformEditorItem item;
+    time.drive(item);
     item.setWidth(1000);
     item.setHeight(100);
     item.setDurationSeconds(100.0);
@@ -9836,11 +9843,10 @@ void WaveformSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     // The whole track is in view: no frame until pixel 101 at 10.1 s.
     QCOMPARE(item.m_playbackFrameRequests, requested);
     QVERIFY(item.m_playbackFrameTimer.isActive());
-    const double untilChangeMs = (10.1 - testClock(item).positionAt(monotonicNowNs())) * 1000.0;
-    QVERIFY2(std::abs(item.m_playbackFrameTimer.remainingTime() - untilChangeMs) <= 3.0,
-        qPrintable(QStringLiteral("%1 ms for %2 ms")
-            .arg(item.m_playbackFrameTimer.remainingTime()).arg(untilChangeMs)));
-    QTRY_COMPARE_WITH_TIMEOUT(item.m_playbackFrameRequests, requested + 1, 1000);
+    // Due in 80 ms, rounded up to whole milliseconds; the timer then wakes it.
+    const int dueInMs = item.m_playbackFrameTimer.interval();
+    QVERIFY2(dueInMs == 80 || dueInMs == 81, qPrintable(QString::number(dueInMs)));
+    QTRY_COMPARE(item.m_playbackFrameRequests, requested + 1);
 
     // Zoomed in, the view follows the playhead every frame.
     item.setZoomLevel(8.0);
@@ -9859,12 +9865,12 @@ void WaveformSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     item.handleWindowFrameSwapped();
     QCOMPARE(item.m_playbackFrameRequests, atStart);
     QVERIFY(item.m_playbackFrameTimer.isActive());
-    QVERIFY(item.m_playbackFrameTimer.remainingTime() <= 13);
+    QVERIFY(item.m_playbackFrameTimer.interval() <= 13);
     // A course correction reschedules without a frame; a seek shows at once.
     PlaybackClock &clock = testClock(item);
     PlaybackSample sample;
-    sample.positionSeconds = clock.positionAt(monotonicNowNs()) + 0.001;
-    sample.sampledAtNs = monotonicNowNs();
+    sample.positionSeconds = clock.positionAt(time.nowNs) + 0.001;
+    sample.sampledAtNs = time.nowNs;
     sample.advancing = true;
     sample.trackToken = clock.state().trackToken;
     clock.applySample(sample, false);
@@ -11706,6 +11712,10 @@ void SpectrogramSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPi
         QVERIFY(moveWindowToScreen(window, screen));
     }
     SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    // The test's time, so that how long painting and the timer take on a
+    // loaded machine moves nothing.
+    TestTime time;
+    time.drive(item);
     // The window does not draw it; the test does.
     prepareWholeTrackPlayback(item, 50.0);
     QSGNode *node = paintSettled(item, nullptr);
@@ -11721,16 +11731,17 @@ void SpectrogramSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPi
     // No frame until then: it would be the same.
     QCOMPARE(item.m_playbackFrameRequests, requested);
     QVERIFY(playbackFrameScheduled(item));
-    // The window's scheduler wakes it.
     QCOMPARE(item.m_frameScheduler->parent(), &window);
+    // Due at the column's change, rounded up to its millisecond.
     const double untilChangeMs = (118.0 / kWholeTrackColumnsPerSecond
-        - testClock(item).positionAt(monotonicNowNs())) * 1000.0;
-    QVERIFY2(std::abs(playbackFrameDueInMs(item) - untilChangeMs) <= 3.0,
-        qPrintable(QStringLiteral("%1 ms for %2 ms")
-            .arg(playbackFrameDueInMs(item)).arg(untilChangeMs)));
-    // Then the frame comes, with the playhead on its next pixel, and the
-    // next one waits for the column after.
-    QTRY_COMPARE_WITH_TIMEOUT(item.m_playbackFrameRequests, requested + 1, 1000);
+        - testClock(item).positionAt(time.nowNs)) * 1000.0;
+    const double dueInMs = playbackFrameDueInMs(item, time.nowNs);
+    QVERIFY2(dueInMs >= untilChangeMs && dueInMs - untilChangeMs < 1.0,
+        qPrintable(QStringLiteral("%1 ms for %2 ms").arg(dueInMs).arg(untilChangeMs)));
+    // The window's scheduler wakes it then, with the playhead on its next
+    // pixel, and the next frame waits for the column after.
+    time.nowNs = item.m_frameScheduler->dueNs(&item);
+    QTRY_COMPARE(item.m_playbackFrameRequests, requested + 1);
     auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
     const double before = playhead->rect().left();
     node = item.updatePaintNode(node, nullptr);
@@ -11742,7 +11753,7 @@ void SpectrogramSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPi
     }
     item.handleWindowAfterAnimating();
     QCOMPARE(item.m_playbackFrameRequests, requested + 1);
-    QVERIFY(playbackFrameDueInMs(item) > 300);
+    QVERIFY(playbackFrameDueInMs(item, time.nowNs) > 300);
     // Paused, it waits for the clock.
     item.setPlaying(false);
     QVERIFY(!playbackFrameScheduled(item));
@@ -12906,7 +12917,7 @@ Item {
     // Index 42 * 24px row height = 1008px row top. Since row is below
     // the viewport (400px), contentY should be set to rowBottom - viewHeight
     // = 1008 + 24 - 400 = 632.
-    QTRY_VERIFY_WITH_TIMEOUT(stubView->property("contentY").toDouble() > 0.0, 100);
+    QTRY_VERIFY(stubView->property("contentY").toDouble() > 0.0);
     QCOMPARE(stubView->property("contentY").toDouble(), 632.0);
 }
 
@@ -21541,6 +21552,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
     qputenv("XDG_CONFIG_HOME", QFile::encodeName(testStorage.filePath("config")));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(testStorage.filePath("cache")));
+    keepGStreamerRegistryIn(testStorage.path());
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
     // Tests with a real bridge play into a sink that needs no audio device.

@@ -20,10 +20,23 @@
 // Make it before the test's first bridge and destroy it after the last one
 // is destroyed: changing the environment while the bridge's threads read it
 // is not safe. Its directories are made in `parent`, a directory of the
-// whole test process: what outlives a test there, such as the GStreamer
-// registry written into the first test's cache directory, goes when the
-// process removes `parent`. Test binaries write no GPU shader cache; see
-// disableGpuShaderCaches() in TestPlatform.h.
+// whole test process: what outlives a test there goes when the process
+// removes `parent`. Test binaries write no GPU shader cache; see
+// disableGpuShaderCaches() in TestPlatform.h, and keep the GStreamer
+// registry out of these directories; see keepGStreamerRegistryIn().
+// GStreamer writes its registry into the cache directory when a process
+// first initializes it, as a test's first bridge starts playback: in a
+// directory of the test's own, which the test removes when it ends. With
+// an empty cache, it rebuilds the registry, which takes seconds on a busy
+// machine, and was still writing it then. Call this in main(), before any
+// bridge starts, to keep the registry in `directory`, a directory of the
+// whole test process.
+inline void keepGStreamerRegistryIn(const QString &directory) {
+    qputenv("GST_REGISTRY", QFile::encodeName(QDir(directory).filePath(
+        QStringLiteral("gstreamer-registry.bin"))));
+    qunsetenv("GST_REGISTRY_1_0");
+}
+
 class TestUserDirectories {
 public:
     explicit TestUserDirectories(const QString &parent)

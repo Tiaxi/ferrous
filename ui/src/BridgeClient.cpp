@@ -5039,18 +5039,34 @@ QString BridgeClient::detectFileBrowserName() {
         return QString{};
     };
 
-    QProcess proc;
-    proc.start(
+    // This runs on a worker thread, so it can wait for a loaded machine.
+    const QString detected = fromDesktopId(runQuery(
         QStringLiteral("xdg-mime"),
-        {QStringLiteral("query"), QStringLiteral("default"), QStringLiteral("inode/directory")});
-    if (proc.waitForFinished(250)) {
-        const QString output = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
-        const QString detected = fromDesktopId(output);
-        if (!detected.isEmpty()) {
-            return detected;
-        }
+        {QStringLiteral("query"), QStringLiteral("default"), QStringLiteral("inode/directory")},
+        2000));
+    if (!detected.isEmpty()) {
+        return detected;
     }
     return detectFileBrowserNameHeuristic();
+}
+
+QString BridgeClient::runQuery(const QString &program, const QStringList &arguments,
+                               int timeoutMs) {
+    QProcess proc;
+    proc.start(program, arguments);
+    if (proc.waitForFinished(timeoutMs) && proc.exitStatus() == QProcess::NormalExit) {
+        return QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
+    }
+    // Ended before it is destroyed: a QProcess destroyed while its process
+    // runs kills it with a warning. A killed process ends at once, so the
+    // wait for it is short; together, the query takes at most a second more
+    // than its time. Killing xdg-mime, a shell script, may leave the helpers
+    // it started running until they finish; they only print what they find.
+    if (proc.state() != QProcess::NotRunning) {
+        proc.kill();
+        proc.waitForFinished(1000);
+    }
+    return {};
 }
 
 bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFolder) const {

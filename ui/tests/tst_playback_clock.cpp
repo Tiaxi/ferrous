@@ -389,12 +389,12 @@ void PlaybackClockTest::framesTickOnlyWhileAdvancing() {
 
 void PlaybackClockTest::framesStopWhileNoWindowShowsThem() {
     PlaybackClock clock;
-    // Real time, which the test moves on instead of waiting for it.
-    qint64 skippedNs = 0;
-    clock.setTimeSource([&skippedNs]() { return monotonicNowNs() + skippedNs; });
+    // The test's time, which it moves on instead of waiting for it, so a
+    // loaded machine moves nothing.
+    attach(clock);
     QSignalSpy position(&clock, &PlaybackClock::positionChanged);
     QSignalSpy enabled(&clock, &PlaybackClock::frameUpdatesEnabledChanged);
-    clock.applySample(sample(10.0, monotonicNowNs(), true), true);
+    clock.applySample(sample(10.0, m_now, true), true);
     QVERIFY(clock.frameUpdatesEnabled());
     QVERIFY(clock.m_tickTimer.isActive());
 
@@ -402,28 +402,31 @@ void PlaybackClockTest::framesStopWhileNoWindowShowsThem() {
     clock.setFrameUpdatesEnabled(false);
     QCOMPARE(enabled.count(), 1);
     QVERIFY(!clock.m_tickTimer.isActive());
+    QVERIFY(!clock.nextTickNs().has_value());
     position.clear();
-    QTest::qWait(100);
+    m_now += 100 * kMs;
     QCOMPARE(position.count(), 0);
     // The engine's samples still move it, such as a seek's.
-    clock.applySample(sample(20.0, monotonicNowNs(), true), true);
+    clock.applySample(sample(20.0, m_now, true), true);
     QVERIFY(!clock.m_tickTimer.isActive());
-    QVERIFY(clock.positionSeconds() >= 20.0);
-    QVERIFY(clock.positionSeconds() < 20.05);
+    QCOMPARE(clock.positionSeconds(), 20.0);
 
     // Shown again: it catches up at once, then goes on frame by frame.
-    skippedNs += 100'000'000;
+    m_now += 100 * kMs;
     position.clear();
     clock.setFrameUpdatesEnabled(true);
     QCOMPARE(enabled.count(), 2);
     QVERIFY(clock.m_tickTimer.isActive());
     QCOMPARE(position.count(), 1);
-    QVERIFY(clock.positionSeconds() >= 20.1);
-    QTRY_VERIFY(position.count() >= 3);
+    QVERIFY(std::abs(clock.positionSeconds() - 20.1) < 1e-9);
+    tick(clock);
+    tick(clock);
+    QCOMPARE(position.count(), 3);
+    QVERIFY(clock.positionSeconds() > 20.1);
 
     // Without frames, paused playback stays paused when shown.
     clock.setFrameUpdatesEnabled(false);
-    clock.applySample(sample(30.0, monotonicNowNs(), false), true);
+    clock.applySample(sample(30.0, m_now, false), true);
     clock.setFrameUpdatesEnabled(true);
     QVERIFY(!clock.m_tickTimer.isActive());
     QCOMPARE(clock.positionSeconds(), 30.0);
