@@ -27,6 +27,9 @@ ToolBar {
     // The position now, for a step of the keys or the wheel.
     property var currentPositionSeconds: function() { return root.displayedPositionSeconds }
     property string positionText: "00:00"
+    // The whole second positionText shows, which changes every second
+    // however few pixels the position moves by.
+    property int positionSecond: Math.floor(root.displayedPositionSeconds + 0.5)
     required property var toggleMutedVolume
     required property var setAppVolume
     required property var normalizedVolumeValue
@@ -188,9 +191,10 @@ ToolBar {
                 return from + Math.max(0, Math.min(1, offset / extent)) * (to - from)
             }
 
-            // The second the value is in, which the texts show; it changes
-            // once a second while the value moves by pixels.
-            readonly property int valueSecond: Math.floor(value)
+            // The second the texts show: a gesture's under the pointer or
+            // keys, otherwise playback's, which changes every second while
+            // the value moves by pixels, which can be seconds apart.
+            readonly property int valueSecond: adjusting ? Math.floor(value) : root.positionSecond
 
             Accessible.name: I18n.i18nc("@label", "Seek")
             Accessible.description: seekAllowed
@@ -335,7 +339,11 @@ ToolBar {
                         id: dragTimeLabel
                         objectName: "seekDragTime"
                         anchors.centerIn: parent
-                        text: FormatUtils.formatSeekTime(seekSlider.valueSecond)
+                        // Only while it is shown, so that playback's seconds
+                        // change no hidden text, which would draw frames.
+                        text: seekDragOverlay.visible
+                            ? FormatUtils.formatSeekTime(seekSlider.valueSecond)
+                            : ""
                         color: root.uiPalette.uiAccentTextColor
                     }
                 }

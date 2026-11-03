@@ -45,8 +45,8 @@ private:
     }
 
     // When the clock's timer is due, in the test's time.
-    qint64 tickDueAt(const PlaybackClock &clock) const {
-        return m_now + static_cast<qint64>(clock.m_tickTimer.interval()) * kMs;
+    static qint64 tickDueAt(const PlaybackClock &clock) {
+        return clock.nextTickNs().value_or(std::numeric_limits<qint64>::max());
     }
 
     // Whether the clock's timer is due in `ms`, rounded up to whole
@@ -59,7 +59,7 @@ private:
     // Fires the clock's timer at its time, as the event loop would.
     void tick(PlaybackClock &clock) {
         m_now = tickDueAt(clock);
-        clock.update(false);
+        clock.tick();
     }
 
 private slots:

@@ -24,6 +24,8 @@ QtObject {
     readonly property real positionSeconds: root.playbackClock ? root.playbackClock.positionSeconds : 0
     // Changes once a second.
     readonly property string positionText: root.playbackClock ? root.playbackClock.positionText : "00:00"
+    // The whole second positionText shows.
+    readonly property int positionSecond: root.playbackClock ? root.playbackClock.positionSecond : 0
     // The smallest move of the position that is shown, such as a device
     // pixel of the seek bar.
     property real positionStepSeconds: 0

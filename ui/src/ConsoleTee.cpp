@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <unistd.h>
 #endif
 
@@ -132,6 +133,11 @@ bool ConsoleTee::install(int fd, const QString &tag) {
 }
 
 void ConsoleTee::forward(int readFd, int savedFd, const QString &tag) const {
+#if defined(Q_OS_LINUX)
+    // Apart from the main thread, which has the process's name, in tools
+    // that list threads.
+    pthread_setname_np(pthread_self(), "ferrous-tee");
+#endif
     std::array<char, 4096> buffer{};
     QByteArray pending;
     std::array<pollfd, 2> fds{};

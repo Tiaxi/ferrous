@@ -1261,6 +1261,7 @@ ApplicationWindow {
             displayedPositionSeconds: playbackController.positionSeconds
             currentPositionSeconds: playbackController.currentPositionSeconds
             positionText: playbackController.positionText
+            positionSecond: playbackController.positionSecond
             toggleMutedVolume: playbackController.toggleMutedVolume
             setAppVolume: playbackController.setAppVolume
             normalizedVolumeValue: playbackController.normalizedVolumeValue

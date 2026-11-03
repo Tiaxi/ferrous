@@ -16,21 +16,45 @@
 
 namespace {
 
-// The voluntary and involuntary context switches of every thread of this
-// process but the main one.
-qint64 otherThreadsContextSwitches() {
-    const QString self = QString::number(::getpid());
-    qint64 total = 0;
+QString readProcText(const QString &path) {
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? QString::fromLatin1(file.readAll()) : QString();
+}
+
+// The tee's threads, by their task directories.
+QStringList teeThreads() {
+    QStringList threads;
     const QStringList tasks = QDir(QStringLiteral("/proc/self/task")).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
     for (const QString &task : tasks) {
-        if (task == self) {
-            continue;
+        const QString base = QStringLiteral("/proc/self/task/%1/").arg(task);
+        if (readProcText(base + QStringLiteral("comm")).trimmed() == QLatin1String("ferrous-tee")) {
+            threads.push_back(base);
         }
-        QFile status(QStringLiteral("/proc/self/task/%1/status").arg(task));
-        if (!status.open(QIODevice::ReadOnly)) {
-            continue;
+    }
+    return threads;
+}
+
+// Whether every tee thread sleeps in poll.
+bool teeThreadsSleepInPoll(qsizetype expected) {
+    const QStringList threads = teeThreads();
+    if (threads.size() != expected) {
+        return false;
+    }
+    for (const QString &base : threads) {
+        const QString stat = readProcText(base + QStringLiteral("stat"));
+        const QString state = stat.mid(stat.lastIndexOf(QLatin1Char(')')) + 2, 1);
+        if (state != QLatin1String("S") || !readProcText(base + QStringLiteral("wchan")).contains(QLatin1String("poll"))) {
+            return false;
         }
-        const QStringList lines = QString::fromLatin1(status.readAll()).split(QLatin1Char('\n'));
+    }
+    return true;
+}
+
+// The voluntary and involuntary context switches of the tee's threads.
+qint64 teeContextSwitches() {
+    qint64 total = 0;
+    for (const QString &base : teeThreads()) {
+        const QStringList lines = readProcText(base + QStringLiteral("status")).split(QLatin1Char('\n'));
         for (const QString &line : lines) {
             if (line.startsWith(QLatin1String("voluntary_ctxt_switches:"))
                 || line.startsWith(QLatin1String("nonvoluntary_ctxt_switches:"))) {
@@ -159,12 +183,15 @@ void ConsoleTeeTest::idleStreamsDoNotWakeTheirThreads() {
         writeText(out.fd, QByteArrayLiteral("ready\n"));
         QTRY_COMPARE(loggedMessages(out.logPath, QStringLiteral("stdout")), QStringList{QStringLiteral("ready")});
 
-        // Two threads that polled ten times a second would switch about
-        // twelve times in 600 ms.
-        const qint64 before = otherThreadsContextSwitches();
+        // Once both threads have gone to sleep in poll, nothing wakes them:
+        // two that polled ten times a second would switch about twelve
+        // times in 600 ms. A busy machine can only delay their sleep.
+        QTRY_VERIFY(teeThreadsSleepInPoll(2));
+        const qint64 before = teeContextSwitches();
         std::this_thread::sleep_for(std::chrono::milliseconds(600));
-        const qint64 switches = otherThreadsContextSwitches() - before;
-        QVERIFY2(switches <= 1, qPrintable(QStringLiteral("%1 context switches while idle").arg(switches)));
+        const qint64 switches = teeContextSwitches() - before;
+        QCOMPARE(switches, qint64{0});
+        QVERIFY(teeThreadsSleepInPoll(2));
 
         // Output still wakes them.
         writeText(err.fd, QByteArrayLiteral("woken\n"));

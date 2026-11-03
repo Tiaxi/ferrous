@@ -67,6 +67,9 @@ class PlaybackClock : public QObject {
     // The position at its last step, jump, pause or resume.
     Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY positionChanged)
     Q_PROPERTY(QString positionText READ positionText NOTIFY positionTextChanged)
+    // The whole second positionText shows, for texts of their own, such as
+    // an accessible description; it changes with positionText.
+    Q_PROPERTY(int positionSecond READ positionSecond NOTIFY positionTextChanged)
     Q_PROPERTY(bool advancing READ advancing NOTIFY stateChanged)
     // Whether the properties follow playback as it advances, for a window
     // that shows them. Without frames they change with the engine's samples.
@@ -107,6 +110,7 @@ public:
     // The position at the last step or change.
     double positionSeconds() const { return m_positionSeconds; }
     QString positionText() const { return m_positionText; }
+    int positionSecond() const { return m_positionSecond; }
     bool advancing() const { return m_state.advancing(); }
 
     // Take a sample from the engine. With `jump`, or for another track, the
@@ -119,6 +123,13 @@ public:
     void setDurationSeconds(double durationSeconds);
     // Update positionSeconds and positionText to now.
     void refresh();
+    // What the clock's timer does when it is due: updates the properties to
+    // now, positionSeconds only by its steps. Tests that drive the clock
+    // with their own time call it at nextTickNs().
+    void tick();
+    // When the timer is due, in the time source's nanoseconds; none while
+    // it is stopped.
+    std::optional<qint64> nextTickNs() const { return m_nextTickNs; }
 
     bool frameUpdatesEnabled() const { return m_frameUpdatesEnabled; }
     void setFrameUpdatesEnabled(bool enabled);
@@ -127,6 +138,8 @@ public:
     void setPositionStepSeconds(double stepSeconds);
 
     static QString formatSeconds(double seconds);
+    // The whole second formatSeconds shows: rounded to the nearest.
+    static int wholeSecond(double seconds);
 
 signals:
     void stateChanged();
@@ -151,7 +164,9 @@ private:
     PlaybackClockState m_state;
     double m_positionSeconds{0.0};
     QString m_positionText{QStringLiteral("00:00")};
+    int m_positionSecond{0};
     QTimer m_tickTimer;
+    std::optional<qint64> m_nextTickNs;
     bool m_frameUpdatesEnabled{true};
     double m_positionStepSeconds{0.0};
 };

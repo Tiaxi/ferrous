@@ -57,7 +57,7 @@ PlaybackClock::PlaybackClock(QObject *parent)
       m_timeSource(monotonicNowNs) {
     m_tickTimer.setSingleShot(true);
     m_tickTimer.setTimerType(Qt::PreciseTimer);
-    connect(&m_tickTimer, &QTimer::timeout, this, [this]() { update(false); });
+    connect(&m_tickTimer, &QTimer::timeout, this, &PlaybackClock::tick);
 }
 
 void PlaybackClock::setTimeSource(TimeSource source) {
@@ -171,6 +171,10 @@ void PlaybackClock::refresh() {
     update(true);
 }
 
+void PlaybackClock::tick() {
+    update(false);
+}
+
 bool PlaybackClock::showsMove(double shown, double position) const {
     if (m_positionStepSeconds <= 0.0) {
         return position != shown;
@@ -190,6 +194,7 @@ void PlaybackClock::update(bool exact) {
     QString text = formatSeconds(position);
     if (text != m_positionText) {
         m_positionText = std::move(text);
+        m_positionSecond = wholeSecond(position);
         emit positionTextChanged();
     }
     scheduleTick(now, position);
@@ -198,6 +203,7 @@ void PlaybackClock::update(bool exact) {
 void PlaybackClock::scheduleTick(qint64 now, double position) {
     if (!m_state.advancing() || !m_frameUpdatesEnabled) {
         m_tickTimer.stop();
+        m_nextTickNs.reset();
         return;
     }
     std::optional<qint64> next;
@@ -221,6 +227,7 @@ void PlaybackClock::scheduleTick(qint64 now, double position) {
     if (!next.has_value()) {
         // The position stops at the end of the track before either changes.
         m_tickTimer.stop();
+        m_nextTickNs.reset();
         return;
     }
     // Rounded up to whole milliseconds, and at least one, so that the clock
@@ -229,13 +236,14 @@ void PlaybackClock::scheduleTick(qint64 now, double position) {
     const qint64 untilNs = *next > now ? *next - now : 0;
     const qint64 intervalMs = std::clamp<qint64>((untilNs + 999'999) / 1'000'000, 1, kMaxIntervalMs);
     m_tickTimer.start(static_cast<int>(intervalMs));
+    m_nextTickNs = now + intervalMs * 1'000'000;
 }
 
 QString PlaybackClock::formatSeconds(double seconds) {
     if (!std::isfinite(seconds) || seconds < 0.0) {
         return QStringLiteral("--:--");
     }
-    const int total = static_cast<int>(seconds + 0.5);
+    const int total = wholeSecond(seconds);
     const int hours = total / 3600;
     const int minutes = (total % 3600) / 60;
     const int secs = total % 60;
@@ -248,4 +256,11 @@ QString PlaybackClock::formatSeconds(double seconds) {
     return QStringLiteral("%1:%2")
         .arg(minutes, 2, 10, QChar('0'))
         .arg(secs, 2, 10, QChar('0'));
+}
+
+int PlaybackClock::wholeSecond(double seconds) {
+    if (!std::isfinite(seconds) || seconds < 0.0) {
+        return 0;
+    }
+    return static_cast<int>(std::min(seconds + 0.5, static_cast<double>(std::numeric_limits<int>::max())));
 }

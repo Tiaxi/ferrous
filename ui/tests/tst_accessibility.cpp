@@ -292,6 +292,8 @@ private slots:
     void playbackMovesTheSeekBarByWholePixels();
     void seekBarStepsByTheWindowsDevicePixels();
     void playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds();
+    void seekBarDescriptionFollowsTheSecondsBetweenPixels();
+    void seekBarCatchesUpWithRealPlayback();
     void seekBarStepsFromThePositionBetweenItsPixels();
     void transportBarHasNoWarnings();
     void transportBarHasNoWarningsUnderTheBasicStyle();
@@ -790,7 +792,9 @@ QByteArray clockTransportHarnessQml() {
     replace("displayedPositionSeconds: harness.positionSeconds",
             "displayedPositionSeconds: testClock.positionSeconds\n"
             "            currentPositionSeconds: function() { return testClock.currentPositionSeconds() }");
-    replace("positionText: harness.positionText", "positionText: testClock.positionText");
+    replace("positionText: harness.positionText",
+            "positionText: testClock.positionText\n"
+            "            positionSecond: testClock.positionSecond");
     replace("        Panes.TransportBar {\n", "        Panes.TransportBar {\n            id: transportBar\n");
     replace("    Components.UiPalette {",
             "    Binding {\n"
@@ -1386,87 +1390,221 @@ void AccessibilityTest::seekBarStepsByTheWindowsDevicePixels() {
     checkSteps(60.0);
 }
 
+namespace {
+
+// A start far from zero, as a monotonic clock has.
+constexpr qint64 kClockStartNs = 5'000'000'000'000LL;
+constexpr qint64 kNsPerSecond = 1'000'000'000LL;
+
+// The transport harness on `clock`, with a track of `durationSeconds`.
+struct ClockHarness {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window{nullptr};
+    QQuickItem *seek{nullptr};
+    QQuickItem *handle{nullptr};
+    QAccessibleInterface *seekInterface{nullptr};
+
+    bool load(PlaybackClock &clock, double durationSeconds, QString *errorText) {
+        engine.rootContext()->setContextProperty(QStringLiteral("testClock"), &clock);
+        window = loadTransportHarness(engine, root, errorText, clockTransportHarnessQml());
+        if (window == nullptr) {
+            return false;
+        }
+        QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+        seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+        handle = visibleItemNamed(window, QStringLiteral("seekHandle"));
+        if (bridge == nullptr || seek == nullptr || handle == nullptr) {
+            *errorText = QStringLiteral("harness items missing");
+            return false;
+        }
+        bridge->setProperty("durationSeconds", durationSeconds);
+        seekInterface = QAccessible::queryAccessibleInterface(seek);
+        return seekInterface != nullptr;
+    }
+
+    QString description() const { return seekInterface->text(QAccessible::Description); }
+};
+
+} // namespace
+
 void AccessibilityTest::playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds() {
     PlaybackClock clock;
-    QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("testClock"), &clock);
-    QScopedPointer<QObject> root;
+    qint64 now = kClockStartNs;
+    clock.setTimeSource([&now]() { return now; });
+    ClockHarness harness;
     QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText, clockTransportHarnessQml());
-    QVERIFY2(window != nullptr, qPrintable(errorText));
-    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
-    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
-    QQuickItem *handle = visibleItemNamed(window, QStringLiteral("seekHandle"));
-    QVERIFY(bridge != nullptr && seek != nullptr && handle != nullptr);
     // A 20 s track: the bar moves by about 30 device pixels a second.
     constexpr double kDuration = 20.0;
-    bridge->setProperty("durationSeconds", kDuration);
-    const double barPixels = seek->property("barDevicePixels").toDouble();
+    QVERIFY2(harness.load(clock, kDuration, &errorText), qPrintable(errorText));
+    const double barPixels = harness.seek->property("barDevicePixels").toDouble();
     QVERIFY(barPixels > 300.0);
-    QCOMPARE(clock.positionStepSeconds(), kDuration / barPixels);
+    const double step = kDuration / barPixels;
+    QCOMPARE(clock.positionStepSeconds(), step);
+    const auto pixelOf = [step](double seconds) { return std::floor(seconds / step + 0.5); };
 
-    QAccessibleInterface *seekInterface = QAccessible::queryAccessibleInterface(seek);
-    QVERIFY(seekInterface != nullptr);
+    QList<double> shown;
     int handleMoves = 0;
-    int positionChanges = 0;
-    int descriptionChanges = 0;
-    qreal handleX = handle->x();
-    QString description = seekInterface->text(QAccessible::Description);
-    connect(&clock, &PlaybackClock::positionChanged, window, [&]() {
-        ++positionChanges;
-        if (handle->x() != handleX) {
+    qreal handleX = 0.0;
+    QStringList descriptions;
+    connect(&clock, &PlaybackClock::positionChanged, harness.window, [&]() {
+        shown.push_back(clock.positionSeconds());
+        if (harness.handle->x() != handleX) {
             ++handleMoves;
-            handleX = handle->x();
+            handleX = harness.handle->x();
         }
-        const QString now = seekInterface->text(QAccessible::Description);
-        if (now != description) {
-            ++descriptionChanges;
-            description = now;
+        const QString description = harness.description();
+        if (descriptions.isEmpty() || descriptions.last() != description) {
+            descriptions.push_back(description);
         }
     });
-    QSignalSpy values(seek, SIGNAL(valueChanged()));
-    QSignalSpy seconds(seek, SIGNAL(valueSecondChanged()));
+    QSignalSpy values(harness.seek, SIGNAL(valueChanged()));
     QSignalSpy texts(&clock, &PlaybackClock::positionTextChanged);
+    connect(&clock, &PlaybackClock::positionTextChanged, harness.window, [&]() {
+        const QString description = harness.description();
+        if (descriptions.isEmpty() || descriptions.last() != description) {
+            descriptions.push_back(description);
+        }
+    });
 
-    // Two seconds of real playback from 1.1 s.
-    PlaybackSample sample;
-    sample.positionSeconds = 1.1;
-    sample.sampledAtNs = monotonicNowNs();
-    sample.advancing = true;
-    sample.durationSeconds = kDuration;
-    sample.trackToken = 1;
-    clock.applySample(sample, true);
-    positionChanges = 0;
+    // Three seconds of playback from 1.1 s, in the clock's own ticks.
+    clock.applySample(PlaybackSample{1.1, now, true, kDuration, 1}, true);
+    handleX = harness.handle->x();
+    shown.clear();
     handleMoves = 0;
-    descriptionChanges = 0;
+    descriptions = QStringList{harness.description()};
     values.clear();
-    seconds.clear();
     texts.clear();
-    QTest::qWait(2000);
-    clock.applySample(PlaybackSample{clock.currentPositionSeconds(), 0, false, kDuration, 1}, false);
-    const double end = clock.positionSeconds();
-    QVERIFY(end > 2.6);
+    const qint64 end = now + 3 * kNsPerSecond;
+    int ticks = 0;
+    while (clock.nextTickNs().has_value() && *clock.nextTickNs() <= end) {
+        now = *clock.nextTickNs();
+        clock.tick();
+        ++ticks;
+    }
+    now = end;
 
-    // The position, the slider's value and the handle move together, by
-    // the bar's pixels, and only then.
-    const QString counts = QStringLiteral("%1 position changes, %2 values, %3 handle moves, %4 seconds, "
-                                          "%5 texts, %6 descriptions over %7 s")
-                               .arg(positionChanges).arg(values.count()).arg(handleMoves)
-                               .arg(seconds.count()).arg(texts.count()).arg(descriptionChanges)
-                               .arg(end - 1.1);
-    qInfo("seek bar from the clock: %s", qPrintable(counts));
-    const int pixels = static_cast<int>(std::floor((end - 1.1) / kDuration * barPixels));
-    QVERIFY2(handleMoves >= pixels - 1 && handleMoves <= pixels + 2, qPrintable(counts));
-    QVERIFY2(positionChanges <= handleMoves + 2 && values.count() <= handleMoves + 2, qPrintable(counts));
-    // The texts change with the seconds: the time label's at 1.5, 2.5 s and
-    // perhaps 3.5 s, the value's at 2, 3 s and perhaps 4 s.
-    QVERIFY2(texts.count() >= 2 && texts.count() <= 3, qPrintable(counts));
-    QVERIFY2(seconds.count() >= 2 && seconds.count() <= 3, qPrintable(counts));
-    QVERIFY2(descriptionChanges == seconds.count(), qPrintable(counts));
+    // The position, the slider's value and the handle moved at every pixel
+    // boundary, once, at most a millisecond after it, and only then.
+    const double endSeconds = clock.currentPositionSeconds();
+    const int pixels = static_cast<int>(pixelOf(endSeconds) - pixelOf(1.1));
+    const QString counts = QStringLiteral("%1 boundaries: %2 positions, %3 values, %4 handle moves, %5 ticks")
+                               .arg(pixels).arg(shown.size()).arg(values.count()).arg(handleMoves).arg(ticks);
+    QVERIFY2(pixels > 80, qPrintable(counts));
+    QVERIFY2(shown.size() == pixels && values.count() == pixels && handleMoves == pixels, qPrintable(counts));
+    for (qsizetype i = 0; i < shown.size(); ++i) {
+        const double pixel = pixelOf(1.1) + static_cast<double>(i) + 1.0;
+        QCOMPARE(pixelOf(shown[i]), pixel);
+        const double late = shown[i] - (pixel - 0.5) * step;
+        QVERIFY2(late >= 0.0 && late <= 0.0011, qPrintable(QString::number(late)));
+    }
+    // The texts changed at 1.5, 2.5 and 3.5 s, and only then.
+    QCOMPARE(texts.count(), 3);
+    QCOMPARE(clock.positionText(), QStringLiteral("00:04"));
+    QCOMPARE(descriptions,
+             (QStringList{QStringLiteral("00:01 of 00:20"), QStringLiteral("00:02 of 00:20"),
+                          QStringLiteral("00:03 of 00:20"), QStringLiteral("00:04 of 00:20")}));
+    QVERIFY2(ticks <= pixels + texts.count(), qPrintable(counts));
+
     // Paused, the clock has no more to show.
-    positionChanges = 0;
+    clock.applySample(PlaybackSample{endSeconds, now, false, kDuration, 1}, false);
+    QVERIFY(!clock.nextTickNs().has_value());
+}
+
+void AccessibilityTest::seekBarDescriptionFollowsTheSecondsBetweenPixels() {
+    PlaybackClock clock;
+    qint64 now = kClockStartNs;
+    clock.setTimeSource([&now]() { return now; });
+    ClockHarness harness;
+    QString errorText;
+    // An hour-long track: a pixel of the bar is seconds long.
+    constexpr double kDuration = 3600.0;
+    QVERIFY2(harness.load(clock, kDuration, &errorText), qPrintable(errorText));
+    const double step = clock.positionStepSeconds();
+    QVERIFY2(step > 2.0, qPrintable(QString::number(step)));
+
+    QStringList descriptions;
+    const auto record = [&]() {
+        const QString description = harness.description();
+        if (descriptions.isEmpty() || descriptions.last() != description) {
+            descriptions.push_back(description);
+        }
+    };
+    connect(&clock, &PlaybackClock::positionTextChanged, harness.window, record);
+    connect(&clock, &PlaybackClock::positionChanged, harness.window, record);
+    QSignalSpy values(harness.seek, SIGNAL(valueChanged()));
+
+    // Ten seconds from 100.2 s: the description and the time label take
+    // every second, though the bar moves only every few.
+    clock.applySample(PlaybackSample{100.2, now, true, kDuration, 1}, true);
+    descriptions = QStringList{harness.description()};
+    values.clear();
+    const qint64 end = now + 10 * kNsPerSecond;
+    while (clock.nextTickNs().has_value() && *clock.nextTickNs() <= end) {
+        now = *clock.nextTickNs();
+        clock.tick();
+    }
+    now = end;
+    QStringList expected;
+    for (int second = 100; second <= 110; ++second) {
+        expected.push_back(QStringLiteral("%1 of 1:00:00").arg(PlaybackClock::formatSeconds(second)));
+    }
+    QCOMPARE(descriptions, expected);
+    QCOMPARE(clock.positionText(), PlaybackClock::formatSeconds(110));
+    QVERIFY2(values.count() <= static_cast<int>(10.0 / step) + 1, qPrintable(QString::number(values.count())));
+
+    // A held key's gesture shows its own second, from where playback is.
+    QVERIFY(tabTo(harness.window, harness.seek));
+    QTest::keyPress(harness.window, Qt::Key_Right);
+    QVERIFY(harness.seek->property("adjusting").toBool());
+    QCOMPARE(harness.description(),
+             QStringLiteral("%1 of 1:00:00").arg(PlaybackClock::formatSeconds(std::floor(110.2 + 5.0))));
+    QTest::keyRelease(harness.window, Qt::Key_Right);
+    const QList<double> seeks = recordedValues(harness.root.data(), "seeks");
+    QVERIFY2(sameValues(seeks, {115.2}), qPrintable(describeValues(seeks)));
+}
+
+void AccessibilityTest::seekBarCatchesUpWithRealPlayback() {
+    // The clock's own timer, in real time. A busy machine may wake it late
+    // and skip pixels; it must still catch up, change only at a pixel, and
+    // stop when playback pauses.
+    PlaybackClock clock;
+    ClockHarness harness;
+    QString errorText;
+    constexpr double kDuration = 20.0;
+    QVERIFY2(harness.load(clock, kDuration, &errorText), qPrintable(errorText));
+    const double step = clock.positionStepSeconds();
+    QVERIFY(step > 0.0 && step < 0.1);
+    const auto pixelOf = [step](double seconds) { return std::floor(seconds / step + 0.5); };
+
+    int changes = 0;
+    int withinAPixel = 0;
+    double lastPixel = -1.0;
+    connect(&clock, &PlaybackClock::positionChanged, harness.window, [&]() {
+        ++changes;
+        const double pixel = pixelOf(clock.positionSeconds());
+        withinAPixel += pixel == lastPixel ? 1 : 0;
+        lastPixel = pixel;
+    });
+    clock.applySample(PlaybackSample{1.1, monotonicNowNs(), true, kDuration, 1}, true);
+    lastPixel = pixelOf(clock.positionSeconds());
+    changes = 0;
+
+    QTRY_VERIFY2(changes >= 3, qPrintable(QString::number(changes)));
+    // The bar is never more than a pixel and a little behind playback, and
+    // the time label shows the second playback is in.
+    QTRY_VERIFY(std::abs(harness.seek->property("value").toDouble() - clock.currentPositionSeconds())
+                <= step + 0.005);
+    QTRY_COMPARE(clock.positionText(), PlaybackClock::formatSeconds(clock.currentPositionSeconds()));
+    QCOMPARE(withinAPixel, 0);
+
+    // Paused: nothing more changes.
+    clock.applySample(PlaybackSample{clock.currentPositionSeconds(), 0, false, kDuration, 1}, false);
+    QVERIFY(!clock.nextTickNs().has_value());
+    QCOMPARE(harness.seek->property("value").toDouble(), clock.positionSeconds());
+    const int paused = changes;
     QTest::qWait(200);
-    QCOMPARE(positionChanges, 0);
+    QCOMPARE(changes, paused);
 }
 
 void AccessibilityTest::seekBarStepsFromThePositionBetweenItsPixels() {
