@@ -12,6 +12,7 @@
 //! cargo run --release --example perf_analysis -- analysis FILE [options]
 //! cargo run --release --example perf_analysis -- seek FILE [options]
 //! cargo run --release --example perf_analysis -- window FILE [options]
+//! cargo run --release --example perf_analysis -- overview-window FILE [options]
 //! cargo run --release --example perf_analysis -- idle FILE [options]
 //! ```
 //!
@@ -28,6 +29,13 @@
 //!
 //! `window` times waveform detail windows through the FFI function the Qt
 //! waveform editor and level meter call.
+//!
+//! `overview-window` lets an `AnalysisEngine` decode the overview waveform
+//! of the file, without a spectrogram, then times the first whole-track
+//! window through that FFI function, as the waveform editor asks for it
+//! once the overview is shown, and the same window again. The window ends
+//! where the overview's audio does, or at `--duration`. The process's CPU
+//! time when the overview completes is the overview's.
 //!
 //! `idle` plays the file through the FFI bridge, as the Qt app drives it,
 //! with a thread that takes its output whenever it signals some, then
@@ -171,7 +179,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((mode, rest)) = args.split_first() else {
-        eprintln!("usage: perf_analysis analysis|seek|window|idle FILE [options]");
+        eprintln!("usage: perf_analysis analysis|seek|window|overview-window|idle FILE [options]");
         std::process::exit(2);
     };
     let options = match parse_options(rest) {
@@ -186,6 +194,7 @@ fn main() {
         "analysis" => run_analysis(&options),
         "seek" => run_seek(&options),
         "window" => run_window(&options),
+        "overview-window" => run_overview_window(&options),
         "idle" => run_idle(&options),
         _ => Err(format!("unknown mode {mode}")),
     };
@@ -943,6 +952,98 @@ fn run_window(options: &Options) -> Result<Fields, String> {
     }
     field(&mut fields, "windows", format!("[{}]", results.join(",")));
     Ok(fields)
+}
+
+// ---------------------------------------------------------------------------
+// overview-window: the overview decode, then the first whole-track window
+// ---------------------------------------------------------------------------
+
+fn run_overview_window(options: &Options) -> Result<Fields, String> {
+    let path = options
+        .file
+        .to_str()
+        .ok_or("the path is not UTF-8")?
+        .to_string();
+    let (engine, events) = AnalysisEngine::new();
+    engine.command(AnalysisCommand::SetSpectrogramActive(false));
+    let started = Instant::now();
+    engine.command(AnalysisCommand::SetTrack {
+        path: options.file.clone(),
+        reset_spectrogram: true,
+        track_token: 1,
+        gapless: false,
+    });
+    let mut overview_done = None;
+    let mut coverage = 0.0_f32;
+    while overview_done.is_none() {
+        if started.elapsed() > options.timeout {
+            return Err("the overview did not complete".into());
+        }
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(AnalysisEvent::Snapshot(snapshot)) => {
+                coverage = snapshot.waveform_coverage_seconds;
+                if snapshot.waveform_complete {
+                    overview_done = Some(started.elapsed());
+                }
+            }
+            Ok(AnalysisEvent::WorkerFailed(message)) => return Err(message),
+            _ => {}
+        }
+    }
+    // The process does nothing else meanwhile.
+    let overview_cpu_ms = approx_f64(process_cpu_ticks()) * 1000.0 / clock_ticks();
+    let rss_after_overview = proc_status_kib("VmRSS");
+    // To the end of the audio the overview decoded, unless given.
+    let duration = if options.duration > 0.0 {
+        options.duration
+    } else {
+        f64::from(coverage) + 0.001
+    };
+    let (first, len) = decode_window(&path, 0.0, duration, options.points);
+    let (again, _) = decode_window(&path, 0.0, duration, options.points);
+    let rss_after_window = proc_status_kib("VmRSS");
+    drop(engine);
+    let mut fields = Fields::new();
+    field(&mut fields, "mode", "\"overview-window\"");
+    field(
+        &mut fields,
+        "file",
+        format!("\"{}\"", file_label(&options.file)),
+    );
+    field(&mut fields, "points", options.points);
+    field(&mut fields, "duration_s", format!("{duration:.3}"));
+    field(&mut fields, "overview_done_ms", ms(overview_done));
+    field(&mut fields, "overview_coverage_s", format!("{coverage:.1}"));
+    field(
+        &mut fields,
+        "overview_process_cpu_ms",
+        format!("{overview_cpu_ms:.0}"),
+    );
+    field(&mut fields, "window_ms", ms(Some(first)));
+    field(&mut fields, "window_again_ms", ms(Some(again)));
+    field(&mut fields, "window_bytes", len);
+    field(&mut fields, "rss_after_overview_kib", rss_after_overview);
+    field(&mut fields, "rss_after_window_kib", rss_after_window);
+    field(&mut fields, "peak_rss_kib", proc_status_kib("VmHWM"));
+    Ok(fields)
+}
+
+/// A `kB` field of `/proc/self/status`, or 0.
+fn proc_status_kib(name: &str) -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix(name)?
+                    .strip_prefix(':')?
+                    .trim()
+                    .strip_suffix("kB")?
+                    .trim()
+                    .parse()
+                    .ok()
+            })
+        })
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------

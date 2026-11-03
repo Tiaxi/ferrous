@@ -58,6 +58,13 @@ thread of the process (thread names with digits folded to `#`).
   `ferrous_ffi_waveform_window_cancellable`, as the waveform editor asks for
   them: with `--duration`, the whole track twice, then 10 s windows, then
   the whole track again.
+- `overview-window FILE`: an `AnalysisEngine` without a spectrogram decodes
+  the overview waveform of the file; then the first whole-track waveform
+  window through the FFI, as above, and the same window again. The window
+  ends where the overview's audio does, or at `--duration`. Reports the
+  overview's time, the process's CPU time when it completes, the windows'
+  times and the process's resident memory after the overview, after the
+  windows and at its peak.
 - `idle FILE`: plays the file through the FFI bridge, as the Qt app drives
   it, with a thread that takes its output whenever the bridge signals some,
   then pauses and stops it. Reports each thread's voluntary context switches
@@ -73,6 +80,7 @@ thread of the process (thread names with digits folded to `#`).
 | `run_analysis_matrix.sh OUT REPS DIR [IDS]` | `analysis` cold, in four configurations |
 | `run_seek_matrix.sh OUT REPS DIR IDS` | `seek`, idle and busy, centered and rolling; `PERF_BIN`, `PERF_CONFIGS` and `PERF_ARGS` choose the driver, configurations and extra options |
 | `run_window.sh OUT SELECTION DIR REPS IDS` | `window`, cold service each run |
+| `run_overview_window.sh OUT SELECTION DIR REPS IDS` | `overview-window`, cold service and no saved overview each run; `PERF_BIN` chooses the driver |
 | `run_nfs.sh OUT SELECTION` | `analysis` of files in place: first run cold, then warm |
 | `app_states.sh OUT REP STEREO SURROUND RAW` | the app's per-thread CPU and wakeups: idle, playing, paused, stopped, driven over MPRIS |
 | `app_library.sh OUT DB FILE` | the app's startup rescan of a copied library database, then playback |

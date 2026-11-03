@@ -205,7 +205,7 @@ fn frame_seconds(frame: u64, sample_rate: u64) -> f64 {
     std::time::Duration::new(seconds, u32::try_from(nanos).unwrap_or(999_999_999)).as_secs_f64()
 }
 
-fn decode_window(
+pub(super) fn decode_window(
     session: &WaveformSession,
     start_seconds: f64,
     end_seconds: f64,
@@ -576,8 +576,19 @@ pub(super) mod tests {
             std::process::id(),
             samples.len()
         ));
+        write_test_wave_to(&path, samples, sample_rate, channels);
+        path
+    }
+
+    /// A 16-bit PCM WAV file of `samples` at `path`.
+    pub(crate) fn write_test_wave_to(
+        path: &Path,
+        samples: &[i16],
+        sample_rate: u32,
+        channels: u16,
+    ) {
         let data_bytes = u32::try_from(samples.len().saturating_mul(2)).unwrap();
-        let mut file = std::fs::File::create(&path).unwrap();
+        let mut file = std::fs::File::create(path).unwrap();
         file.write_all(b"RIFF").unwrap();
         file.write_all(&(36 + data_bytes).to_le_bytes()).unwrap();
         file.write_all(b"WAVEfmt ").unwrap();
@@ -594,7 +605,6 @@ pub(super) mod tests {
         for sample in samples {
             file.write_all(&sample.to_le_bytes()).unwrap();
         }
-        path
     }
 
     #[test]
