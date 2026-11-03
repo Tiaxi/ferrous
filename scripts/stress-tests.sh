@@ -111,6 +111,16 @@ OUT_DIR="$(cd "${OUT_DIR}" && pwd)"
 # the end, so no run sees the real settings, library or cache.
 STATE_ROOT="$(mktemp -d "${OUT_DIR}/state.XXXXXX")"
 LOAD_PIDS=()
+RUN_PID=""
+
+# Stops `pid` and the processes below it, children first.
+kill_tree() {
+    local child
+    for child in $(pgrep -P "$1" || true); do
+        kill_tree "${child}"
+    done
+    kill "$1" 2>/dev/null || true
+}
 
 stop_load() {
     local pid
@@ -124,6 +134,10 @@ stop_load() {
 }
 
 cleanup() {
+    if [[ -n "${RUN_PID}" ]]; then
+        kill_tree "${RUN_PID}"
+        wait "${RUN_PID}" 2>/dev/null || true
+    fi
     stop_load
     rm -rf -- "${STATE_ROOT}"
 }
@@ -200,7 +214,11 @@ for suite in "${SUITES[@]}"; do
         context="${suite} run ${i} ${parallel} load=${loaded} loadavg_start=$(cut -d' ' -f1 /proc/loadavg)"
         started=${SECONDS}
         status=0
-        (cd "${REPO_ROOT}" && with_test_dirs "${command[@]}") >"${log}" 2>&1 || status=$?
+        # In the background, so that a signal stops the run at once.
+        (cd "${REPO_ROOT}" && with_test_dirs "${command[@]}") >"${log}" 2>&1 &
+        RUN_PID=$!
+        wait "${RUN_PID}" || status=$?
+        RUN_PID=""
         context+=" loadavg_end=$(cut -d' ' -f1 /proc/loadavg) seconds=$((SECONDS - started))"
         stop_load
         total_runs=$((total_runs + 1))

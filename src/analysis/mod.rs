@@ -5422,7 +5422,10 @@ mod tests {
         }
     }
 
-    /// Wait until `done` holds of the ring fed by `engine`'s output.
+    /// Wait until `done` holds of the ring fed by `engine`'s output. It
+    /// fails when the columns stop coming, not after a time: a session
+    /// may decode a minute of audio to reach the view, which takes a
+    /// loaded machine longer, but every chunk is progress.
     #[cfg(feature = "gst")]
     #[track_caller]
     fn fill_ring_until(
@@ -5431,11 +5434,18 @@ mod tests {
         what: &str,
         mut done: impl FnMut(&ModelRing) -> bool,
     ) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        const STALL: Duration = Duration::from_secs(30);
+        let mut deadline = std::time::Instant::now() + STALL;
         while !done(ring) {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             match events.recv_timeout(left) {
-                Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) => ring.take(&chunk),
+                Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) => {
+                    let columns = ring.columns;
+                    ring.take(&chunk);
+                    if ring.columns != columns {
+                        deadline = std::time::Instant::now() + STALL;
+                    }
+                }
                 Ok(AnalysisEvent::WorkerFailed(error)) => panic!("{what}: {error}"),
                 Ok(AnalysisEvent::Snapshot(_)) => {}
                 Err(error) => panic!("{what}: {error}; columns {:?}", ring.columns),
