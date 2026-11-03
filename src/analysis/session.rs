@@ -1760,15 +1760,6 @@ fn session_decode_loop(
                     }
                 }
                 if let Some(backfill) = session.backfill {
-                    if backfill.resume.is_some() && !backfill.right_ended {
-                        // The file ends before the columns the left was to
-                        // end at, which its right did not reach either.
-                        session.backfill = Some(Backfill {
-                            end: session.columns_produced,
-                            ..backfill
-                        });
-                        continue;
-                    }
                     if backfill.resume.is_none() && session.pending_continue.is_none() {
                         // The right ends here. The chunks of the left carry
                         // where, and the end is published once they are
@@ -1782,11 +1773,13 @@ fn session_decode_loop(
                         continue;
                     }
                     // A continuation goes on from the right. Or the left
-                    // reached the end of the file, after the right found no
-                    // audio at the playhead, which a padded duration
-                    // estimate can put past the end: the file ends where
-                    // the left did, not where the right started, and every
-                    // column of the session is sent.
+                    // reached the end of the file, before the playhead,
+                    // which a padded duration estimate can put past the
+                    // end: the right has no audio, whether it found none or
+                    // went to the left before it read any, as it does for a
+                    // playhead past the end the session knows. The file
+                    // ends where the left did, not where the right started,
+                    // and every column of the session is sent.
                     session.backfill = None;
                 }
                 // Real source EOF.  Publish the decoded extent while this
@@ -1982,8 +1975,24 @@ fn session_seek_start_seconds(session: &SpectrogramSessionState, position_second
     centered_view::decode_start_seconds(
         position_seconds,
         window_seconds,
-        session.track_duration_seconds,
+        view_duration_seconds(session),
     )
+}
+
+/// How long the track is for a centered view of the session: where the
+/// file ends, once the session has decoded its end, as the UI's view ends
+/// at the end its chunks carry; until then the published duration, which
+/// for a raw stream is an estimate that can run past the audio.
+fn view_duration_seconds(session: &SpectrogramSessionState) -> f64 {
+    match session.end_column {
+        Some(end) if session.timeline_of == ColumnTimeline::PlayingFile => {
+            // Column counts are far below f64's exact-integer range.
+            #[allow(clippy::cast_precision_loss)]
+            let end = end as f64;
+            end / session.cols_per_second
+        }
+        _ => session.track_duration_seconds,
+    }
 }
 
 /// Take a seek to `position_seconds`. A rolling view shows what plays from
@@ -2020,7 +2029,7 @@ fn decoded_columns_cover_view(session: &SpectrogramSessionState, position_second
     let left = centered_view::visible_left_edge_seconds(
         position_seconds,
         window,
-        session.track_duration_seconds,
+        view_duration_seconds(session),
     );
     let left_column = f64_to_u64_saturating(left * session.cols_per_second);
     let frontier = decoded_frontier(session);
@@ -2295,7 +2304,7 @@ fn view_right_column(session: &SpectrogramSessionState) -> u64 {
     let left = centered_view::visible_left_edge_seconds(
         session.target_position_seconds,
         window,
-        session.track_duration_seconds,
+        view_duration_seconds(session),
     );
     f64_to_u64_saturating((left + window) * session.cols_per_second)
 }
@@ -7594,17 +7603,22 @@ mod tests {
         stft_seek_grid(seconds, PADDED_RATE, 256, REFERENCE_HOP).0
     }
 
-    /// Where a centered session of the padded file for a playhead at
-    /// `target` starts.
     #[cfg(feature = "gst")]
-    fn padded_start_seconds(target: f64) -> f64 {
+    fn padded_columns_per_second() -> f64 {
+        f64::from(PADDED_RATE) / usize_to_f64_approx(REFERENCE_HOP)
+    }
+
+    /// Where a centered session of the padded file for a playhead at
+    /// `target` starts, in a track `duration` seconds long (0 if unknown).
+    #[cfg(feature = "gst")]
+    fn padded_start_seconds(target: f64, duration: f64) -> f64 {
         let window = centered_view::window_seconds(
             BACKFILL_WIDTH,
             1.0,
             REFERENCE_HOP,
-            f64::from(PADDED_RATE) / usize_to_f64_approx(REFERENCE_HOP),
+            padded_columns_per_second(),
         );
-        centered_view::decode_start_seconds(target, window, 0.0)
+        centered_view::decode_start_seconds(target, window, duration)
     }
 
     /// A centered session of `path` as `track_token`, with its playhead at
@@ -7624,7 +7638,7 @@ mod tests {
             *token = track_token;
             *display_mode = SpectrogramDisplayMode::Centered;
             *widget_width = BACKFILL_WIDTH;
-            *start_seconds = padded_start_seconds(target);
+            *start_seconds = padded_start_seconds(target, 0.0);
             *target_position_seconds = target;
         }
         command
@@ -7666,7 +7680,7 @@ mod tests {
         assert_eq!(spans_of(&reference), vec![(0, end)]);
 
         let target = 22.0;
-        let start = padded_column(padded_start_seconds(target));
+        let start = padded_column(padded_start_seconds(target, 0.0));
         let playhead = padded_column(target);
         assert!(
             start < end && end + MIN_BACKFILL_COLUMNS < playhead,
@@ -7704,29 +7718,53 @@ mod tests {
         assert_eq!(u64::from(finalize.total_columns_estimate), end);
         assert_eq!(u64::from(finalize.start_column_index), end);
 
-        // A seek back into the audio, left of what the session decoded,
-        // starts over and ends at the same column.
-        let back = 18.0;
-        commands
-            .send(SpectrogramWorkerCommand::Seek {
-                position_seconds: back,
-            })
-            .unwrap();
-        let chunks = chunks_through(&event_rx, |chunk| chunk.complete);
-        assert!(chunks[0].buffer_reset);
-        let back_start = padded_column(padded_start_seconds(back));
-        assert_eq!(
-            spans_of(&chunks),
-            vec![
-                (padded_column(back), end),
-                (back_start, padded_column(back))
-            ]
-        );
-        assert_eq!(chunks.iter().filter(|chunk| chunk.complete).count(), 1);
-        assert_eq!(
-            u64::from(chunks.last().unwrap().total_columns_estimate),
-            end
-        );
+        // Once the UI has the end, its view of a playhead near it ends there,
+        // a view's width after its left edge, which the session did not
+        // decode. A seek keeps the session's columns only if they cover that
+        // view, and otherwise starts before it: whether its playhead is in
+        // the audio the session decoded, further into the padding, or left
+        // of what it decoded. The padded duration would put the view's left
+        // edge in the columns decoded, and leave the UI's view without the
+        // columns left of them.
+        let end_seconds = end as f64 / padded_columns_per_second();
+        let view_left = end - u64::from(BACKFILL_WIDTH);
+        assert!(view_left < start, "{view_left} {start}");
+        for (session, seek) in [20.1, 25.0, 18.0].into_iter().enumerate() {
+            if session > 0 {
+                commands.send(padded_session_on(&path, 30, target)).unwrap();
+                let chunks = chunks_through(&event_rx, |chunk| chunk.complete);
+                assert_eq!(spans_of(&chunks), vec![(start, end)], "{seek}");
+            }
+            commands
+                .send(SpectrogramWorkerCommand::Seek {
+                    position_seconds: seek,
+                })
+                .unwrap();
+            let chunks = chunks_through(&event_rx, |chunk| chunk.complete);
+            assert!(chunks[0].buffer_reset, "{seek}");
+            let seek_start = padded_column(padded_start_seconds(seek, end_seconds));
+            assert_eq!(
+                u64::from(chunks[0].start_column_index),
+                seek_start,
+                "{seek}"
+            );
+            assert!(seek_start <= view_left, "{seek}: {seek_start}");
+            // The playhead's columns first, if it is in the audio, then the
+            // left of the view, up to the same end.
+            let seek_playhead = padded_column(seek);
+            let spans = if seek_playhead < end {
+                vec![(seek_playhead, end), (seek_start, seek_playhead)]
+            } else {
+                vec![(seek_start, end)]
+            };
+            assert_eq!(spans_of(&chunks), spans, "{seek}");
+            assert_eq!(chunks.iter().filter(|chunk| chunk.complete).count(), 1);
+            assert_eq!(
+                u64::from(chunks.last().unwrap().total_columns_estimate),
+                end,
+                "{seek}"
+            );
+        }
 
         // A gapless switch after the end publishes no other end for it.
         let mut successor = padded_session_on(&path, 31, 0.0);
