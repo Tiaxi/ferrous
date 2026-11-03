@@ -1389,6 +1389,7 @@ private slots:
     void waveformEditorUsesSceneGraphAndNativeFrameInterpolation();
     void waveformSceneGraphReusesTextures();
     void waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn();
+    void waveformEditorHiddenDrawsNothing();
     void waveformEditorMadeInAWindowSchedulesPlaybackFrames();
     void waveformEditorParentedByQmlBindsItsWindowOnce();
     void waveformSceneGraphMatchesRaster_data();
@@ -9663,6 +9664,51 @@ void WaveformSmokeTest::waveformSceneGraphReusesTextures() {
     QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, native ? quint64{1} : quint64{0});
     if (native) QCOMPARE(WaveformSceneGraph::statistics(node).residentBytes, quint64{4096 * 180 * 4});
     delete node;
+}
+
+void WaveformSmokeTest::waveformEditorHiddenDrawsNothing() {
+    // Qt asks a hidden item for its node too, whenever it is made dirty or
+    // enters a window: the waveform that the spectrogram replaces, for one,
+    // as it moves into the fullscreen viewer with it, where it drew a whole
+    // screen of pixels into the viewer's first frame. Hidden, the editor
+    // draws nothing and keeps the node it has; shown again, it asks for a
+    // frame, which draws it as it is then.
+    QQuickWindow window;
+    window.resize(64, 64);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *item = new WaveformEditorItem;
+    item->setParentItem(window.contentItem());
+    item->setWidth(400);
+    item->setHeight(100);
+    item->setDurationSeconds(60.0);
+    item->setOverviewComplete(true);
+    item->setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    item->setVisible(false);
+    QCOMPARE(item->updatePaintNode(nullptr, nullptr), nullptr);
+
+    item->setVisible(true);
+    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    const auto guard = qScopeGuard([&node]() { delete node; });
+    QVERIFY(WaveformSceneGraph::statistics(node).uploadedBytes >= 400 * 100 * 4);
+    node = item->updatePaintNode(node, nullptr);
+    QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, quint64{0});
+
+    // Hidden, a change draws nothing.
+    item->setVisible(false);
+    item->setOverviewData(QByteArray(8192, static_cast<char>(32)));
+    QSGNode *const kept = node;
+    node = item->updatePaintNode(node, nullptr);
+    QCOMPARE(node, kept);
+    QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, quint64{0});
+
+    // Shown, it asks for a frame, which draws the change.
+    const quint64 requests = item->m_playbackFrameRequests;
+    item->setVisible(true);
+    QVERIFY(item->m_playbackFrameRequests > requests);
+    node = item->updatePaintNode(node, nullptr);
+    QVERIFY(WaveformSceneGraph::statistics(node).textureUploads > 0);
 }
 
 void WaveformSmokeTest::waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn() {

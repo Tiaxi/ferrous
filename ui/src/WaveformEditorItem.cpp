@@ -1710,6 +1710,13 @@ bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
 }
 
 QSGNode *WaveformEditorItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) {
+    // Qt asks a hidden item for its node too, whenever it changes or enters
+    // a window, as the waveform the spectrogram replaces does with it when
+    // the fullscreen viewer opens. Hidden, it keeps what it has and draws
+    // nothing; shown again, it asks for a frame (shownChanged).
+    if (!isVisible()) {
+        return oldNode;
+    }
     bool rasterize = false;
     if (window() && window()->rendererInterface()->graphicsApi() == QSGRendererInterface::Software) {
         QMutexLocker lock(&m_stateMutex);
