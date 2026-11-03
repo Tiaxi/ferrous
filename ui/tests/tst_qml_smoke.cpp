@@ -21552,6 +21552,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
     qputenv("XDG_CONFIG_HOME", QFile::encodeName(testStorage.filePath("config")));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(testStorage.filePath("cache")));
+    keepGStreamerRegistryIn(testStorage.path());
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
     // Tests with a real bridge play into a sink that needs no audio device.
