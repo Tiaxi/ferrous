@@ -1507,9 +1507,16 @@ ApplicationWindow {
         visible: false
     }
 
+    // Holds the current cover decoded as the album art viewer shows it, so
+    // the viewer opens at once. Qt shares a decoded image only between
+    // Images with the same source, sourceSize, device pixel ratio, fillMode
+    // (Fit or Crop), autoTransform and sourceClipRect: keep these as in
+    // AlbumArtSurface's Image, or the viewer decodes the cover again.
     Image {
         id: albumArtViewerPreloadImage
+        objectName: "albumArtViewerPreloadImage"
         visible: false
+        fillMode: Image.PreserveAspectFit
         asynchronous: true
         cache: true
         retainWhileLoading: true
