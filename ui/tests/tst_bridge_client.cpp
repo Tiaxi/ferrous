@@ -43,6 +43,7 @@
 #include "../src/GlobalSearchResultsModel.h"
 #include "../src/MprisController.h"
 #include "../src/SpectrogramItem.h"
+#include "../src/WindowPresence.h"
 #undef private
 
 #include "../src/FerrousBridgeFfi.h"
@@ -228,6 +229,7 @@ private slots:
     void queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout();
     void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
+    void spectrogramActivityStopsForAWindowOffScreen();
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
     void tagEditorRenamesThroughTheBridgeGate();
@@ -450,6 +452,54 @@ void BridgeClientTest::spectrogramActivityFollowsVisibleItemsAndWindows() {
     const QByteArray activeCommand = BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramActive, 1);
     QCOMPARE(activeCommand, QByteArray::fromHex("40000100000001"));
+}
+
+void BridgeClientTest::spectrogramActivityStopsForAWindowOffScreen() {
+    // On Wayland a minimized window, or one whose display is off, keeps its
+    // visibility and only stops being exposed. Analysis stops once it has
+    // stayed unexposed for a while; a brief unexposure, such as a desktop
+    // switch, does not restart it.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QQuickWindow window;
+    SpectrogramItem view(window.contentItem());
+    client.registerSpectrogramItem(&view, 0);
+    window.show();
+    QTRY_VERIFY(client.m_spectrogramActive);
+    WindowPresence *presence = WindowPresence::of(&window);
+    QVERIFY(presence->shown());
+    QSignalSpy shownChanges(presence, &WindowPresence::shownChanged);
+    bool exposed = true;
+    presence->m_isExposed = [&exposed](const QWindow &) { return exposed; };
+    const auto expose = [&](bool value) {
+        exposed = value;
+        QExposeEvent event(value ? QRegion(0, 0, 10, 10) : QRegion());
+        QCoreApplication::sendEvent(&window, &event);
+    };
+
+    expose(false);
+    QVERIFY(presence->shown());
+    QVERIFY(presence->m_unexposedGrace.isActive());
+    QCOMPARE(presence->m_unexposedGrace.interval(), WindowPresence::kUnexposedGraceMs);
+    QCoreApplication::processEvents();
+    QVERIFY(client.m_spectrogramActive);
+    expose(true);
+    QVERIFY(!presence->m_unexposedGrace.isActive());
+    QCOMPARE(shownChanges.size(), 0);
+
+    expose(false);
+    QTRY_VERIFY_WITH_TIMEOUT(!presence->shown(), WindowPresence::kUnexposedGraceMs * 3);
+    QCOMPARE(shownChanges.size(), 1);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    // Back on screen, at once.
+    expose(true);
+    QVERIFY(presence->shown());
+    QTRY_VERIFY(client.m_spectrogramActive);
+    // Minimized where the platform says so, at once too.
+    window.setVisibility(QWindow::Minimized);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    QVERIFY(!presence->m_unexposedGrace.isActive());
+    client.unregisterSpectrogramItem(&view);
 }
 
 void BridgeClientTest::tagJobsKeepUiResponsiveAndDiscardClosedLoads() {

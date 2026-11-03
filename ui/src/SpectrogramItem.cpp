@@ -1639,13 +1639,18 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
 #endif
     rebuildPalette();
     connect(this, &QQuickItem::visibleChanged, this, [this]() {
-        if (!isVisible()) return;
+        if (!isVisible()) {
+            // A hidden pane asks for no frames until it is shown again.
+            cancelPlaybackFrame();
+            return;
+        }
         {
             QMutexLocker lock(&m_stateMutex);
             m_animationTickInitialized = false;
             m_precomputedCanvasDirty = true;
         }
-        update();
+        // One frame shows it as it is now; its frames then follow playback.
+        requestPlaybackFrame();
     });
     connect(this, &QQuickItem::windowChanged, this, &SpectrogramItem::bindWindowFpsTracking);
     bindWindowFpsTracking(window());
@@ -1673,6 +1678,7 @@ SpectrogramItem::~SpectrogramItem() {
     disconnect(this, nullptr, this, nullptr);
     disconnect(m_animationTickConnection);
     disconnect(m_windowVisibilityConnection);
+    disconnect(m_windowPresenceConnection);
     cancelPlaybackFrame();
     // A rasterization still running stops at its next check, and none
     // delivers to this item from now on.
@@ -6316,6 +6322,9 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
         disconnect(m_windowVisibilityConnection);
         m_windowVisibilityConnection = QMetaObject::Connection{};
     }
+    disconnect(m_windowPresenceConnection);
+    m_windowPresenceConnection = QMetaObject::Connection{};
+    m_windowPresence = WindowPresence::of(window);
     // The new window draws a frame of its own, which schedules the next
     // one with the new window's panes.
     cancelPlaybackFrame();
@@ -6361,7 +6370,29 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
             update();
         },
         Qt::QueuedConnection);
+    m_windowPresenceConnection = connect(
+        m_windowPresence, &WindowPresence::shownChanged,
+        this, &SpectrogramItem::windowPresenceChanged);
     update();
+}
+
+bool SpectrogramItem::showsPlaybackFrames() const {
+    return isVisible() && (window() == nullptr || (m_windowPresence && m_windowPresence->shown()));
+}
+
+void SpectrogramItem::windowPresenceChanged() {
+    if (!showsPlaybackFrames()) {
+        // Nothing would see them: no frames until the window is back.
+        cancelPlaybackFrame();
+        return;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_animationTickInitialized = false;
+    }
+    // One frame shows playback as it is now; the frames that follow it
+    // ask for their own.
+    requestPlaybackFrame();
 }
 
 void SpectrogramItem::handleWindowAfterAnimating() {
@@ -6445,6 +6476,11 @@ qint64 SpectrogramItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
 }
 
 void SpectrogramItem::schedulePlaybackFrame() {
+    if (!showsPlaybackFrames()) {
+        // Showing it asks for its frame.
+        cancelPlaybackFrame();
+        return;
+    }
     qint64 delayNs = 0;
     qint64 nowNs = 0;
     {
@@ -6469,6 +6505,12 @@ void SpectrogramItem::schedulePlaybackFrame() {
 }
 
 void SpectrogramItem::requestPlaybackFrame() {
+    if (!showsPlaybackFrames()) {
+        // A pane no one sees keeps its state up to date without frames;
+        // showing it asks for one.
+        cancelPlaybackFrame();
+        return;
+    }
     ++m_playbackFrameRequests;
     update();
 }
