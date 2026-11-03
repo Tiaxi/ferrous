@@ -429,11 +429,6 @@ fn read_symphonia_frames(
     if packet.track_id() != track_id {
         return Ok(AudioRead::Pending);
     }
-    let time_base = format
-        .tracks()
-        .iter()
-        .find(|track| track.id == track_id)
-        .and_then(|track| track.codec_params.time_base);
     let audio = match decoder.decode(&packet) {
         Ok(audio) => audio,
         Err(SymphoniaError::DecodeError(_)) => return Ok(AudioRead::Pending),
@@ -441,9 +436,7 @@ fn read_symphonia_frames(
     };
     let spec = *audio.spec();
     let channels = spec.channels.count().max(1);
-    let first_frame = time_base.map_or(packet.ts(), |base| {
-        timestamp_frame(packet.ts(), base.numer, base.denom, spec.rate)
-    });
+    let first_frame = packet_first_frame(format.as_ref(), track_id, packet.ts(), spec.rate);
     let samples = interleave_f32(&audio);
     Ok(AudioRead::Frames(AudioFrames {
         frames: samples.len() / channels,
@@ -451,6 +444,33 @@ fn read_symphonia_frames(
         channels,
         first_frame,
     }))
+}
+
+/// The first frame of the audio of a packet of track `track_id` with
+/// timestamp `ts`, decoded at `rate` Hz.
+pub(super) fn packet_first_frame(
+    format: &dyn symphonia::core::formats::FormatReader,
+    track_id: u32,
+    ts: u64,
+    rate: u32,
+) -> u64 {
+    format
+        .tracks()
+        .iter()
+        .find(|track| track.id == track_id)
+        .and_then(|track| track.codec_params.time_base)
+        .map_or(ts, |base| timestamp_frame(ts, base.numer, base.denom, rate))
+}
+
+/// The sample rate and channel count analysis reads a Symphonia track
+/// with, as its header tells them.
+pub(super) fn symphonia_track_shape(
+    params: &symphonia::core::codecs::CodecParameters,
+) -> (u64, usize) {
+    (
+        u64::from(params.sample_rate.unwrap_or(48_000)),
+        params.channels.map_or(2, |ch| ch.count().max(1)),
+    )
 }
 
 /// Convert decoded audio to interleaved F32 samples in one pass, as
@@ -675,11 +695,7 @@ pub(super) fn open_symphonia_file(path: &Path) -> Option<SymphoniaFile> {
         .format;
     let track = format.default_track()?;
     let track_id = track.id;
-    let native_sample_rate = u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
-    let native_channels = track
-        .codec_params
-        .channels
-        .map_or(2, |ch| ch.count().max(1));
+    let (native_sample_rate, native_channels) = symphonia_track_shape(&track.codec_params);
     let length = TrackLength::of_frames(track.codec_params.n_frames, native_sample_rate);
     let audio_decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())

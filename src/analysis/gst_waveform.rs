@@ -12,6 +12,7 @@ use super::decoders::{
 };
 use super::fft::{OverviewProgress, WaveformAccumulator};
 use super::track_io::stamp_of;
+use super::waveform_prefill::PrefillSlot;
 use crate::playback::file_source::FileSource;
 use crate::raw_audio::{
     audio_byte_range_of, conceal_damaged_ac3_frames, configure_raw_surround_decoding,
@@ -61,11 +62,13 @@ fn start_overview_decode(
 /// The last update is [`OverviewProgress::Complete`] only if the decode
 /// reached the end of the file. An error that stops it after it decoded
 /// audio ends it with [`OverviewProgress::Truncated`] and the peaks of the
-/// audio before the error.
+/// audio before the error. Only a decode that reaches the end builds the
+/// summaries `prefill` asks for.
 pub(super) fn decode_waveform_peaks_stream_gst<F, C>(
     path: &Path,
     max_points: usize,
     source: &Cell<Option<WaveformSourceStamp>>,
+    prefill: &mut PrefillSlot<'_>,
     on_update: F,
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
@@ -82,7 +85,15 @@ where
     configure_raw_surround_decoding();
     let pipeline = gst::Pipeline::new();
     conceal_damaged_ac3_frames(pipeline.upcast_ref());
-    decode_overview_in(path, pipeline, max_points, source, on_update, is_cancelled)
+    decode_overview_in(
+        path,
+        pipeline,
+        max_points,
+        source,
+        prefill,
+        on_update,
+        is_cancelled,
+    )
 }
 
 /// [`decode_waveform_peaks_stream_gst`] in `pipeline`, which has what it
@@ -92,6 +103,7 @@ fn decode_overview_in<F, C>(
     pipeline: gst::Pipeline,
     max_points: usize,
     source: &Cell<Option<WaveformSourceStamp>>,
+    prefill: &mut PrefillSlot<'_>,
     on_update: F,
     is_cancelled: C,
 ) -> anyhow::Result<()>
@@ -101,8 +113,10 @@ where
 {
     let (decode, file_source) = start_overview_decode(path, pipeline)?;
     // The source opened the file when the pipeline started.
-    source.set(file_source.opened_metadata().as_ref().and_then(stamp_of));
-    read_overview(path, decode, max_points, on_update, is_cancelled)
+    let metadata = file_source.opened_metadata();
+    source.set(metadata.as_ref().and_then(stamp_of));
+    prefill.opened(path, metadata);
+    read_overview(path, decode, max_points, prefill, on_update, is_cancelled)
 }
 
 /// Read the overview of the file at `path` from `decode`, its started
@@ -111,6 +125,7 @@ fn read_overview<F, C>(
     path: &Path,
     decode: GstDecode,
     max_points: usize,
+    prefill: &mut PrefillSlot<'_>,
     mut on_update: F,
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
@@ -121,19 +136,24 @@ where
     let GstDecode {
         source: mut frames,
         sample_rate,
+        channels,
         duration_ns,
-        ..
     } = decode;
     // A failure ends the overview with the audio decoded before it, also
     // the audio still queued when the pipeline reported it.
     frames.read_queued_audio_on_failure();
     // The duration only sizes the bins; the peaks and the seconds they
     // cover are those of the audio decoded.
-    let estimated_frames = duration_ns
+    let told_frames = duration_ns
         .or_else(|| raw_surround_duration_ns(path))
-        .map_or(sample_rate * UNKNOWN_DURATION_SECONDS, |ns| {
-            ns.saturating_mul(sample_rate) / 1_000_000_000
-        });
+        .map(|ns| ns.saturating_mul(sample_rate) / 1_000_000_000);
+    let estimated_frames = told_frames.unwrap_or(sample_rate * UNKNOWN_DURATION_SECONDS);
+    // The detail service reads the file with the same decode, from a
+    // `filesrc`. It keeps gaps as missing coverage, so it gets the packets
+    // before the timeline fills them.
+    let mut builder = prefill
+        .builder(sample_rate, channels, true)
+        .map(|builder| builder.expecting(told_frames));
     let mut waveform = WaveformAccumulator::new(max_points, estimated_frames, sample_rate);
     // Missing audio counts as silence and overlaps once, so the peaks stay
     // at the times they play.
@@ -143,7 +163,14 @@ where
         if is_cancelled() {
             return Ok(());
         }
-        match timeline.read(|| frames.next_frames()) {
+        let read = timeline.read(|| {
+            let read = frames.next_frames();
+            if let (Ok(AudioRead::Frames(audio)), Some(builder)) = (&read, builder.as_mut()) {
+                builder.push(audio.first_frame, &audio.samples, audio.channels);
+            }
+            read
+        });
+        match read {
             Ok(AudioRead::Frames(audio)) => {
                 decoded_any = true;
                 let samples = &audio.samples[..audio.analysis_frames() * audio.channels];
@@ -162,6 +189,9 @@ where
 
     if !decoded_any {
         anyhow::bail!("no audio could be decoded");
+    }
+    if reached_end {
+        prefill.finished(builder);
     }
     if !is_cancelled() {
         let progress = if reached_end {
@@ -237,7 +267,11 @@ pub(super) fn overview_failing_after(
         });
     });
 
-    let (decode, _) = start_overview_decode(path, pipeline).expect("start the decode");
+    let (decode, file_source) = start_overview_decode(path, pipeline).expect("start the decode");
+    let mut built = None;
+    let mut sink = |_| built = Some(());
+    let mut prefill = PrefillSlot::offering(&mut sink);
+    prefill.opened(path, file_source.opened_metadata());
     if before_first_read {
         failed_rx
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -248,6 +282,7 @@ pub(super) fn overview_failing_after(
         path,
         decode,
         64,
+        &mut prefill,
         |peaks, coverage, progress| {
             updates.push((peaks, coverage, progress));
             true
@@ -255,6 +290,9 @@ pub(super) fn overview_failing_after(
         || false,
     )
     .expect("an overview of the audio before the failure");
+    // The detail service stops at the failure.
+    drop(prefill);
+    assert!(built.is_none(), "a failed decode built summaries");
     let seconds = std::time::Duration::from_nanos(end_ns.load(Ordering::SeqCst)).as_secs_f32();
     (updates, seconds)
 }
@@ -300,6 +338,7 @@ mod tests {
             path,
             max_points,
             &Cell::new(None),
+            &mut PrefillSlot::default(),
             |peaks, coverage, progress| {
                 updates.push((peaks, coverage, progress));
                 true
@@ -418,6 +457,7 @@ mod tests {
             pipeline,
             64,
             &Cell::new(None),
+            &mut PrefillSlot::default(),
             |_, _, progress| {
                 complete |= progress == OverviewProgress::Complete;
                 true
@@ -464,6 +504,7 @@ mod tests {
             &path,
             1_024,
             &Cell::new(None),
+            &mut PrefillSlot::default(),
             |peaks, _, progress| {
                 if progress == OverviewProgress::Complete {
                     symphonia = Some(peaks);
@@ -499,6 +540,7 @@ mod tests {
             &path,
             1_024,
             &Cell::new(None),
+            &mut PrefillSlot::default(),
             |_, _, progress| {
                 assert!(!cancelled.get(), "an update after the cancel");
                 updates.push(progress);

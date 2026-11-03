@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use super::decoders::{open_audio_file, AudioFrameSource, AudioFrames, AudioRead};
 use super::usize_to_u64;
+use super::waveform_prefill::CoarsePrefill;
 use super::waveform_pyramid::{PyramidTile, COARSE_SUMMARY_FRAMES};
 
 pub(super) const TILE_FRAMES: u64 = 16_384;
@@ -20,7 +21,7 @@ const SUMMARY_CACHE_BYTES: usize = 16 * 1024 * 1024;
 /// hi-res surround track exceed the LRU's budget. This holds ~26 minutes of
 /// 96 kHz 5.1 audio, ~13 of 192 kHz 5.1, or about two hours of 44.1 kHz
 /// stereo.
-const COARSE_SUMMARY_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const COARSE_SUMMARY_BYTES: usize = 16 * 1024 * 1024;
 
 // Calls originate on the Qt worker pool: the level meter and the waveform
 // detail view share one active-track decoder and cache across those threads
@@ -29,17 +30,21 @@ const COARSE_SUMMARY_BYTES: usize = 16 * 1024 * 1024;
 static SERVICE: Mutex<ServiceSlot> = Mutex::new(ServiceSlot {
     session: None,
     opening: false,
+    prefill: None,
 });
 /// Signalled when an open of a session ends.
 static OPENED: Condvar = Condvar::new();
 /// How often a request waiting for another's open looks at its cancellation.
 const CANCELLATION_CHECK_INTERVAL: Duration = Duration::from_millis(5);
 
-struct ServiceSlot {
+pub(super) struct ServiceSlot {
     session: Option<Arc<WaveformSession>>,
     /// Whether a request is opening a session. One file is opened at a
     /// time, so requests for the same file share one decoder.
     opening: bool,
+    /// Coarse summaries the overview decode built for a file the service
+    /// had no session for, which the session that opens it takes.
+    prefill: Option<CoarsePrefill>,
 }
 
 fn lock_service() -> MutexGuard<'static, ServiceSlot> {
@@ -48,8 +53,8 @@ fn lock_service() -> MutexGuard<'static, ServiceSlot> {
     SERVICE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[derive(PartialEq, Eq)]
-struct SourceIdentity {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SourceIdentity {
     path: PathBuf,
     length: u64,
     modified: SystemTime,
@@ -57,7 +62,22 @@ struct SourceIdentity {
 
 impl SourceIdentity {
     fn read(path: &Path) -> anyhow::Result<Self> {
-        let metadata = path.metadata()?;
+        Ok(Self::of(path, &path.metadata()?)?)
+    }
+
+    /// A made-up identity of a file at `path`.
+    #[cfg(test)]
+    pub(super) fn made_up(path: &str) -> Self {
+        Self {
+            path: PathBuf::from(path),
+            length: 0,
+            modified: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// The identity of the file at `path` whose metadata is `metadata`, as
+    /// the handle that reads it tells.
+    pub(super) fn of(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<Self> {
         Ok(Self {
             path: path.to_path_buf(),
             length: metadata.len(),
@@ -73,6 +93,28 @@ pub(super) struct PcmTile {
 }
 
 impl PcmTile {
+    /// Each segment's first frame, frames, channels and samples, the
+    /// samples bit for bit.
+    #[cfg(test)]
+    pub(super) fn bits(&self) -> Vec<(u64, usize, usize, Vec<u32>)> {
+        self.segments
+            .iter()
+            .map(|segment| {
+                let samples = segment
+                    .samples
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect();
+                (
+                    segment.first_frame,
+                    segment.frames,
+                    segment.channels,
+                    samples,
+                )
+            })
+            .collect()
+    }
+
     fn bytes(&self) -> usize {
         self.segments.capacity() * std::mem::size_of::<AudioFrames>()
             + self
@@ -155,8 +197,7 @@ impl<T> RetainedTiles<T> {
     }
 
     fn insert(&mut self, index: u64, tile: Arc<T>, bytes: usize) {
-        // The map's entry, the `Arc`'s counts and the tile itself.
-        let bytes = bytes + std::mem::size_of::<(u64, Arc<T>)>() + 2 * std::mem::size_of::<usize>();
+        let bytes = retained_bytes::<T>(bytes);
         if self.tiles.contains_key(&index) || self.bytes + bytes > self.budget {
             return;
         }
@@ -165,11 +206,33 @@ impl<T> RetainedTiles<T> {
     }
 }
 
+/// What a tile of `bytes` takes in a [`RetainedTiles`]: the map's entry,
+/// the `Arc`'s counts and the tile itself.
+pub(super) fn retained_bytes<T>(bytes: usize) -> usize {
+    bytes + std::mem::size_of::<(u64, Arc<T>)>() + 2 * std::mem::size_of::<usize>()
+}
+
 /// What the decoder reads next. Held while one tile decodes.
-struct Decoder {
-    source: AudioFrameSource,
+struct Decoder<S = AudioFrameSource> {
+    source: S,
     next_frame: u64,
     pending: Option<AudioFrames>,
+}
+
+/// The decoder of a file, as the service reads it.
+trait FrameSource {
+    fn next_frames(&mut self) -> anyhow::Result<AudioRead>;
+    fn seek_to_frame(&mut self, frame: u64, sample_rate: u32) -> anyhow::Result<()>;
+}
+
+impl FrameSource for AudioFrameSource {
+    fn next_frames(&mut self) -> anyhow::Result<AudioRead> {
+        AudioFrameSource::next_frames(self)
+    }
+
+    fn seek_to_frame(&mut self, frame: u64, sample_rate: u32) -> anyhow::Result<()> {
+        AudioFrameSource::seek_to_frame(self, frame, sample_rate)
+    }
 }
 
 /// Decoded tiles, shared by every request. Held only to look up or store.
@@ -212,6 +275,8 @@ pub(super) struct WaveformSession {
     identity: SourceIdentity,
     pub(super) sample_rate: u32,
     pub(super) channels: usize,
+    /// Whether `GStreamer` decodes the file, rather than Symphonia.
+    gstreamer: bool,
     /// Locked after `decoder` when both are held.
     caches: Mutex<Caches>,
     decoder: Mutex<Decoder>,
@@ -220,6 +285,9 @@ pub(super) struct WaveformSession {
     broken: AtomicBool,
     #[cfg(test)]
     decoded_tiles: AtomicUsize,
+    /// Whether the session took summaries from the overview decode.
+    #[cfg(test)]
+    adopted: AtomicBool,
 }
 
 impl WaveformSession {
@@ -233,8 +301,9 @@ impl WaveformSession {
             .ok_or_else(|| anyhow::anyhow!("unsupported audio file"))?;
         Ok(Self {
             identity,
-            sample_rate: u32::try_from(rate).unwrap_or(u32::MAX).max(1),
-            channels: channels.clamp(1, usize::from(u16::MAX)),
+            sample_rate: session_sample_rate(rate),
+            channels: session_channels(channels),
+            gstreamer: source.decodes_on_its_own_thread(),
             caches: Mutex::new(Caches {
                 pcm: TileCache::new(PCM_CACHE_BYTES),
                 summaries: TileCache::new(SUMMARY_CACHE_BYTES),
@@ -250,6 +319,8 @@ impl WaveformSession {
             broken: AtomicBool::new(false),
             #[cfg(test)]
             decoded_tiles: AtomicUsize::new(0),
+            #[cfg(test)]
+            adopted: AtomicBool::new(false),
         })
     }
 
@@ -388,12 +459,34 @@ impl WaveformSession {
         self.decoded_tiles.load(Ordering::Relaxed)
     }
 
+    /// Whether the session took summaries from the overview decode.
+    #[cfg(test)]
+    pub(super) fn adopted(&self) -> bool {
+        self.adopted.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(super) fn eof_frame(&self) -> Option<u64> {
+        self.caches().eof_frame
+    }
+
+    #[cfg(test)]
+    pub(super) fn identity(&self) -> &SourceIdentity {
+        &self.identity
+    }
+
+    /// How many tiles the coarse summaries hold.
+    #[cfg(test)]
+    pub(super) fn coarse_tiles(&self) -> usize {
+        self.caches().coarse_summaries.tiles.len()
+    }
+
     pub(super) fn reached_eof(&self, frame: u64) -> bool {
         self.caches().eof_frame.is_some_and(|eof| frame >= eof)
     }
 }
 
-impl Decoder {
+impl<S: FrameSource> Decoder<S> {
     /// Decode tile `index`, and return it with the end of the file if the
     /// decode reached it.
     fn decode_tile(
@@ -433,23 +526,23 @@ impl Decoder {
                     }
                 }
             };
-            let packet_end = frames
-                .first_frame
-                .saturating_add(usize_to_u64(frames.frames));
-            let first = frames.first_frame.max(start);
-            let last = packet_end.min(end);
-            if first < last {
-                let offset = usize::try_from(first - frames.first_frame)? * frames.channels;
-                let count = usize::try_from(last - first)?;
+            let packet = TilePacket::of(
+                frames.first_frame,
+                frames.frames,
+                frames.channels,
+                start,
+                end,
+            )?;
+            if let Some((first, count, samples)) = packet.samples(&frames.samples) {
                 tile.segments.push(AudioFrames {
-                    samples: frames.samples[offset..offset + count * frames.channels].to_vec(),
+                    samples: samples.to_vec(),
                     first_frame: first,
                     frames: count,
                     channels: frames.channels,
                 });
             }
-            self.next_frame = packet_end.min(end).max(self.next_frame);
-            if packet_end > end {
+            self.next_frame = packet.next_frame(self.next_frame);
+            if packet.reaches_past_tile() {
                 self.pending = Some(frames);
             }
         }
@@ -470,6 +563,184 @@ impl Decoder {
         }
         Ok((tile, reached_eof))
     }
+}
+
+/// Where a packet the decoder gives falls in tile `[start, end)`, as the
+/// service's decoder places it while it reads the file in order: the frames
+/// of the packet within the tile go in it at their own position, and a
+/// packet that reaches past the tile is read again for the next one. Frames
+/// before the tile, which an overlap gives, are left out, and a gap stays
+/// empty.
+pub(super) struct TilePacket {
+    first: u64,
+    last: u64,
+    offset: usize,
+    channels: usize,
+    reaches_past: bool,
+}
+
+impl TilePacket {
+    /// The packet of `frames` frames in `channels` channels whose first
+    /// frame is `first_frame`, for tile `[start, end)`.
+    pub(super) fn of(
+        first_frame: u64,
+        frames: usize,
+        channels: usize,
+        start: u64,
+        end: u64,
+    ) -> anyhow::Result<Self> {
+        let packet_end = first_frame.saturating_add(usize_to_u64(frames));
+        let first = first_frame.max(start);
+        let last = packet_end.min(end);
+        let offset = if first < last {
+            usize::try_from(first - first_frame)? * channels
+        } else {
+            0
+        };
+        Ok(Self {
+            first,
+            last,
+            offset,
+            channels,
+            reaches_past: packet_end > end,
+        })
+    }
+
+    /// The first frame, the frame count and the samples of what the tile
+    /// holds of the packet whose samples are `samples`, if anything.
+    pub(super) fn samples<'a>(&self, samples: &'a [f32]) -> Option<(u64, usize, &'a [f32])> {
+        if self.first >= self.last {
+            return None;
+        }
+        let count = usize::try_from(self.last - self.first).ok()?;
+        let samples = samples.get(self.offset..self.offset + count * self.channels)?;
+        Some((self.first, count, samples))
+    }
+
+    /// The frame the decoder reads next once it read the packet, having
+    /// read up to `next_frame` before.
+    pub(super) fn next_frame(&self, next_frame: u64) -> u64 {
+        self.last.max(next_frame)
+    }
+
+    /// Whether the packet has frames past the tile, so it is kept for the
+    /// next tile, which then completes the tile without reading further.
+    pub(super) fn reaches_past_tile(&self) -> bool {
+        self.reaches_past
+    }
+}
+
+/// The sample rate of a session for a decoder of `rate` Hz.
+pub(super) fn session_sample_rate(rate: u64) -> u32 {
+    u32::try_from(rate).unwrap_or(u32::MAX).max(1)
+}
+
+/// The channel count of a session for a decoder of `channels` channels.
+pub(super) fn session_channels(channels: usize) -> usize {
+    channels.clamp(1, usize::from(u16::MAX))
+}
+
+impl WaveformSession {
+    /// Take the coarse summaries the overview decode built for this file,
+    /// if it decoded it as this session does. Tiles the session has keep
+    /// theirs.
+    fn adopt(&self, prefill: CoarsePrefill) {
+        let CoarsePrefill {
+            identity,
+            sample_rate,
+            channels,
+            gstreamer,
+            tiles,
+            eof_frame,
+            last_tile,
+            ..
+        } = prefill;
+        if identity != self.identity
+            || (sample_rate, channels, gstreamer)
+                != (self.sample_rate, self.channels, self.gstreamer)
+        {
+            return;
+        }
+        let mut caches = self.caches();
+        if caches.eof_frame.is_some_and(|eof| eof != eof_frame) {
+            return;
+        }
+        caches.eof_frame = Some(eof_frame);
+        for (index, tile) in tiles {
+            let bytes = tile.bytes();
+            caches.coarse_summaries.insert(index, tile, bytes);
+        }
+        if caches.last_tile.is_none() {
+            if let Some((index, tile)) = last_tile {
+                caches.keep_if_last(index, &tile);
+            }
+        }
+        #[cfg(test)]
+        self.adopted.store(true, Ordering::Relaxed);
+    }
+}
+
+impl ServiceSlot {
+    /// A slot with `session` open, for tests of the handover.
+    #[cfg(test)]
+    pub(super) fn holding(session: Option<Arc<WaveformSession>>) -> Self {
+        Self {
+            session,
+            opening: false,
+            prefill: None,
+        }
+    }
+
+    /// The identity of the file whose summaries the slot keeps.
+    #[cfg(test)]
+    pub(super) fn prefill_identity(&self) -> Option<&SourceIdentity> {
+        self.prefill.as_ref().map(|prefill| &prefill.identity)
+    }
+
+    /// Give the open session the coarse summaries the overview decode
+    /// built, if they are of its file, or else keep them for the session
+    /// that opens it next. Returns those they replace, of another file.
+    pub(super) fn offer(&mut self, prefill: CoarsePrefill) -> Option<CoarsePrefill> {
+        let open = self
+            .session
+            .as_ref()
+            .filter(|session| session.identity == prefill.identity)
+            .filter(|session| !session.broken.load(Ordering::Relaxed));
+        if let Some(session) = open {
+            session.adopt(prefill);
+            self.prefill.take()
+        } else {
+            self.prefill.replace(prefill)
+        }
+    }
+
+    /// Give `session`, which has just opened its file, the summaries kept
+    /// for it. Those of its path for another identity are of a file that
+    /// has changed since and are dropped; those of another path are kept
+    /// for when that opens.
+    pub(super) fn hand_over(&mut self, session: &WaveformSession) {
+        if let Some(prefill) = self
+            .prefill
+            .take_if(|prefill| prefill.identity.path == session.identity.path)
+        {
+            session.adopt(prefill);
+        }
+    }
+}
+
+/// Give the service the coarse summaries the overview decode built: to the
+/// session of their file, if it is open, or else to the session that opens
+/// it next. They replace any the service holds for another.
+pub(super) fn offer_prefill(prefill: CoarsePrefill) {
+    let replaced = lock_service().offer(prefill);
+    drop(replaced);
+}
+
+/// Drop the coarse summaries the overview decode built that no session
+/// took, as when another track starts.
+pub(super) fn discard_prefill() {
+    let prefill = lock_service().prefill.take();
+    drop(prefill);
 }
 
 /// Clears the opening flag, and wakes the requests waiting for it, when an
@@ -523,7 +794,10 @@ fn shared_session(
     #[cfg(test)]
     test_hooks::opening();
     let session = Arc::new(WaveformSession::open_identified(identity)?);
-    lock_service().session = Some(Arc::clone(&session));
+    let mut service = lock_service();
+    service.hand_over(&session);
+    service.session = Some(Arc::clone(&session));
+    drop(service);
     drop(opening);
     Ok(session)
 }
@@ -580,6 +854,156 @@ mod tests {
     use super::super::waveform_window::decode_waveform_window;
     use super::super::waveform_window::tests::write_test_wave;
     use super::*;
+
+    /// Packets a test gives the service's decoder, in order; `None` is a
+    /// read that finds nothing yet.
+    struct Packets(std::collections::VecDeque<Option<AudioFrames>>);
+
+    impl FrameSource for Packets {
+        fn next_frames(&mut self) -> anyhow::Result<AudioRead> {
+            Ok(match self.0.pop_front() {
+                None => AudioRead::Eof,
+                // As `AudioFrameSource` gives an empty packet.
+                Some(Some(frames)) if frames.frames > 0 => AudioRead::Frames(frames),
+                Some(_) => AudioRead::Pending,
+            })
+        }
+
+        fn seek_to_frame(&mut self, _: u64, _: u32) -> anyhow::Result<()> {
+            anyhow::bail!("a whole-track window reads the file in order")
+        }
+    }
+
+    /// A packet of `frames` frames in `channels` channels from
+    /// `first_frame` on, with values past full scale both ways.
+    fn packet(first_frame: u64, frames: usize, channels: usize) -> AudioFrames {
+        let mut state = first_frame.wrapping_mul(0x9e37_79b9) ^ usize_to_u64(channels);
+        let samples = (0..frames * channels)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                f32::from(u16::try_from(state >> 48).unwrap()) / 25_000.0 - 1.3
+            })
+            .collect();
+        AudioFrames {
+            samples,
+            first_frame,
+            frames,
+            channels,
+        }
+    }
+
+    type TileBits = (u64, (u32, u32, usize, Vec<[u32; 2]>));
+    type PcmBits = Vec<(u64, usize, usize, Vec<u32>)>;
+
+    /// The coarse tiles, the end of the file and the last tile's PCM that
+    /// the service builds from `packets`, reading them as a whole-track
+    /// window does.
+    fn service_reading(
+        packets: &[Option<AudioFrames>],
+        channels: usize,
+    ) -> (Vec<TileBits>, Option<u64>, Option<(u64, PcmBits)>) {
+        let copy = |frames: &AudioFrames| AudioFrames {
+            samples: frames.samples.clone(),
+            ..*frames
+        };
+        let mut decoder = Decoder {
+            source: Packets(packets.iter().map(|p| p.as_ref().map(copy)).collect()),
+            next_frame: 0,
+            pending: None,
+        };
+        let (mut tiles, mut eof, mut last) = (Vec::new(), None, None);
+        for index in 0..100 {
+            if eof.is_some_and(|eof| index * TILE_FRAMES >= eof) {
+                break;
+            }
+            let (tile, reached) = decoder
+                .decode_tile(index, eof, 48_000, &|| false)
+                .expect("decode in order");
+            eof = eof.or(reached);
+            if !tile.segments.is_empty() {
+                let (_, coarse) = PyramidTile::build(&tile, index, channels);
+                tiles.push((index, coarse.bits()));
+                if eof
+                    .and_then(|eof| eof.checked_sub(1))
+                    .map(|f| f / TILE_FRAMES)
+                    == Some(index)
+                {
+                    last = Some((index, tile.bits()));
+                }
+            }
+        }
+        (tiles, eof, last)
+    }
+
+    #[test]
+    fn prefilled_tiles_equal_the_tiles_the_service_builds_packet_for_packet() {
+        use super::super::waveform_prefill::PrefillBuilder;
+
+        // (first frame, frames, channels) of the packets, for a stereo file.
+        let packets = [
+            (300, 700, 2),        // a stream that starts late
+            (1_000, 4_000, 2),    //
+            (5_100, 3_900, 2),    // after a gap
+            (8_990, 7_394, 2),    // overlapping, ending on the edge of tile 0
+            (16_384, 3_616, 2),   //
+            (20_000, 40_000, 2),  // over tiles 1 to 3
+            (70_000, 5_000, 2),   // after a gap over the edge of tile 4
+            (100_000, 10_000, 2), // after a gap over all of tile 5
+            (110_000, 5_000, 2),  // over the edge of tile 7
+            (114_000, 6_000, 1),  // mono, overlapping that edge
+            (120_000, 0, 2),      // empty
+            (120_000, 1_000, 8),  // eight channels
+            (121_000, 10_072, 2), // to the edge of tile 8
+        ];
+        for (name, channels, end) in [
+            ("ending on a tile edge", 2, None),
+            ("ending within a tile", 2, Some(4_000)),
+            ("ending a frame past a tile edge", 2, Some(10_073)),
+            ("of six channels", 6, None),
+        ] {
+            let mut list: Vec<_> = packets
+                .iter()
+                .map(|&(first, frames, decoded)| {
+                    let decoded = if channels == 2 { decoded } else { channels };
+                    Some(packet(first, frames, decoded))
+                })
+                .collect();
+            if let Some(frames) = end {
+                *list.last_mut().unwrap() = Some(packet(121_000, frames, channels));
+            }
+            // Reads that find nothing yet change nothing.
+            list.insert(3, None);
+            list.insert(9, None);
+            let (tiles, eof, last) = service_reading(&list, channels);
+
+            let identity = SourceIdentity::made_up("/packets");
+            let mut builder = PrefillBuilder::of(identity, 48_000, channels, false);
+            for frames in list.iter().flatten() {
+                builder.push(frames.first_frame, &frames.samples, frames.channels);
+            }
+            let prefill = builder.finish().expect("a complete decode");
+            let built: Vec<_> = prefill
+                .tiles
+                .iter()
+                .map(|(index, tile)| (*index, tile.bits()))
+                .collect();
+            assert_eq!(
+                built.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+                tiles.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+                "{name}: the tiles that hold audio"
+            );
+            assert!(built == tiles, "{name}: the summaries differ");
+            assert_eq!(Some(prefill.eof_frame), eof, "{name}: the end of the file");
+            let built_last = prefill
+                .last_tile
+                .as_ref()
+                .map(|(index, tile)| (*index, tile.bits()));
+            assert!(built_last == last, "{name}: the last tile differs");
+            assert!(last.is_some(), "{name}: the last tile holds audio");
+        }
+    }
 
     #[test]
     fn the_level_meter_is_not_blocked_by_a_detail_decode_in_progress() {

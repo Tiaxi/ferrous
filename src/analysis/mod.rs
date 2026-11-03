@@ -17,6 +17,7 @@ mod gst_waveform;
 mod session;
 mod stft_batch;
 mod track_io;
+mod waveform_prefill;
 mod waveform_pyramid;
 mod waveform_service;
 mod waveform_window;
@@ -37,7 +38,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use symphonia::core::audio::SampleBuffer;
 
 use cache::{usize_to_u64, WaveformSourceStamp};
-use decoders::analysis_format_options;
+use decoders::{analysis_format_options, packet_first_frame, symphonia_track_shape};
 use fft::{ensure_sample_buffer, OverviewProgress, WaveformAccumulator, MIN_PREVIEW_PEAKS};
 #[cfg(feature = "gst")]
 use gst_waveform::decode_waveform_peaks_stream_gst;
@@ -54,6 +55,7 @@ use track_io::{
     format_from_name, spawn_track_io, stamp_of, FormatCache, TrackFormat, TrackIoReply,
     TrackIoRequest,
 };
+use waveform_prefill::PrefillSlot;
 
 use crate::playback::{remap_path, PathRenames};
 use crate::profile_logging::heartbeat_trace_enabled;
@@ -317,6 +319,8 @@ pub fn accepted_spectrogram_zoom(current: f32, requested: f32) -> Option<f32> {
 struct WaveformDecodeJob {
     track_token: u64,
     path: PathBuf,
+    /// Whether to decode the overview, which a saved one makes needless.
+    decode: bool,
 }
 
 // The bools in this struct are independent flags with distinct semantics;
@@ -1450,11 +1454,19 @@ impl AnalysisRuntimeState {
             self.snapshot.waveform_complete = true;
             self.waveform_dirty = true;
             self.emit_snapshot(ctx.event_tx, true);
+            // The decode worker drops what it built for the last track.
+            let _ = ctx.waveform_job_tx.send(WaveformDecodeJob {
+                track_token,
+                path,
+                decode: false,
+            });
             return;
         }
-        let _ = ctx
-            .waveform_job_tx
-            .send(WaveformDecodeJob { track_token, path });
+        let _ = ctx.waveform_job_tx.send(WaveformDecodeJob {
+            track_token,
+            path,
+            decode: true,
+        });
     }
 
     /// The file helper has stopped: tracks play on without saved
@@ -1476,9 +1488,11 @@ impl AnalysisRuntimeState {
             self.active_track_path.clone(),
         ) {
             if track_token == self.active_track_token {
-                let _ = ctx
-                    .waveform_job_tx
-                    .send(WaveformDecodeJob { track_token, path });
+                let _ = ctx.waveform_job_tx.send(WaveformDecodeJob {
+                    track_token,
+                    path,
+                    decode: true,
+                });
             }
         }
     }
@@ -2039,30 +2053,73 @@ fn spawn_waveform_decode_worker(
             while let Ok(next_job) = waveform_job_rx.try_recv() {
                 job = next_job;
             }
+            // What the last decode built for the detail service is of
+            // another track, if no session took it.
+            waveform_service::discard_prefill();
+            if !job.decode {
+                continue;
+            }
             let track_token = job.track_token;
             let superseded = || {
                 closed.load(Ordering::Relaxed)
                     || waveform_decode_active_token.load(Ordering::Relaxed) != track_token
             };
-            let source = Cell::new(None);
-            let _ = decode_waveform_peaks_stream(
+            decode_overview_job(
                 &job.path,
-                1024,
-                &source,
-                |peaks, coverage_seconds, progress| {
-                    if superseded() {
-                        return false;
-                    }
+                &superseded,
+                |update| {
                     let _ = waveform_tx.send(AnalysisCommand::WaveformProgress {
                         track_token,
-                        update: WaveformUpdate::of(peaks, coverage_seconds, progress, source.get()),
+                        update,
                     });
-                    true
                 },
-                &superseded,
+                waveform_service::offer_prefill,
             );
         }
     })
+}
+
+/// Decode the overview of the file at `path` for a track, and `send` its
+/// updates until it is `superseded`. A decode that reached the end of the
+/// file, for a track not superseded by then, also builds the coarse
+/// summaries of the waveform detail service and `offer`s them, before it
+/// sends its last update: a whole-track window asked for once the overview
+/// is complete finds them.
+fn decode_overview_job(
+    path: &Path,
+    superseded: &dyn Fn() -> bool,
+    mut send: impl FnMut(WaveformUpdate),
+    offer: impl FnOnce(waveform_prefill::CoarsePrefill),
+) {
+    let source = Cell::new(None);
+    let mut offer = Some(offer);
+    // A track superseded after this check has its summaries dropped by the
+    // next job, which the next track sends.
+    let mut sink = |prefill| {
+        if let Some(offer) = offer.take().filter(|_| !superseded()) {
+            offer(prefill);
+        }
+    };
+    let mut prefill = PrefillSlot::offering(&mut sink);
+    let _ = decode_waveform_peaks_stream(
+        path,
+        1024,
+        &source,
+        &mut prefill,
+        |peaks, coverage_seconds, progress| {
+            if superseded() {
+                return false;
+            }
+            send(WaveformUpdate::of(
+                peaks,
+                coverage_seconds,
+                progress,
+                source.get(),
+            ));
+            true
+        },
+        superseded,
+    );
 }
 
 /// Saturating conversion from `f64` to `u64`, clamping to `[0, u64::MAX]`.
@@ -2233,6 +2290,7 @@ fn decode_waveform_peaks_stream<F, C>(
     path: &Path,
     max_points: usize,
     source: &Cell<Option<WaveformSourceStamp>>,
+    prefill: &mut PrefillSlot<'_>,
     mut on_update: F,
     mut is_cancelled: C,
 ) -> anyhow::Result<()>
@@ -2243,18 +2301,28 @@ where
     source.set(None);
     #[cfg(feature = "gst")]
     if is_raw_surround_file(path) {
-        return decode_waveform_peaks_stream_gst(path, max_points, source, on_update, is_cancelled);
+        return decode_waveform_peaks_stream_gst(
+            path,
+            max_points,
+            source,
+            prefill,
+            on_update,
+            is_cancelled,
+        );
     }
 
     let unreadable = match File::open(path)
         .map_err(anyhow::Error::from)
         .and_then(|file| {
             // The file this handle reads, whichever is at the path later.
-            source.set(file.metadata().ok().as_ref().and_then(stamp_of));
+            let metadata = file.metadata().ok();
+            source.set(metadata.as_ref().and_then(stamp_of));
+            prefill.opened(path, metadata);
             decode_waveform_peaks_symphonia(
                 Box::new(file),
                 path.extension().and_then(|e| e.to_str()),
                 max_points,
+                prefill,
                 &mut on_update,
                 &mut is_cancelled,
             )
@@ -2271,7 +2339,7 @@ where
         if is_cancelled() {
             return Ok(());
         }
-        decode_waveform_peaks_stream_gst(path, max_points, source, on_update, is_cancelled)
+        decode_waveform_peaks_stream_gst(path, max_points, source, prefill, on_update, is_cancelled)
     }
     #[cfg(not(feature = "gst"))]
     Err(unreadable)
@@ -2283,11 +2351,13 @@ where
 /// The last update is [`OverviewProgress::Complete`] only if the decode
 /// reached the end of the file. An error that stops it before, such as a
 /// read error, ends it with [`OverviewProgress::Truncated`] and the peaks of
-/// the audio before the error.
+/// the audio before the error. Only a decode that reaches the end builds
+/// the summaries `prefill` asks for.
 fn decode_waveform_peaks_symphonia<F, C>(
     source: Box<dyn MediaSource>,
     extension: Option<&str>,
     max_points: usize,
+    prefill: &mut PrefillSlot<'_>,
     on_update: &mut F,
     is_cancelled: &mut C,
 ) -> anyhow::Result<bool>
@@ -2321,8 +2391,12 @@ where
 
     let mut audio_decoder =
         symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
-    let sample_rate_hz = u64::from(track.codec_params.sample_rate.unwrap_or(48_000));
+    let (sample_rate_hz, track_channels) = symphonia_track_shape(&track.codec_params);
     let estimated_frames = track.codec_params.n_frames.unwrap_or(sample_rate_hz * 240);
+    // The detail service reads the file with the same reader and decoder.
+    let mut builder = prefill
+        .builder(sample_rate_hz, track_channels, false)
+        .map(|builder| builder.expecting(track.codec_params.n_frames));
 
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
     let mut waveform = WaveformAccumulator::new(max_points, estimated_frames, sample_rate_hz);
@@ -2352,6 +2426,10 @@ where
             // A damaged packet; the next one may decode.
             Err(SymphoniaError::DecodeError(_)) => continue,
             Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {
+                // The detail service stops at this error.
+                if let Some(builder) = builder.as_mut() {
+                    builder.fail();
+                }
                 continue;
             }
             Err(_) => break false,
@@ -2365,6 +2443,10 @@ where
 
         let samples = buf.samples();
         decoded_any |= !samples.is_empty();
+        if let Some(builder) = builder.as_mut() {
+            let first_frame = packet_first_frame(format.as_ref(), track_id, packet.ts(), spec.rate);
+            builder.push(first_frame, samples, channels);
+        }
         if !waveform.push_frames(samples, channels, on_update, is_cancelled) {
             return Ok(true);
         }
@@ -2372,6 +2454,9 @@ where
 
     if !decoded_any {
         return Ok(false);
+    }
+    if reached_end {
+        prefill.finished(builder);
     }
     if !is_cancelled() {
         let progress = if reached_end {
@@ -2414,6 +2499,7 @@ mod tests {
                     &path,
                     1024,
                     &Cell::new(None),
+                    &mut PrefillSlot::default(),
                     |peaks, _, progress| {
                         if progress == OverviewProgress::Complete {
                             maximum = peaks.iter().copied().fold(0.0_f32, f32::max);
@@ -2485,6 +2571,7 @@ mod tests {
             path,
             1024,
             &Cell::new(None),
+            &mut PrefillSlot::default(),
             |peaks, _, progress| {
                 if progress == OverviewProgress::Complete {
                     overview = Some(peaks);
@@ -5728,14 +5815,27 @@ mod tests {
             assert_eq!(state.pending_track_load, None);
             assert_eq!(state.active_session_effective_rate, 44_100);
             if saved {
-                assert!(channels.waveform_job_rx.try_recv().is_err());
+                // Only for the decode worker to drop what it built for the
+                // last track.
+                assert!(matches!(
+                    channels.waveform_job_rx.try_recv(),
+                    Ok(WaveformDecodeJob {
+                        track_token: 4,
+                        decode: false,
+                        ..
+                    })
+                ));
                 assert!(channels.event_rx.try_iter().any(|event| matches!(event,
                     AnalysisEvent::Snapshot(snapshot)
                         if snapshot.waveform_complete && snapshot.waveform_peaks == [0.5; 4])));
             } else {
                 assert!(matches!(
                     channels.waveform_job_rx.try_recv(),
-                    Ok(WaveformDecodeJob { track_token: 4, .. })
+                    Ok(WaveformDecodeJob {
+                        track_token: 4,
+                        decode: true,
+                        ..
+                    })
                 ));
             }
 
@@ -5891,6 +5991,7 @@ mod tests {
             path,
             64,
             &source,
+            &mut PrefillSlot::default(),
             |_, _, progress| {
                 sources.push(source.get());
                 complete |= progress == OverviewProgress::Complete;
@@ -5969,6 +6070,7 @@ mod tests {
             path,
             64,
             &source,
+            &mut PrefillSlot::default(),
             |_, coverage, progress| {
                 if progress == OverviewProgress::Complete {
                     finished = Some((source.get(), coverage));
@@ -6085,6 +6187,7 @@ mod tests {
             source,
             Some(extension),
             1024,
+            &mut PrefillSlot::default(),
             &mut |peaks, coverage, progress| {
                 updates.push((peaks, coverage, progress));
                 true
