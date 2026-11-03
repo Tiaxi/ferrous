@@ -45,11 +45,15 @@ thread of the process (thread names with digits folded to `#`).
   the track. For each seek: when the engine reported it applied
   (`landed_ms`), when the position advanced again, when the first columns of
   the restarted spectrogram session arrived, and when columns covering the
-  target did (`reset: false` means they were decoded already), and, as
-  `view_ms`, when every column of a view of `--width` columns around the
-  target had (the view a centered spectrogram shows at zoom 1). `--idle`
+  target did, and, as `view_ms`, when every column of a view of `--width`
+  columns around the target had (the view a centered spectrogram shows at
+  zoom 1). Both count the columns that arrived since the session's last
+  reset, or since the seek without one (`reset: false`); columns decoded
+  before the seek do not arrive again, so a view they cover has no time. `--idle`
   waits for the overview and the lookahead before seeking; `--warmup` and
-  `--settle` set the waits.
+  `--settle` set the waits. `--settle` takes one value per seek, separated
+  by commas, the last for the rest: `--seeks 0.3,0.38 --settle 0.05,5`
+  seeks again while the session the first seek started is young.
 - `window FILE`: waveform detail windows through
   `ferrous_ffi_waveform_window_cancellable`, as the waveform editor asks for
   them: with `--duration`, the whole track twice, then 10 s windows, then
