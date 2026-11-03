@@ -231,7 +231,9 @@ Rectangle {
                             0, depthResolved * Math.round(libraryAlbumView.rowHeight * 0.75))
                     }
 
-                    Label {
+                    // Plain Text with the shared palette's colours, rather
+                    // than Labels, which each set up a Kirigami theme.
+                    Text {
                         id: expanderIcon
                         Layout.preferredWidth: libraryAlbumView.rowHeight
                         Layout.fillHeight: true
@@ -240,6 +242,7 @@ Rectangle {
                         verticalAlignment: Text.AlignVCenter
                         text: hasChildren ? (expanded ? "▾" : "▸") : ""
                         // The triangles are small in most fonts.
+                        font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize * 1.5
                         font.bold: true
                         color: rowSelected
@@ -267,11 +270,13 @@ Rectangle {
                         }
                     }
 
-                    Label {
+                    Text {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         Layout.alignment: Qt.AlignVCenter
+                        font: root.uiPalette.baseFont
                         elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignLeft
                         verticalAlignment: Text.AlignVCenter
                         text: rowTitle
                         color: rowSelected
@@ -333,53 +338,54 @@ Rectangle {
                         root.controller.playRowItems(rowMap)
                     }
                 }
+            }
 
-                Menu {
-                    id: libraryContextMenu
-                    objectName: "libraryContextMenu"
-                    property var rowMap: ({})
-                    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-                    exit: Components.PopupTransition { duration: root.popupTransitionMs }
+            // One menu for every row, rather than one in each row.
+            Menu {
+                id: libraryContextMenu
+                objectName: "libraryContextMenu"
+                property var rowMap: ({})
+                enter: Components.PopupTransition { duration: root.popupTransitionMs }
+                exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Play")
-                        enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
-                        onTriggered: root.controller.playRowItems(libraryContextMenu.rowMap)
-                    }
+                MenuItem {
+                    text: I18n.i18nc("@action:inmenu", "Play")
+                    enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
+                    onTriggered: root.controller.playRowItems(libraryContextMenu.rowMap)
+                }
 
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Queue")
-                        enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
-                        onTriggered: root.controller.appendRowItems(libraryContextMenu.rowMap)
-                    }
+                MenuItem {
+                    text: I18n.i18nc("@action:inmenu", "Queue")
+                    enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
+                    onTriggered: root.controller.appendRowItems(libraryContextMenu.rowMap)
+                }
 
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Edit Tags")
-                        visible: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
-                        enabled: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
-                        onTriggered: root.controller.openTagEditorForRow(libraryContextMenu.rowMap)
-                    }
+                MenuItem {
+                    text: I18n.i18nc("@action:inmenu", "Edit Tags")
+                    visible: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
+                    enabled: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
+                    onTriggered: root.controller.openTagEditorForRow(libraryContextMenu.rowMap)
+                }
 
-                    MenuSeparator {}
-                    MenuItem { action: root.playAllLibraryTracksAction }
-                    MenuItem { action: root.appendAllLibraryTracksAction }
-                    MenuSeparator {}
+                MenuSeparator {}
+                MenuItem { action: root.playAllLibraryTracksAction }
+                MenuItem { action: root.appendAllLibraryTracksAction }
+                MenuSeparator {}
 
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu %1 is an application", "Open in %1", root.uiBridge.fileBrowserName)
-                        visible: libraryContextMenu.rowMap.rowType !== "track"
-                        enabled: (libraryContextMenu.rowMap.openPath || "").length > 0
-                        onTriggered: root.uiBridge.openInFileBrowser(
-                            libraryContextMenu.rowMap.openPath || "")
-                    }
+                MenuItem {
+                    text: I18n.i18nc("@action:inmenu %1 is an application", "Open in %1", root.uiBridge.fileBrowserName)
+                    visible: libraryContextMenu.rowMap.rowType !== "track"
+                    enabled: (libraryContextMenu.rowMap.openPath || "").length > 0
+                    onTriggered: root.uiBridge.openInFileBrowser(
+                        libraryContextMenu.rowMap.openPath || "")
+                }
 
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Open containing folder")
-                        visible: libraryContextMenu.rowMap.rowType === "track"
-                        enabled: (libraryContextMenu.rowMap.trackPath || "").length > 0
-                        onTriggered: root.uiBridge.openContainingFolder(
-                            libraryContextMenu.rowMap.trackPath || "")
-                    }
+                MenuItem {
+                    text: I18n.i18nc("@action:inmenu", "Open containing folder")
+                    visible: libraryContextMenu.rowMap.rowType === "track"
+                    enabled: (libraryContextMenu.rowMap.trackPath || "").length > 0
+                    onTriggered: root.uiBridge.openContainingFolder(
+                        libraryContextMenu.rowMap.trackPath || "")
                 }
             }
         }

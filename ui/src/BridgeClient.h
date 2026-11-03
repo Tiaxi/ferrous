@@ -32,6 +32,7 @@
 #include "BinaryBridgeCodec.h"
 #include "GlobalSearchResultsModel.h"
 #include "PlaybackClock.h"
+#include "QueueRows.h"
 
 struct FerrousFfiBridge;
 struct FerrousFfiRenameGate;
@@ -40,62 +41,6 @@ class QNetworkReply;
 class QSocketNotifier;
 class QTemporaryDir;
 class QQuickWindow;
-
-struct QueueRowData {
-    QString title;
-    QString artist;
-    QString album;
-    QString coverPath;
-    QString genre;
-    QString lengthText;
-    QString path;
-    int trackNumber{0};
-    int year{std::numeric_limits<int>::min()};
-    quint64 coverStamp{0};
-
-    bool operator==(const QueueRowData &other) const = default;
-};
-
-class QueueRowsModel final : public QAbstractListModel {
-    Q_OBJECT
-
-public:
-    enum Role {
-        TitleRole = Qt::UserRole + 1,
-        ArtistRole,
-        AlbumRole,
-        CoverPathRole,
-        GenreRole,
-        LengthTextRole,
-        PathRole,
-        TrackNumberRole,
-        YearRole,
-    };
-
-    explicit QueueRowsModel(QObject *parent = nullptr);
-
-    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
-    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
-    QHash<int, QByteArray> roleNames() const override;
-
-    // Replace every row, with a model reset.
-    bool setRows(QVector<QueueRowData> rows);
-    // The row edits of a queue delta, each with its row signals. Each
-    // returns false, changing nothing, if it does not fit the rows.
-    bool insertRowsAt(int at, QVector<QueueRowData> rows);
-    bool removeRowsAt(int start, int count);
-    // Take the row at `from` out and put it back at `to`.
-    bool moveRow(int from, int to);
-    // Take the `count` rows from `from` on out and put them back, in their
-    // order, from `to` on.
-    bool moveRows(int from, int count, int to);
-    bool updateRow(int index, QueueRowData row);
-    const QueueRowData *rowAt(int index) const;
-    QVariant trackNumberAt(int index) const;
-
-private:
-    QVector<QueueRowData> m_rows;
-};
 
 class BridgeClient : public QObject {
     Q_OBJECT
@@ -642,9 +587,11 @@ private:
     bool applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame);
     void applyDeferredSearchDisplayRows();
     int queuePathFirstIndex(const QString &path) const;
-    // Apply the rows of a queue section that fits the client's rows.
+    // Apply the rows of a queue section that fits the client's rows, taking
+    // them from `prepared` when they were made already.
     // Returns false if its operations did not fit them after all.
-    bool applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue);
+    bool applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue,
+                        PreparedQueueRows *prepared);
     // After the snapshot's rows are in place.
     void applyQueueUndo(const BinaryBridgeCodec::DecodedQueueUndo &undo);
     void applyBackendQueueColumnWidths(
@@ -677,7 +624,17 @@ private:
     BridgePollRunResult drainBridgeQueues(qint64 budgetMs);
     void pollInProcessBridge();
     void applyLibraryTreeFrame(int version, const QByteArray &treeBytes);
-    bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot);
+    // `preparedRows`, if given, has the snapshot's queue rows made already
+    // (see QueueSnapshotWorker); the rows are taken from it.
+    bool processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot,
+                               PreparedQueueRows *preparedRows = nullptr);
+    // Apply the snapshots the worker decoded, in their order.
+    void applyWorkerSnapshots();
+    // Whether snapshot packets wait in the worker; until they are applied,
+    // later packets go there too, and library tree frames wait.
+    bool workerSnapshotsPending() const;
+    void resetPollChanges();
+    void schedulePollChanges();
     void processAnalysisBytes(const QByteArray &chunk);
     PrecomputedDispatchStats parsePrecomputedSpectrogramFrame(const QByteArray &raw);
     void routePrecomputedSpectrogramFrame(
@@ -726,9 +683,6 @@ private:
     void sendLibraryRootCommand(quint16 cmdId, const QString &path, const QString &name);
     static QString formatSeconds(double seconds);
     static QString formatDurationCompact(double seconds);
-    static QueueRowData queueRowFromTrack(const BinaryBridgeCodec::DecodedQueueTrack &track);
-    static QVector<QueueRowData> queueRowsFromTracks(
-        const QVector<BinaryBridgeCodec::DecodedQueueTrack> &tracks);
 
     FerrousFfiBridge *m_ffiBridge{nullptr};
     QSocketNotifier *m_bridgeWakeNotifier{nullptr};
@@ -745,6 +699,9 @@ private:
     int m_queueLength{0};
     QString m_queueDurationText{"00:00"};
     QueueRowsModel m_queueRowsModel;
+    // Decodes large snapshots and frees dropped queue rows off the GUI
+    // thread; stopped first when the client goes.
+    std::unique_ptr<QueueSnapshotWorker> m_snapshotWorker;
     // The backend's revision of the rows, which commands naming rows carry;
     // 0 while the rows match none.
     quint64 m_queueRevision{0};
