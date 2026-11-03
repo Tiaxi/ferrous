@@ -1760,7 +1760,7 @@ fn session_decode_loop(
                     }
                 }
                 if let Some(backfill) = session.backfill {
-                    if backfill.resume.is_some() {
+                    if backfill.resume.is_some() && !backfill.right_ended {
                         // The file ends before the columns the left was to
                         // end at, which its right did not reach either.
                         session.backfill = Some(Backfill {
@@ -1769,7 +1769,7 @@ fn session_decode_loop(
                         });
                         continue;
                     }
-                    if session.pending_continue.is_none() {
+                    if backfill.resume.is_none() && session.pending_continue.is_none() {
                         // The right ends here. The chunks of the left carry
                         // where, and the end is published once they are
                         // sent: until then more columns come.
@@ -1781,7 +1781,12 @@ fn session_decode_loop(
                         });
                         continue;
                     }
-                    // A continuation goes on from the right.
+                    // A continuation goes on from the right. Or the left
+                    // reached the end of the file, after the right found no
+                    // audio at the playhead, which a padded duration
+                    // estimate can put past the end: the file ends where
+                    // the left did, not where the right started, and every
+                    // column of the session is sent.
                     session.backfill = None;
                 }
                 // Real source EOF.  Publish the decoded extent while this
@@ -7560,6 +7565,182 @@ mod tests {
         assert_eq!(finals.len(), 1, "the end is published once");
         assert_eq!(u64::from(finals[0].total_columns_estimate), end);
         assert!(chunks.last().unwrap().complete);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// The rate of the raw AC-3 tone, whose columns at the reference hop
+    /// come 46.875 a second.
+    #[cfg(feature = "gst")]
+    const PADDED_RATE: u32 = 48_000;
+
+    /// A raw AC-3 file: 20.48 s of a tone at 32 kbit/s, then 10 s worth of
+    /// bytes that hold no frame. Its duration, estimated from the bitrate of
+    /// its first frame and the length of its frames, takes the padding in,
+    /// so a playhead can land past the end of its audio.
+    #[cfg(feature = "gst")]
+    fn write_padded_ac3_fixture(name: &str) -> PathBuf {
+        use crate::raw_audio::TEST_AC3;
+
+        let path =
+            std::env::temp_dir().join(format!("ferrous-padded-{name}-{}.ac3", std::process::id()));
+        let mut bytes = TEST_AC3.repeat(20);
+        bytes.resize(bytes.len() + 10 * 32_000 / 8, 0);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[cfg(feature = "gst")]
+    fn padded_column(seconds: f64) -> u64 {
+        stft_seek_grid(seconds, PADDED_RATE, 256, REFERENCE_HOP).0
+    }
+
+    /// Where a centered session of the padded file for a playhead at
+    /// `target` starts.
+    #[cfg(feature = "gst")]
+    fn padded_start_seconds(target: f64) -> f64 {
+        let window = centered_view::window_seconds(
+            BACKFILL_WIDTH,
+            1.0,
+            REFERENCE_HOP,
+            f64::from(PADDED_RATE) / usize_to_f64_approx(REFERENCE_HOP),
+        );
+        centered_view::decode_start_seconds(target, window, 0.0)
+    }
+
+    /// A centered session of `path` as `track_token`, with its playhead at
+    /// `target`, starting where a restart for it does.
+    #[cfg(feature = "gst")]
+    fn padded_session_on(path: &Path, track_token: u64, target: f64) -> SpectrogramWorkerCommand {
+        let mut command = test_new_track(&path.to_string_lossy(), 1);
+        if let SpectrogramWorkerCommand::NewTrack {
+            track_token: token,
+            display_mode,
+            widget_width,
+            start_seconds,
+            target_position_seconds,
+            ..
+        } = &mut command
+        {
+            *token = track_token;
+            *display_mode = SpectrogramDisplayMode::Centered;
+            *widget_width = BACKFILL_WIDTH;
+            *start_seconds = padded_start_seconds(target);
+            *target_position_seconds = target;
+        }
+        command
+    }
+
+    /// The chunks a worker sends up to the first that satisfies `last`,
+    /// that one included.
+    #[cfg(feature = "gst")]
+    fn chunks_through(
+        events: &Receiver<AnalysisEvent>,
+        last: impl Fn(&PrecomputedSpectrogramChunk) -> bool,
+    ) -> Vec<PrecomputedSpectrogramChunk> {
+        let mut chunks = Vec::new();
+        while !chunks.last().is_some_and(&last) {
+            chunks.push(wait_for_chunk(events, |_| true).expect("a chunk"));
+        }
+        chunks
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_centered_playhead_past_the_audio_of_a_padded_estimate_ends_where_the_audio_does() {
+        // A seek into the padding puts the playhead past the end of the
+        // audio: the right of the view finds none, and the left reaches the
+        // end of the file. The session ends there, as a session reading the
+        // file from its start does, not at the playhead: the UI would keep
+        // the columns between them pending, and show the track that much
+        // longer than its audio.
+        let path = write_padded_ac3_fixture("end");
+        let reference = run_watched_session(
+            padded_session_on(&path, 30, 0.0),
+            1,
+            unbounded(),
+            &Arc::new(AtomicU64::new(1)),
+            |_| {},
+            ends_complete,
+        );
+        let end = u64::from(reference.last().unwrap().total_columns_estimate);
+        assert_eq!(spans_of(&reference), vec![(0, end)]);
+
+        let target = 22.0;
+        let start = padded_column(padded_start_seconds(target));
+        let playhead = padded_column(target);
+        assert!(
+            start < end && end + MIN_BACKFILL_COLUMNS < playhead,
+            "{start} {end} {playhead}"
+        );
+
+        let generation = Arc::new(AtomicU64::new(1));
+        let (commands, command_rx) = unbounded();
+        let (events, event_rx) = unbounded();
+        let worker_generation = Arc::clone(&generation);
+        let worker = std::thread::spawn(move || {
+            spectrogram_worker_loop(
+                &command_rx,
+                &events,
+                &worker_generation,
+                &AtomicU64::new(0),
+                &AtomicU64::new(0),
+                &unbounded().0,
+            );
+        });
+        commands.send(padded_session_on(&path, 30, target)).unwrap();
+        let chunks = chunks_through(&event_rx, |chunk| chunk.complete);
+        // The session starts with the estimate, padding and all.
+        assert!(chunks[0].buffer_reset);
+        assert!(
+            u64::from(chunks[0].total_columns_estimate) > playhead,
+            "{}",
+            chunks[0].total_columns_estimate
+        );
+        // The left of the view, up to the end of the audio, the last,
+        // partial column included, is all there is.
+        assert_eq!(spans_of(&chunks), vec![(start, end)]);
+        let finalize = chunks.last().unwrap();
+        assert_eq!(finalize.column_count, 0);
+        assert_eq!(u64::from(finalize.total_columns_estimate), end);
+        assert_eq!(u64::from(finalize.start_column_index), end);
+
+        // A seek back into the audio, left of what the session decoded,
+        // starts over and ends at the same column.
+        let back = 18.0;
+        commands
+            .send(SpectrogramWorkerCommand::Seek {
+                position_seconds: back,
+            })
+            .unwrap();
+        let chunks = chunks_through(&event_rx, |chunk| chunk.complete);
+        assert!(chunks[0].buffer_reset);
+        let back_start = padded_column(padded_start_seconds(back));
+        assert_eq!(
+            spans_of(&chunks),
+            vec![
+                (padded_column(back), end),
+                (back_start, padded_column(back))
+            ]
+        );
+        assert_eq!(chunks.iter().filter(|chunk| chunk.complete).count(), 1);
+        assert_eq!(
+            u64::from(chunks.last().unwrap().total_columns_estimate),
+            end
+        );
+
+        // A gapless switch after the end publishes no other end for it.
+        let mut successor = padded_session_on(&path, 31, 0.0);
+        if let SpectrogramWorkerCommand::NewTrack { handoff, .. } = &mut successor {
+            handoff.finalize_previous = true;
+        }
+        commands.send(successor).unwrap();
+        let chunks = chunks_through(&event_rx, |chunk| chunk.track_token == 31);
+        assert!(
+            chunks.iter().all(|chunk| chunk.track_token == 31),
+            "{chunks:?}"
+        );
+        drop(commands);
+        worker.join().expect("worker");
         std::fs::remove_file(path).unwrap();
     }
 
