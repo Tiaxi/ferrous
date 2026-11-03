@@ -1415,15 +1415,7 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
             ? std::numeric_limits<int>::max()
             : static_cast<int>(version);
-        // A tree frame taken while snapshots before it decode on the worker
-        // waits here for them. It is taken all the same: the bridge signals
-        // its wake-up again for as long as a frame is left in its queues.
-        if (workerSnapshotsPending() || !m_deferredTreeFrames.empty()) {
-            m_deferredTreeFrames.push_back(
-                DeferredTreeFrame{versionInt, treeBytes, m_workerSnapshotsSubmitted});
-        } else {
-            applyLibraryTreeFrame(versionInt, treeBytes);
-        }
+        receiveLibraryTreeFrame(versionInt, treeBytes);
     }
     result.treeCapSaturated = result.processedTreeFrames >= kMaxTreeFramesPerPass;
 
@@ -1675,22 +1667,38 @@ bool BridgeClient::workerSnapshotsPending() const {
 }
 
 void BridgeClient::submitWorkerSnapshot(QByteArray packet) {
-    ++m_workerSnapshotsSubmitted;
-    m_snapshotWorker->submit(std::move(packet));
+    const quint64 sequence = m_snapshotWorker->submit(std::move(packet));
+    if (sequence != 0) {
+        m_lastWorkerSnapshot = sequence;
+    }
 }
 
-void BridgeClient::applyDeferredTreeFrames(bool all) {
-    while (!m_deferredTreeFrames.empty()
-           && (all || m_deferredTreeFrames.front().afterSnapshots <= m_workerSnapshotsApplied)) {
-        DeferredTreeFrame frame = std::move(m_deferredTreeFrames.front());
-        m_deferredTreeFrames.pop_front();
-        applyLibraryTreeFrame(frame.version, frame.bytes);
+void BridgeClient::receiveLibraryTreeFrame(int version, const QByteArray &treeBytes) {
+    // A tree frame taken while snapshots before it decode on the worker
+    // waits here for them. It is taken all the same: the bridge signals its
+    // wake-up again for as long as a frame is left in its queues. Each tree
+    // is the whole library, so a newer one replaces one held, and waits for
+    // the snapshots before it, which include the held one's.
+    if (workerSnapshotsPending() || m_deferredTreeFrame.has_value()) {
+        m_deferredTreeFrame = DeferredTreeFrame{version, treeBytes, m_lastWorkerSnapshot};
+        return;
     }
+    applyLibraryTreeFrame(version, treeBytes);
+}
+
+void BridgeClient::applyDeferredTreeFrame(quint64 appliedSequence, bool all) {
+    if (!m_deferredTreeFrame.has_value()
+        || (!all && m_deferredTreeFrame->afterSnapshot > appliedSequence)) {
+        return;
+    }
+    DeferredTreeFrame frame = std::move(*m_deferredTreeFrame);
+    m_deferredTreeFrame.reset();
+    applyLibraryTreeFrame(frame.version, frame.bytes);
 }
 
 void BridgeClient::applyWorkerSnapshots() {
     std::vector<QueueSnapshotWorker::Result> ready = m_snapshotWorker->takeReady();
-    if (ready.empty() && m_deferredTreeFrames.empty()) {
+    if (ready.empty() && !m_deferredTreeFrame.has_value()) {
         return;
     }
     resetPollChanges();
@@ -1704,13 +1712,14 @@ void BridgeClient::applyWorkerSnapshots() {
         } else {
             processBinarySnapshot(result.snapshot, &result.rows);
         }
-        ++m_workerSnapshotsApplied;
-        // The library trees that came after this snapshot, before the next.
-        applyDeferredTreeFrames(false);
+        // The tree that came after this snapshot, before the next. The
+        // sequence numbers go on across generations, so a snapshot dropped
+        // with its generation holds back no tree after a later one.
+        applyDeferredTreeFrame(result.sequence, false);
     }
-    // Once none is pending, every snapshot submitted before the trees was
+    // Once none is pending, every snapshot submitted before the tree was
     // applied, or dropped with its generation.
-    applyDeferredTreeFrames(!workerSnapshotsPending());
+    applyDeferredTreeFrame(0, !workerSnapshotsPending());
     schedulePollChanges();
 }
 

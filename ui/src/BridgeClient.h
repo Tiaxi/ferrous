@@ -22,7 +22,6 @@
 #include <QVector>
 
 #include <condition_variable>
-#include <deque>
 #include <limits>
 #include <functional>
 #include <memory>
@@ -635,9 +634,12 @@ private:
     // later packets go there too, and library tree frames wait.
     bool workerSnapshotsPending() const;
     void submitWorkerSnapshot(QByteArray packet);
-    // Apply the library trees whose snapshots before them were applied, or
-    // with `all`, every one.
-    void applyDeferredTreeFrames(bool all);
+    // Apply a library tree frame from the bridge, or hold it while
+    // snapshots before it are on the worker.
+    void receiveLibraryTreeFrame(int version, const QByteArray &treeBytes);
+    // Apply the held library tree once the snapshots submitted before it
+    // were applied (up to `appliedSequence`), or with `all`, in any case.
+    void applyDeferredTreeFrame(quint64 appliedSequence, bool all);
     void resetPollChanges();
     void schedulePollChanges();
     void processAnalysisBytes(const QByteArray &chunk);
@@ -707,19 +709,18 @@ private:
     // Decodes large snapshots and frees dropped queue rows off the GUI
     // thread; stopped first when the client goes.
     std::unique_ptr<QueueSnapshotWorker> m_snapshotWorker;
-    // A library tree frame taken while snapshots before it were on the
-    // worker, which waits until the first `afterSnapshots` submitted there
-    // are applied.
+    // The library tree frame taken while snapshots before it were on the
+    // worker, which waits until the one with sequence number
+    // `afterSnapshot` is applied. Each tree is the whole library, so a
+    // newer one replaces it, as the bridge keeps only the newest.
     struct DeferredTreeFrame {
         int version{0};
         QByteArray bytes;
-        quint64 afterSnapshots{0};
+        quint64 afterSnapshot{0};
     };
-    std::deque<DeferredTreeFrame> m_deferredTreeFrames;
-    // Snapshot packets submitted to the worker, and of those, the ones
-    // applied (or reported as not decoding).
-    quint64 m_workerSnapshotsSubmitted{0};
-    quint64 m_workerSnapshotsApplied{0};
+    std::optional<DeferredTreeFrame> m_deferredTreeFrame;
+    // The sequence number of the last snapshot packet submitted to the worker.
+    quint64 m_lastWorkerSnapshot{0};
     // The backend's revision of the rows, which commands naming rows carry;
     // 0 while the rows match none.
     quint64 m_queueRevision{0};

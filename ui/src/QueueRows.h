@@ -113,8 +113,10 @@ private:
 class QueueSnapshotWorker {
 public:
     struct Result {
-        // The generation the packet was submitted in.
+        // The generation the packet was submitted in, and the sequence
+        // number submit() gave it.
         quint64 generation{0};
+        quint64 sequence{0};
         bool ok{false};
         QString error;
         BinaryBridgeCodec::DecodedSnapshot snapshot;
@@ -136,7 +138,9 @@ public:
     // rows handed to it, and calling `ready` no more. Later rows are freed
     // where they are released and later packets dropped.
     void stop();
-    void submit(QByteArray packet);
+    // Returns the packet's sequence number, which grows with each packet
+    // and is never used again, across generations; 0 once stopped.
+    quint64 submit(QByteArray packet);
     // Free `rows` on the worker's thread.
     void release(QVector<QueueRowData> rows);
     // The results ready, oldest first, of packets submitted since the last
@@ -158,6 +162,7 @@ private:
     struct Task {
         bool decode{false};
         quint64 generation{0};
+        quint64 sequence{0};
         QByteArray packet;
         QVector<QueueRowData> rows;
     };
@@ -169,6 +174,7 @@ private:
     std::deque<Task> m_tasks;
     std::deque<Result> m_ready;
     quint64 m_generation{1};
+    quint64 m_lastSequence{0};
     int m_pending{0};
     bool m_stopped{false};
     std::function<void()> m_readyCallback;

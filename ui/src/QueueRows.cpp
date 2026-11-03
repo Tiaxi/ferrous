@@ -298,16 +298,19 @@ void QueueSnapshotWorker::stop() {
     }
 }
 
-void QueueSnapshotWorker::submit(QByteArray packet) {
+quint64 QueueSnapshotWorker::submit(QByteArray packet) {
+    quint64 sequence = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_stopped) {
-            return;
+            return 0;
         }
-        m_tasks.push_back(Task{true, m_generation, std::move(packet), {}});
+        sequence = ++m_lastSequence;
+        m_tasks.push_back(Task{true, m_generation, sequence, std::move(packet), {}});
         ++m_pending;
     }
     m_wake.notify_one();
+    return sequence;
 }
 
 void QueueSnapshotWorker::release(QVector<QueueRowData> rows) {
@@ -317,7 +320,7 @@ void QueueSnapshotWorker::release(QVector<QueueRowData> rows) {
             // Freed here, as `rows` goes.
             return;
         }
-        m_tasks.push_back(Task{false, 0, {}, std::move(rows)});
+        m_tasks.push_back(Task{false, 0, 0, {}, std::move(rows)});
     }
     m_wake.notify_one();
 }
@@ -416,6 +419,7 @@ void QueueSnapshotWorker::run() {
 
         Result result;
         result.generation = task.generation;
+        result.sequence = task.sequence;
         result.ok = BinaryBridgeCodec::decodeSnapshotPacket(
             task.packet, &result.snapshot, &result.error);
         task.packet = {};
