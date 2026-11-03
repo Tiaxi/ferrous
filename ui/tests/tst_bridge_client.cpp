@@ -23,6 +23,7 @@
 #include <QSocketNotifier>
 #include <QFutureWatcher>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -217,6 +218,7 @@ public:
 private slots:
     void init();
     void cleanup();
+    void aQueryOverItsTimeIsStoppedWithoutAWarning();
     void libraryViewStateKeepsOffsetsIntoTallRows();
     void savedWindowGeometryIsFittedToTheScreens();
     void windowLayoutIsSentAsTheBackendReadsIt();
@@ -1507,6 +1509,41 @@ void BridgeClientTest::queueColumnWidthsKeepTheNewestWhileAcksAreLate() {
     client.processBinarySnapshot(columnWidthsSnapshot({0, 0, 90}, 3));
     QCOMPARE(client.queueColumnWidths(), (QVariantMap{{QStringLiteral("length"), 90}}));
     QCOMPARE(changed.count(), 2);
+}
+
+namespace {
+std::atomic<int> processWarnings{0};
+QtMessageHandler handlerBeforeProcessWarnings = nullptr;
+
+void countProcessWarnings(QtMsgType type, const QMessageLogContext &context, const QString &message) {
+    if (message.contains(QLatin1String("QProcess"))) {
+        processWarnings.fetch_add(1);
+    }
+    if (handlerBeforeProcessWarnings != nullptr) {
+        handlerBeforeProcessWarnings(type, context, message);
+    }
+}
+} // namespace
+
+void BridgeClientTest::aQueryOverItsTimeIsStoppedWithoutAWarning() {
+    // The file manager's name comes from a query to xdg-mime. One that a
+    // loaded machine kept over its time was destroyed running, which
+    // warns; it is killed and waited for instead.
+    processWarnings = 0;
+    handlerBeforeProcessWarnings = qInstallMessageHandler(countProcessWarnings);
+    const QString slow = BridgeClient::runQuery(
+        QStringLiteral("sleep"), {QStringLiteral("30")}, 50);
+    const QString missing = BridgeClient::runQuery(
+        QStringLiteral("ferrous-no-such-program"), {}, 1000);
+    qInstallMessageHandler(handlerBeforeProcessWarnings);
+    handlerBeforeProcessWarnings = nullptr;
+    QCOMPARE(slow, QString());
+    QCOMPARE(missing, QString());
+    QCOMPARE(processWarnings.load(), 0);
+    // One that answers gives its answer, trimmed.
+    QCOMPARE(BridgeClient::runQuery(QStringLiteral("echo"),
+                 {QStringLiteral("org.kde.dolphin.desktop")}, 30'000),
+        QStringLiteral("org.kde.dolphin.desktop"));
 }
 
 void BridgeClientTest::libraryViewStateKeepsOffsetsIntoTallRows() {
