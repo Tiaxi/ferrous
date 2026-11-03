@@ -20012,7 +20012,10 @@ void SpectrogramSmokeTest::spectrogramSceneGraphDrawsTheCanvas() {
                 kStripeColumns, 48'000, 1024, false, false, 1, false, 2);
         };
         item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0, false, true, 1, true, 2);
-        setTestPosition(item, 20.0);
+        // Off a quarter column, like the seek before, so that the zoom
+        // preview's pixel centres fall within texels, not on their edges,
+        // which renderers round either way.
+        setTestPosition(item, 20.25);
         const qint64 playhead = static_cast<qint64>(testClock(item).positionAt(time.nowNs)
             * kStripeColumnsPerSecond);
         const qint64 start = playhead - 200 - 94;
