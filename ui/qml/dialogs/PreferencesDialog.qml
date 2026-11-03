@@ -50,6 +50,8 @@ Dialog {
     enter: Components.PopupTransition { duration: root.popupTransitionMs }
     exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
+    onAboutToShow: pagesLoader.active = true
+
     contentItem: ColumnLayout {
         spacing: 14
 
@@ -88,52 +90,61 @@ Dialog {
             }
         }
 
-        StackLayout {
-            objectName: "preferencesPages"
+        // The pages are made when the dialog first opens, rather than with
+        // the window, which then shows sooner.
+        Loader {
+            id: pagesLoader
+            objectName: "preferencesPagesLoader"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: root.pageIndex
+            active: false
+            sourceComponent: Component {
+                StackLayout {
+                    objectName: "preferencesPages"
+                    currentIndex: root.pageIndex
 
-            Preferences.LibraryPage {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                uiBridge: root.uiBridge
-                uiPalette: root.uiPalette
-                windowRoot: root.windowRoot
-                promptAddLibraryRoot: root.promptAddLibraryRoot
-                openLibraryRootNameDialog: root.openLibraryRootNameDialog
-                stepScrollView: root.stepScrollView
-                snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
-                snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
-            }
+                    Preferences.LibraryPage {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        uiBridge: root.uiBridge
+                        uiPalette: root.uiPalette
+                        windowRoot: root.windowRoot
+                        promptAddLibraryRoot: root.promptAddLibraryRoot
+                        openLibraryRootNameDialog: root.openLibraryRootNameDialog
+                        stepScrollView: root.stepScrollView
+                        snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
+                        snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
+                    }
 
-            Preferences.SpectrogramPage {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                uiBridge: root.uiBridge
-                uiPalette: root.uiPalette
-                spectrogramFftChoices: root.spectrogramFftChoices
-            }
+                    Preferences.SpectrogramPage {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        uiBridge: root.uiBridge
+                        uiPalette: root.uiPalette
+                        spectrogramFftChoices: root.spectrogramFftChoices
+                    }
 
-            Preferences.DisplayPage {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                uiBridge: root.uiBridge
-                uiPalette: root.uiPalette
-            }
+                    Preferences.DisplayPage {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        uiBridge: root.uiBridge
+                        uiPalette: root.uiPalette
+                    }
 
-            Preferences.LastFmPage {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                uiBridge: root.uiBridge
-                uiPalette: root.uiPalette
-            }
+                    Preferences.LastFmPage {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        uiBridge: root.uiBridge
+                        uiPalette: root.uiPalette
+                    }
 
-            Preferences.SystemMediaPage {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                uiBridge: root.uiBridge
-                uiPalette: root.uiPalette
+                    Preferences.SystemMediaPage {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        uiBridge: root.uiBridge
+                        uiPalette: root.uiPalette
+                    }
+                }
             }
         }
     }

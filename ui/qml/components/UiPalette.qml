@@ -56,6 +56,16 @@ QtObject {
     readonly property font baseFont: root.windowRoot.font !== undefined
         ? root.windowRoot.font
         : Qt.application.font
+    // The base font, bold. List rows draw plain Text with these fonts and
+    // this palette's colours rather than styled controls, which each set up
+    // a Kirigami theme of their own.
+    // A font's pointSize in QML is its size in points even when it was set
+    // in pixels.
+    readonly property font boldFont: Qt.font({
+        family: root.baseFont.family,
+        pointSize: root.baseFont.pointSize,
+        bold: true
+    })
     // The height of a list row: a line of text and a third of a line of
     // margin. The rows and the scrolling, paging and drop positions that
     // count in rows all use it, so they follow the font size.

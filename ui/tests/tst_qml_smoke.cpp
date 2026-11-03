@@ -1214,6 +1214,8 @@ private slots:
     void spectrogramPlaybackBenchmark();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
+    void spectrogramPlaybackRateSwitchKeepsTheSessionRate();
+    void spectrogramSessionRateChangeRemapsTheSpectrogram();
     void spectrogramCrosshairOverlayGeneratesOnHover();
     void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
     void spectrogramGridOverlayGeneratesWhenEnabled();
@@ -1444,6 +1446,7 @@ private slots:
     void queueSelectionFollowsRowRangeMoves();
     void emptyLibraryAndFileMenuAddALibraryFolder();
     void draggingAHighlightedQueueRowMovesEveryHighlightedRow();
+    void queueRowsShowTheirStatesInThePaletteColours();
     void queueDropsFollowTheRowsAfterRowsAboveAreRemoved();
     void aRevealDuringTheSavedViewRestoreKeepsSavingTheView();
     void escapeCancelsAQueueRowDrag();
@@ -1633,9 +1636,19 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
     QObject *root = engine.rootObjects().constFirst();
     QVERIFY(root != nullptr);
 
+    // The preference pages are made when the dialog first opens, not with
+    // the window, and stay once made.
+    QObject *preferencesDialog = root->findChild<QObject *>(QStringLiteral("preferencesDialog"));
+    QVERIFY(preferencesDialog != nullptr);
+    QVERIFY(root->findChild<QObject *>(QStringLiteral("preferencesPages")) == nullptr);
+    QVERIFY(QMetaObject::invokeMethod(preferencesDialog, "open"));
     QObject *preventDisplaySleepCheckBox = root->findChild<QObject *>(
         QStringLiteral("preventDisplaySleepInFullscreenCheckBox"));
     QVERIFY(preventDisplaySleepCheckBox != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(preferencesDialog, "close"));
+    QTRY_VERIFY(!preferencesDialog->property("visible").toBool());
+    QCOMPARE(root->findChild<QObject *>(QStringLiteral("preventDisplaySleepInFullscreenCheckBox")),
+             preventDisplaySleepCheckBox);
     QVERIFY(preventDisplaySleepCheckBox->property("checked").toBool());
 
     QObject *libraryView = qvariant_cast<QObject *>(root->property("libraryViewRef"));
@@ -5264,8 +5277,10 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     meter->m_channels[0].observe(-3, 0);
     clock.holdAt(0.0);
     QCOMPARE(meter->m_channels[0].peak, -60.0);
-    auto *checkBox = root->findChild<QObject *>(QStringLiteral("showLevelMeterCheckBox"));
-    QVERIFY(checkBox);
+    // The preference pages are made when the dialog opens.
+    QVERIFY(QMetaObject::invokeMethod(root->findChild<QObject *>(QStringLiteral("preferencesDialog")), "open"));
+    QObject *checkBox = nullptr;
+    QTRY_VERIFY((checkBox = root->findChild<QObject *>(QStringLiteral("showLevelMeterCheckBox"))) != nullptr);
     QVERIFY(checkBox->property("checked").toBool());
     bridge->setProperty("playbackState", QStringLiteral("Paused"));
     bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/first.wav"));
@@ -14628,6 +14643,121 @@ void SpectrogramSmokeTest::spectrogramPreservesNativeRateAcrossModesAndTrackTran
     }
 }
 
+void SpectrogramSmokeTest::spectrogramPlaybackRateSwitchKeepsTheSessionRate() {
+    // A decoder that falls back to another rate for single frames has
+    // playback report the switch and the switch back. The columns keep
+    // their analysis session's rate: nothing is mapped, rasterized or
+    // uploaded again, and the frequency grid stays as it was.
+    for (const int mode : {1, 0}) {
+        QQuickWindow window;
+        window.resize(400, 100);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+        item.setSampleRateHz(48'000);
+        prepareWholeTrackPlayback(item, 50.0);
+        item.setDisplayMode(mode);
+        item.setPlaying(false);
+        item.setGridEnabled(true);
+        QSGNode *node = paintSettled(item, nullptr);
+        node = item.updatePaintNode(node, nullptr);
+        QVERIFY(drawnCanvasFragments(node) > 0);
+        int mappingHeight = 0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            mappingHeight = item.m_mappingHeight;
+            QVERIFY(mappingHeight > 0);
+            QCOMPARE(item.m_freqGridCachedSampleRateHz, 48'000);
+        }
+        QSignalSpy rateChanged(&item, &SpectrogramItem::sampleRateHzChanged);
+        for (const int playbackRate : {44'100, 48'000, 96'000, 48'000}) {
+            item.setSampleRateHz(playbackRate);
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QCOMPARE(item.m_sampleRateHz, 48'000);
+                QCOMPARE(item.m_mappingHeight, mappingHeight);
+                QVERIFY(!item.m_precomputedCanvasDirty);
+                QVERIFY(!item.m_freqGridDirty);
+            }
+            node = item.updatePaintNode(node, nullptr);
+            QVERIFY(!spectrogramRasterPending(item));
+            const SpectrogramSceneStatistics statistics =
+                SpectrogramItem::sceneStatistics(node);
+            QCOMPARE(statistics.canvasUploads, 0);
+            QCOMPARE(statistics.canvasTextures, 0);
+            QCOMPARE(statistics.overlayTextures, 0);
+        }
+        QCOMPARE(rateChanged.count(), 0);
+        QCOMPARE(item.sampleRateHz(), 48'000);
+
+        // A mode switch while playback reports the fallback rate keeps the
+        // session's rate too.
+        item.setSampleRateHz(44'100);
+        item.setDisplayMode(mode == 0 ? 1 : 0);
+        node = paintSettled(item, node);
+        QCOMPARE(item.sampleRateHz(), 48'000);
+        QVERIFY(std::abs(item.pixelToFrequencyHz(0, mappingHeight) - 24'000.0) < 500.0);
+        delete node;
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramSessionRateChangeRemapsTheSpectrogram() {
+    QQuickWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    // Before any session, as for the first track after startup, playback's
+    // rate is the spectrogram's.
+    item.setSampleRateHz(96'000);
+    QCOMPARE(item.sampleRateHz(), 96'000);
+    item.setSampleRateHz(48'000);
+    QCOMPARE(item.sampleRateHz(), 48'000);
+    prepareWholeTrackPlayback(item, 50.0);
+    item.setPlaying(false);
+    item.setGridEnabled(true);
+    QSGNode *node = paintSettled(item, nullptr);
+    node = item.updatePaintNode(node, nullptr);
+    int mappingHeight = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        mappingHeight = item.m_mappingHeight;
+        QCOMPARE(item.m_freqGridCachedSampleRateHz, 48'000);
+    }
+    QVERIFY(std::abs(item.pixelToFrequencyHz(0, mappingHeight) - 24'000.0) < 500.0);
+
+    // The next track plays at 96 kHz. Playback reports it before the new
+    // session's columns arrive; until then the shown columns keep theirs.
+    item.setSampleRateHz(96'000);
+    QCOMPARE(item.sampleRateHz(), 48'000);
+    // The track change resets the zoom: the new session's reset, then its
+    // columns at the reference hop.
+    constexpr int bins = 64;
+    constexpr int columns = 380;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        0, 10'000, 96'000, 1024, false, true, 2, true, 2);
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        columns, 10'000, 96'000, 1024, false, false, 2, true, 2);
+    node = paintSettled(item, node);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_sampleRateHz, 96'000);
+        QCOMPARE(item.m_mappingHeight, mappingHeight);
+        QCOMPARE(item.m_freqGridCachedSampleRateHz, 96'000);
+    }
+    QCOMPARE(item.sampleRateHz(), 96'000);
+    QVERIFY(std::abs(item.pixelToFrequencyHz(0, mappingHeight) - 48'000.0) < 1'000.0);
+
+    // Without the session's columns, playback's rate stands in again.
+    item.setSampleRateHz(44'100);
+    QCOMPARE(item.sampleRateHz(), 96'000);
+    QSignalSpy rateChanged(&item, &SpectrogramItem::sampleRateHzChanged);
+    item.clearPrecomputed();
+    QCOMPARE(rateChanged.count(), 1);
+    QCOMPARE(item.sampleRateHz(), 44'100);
+    delete node;
+}
+
 void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
     SpectrogramItem item;
     item.setSampleRateHz(48000);
@@ -17784,11 +17914,47 @@ ApplicationWindow {
         return valid && albumFound && trackFound;
     };
     QTRY_VERIFY(typeLabelsReadable());
+    // The selected row shows in the selection colours, the others in their
+    // alternating colours, and their text in the palette's.
+    const auto rowItem = [view](int index) {
+        QQuickItem *item = nullptr;
+        QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, index));
+        return item;
+    };
+    const auto childNamed = [](QQuickItem *row, const QString &name) -> QQuickItem * {
+        for (QQuickItem *child : row->childItems()) {
+            if (child->objectName() == name) return child;
+        }
+        return nullptr;
+    };
+    auto *dialog = object->findChild<QObject *>(QStringLiteral("globalSearchDialog"));
+    QVERIFY(dialog);
+    const int selectedIndex = object->property("selectionIndex").toInt();
+    QQuickItem *selectedRow = rowItem(selectedIndex);
+    QQuickItem *otherRow = rowItem(selectedIndex + 1);
+    QVERIFY(selectedRow && otherRow);
+    QCOMPARE(selectedRow->property("color").value<QColor>(), QColor("#345578"));
+    QCOMPARE(childNamed(selectedRow, "globalSearchResultName")->property("color").value<QColor>(), QColor("white"));
+    QCOMPARE(otherRow->property("color").value<QColor>(),
+             QColor((selectedIndex + 1) % 2 ? "#202020" : "#252525"));
+    QCOMPARE(childNamed(otherRow, "globalSearchResultName")->property("color").value<QColor>(), QColor("#eee"));
+    QCOMPARE(childNamed(otherRow, "globalSearchResultSummary")->property("color").value<QColor>(), QColor("#eee"));
+    // The rows' text follows the dialog's font.
+    QCOMPARE(childNamed(otherRow, "globalSearchResultName")->property("font").value<QFont>(),
+             dialog->property("font").value<QFont>());
+    // One tooltip, for the row under the pointer, with its name and details.
+    auto *toolTip = object->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+    QVERIFY(toolTip);
+    QVERIFY(!toolTip->property("visible").toBool());
+    QTest::mouseMove(window, otherRow->mapToScene(QPointF(otherRow->width() / 2, otherRow->height() / 2)).toPoint());
+    QTRY_VERIFY(toolTip->property("visible").toBool());
+    const QString toolTipText = toolTip->property("text").toString();
+    QVERIFY2(toolTipText.startsWith(QStringLiteral("Blue")) && toolTipText.contains(QStringLiteral("\nExample Ensemble")),
+             qPrintable(toolTipText));
+    QCOMPARE(toolTip->property("parent").value<QQuickItem *>(), otherRow);
     QVERIFY(showMore->mapToScene(QPointF(0, showMore->height())).y()
             <= view->mapToScene(QPointF()).y());
     // Removing the normal footer gives its space back to the results.
-    auto *dialog = object->findChild<QObject *>(QStringLiteral("globalSearchDialog"));
-    QVERIFY(dialog);
     const qreal dialogBottom = dialog->property("y").toReal() + dialog->property("height").toReal();
     QVERIFY(dialogBottom - view->mapToScene(QPointF(0, view->height())).y() <= 12);
     const QPointF wheelPosition = view->mapToScene(QPointF(view->width() / 2, view->height() / 2));
@@ -18320,20 +18486,9 @@ void LibraryQueueSmokeTest::libraryKeysReachBothEndsAndOpenTheContextMenu() {
     const auto current = [library]() {
         return callIntFunction(library, "currentSelectionIndex");
     };
-    // Each row has its own context menu.
-    const auto rowMenuVisible = [libraryView]() {
-        for (int row = 0; row < 3; ++row) {
-            QQuickItem *rowItem = nullptr;
-            QMetaObject::invokeMethod(libraryView, "itemAtIndex",
-                Q_RETURN_ARG(QQuickItem *, rowItem), Q_ARG(int, row));
-            QObject *menu = rowItem != nullptr
-                ? rowItem->findChild<QObject *>(QStringLiteral("libraryContextMenu"))
-                : nullptr;
-            if (menu != nullptr && menu->property("visible").toBool()) {
-                return true;
-            }
-        }
-        return false;
+    // The rows share one context menu, which every row opens.
+    const auto rowMenuVisible = [window]() {
+        return anyMenuVisible(window, QStringLiteral("libraryContextMenu"));
     };
     const auto selectedCount = [&libraryModel]() {
         return libraryModel.selectionCount();
@@ -22392,6 +22547,126 @@ QList<int> queueSelection(QObject *controller) {
 }
 
 } // namespace
+
+void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
+    QueueRowsModel rows;
+    loadQueueRows(rows, 6);
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    // An application window, whose palette and font the palette follows.
+    QByteArray source = kQueuePaneHarness;
+    source.replace("Window {\n    id: harness", "ApplicationWindow {\n    id: harness");
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, source, baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QObject *palette = nullptr;
+    for (QObject *object : root->findChildren<QObject *>()) {
+        if (object->property("uiSelectionColor").isValid() && object->property("boldFont").isValid()) {
+            palette = object;
+        }
+    }
+    QVERIFY(controller != nullptr && bridge != nullptr && palette != nullptr);
+    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
+    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    QTRY_VERIFY(!queueRowPoint(view, 5, 0.5).isNull());
+    const auto row = [view](int index) {
+        QQuickItem *item = nullptr;
+        QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, index));
+        return item;
+    };
+    const auto cell = [&row](int index, const QString &column) -> QQuickItem * {
+        QQuickItem *item = row(index);
+        if (item == nullptr) {
+            return nullptr;
+        }
+        for (QQuickItem *child : item->childItems()) {
+            if (child->objectName() == QStringLiteral("queueCell_") + column) {
+                return child;
+            }
+        }
+        return nullptr;
+    };
+    // As 8-bit ARGB: the palette mixes its colours at a finer precision.
+    const auto color = [](QObject *object) {
+        return object->property("color").value<QColor>().name(QColor::HexArgb);
+    };
+    const auto paletteColor = [palette](const char *name) {
+        return palette->property(name).value<QColor>().name(QColor::HexArgb);
+    };
+
+    // The rows' data.
+    QCOMPARE(cell(0, "title")->property("text").toString(), QStringLiteral("Track 0"));
+    QCOMPARE(cell(3, "order")->property("text").toString(), QStringLiteral("4"));
+    QCOMPARE(cell(3, "length")->property("text").toString(), QStringLiteral("1:00"));
+    QCOMPARE(cell(3, "artist")->property("text").toString(), QString());
+    QCOMPARE(cell(0, "indicator")->property("text").toString(), QString());
+    // Alternating rows, in the palette's colours.
+    QCOMPARE(color(row(0)), paletteColor("uiSurfaceRaisedColor"));
+    QCOMPARE(color(row(1)), paletteColor("uiSurfaceAltColor"));
+    QCOMPARE(color(cell(1, "title")), paletteColor("uiTextColor"));
+    QCOMPARE(cell(1, "title")->property("font").value<QFont>(),
+             palette->property("baseFont").value<QFont>());
+    QVERIFY(cell(1, "indicator")->property("font").value<QFont>().bold());
+
+    // The playing row shows its state.
+    bridge->setProperty("playingQueueIndex", 2);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_COMPARE(cell(2, "indicator")->property("text").toString(), QStringLiteral("▶"));
+    QCOMPARE(color(cell(2, "indicator")), paletteColor("uiActiveIndicatorColor"));
+    QCOMPARE(cell(1, "indicator")->property("text").toString(), QString());
+    QVERIFY(row(2)->property("isCurrentQueueRow").toBool());
+    bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QTRY_COMPARE(cell(2, "indicator")->property("text").toString(), QStringLiteral("⏸"));
+    QCOMPARE(color(cell(2, "indicator")), paletteColor("uiMutedTextColor"));
+
+    // Highlighted rows, the playing one among them, in the selection colours.
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
+        Q_ARG(QVariant, QVariant(QVariantList{2, 4}))));
+    QTRY_COMPARE(color(row(4)), paletteColor("uiSelectionColor"));
+    QCOMPARE(color(row(2)), paletteColor("uiSelectionColor"));
+    QCOMPARE(color(row(3)), paletteColor("uiSurfaceAltColor"));
+    for (const QString &column : {QStringLiteral("indicator"), QStringLiteral("order"), QStringLiteral("title"),
+             QStringLiteral("artist"), QStringLiteral("album"), QStringLiteral("length")}) {
+        QCOMPARE(color(cell(2, column)), paletteColor("uiSelectionTextColor"));
+        QCOMPARE(color(cell(3, column)), paletteColor("uiTextColor"));
+    }
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
+        Q_ARG(QVariant, QVariant(QVariantList{4}))));
+    QTRY_COMPARE(color(row(2)), paletteColor("uiSurfaceRaisedColor"));
+    QCOMPARE(color(cell(2, "indicator")), paletteColor("uiMutedTextColor"));
+
+    // A palette change at runtime reaches the rows.
+    const QString oldBase = paletteColor("uiSurfaceRaisedColor");
+    const QString oldSelection = paletteColor("uiSelectionColor");
+    QObject *windowPalette = root->property("palette").value<QObject *>();
+    QVERIFY(windowPalette != nullptr);
+    QVERIFY(windowPalette->setProperty("base", QColor("#203040")));
+    QVERIFY(windowPalette->setProperty("alternateBase", QColor("#405060")));
+    QVERIFY(windowPalette->setProperty("window", QColor("#102030")));
+    QTRY_COMPARE(paletteColor("uiSurfaceRaisedColor"), QStringLiteral("#ff203040"));
+    QVERIFY(paletteColor("uiSelectionColor") != oldSelection);
+    QVERIFY(oldBase != QStringLiteral("#ff203040"));
+    QTRY_COMPARE(color(row(0)), QStringLiteral("#ff203040"));
+    QCOMPARE(color(row(1)), QStringLiteral("#ff405060"));
+    QCOMPARE(color(row(4)), paletteColor("uiSelectionColor"));
+
+    // So does a font change, and the cells stay in their header's columns.
+    QFont larger = root->property("font").value<QFont>();
+    larger.setPointSizeF((larger.pointSizeF() > 0 ? larger.pointSizeF() : 10.0) * 2);
+    QVERIFY(root->setProperty("font", larger));
+    QTRY_COMPARE(cell(1, "title")->property("font").value<QFont>().pointSizeF(), larger.pointSizeF());
+    QTRY_COMPARE(cell(1, "indicator")->property("font").value<QFont>().pointSizeF(), larger.pointSizeF());
+    QVERIFY(cell(1, "indicator")->property("font").value<QFont>().bold());
+    QTRY_COMPARE(row(1)->height(), palette->property("rowHeight").toReal());
+    QQuickItem *titleCell = cell(1, "title");
+    QVERIFY(titleCell->y() >= 0 && titleCell->y() + titleCell->height() <= row(1)->height() + 0.5);
+}
 
 void LibraryQueueSmokeTest::draggingAHighlightedQueueRowMovesEveryHighlightedRow() {
     QueueRowsModel rows;

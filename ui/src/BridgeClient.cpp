@@ -637,163 +637,6 @@ QString formatLabelFromPath(const QString &path) {
 
 } // namespace
 
-QueueRowsModel::QueueRowsModel(QObject *parent)
-    : QAbstractListModel(parent) {}
-
-int QueueRowsModel::rowCount(const QModelIndex &parent) const {
-    if (parent.isValid()) {
-        return 0;
-    }
-    return m_rows.size();
-}
-
-QVariant QueueRowsModel::data(const QModelIndex &index, int role) const {
-    if (!index.isValid() || index.row() < 0 || index.row() >= m_rows.size()) {
-        return {};
-    }
-
-    const QueueRowData &row = m_rows.at(index.row());
-    switch (role) {
-    case TitleRole:
-        return row.title;
-    case ArtistRole:
-        return row.artist;
-    case AlbumRole:
-        return row.album;
-    case CoverPathRole:
-        return row.coverPath;
-    case GenreRole:
-        return row.genre;
-    case LengthTextRole:
-        return row.lengthText;
-    case PathRole:
-        return row.path;
-    case TrackNumberRole:
-        return row.trackNumber > 0 ? QVariant(row.trackNumber) : QVariant{};
-    case YearRole:
-        return row.year != std::numeric_limits<int>::min() ? QVariant(row.year) : QVariant{};
-    default:
-        return {};
-    }
-}
-
-QHash<int, QByteArray> QueueRowsModel::roleNames() const {
-    return {
-        {TitleRole, "title"},
-        {ArtistRole, "artist"},
-        {AlbumRole, "album"},
-        {CoverPathRole, "coverPath"},
-        {GenreRole, "genre"},
-        {LengthTextRole, "lengthText"},
-        {PathRole, "path"},
-        {TrackNumberRole, "trackNumber"},
-        {YearRole, "year"},
-    };
-}
-
-bool QueueRowsModel::setRows(QVector<QueueRowData> rows) {
-    if (m_rows == rows) {
-        return false;
-    }
-    beginResetModel();
-    m_rows = std::move(rows);
-    endResetModel();
-    return true;
-}
-
-bool QueueRowsModel::insertRowsAt(int at, QVector<QueueRowData> rows) {
-    if (at < 0 || at > m_rows.size()) {
-        return false;
-    }
-    if (rows.isEmpty()) {
-        return true;
-    }
-    beginInsertRows(QModelIndex(), at, at + static_cast<int>(rows.size()) - 1);
-    m_rows.insert(at, rows.size(), QueueRowData{});
-    std::move(rows.begin(), rows.end(), m_rows.begin() + at);
-    endInsertRows();
-    return true;
-}
-
-bool QueueRowsModel::removeRowsAt(int start, int count) {
-    if (start < 0 || count < 0 || count > m_rows.size() - start) {
-        return false;
-    }
-    if (count == 0) {
-        return true;
-    }
-    beginRemoveRows(QModelIndex(), start, start + count - 1);
-    m_rows.remove(start, count);
-    endRemoveRows();
-    return true;
-}
-
-bool QueueRowsModel::moveRow(int from, int to) {
-    if (from < 0 || to < 0 || from >= m_rows.size() || to >= m_rows.size()) {
-        return false;
-    }
-    if (from == to) {
-        return true;
-    }
-    // Qt names the row the moved one goes before, counted before the move.
-    if (!beginMoveRows(QModelIndex(), from, from, QModelIndex(), to > from ? to + 1 : to)) {
-        return false;
-    }
-    m_rows.move(from, to);
-    endMoveRows();
-    return true;
-}
-
-bool QueueRowsModel::moveRows(int from, int count, int to) {
-    const int size = static_cast<int>(m_rows.size());
-    if (from < 0 || count <= 0 || to < 0 || count > size - from || count > size - to) {
-        return false;
-    }
-    if (from == to) {
-        return true;
-    }
-    // Qt names the row the moved ones go before, counted before the move.
-    if (!beginMoveRows(QModelIndex(), from, from + count - 1, QModelIndex(),
-                       to > from ? to + count : to)) {
-        return false;
-    }
-    QVector<QueueRowData> moved(std::make_move_iterator(m_rows.begin() + from),
-                                std::make_move_iterator(m_rows.begin() + from + count));
-    m_rows.remove(from, count);
-    m_rows.insert(to, count, QueueRowData{});
-    std::move(moved.begin(), moved.end(), m_rows.begin() + to);
-    endMoveRows();
-    return true;
-}
-
-bool QueueRowsModel::updateRow(int index, QueueRowData row) {
-    if (index < 0 || index >= m_rows.size()) {
-        return false;
-    }
-    if (m_rows.at(index) == row) {
-        return true;
-    }
-    m_rows[index] = std::move(row);
-    const QModelIndex changed = this->index(index, 0);
-    emit dataChanged(changed, changed);
-    return true;
-}
-
-const QueueRowData *QueueRowsModel::rowAt(int index) const {
-    if (index < 0 || index >= m_rows.size()) {
-        return nullptr;
-    }
-    return &m_rows.at(index);
-}
-
-QVariant QueueRowsModel::trackNumberAt(int index) const {
-    const QueueRowData *row = rowAt(index);
-    if (row == nullptr || row->trackNumber <= 0) {
-        return {};
-    }
-    return row->trackNumber;
-}
-
 BridgeClient::BridgeClient(QObject *parent)
     : QObject(parent),
       m_playbackClock(new PlaybackClock(this)) {
@@ -927,12 +770,20 @@ BridgeClient::BridgeClient(QObject *parent)
     }
 
     startSearchApplyWorker();
+    m_snapshotWorker = std::make_unique<QueueSnapshotWorker>([this]() {
+        QMetaObject::invokeMethod(this, &BridgeClient::applyWorkerSnapshots, Qt::QueuedConnection);
+    });
+    m_queueRowsModel.setRowReleaser([worker = m_snapshotWorker.get()](QVector<QueueRowData> &&rows) {
+        worker->release(std::move(rows));
+    });
     startFileBrowserNameDetection();
     startInProcessBridge();
     scheduleSpectrogramActivityUpdate();
 }
 
 BridgeClient::~BridgeClient() {
+    // Before anything it posts to goes. Later rows are freed here.
+    m_snapshotWorker->stop();
     m_bridgePollTimer.stop();
     if (m_bridgeWakeNotifier != nullptr) {
         m_bridgeWakeNotifier->setEnabled(false);
@@ -1521,6 +1372,14 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
             static_cast<qsizetype>(len));
         ferrous_ffi_bridge_free_binary_event(packetPtr, len);
 
+        // A large packet, such as a queue of thousands of tracks, decodes on
+        // the worker; the packets after it follow it there, so that the
+        // snapshots apply in their order.
+        if (packet.size() >= QueueSnapshotWorker::kMinPacketBytes || workerSnapshotsPending()) {
+            submitWorkerSnapshot(packet);
+            continue;
+        }
+
         BinaryBridgeCodec::DecodedSnapshot decoded;
         QString decodeError;
         if (!BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &decodeError)) {
@@ -1557,7 +1416,7 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
             ? std::numeric_limits<int>::max()
             : static_cast<int>(version);
-        applyLibraryTreeFrame(versionInt, treeBytes);
+        receiveLibraryTreeFrame(versionInt, treeBytes);
     }
     result.treeCapSaturated = result.processedTreeFrames >= kMaxTreeFramesPerPass;
 
@@ -1774,26 +1633,16 @@ void BridgeClient::searchApplyWorkerLoop() {
     }
 }
 
-void BridgeClient::pollInProcessBridge() {
-    if (m_ffiBridge == nullptr) {
-        return;
-    }
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-    QElapsedTimer pollTimer;
-    pollTimer.start();
-#endif
-
+void BridgeClient::resetPollChanges() {
     m_pollPlaybackChanged = false;
     m_pollTrackIdentityChanged = false;
     m_pollTrackMetadataChanged = false;
     m_pollSnapshotChanged = false;
     m_pollLibraryChanged = false;
     m_pollLibraryScanChanged = false;
-    const BridgePollRunResult run = drainBridgeQueues(m_bridgePollBudgetMs);
-    // After the drain, so the wake fd is ready again only for what is still
-    // queued, which the next poll takes.
-    ferrous_ffi_bridge_ack_wakeup(m_ffiBridge);
+}
 
+void BridgeClient::schedulePollChanges() {
     if (m_pollPlaybackChanged) {
         schedulePlaybackChanged();
     }
@@ -1812,6 +1661,84 @@ void BridgeClient::pollInProcessBridge() {
     if (m_pollLibraryScanChanged) {
         scheduleLibraryScanChanged();
     }
+}
+
+bool BridgeClient::workerSnapshotsPending() const {
+    return m_snapshotWorker->pendingCount() > 0;
+}
+
+void BridgeClient::submitWorkerSnapshot(QByteArray packet) {
+    const quint64 sequence = m_snapshotWorker->submit(std::move(packet));
+    if (sequence != 0) {
+        m_lastWorkerSnapshot = sequence;
+    }
+}
+
+void BridgeClient::receiveLibraryTreeFrame(int version, const QByteArray &treeBytes) {
+    // A tree frame taken while snapshots before it decode on the worker
+    // waits here for them. It is taken all the same: the bridge signals its
+    // wake-up again for as long as a frame is left in its queues. Each tree
+    // is the whole library, so a newer one replaces one held, and waits for
+    // the snapshots before it, which include the held one's.
+    if (workerSnapshotsPending() || m_deferredTreeFrame.has_value()) {
+        m_deferredTreeFrame = DeferredTreeFrame{version, treeBytes, m_lastWorkerSnapshot};
+        return;
+    }
+    applyLibraryTreeFrame(version, treeBytes);
+}
+
+void BridgeClient::applyDeferredTreeFrame(quint64 appliedSequence, bool all) {
+    if (!m_deferredTreeFrame.has_value()
+        || (!all && m_deferredTreeFrame->afterSnapshot > appliedSequence)) {
+        return;
+    }
+    DeferredTreeFrame frame = std::move(*m_deferredTreeFrame);
+    m_deferredTreeFrame.reset();
+    applyLibraryTreeFrame(frame.version, frame.bytes);
+}
+
+void BridgeClient::applyWorkerSnapshots() {
+    std::vector<QueueSnapshotWorker::Result> ready = m_snapshotWorker->takeReady();
+    if (ready.empty() && !m_deferredTreeFrame.has_value()) {
+        return;
+    }
+    resetPollChanges();
+    for (QueueSnapshotWorker::Result &result : ready) {
+        if (!result.ok) {
+            logDiagnostic(
+                QStringLiteral("bridge"),
+                QStringLiteral("snapshot decode error: %1").arg(result.error));
+            reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                        i18nc("@info", "invalid bridge packet: %1", result.error));
+        } else {
+            processBinarySnapshot(result.snapshot, &result.rows);
+        }
+        // The tree that came after this snapshot, before the next. The
+        // sequence numbers go on across generations, so a snapshot dropped
+        // with its generation holds back no tree after a later one.
+        applyDeferredTreeFrame(result.sequence, false);
+    }
+    // Once none is pending, every snapshot submitted before the tree was
+    // applied, or dropped with its generation.
+    applyDeferredTreeFrame(0, !workerSnapshotsPending());
+    schedulePollChanges();
+}
+
+void BridgeClient::pollInProcessBridge() {
+    if (m_ffiBridge == nullptr) {
+        return;
+    }
+#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
+    QElapsedTimer pollTimer;
+    pollTimer.start();
+#endif
+
+    resetPollChanges();
+    const BridgePollRunResult run = drainBridgeQueues(m_bridgePollBudgetMs);
+    // After the drain, so the wake fd is ready again only for what is still
+    // queued, which the next poll takes.
+    ferrous_ffi_bridge_ack_wakeup(m_ffiBridge);
+    schedulePollChanges();
 
     if (m_ffiBridge != nullptr) {
         if (run.shouldContinueImmediately()) {
@@ -3274,45 +3201,30 @@ QString BridgeClient::queuePathAt(int index) const {
     return row != nullptr ? row->path : QString{};
 }
 
-QueueRowData BridgeClient::queueRowFromTrack(const BinaryBridgeCodec::DecodedQueueTrack &track) {
-    QueueRowData row;
-    row.title = track.title.trimmed().isEmpty() ? track.path : track.title;
-    row.artist = track.artist;
-    row.album = track.album;
-    row.coverPath = track.coverPath;
-    row.coverStamp = track.coverStamp;
-    row.genre = track.genre;
-    row.lengthText = track.lengthSeconds >= 0.0f
-        ? formatDurationCompact(static_cast<double>(track.lengthSeconds))
-        : QStringLiteral("--:--");
-    row.path = track.path;
-    row.trackNumber = track.trackNumber;
-    row.year = track.year;
-    return row;
-}
-
-QVector<QueueRowData> BridgeClient::queueRowsFromTracks(
-    const QVector<BinaryBridgeCodec::DecodedQueueTrack> &tracks) {
-    QVector<QueueRowData> rows;
-    rows.reserve(tracks.size());
-    for (const auto &track : tracks) {
-        rows.push_back(queueRowFromTrack(track));
-    }
-    return rows;
-}
-
-bool BridgeClient::applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue) {
+bool BridgeClient::applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue,
+                                  PreparedQueueRows *prepared) {
+    const bool usePrepared = prepared != nullptr && prepared->prepared;
     if (queue.kind == BinaryBridgeCodec::QueueFull) {
-        m_queueRowsModel.setRows(queueRowsFromTracks(queue.tracks));
+        m_queueRowsModel.setRows(usePrepared ? std::move(prepared->rows)
+                                             : queueRowsFromTracks(queue.tracks));
         return m_queueRowsModel.rowCount() == queue.len;
     }
+    if (usePrepared && prepared->opRows.size() != queue.ops.size()) {
+        return false;
+    }
+    // The rows of operation `i`.
+    const auto opRows = [&](qsizetype i) {
+        return usePrepared ? std::move(prepared->opRows[i])
+                           : queueRowsFromTracks(queue.ops.at(i).tracks);
+    };
     // Only the rows the operations name change, each with its row signals,
     // so views keep their place and selections follow their rows.
-    for (const BinaryBridgeCodec::DecodedQueueOp &op : queue.ops) {
+    for (qsizetype i = 0; i < queue.ops.size(); ++i) {
+        const BinaryBridgeCodec::DecodedQueueOp &op = queue.ops.at(i);
         bool applied = false;
         switch (op.type) {
         case BinaryBridgeCodec::QueueOpInsert:
-            applied = m_queueRowsModel.insertRowsAt(op.index, queueRowsFromTracks(op.tracks));
+            applied = m_queueRowsModel.insertRowsAt(op.index, opRows(i));
             break;
         case BinaryBridgeCodec::QueueOpRemove:
             applied = m_queueRowsModel.removeRowsAt(op.index, op.count);
@@ -3323,10 +3235,12 @@ bool BridgeClient::applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue) 
         case BinaryBridgeCodec::QueueOpMoveRows:
             applied = m_queueRowsModel.moveRows(op.index, op.count, op.to);
             break;
-        case BinaryBridgeCodec::QueueOpUpdate:
-            applied = op.tracks.size() == 1
-                && m_queueRowsModel.updateRow(op.index, queueRowFromTrack(op.tracks.first()));
+        case BinaryBridgeCodec::QueueOpUpdate: {
+            QVector<QueueRowData> rows = opRows(i);
+            applied = rows.size() == 1
+                && m_queueRowsModel.updateRow(op.index, std::move(rows.first()));
             break;
+        }
         default:
             break;
         }
@@ -5161,7 +5075,8 @@ void BridgeClient::applyLibraryTreeFrame(int version, const QByteArray &treeByte
     emit libraryTreeFrameReceived(version, treeBytes);
 }
 
-bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
+bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapshot &snapshot,
+                                         PreparedQueueRows *preparedRows) {
     if (snapshot.hasStopped) {
         if (m_connected) {
             m_connected = false;
@@ -5459,7 +5374,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         }
 
         const int previousLength = m_queueLength;
-        if (applyQueueRows(queue)) {
+        if (applyQueueRows(queue, preparedRows)) {
             m_queueRevision = queue.revision;
             if (queue.kind == BinaryBridgeCodec::QueueFull) {
                 m_queueResyncRequested = false;
@@ -6174,20 +6089,5 @@ QString BridgeClient::formatSeconds(double seconds) {
 }
 
 QString BridgeClient::formatDurationCompact(double seconds) {
-    if (!std::isfinite(seconds) || seconds < 0.0) {
-        return QStringLiteral("--:--");
-    }
-    const int total = static_cast<int>(seconds + 0.5);
-    const int hours = total / 3600;
-    const int minutes = (total % 3600) / 60;
-    const int secs = total % 60;
-    if (hours > 0) {
-        return QStringLiteral("%1:%2:%3")
-            .arg(hours)
-            .arg(minutes, 2, 10, QChar('0'))
-            .arg(secs, 2, 10, QChar('0'));
-    }
-    return QStringLiteral("%1:%2")
-        .arg(minutes)
-        .arg(secs, 2, 10, QChar('0'));
+    return formatQueueDuration(seconds);
 }

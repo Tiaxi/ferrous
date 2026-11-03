@@ -279,6 +279,12 @@ private slots:
     void rowCommandsCarryTheQueueRevision();
     void aLargeQueueEditDecodesOnlyTheChangedRows();
     void gaplessAndRepeatOneMoveOnlyThePlayingRow();
+    void snapshotWorkerDecodesPacketsInTheirOrder();
+    void snapshotWorkerDropsPacketsOfAnEarlierGeneration();
+    void droppedQueueRowsAreFreedOnTheWorker();
+    void largeSnapshotsApplyFromTheWorkerInOrder();
+    void libraryTreesWaitForTheWorkerSnapshotsBeforeThem();
+    void libraryTreesBehindWorkerSnapshotsDoNotSpinTheWakeUp();
     void realBridgeQueueEditsArriveAsRowSignals();
     void aSelectionFollowsAQueueChangeMadeBeforeItsEcho();
     void aRestoredRowSelectedOnUndoStaysSelected();
@@ -3153,6 +3159,357 @@ void BridgeClientTest::aLargeQueueEditDecodesOnlyTheChangedRows() {
     QByteArray overlong = delta;
     qToLittleEndian<quint32>(1000000, overlong.data() + 45);
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(queuePacket(overlong), &refused, &error));
+}
+
+namespace {
+
+// A packet with the whole queue of `count` rows at `revision`, titled
+// "<revision>:<row>".
+QByteArray fullQueuePacket(quint64 revision, int count) {
+    QByteArray section;
+    putQueueHeader(section, BinaryBridgeCodec::QueueFull, revision, static_cast<quint32>(count));
+    for (int index = 0; index < count; ++index) {
+        putQueueRow(section, QStringLiteral("/music/%1.flac").arg(index),
+                    QStringLiteral("%1:%2").arg(revision).arg(index));
+    }
+    return queuePacket(section);
+}
+
+// A packet that inserts `count` rows at `at` into the rows of revision
+// `base`, which then has `len` rows.
+QByteArray insertQueuePacket(quint64 base, quint64 revision, int len, int at, int count) {
+    QByteArray section;
+    putQueueHeader(section, BinaryBridgeCodec::QueueDelta, revision, static_cast<quint32>(len));
+    putLe<quint64>(section, base);
+    putLe<quint32>(section, 1);
+    putLe<quint8>(section, BinaryBridgeCodec::QueueOpInsert);
+    putLe<quint32>(section, static_cast<quint32>(at));
+    putLe<quint32>(section, static_cast<quint32>(count));
+    for (int index = 0; index < count; ++index) {
+        putQueueRow(section, QStringLiteral("/inserted/%1.flac").arg(index),
+                    QStringLiteral("inserted %1").arg(index));
+    }
+    return queuePacket(section);
+}
+
+// Takes the worker's results until `count` arrived or it has none pending.
+std::vector<QueueSnapshotWorker::Result> takeResults(QueueSnapshotWorker &worker, int count) {
+    std::vector<QueueSnapshotWorker::Result> results;
+    QElapsedTimer timer;
+    timer.start();
+    while (static_cast<int>(results.size()) < count && worker.pendingCount() > 0
+           && timer.elapsed() < 10000) {
+        for (auto &result : worker.takeReady()) {
+            results.push_back(std::move(result));
+        }
+        QTest::qWait(1);
+    }
+    return results;
+}
+
+QVector<QueueRowData> numberedRows(int count) {
+    QVector<QueueRowData> rows;
+    rows.reserve(count);
+    for (int index = 0; index < count; ++index) {
+        QueueRowData row;
+        row.title = QStringLiteral("Row %1").arg(index);
+        row.path = QStringLiteral("/music/%1.flac").arg(index);
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+} // namespace
+
+void BridgeClientTest::snapshotWorkerDecodesPacketsInTheirOrder() {
+    std::atomic<int> readyCalls{0};
+    QueueSnapshotWorker worker([&readyCalls]() { readyCalls.fetch_add(1); });
+    // A large packet first, which takes longest, then small ones.
+    worker.submit(fullQueuePacket(1, 5000));
+    worker.submit(fullQueuePacket(2, 3));
+    worker.submit(insertQueuePacket(2, 3, 5, 1, 2));
+    QByteArray broken = fullQueuePacket(4, 2);
+    broken.chop(1);
+    worker.submit(broken);
+    QCOMPARE(worker.pendingCount(), 4);
+
+    const std::vector<QueueSnapshotWorker::Result> results = takeResults(worker, 4);
+    QCOMPARE(results.size(), std::size_t(4));
+    QCOMPARE(worker.pendingCount(), 0);
+    QTRY_COMPARE(readyCalls.load(), 4);
+    QVERIFY(results[0].ok && results[1].ok && results[2].ok);
+    QCOMPARE(results[0].snapshot.queue.revision, quint64(1));
+    QCOMPARE(results[1].snapshot.queue.revision, quint64(2));
+    QCOMPARE(results[2].snapshot.queue.revision, quint64(3));
+    // The rows come made, and the decoded tracks they replace are gone.
+    QVERIFY(results[0].rows.prepared);
+    QCOMPARE(results[0].rows.rows.size(), 5000);
+    QVERIFY(results[0].snapshot.queue.tracks.isEmpty());
+    QCOMPARE(results[0].rows.rows.at(4999).title, QStringLiteral("1:4999"));
+    QCOMPARE(results[0].rows.rows.at(4999).lengthText, QStringLiteral("1:00"));
+    QCOMPARE(results[2].rows.opRows.size(), 1);
+    QCOMPARE(results[2].rows.opRows.at(0).size(), 2);
+    QVERIFY(results[2].snapshot.queue.ops.at(0).tracks.isEmpty());
+    // A packet that does not decode says why, in its place.
+    QVERIFY(!results[3].ok);
+    QVERIFY(!results[3].error.isEmpty());
+}
+
+void BridgeClientTest::snapshotWorkerDropsPacketsOfAnEarlierGeneration() {
+    QueueSnapshotWorker worker([]() {});
+    for (quint64 revision = 1; revision <= 4; ++revision) {
+        worker.submit(fullQueuePacket(revision, 2000));
+    }
+    const quint64 before = worker.generation();
+    // Whether those are decoded, being decoded or done, none comes out now.
+    worker.invalidate();
+    QCOMPARE(worker.generation(), before + 1);
+    QCOMPARE(worker.pendingCount(), 0);
+    worker.submit(fullQueuePacket(5, 3));
+    const std::vector<QueueSnapshotWorker::Result> results = takeResults(worker, 1);
+    QCOMPARE(results.size(), std::size_t(1));
+    QCOMPARE(results[0].snapshot.queue.revision, quint64(5));
+    QCOMPARE(results[0].generation, before + 1);
+    // Nothing of the earlier generation turns up later either.
+    QTest::qWait(50);
+    QVERIFY(worker.takeReady().empty());
+
+    // A stopped worker takes no more packets, and frees rows where they go.
+    worker.stop();
+    worker.submit(fullQueuePacket(6, 3));
+    QCOMPARE(worker.pendingCount(), 0);
+    worker.release(numberedRows(QueueRowsModel::kReleaseThreshold));
+    QVERIFY(worker.takeReady().empty());
+}
+
+void BridgeClientTest::droppedQueueRowsAreFreedOnTheWorker() {
+    QueueSnapshotWorker worker([]() {});
+    std::mutex mutex;
+    std::vector<std::pair<std::thread::id, qsizetype>> freed;
+    worker.setReleaseObserver([&](qsizetype count) {
+        std::lock_guard<std::mutex> lock(mutex);
+        freed.emplace_back(std::this_thread::get_id(), count);
+    });
+    const auto freedCounts = [&]() {
+        std::lock_guard<std::mutex> lock(mutex);
+        QList<qsizetype> counts;
+        for (const auto &entry : freed) {
+            counts.push_back(entry.second);
+        }
+        return counts;
+    };
+    QueueRowsModel model;
+    model.setRowReleaser([&worker](QVector<QueueRowData> &&rows) {
+        worker.release(std::move(rows));
+    });
+    constexpr int kRows = 4000;
+    model.setRows(numberedRows(kRows));
+    QCOMPARE(model.rowCount(), kRows);
+    QVERIFY(freedCounts().isEmpty());
+
+    // Replacing the rows frees the old ones on the worker.
+    QVector<QueueRowData> replacement = numberedRows(kRows + 1);
+    replacement[0].title = QStringLiteral("Replacement");
+    QVERIFY(model.setRows(std::move(replacement)));
+    QTRY_COMPARE(freedCounts(), (QList<qsizetype>{kRows}));
+    // The model's rows are its own, whole, after the old ones went.
+    QCOMPARE(model.rowAt(0)->title, QStringLiteral("Replacement"));
+    QCOMPARE(model.rowAt(kRows)->path, QStringLiteral("/music/%1.flac").arg(kRows));
+
+    // So does a long removal, while the rest stay as they were.
+    QVERIFY(model.removeRowsAt(1, kRows - 1));
+    QTRY_COMPARE(freedCounts(), (QList<qsizetype>{kRows, kRows - 1}));
+    QCOMPARE(model.rowCount(), 2);
+    QCOMPARE(model.rowAt(0)->title, QStringLiteral("Replacement"));
+    QCOMPARE(model.rowAt(1)->title, QStringLiteral("Row %1").arg(kRows));
+    QCOMPARE(model.data(model.index(1, 0), QueueRowsModel::PathRole).toString(),
+             QStringLiteral("/music/%1.flac").arg(kRows));
+
+    // A few rows are freed where they are dropped.
+    QVERIFY(model.removeRowsAt(0, 1));
+    QVERIFY(model.setRows({}));
+    QTest::qWait(20);
+    QCOMPARE(freedCounts().size(), 2);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto &entry : freed) {
+            QVERIFY(entry.first == worker.threadId());
+            QVERIFY(entry.first != std::this_thread::get_id());
+        }
+    }
+
+    // A value the model handed out stays valid after its row is freed.
+    model.setRows(numberedRows(kRows));
+    const QString kept = model.data(model.index(7, 0), QueueRowsModel::TitleRole).toString();
+    QVERIFY(model.setRows(numberedRows(1)));
+    QTRY_COMPARE(freedCounts().size(), 3);
+    QCOMPARE(kept, QStringLiteral("Row 7"));
+}
+
+void BridgeClientTest::largeSnapshotsApplyFromTheWorkerInOrder() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QSignalSpy snapshotChanged(&client, &BridgeClient::snapshotChanged);
+    constexpr int kRows = 6000;
+    const QByteArray full = fullQueuePacket(1, kRows);
+    QVERIFY(full.size() >= QueueSnapshotWorker::kMinPacketBytes);
+    const QByteArray insert = insertQueuePacket(1, 2, kRows + 2, 0, 2);
+    QVERIFY(insert.size() < QueueSnapshotWorker::kMinPacketBytes);
+
+    // The small edit follows the large queue to the worker and applies
+    // after it, so it fits the rows.
+    client.submitWorkerSnapshot(full);
+    QVERIFY(client.workerSnapshotsPending());
+    client.submitWorkerSnapshot(insert);
+    QTRY_VERIFY(!client.workerSnapshotsPending());
+    QTRY_COMPARE(client.queueLength(), kRows + 2);
+    QCOMPARE(client.m_queueRevision, quint64(2));
+    QVERIFY(!client.m_queueResyncRequested);
+    QCOMPARE(model->rowAt(0)->title, QStringLiteral("inserted 0"));
+    QCOMPARE(model->rowAt(2)->title, QStringLiteral("1:0"));
+    QCOMPARE(model->rowAt(kRows + 1)->title, QStringLiteral("1:%1").arg(kRows - 1));
+    QTRY_VERIFY(snapshotChanged.count() > 0);
+
+    // A large packet that does not decode is reported, as it is when it
+    // decodes here.
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    QByteArray broken = fullQueuePacket(3, kRows);
+    broken.chop(1);
+    client.submitWorkerSnapshot(broken);
+    QTRY_COMPARE(errors.count(), 1);
+    QVERIFY(errors.at(0).at(0).toString().contains(QStringLiteral("invalid bridge packet")));
+    QCOMPARE(client.m_queueRevision, quint64(2));
+
+    // A packet of an earlier generation is not applied.
+    client.submitWorkerSnapshot(fullQueuePacket(3, kRows));
+    client.m_snapshotWorker->invalidate();
+    QVERIFY(!client.workerSnapshotsPending());
+    QTest::qWait(100);
+    QCoreApplication::processEvents();
+    QCOMPARE(client.m_queueRevision, quint64(2));
+    QCOMPARE(client.queueLength(), kRows + 2);
+}
+
+void BridgeClientTest::libraryTreesWaitForTheWorkerSnapshotsBeforeThem() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QStringList order;
+    connect(model, &QAbstractItemModel::modelReset, &client, [&]() {
+        order.push_back(QStringLiteral("queue %1").arg(model->rowCount()));
+    });
+    connect(&client, &BridgeClient::libraryTreeFrameReceived, &client, [&](int version, const QByteArray &) {
+        order.push_back(QStringLiteral("tree %1").arg(version));
+    });
+    const auto tree = [&client](int version) {
+        client.receiveLibraryTreeFrame(version, QByteArray::number(version));
+    };
+    // What applied once the worker's snapshots and the held tree are done.
+    const auto applied = [&]() {
+        if (!QTest::qWaitFor([&]() {
+                return !client.workerSnapshotsPending() && !client.m_deferredTreeFrame.has_value();
+            }, 10000)) {
+            return QStringList{QStringLiteral("timed out")} + order;
+        }
+        const QStringList taken = order;
+        order.clear();
+        return taken;
+    };
+    constexpr int kRows = 6000;
+
+    // A tree that comes between two snapshots applies between them, also
+    // when both come out of the worker together.
+    client.submitWorkerSnapshot(fullQueuePacket(1, kRows));
+    tree(1);
+    client.submitWorkerSnapshot(fullQueuePacket(2, kRows + 1));
+    QCOMPARE(applied(), (QStringList{QStringLiteral("queue 6000"), QStringLiteral("tree 1"),
+                                     QStringLiteral("queue 6001")}));
+
+    // Of many trees while snapshots decode, only the newest is kept, as the
+    // bridge keeps only the newest, and it waits for every snapshot before it.
+    client.submitWorkerSnapshot(fullQueuePacket(3, kRows));
+    for (int version = 2; version <= 50; ++version) {
+        tree(version);
+        QVERIFY(client.m_deferredTreeFrame.has_value());
+        QCOMPARE(client.m_deferredTreeFrame->version, version);
+    }
+    client.submitWorkerSnapshot(fullQueuePacket(4, kRows + 1));
+    tree(51);
+    tree(52);
+    QCOMPARE(client.m_deferredTreeFrame->version, 52);
+    QCOMPARE(client.m_deferredTreeFrame->afterSnapshot, client.m_lastWorkerSnapshot);
+    QCOMPARE(applied(), (QStringList{QStringLiteral("queue 6000"), QStringLiteral("queue 6001"),
+                                     QStringLiteral("tree 52")}));
+    QCOMPARE(client.libraryVersion(), 52);
+
+    // A tree held when a generation is dropped applies once nothing is
+    // pending.
+    client.submitWorkerSnapshot(fullQueuePacket(5, kRows));
+    tree(53);
+    client.m_snapshotWorker->invalidate();
+    client.applyWorkerSnapshots();
+    QVERIFY(!client.m_deferredTreeFrame.has_value());
+    QCOMPARE(client.libraryVersion(), 53);
+    order.clear();
+
+    // After a dropped generation, trees still go between the snapshots
+    // around them.
+    client.submitWorkerSnapshot(fullQueuePacket(6, kRows));
+    client.m_snapshotWorker->invalidate();
+    client.submitWorkerSnapshot(fullQueuePacket(7, kRows + 1));
+    tree(54);
+    client.submitWorkerSnapshot(fullQueuePacket(8, kRows));
+    QCOMPARE(applied(), (QStringList{QStringLiteral("queue 6001"), QStringLiteral("tree 54"),
+                                     QStringLiteral("queue 6000")}));
+}
+
+void BridgeClientTest::libraryTreesBehindWorkerSnapshotsDoNotSpinTheWakeUp() {
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    QVERIFY(bridge.m_bridgeWakeNotifier != nullptr);
+    // A worker whose results wait until the test applies them, which keeps
+    // its snapshot pending while the bridge runs.
+    bridge.m_snapshotWorker->stop();
+    bridge.m_snapshotWorker = std::make_unique<QueueSnapshotWorker>([]() {});
+    bridge.m_queueRowsModel.setRowReleaser([worker = bridge.m_snapshotWorker.get()](QVector<QueueRowData> &&rows) {
+        worker->release(std::move(rows));
+    });
+    QTest::qWait(300);
+
+    auto *model = qobject_cast<QueueRowsModel *>(bridge.queueRows());
+    QStringList order;
+    connect(model, &QAbstractItemModel::modelReset, &bridge, [&]() { order.push_back(QStringLiteral("queue")); });
+    connect(&bridge, &BridgeClient::libraryTreeFrameReceived, &bridge,
+            [&](int, const QByteArray &) { order.push_back(QStringLiteral("tree")); });
+    int wakeUps = 0;
+    connect(bridge.m_bridgeWakeNotifier, &QSocketNotifier::activated, &bridge, [&]() { ++wakeUps; });
+
+    bridge.submitWorkerSnapshot(fullQueuePacket(1, 6000));
+    QVERIFY(bridge.workerSnapshotsPending());
+    // A new library folder makes the bridge send a library tree.
+    bridge.addLibraryRoot(root.path(), QString());
+    // Until the tree is taken, the bridge wakes the client again each time
+    // round the event loop.
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.m_deferredTreeFrame.has_value() || wakeUps > 1000, 15000);
+    QVERIFY2(bridge.m_deferredTreeFrame.has_value(),
+             qPrintable(QStringLiteral("%1 wake-ups and no tree taken").arg(wakeUps)));
+    // Taken, it wakes the client only for new traffic: a few times.
+    const int wakeUpsBefore = wakeUps;
+    QTest::qWait(300);
+    QVERIFY2(wakeUps - wakeUpsBefore < 30, qPrintable(QString::number(wakeUps - wakeUpsBefore)));
+    QVERIFY2(wakeUps < 100, qPrintable(QString::number(wakeUps)));
+    QVERIFY(order.isEmpty());
+    QVERIFY(bridge.workerSnapshotsPending());
+
+    // Once the snapshot applies, the tree follows it.
+    QTRY_VERIFY((bridge.applyWorkerSnapshots(), !bridge.workerSnapshotsPending()));
+    QVERIFY(!bridge.m_deferredTreeFrame.has_value());
+    QVERIFY(order.size() >= 2);
+    QCOMPARE(order.first(), QStringLiteral("queue"));
+    QVERIFY(order.contains(QStringLiteral("tree")));
 }
 
 void BridgeClientTest::gaplessAndRepeatOneMoveOnlyThePlayingRow() {
