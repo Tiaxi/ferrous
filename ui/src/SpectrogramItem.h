@@ -432,6 +432,9 @@ private:
     bool reanchorRollingEpochForCurrentDataLocked(
         std::chrono::steady_clock::time_point now);
     void updateCanvasFillReadinessLocked();
+    // Whether the ring holds every column of the current track from
+    // firstColumn to lastColumn.
+    bool ringHoldsColumnsLocked(qint64 firstColumn, qint64 lastColumn) const;
     void applyPrecomputedResetLocked(
         int startIndex,
         int bins,
@@ -709,6 +712,14 @@ private:
     std::vector<qint64> m_ringSequenceId; // per slot: write sequence stored there, or -1
     std::vector<quint64> m_ringTrackToken; // per slot: track token stored there, or 0
     QHash<quint64, QHash<qint32, qint64>> m_trackColumnToSeqByToken;
+    // A centered session's columns go to the write sequence of their
+    // offset from its first column, m_centeredColumnBase, so that a session
+    // that sends the playhead's columns before those left of them, as the
+    // worker does after a seek, has each where it belongs, and the ring
+    // drops the columns furthest left first. -1 when the ring is written
+    // in order of arrival; the track of those columns, or 0 for any.
+    qint64 m_centeredColumnBase{-1};
+    quint64 m_centeredColumnToken{0};
     int m_ringCapacity{0};            // number of column slots
     // Max widget width ever observed ACROSS ALL SpectrogramItem
     // instances (static).  The Rust-side max-widget-width tracker that
@@ -794,6 +805,9 @@ private:
     // session restart changes the hop; cleared when the ring covers
     // the display.  updatePaintNode skips canvas updates while active.
     bool m_zoomFillActive{false};
+    // The freeze is over a seek, not a zoom: it ends once the ring holds
+    // the playhead's column, and the rest of the view fills in as it comes.
+    bool m_seekFillActive{false};
     // The canvas's pixels per display column.
     double m_precomputedCanvasZoomLevel{1.0};
     // Restarting the backend for every wheel step would decode the same

@@ -2422,6 +2422,17 @@ void SpectrogramItem::setZoomEnabled(bool value) {
     emit zoomEnabledChanged();
 }
 
+bool SpectrogramItem::ringHoldsColumnsLocked(qint64 firstColumn, qint64 lastColumn) const {
+    // From the right: the columns that come last are those just left of
+    // the playhead.
+    for (qint64 column = lastColumn; column >= firstColumn; --column) {
+        if (ringSlotForDisplayIndexLocked(column, false) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void SpectrogramItem::updateCanvasFillReadinessLocked() {
     if (m_zoomFillActive && m_awaitingZoomData) {
         // The data is not for the requested zoom yet.
@@ -2527,7 +2538,24 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
             && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 64
                 >= static_cast<qint64>(m_precomputedTotalColumnsEstimate);
 
-        if (ringCoversDisplayLeft
+        if (m_seekFillActive) {
+            // After a seek the worker decodes the playhead's columns
+            // first: they end the freeze, and the columns left of them,
+            // which come next, draw in as they arrive, as missing columns
+            // do until then.
+            if (ringSlotForDisplayIndexLocked(nowCol, false) >= 0 || decodeReachedEnd) {
+                m_zoomFillActive = false;
+                m_seekFillActive = false;
+                m_precomputedCanvasDirty = true;
+            }
+            return;
+        }
+        // The columns left of the playhead may come after those right of
+        // it: a zoom shows the view once it has all of them.
+        const bool ringHoldsDisplayLeftHalf = ringCoversDisplayLeft
+            && ringHoldsColumnsLocked(displayLeftCol + 1,
+                std::min(nowCol, static_cast<qint64>(m_precomputedMaxColumnIndex)));
+        if (ringHoldsDisplayLeftHalf
             && ((ringHasEnoughColumns && ringCoversDisplayRight)
                 || decodeReachedEnd)) {
             m_zoomFillActive = false;
@@ -2599,11 +2627,13 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedTotalColumnsEstimate = totalEstimate;
             m_precomputedCanvasDirty = true;
         }
-        // The session has ended, so whatever the freeze waits for will not
-        // arrive: show what there is rather than the frozen image of another
+        // The session has ended, and sent every column it decodes, the
+        // left of a centered view after the right included, so whatever
+        // the freeze waits for will not arrive: show what there is rather than the frozen image of another
         // position while playback goes on.  A zoom waits for its own session.
         if (m_zoomFillActive && !m_awaitingZoomData) {
             m_zoomFillActive = false;
+            m_seekFillActive = false;
             m_precomputedCanvasDirty = true;
         }
         update();
@@ -2681,6 +2711,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         && m_displayMode == 1
         && !m_canvas.isNull()) {
         m_zoomFillActive = true;
+        m_seekFillActive = false;
     }
     // A restart that is not for the requested zoom yet, such as a session
     // for an earlier zoom: keep the previewed canvas on screen rather than
@@ -2693,6 +2724,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         && !m_canvas.isNull()
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
         m_zoomFillActive = true;
+        m_seekFillActive = false;
     }
 
     // If this widget has no ring and receives data (not a reset), it was
@@ -2702,6 +2734,12 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (!bufferReset && columns > 0 && m_ringCapacity == 0 && !m_precomputedResetPending) {
         applyPrecomputedResetLocked(startIndex, bins, trackToken, generation, true);
         appliedImplicitReset = true;
+        if (m_centeredColumnBase >= 0) {
+            // Where the session's columns start is unknown: the columns
+            // left of these, which may come next, go where their column
+            // puts them too.
+            m_centeredColumnBase = 0;
+        }
     }
 
     bool appliedReset = false;
@@ -2735,6 +2773,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_ringSequenceId.clear();
         m_ringTrackToken.clear();
         m_trackColumnToSeqByToken.clear();
+        m_centeredColumnBase = -1;
         ++m_ringGeneration;
         cancelPendingRasterLocked();
         m_precomputedMaxColumnIndex = -1;
@@ -2744,7 +2783,10 @@ void SpectrogramItem::feedPrecomputedChunk(
         if (preserveCanvasForSeek) {
             // Canvas, m_precomputedReady, and the stored display range
             // all stay as-is so the paint keeps rendering the old
-            // image through canvasFreeze.
+            // image through canvasFreeze, until the playhead's columns
+            // arrive, which the worker decodes first.  A zoom freeze it
+            // interrupts waits for the whole view still.
+            m_seekFillActive = m_seekFillActive || !m_zoomFillActive;
             m_zoomFillActive = true;
         } else {
             m_precomputedReady = false;
@@ -3150,6 +3192,11 @@ void SpectrogramItem::feedPrecomputedChunk(
                 QHash<qint32, qint64>{});
         }
         activeTokenIt->reserve(activeTokenIt->size() + columns);
+        // A centered session's columns may arrive out of order: the
+        // playhead's first, then those left of it.
+        const bool columnAddressed = m_displayMode == 1
+            && m_centeredColumnBase >= 0
+            && (m_centeredColumnToken == 0 || effectiveTrackToken == m_centeredColumnToken);
 
         for (int col = 0; col < columns; ++col) {
             const int srcOff = col * stridePerColumn + channelOffset;
@@ -3160,8 +3207,16 @@ void SpectrogramItem::feedPrecomputedChunk(
             if (trackCol < 0) {
                 continue;
             }
-            const int slot =
-                static_cast<int>(m_ringWriteSeq % m_ringCapacity);
+            qint64 seq = m_ringWriteSeq;
+            if (columnAddressed && trackCol >= m_centeredColumnBase) {
+                seq = static_cast<qint64>(trackCol) - m_centeredColumnBase;
+                if (seq < m_ringWriteSeq - m_ringCapacity) {
+                    // Further left than the ring reaches from its newest
+                    // column: it would drop a column to the right of it.
+                    continue;
+                }
+            }
+            const int slot = static_cast<int>(seq % m_ringCapacity);
             if (!m_ringSequenceId.empty()) {
                 const qint64 previousSeq = m_ringSequenceId[static_cast<size_t>(slot)];
                 if (previousSeq >= m_ringOldestSeq && previousSeq < m_ringWriteSeq) {
@@ -3191,16 +3246,16 @@ void SpectrogramItem::feedPrecomputedChunk(
             }
             m_ringColumnId[static_cast<size_t>(slot)] = trackCol;
             if (!m_ringSequenceId.empty()) {
-                m_ringSequenceId[static_cast<size_t>(slot)] = m_ringWriteSeq;
+                m_ringSequenceId[static_cast<size_t>(slot)] = seq;
             }
             if (!m_ringTrackToken.empty()) {
                 m_ringTrackToken[static_cast<size_t>(slot)] = effectiveTrackToken;
             }
-            activeTokenIt->insert(trackCol, m_ringWriteSeq);
+            activeTokenIt->insert(trackCol, seq);
             if (trackCol > m_precomputedMaxColumnIndex) {
                 m_precomputedMaxColumnIndex = trackCol;
             }
-            m_ringWriteSeq++;
+            m_ringWriteSeq = std::max(m_ringWriteSeq, seq + 1);
         }
         m_ringOldestSeq = std::max<qint64>(0, m_ringWriteSeq - m_ringCapacity);
         FERROUS_SPECTROGRAM_LOGF(stderr,
@@ -3419,6 +3474,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_ringSequenceId.clear();
     m_ringTrackToken.clear();
     m_trackColumnToSeqByToken.clear();
+    m_centeredColumnBase = -1;
     m_ringCapacity = 0;
     m_ringOldestSeq = 0;
     m_ringWriteSeq = 0;
@@ -3444,6 +3500,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedTrackToken = 0;
     m_awaitingZoomData = false;
     m_zoomFillActive = false;
+    m_seekFillActive = false;
     m_renderZoomLevel = m_zoomLevel;
     m_gaplessPositionOffset = 0.0;
     m_gaplessContinuationPending = false;
@@ -3466,7 +3523,6 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     quint64 trackToken,
     quint64 generation,
     bool clearHistoryOnReset) {
-    Q_UNUSED(trackToken);
     if (generation != 0) {
         m_precomputedSessionGeneration = generation;
         m_precomputedCommittedGeneration = std::max(m_precomputedCommittedGeneration, generation);
@@ -3520,7 +3576,12 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_ringTrackToken.clear();
         m_trackColumnToSeqByToken.clear();
         m_ringCapacity = 0;
+        // A centered session's columns from here on go where their
+        // column puts them, counted from its first.
+        m_centeredColumnBase = m_displayMode == 1 ? std::max(0, startIndex) : -1;
+        m_centeredColumnToken = trackToken;
     } else {
+        m_centeredColumnBase = -1;
         // Preserve only the history that has actually been shown on screen.
         // Any speculative lookahead beyond the current playback head is stale
         // after a seek/non-gapless reset; keeping it and remapping to the

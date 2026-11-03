@@ -45,7 +45,9 @@ thread of the process (thread names with digits folded to `#`).
   the track. For each seek: when the engine reported it applied
   (`landed_ms`), when the position advanced again, when the first columns of
   the restarted spectrogram session arrived, and when columns covering the
-  target did (`reset: false` means they were decoded already). `--idle`
+  target did (`reset: false` means they were decoded already), and, as
+  `view_ms`, when every column of a view of `--width` columns around the
+  target had (the view a centered spectrogram shows at zoom 1). `--idle`
   waits for the overview and the lookahead before seeking; `--warmup` and
   `--settle` set the waits.
 - `window FILE`: waveform detail windows through
@@ -65,7 +67,7 @@ thread of the process (thread names with digits folded to `#`).
 | Script | Measures |
 | --- | --- |
 | `run_analysis_matrix.sh OUT REPS DIR [IDS]` | `analysis` cold, in four configurations |
-| `run_seek_matrix.sh OUT REPS DIR IDS` | `seek`, idle and busy, centered and rolling |
+| `run_seek_matrix.sh OUT REPS DIR IDS` | `seek`, idle and busy, centered and rolling; `PERF_BIN`, `PERF_CONFIGS` and `PERF_ARGS` choose the driver, configurations and extra options |
 | `run_window.sh OUT SELECTION DIR REPS IDS` | `window`, cold service each run |
 | `run_nfs.sh OUT SELECTION` | `analysis` of files in place: first run cold, then warm |
 | `app_states.sh OUT REP STEREO SURROUND RAW` | the app's per-thread CPU and wakeups: idle, playing, paused, stopped, driven over MPRIS |

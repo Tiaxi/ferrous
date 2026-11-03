@@ -558,6 +558,9 @@ struct SeekTiming {
     reset: bool,
     /// The first chunk that covers the target column.
     target_chunk: Option<Duration>,
+    /// When every column of a centered view of the target, at zoom 1,
+    /// had arrived since the reset.
+    view_complete: Option<Duration>,
     /// Snapshots the bridge sent while the seek settled.
     snapshots: u64,
 }
@@ -652,7 +655,7 @@ fn run_seek(options: &Options) -> Result<Fields, String> {
     let targets: Vec<f64> = options.seeks.iter().map(|f| f * bridge.duration).collect();
     let timings: Vec<SeekTiming> = targets
         .into_iter()
-        .map(|target| measure_seek(&mut bridge, target, options.settle))
+        .map(|target| measure_seek(&mut bridge, target, options.settle, options.width))
         .collect();
     let _ = bridge.handle.shutdown();
 
@@ -729,11 +732,15 @@ fn start_playback(options: &Options) -> Result<(Bridge, Duration), String> {
 }
 
 /// Seek to `target` seconds and watch the bridge for `settle` seconds.
-fn measure_seek(bridge: &mut Bridge, target: f64, settle: f64) -> SeekTiming {
+fn measure_seek(bridge: &mut Bridge, target: f64, settle: f64, width: u32) -> SeekTiming {
     let mut timing = SeekTiming {
         target,
         ..SeekTiming::default()
     };
+    // The columns of the view the target is centered in, which arrive
+    // after the reset, by offset from its left edge.
+    let mut view: Option<(u64, Vec<bool>)> = None;
+    let mut view_missing = 0_usize;
     let serial = bridge.seek_landed_serial;
     let snapshots_before = bridge.snapshots;
     let issued = Instant::now();
@@ -769,6 +776,27 @@ fn measure_seek(bridge: &mut Bridge, target: f64, settle: f64) -> SeekTiming {
                     if count > 0 && start <= target_column && target_column < start + count {
                         timing.target_chunk.get_or_insert(elapsed);
                     }
+                    let (left, seen) = view.get_or_insert_with(|| {
+                        let (left, columns) =
+                            view_columns(target_column, width, bridge.duration, bridge.column_rate);
+                        view_missing = columns;
+                        (left, vec![false; columns])
+                    });
+                    for column in start..start + count {
+                        let Some(offset) = column
+                            .checked_sub(*left)
+                            .and_then(|offset| usize::try_from(offset).ok())
+                        else {
+                            continue;
+                        };
+                        if let Some(slot) = seen.get_mut(offset).filter(|slot| !**slot) {
+                            *slot = true;
+                            view_missing -= 1;
+                        }
+                    }
+                    if view_missing == 0 && count > 0 {
+                        timing.view_complete.get_or_insert(elapsed);
+                    }
                 }
             }
             Seen::Nothing => {}
@@ -778,15 +806,31 @@ fn measure_seek(bridge: &mut Bridge, target: f64, settle: f64) -> SeekTiming {
     timing
 }
 
+/// The first column and the number of columns of a centered view `width`
+/// columns wide around `target_column`, in a track `duration` seconds long
+/// at `column_rate` columns a second: it ends at the end of the track.
+fn view_columns(target_column: u64, width: u32, duration: f64, column_rate: f64) -> (u64, usize) {
+    // Track lengths in columns are far below 2^52.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let total = (duration * column_rate) as u64;
+    let width = u64::from(width);
+    let left = target_column
+        .saturating_sub(width / 2)
+        .min(total.saturating_sub(width));
+    let right = (left + width).min(total.max(left));
+    (left, usize::try_from(right - left).unwrap_or(0))
+}
+
 impl SeekTiming {
     fn json(&self) -> String {
         format!(
-            "{{\"target_s\":{:.1},\"landed_ms\":{},\"advancing_ms\":{},\"first_chunk_ms\":{},\"target_chunk_ms\":{},\"reset\":{},\"snapshots\":{}}}",
+            "{{\"target_s\":{:.1},\"landed_ms\":{},\"advancing_ms\":{},\"first_chunk_ms\":{},\"target_chunk_ms\":{},\"view_ms\":{},\"reset\":{},\"snapshots\":{}}}",
             self.target,
             ms(self.landed),
             ms(self.advancing),
             ms(self.first_chunk),
             ms(self.target_chunk),
+            ms(self.view_complete),
             self.reset,
             self.snapshots
         )
