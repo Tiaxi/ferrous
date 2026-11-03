@@ -22,14 +22,23 @@ ToolBar {
     required property bool volumeMuted
     // How far the arrow keys move the seek bar.
     required property real keyboardSeekStepSeconds
+    // The position as shown, which moves by positionStepSeconds.
     required property real displayedPositionSeconds
+    // The position now, for a step of the keys or the wheel.
+    property var currentPositionSeconds: function() { return root.displayedPositionSeconds }
     property string positionText: "00:00"
+    // The whole second positionText shows, which changes every second
+    // however few pixels the position moves by.
+    property int positionSecond: Math.floor(root.displayedPositionSeconds + 0.5)
     required property var toggleMutedVolume
     required property var setAppVolume
     required property var normalizedVolumeValue
     required property var seekCommitted
 
     readonly property alias seekPressed: seekSlider.pressed
+    // The time of one device pixel of the seek bar: the smallest move of the
+    // position it shows, so the position needs to change no more often.
+    readonly property real positionStepSeconds: seekSlider.to / seekSlider.barDevicePixels
     readonly property bool volumeSilent: root.volumeMuted
         || root.normalizedVolumeValue(root.uiBridge.volume) <= 0.0001
 
@@ -46,6 +55,7 @@ ToolBar {
         // The arrow keys held down.
         property var heldKeys: []
         readonly property bool adjusting: pressed || heldKeys.length > 0
+        readonly property bool pointerHeld: pointerHold.active
 
         // The mouse's or a touch's hold. Its passive grab leaves the drag
         // to the slider.
@@ -181,21 +191,42 @@ ToolBar {
                 return from + Math.max(0, Math.min(1, offset / extent)) * (to - from)
             }
 
+            // The second the texts show: a gesture's under the pointer or
+            // keys, otherwise playback's, which changes every second while
+            // the value moves by pixels, which can be seconds apart.
+            readonly property int valueSecond: adjusting ? Math.floor(value) : root.positionSecond
+
             Accessible.name: I18n.i18nc("@label", "Seek")
             Accessible.description: seekAllowed
                 ? I18n.i18nc("@info position of duration", "%1 of %2",
-                    FormatUtils.formatSeekTime(value),
+                    FormatUtils.formatSeekTime(valueSecond),
                     FormatUtils.formatSeekTime(root.uiBridge.durationSeconds))
                 : I18n.i18nc("@info", "No track playing")
 
             // Where the current gesture moved the slider, or NaN. The
             // position's Binding may write the value first when it ends.
             property real gestureValue: NaN
+            // The value before its latest change, which a step of the keys
+            // or the wheel moves it from.
+            property real valueBeforeChange: 0
+            property real latestValue: 0
+            onValueChanged: {
+                valueBeforeChange = latestValue
+                latestValue = value
+            }
 
             // A drag or a held key seeks once, when it ends, so the backend
             // gets no seek per autorepeat; other moves, such as the wheel's,
             // seek at once.
             onMoved: {
+                const stepped = !pointerHeld && (heldKeys.length > 0 || !pressed)
+                if (stepped && isNaN(gestureValue) && durationKnown && value > from && value < to) {
+                    // The first step of the keys or a step of the wheel
+                    // moves from the position now, which the value shows
+                    // only to its last pixel. A step to either end stays.
+                    const target = value - valueBeforeChange + root.currentPositionSeconds()
+                    value = Math.max(from, Math.min(to, target))
+                }
                 if (adjusting) {
                     gestureValue = value
                 } else if (seekAllowed) {
@@ -308,7 +339,11 @@ ToolBar {
                         id: dragTimeLabel
                         objectName: "seekDragTime"
                         anchors.centerIn: parent
-                        text: FormatUtils.formatSeekTime(seekSlider.value)
+                        // Only while it is shown, so that playback's seconds
+                        // change no hidden text, which would draw frames.
+                        text: seekDragOverlay.visible
+                            ? FormatUtils.formatSeekTime(seekSlider.valueSecond)
+                            : ""
                         color: root.uiPalette.uiAccentTextColor
                     }
                 }

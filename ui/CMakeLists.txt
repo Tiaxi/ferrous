@@ -101,6 +101,7 @@ add_custom_target(ferrous_rust_bridge ALL
 
 qt_add_executable(ferrous
     src/AppInstanceController.cpp
+    src/ConsoleTee.cpp
     src/main.cpp
     src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
@@ -382,6 +383,17 @@ if(BUILD_TESTING)
     ferrous_enable_strict_warnings(ferrous_playback_clock_tests)
     add_test(NAME ferrous_playback_clock_tests COMMAND ferrous_playback_clock_tests)
     set_tests_properties(ferrous_playback_clock_tests PROPERTIES TIMEOUT 60)
+
+    qt_add_executable(ferrous_console_tee_tests
+        tests/tst_console_tee.cpp
+        src/ConsoleTee.cpp
+        src/DiagnosticsLog.cpp
+    )
+    target_include_directories(ferrous_console_tee_tests PRIVATE src)
+    target_link_libraries(ferrous_console_tee_tests PRIVATE Qt6::Core Qt6::Test)
+    ferrous_enable_strict_warnings(ferrous_console_tee_tests)
+    add_test(NAME ferrous_console_tee_tests COMMAND ferrous_console_tee_tests)
+    set_tests_properties(ferrous_console_tee_tests PROPERTIES TIMEOUT 60)
 
     qt_add_executable(ferrous_level_meter_tests
         tests/tst_level_meter.cpp

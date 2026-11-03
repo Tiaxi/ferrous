@@ -56,15 +56,30 @@ struct PlaybackClockState {
 // edge, is made up by running slightly faster or slower until the next
 // sample. The displayed position never goes back then. A seek, a track
 // change, a stop, or a larger difference starts over from the sample.
+//
+// The properties change only when a view would show it: positionText when
+// its second does, and positionSeconds when the position moves by a step,
+// such as a device pixel of the seek bar. Code that needs the time itself,
+// such as a seek relative to it, reads currentPositionSeconds(); render code
+// reads state().
 class PlaybackClock : public QObject {
     Q_OBJECT
+    // The position at its last step, jump, pause or resume.
     Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY positionChanged)
     Q_PROPERTY(QString positionText READ positionText NOTIFY positionTextChanged)
+    // The whole second positionText shows, for texts of their own, such as
+    // an accessible description; it changes with positionText.
+    Q_PROPERTY(int positionSecond READ positionSecond NOTIFY positionTextChanged)
     Q_PROPERTY(bool advancing READ advancing NOTIFY stateChanged)
-    // Whether positionSeconds follows playback frame by frame, for a window
-    // that shows it. Without frames it changes with the engine's samples.
+    // Whether the properties follow playback as it advances, for a window
+    // that shows them. Without frames they change with the engine's samples.
     Q_PROPERTY(bool frameUpdatesEnabled READ frameUpdatesEnabled WRITE setFrameUpdatesEnabled
                    NOTIFY frameUpdatesEnabledChanged)
+    // The smallest move of the position a view shows, such as a device
+    // pixel of the seek bar: positionSeconds changes when the position
+    // rounds to another multiple of it. 0 changes it every frame.
+    Q_PROPERTY(double positionStepSeconds READ positionStepSeconds WRITE setPositionStepSeconds
+                   NOTIFY positionStepSecondsChanged)
 
 public:
     using TimeSource = std::function<qint64()>;
@@ -79,7 +94,7 @@ public:
     // discontinuity, such as a seek that lands on its target.
     static constexpr double kJumpThresholdSeconds = 0.03;
     // How often positionSeconds updates while playback advances, with frame
-    // updates enabled.
+    // updates enabled and no position step.
     static constexpr int kFrameIntervalMs = 16;
 
     explicit PlaybackClock(QObject *parent = nullptr);
@@ -90,9 +105,12 @@ public:
 
     PlaybackClockState state() const { return m_state; }
     double positionAt(qint64 nowNs) const { return m_state.positionAt(nowNs); }
-    // The position at the last frame or change.
+    // The position now.
+    Q_INVOKABLE double currentPositionSeconds() const { return positionAt(nowNs()); }
+    // The position at the last step or change.
     double positionSeconds() const { return m_positionSeconds; }
     QString positionText() const { return m_positionText; }
+    int positionSecond() const { return m_positionSecond; }
     bool advancing() const { return m_state.advancing(); }
 
     // Take a sample from the engine. With `jump`, or for another track, the
@@ -103,30 +121,52 @@ public:
     void holdAt(double positionSeconds);
     // The duration of the current track, which bounds the position.
     void setDurationSeconds(double durationSeconds);
-    // Update positionSeconds to now.
+    // Update positionSeconds and positionText to now.
     void refresh();
+    // What the clock's timer does when it is due: updates the properties to
+    // now, positionSeconds only by its steps. Tests that drive the clock
+    // with their own time call it at nextTickNs().
+    void tick();
+    // When the timer is due, in the time source's nanoseconds; none while
+    // it is stopped.
+    std::optional<qint64> nextTickNs() const { return m_nextTickNs; }
 
     bool frameUpdatesEnabled() const { return m_frameUpdatesEnabled; }
     void setFrameUpdatesEnabled(bool enabled);
 
+    double positionStepSeconds() const { return m_positionStepSeconds; }
+    void setPositionStepSeconds(double stepSeconds);
+
     static QString formatSeconds(double seconds);
+    // The whole second formatSeconds shows: rounded to the nearest.
+    static int wholeSecond(double seconds);
 
 signals:
     void stateChanged();
     void positionChanged();
     void positionTextChanged();
     void frameUpdatesEnabledChanged();
+    void positionStepSecondsChanged();
 
 private:
     friend class PlaybackClockTest;
 
     void setState(const PlaybackClockState &state);
-    void updateFrameTimer();
+    // Updates the properties to `now`: positionSeconds to the exact
+    // position, or only when it has moved by a step.
+    void update(bool exact);
+    // Whether positionSeconds shows `position` somewhere other than `shown`.
+    bool showsMove(double shown, double position) const;
+    // Wakes the clock when its properties would next change.
+    void scheduleTick(qint64 now, double position);
 
     TimeSource m_timeSource;
     PlaybackClockState m_state;
     double m_positionSeconds{0.0};
     QString m_positionText{QStringLiteral("00:00")};
-    QTimer m_frameTimer;
+    int m_positionSecond{0};
+    QTimer m_tickTimer;
+    std::optional<qint64> m_nextTickNs;
     bool m_frameUpdatesEnabled{true};
+    double m_positionStepSeconds{0.0};
 };

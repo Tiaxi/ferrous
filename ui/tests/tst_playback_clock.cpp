@@ -44,6 +44,24 @@ private:
         clock.setTimeSource([this]() { return m_now; });
     }
 
+    // When the clock's timer is due, in the test's time.
+    static qint64 tickDueAt(const PlaybackClock &clock) {
+        return clock.nextTickNs().value_or(std::numeric_limits<qint64>::max());
+    }
+
+    // Whether the clock's timer is due in `ms`, rounded up to whole
+    // milliseconds.
+    static bool dueIn(const PlaybackClock &clock, int ms) {
+        const int interval = clock.m_tickTimer.interval();
+        return clock.m_tickTimer.isActive() && (interval == ms || interval == ms + 1);
+    }
+
+    // Fires the clock's timer at its time, as the event loop would.
+    void tick(PlaybackClock &clock) {
+        m_now = tickDueAt(clock);
+        clock.tick();
+    }
+
 private slots:
     void monotonicClockIsTheSteadyClock();
     void steadyPlaybackAdvancesInRealTime();
@@ -62,6 +80,10 @@ private slots:
     void framesTickOnlyWhileAdvancing();
     void framesStopWhileNoWindowShowsThem();
     void reachesAtFindsWhenThePositionArrives();
+    void positionMovesByStepsAndTextBySeconds();
+    void jumpsPausesAndStepChangesShowTheExactPosition();
+    void ticksWaitForAGaplessSuccessorsStart();
+    void ticksStopAtTheEndOfTheTrack();
 };
 
 void PlaybackClockTest::monotonicClockIsTheSteadyClock() {
@@ -357,10 +379,10 @@ void PlaybackClockTest::framesTickOnlyWhileAdvancing() {
     QCOMPARE(clock.positionText(), QStringLiteral("01:01"));
     QCOMPARE(text.count(), 1);
     // Paused: no frames.
-    QVERIFY(!clock.m_frameTimer.isActive());
+    QVERIFY(!clock.m_tickTimer.isActive());
     position.clear();
     clock.applySample(sample(61.0, monotonicNowNs(), true), false);
-    QVERIFY(clock.m_frameTimer.isActive());
+    QVERIFY(clock.m_tickTimer.isActive());
     QTRY_VERIFY(position.count() >= 2);
     QVERIFY(clock.positionSeconds() > 61.0);
 }
@@ -374,18 +396,18 @@ void PlaybackClockTest::framesStopWhileNoWindowShowsThem() {
     QSignalSpy enabled(&clock, &PlaybackClock::frameUpdatesEnabledChanged);
     clock.applySample(sample(10.0, monotonicNowNs(), true), true);
     QVERIFY(clock.frameUpdatesEnabled());
-    QVERIFY(clock.m_frameTimer.isActive());
+    QVERIFY(clock.m_tickTimer.isActive());
 
     // A hidden or minimized window: playback goes on without frames.
     clock.setFrameUpdatesEnabled(false);
     QCOMPARE(enabled.count(), 1);
-    QVERIFY(!clock.m_frameTimer.isActive());
+    QVERIFY(!clock.m_tickTimer.isActive());
     position.clear();
     QTest::qWait(100);
     QCOMPARE(position.count(), 0);
     // The engine's samples still move it, such as a seek's.
     clock.applySample(sample(20.0, monotonicNowNs(), true), true);
-    QVERIFY(!clock.m_frameTimer.isActive());
+    QVERIFY(!clock.m_tickTimer.isActive());
     QVERIFY(clock.positionSeconds() >= 20.0);
     QVERIFY(clock.positionSeconds() < 20.05);
 
@@ -394,7 +416,7 @@ void PlaybackClockTest::framesStopWhileNoWindowShowsThem() {
     position.clear();
     clock.setFrameUpdatesEnabled(true);
     QCOMPARE(enabled.count(), 2);
-    QVERIFY(clock.m_frameTimer.isActive());
+    QVERIFY(clock.m_tickTimer.isActive());
     QCOMPARE(position.count(), 1);
     QVERIFY(clock.positionSeconds() >= 20.1);
     QTRY_VERIFY(position.count() >= 3);
@@ -403,7 +425,7 @@ void PlaybackClockTest::framesStopWhileNoWindowShowsThem() {
     clock.setFrameUpdatesEnabled(false);
     clock.applySample(sample(30.0, monotonicNowNs(), false), true);
     clock.setFrameUpdatesEnabled(true);
-    QVERIFY(!clock.m_frameTimer.isActive());
+    QVERIFY(!clock.m_tickTimer.isActive());
     QCOMPARE(clock.positionSeconds(), 30.0);
 }
 
@@ -435,6 +457,138 @@ void PlaybackClockTest::reachesAtFindsWhenThePositionArrives() {
     state.rate = 1.0;
     QCOMPARE(state.reachesAt(0.5), std::optional<qint64>(kStart + 1500 * kMs));
     QCOMPARE(state.reachesAt(0.0), std::optional<qint64>(kAlways));
+}
+
+void PlaybackClockTest::positionMovesByStepsAndTextBySeconds() {
+    // A seek bar 2000 device pixels wide for a 200 s track.
+    constexpr double kStep = 0.1;
+    const auto stepOf = [](double position) { return std::floor(position / kStep + 0.5); };
+    PlaybackClock clock;
+    attach(clock);
+    clock.setPositionStepSeconds(kStep);
+    clock.applySample(sample(10.02, kStart, true), true);
+    QCOMPARE(clock.positionSeconds(), 10.02);
+    QList<double> shown;
+    connect(&clock, &PlaybackClock::positionChanged, &clock,
+            [&]() { shown.push_back(clock.positionSeconds()); });
+    QSignalSpy text(&clock, &PlaybackClock::positionTextChanged);
+
+    // Three seconds, with the engine's samples every 40 ms, each a little
+    // off, as a sink quantizes them.
+    int ticks = 0;
+    qint64 nextSampleAt = kStart + 40 * kMs;
+    for (int sampleIndex = 1; m_now < kStart + 3000 * kMs;) {
+        QVERIFY(clock.m_tickTimer.isActive());
+        QVERIFY(clock.m_tickTimer.isSingleShot());
+        if (nextSampleAt <= tickDueAt(clock)) {
+            m_now = nextSampleAt;
+            const double offset = sampleIndex % 2 == 0 ? 0.0 : -0.003;
+            clock.applySample(
+                sample(10.02 + seconds(nextSampleAt - 2 * kMs - kStart) + offset,
+                       nextSampleAt - 2 * kMs, true),
+                false);
+            nextSampleAt += 40 * kMs;
+            ++sampleIndex;
+            continue;
+        }
+        tick(clock);
+        ++ticks;
+        // Between its steps, the exact position is there on demand.
+        QCOMPARE(clock.currentPositionSeconds(), clock.positionAt(m_now));
+        QVERIFY(std::abs(clock.currentPositionSeconds() - clock.positionSeconds()) <= kStep);
+    }
+
+    // positionSeconds took every step once, each at most a millisecond
+    // after the position reached it, and never between steps.
+    const double finalPosition = clock.positionAt(m_now);
+    QCOMPARE(shown.size(), static_cast<qsizetype>(stepOf(finalPosition) - stepOf(10.02)));
+    for (qsizetype i = 0; i < shown.size(); ++i) {
+        const double step = stepOf(10.02) + static_cast<double>(i) + 1.0;
+        QCOMPARE(stepOf(shown[i]), step);
+        const double late = shown[i] - (step - 0.5) * kStep;
+        QVERIFY2(late >= 0.0 && late <= 0.0012, qPrintable(QString::number(late)));
+    }
+    // The text changed at 10.5, 11.5 and 12.5 s.
+    QCOMPARE(text.count(), 3);
+    QCOMPARE(clock.positionText(), QStringLiteral("00:13"));
+    // The clock woke only for those changes, not frame by frame.
+    QVERIFY2(ticks <= shown.size() + text.count(),
+             qPrintable(QStringLiteral("%1 ticks for %2 steps").arg(ticks).arg(shown.size())));
+}
+
+void PlaybackClockTest::jumpsPausesAndStepChangesShowTheExactPosition() {
+    PlaybackClock clock;
+    attach(clock);
+    clock.setPositionStepSeconds(1.0);
+    clock.applySample(sample(10.2, kStart, true), true);
+    QSignalSpy position(&clock, &PlaybackClock::positionChanged);
+    m_now += 100 * kMs;
+    clock.refresh();
+    QCOMPARE(position.count(), 1);
+    QVERIFY(std::abs(clock.positionSeconds() - 10.3) < 1e-9);
+
+    // A seek within the step shows its target.
+    clock.holdAt(10.4);
+    QCOMPARE(position.count(), 2);
+    QCOMPARE(clock.positionSeconds(), 10.4);
+    QVERIFY(!clock.m_tickTimer.isActive());
+
+    // Resumed and paused, also within the step.
+    clock.applySample(sample(10.4, m_now, true), true);
+    m_now += 200 * kMs;
+    clock.applySample(sample(10.6, m_now, false), false);
+    QCOMPARE(position.count(), 3);
+    QCOMPARE(clock.positionSeconds(), 10.6);
+    QVERIFY(!clock.m_tickTimer.isActive());
+
+    // A finer step shows where the position is.
+    clock.applySample(sample(10.6, m_now, true), false);
+    m_now += 150 * kMs;
+    clock.update(false);
+    QCOMPARE(clock.positionSeconds(), 10.6);
+    position.clear();
+    clock.setPositionStepSeconds(0.05);
+    QCOMPARE(position.count(), 1);
+    QVERIFY(std::abs(clock.positionSeconds() - 10.75) < 1e-9);
+    // The next boundary of the finer step is 25 ms away.
+    QVERIFY(dueIn(clock, 25));
+    // A step of 0 goes back to frames.
+    clock.setPositionStepSeconds(0.0);
+    QCOMPARE(clock.m_tickTimer.interval(), PlaybackClock::kFrameIntervalMs);
+}
+
+void PlaybackClockTest::ticksWaitForAGaplessSuccessorsStart() {
+    PlaybackClock clock;
+    attach(clock);
+    clock.setPositionStepSeconds(0.1);
+    clock.applySample(sample(3.8, kStart, true, 1, 4.0), true);
+    m_now = kStart + 20 * kMs;
+    // The successor starts 180 ms from now; its first step is at 0.05 s.
+    const qint64 startsAt = kStart + 200 * kMs;
+    clock.applySample(sample(0.0, startsAt, true, 2, 4.5), false);
+    QCOMPARE(clock.positionSeconds(), 0.0);
+    QVERIFY(dueIn(clock, 230));
+    tick(clock);
+    QVERIFY(clock.positionSeconds() > 0.05 && clock.positionSeconds() < 0.0511);
+    // Repeat-One: the same file again is another track and starts over.
+    m_now += 4'000 * kMs;
+    clock.applySample(sample(0.0, m_now, true, 3, 4.5), false);
+    QCOMPARE(clock.positionSeconds(), 0.0);
+    QVERIFY(dueIn(clock, 50));
+}
+
+void PlaybackClockTest::ticksStopAtTheEndOfTheTrack() {
+    PlaybackClock clock;
+    attach(clock);
+    clock.setPositionStepSeconds(0.1);
+    clock.applySample(sample(3.9, kStart, true, 1, 4.0), true);
+    QCOMPARE(clock.positionText(), QStringLiteral("00:04"));
+    // The step at 3.95 s is the last before the position stops at 4.0 s.
+    QVERIFY(dueIn(clock, 50));
+    tick(clock);
+    QVERIFY(clock.positionSeconds() > 3.95);
+    QVERIFY(clock.advancing());
+    QVERIFY(!clock.m_tickTimer.isActive());
 }
 
 QTEST_MAIN(PlaybackClockTest)

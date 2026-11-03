@@ -6151,6 +6151,24 @@ Item {
         "seekCommitted",
         Q_ARG(QVariant, QVariant::fromValue(90.0))));
     QCOMPARE(bridge->property("seekCalls").toList().size(), 1);
+
+    // The shown position moves by the step the view asks for; a relative
+    // seek starts from the position now.
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    qint64 now = 5'000'000'000'000LL;
+    clock.setTimeSource([&now]() { return now; });
+    controller->setProperty("positionStepSeconds", 0.5);
+    QCOMPARE(clock.positionStepSeconds(), 0.5);
+    clock.applySample(PlaybackSample{72.0, now, true, 180.0, 1}, true);
+    now += 200'000'000LL;
+    QCOMPARE(controller->property("positionSeconds").toDouble(), 72.0);
+    QVERIFY(QMetaObject::invokeMethod(
+        controller,
+        "seekBy",
+        Q_ARG(QVariant, QVariant::fromValue(10.0))));
+    const QVariantList seekCalls = bridge->property("seekCalls").toList();
+    QCOMPARE(seekCalls.size(), 2);
+    QVERIFY(std::abs(seekCalls.last().toDouble() - 82.2) < 1e-9);
 }
 
 void SpectrogramSmokeTest::spectrogramMetadataOnlyResetWaitsForDataChunk() {
