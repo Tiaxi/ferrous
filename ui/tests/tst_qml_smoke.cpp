@@ -1179,6 +1179,8 @@ private slots:
     void spectrogramPlaybackBenchmark();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
     void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
+    void spectrogramPlaybackRateSwitchKeepsTheSessionRate();
+    void spectrogramSessionRateChangeRemapsTheSpectrogram();
     void spectrogramCrosshairOverlayGeneratesOnHover();
     void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
     void spectrogramGridOverlayGeneratesWhenEnabled();
@@ -14118,6 +14120,121 @@ void SpectrogramSmokeTest::spectrogramPreservesNativeRateAcrossModesAndTrackTran
             false, true, 1, true, 1);
         QCOMPARE(item.m_precomputedSampleRateHz, 44100);
     }
+}
+
+void SpectrogramSmokeTest::spectrogramPlaybackRateSwitchKeepsTheSessionRate() {
+    // A decoder that falls back to another rate for single frames has
+    // playback report the switch and the switch back. The columns keep
+    // their analysis session's rate: nothing is mapped, rasterized or
+    // uploaded again, and the frequency grid stays as it was.
+    for (const int mode : {1, 0}) {
+        QQuickWindow window;
+        window.resize(400, 100);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+        item.setSampleRateHz(48'000);
+        prepareWholeTrackPlayback(item, 50.0);
+        item.setDisplayMode(mode);
+        item.setPlaying(false);
+        item.setGridEnabled(true);
+        QSGNode *node = paintSettled(item, nullptr);
+        node = item.updatePaintNode(node, nullptr);
+        QVERIFY(drawnCanvasFragments(node) > 0);
+        int mappingHeight = 0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            mappingHeight = item.m_mappingHeight;
+            QVERIFY(mappingHeight > 0);
+            QCOMPARE(item.m_freqGridCachedSampleRateHz, 48'000);
+        }
+        QSignalSpy rateChanged(&item, &SpectrogramItem::sampleRateHzChanged);
+        for (const int playbackRate : {44'100, 48'000, 96'000, 48'000}) {
+            item.setSampleRateHz(playbackRate);
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QCOMPARE(item.m_sampleRateHz, 48'000);
+                QCOMPARE(item.m_mappingHeight, mappingHeight);
+                QVERIFY(!item.m_precomputedCanvasDirty);
+                QVERIFY(!item.m_freqGridDirty);
+            }
+            node = item.updatePaintNode(node, nullptr);
+            QVERIFY(!spectrogramRasterPending(item));
+            const SpectrogramSceneStatistics statistics =
+                SpectrogramItem::sceneStatistics(node);
+            QCOMPARE(statistics.canvasUploads, 0);
+            QCOMPARE(statistics.canvasTextures, 0);
+            QCOMPARE(statistics.overlayTextures, 0);
+        }
+        QCOMPARE(rateChanged.count(), 0);
+        QCOMPARE(item.sampleRateHz(), 48'000);
+
+        // A mode switch while playback reports the fallback rate keeps the
+        // session's rate too.
+        item.setSampleRateHz(44'100);
+        item.setDisplayMode(mode == 0 ? 1 : 0);
+        node = paintSettled(item, node);
+        QCOMPARE(item.sampleRateHz(), 48'000);
+        QVERIFY(std::abs(item.pixelToFrequencyHz(0, mappingHeight) - 24'000.0) < 500.0);
+        delete node;
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramSessionRateChangeRemapsTheSpectrogram() {
+    QQuickWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    // Before any session, as for the first track after startup, playback's
+    // rate is the spectrogram's.
+    item.setSampleRateHz(96'000);
+    QCOMPARE(item.sampleRateHz(), 96'000);
+    item.setSampleRateHz(48'000);
+    QCOMPARE(item.sampleRateHz(), 48'000);
+    prepareWholeTrackPlayback(item, 50.0);
+    item.setPlaying(false);
+    item.setGridEnabled(true);
+    QSGNode *node = paintSettled(item, nullptr);
+    node = item.updatePaintNode(node, nullptr);
+    int mappingHeight = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        mappingHeight = item.m_mappingHeight;
+        QCOMPARE(item.m_freqGridCachedSampleRateHz, 48'000);
+    }
+    QVERIFY(std::abs(item.pixelToFrequencyHz(0, mappingHeight) - 24'000.0) < 500.0);
+
+    // The next track plays at 96 kHz. Playback reports it before the new
+    // session's columns arrive; until then the shown columns keep theirs.
+    item.setSampleRateHz(96'000);
+    QCOMPARE(item.sampleRateHz(), 48'000);
+    // The track change resets the zoom: the new session's reset, then its
+    // columns at the reference hop.
+    constexpr int bins = 64;
+    constexpr int columns = 380;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        0, 10'000, 96'000, 1024, false, true, 2, true, 2);
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        columns, 10'000, 96'000, 1024, false, false, 2, true, 2);
+    node = paintSettled(item, node);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_sampleRateHz, 96'000);
+        QCOMPARE(item.m_mappingHeight, mappingHeight);
+        QCOMPARE(item.m_freqGridCachedSampleRateHz, 96'000);
+    }
+    QCOMPARE(item.sampleRateHz(), 96'000);
+    QVERIFY(std::abs(item.pixelToFrequencyHz(0, mappingHeight) - 48'000.0) < 1'000.0);
+
+    // Without the session's columns, playback's rate stands in again.
+    item.setSampleRateHz(44'100);
+    QCOMPARE(item.sampleRateHz(), 96'000);
+    QSignalSpy rateChanged(&item, &SpectrogramItem::sampleRateHzChanged);
+    item.clearPrecomputed();
+    QCOMPARE(rateChanged.count(), 1);
+    QCOMPARE(item.sampleRateHz(), 44'100);
+    delete node;
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
