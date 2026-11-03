@@ -1396,6 +1396,7 @@ private slots:
     void waveformSceneGraphLaysOutEachLabelOnce();
     void waveformEditorIdleViewWaitsForThePlayheadsNextPixel();
     void waveformEditorNoOneSeesAsksForNoPlaybackFrames();
+    void waveformEditorOffScreenDecodesNoDetail();
     void waveformEditorLateFrameCallbackDrawsAtOnce();
     void waveformEditorIdleViewDrawsOnlyFramesThatDiffer();
     void waveformEditorFollowingViewDrawsOnlyAtPixelSteps_data();
@@ -10120,6 +10121,120 @@ void WaveformSmokeTest::waveformEditorNoOneSeesAsksForNoPlaybackFrames() {
     paint();
     item->handleWindowFrameSwapped();
     QVERIFY(scheduled());
+    delete item;
+}
+
+void WaveformSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
+    // A zoomed waveform in a window off screen decodes no detail: the
+    // request in flight is cancelled, and the engine's samples, a seek
+    // among them, start none. The detail it has stays; back on screen, it
+    // asks for the detail of where playback is then.
+    constexpr quint32 kFrames = 480'000;
+    QByteArray wav("RIFF", 4);
+    appendLe<quint32>(wav, 36 + kFrames * 4);
+    wav.append("WAVEfmt ", 8);
+    appendLe<quint32>(wav, 16);
+    appendLe<quint16>(wav, 1);
+    appendLe<quint16>(wav, 2);
+    appendLe<quint32>(wav, 48'000);
+    appendLe<quint32>(wav, 48'000 * 4);
+    appendLe<quint16>(wav, 4);
+    appendLe<quint16>(wav, 16);
+    wav.append("data", 4);
+    appendLe<quint32>(wav, kFrames * 4);
+    for (quint32 frame = 0; frame < kFrames; ++frame) {
+        const qint16 sample = static_cast<qint16>((frame % 48) * 512);
+        appendLe<qint16>(wav, sample);
+        appendLe<qint16>(wav, -sample);
+    }
+    QTemporaryFile file;
+    QVERIFY(file.open());
+    QCOMPARE(file.write(wav), wav.size());
+    QVERIFY(file.flush());
+
+    QQuickWindow window;
+    window.resize(400, 100);
+    presentWithoutDrawing(window);
+    TestTime time;
+    auto *item = new WaveformEditorItem(window.contentItem());
+    time.drive(*item);
+    // The real decoder, each decode held until the test lets it go.
+    auto gate = std::make_shared<QSemaphore>();
+    auto started = std::make_shared<std::atomic_int>(0);
+    item->m_decodeWindow = [gate, started](const QString &path, double start, double end,
+                                           int points,
+                                           const std::shared_ptr<std::atomic_bool> &cancelled) {
+        ++*started;
+        gate->tryAcquire(1, 5000);
+        return WaveformEditorItem::decodeWindow(path, start, end, points, cancelled);
+    };
+    item->setWidth(400);
+    item->setHeight(100);
+    item->setDurationSeconds(static_cast<double>(kFrames) / 48'000.0);
+    item->setZoomLevel(8.0);
+    setTestPosition(*item, 3.0);
+    item->setPlaying(true);
+    setTestPosition(*item, 3.0);
+    item->setSourcePath(file.fileName());
+    const auto viewHasDetail = [item]() {
+        QMutexLocker lock(&item->m_stateMutex);
+        const auto [start, end] = item->detailRequestVisibleRangeLocked();
+        return item->detailCoversRangeLocked(start, end);
+    };
+    QTRY_COMPARE(started->load(), 1);
+    gate->release();
+    QTRY_VERIFY(!item->m_decodeActive);
+    QVERIFY(viewHasDetail());
+    const double detailStart = item->m_detail.startSeconds;
+
+    // A seek out of it asks for more, which is in flight when the window
+    // leaves the screen.
+    PlaybackClock &clock = testClock(*item);
+    PlaybackSample sample;
+    sample.advancing = true;
+    sample.trackToken = clock.state().trackToken;
+    sample.durationSeconds = item->durationSeconds();
+    sample.positionSeconds = 7.0;
+    sample.sampledAtNs = time.nowNs;
+    clock.applySample(sample, true);
+    QTRY_COMPARE(started->load(), 2);
+    const std::shared_ptr<std::atomic_bool> inFlight = item->m_decodeCancelled;
+    QVERIFY(inFlight && !inFlight->load());
+    setTestExposed(window, false);
+    // Within the grace, it goes on.
+    QVERIFY(!inFlight->load());
+    endTestUnexposedGrace(window);
+    QVERIFY(inFlight->load());
+    QVERIFY(!item->m_requestInFlight);
+    QVERIFY(!item->m_requestTimer.isActive());
+    gate->release();
+    QTRY_VERIFY(!item->m_decodeActive);
+    // The engine's samples go on, with another seek; nothing decodes.
+    for (int i = 0; i < 12; ++i) {
+        time.advance(0.04);
+        sample.positionSeconds = clock.positionAt(time.nowNs) + 0.001;
+        sample.sampledAtNs = time.nowNs;
+        clock.applySample(sample, false);
+        item->handleWindowFrameSwapped();
+    }
+    sample.positionSeconds = 8.5;
+    clock.applySample(sample, true);
+    QTest::qWait(150);
+    QCOMPARE(started->load(), 2);
+    QVERIFY(!item->m_requestTimer.isActive());
+    QVERIFY(!item->m_decodeActive);
+    // What it decoded before stays.
+    QVERIFY(item->m_detail.pointCount > 0);
+    QCOMPARE(item->m_detail.startSeconds, detailStart);
+
+    // Back on screen, the detail of where playback is now.
+    setTestExposed(window, true);
+    QTRY_COMPARE(started->load(), 3);
+    gate->release();
+    QTRY_VERIFY(!item->m_decodeActive);
+    QVERIFY(viewHasDetail());
+    QVERIFY(item->m_detail.startSeconds <= 8.5 && item->m_detail.endSeconds >= 8.5);
+    gate->release(8);
     delete item;
 }
 

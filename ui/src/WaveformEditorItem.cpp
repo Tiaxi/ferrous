@@ -647,6 +647,8 @@ bool WaveformEditorItem::parseWindow(const QByteArray &bytes, DetailWindow *wind
 }
 
 void WaveformEditorItem::scheduleDetailRequest(bool immediate) {
+    // Showing it asks for what it misses then.
+    if (!shownOnScreen()) return;
     const int delayMs = immediate ? 0 : 40;
     if (thread() == QThread::currentThread()
         && (!m_requestTimer.isActive()
@@ -674,6 +676,7 @@ void WaveformEditorItem::requestDetailWindow() {
     {
         QMutexLocker lock(&m_stateMutex);
         if (m_sourcePath.isEmpty() || m_durationSeconds <= 0.0 || width() < 2.0) return;
+        if (!shownOnScreen()) return;
         if (m_decodeActive) {
             // A request still in flight for part of the view stays: its
             // arrival asks for what it misses. Replacing it instead would
@@ -1312,16 +1315,31 @@ void WaveformEditorItem::bindWindowFrameLoop(QQuickWindow *window) {
     if (playing()) update();
 }
 
-bool WaveformEditorItem::showsPlaybackFrames() const {
+bool WaveformEditorItem::shownOnScreen() const {
     return isVisible() && (window() == nullptr || (m_windowPresence && m_windowPresence->shown()));
 }
 
 void WaveformEditorItem::shownChanged() {
-    if (!showsPlaybackFrames()) {
-        // Nothing would see them: no frames until it is shown again.
+    if (!shownOnScreen()) {
+        // Nothing would see them: no frames and no detail decoding until
+        // it is shown again. The detail it has stays.
         cancelPlaybackFrame();
+        m_requestTimer.stop();
+        QMutexLocker lock(&m_stateMutex);
+        if (m_decodeActive || m_requestInFlight) {
+            invalidateDetailRequestLocked();
+            clearPendingRequestLocked();
+        }
         return;
     }
+    bool request = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
+        request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
+    }
+    // The detail of where playback is now, if it has not got it.
+    if (request) scheduleDetailRequest(true);
     // One frame shows playback as it is now, also a seek made while it
     // was hidden; the frames that follow it ask for their own.
     requestPlaybackFrame();
@@ -1446,7 +1464,7 @@ qint64 WaveformEditorItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
 }
 
 void WaveformEditorItem::schedulePlaybackFrame(qint64 delayNs, qint64 nowNs) {
-    if (!showsPlaybackFrames()) {
+    if (!shownOnScreen()) {
         // Showing it asks for its frame.
         cancelPlaybackFrame();
     } else if (delayNs == 0) {
@@ -1461,7 +1479,7 @@ void WaveformEditorItem::schedulePlaybackFrame(qint64 delayNs, qint64 nowNs) {
 }
 
 void WaveformEditorItem::requestPlaybackFrame() {
-    if (!showsPlaybackFrames()) {
+    if (!shownOnScreen()) {
         // A view no one sees keeps its state up to date without frames;
         // showing it asks for one.
         cancelPlaybackFrame();

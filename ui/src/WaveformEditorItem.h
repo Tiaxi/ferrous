@@ -298,10 +298,10 @@ private:
     void schedulePlaybackFrame(qint64 delayNs, qint64 nowNs);
     void requestPlaybackFrame() override;
     void cancelPlaybackFrame();
-    // Whether anyone would see a frame of playback: the item is visible,
-    // and its window, if it has one, is on screen (see WindowPresence).
-    // Playback frames are only asked for then.
-    bool showsPlaybackFrames() const;
+    // Whether anyone would see the view: the item is visible, and its
+    // window, if it has one, is on screen (see WindowPresence). Playback
+    // frames and detail are only asked for then.
+    bool shownOnScreen() const;
     // The item or its window came on screen or left it.
     void shownChanged();
     // The window's scheduler, or the item's own outside a window.
