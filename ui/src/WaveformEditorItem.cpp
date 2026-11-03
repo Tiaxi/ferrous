@@ -1108,9 +1108,12 @@ WaveformEditorItem::CacheGrid WaveformEditorItem::cacheGridForRangeLocked(
     desiredStart = std::min(desiredStart, visibleStart);
     desiredEnd = std::max(desiredEnd, visibleEnd);
 
+    // A raster pixel is a device column of the view, as the view scrolls
+    // by (see followingStartLocked), so that a step of the view moves it by
+    // whole pixels; the view may end in a fraction of one, which the
+    // raster's whole pixels cover.
     const int viewportWidth = renderPixelWidthLocked();
-    const double secondsPerPixel = visibleSpan
-        / static_cast<double>(viewportWidth);
+    const double secondsPerPixel = visibleSpan / deviceColumnsLocked();
     // Keep the raster origin on a track-absolute lattice.  A moving cache can
     // then translate its overlap by whole pixels without regrouping peaks.
     const double firstPixel = std::floor(
@@ -1690,6 +1693,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     double position = 0.0;
     double cacheStart = 0.0;
     double cacheSecondsPerPixel = 0.0;
+    double deviceColumns = 1.0;
     int channels = 1;
     int fpsValue = 0;
     bool showFps = false;
@@ -1779,6 +1783,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
             : frameChangeSecondsLocked(visibleStart, visibleEnd, position, canvasWidth);
         cacheStart = m_cacheStartSeconds;
         cacheSecondsPerPixel = m_cacheSecondsPerPixel;
+        deviceColumns = deviceColumnsLocked();
         channels = displayedChannelCountLocked();
         showFps = m_showFpsOverlay;
         reservedCorner = m_reservedCorner;
@@ -1795,10 +1800,26 @@ void WaveformEditorItem::paint(QPainter *painter) {
             cachePaintCoversCanvas = true;
             cachePainted = true;
         } else if (cacheSecondsPerPixel > 0.0 && visibleEnd > visibleStart) {
-            const double sourceX = (visibleStart - cacheStart)
+            // The cache's pixels over the view's width: the view's device
+            // columns, which may end in a fraction of one.
+            double sourceX = (visibleStart - cacheStart)
                 / cacheSecondsPerPixel;
-            const double sourceWidth = (visibleEnd - visibleStart)
+            const double viewPixels = (visibleEnd - visibleStart)
                 / cacheSecondsPerPixel;
+            double sourceWidth = viewPixels;
+            double destinationScale = static_cast<double>(canvasWidth)
+                / viewPixels;
+            if (std::abs(viewPixels - deviceColumns) < kColumnEpsilon
+                && std::abs(sourceX - std::round(sourceX)) < kColumnEpsilon) {
+                // A cache on the view's grid is drawn a pixel to a device
+                // pixel, from whole pixels of it, so that a step of the view
+                // moves the drawing by one: a fraction of a pixel, at an
+                // edge or from rounding, would make a renderer stretch it.
+                // A last pixel partly outside the view is clipped.
+                sourceX = std::round(sourceX);
+                sourceWidth = std::ceil(deviceColumns - kColumnEpsilon);
+                destinationScale = static_cast<double>(canvasWidth) / deviceColumns;
+            }
             const QRectF requestedSource(
                 sourceX, 0.0, sourceWidth, cache.height());
             const QRectF clippedSource = requestedSource.intersected(
@@ -1809,8 +1830,6 @@ void WaveformEditorItem::paint(QPainter *painter) {
                     painter->fillRect(
                         QRect(0, 0, canvasWidth, canvasHeight), kBackground);
                 }
-                const double destinationScale = static_cast<double>(canvasWidth)
-                    / sourceWidth;
                 const QRectF destination(
                     (clippedSource.left() - sourceX) * destinationScale,
                     0.0,
@@ -2024,9 +2043,8 @@ bool WaveformEditorItem::playbackTilesEligibleLocked(
     // rebuild, which delays the next result and repeatedly exhausts lookahead.
     // Absolute tile coordinates keep retained pixels valid across nearby seeks;
     // source, scale and appearance changes invalidate them separately.
-    const int renderWidth = renderPixelWidthLocked();
-    const double secondsPerPixel = (visibleEnd - visibleStart)
-        / static_cast<double>(std::max(1, renderWidth));
+    // Device columns of the view, as the cache's pixels.
+    const double secondsPerPixel = (visibleEnd - visibleStart) / deviceColumnsLocked();
     const double tolerance = std::max(1.0e-12, secondsPerPixel * 1.0e-7);
     const bool compatible = !m_playbackTiles.empty()
         && std::abs(m_playbackTileSecondsPerPixel - secondsPerPixel)
@@ -2052,9 +2070,8 @@ void WaveformEditorItem::clearPlaybackTilesLocked() {
 
 void WaveformEditorItem::preparePlaybackTilesLocked(
     double visibleStart, double visibleEnd, int height) {
-    const int renderWidth = renderPixelWidthLocked();
-    const double secondsPerPixel = (visibleEnd - visibleStart)
-        / static_cast<double>(std::max(1, renderWidth));
+    // Device columns of the view, as the cache's pixels.
+    const double secondsPerPixel = (visibleEnd - visibleStart) / deviceColumnsLocked();
     const int channels = displayedChannelCountLocked();
     const double tolerance = std::max(
         1.0e-12, secondsPerPixel * 1.0e-7);

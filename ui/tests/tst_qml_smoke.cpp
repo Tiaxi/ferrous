@@ -10134,6 +10134,15 @@ void WaveformSmokeTest::waveformEditorFollowingViewDrawsOnlyAtPixelSteps_data() 
     QTest::newRow("1.5x overview") << 1.5 << 400 << false;
     QTest::newRow("1.5x tiles") << 1.5 << 400 << true;
     QTest::newRow("2x tiles") << 2.0 << 400 << true;
+    // 401 logical pixels end in a fraction of a device pixel at 1.25 and
+    // 1.5: the raster's pixels are still the view's device columns.
+    for (const double oddScale : {1.25, 1.5, 2.0}) {
+        for (const bool oddTiles : {false, true}) {
+            const QByteArray name = QByteArray::number(oddScale) + "x odd width "
+                + (oddTiles ? "tiles" : "overview");
+            QTest::newRow(name.constData()) << oddScale << 401 << oddTiles;
+        }
+    }
 }
 
 void WaveformSmokeTest::waveformEditorFollowingViewDrawsOnlyAtPixelSteps() {
