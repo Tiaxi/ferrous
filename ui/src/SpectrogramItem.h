@@ -596,7 +596,13 @@ private:
 
     double m_dbRange{132.0};
     bool m_logScale{false};
+    // The rate the frequency mapping, grid and crosshair use: the analysis
+    // session's once it is known, else playback's.
     int m_sampleRateHz{48000};
+    // Playback's latest rate, from the sampleRateHz property. A decoder can
+    // fall back to another rate for single frames; the session's columns
+    // keep theirs, so this only stands in until a session rate is known.
+    int m_playbackSampleRateHz{48000};
     int m_maxColumns{640};
     int m_binsPerColumn{0};
 
@@ -707,6 +713,8 @@ private:
     int m_precomputedBinsPerColumn{0};
     int m_precomputedTotalColumnsEstimate{0};
     int m_precomputedSampleRateHz{44100};
+    // Whether an analysis chunk has set m_precomputedSampleRateHz.
+    bool m_precomputedSampleRateKnown{false};
     int m_precomputedHopSize{1024};
     quint64 m_precomputedTrackToken{0};
     quint64 m_precomputedCommittedToken{0}; // token from the most recent buffer_reset

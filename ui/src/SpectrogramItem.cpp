@@ -1780,11 +1780,14 @@ int SpectrogramItem::sampleRateHz() const {
 void SpectrogramItem::setSampleRateHz(int value) {
     {
         QMutexLocker lock(&m_stateMutex);
-        const int clamped = std::max(1000, value);
-        if (m_sampleRateHz == clamped) {
+        m_playbackSampleRateHz = std::max(1000, value);
+        // The columns shown keep their analysis session's rate whatever
+        // playback reports meanwhile, such as a decoder's single-frame
+        // fallback to another rate.
+        if (m_precomputedSampleRateKnown || m_sampleRateHz == m_playbackSampleRateHz) {
             return;
         }
-        m_sampleRateHz = clamped;
+        m_sampleRateHz = m_playbackSampleRateHz;
         invalidateMapping();
         markCanvasStaleLocked();
         m_freqGridDirty = true;
@@ -2838,6 +2841,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         }
         if (sampleRate > 0) {
             m_precomputedSampleRateHz = sampleRate;
+            m_precomputedSampleRateKnown = true;
         }
         if (hopSize > 0) {
             m_precomputedHopSize = hopSize;
@@ -3026,6 +3030,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (columns > 0) {
         if (sampleRate > 0) {
             m_precomputedSampleRateHz = sampleRate;
+            m_precomputedSampleRateKnown = true;
         }
         if (hopSize > 0) {
             m_precomputedHopSize = hopSize;
@@ -3507,12 +3512,24 @@ void SpectrogramItem::clearPrecomputed() {
     m_positionJumpHoldActive = false;
     m_positionJumpHoldUntilNs = 0;
     m_timeGridDirty = true;
+    // Without the session's columns, playback's rate stands in again.
+    m_precomputedSampleRateKnown = false;
+    const bool rateChanged = m_sampleRateHz != m_playbackSampleRateHz;
+    if (rateChanged) {
+        m_sampleRateHz = m_playbackSampleRateHz;
+        invalidateMapping();
+        m_freqGridDirty = true;
+        m_crosshairDirty = true;
+    }
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
     invalidateCanvas();
     lock.unlock();
     if (wasReady) {
         emit precomputedReadyChanged();
+    }
+    if (rateChanged) {
+        emit sampleRateHzChanged();
     }
     update();
 }
@@ -4685,7 +4702,7 @@ double SpectrogramItem::pixelToFrequencyHz(int pixelY, int viewHeight) const {
         self->m_binsPerColumn = m_precomputedBinsPerColumn;
         needInvalidateMapping = true;
     }
-    if (m_precomputedSampleRateHz > 0
+    if (m_precomputedSampleRateKnown
         && m_sampleRateHz != m_precomputedSampleRateHz) {
         self->m_sampleRateHz = m_precomputedSampleRateHz;
         needInvalidateMapping = true;
