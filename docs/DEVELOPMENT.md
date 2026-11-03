@@ -58,7 +58,7 @@ cargo install cargo-llvm-cov
 
 ### Stress runs
 
-Timing-sensitive tests fail only now and then, mostly on a loaded machine. `./scripts/stress-tests.sh` runs the suites again and again to find them: the Rust tests with the GStreamer backend (`gst`) and with the mock backend (`mock`), and the CTest tests (`ctest`), 30 times each by default. It builds first unless given `--no-build`. Run *i* of a suite uses the *i*-th value of its parallelism list, cycling: `--test-threads` 1, libtest's default and 32 for the mock backend, 4 in place of 1 for GStreamer, whose tests play their fixtures in real time and take about 20 minutes on one thread, and `ctest -j` 1, 4 and the number of CPUs for CTest. Every third run is under load, from `stress-ng --cpu` with twice as many workers as CPUs, or busy shell loops without `stress-ng`; the load ends with the run.
+Timing-sensitive tests fail only now and then, mostly on a loaded machine. `./scripts/stress-tests.sh` runs the suites again and again to find them: the Rust tests with the GStreamer backend (`gst`) and with the mock backend (`mock`), and the CTest tests (`ctest`), 30 times each by default. It builds first unless given `--no-build`. Run *i* of a suite uses the *i*-th value of its parallelism list, cycling: `--test-threads` 1, libtest's default and 32 for the mock backend; 4, the default and 32 for GStreamer, whose tests play their fixtures in real time and take about 20 minutes on one thread; and `ctest -j` 1, 4 and the number of CPUs. Every third run is under load, from `stress-ng --cpu` with twice as many workers as CPUs, or busy shell loops without `stress-ng`; the load ends with the run. The whole loop takes about two hours on a machine with 16 CPU threads.
 
 ```bash
 ./scripts/stress-tests.sh                             # 30 runs of each suite
@@ -66,7 +66,7 @@ Timing-sensitive tests fail only now and then, mostly on a loaded machine. `./sc
 ./scripts/stress-tests.sh --suite ctest --runs 5 --first 6 --no-build
 ```
 
-`--first` numbers the runs from another index, so a long loop can be split into several invocations that keep the cycle of parallelism and load. Each run writes its log to `target/stress/<suite>-<i>.log` and a line to `target/stress/summary.txt` with its parallelism, whether it was loaded, the load average at its start and end, and its duration; a failed run adds the tests that failed. The runs use throwaway user and temporary directories, as `run-tests.sh` does, and the script exits with a failure when any run failed. `--help` lists the other options.
+`--first` numbers the runs from another index, so a long loop can be split into several invocations that keep the cycle of parallelism and load. Each run writes its log to `target/stress/<suite>-<i>.log` and appends a line to `target/stress/summary.txt` with its parallelism, whether it was loaded, the load average at its start and end, and its duration; a failed run adds the tests that failed. The runs use throwaway user and temporary directories, as `run-tests.sh` does, and the script exits with a failure when any run failed. `--help` lists the other options.
 
 Fix a test that fails there where its timing assumption is: wait for the signal, state or message it needs instead of a fixed time, drive time the test sets (`TestTime` and the clocks' time sources in the Qt tests) instead of the wall clock, and isolate tests that share global state. A longer timeout alone does not fix it.
 
