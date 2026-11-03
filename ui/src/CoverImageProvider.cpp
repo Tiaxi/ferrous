@@ -9,6 +9,18 @@
 
 // --- CoverImageResponse ---
 
+QSize CoverImageResponse::decodeSize(
+    const QSize &sourceSize, const QSize &requestedSize) {
+    const QSize fitted = sourceSize.scaled(requestedSize, Qt::KeepAspectRatio);
+    // Never enlarge: upscaled pixels hold no more detail than the source, and
+    // the scene graph scales the texture when the Image item draws it larger.
+    // An unknown source size keeps the fitted size.
+    if (sourceSize.isEmpty()) {
+        return fitted;
+    }
+    return fitted.boundedTo(sourceSize);
+}
+
 CoverImageResponse::CoverImageResponse(
     const QString &filePath, const QSize &requestedSize)
     : m_filePath(filePath), m_requestedSize(requestedSize) {
@@ -47,8 +59,7 @@ void CoverImageResponse::run() {
 
     QImageReader reader(m_filePath);
     if (m_requestedSize.isValid()) {
-        reader.setScaledSize(
-            reader.size().scaled(m_requestedSize, Qt::KeepAspectRatio));
+        reader.setScaledSize(decodeSize(reader.size(), m_requestedSize));
     }
 
     m_image = reader.read();

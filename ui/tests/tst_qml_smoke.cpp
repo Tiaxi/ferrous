@@ -62,6 +62,7 @@
 #include <utility>
 
 #include "../src/BridgeClient.h"
+#include "../src/CoverImageProvider.h"
 #include "../src/DiagnosticsLog.h"
 #include "../src/DisplaySleepInhibitor.h"
 #include "../src/LibraryTreeModel.h"
@@ -1483,6 +1484,9 @@ private slots:
     void playbackControllerReadsTheBridgeClock();
     void mainWindowStopsPositionFramesWhileHidden();
     void albumArtZoomFollowsTheWheelDelta();
+    void albumArtSmallerThanTheRequestIsShownScaledUp();
+    void albumArtViewerShowsThePreloadedCover_data();
+    void albumArtViewerShowsThePreloadedCover();
     void spaceTogglesPlaybackWhenTheLibraryHasFocus();
     void spaceTypesIntoTextFields();
     void playbackShortcutsWorkInTheViewers();
@@ -18399,6 +18403,236 @@ Window {
     QVERIFY(std::abs(zoom() - expected) < 1e-9);
     QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, -1200)));
     QCOMPARE(zoom(), 1.0);
+}
+
+void TransportInputSmokeTest::albumArtSmallerThanTheRequestIsShownScaledUp() {
+    // The cover provider decodes a cover smaller than the requested size at
+    // its own size; the album art viewer and the tile still show it fitted
+    // to their area, as they did when it was enlarged on decoding.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(300, 200, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    QQmlApplicationEngine engine;
+    engine.addImageProvider(QStringLiteral("covers"), new CoverImageProvider);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("testCoverUrl"), CoverImageProvider::urlForPath(coverPath));
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    width: 1200
+    height: 600
+    visible: true
+    property alias surface: surface
+    property alias tile: tile
+
+    Action { id: replaceFromItunesAction }
+    QtObject {
+        id: bridge
+        property string currentTrackCoverPath: testCoverUrl
+    }
+
+    Viewers.AlbumArtSurface {
+        id: surface
+        anchors.fill: parent
+        viewerOpen: true
+        viewerSource: testCoverUrl
+        infoVisible: false
+        initialViewToken: 0
+        viewerDecodeWidth: 1200
+        viewerDecodeHeight: 600
+        infoOverlayText: ""
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        closeViewer: function() {}
+        toggleInfoVisible: function() {}
+        focusFullscreen: function() {}
+        comparisonLabel: ""
+        comparisonModeAvailable: false
+    }
+
+    Components.AlbumArtTile {
+        id: tile
+        width: 320
+        height: 320
+        uiBridge: bridge
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        openAlbumArtViewer: function() {}
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+
+    const auto imageIn = [&root](const char *name) -> QQuickItem * {
+        auto *item = qvariant_cast<QQuickItem *>(root->property(name));
+        QList<QQuickItem *> items;
+        if (item != nullptr) {
+            collectQuickItems(item, &items);
+        }
+        for (QQuickItem *each : items) {
+            if (each->inherits("QQuickImage")) {
+                return each;
+            }
+        }
+        return nullptr;
+    };
+    struct Expected {
+        const char *view;
+        QSizeF painted;
+        QPointF paintedCenter;
+    };
+    // The viewer fits the cover to its 1200x600 area, centred; the tile to
+    // its 320x320 square.
+    const QList<Expected> views{
+        {"surface", QSizeF(900, 600), QPointF(600, 300)},
+        {"tile", QSizeF(320, 320.0 * 2 / 3), QPointF(160, 160)},
+    };
+    for (const Expected &expected : views) {
+        QQuickItem *image = imageIn(expected.view);
+        QVERIFY2(image != nullptr, expected.view);
+        // Image.Ready is 1.
+        QTRY_COMPARE_WITH_TIMEOUT(image->property("status").toInt(), 1, 5000);
+        QCOMPARE(QSize(image->property("implicitWidth").toInt(),
+                       image->property("implicitHeight").toInt()),
+                 QSize(300, 200));
+        const QSizeF painted(image->property("paintedWidth").toReal(),
+                             image->property("paintedHeight").toReal());
+        QVERIFY2(std::abs(painted.width() - expected.painted.width()) < 0.5
+                     && std::abs(painted.height() - expected.painted.height()) < 0.5,
+                 qPrintable(QStringLiteral("%1 painted %2x%3")
+                                .arg(QLatin1String(expected.view))
+                                .arg(painted.width())
+                                .arg(painted.height())));
+        const QPointF center = image->mapToScene(
+            QPointF(image->width() / 2, image->height() / 2));
+        QCOMPARE(center, expected.paintedCenter);
+    }
+}
+
+namespace {
+
+// The cover provider, recording the size of every image it is asked for.
+class RecordingCoverImageProvider final : public CoverImageProvider {
+public:
+    QQuickImageResponse *requestImageResponse(
+        const QString &id, const QSize &requestedSize) override {
+        {
+            QMutexLocker locker(&m_mutex);
+            m_requests.append(requestedSize);
+        }
+        return CoverImageProvider::requestImageResponse(id, requestedSize);
+    }
+
+    QList<QSize> requests() const {
+        QMutexLocker locker(&m_mutex);
+        return m_requests;
+    }
+
+private:
+    mutable QMutex m_mutex;
+    QList<QSize> m_requests;
+};
+
+} // namespace
+
+void TransportInputSmokeTest::albumArtViewerShowsThePreloadedCover_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<int>("viewerMode");
+    QTest::newRow("popup") << 1.0 << 0;
+    QTest::newRow("popup at 2x") << 2.0 << 0;
+    QTest::newRow("whole screen") << 1.0 << 1;
+}
+
+void TransportInputSmokeTest::albumArtViewerShowsThePreloadedCover() {
+    // The hidden preload decodes the current cover as the album art viewer
+    // asks for it, so that opening the viewer decodes nothing more: the
+    // cover is decoded once at the viewer's size.
+    QFETCH(double, scale);
+    QFETCH(int, viewerMode);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(300, 200, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    auto *provider = new RecordingCoverImageProvider;
+    engine.addImageProvider(QStringLiteral("covers"), provider);
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    if (scale != 1.0) {
+        QScreen *screen = hiDpiTestScreen(scale);
+        if (screen == nullptr) {
+            QSKIP("Needs the offscreen platform's HiDPI test screen at that scale");
+        }
+        QVERIFY(moveWindowToScreen(*window, screen));
+    }
+    if (std::abs(window->effectiveDevicePixelRatio() - scale) > 1e-9) {
+        QSKIP("The window is at another scale");
+    }
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *preload = window->findChild<QQuickItem *>(QStringLiteral("albumArtViewerPreloadImage"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && preload != nullptr && surface != nullptr);
+    QQuickItem *viewerImage = nullptr;
+    QList<QQuickItem *> surfaceItems;
+    collectQuickItems(surface, &surfaceItems);
+    for (QQuickItem *each : surfaceItems) {
+        if (each->inherits("QQuickImage")) {
+            viewerImage = each;
+            break;
+        }
+    }
+    QVERIFY(viewerImage != nullptr);
+    bridge->setProperty("viewerFullscreenMode", viewerMode);
+
+    // Image.Ready is 1. The implicit size is in logical pixels.
+    const auto readyWithTheCover = [scale](QQuickItem *image) {
+        return image->property("status").toInt() == 1
+            && QSizeF(image->property("implicitWidth").toReal(),
+                      image->property("implicitHeight").toReal()) * scale == QSizeF(300, 200);
+    };
+    bridge->setProperty("currentTrackCoverPath", CoverImageProvider::urlForPath(coverPath));
+    QTRY_VERIFY_WITH_TIMEOUT(readyWithTheCover(preload), 5000);
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewerForCurrentArt"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(readyWithTheCover(viewerImage), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(readyWithTheCover(preload), 5000);
+    QCOMPARE(viewerImage->property("sourceSize"), preload->property("sourceSize"));
+    QCOMPARE(viewerImage->window()->effectiveDevicePixelRatio(), scale);
+
+    // Give a second request time to reach the provider before counting.
+    QTest::qWait(100);
+    const QSize viewerRequest =
+        viewerImage->property("sourceSize").toSize() * viewerImage->window()->effectiveDevicePixelRatio();
+    const QList<QSize> requests = provider->requests();
+    QVERIFY2(requests.count(viewerRequest) == 1,
+             qPrintable(QStringLiteral("%1 requests at %2x%3")
+                            .arg(requests.count(viewerRequest))
+                            .arg(viewerRequest.width())
+                            .arg(viewerRequest.height())));
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
 
 void SpectrogramSmokeTest::spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll() {

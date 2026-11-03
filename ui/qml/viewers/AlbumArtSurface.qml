@@ -119,6 +119,8 @@ Item {
             scale: root.zoom
             transformOrigin: Item.Center
 
+            // Shares its decoded image with albumArtViewerPreloadImage in
+            // Main.qml, which must keep the same image options.
             Image {
                 id: albumArtImageFull
                 anchors.fill: parent
