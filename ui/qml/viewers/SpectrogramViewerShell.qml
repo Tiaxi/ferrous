@@ -26,7 +26,10 @@ Item {
     property var errorController: null
 
     property alias popupHost: spectrogramPopupHost
-    property alias windowHost: spectrogramWindowHost
+    // The window of the viewer over the whole screen, and the item in it
+    // that holds the visualization; null until the viewer first opens there.
+    readonly property Window fullscreenWindow: spectrogramFullscreenWindowLoader.item
+    readonly property Item windowHost: root.fullscreenWindow ? root.fullscreenWindow.host : null
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
     // What the visualization keeps clear of in its top right corner: the
     // close button, the switch beside it and the gap beside that. Both
@@ -40,7 +43,8 @@ Item {
         root.viewerOpen
         && root.useWholeScreenViewerMode
         && root.displaySleepInhibitionEnabled
-        && spectrogramFullscreenWindow.visibility === Window.FullScreen
+        && root.fullscreenWindow !== null
+        && root.fullscreenWindow.visibility === Window.FullScreen
     // A paused or stopped fullscreen view lets the screen blank as usual.
     readonly property bool displaySleepInhibited:
         root.fullscreenDisplayActive && root.playbackPlaying
@@ -62,6 +66,18 @@ Item {
         active: root.viewerOpen
     }
 
+    readonly property bool wholeScreenOpen: root.viewerOpen && root.useWholeScreenViewerMode
+    // The window is made the first time the viewer opens over the whole
+    // screen, not at startup, and kept from then on: it only hides when
+    // the viewer closes. Qt keeps the graphics and the scene graph of a
+    // hidden window (persistentGraphics and persistentSceneGraph, true by
+    // default), so opening it again sets none of them up again.
+    onWholeScreenOpenChanged: {
+        if (root.wholeScreenOpen) {
+            spectrogramFullscreenWindowLoader.active = true
+        }
+    }
+
     onViewerOpenChanged: Qt.callLater(root.syncPresentation)
     onDisplaySleepInhibitedChanged: root.syncDisplaySleepInhibition()
     onDisplaySleepInhibitorChanged: root.syncDisplaySleepInhibition()
@@ -79,12 +95,15 @@ Item {
         } else if (spectrogramViewer.visible) {
             spectrogramViewer.close()
         }
-        if (root.viewerOpen && root.useWholeScreenViewerMode) {
-            spectrogramFullscreenWindow.requestActivate()
+        if (root.wholeScreenOpen && root.fullscreenWindow) {
+            root.fullscreenWindow.requestActivate()
         }
     }
 
     Component.onCompleted: {
+        if (root.wholeScreenOpen) {
+            spectrogramFullscreenWindowLoader.active = true
+        }
         Qt.callLater(root.syncPresentation)
         root.syncDisplaySleepInhibition()
     }
@@ -194,113 +213,122 @@ Item {
         }
     }
 
-    Window {
-        id: spectrogramFullscreenWindow
-        objectName: "spectrogramFullscreenWindow"
-        screen: root.windowRoot.screen
-        transientParent: root.windowRoot
-        modality: Qt.ApplicationModal
-        flags: Qt.Window | Qt.FramelessWindowHint
-        visibility: root.viewerOpen && root.useWholeScreenViewerMode
-            ? Window.FullScreen
-            : Window.Hidden
-        color: "#000000"
-        title: root.titleText
+    Loader {
+        id: spectrogramFullscreenWindowLoader
+        objectName: "spectrogramFullscreenWindowLoader"
+        active: false
 
-        onVisibilityChanged: function() {
-            if (spectrogramFullscreenWindow.visibility === Window.FullScreen) {
-                requestActivate()
-                spectrogramFullscreenFocusSink.forceActiveFocus()
-            }
-        }
+        sourceComponent: Component {
+            Window {
+                id: spectrogramFullscreenWindow
+                objectName: "spectrogramFullscreenWindow"
+                readonly property Item host: spectrogramWindowHost
+                screen: root.windowRoot.screen
+                transientParent: root.windowRoot
+                modality: Qt.ApplicationModal
+                flags: Qt.Window | Qt.FramelessWindowHint
+                visibility: root.viewerOpen && root.useWholeScreenViewerMode
+                    ? Window.FullScreen
+                    : Window.Hidden
+                color: "#000000"
+                title: root.titleText
 
-        onClosing: function(close) {
-            if (root.viewerOpen && root.useWholeScreenViewerMode) {
-                root.closeViewer()
-            }
-        }
-
-        FocusScope {
-            id: spectrogramFullscreenFocusSink
-            anchors.fill: parent
-            focus: spectrogramFullscreenWindow.visibility === Window.FullScreen
-            // Above the viewer, and inside the scope that handles the
-            // viewer's keys, so they work while the error's buttons have focus.
-            z: 30
-
-            Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) {
-                    event.accepted = true
-                    root.closeViewer()
+                onVisibilityChanged: function() {
+                    if (spectrogramFullscreenWindow.visibility === Window.FullScreen) {
+                        requestActivate()
+                        spectrogramFullscreenFocusSink.forceActiveFocus()
+                    }
                 }
-            }
 
-            Components.ErrorBanner {
-                objectName: "spectrogramFullscreenErrorBanner"
-                anchors.bottom: parent.bottom
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.bottomMargin: 24
-                width: Math.min(parent.width - 48, 720)
-                errorController: root.errorController
-                active: root.viewerOpen && root.useWholeScreenViewerMode
-            }
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.LeftButton
-            onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
-            onClicked: root.closeViewer()
-        }
-
-        Components.ViewerCloseButton {
-            id: fullscreenCloseButton
-            objectName: "spectrogramFullscreenCloseButton"
-            z: 20
-            anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: 12
-            visible: root.fullscreenControlsVisible
-            fillColor: Qt.rgba(0, 0, 0, 0.45)
-            borderColor: Qt.rgba(1, 1, 1, 0.24)
-            onClicked: root.closeViewer()
-
-            HoverHandler {
-                onPointChanged: root.noteFullscreenPointerActivity(
-                    point.scenePosition.x, point.scenePosition.y)
-            }
-        }
-
-
-        Components.VisualizationModeSwitch {
-            z: 20
-            anchors.top: parent.top
-            anchors.right: fullscreenCloseButton.left
-            anchors.margins: 12
-            controlsVisible: root.fullscreenControlsVisible
-            selectedMode: root.visualizationMode
-            setMode: root.setVisualizationMode
-            pointerActivity: root.noteFullscreenPointerActivity
-        }
-
-        Rectangle {
-            anchors.fill: parent
-            color: "#0b0b0f"
-
-            MouseArea {
-                anchors.fill: parent
-                acceptedButtons: Qt.LeftButton
-                onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
-                onDoubleClicked: function(mouse) {
-                    if (mouse.button === Qt.LeftButton) {
+                onClosing: function(close) {
+                    if (root.viewerOpen && root.useWholeScreenViewerMode) {
                         root.closeViewer()
                     }
                 }
-            }
 
-            Item {
-                id: spectrogramWindowHost
-                anchors.fill: parent
+                FocusScope {
+                    id: spectrogramFullscreenFocusSink
+                    anchors.fill: parent
+                    focus: spectrogramFullscreenWindow.visibility === Window.FullScreen
+                    // Above the viewer, and inside the scope that handles the
+                    // viewer's keys, so they work while the error's buttons have focus.
+                    z: 30
+
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Escape) {
+                            event.accepted = true
+                            root.closeViewer()
+                        }
+                    }
+
+                    Components.ErrorBanner {
+                        objectName: "spectrogramFullscreenErrorBanner"
+                        anchors.bottom: parent.bottom
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottomMargin: 24
+                        width: Math.min(parent.width - 48, 720)
+                        errorController: root.errorController
+                        active: root.viewerOpen && root.useWholeScreenViewerMode
+                    }
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton
+                    onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
+                    onClicked: root.closeViewer()
+                }
+
+                Components.ViewerCloseButton {
+                    id: fullscreenCloseButton
+                    objectName: "spectrogramFullscreenCloseButton"
+                    z: 20
+                    anchors.top: parent.top
+                    anchors.right: parent.right
+                    anchors.margins: 12
+                    visible: root.fullscreenControlsVisible
+                    fillColor: Qt.rgba(0, 0, 0, 0.45)
+                    borderColor: Qt.rgba(1, 1, 1, 0.24)
+                    onClicked: root.closeViewer()
+
+                    HoverHandler {
+                        onPointChanged: root.noteFullscreenPointerActivity(
+                            point.scenePosition.x, point.scenePosition.y)
+                    }
+                }
+
+
+                Components.VisualizationModeSwitch {
+                    z: 20
+                    anchors.top: parent.top
+                    anchors.right: fullscreenCloseButton.left
+                    anchors.margins: 12
+                    controlsVisible: root.fullscreenControlsVisible
+                    selectedMode: root.visualizationMode
+                    setMode: root.setVisualizationMode
+                    pointerActivity: root.noteFullscreenPointerActivity
+                }
+
+                Rectangle {
+                    anchors.fill: parent
+                    color: "#0b0b0f"
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton
+                        onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
+                        onDoubleClicked: function(mouse) {
+                            if (mouse.button === Qt.LeftButton) {
+                                root.closeViewer()
+                            }
+                        }
+                    }
+
+                    Item {
+                        id: spectrogramWindowHost
+                        anchors.fill: parent
+                    }
+                }
             }
         }
     }
