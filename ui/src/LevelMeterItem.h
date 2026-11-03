@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "PlaybackClock.h"
+#include "WaveformReaderLease.h"
 
 class LevelMeterItem : public QQuickItem {
     Q_OBJECT
@@ -76,6 +77,9 @@ private:
     void bindWindow(QQuickWindow *window);
     void visibilityChanged();
     bool visibleForPlayback() const;
+    // Tells the detail service which file the meter reads: its source
+    // while it is visible for playback, none otherwise.
+    void updateReaderLease();
     void scheduleTick();
     void tick();
     // Runs the ballistics up to `now`; returns the playback position there.
@@ -121,5 +125,6 @@ private:
     QMetaObject::Connection m_frameConnection;
     QMetaObject::Connection m_visibilityConnection;
     QMetaObject::Connection m_clockConnection;
+    WaveformReaderLease m_readerLease{WaveformReaderLease::Kind::Meter};
     std::function<Window(const QString &, double, double, const Cancellation &)> m_decodeWindow{decodeWindow};
 };

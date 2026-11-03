@@ -1784,6 +1784,110 @@ pub unsafe extern "C" fn ferrous_ffi_waveform_window_cancellable(
     )
 }
 
+/// The waveform reader of a `kind` the UI passes: 0 for a waveform view,
+/// 1 for the level meter.
+fn waveform_reader(kind: u32) -> Option<crate::analysis::WaveformReader> {
+    match kind {
+        0 => Some(crate::analysis::WaveformReader::View),
+        1 => Some(crate::analysis::WaveformReader::Meter),
+        _ => None,
+    }
+}
+
+/// Retain or release a waveform reader of `kind` for the file at the path
+/// of `path_len` bytes at `path_ptr`.
+///
+/// # Safety
+///
+/// `path_ptr` must point to `path_len` readable bytes for this call.
+unsafe fn change_waveform_reader(
+    name: &str,
+    path_ptr: *const c_uchar,
+    path_len: usize,
+    kind: u32,
+    change: fn(&std::path::Path, crate::analysis::WaveformReader),
+) {
+    ffi_call(
+        name,
+        |_| (),
+        || {
+            // SAFETY: The caller supplies a readable path for the duration of the call.
+            let Some(bytes) = (unsafe { input_bytes(path_ptr, path_len) }) else {
+                return;
+            };
+            let (Ok(path), Some(reader)) = (std::str::from_utf8(bytes), waveform_reader(kind))
+            else {
+                return;
+            };
+            change(std::path::Path::new(path), reader);
+        },
+    );
+}
+
+#[no_mangle]
+/// A waveform reader of `kind` (0 a view, 1 the level meter) starts reading
+/// the file at the path, which [`ferrous_ffi_waveform_window_cancellable`]
+/// then reads for it. The waveform detail service keeps what such readers
+/// need of the file until each has released it. Cheap enough for the UI
+/// thread.
+///
+/// # Safety
+///
+/// `path_ptr` must point to `path_len` readable UTF-8 bytes for this call.
+pub unsafe extern "C" fn ferrous_ffi_waveform_reader_retain(
+    path_ptr: *const c_uchar,
+    path_len: usize,
+    kind: u32,
+) {
+    // SAFETY: The caller supplies a readable path for the duration of the call.
+    unsafe {
+        change_waveform_reader(
+            "ferrous_ffi_waveform_reader_retain",
+            path_ptr,
+            path_len,
+            kind,
+            crate::analysis::retain_reader,
+        );
+    };
+}
+
+#[no_mangle]
+/// A waveform reader that [`ferrous_ffi_waveform_reader_retain`] retained
+/// stops reading the file. Cheap enough for the UI thread: call
+/// [`ferrous_ffi_waveform_release_unread`] after it, off that thread.
+///
+/// # Safety
+///
+/// `path_ptr` must point to `path_len` readable UTF-8 bytes for this call.
+pub unsafe extern "C" fn ferrous_ffi_waveform_reader_release(
+    path_ptr: *const c_uchar,
+    path_len: usize,
+    kind: u32,
+) {
+    // SAFETY: The caller supplies a readable path for the duration of the call.
+    unsafe {
+        change_waveform_reader(
+            "ferrous_ffi_waveform_reader_release",
+            path_ptr,
+            path_len,
+            kind,
+            crate::analysis::release_reader,
+        );
+    };
+}
+
+#[no_mangle]
+/// Free what the waveform detail service holds that no reader needs any
+/// more. It may close a decoder, which can take a while, so it is called
+/// off the UI thread.
+pub extern "C" fn ferrous_ffi_waveform_release_unread() {
+    ffi_call(
+        "ferrous_ffi_waveform_release_unread",
+        |_| (),
+        crate::analysis::release_unread,
+    );
+}
+
 #[no_mangle]
 /// # Safety
 ///

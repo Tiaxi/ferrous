@@ -25,8 +25,9 @@ use super::waveform_service::{
 /// for the service: a tile of them is 4 MiB of 32-bit samples.
 const LAST_TILE_PCM_CHANNELS: usize = 64;
 
-/// The coarse summaries of a file the overview decoded to its end, for the
-/// waveform detail service.
+/// The coarse summaries of a file for the waveform detail service: those
+/// the overview decode built reading it to its end, or those a session kept
+/// for the current track when no view read it any more.
 #[cfg_attr(test, derive(Clone))]
 pub(super) struct CoarsePrefill {
     pub(super) identity: SourceIdentity,
@@ -36,7 +37,9 @@ pub(super) struct CoarsePrefill {
     pub(super) gstreamer: bool,
     /// The complete tiles, in order, up to the service's budget.
     pub(super) tiles: Vec<(u64, Arc<PyramidTile>)>,
-    pub(super) eof_frame: u64,
+    /// The end of the file, if known: the overview decode always knows it,
+    /// a session only once a window has read that far.
+    pub(super) eof_frame: Option<u64>,
     /// The PCM of the tile that holds the last frame.
     pub(super) last_tile: Option<(u64, Arc<PcmTile>)>,
 }
@@ -189,7 +192,7 @@ impl PrefillBuilder {
             channels: self.channels,
             gstreamer: self.gstreamer,
             tiles: self.tiles,
-            eof_frame,
+            eof_frame: Some(eof_frame),
             last_tile,
         })
     }
@@ -438,7 +441,7 @@ mod tests {
             "{name}: the tiles"
         );
         assert!(built == tiles, "{name}: the summaries differ");
-        assert_eq!(prefill.eof_frame, eof, "{name}: the end of the file");
+        assert_eq!(prefill.eof_frame, Some(eof), "{name}: the end of the file");
         let built_last = prefill
             .last_tile
             .as_ref()
@@ -830,7 +833,7 @@ mod tests {
                 builder.push(usize_to_u64(packet * 4_000), chunk, 1);
             }
             let prefill = builder.finish().expect("summaries");
-            assert_eq!(prefill.eof_frame, eof);
+            assert_eq!(prefill.eof_frame, Some(eof));
             let last = prefill.last_tile.map(|(index, tile)| (index, tile.bits()));
             if kept {
                 let (index, segments) = last.expect("the last tile");

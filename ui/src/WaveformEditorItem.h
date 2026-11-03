@@ -29,6 +29,7 @@
 
 #include "PlaybackClock.h"
 #include "PlaybackFrameScheduler.h"
+#include "WaveformReaderLease.h"
 #include "WindowPresence.h"
 
 class QHoverEvent;
@@ -304,6 +305,9 @@ private:
     bool shownOnScreen() const;
     // The item or its window came on screen or left it.
     void shownChanged();
+    // Tells the detail service which file the view reads: its source while
+    // it is shown, none otherwise.
+    void updateReaderLease();
     // The window's scheduler, or the item's own outside a window.
     PlaybackFrameScheduler *frameScheduler();
     bool cacheCoversRangeLocked(double start, double end) const;
@@ -441,6 +445,7 @@ private:
     QPointer<WindowPresence> m_windowPresence;
     QMetaObject::Connection m_windowPresenceConnection;
     QTimer m_requestTimer;
+    WaveformReaderLease m_readerLease{WaveformReaderLease::Kind::View};
     // Wakes the next playback frame, with the other views of the window.
     QPointer<PlaybackFrameScheduler> m_frameScheduler;
     // How many playback frames the item has asked for, for tests.

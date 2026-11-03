@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 #include "TestPlatform.h"
+#include "WaveformReaderLog.h"
 #define private public
 #include "LevelMeterItem.h"
 #undef private
@@ -237,6 +238,7 @@ private slots:
     void lateDataDoesNotReplayOldPeaks();
     void requestsAreBoundedAndObsoleteResultsAreDiscarded();
     void destructionCancelsPendingDecode();
+    void readsItsFileOnlyWhileVisibleForPlayback();
     void sceneGraphDrawsFixedGradientAndThinSurroundRows();
     void shownLevelsFollowTheBallistics();
     void steadyLevelsDrawNoFrames();
@@ -516,6 +518,56 @@ void LevelMeterTest::destructionCancelsPendingDecode() {
     gate->release();
     QTRY_VERIFY(finished->load());
     QCoreApplication::processEvents();
+}
+
+void LevelMeterTest::readsItsFileOnlyWhileVisibleForPlayback() {
+    // The waveform detail service keeps what the meter reads of a file
+    // while it is visible in a window on screen, and frees it after.
+    WaveformReaderLog log;
+    PlaybackClock clock;
+    QQuickWindow view;
+    view.resize(400, 40);
+    auto item = std::make_unique<LevelMeterItem>(view.contentItem());
+    item->setClock(&clock);
+    item->setSize(QSizeF(400, 20));
+    item->setDurationSeconds(10);
+    item->m_decodeWindow = [](const QString &, double, double, const LevelMeterItem::Cancellation &) {
+        return LevelMeterItem::Window{};
+    };
+    item->setPlaying(true);
+    item->setSourcePath(QStringLiteral("first.wav"));
+    QVERIFY(!item->visibleForPlayback());
+    QCOMPARE(log.held(), QStringList());
+    view.show();
+    QTRY_VERIFY(item->visibleForPlayback());
+    QCOMPARE(log.held(), QStringList{QStringLiteral("first.wav meter")});
+
+    // The next track: the new file is retained before the old one goes.
+    WaveformReaderLog::order().clear();
+    item->setSourcePath(QStringLiteral("second.wav"));
+    QCOMPARE(WaveformReaderLog::order(),
+             (QStringList{QStringLiteral("+second.wav meter"), QStringLiteral("-first.wav meter")}));
+    QTRY_VERIFY(WaveformReaderLog::releasesUnread().load() >= 1);
+
+    item->setVisible(false);
+    QCOMPARE(log.held(), QStringList());
+    item->setVisible(true);
+    QCOMPARE(log.held(), QStringList{QStringLiteral("second.wav meter")});
+    // Its window off screen, as minimized.
+    view.hide();
+    QTRY_VERIFY(!item->visibleForPlayback());
+    QCOMPARE(log.held(), QStringList());
+    view.show();
+    QTRY_VERIFY(item->visibleForPlayback());
+    QCOMPARE(log.held(), QStringList{QStringLiteral("second.wav meter")});
+    // Stopped: the meter's source is cleared.
+    item->setSourcePath(QString());
+    QCOMPARE(log.held(), QStringList());
+    item->setSourcePath(QStringLiteral("second.wav"));
+    const int passes = WaveformReaderLog::releasesUnread().load();
+    item.reset();
+    QCOMPARE(log.held(), QStringList());
+    QTRY_VERIFY(WaveformReaderLog::releasesUnread().load() > passes);
 }
 
 void LevelMeterTest::sceneGraphDrawsFixedGradientAndThinSurroundRows() {

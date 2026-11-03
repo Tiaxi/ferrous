@@ -72,6 +72,7 @@
 #include "../src/WindowActivation.h"
 #include "TestPlatform.h"
 #include "TestUserDirectories.h"
+#include "WaveformReaderLog.h"
 #define protected public
 #define private public
 #include "../src/SpectrogramItem.h"
@@ -1401,6 +1402,7 @@ private slots:
     void waveformEditorNoOneSeesAsksForNoPlaybackFrames();
     void waveformEditorOffScreenDecodesNoDetail();
     void waveformEditorMovedBetweenWindowsFollowsTheirPresence();
+    void waveformEditorReadsItsFileOnlyWhileShown();
     void waveformEditorLateFrameCallbackDrawsAtOnce();
     void waveformEditorIdleViewDrawsOnlyFramesThatDiffer();
     void waveformEditorFollowingViewDrawsOnlyAtPixelSteps_data();
@@ -10378,6 +10380,74 @@ void WaveformSmokeTest::waveformEditorMovedBetweenWindowsFollowsTheirPresence() 
     }
     gate->release(8);
     delete item;
+}
+
+void WaveformSmokeTest::waveformEditorReadsItsFileOnlyWhileShown() {
+    // The waveform detail service keeps what a view reads of its file only
+    // while the view is shown in a window on screen: hidden, as in the
+    // spectrogram mode, or in a window off screen, as minimized, it frees
+    // the file's fine caches and decoder. A view moving to the next track,
+    // or into another window, retains the new before it releases the old.
+    WaveformReaderLog log;
+    QQuickWindow shown;
+    shown.resize(400, 100);
+    presentWithoutDrawing(shown);
+    QQuickWindow other;
+    other.resize(400, 100);
+    presentWithoutDrawing(other);
+    TestTime time;
+    auto *item = new WaveformEditorItem(shown.contentItem());
+    time.drive(*item);
+    item->m_decodeWindow = [](const QString &, double, double, int,
+                              const std::shared_ptr<std::atomic_bool> &) { return QByteArray(); };
+    item->setWidth(400);
+    item->setHeight(100);
+    item->setDurationSeconds(10.0);
+    QCOMPARE(log.held(), QStringList());
+    item->setSourcePath(QStringLiteral("first.wav"));
+    QCOMPARE(log.held(), QStringList{QStringLiteral("first.wav view")});
+
+    WaveformReaderLog::order().clear();
+    item->setSourcePath(QStringLiteral("second.wav"));
+    QCOMPARE(WaveformReaderLog::order(),
+             (QStringList{QStringLiteral("+second.wav view"), QStringLiteral("-first.wav view")}));
+    QTRY_VERIFY(WaveformReaderLog::releasesUnread().load() >= 1);
+
+    item->setVisible(false);
+    QCOMPARE(log.held(), QStringList());
+    item->setVisible(true);
+    QCOMPARE(log.held(), QStringList{QStringLiteral("second.wav view")});
+
+    // Off screen once its grace ends, not at once.
+    setTestExposed(shown, false);
+    QCOMPARE(log.held(), QStringList{QStringLiteral("second.wav view")});
+    endTestUnexposedGrace(shown);
+    QCOMPARE(log.held(), QStringList());
+    setTestExposed(shown, true);
+    QCOMPARE(log.held(), QStringList{QStringLiteral("second.wav view")});
+
+    // A second view of the file, as the fullscreen viewer's, holds it too.
+    auto *viewer = new WaveformEditorItem(other.contentItem());
+    time.drive(*viewer);
+    viewer->m_decodeWindow = item->m_decodeWindow;
+    viewer->setSourcePath(QStringLiteral("second.wav"));
+    QCOMPARE(log.held(),
+             (QStringList{QStringLiteral("second.wav view"), QStringLiteral("second.wav view")}));
+    delete viewer;
+    QCOMPARE(log.held(), QStringList{QStringLiteral("second.wav view")});
+
+    // Moved into a window off screen, and back.
+    setTestExposed(other, false);
+    endTestUnexposedGrace(other);
+    item->setParentItem(other.contentItem());
+    QCOMPARE(log.held(), QStringList());
+    item->setParentItem(shown.contentItem());
+    QCOMPARE(log.held(), QStringList{QStringLiteral("second.wav view")});
+
+    const int passes = WaveformReaderLog::releasesUnread().load();
+    delete item;
+    QCOMPARE(log.held(), QStringList());
+    QTRY_VERIFY(WaveformReaderLog::releasesUnread().load() > passes);
 }
 
 void WaveformSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::f64_to_u64_saturating;
 use super::waveform_pyramid::SUMMARY_FRAMES;
-use super::waveform_service::{with_session, WaveformSession, TILE_FRAMES};
+use super::waveform_service::{with_session, PcmTile, WaveformSession, TILE_FRAMES};
 
 const MAX_WINDOW_POINTS: usize = 65_536;
 
@@ -109,6 +109,12 @@ impl WindowAccumulator {
             if let Some(maximum) = self.downmix_maxima.get_mut(point) {
                 *maximum = maximum.max(mixed);
             }
+        }
+    }
+
+    fn push_pcm(&mut self, tile: &PcmTile) {
+        for frames in &tile.segments {
+            self.push_interleaved(frames.first_frame, &frames.samples, frames.channels);
         }
     }
 
@@ -224,23 +230,24 @@ pub(super) fn decode_window(
         if session.reached_eof(index.saturating_mul(TILE_FRAMES)) {
             break;
         }
-        // Summary rows past the end of the window would add samples outside
-        // it; such a tile is read as PCM, unless decoding it finds that the
-        // file ends within the window.
-        if !(summarized && session.tile_ends_by(index, end_frame)) {
+        let tile = if !summarized {
             let tile = session.tile(index, cancelled)?;
-            if !(summarized && session.tile_ends_by(index, end_frame)) {
-                for frames in &tile.segments {
-                    accumulator.push_interleaved(
-                        frames.first_frame,
-                        &frames.samples,
-                        frames.channels,
-                    );
-                }
+            accumulator.push_pcm(&tile);
+            continue;
+        } else if session.tile_ends_by(index, end_frame) {
+            session.summary(index, accumulator.frames_per_point, cancelled)?
+        } else {
+            // Summary rows past the end of the window would add samples
+            // outside it; such a tile is read as PCM, unless decoding it
+            // finds that the file ends within the window.
+            let (pcm, summary) =
+                session.clipped_tile(index, accumulator.frames_per_point, cancelled)?;
+            if !session.tile_ends_by(index, end_frame) {
+                accumulator.push_pcm(&pcm);
                 continue;
             }
-        }
-        let tile = session.summary(index, accumulator.frames_per_point, cancelled)?;
+            summary
+        };
         let (rows, span) = tile.rows(accumulator.frames_per_point);
         for (row, extrema) in rows.chunks_exact(tile.row_width()).enumerate() {
             accumulator.push_summary(
@@ -474,10 +481,15 @@ pub(super) mod tests {
                 assert_eq!(actual.downmix_extrema, expected.downmix_extrema);
             }
         }
+        // The windows of summaries keep the summaries of the tiles they
+        // read, and of the tile their end clips, not their PCM: the first
+        // pass decodes tiles 0 to 2 for them, and tile 2 once more after
+        // the others were decoded, then the window at sample resolution its
+        // three tiles, which it keeps. The passes after it decode nothing.
         assert_eq!(
             session.decoded_tiles(),
-            3,
-            "all overlapping resolutions reuse PCM"
+            3 + 1 + 3,
+            "all overlapping resolutions reuse what they cached"
         );
         std::fs::remove_file(path).expect("remove fixture");
     }

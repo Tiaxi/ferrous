@@ -22,6 +22,7 @@ mod waveform_pyramid;
 mod waveform_service;
 mod waveform_window;
 
+pub(crate) use waveform_service::{release_reader, release_unread, retain_reader, WaveformReader};
 pub(crate) use waveform_window::{decode_waveform_window_cancellable, WaveformWindow};
 
 use std::cell::Cell;
@@ -2053,9 +2054,10 @@ fn spawn_waveform_decode_worker(
             while let Ok(next_job) = waveform_job_rx.try_recv() {
                 job = next_job;
             }
-            // What the last decode built for the detail service is of
-            // another track, if no session took it.
-            waveform_service::discard_prefill();
+            // What the detail service holds of another track, and nothing
+            // reads, is no longer needed: such as what the last decode
+            // built for it, if no session took it.
+            waveform_service::track_changed(&job.path);
             if !job.decode {
                 continue;
             }

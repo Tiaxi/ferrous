@@ -74,6 +74,11 @@ std::uint8_t *ferrous_ffi_waveform_window_cancellable(
     double start_seconds, double end_seconds, std::uint32_t max_points,
     std::size_t *len_out, bool (*cancelled)(const void *), const void *context);
 void ferrous_ffi_waveform_window_free(std::uint8_t *ptr, std::size_t len);
+void ferrous_ffi_waveform_reader_retain(
+    const std::uint8_t *path_ptr, std::size_t path_len, std::uint32_t kind);
+void ferrous_ffi_waveform_reader_release(
+    const std::uint8_t *path_ptr, std::size_t path_len, std::uint32_t kind);
+void ferrous_ffi_waveform_release_unread();
 double ferrous_ffi_fuzzy_match_score(
     const std::uint8_t *candidate_album_ptr, std::size_t candidate_album_len,
     const std::uint8_t *candidate_artist_ptr, std::size_t candidate_artist_len,
