@@ -2540,6 +2540,12 @@ void BridgeClient::registerSpectrogramItem(QObject *item, int channelIndex) {
             scheduleSpectrogramActivityUpdate();
         });
         route.destructionConnection = connect(view, &QObject::destroyed, this, &BridgeClient::scheduleSpectrogramActivityUpdate);
+        if (auto *pane = qobject_cast<SpectrogramItem *>(view)) {
+            route.columnsConnection = connect(pane, &SpectrogramItem::columnsNeeded, this, [this]() {
+                m_spectrogramColumnsNeeded = true;
+                scheduleSpectrogramActivityUpdate();
+            });
+        }
         observeSpectrogramWindow(view->window());
     }
     scheduleSpectrogramActivityUpdate();
@@ -2554,6 +2560,7 @@ void BridgeClient::unregisterSpectrogramItem(QObject *item) {
         disconnect(route.visibilityConnection);
         disconnect(route.windowConnection);
         disconnect(route.destructionConnection);
+        disconnect(route.columnsConnection);
         return true;
     });
     scheduleSpectrogramActivityUpdate();
@@ -2587,7 +2594,20 @@ void BridgeClient::updateSpectrogramActivity() {
         return view != nullptr && view->isVisible() && window != nullptr
             && WindowPresence::of(window)->shown();
     });
-    if (active == m_spectrogramActive) return;
+    // A pane shown again has released its columns (see SpectrogramItem::
+    // releaseStorageLocked) and takes them from a fresh session, which
+    // showing a view starts. When other panes kept analysis on meanwhile,
+    // nothing else starts one: it restarts.
+    const bool columnsNeeded = std::exchange(m_spectrogramColumnsNeeded, false);
+    if (active == m_spectrogramActive) {
+        if (active && columnsNeeded) {
+            sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+                BinaryBridgeCodec::CmdSetSpectrogramActive, 0));
+            sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+                BinaryBridgeCodec::CmdSetSpectrogramActive, 1));
+        }
+        return;
+    }
     m_spectrogramActive = active;
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramActive, active ? 1 : 0));

@@ -1130,7 +1130,8 @@ public:
     using QmlSmokeTest::QmlSmokeTest;
 
 private slots:
-    void hiddenSpectrogramDefersPaintingAndRetainsIncomingData();
+    void hiddenSpectrogramReleasesItsColumnsAndCanvasUntilShown();
+    void spectrogramOffScreenReleasesItsColumnsOnlyAfterTheGrace();
     void spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints();
     void spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers();
     void spectrogramHoverChannelButtonsRemainClickable();
@@ -12781,14 +12782,15 @@ constexpr int kStripeBins = 64;
 constexpr int kStripeColumns = 4000;
 constexpr double kStripeColumnsPerSecond = 48'000.0 / 1024.0;
 
-void feedColumnStripes(SpectrogramItem &item) {
+// The columns of a session of `generation`, which starts with a reset.
+void feedColumnStripes(SpectrogramItem &item, quint64 generation = 1) {
     QByteArray data(kStripeBins * kStripeColumns, Qt::Uninitialized);
     for (int column = 0; column < kStripeColumns; ++column) {
         std::fill_n(data.data() + static_cast<qsizetype>(column) * kStripeBins, kStripeBins,
             static_cast<char>(40 + (column * 53) % 180));
     }
     item.feedPrecomputedChunk(data, kStripeBins, 0, kStripeColumns, 0, kStripeColumns,
-        48'000, 1024, true, true, 1, true, 1);
+        48'000, 1024, true, true, 1, true, generation);
 }
 
 // A pane on `time` playing from 40 s, rolling (mode 0) or centered and
@@ -13269,9 +13271,11 @@ void SpectrogramSmokeTest::spectrogramPaneNoOneSeesAsksForNoPlaybackFrames() {
         return std::abs(item.m_positionSeconds - clock.positionAt(time.nowNs)) < 1e-9;
     };
 
+    QSignalSpy columnsNeeded(&item, &SpectrogramItem::columnsNeeded);
     item.setVisible(false);
     QVERIFY(!playbackFrameScheduled(item));
     QVERIFY(!scheduler->timerActive());
+    QCOMPARE(item.m_ring.committedBytes(), qint64(0));
     quint64 requested = item.m_playbackFrameRequests;
     playOn();
     QCOMPARE(item.m_playbackFrameRequests, requested);
@@ -13280,8 +13284,10 @@ void SpectrogramSmokeTest::spectrogramPaneNoOneSeesAsksForNoPlaybackFrames() {
     item.setVisible(true);
     QCOMPARE(item.m_playbackFrameRequests, requested + 1);
     QVERIFY(showsPlaybackNow());
+    // It released its columns, and asks for a fresh session's.
+    QCOMPARE(columnsNeeded.size(), 1);
+    feedColumnStripes(item, 2);
     {
-        // Its canvas is drawn again from the data it kept.
         QMutexLocker lock(&item.m_stateMutex);
         QVERIFY(item.m_precomputedCanvasDirty);
     }
@@ -13308,6 +13314,8 @@ void SpectrogramSmokeTest::spectrogramPaneNoOneSeesAsksForNoPlaybackFrames() {
     QVERIFY(WindowPresence::of(&window)->shown());
     QCOMPARE(item.m_playbackFrameRequests, requested + 1);
     QVERIFY(showsPlaybackNow());
+    QCOMPARE(columnsNeeded.size(), 2);
+    feedColumnStripes(item, 3);
     node = paintSettled(item, node);
     node = item.updatePaintNode(node, nullptr);
     item.handleWindowAfterAnimating();
@@ -17530,40 +17538,160 @@ void SpectrogramSmokeTest::spectrogramRollingCanvasAdvancesIncrementallyAtFracti
     }
 }
 
-void SpectrogramSmokeTest::hiddenSpectrogramDefersPaintingAndRetainsIncomingData() {
+void SpectrogramSmokeTest::hiddenSpectrogramReleasesItsColumnsAndCanvasUntilShown() {
+    // A pane no one sees, such as the spectrogram behind the waveform view,
+    // frees its ring and canvas, and takes no columns: not of a gapless
+    // successor, nor of the same track played again. Shown again, it asks
+    // for a fresh session, takes nothing from an older one, and fills from
+    // the fresh one.
     for (const int mode : {0, 1}) {
-        SpectrogramItem item;
+        // A parentless item stays hidden once hidden.
+        QQuickItem surface;
+        SpectrogramItem item(&surface);
         item.setWidth(100);
         item.setHeight(10);
         item.setDisplayMode(mode);
         constexpr int bins = 4;
         item.feedPrecomputedChunk(QByteArray(100 * bins, '\x60'), bins, 0, 100,
-            0, 1000, 48000, 1024, false, true, 1);
+            0, 1000, 48000, 1024, false, true, 1, true, 1);
         {
             QMutexLocker lock(&item.m_stateMutex);
             item.ensureMapping(10);
-            rebuildCanvasNow(item, 100, 10, 0, 99, false);
+            rebuildCanvasNow(item, 100, 10, 0, 99, mode == 0);
         }
-        const QImage before = item.m_canvas.copy();
-        const qint64 sequence = item.m_ringWriteSeq;
+        QVERIFY(!item.m_canvas.isNull());
+        QVERIFY(item.m_ring.committedBytes() > 0);
+        QVERIFY(item.m_precomputedReady);
+        QSignalSpy columnsNeeded(&item, &SpectrogramItem::columnsNeeded);
+        QSignalSpy readyChanges(&item, &SpectrogramItem::precomputedReadyChanged);
+
         item.setVisible(false);
-        item.m_animationTickInitialized = false;
-        item.handleWindowAfterAnimating();
-        QVERIFY(!item.m_animationTickInitialized);
-        item.feedPrecomputedChunk(QByteArray(bins, '\xF0'), bins, 0, 1,
-            100, 1000, 48000, 1024, false, false, 1);
-        QCOMPARE(item.m_ringWriteSeq, sequence + 1);
-        QCOMPARE(item.m_canvas, before);
-        QVERIFY(item.m_precomputedCanvasDirty);
+        QCOMPARE(item.m_ring.committedBytes(), qint64(0));
+        QCOMPARE(item.m_ring.capacity(), 0);
+        QCOMPARE(item.m_ringCapacity, 0);
+        QCOMPARE(item.m_ringColumnId.capacity(), size_t(0));
+        QCOMPARE(item.m_ringSequenceId.capacity(), size_t(0));
+        QCOMPARE(item.m_ringTrackToken.capacity(), size_t(0));
+        QVERIFY(item.m_trackColumnToSeqByToken.isEmpty());
+        QVERIFY(item.m_canvas.isNull());
+        QVERIFY(item.m_rasterTiles.isEmpty());
+        QVERIFY(!item.m_precomputedReady);
+        QCOMPARE(readyChanges.size(), 1);
+        // A window that still draws it drops its node.
+        QCOMPARE(item.updatePaintNode(nullptr, nullptr), nullptr);
+
+        // Columns go on arriving; a gapless successor's, then the same
+        // track's again, as Repeat-One plays it.
+        item.feedPrecomputedChunk(QByteArray(50 * bins, '\x70'), bins, 0, 50,
+            100, 1000, 48000, 1024, false, false, 1, false, 1);
+        item.feedPrecomputedChunk(QByteArray(50 * bins, '\x70'), bins, 0, 50,
+            0, 1000, 48000, 1024, false, false, 2, false, 1);
+        item.feedPrecomputedChunk(QByteArray(), bins, 0, 0,
+            0, 1000, 48000, 1024, false, true, 3, true, 2);
+        item.feedPrecomputedChunk(QByteArray(50 * bins, '\x70'), bins, 0, 50,
+            0, 1000, 48000, 1024, false, false, 3, false, 2);
+        QCOMPARE(item.m_ring.committedBytes(), qint64(0));
+        QCOMPARE(item.m_ringCapacity, 0);
+        QVERIFY(item.m_canvas.isNull());
+        QCOMPARE(columnsNeeded.size(), 0);
+
         item.setVisible(true);
-        QVERIFY(!item.m_animationTickInitialized);
+        QCOMPARE(columnsNeeded.size(), 1);
+        // Columns of a session older than the fresh one, still on their way.
+        item.feedPrecomputedChunk(QByteArray(50 * bins, '\x70'), bins, 0, 50,
+            50, 1000, 48000, 1024, false, false, 3, false, 2);
+        QCOMPARE(item.m_ring.committedBytes(), qint64(0));
+        QVERIFY(!item.m_precomputedReady);
+
+        // The fresh session: its reset, then the playhead's columns.
+        item.feedPrecomputedChunk(QByteArray(), bins, 0, 0,
+            200, 1000, 48000, 1024, false, true, 3, true, 3);
+        item.feedPrecomputedChunk(QByteArray(100 * bins, '\xF0'), bins, 0, 100,
+            200, 1000, 48000, 1024, false, false, 3, false, 3);
+        QVERIFY(item.m_ring.committedBytes() > 0);
+        QVERIFY(item.m_precomputedReady);
+        QCOMPARE(readyChanges.size(), 2);
+        QCOMPARE(item.m_precomputedCommittedGeneration, quint64(3));
+        if (mode == 0) {
+            // Rolling history starts with the fresh session's columns.
+            QCOMPARE(item.m_ringOldestSeq, qint64(0));
+            QCOMPARE(item.m_ringWriteSeq, qint64(100));
+            QCOMPARE(item.ringColumnLocked(0, true)[0], quint8(0xF0));
+        } else {
+            QCOMPARE(item.ringColumnLocked(200, false)[0], quint8(0xF0));
+            QVERIFY(item.ringColumnLocked(199, false) == nullptr);
+        }
         {
             QMutexLocker lock(&item.m_stateMutex);
-            rebuildCanvasNow(item, 100, 10, 1, 100, false);
+            item.ensureMapping(10);
+            if (mode == 0) {
+                rebuildCanvasNow(item, 100, 10, 0, 99, true);
+            } else {
+                rebuildCanvasNow(item, 100, 10, 200, 299, false);
+            }
         }
-        QVERIFY(item.m_canvas != before);
-        QVERIFY(!item.m_precomputedCanvasDirty);
+        QVERIFY(!item.m_canvas.isNull());
+        QVERIFY(item.m_canvas.pixel(50, 5) != qRgb(0, 0, 0));
+        QCOMPARE(columnsNeeded.size(), 1);
     }
+}
+
+void SpectrogramSmokeTest::spectrogramOffScreenReleasesItsColumnsOnlyAfterTheGrace() {
+    // A brief unexposure, such as a desktop switch, releases nothing; a
+    // window that stays off screen, such as a minimized one, releases its
+    // panes' columns once its grace ends, and asks for them when back.
+    QQuickWindow window;
+    window.resize(400, 100);
+    presentWithoutDrawing(window);
+    TestTime time;
+    // The window does not draw it; the test does.
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareScrollingPlayback(item, time, 1);
+    QSGNode *node = paintSettled(item, nullptr);
+    QVERIFY(node != nullptr);
+    QVERIFY(!item.m_canvas.isNull());
+    const qint64 committed = item.m_ring.committedBytes();
+    QVERIFY(committed > 0);
+    QSignalSpy columnsNeeded(&item, &SpectrogramItem::columnsNeeded);
+
+    setTestExposed(window, false);
+    QVERIFY(WindowPresence::of(&window)->shown());
+    QCOMPARE(item.m_ring.committedBytes(), committed);
+    QVERIFY(!item.m_canvas.isNull());
+    setTestExposed(window, true);
+    QCOMPARE(item.m_ring.committedBytes(), committed);
+    QCOMPARE(columnsNeeded.size(), 0);
+
+    setTestExposed(window, false);
+    endTestUnexposedGrace(window);
+    QCOMPARE(item.m_ring.committedBytes(), qint64(0));
+    QVERIFY(item.m_canvas.isNull());
+    QCOMPARE(item.updatePaintNode(node, nullptr), nullptr);
+    node = nullptr;
+    feedColumnStripes(item, 2);
+    QCOMPARE(item.m_ring.committedBytes(), qint64(0));
+
+    setTestExposed(window, true);
+    QCOMPARE(columnsNeeded.size(), 1);
+    feedColumnStripes(item, 3);
+    QCOMPARE(item.m_ring.committedBytes(), committed);
+    node = paintSettled(item, nullptr);
+    QVERIFY(!item.m_canvas.isNull());
+
+    // Moved into a window off screen, as the panes are into the viewer's
+    // window before it is shown, it releases them too.
+    QQuickWindow offScreen;
+    offScreen.resize(400, 100);
+    presentWithoutDrawing(offScreen);
+    setTestExposed(offScreen, false);
+    endTestUnexposedGrace(offScreen);
+    item.setParentItem(offScreen.contentItem());
+    QCOMPARE(item.m_ring.committedBytes(), qint64(0));
+    QVERIFY(item.m_canvas.isNull());
+    item.setParentItem(window.contentItem());
+    QCOMPARE(columnsNeeded.size(), 2);
+    delete &item;
+    delete node;
 }
 
 void SpectrogramSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset() {

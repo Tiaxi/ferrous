@@ -336,6 +336,9 @@ signals:
     void zoomResetRequested();
     void backendZoomRequested(float zoomLevel);
     void spectrogramWidthChanged(int width);
+    // Shown again after it released its columns: it shows nothing until a
+    // fresh analysis session sends them again (see releaseStorageLocked).
+    void columnsNeeded();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -552,6 +555,14 @@ private:
     bool showsPlaybackFrames() const;
     // Its window came on screen or left it.
     void windowPresenceChanged();
+    // Releases its columns and canvas when it stops being shown, and asks
+    // for them again when it is shown again.
+    void updateStorageRetention();
+    // Frees the ring and the canvas: nothing can use them while no one sees
+    // the pane, and showing it again starts a fresh analysis session, which
+    // clears them anyway. Until a reset of that session arrives, it takes
+    // no columns.
+    void releaseStorageLocked();
     // What a data chunk could change of a frame besides its columns.
     struct ShownDataState {
         int totalColumnsEstimate{0};
@@ -686,6 +697,10 @@ private:
     QMetaObject::Connection m_windowVisibilityConnection;
     QPointer<WindowPresence> m_windowPresence;
     QMetaObject::Connection m_windowPresenceConnection;
+
+    // Its ring and canvas are released while it is not shown, and it
+    // takes no columns then.
+    bool m_storageReleased{false};
 
     // Ring-buffer spectrogram storage.
     SpectrogramRingStorage m_ring;    // capacity columns of bins_per_column bytes

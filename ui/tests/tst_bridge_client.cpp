@@ -230,6 +230,9 @@ private slots:
     void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void spectrogramActivityStopsForAWindowOffScreen();
+    void spectrogramPanesOffScreenReleaseColumnsWhileShownPanesKeepThem();
+    void spectrogramTrackChangeWhileNoPaneIsShownAllocatesNoRings_data();
+    void spectrogramTrackChangeWhileNoPaneIsShownAllocatesNoRings();
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
     void tagEditorRenamesThroughTheBridgeGate();
@@ -501,6 +504,182 @@ void BridgeClientTest::spectrogramActivityStopsForAWindowOffScreen() {
     QTRY_VERIFY(!client.m_spectrogramActive);
     QVERIFY(!presence->m_unexposedGrace.isActive());
     client.unregisterSpectrogramItem(&view);
+}
+
+namespace {
+
+// A frame of `columns` columns for `channels` channels from track column
+// `start`: a session's reset when `reset`, which clears the history.
+QByteArray spectrogramFrame(
+    int channels, int columns, int start, quint64 trackToken, quint64 generation, bool reset) {
+    QByteArray frame = makePrecomputedFrame(16, channels, columns, start, 10'000, trackToken, generation);
+    frame[45] = reset ? 1 : 0;
+    frame[46] = reset ? 1 : 0;
+    return frame;
+}
+
+QByteArray spectrogramActiveCommand(bool active) {
+    return BinaryBridgeCodec::encodeCommandU8(BinaryBridgeCodec::CmdSetSpectrogramActive, active ? 1 : 0);
+}
+
+} // namespace
+
+void BridgeClientTest::spectrogramPanesOffScreenReleaseColumnsWhileShownPanesKeepThem() {
+    // The main window minimized while the fullscreen viewer shows: the
+    // viewer's panes keep their columns, and the main window's free theirs
+    // and take none of those that go on arriving, across a gapless
+    // successor and Repeat-One too. Back on screen, they ask for a fresh
+    // session, which analysis, kept on by the viewer, restarts for.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QQuickWindow main;
+    QQuickWindow viewer;
+    main.resize(320, 100);
+    viewer.resize(320, 100);
+    SpectrogramItem mainPane(main.contentItem());
+    SpectrogramItem viewerPane(viewer.contentItem());
+    for (SpectrogramItem *pane : {&mainPane, &viewerPane}) {
+        pane->setWidth(320);
+        pane->setHeight(100);
+        pane->setDisplayMode(1);
+    }
+    client.registerSpectrogramItem(&mainPane, 0);
+    client.registerSpectrogramItem(&viewerPane, 1);
+    main.show();
+    viewer.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&main));
+    QVERIFY(QTest::qWaitForWindowExposed(&viewer));
+    QTRY_VERIFY(client.m_spectrogramActive);
+    const auto feed = [&client](int columns, int start, quint64 token, quint64 generation, bool reset) {
+        QVERIFY(client.parsePrecomputedSpectrogramFrame(
+            spectrogramFrame(2, columns, start, token, generation, reset)).valid);
+    };
+    feed(40, 0, 1, 1, true);
+    QVERIFY(mainPane.m_ring.committedBytes() > 0);
+    QVERIFY(viewerPane.m_ring.committedBytes() > 0);
+
+    main.setVisibility(QWindow::Minimized);
+    QTRY_VERIFY(mainPane.m_storageReleased);
+    QCOMPARE(mainPane.m_ring.committedBytes(), qint64(0));
+    QCOMPARE(mainPane.m_ringCapacity, 0);
+    QVERIFY(mainPane.m_canvas.isNull());
+    QVERIFY(!viewerPane.m_storageReleased);
+    QCoreApplication::processEvents();
+    QVERIFY(client.m_spectrogramActive);
+    sent.clear();
+
+    feed(40, 40, 1, 1, false);
+    // A gapless successor, then the same file again, as Repeat-One plays it.
+    feed(40, 0, 2, 1, false);
+    feed(40, 0, 3, 2, true);
+    QCOMPARE(mainPane.m_ring.committedBytes(), qint64(0));
+    QCOMPARE(mainPane.m_ringCapacity, 0);
+    QVERIFY(viewerPane.m_ring.committedBytes() > 0);
+    QCOMPARE(viewerPane.m_precomputedTrackToken, quint64(3));
+    QVERIFY(sent.isEmpty());
+
+    main.showNormal();
+    QVERIFY(QTest::qWaitForWindowExposed(&main));
+    QTRY_VERIFY(!mainPane.m_storageReleased);
+    QTRY_COMPARE(sent.size(), 2);
+    QCOMPARE(sent.at(0), spectrogramActiveCommand(false));
+    QCOMPARE(sent.at(1), spectrogramActiveCommand(true));
+    QVERIFY(client.m_spectrogramActive);
+    // The restarted session's columns, not those of the one before it.
+    feed(40, 40, 3, 2, false);
+    QCOMPARE(mainPane.m_ring.committedBytes(), qint64(0));
+    feed(40, 100, 3, 3, true);
+    QVERIFY(mainPane.m_ring.committedBytes() > 0);
+    QCOMPARE(mainPane.m_precomputedCommittedGeneration, quint64(3));
+    QCOMPARE(mainPane.ringColumnLocked(100, false)[0], quint8(0x11));
+    QCOMPARE(viewerPane.ringColumnLocked(100, false)[0], quint8(0x77));
+    QCoreApplication::processEvents();
+    QCOMPARE(sent.size(), 2);
+    client.unregisterSpectrogramItem(&mainPane);
+    client.unregisterSpectrogramItem(&viewerPane);
+}
+
+void BridgeClientTest::spectrogramTrackChangeWhileNoPaneIsShownAllocatesNoRings_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("rolling") << 0;
+    QTest::newRow("centered") << 1;
+}
+
+void BridgeClientTest::spectrogramTrackChangeWhileNoPaneIsShownAllocatesNoRings() {
+    // Behind the waveform view, no pane takes columns: not those still on
+    // their way when analysis stops, nor a gapless successor's or Repeat-
+    // One's. Shown again, analysis starts a fresh session once, which
+    // fills them.
+    QFETCH(int, mode);
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QQuickWindow window;
+    window.resize(320, 200);
+    QQuickItem surface(window.contentItem());
+    SpectrogramItem left(&surface);
+    SpectrogramItem right(&surface);
+    for (SpectrogramItem *pane : {&left, &right}) {
+        pane->setWidth(320);
+        pane->setHeight(100);
+        pane->setDisplayMode(mode);
+    }
+    client.registerSpectrogramItem(&left, 0);
+    client.registerSpectrogramItem(&right, 1);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_VERIFY(client.m_spectrogramActive);
+    const auto feed = [&client](int columns, int start, quint64 token, quint64 generation, bool reset) {
+        QVERIFY(client.parsePrecomputedSpectrogramFrame(
+            spectrogramFrame(2, columns, start, token, generation, reset)).valid);
+    };
+    feed(40, 0, 1, 1, true);
+    QVERIFY(left.m_ring.committedBytes() > 0);
+    QVERIFY(right.m_ring.committedBytes() > 0);
+
+    surface.setVisible(false);
+    QCOMPARE(left.m_ring.committedBytes(), qint64(0));
+    QCOMPARE(right.m_ring.committedBytes(), qint64(0));
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    sent.clear();
+    feed(40, 40, 1, 1, false);
+    feed(40, 0, 2, 1, false);
+    feed(40, 0, 3, 2, true);
+    for (SpectrogramItem *pane : {&left, &right}) {
+        QCOMPARE(pane->m_ring.committedBytes(), qint64(0));
+        QCOMPARE(pane->m_ringCapacity, 0);
+        QVERIFY(pane->m_ringColumnId.empty());
+        QVERIFY(pane->m_canvas.isNull());
+    }
+
+    surface.setVisible(true);
+    QTRY_VERIFY(client.m_spectrogramActive);
+    QCoreApplication::processEvents();
+    QCOMPARE(sent, QList<QByteArray>{spectrogramActiveCommand(true)});
+    feed(40, 200, 3, 3, true);
+    for (SpectrogramItem *pane : {&left, &right}) {
+        QVERIFY(pane->m_ring.committedBytes() > 0);
+        QVERIFY(pane->m_precomputedReady);
+        QCOMPARE(pane->m_precomputedTrackToken, quint64(3));
+    }
+    if (mode == 0) {
+        QCOMPARE(left.m_ringWriteSeq, qint64(40));
+        QCOMPARE(left.ringColumnLocked(0, true)[0], quint8(0x11));
+    } else {
+        QCOMPARE(left.ringColumnLocked(200, false)[0], quint8(0x11));
+        QCOMPARE(right.ringColumnLocked(239, false)[0], quint8(0x77));
+    }
+    client.unregisterSpectrogramItem(&left);
+    client.unregisterSpectrogramItem(&right);
 }
 
 void BridgeClientTest::tagJobsKeepUiResponsiveAndDiscardClosedLoads() {

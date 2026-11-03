@@ -570,6 +570,7 @@ private:
         QMetaObject::Connection visibilityConnection{};
         QMetaObject::Connection windowConnection{};
         QMetaObject::Connection destructionConnection{};
+        QMetaObject::Connection columnsConnection{};
     };
 
     void scheduleSpectrogramActivityUpdate();
@@ -910,6 +911,9 @@ private:
     QSet<QQuickWindow *> m_spectrogramWindows;
     bool m_spectrogramActivityPending{false};
     bool m_spectrogramActive{true};
+    // A pane shown again after it released its columns waits for a fresh
+    // analysis session; see updateSpectrogramActivity.
+    bool m_spectrogramColumnsNeeded{false};
     std::thread m_searchApplyThread;
     mutable std::mutex m_searchApplyMutex;
     std::condition_variable m_searchApplyCv;
