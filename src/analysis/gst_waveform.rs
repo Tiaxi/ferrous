@@ -9,7 +9,6 @@ use gstreamer as gst;
 use super::cache::WaveformSourceStamp;
 use super::decoders::{
     raw_surround_duration_ns, start_gstreamer_decode, AudioRead, AudioTimeline, GstDecode,
-    RateChanges,
 };
 use super::fft::{OverviewProgress, WaveformAccumulator};
 use super::track_io::stamp_of;
@@ -50,7 +49,7 @@ fn start_overview_decode(
     test_hooks::source_built();
     // The peaks of a stream whose rate changes mid-stream stay on one time
     // line, and are exact where the rate is the one it started at.
-    let decode = start_gstreamer_decode(path, pipeline, &src, RateChanges::ResampleToFirst)?;
+    let decode = start_gstreamer_decode(path, pipeline, &src)?;
     Ok((decode, file_source))
 }
 

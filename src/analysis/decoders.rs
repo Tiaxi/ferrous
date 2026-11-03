@@ -549,7 +549,8 @@ fn read_gstreamer_frames(
                 )
             });
     if let Some(rate) = rate.filter(|&rate| rate != sample_rate) {
-        // Columns are laid out at the rate the session planned for.
+        // Columns are laid out at the rate the session planned for, which
+        // `start_gstreamer_decode` pins its output to.
         anyhow::bail!("the sample rate changes from {sample_rate} Hz to {rate} Hz mid-stream");
     }
     let channels = channels.unwrap_or(native_channels);
@@ -756,7 +757,7 @@ fn open_gstreamer_pipeline(
     src.set_property("location", path.to_string_lossy().to_string());
     filter_raw_surround_source(&src);
 
-    let decode = start_gstreamer_decode(path, pipeline, &src, RateChanges::Report).ok()?;
+    let decode = start_gstreamer_decode(path, pipeline, &src).ok()?;
     // The parser of a raw AC3/DTS file has seen too few frames to tell its
     // duration yet.
     let duration_ns = decode
@@ -765,20 +766,6 @@ fn open_gstreamer_pipeline(
     let total_frames = duration_ns.map(|ns| ns * decode.sample_rate / 1_000_000_000);
     let length = TrackLength::of_frames(total_frames, decode.sample_rate);
     Some((decode.source, decode.sample_rate, decode.channels, length))
-}
-
-/// What a `GStreamer` decode does where the sample rate of its stream
-/// changes mid-stream, as a DTS 96/24 stream's does where its decoder falls
-/// back to the 48 kHz core of a damaged frame.
-#[cfg(feature = "gst")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RateChanges {
-    /// Pass the audio on at its new rate, which the reader reports as an
-    /// error: analysis lays out its columns at one rate.
-    Report,
-    /// Resample the audio at another rate to the rate the stream started
-    /// at. The resampler passes audio at that rate through untouched.
-    ResampleToFirst,
 }
 
 /// A `GStreamer` decode that [`start_gstreamer_decode`] started.
@@ -792,12 +779,17 @@ pub(super) struct GstDecode {
 }
 
 /// Start decoding what `src`, a source of the file at `path`, reads, at the
-/// stream's own rate:
-/// `src → decodebin → audioconvert → capsfilter(F32LE) → appsink(sync=false)`.
+/// rate the stream starts at:
+/// `src → decodebin → audioconvert → audioresample → capsfilter(F32LE) →
+/// appsink(sync=false)`.
 ///
-/// Nothing is resampled at the stream's own rate: the spectrogram needs it
-/// for its frequency resolution, and the overview every sample for its
-/// peaks. `rate_changes` tells what happens where that rate changes.
+/// Nothing is resampled at that rate: the resampler passes the audio
+/// through untouched, as the spectrogram needs it for its frequency
+/// resolution and the overview every sample for its peaks. Where the
+/// stream's rate changes mid-stream, as a DTS 96/24 stream's does where its
+/// decoder falls back to the 48 kHz core of a damaged frame, the resampler
+/// converts the audio at the other rate to it, so the decode keeps one rate
+/// and one timeline: analysis lays out its columns at one rate.
 /// Connect what `pipeline` needs before it starts, such as the AC3
 /// concealment, before calling this. On failure, the pipeline is stopped.
 #[cfg(feature = "gst")]
@@ -805,7 +797,6 @@ pub(super) fn start_gstreamer_decode(
     path: &Path,
     pipeline: gst::Pipeline,
     src: &gst::Element,
-    rate_changes: RateChanges,
 ) -> anyhow::Result<GstDecode> {
     let shutdown = super::gst_lifecycle::PipelineShutdown::new(&pipeline);
     let element = |name: &str| {
@@ -815,6 +806,7 @@ pub(super) fn start_gstreamer_decode(
     };
     let decodebin = element("decodebin")?;
     let conv = element("audioconvert")?;
+    let resample = element("audioresample")?;
     let capsfilter = element("capsfilter")?;
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
@@ -824,15 +816,16 @@ pub(super) fn start_gstreamer_decode(
 
     let appsink = analysis_decode_sink();
 
-    pipeline.add_many([src, &decodebin, &conv, &capsfilter, appsink.upcast_ref()])?;
+    pipeline.add_many([
+        src,
+        &decodebin,
+        &conv,
+        &resample,
+        &capsfilter,
+        appsink.upcast_ref(),
+    ])?;
     src.link(&decodebin)?;
-    if rate_changes == RateChanges::ResampleToFirst {
-        let resample = element("audioresample")?;
-        pipeline.add(&resample)?;
-        gst::Element::link_many([&conv, &resample, &capsfilter, appsink.upcast_ref()])?;
-    } else {
-        gst::Element::link_many([&conv, &capsfilter, appsink.upcast_ref()])?;
-    }
+    gst::Element::link_many([&conv, &resample, &capsfilter, appsink.upcast_ref()])?;
 
     // Dynamic pad linking for decodebin → audioconvert.
     let conv_sink_pad = conv
@@ -884,15 +877,13 @@ pub(super) fn start_gstreamer_decode(
     let duration_ns = pipeline
         .query_duration::<gst::ClockTime>()
         .map(gst::ClockTime::nseconds);
-    if rate_changes == RateChanges::ResampleToFirst {
-        // Keep the rate the stream starts at, which it negotiated already.
-        let caps = gst::Caps::builder("audio/x-raw")
-            .field("format", "F32LE")
-            .field("layout", "interleaved")
-            .field("rate", i32::try_from(sample_rate)?)
-            .build();
-        capsfilter.set_property("caps", &caps);
-    }
+    // Keep the rate the stream starts at, which it negotiated already.
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "F32LE")
+        .field("layout", "interleaved")
+        .field("rate", i32::try_from(sample_rate)?)
+        .build();
+    capsfilter.set_property("caps", &caps);
 
     // Transition to PLAYING so the pipeline starts streaming.
     pipeline.set_state(gst::State::Playing)?;
@@ -1226,6 +1217,104 @@ mod tests {
             .set_state(gst::State::Null)
             .expect("cancel parked decoder");
         assert_eq!(pipeline.current_state(), gst::State::Null);
+    }
+
+    /// Where the rate of a stream changes mid-stream, as libav's DTS 96/24
+    /// decoder switches between 96 and 48 kHz on contiguous timestamps, the
+    /// decode converts the audio at the other rate to the rate the stream
+    /// started at, on the stream's timeline: an impulse in each second
+    /// lands on its frame, also in the second at 48 kHz, and the audio at
+    /// 96 kHz is passed on untouched.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_decode_converts_a_stretch_at_another_rate_on_the_stream_timeline() {
+        const RATE: usize = 96_000;
+        // In seconds; each the time of a 48 kHz frame.
+        const IMPULSES: [f64; 6] = [0.2, 0.7125, 1.2, 1.7125, 2.2, 2.7125];
+
+        gst::init().expect("gstreamer initialization");
+        let src = gst_app::AppSrc::builder()
+            .format(gst::Format::Time)
+            // Queue the whole stream: it is pushed before the decode starts.
+            .max_bytes(0)
+            .build();
+        for (part, rate) in [RATE, RATE / 2, RATE].into_iter().enumerate() {
+            src.set_caps(Some(
+                &gst::Caps::builder("audio/x-raw")
+                    .field("format", "F32LE")
+                    .field("layout", "interleaved")
+                    .field("channels", 1)
+                    .field("rate", i32::try_from(rate).expect("rate"))
+                    .build(),
+            ));
+            // Buffers of 10 ms.
+            for block in 0..100_u32 {
+                let start =
+                    f64::from(u32::try_from(part).expect("part")) + f64::from(block) / 100.0;
+                let mut samples = vec![0.0_f32; rate / 100];
+                for &impulse in &IMPULSES {
+                    let offset = ((impulse - start) * rate as f64).round();
+                    if (0.0..samples.len() as f64).contains(&offset) {
+                        samples[offset as usize] = 1.0;
+                    }
+                }
+                let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+                let mut buffer = gst::Buffer::from_mut_slice(bytes);
+                let buffer_ref = buffer.get_mut().expect("writable buffer");
+                buffer_ref.set_pts(gst::ClockTime::from_nseconds(f64_to_u64_saturating(
+                    start * 1e9,
+                )));
+                buffer_ref.set_duration(gst::ClockTime::from_mseconds(10));
+                src.push_buffer(buffer).expect("queue buffer");
+            }
+        }
+        src.end_of_stream().expect("queue EOF");
+
+        let decode = start_gstreamer_decode(
+            Path::new("rate-change.raw"),
+            gst::Pipeline::new(),
+            src.upcast_ref(),
+        )
+        .expect("start decode");
+        assert_eq!(decode.sample_rate, 96_000);
+        let mut source = decode.source;
+        let mut timeline = AudioTimeline::new(0);
+        let mut samples = Vec::new();
+        loop {
+            match timeline.read(|| source.next_frames()).expect("decode") {
+                AudioRead::Frames(audio) => {
+                    assert_eq!(audio.first_frame, usize_to_u64(samples.len()));
+                    samples.extend_from_slice(&audio.samples);
+                }
+                AudioRead::Pending => {}
+                AudioRead::Eof => break,
+            }
+        }
+        assert!(
+            samples.len().abs_diff(3 * RATE) <= 1,
+            "{} frames",
+            samples.len()
+        );
+        for impulse in IMPULSES {
+            let frame = (impulse * RATE as f64).round() as usize;
+            let loudest = (frame - 100..frame + 100)
+                .max_by(|&a, &b| samples[a].abs().total_cmp(&samples[b].abs()))
+                .expect("frames");
+            assert_eq!(loudest, frame, "the impulse at {impulse} s");
+            if (1.0..2.0).contains(&impulse) {
+                assert!(samples[frame] > 0.5, "{}", samples[frame]);
+            }
+        }
+        // Untouched at 96 kHz: nothing but the impulses.
+        for (frame, &sample) in samples.iter().enumerate() {
+            let seconds = frame as f64 / RATE as f64;
+            if !(1.0..2.0).contains(&seconds) {
+                let impulse = IMPULSES
+                    .iter()
+                    .any(|&t| (t * RATE as f64).round() as usize == frame);
+                assert_eq!(sample, if impulse { 1.0 } else { 0.0 }, "frame {frame}");
+            }
+        }
     }
 
     #[test]
