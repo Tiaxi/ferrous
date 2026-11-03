@@ -703,7 +703,8 @@ private:
     static QString detectFileBrowserNameHeuristic();
     static QString detectFileBrowserName();
     // What `program` prints, trimmed, or nothing when it fails or takes
-    // longer than `timeoutMs`; then it is killed and waited for.
+    // longer than `timeoutMs`; then it is killed and waited for, up to a
+    // second.
     static QString runQuery(const QString &program, const QStringList &arguments, int timeoutMs);
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     // Returns whether the bridge took the command.

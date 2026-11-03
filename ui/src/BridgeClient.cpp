@@ -5058,10 +5058,13 @@ QString BridgeClient::runQuery(const QString &program, const QStringList &argume
         return QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
     }
     // Ended before it is destroyed: a QProcess destroyed while its process
-    // runs kills it with a warning.
+    // runs kills it with a warning. A killed process ends at once, so the
+    // wait for it is short; together, the query takes at most a second more
+    // than its time. Killing xdg-mime, a shell script, may leave the helpers
+    // it started running until they finish; they only print what they find.
     if (proc.state() != QProcess::NotRunning) {
         proc.kill();
-        proc.waitForFinished();
+        proc.waitForFinished(1000);
     }
     return {};
 }

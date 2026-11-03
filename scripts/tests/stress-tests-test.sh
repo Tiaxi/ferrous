@@ -25,11 +25,25 @@ bin="${WORK_DIR}/bin"
 mkdir -p "${repo}/scripts" "${bin}"
 cp "${SCRIPT_DIR}/../stress-tests.sh" "${SCRIPT_DIR}/../load-build-env.sh" "${repo}/scripts/"
 
-# Records each run's arguments and directories; fails when FAKE_CARGO_FAIL
-# is set, as a test binary with a failed test does.
+# The stand-in load says it runs, once its stop handler is in place, by
+# writing to this pipe, which the stand-in cargo of the loaded run reads
+# before it ends: the run then overlaps the load, and stopping the load
+# finds the handler.
+mkfifo "${WORK_DIR}/load-ready"
+
+# Records each run's arguments and directories, and whether the load runs;
+# waits for the load in run FAKE_LOADED_CALL; fails when FAKE_CARGO_FAIL is
+# set, as a test binary with a failed test does.
 cat >"${bin}/cargo" <<'SH'
 #!/usr/bin/env bash
-echo "args=$* tmp=${TMPDIR} config=${XDG_CONFIG_HOME}" >>"${STUB_LOG}"
+call=$(($(grep -c '^args=' "${STUB_LOG}") + 1))
+if [[ "${call}" == "${FAKE_LOADED_CALL:-}" ]]; then
+    # Bounded only so that a script that never starts the load fails.
+    timeout 60 cat "${STUB_DIR}/load-ready" >/dev/null || exit 70
+fi
+load=off
+[[ -e "${STUB_DIR}/load-running" ]] && load=on
+echo "args=$* tmp=${TMPDIR} config=${XDG_CONFIG_HOME} load=${load}" >>"${STUB_LOG}"
 if [[ -n "${FAKE_CARGO_FAIL:-}" ]]; then
     echo "test some::module::a_test ... FAILED"
     exit 101
@@ -39,14 +53,25 @@ SH
 # Runs until it is stopped, and says so.
 cat >"${bin}/stress-ng" <<'SH'
 #!/usr/bin/env bash
+idle=""
+stopped() {
+    [[ -n "${idle}" ]] && kill "${idle}" 2>/dev/null
+    rm -f "${STUB_DIR}/load-running"
+    echo "load stopped $*" >>"${STUB_LOG}"
+    exit 0
+}
+trap 'stopped' TERM
+echo "${$}" >"${STUB_DIR}/load-running"
 echo "load started $*" >>"${STUB_LOG}"
-trap 'echo "load stopped" >>"${STUB_LOG}"; exit 0' TERM
-while :; do sleep 0.05; done
+echo ready >"${STUB_DIR}/load-ready"
+sleep infinity &
+idle=$!
+wait "${idle}"
 SH
 chmod +x "${bin}/cargo" "${bin}/stress-ng"
 
 stress() {
-    PATH="${bin}:${PATH}" STUB_LOG="${WORK_DIR}/stub.log" \
+    PATH="${bin}:${PATH}" STUB_LOG="${WORK_DIR}/stub.log" STUB_DIR="${WORK_DIR}" \
         FERROUS_STRESS_DIR="${WORK_DIR}/out" \
         bash "${repo}/scripts/stress-tests.sh" --no-build "$@"
 }
@@ -54,7 +79,7 @@ stress() {
 # Three runs of the mock suite: 1 thread, libtest's default, 32 threads,
 # the third under load.
 : >"${WORK_DIR}/stub.log"
-stress --suite mock --runs 3 --load-workers 2 >"${WORK_DIR}/pass.out" 2>&1 \
+FAKE_LOADED_CALL=3 stress --suite mock --runs 3 --load-workers 2 >"${WORK_DIR}/pass.out" 2>&1 \
     || fail "passing runs failed: $(cat "${WORK_DIR}/pass.out")"
 summary="${WORK_DIR}/out/summary.txt"
 [[ "$(grep -c '^PASS mock run' "${summary}")" -eq 3 ]] || fail "summary: $(cat "${summary}")"
@@ -71,12 +96,16 @@ mapfile -t calls < <(grep '^args=' "${WORK_DIR}/stub.log")
 [[ "${calls[0]}" == *"tmp=${WORK_DIR}/out/state."*"/run/tmp config=${WORK_DIR}/out/state."* ]] \
     || fail "run directories: ${calls[0]}"
 compgen -G "${WORK_DIR}/out/state.*" >/dev/null && fail "the state directory was left behind"
-# The load ran during the third run only, and was stopped with it.
+# The load ran during the third run only, and was stopped with it: the
+# third run saw it, after the handshake, and it was gone before the script
+# ended.
+[[ "${calls[0]}" == *" load=off" && "${calls[1]}" == *" load=off" ]] \
+    || fail "load during the first runs: ${calls[*]}"
+[[ "${calls[2]}" == *" load=on" ]] || fail "no load during the third run: ${calls[2]}"
 [[ "$(grep -c '^load started --quiet --cpu 2$' "${WORK_DIR}/stub.log")" -eq 1 ]] \
     || fail "load: $(cat "${WORK_DIR}/stub.log")"
-grep -q '^load stopped$' "${WORK_DIR}/stub.log" || fail "the load was not stopped"
-[[ "$(grep -n '' "${WORK_DIR}/stub.log" | grep -m1 'load started' | cut -d: -f1)" -eq 3 ]] \
-    || fail "the load did not start with the third run: $(cat "${WORK_DIR}/stub.log")"
+grep -q '^load stopped' "${WORK_DIR}/stub.log" || fail "the load was not stopped"
+[[ ! -e "${WORK_DIR}/load-running" ]] || fail "the load still runs"
 [[ -f "${WORK_DIR}/out/mock-3.log" ]] || fail "no log of run 3"
 
 # A failed run fails the script and names the test; --first continues the
