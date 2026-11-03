@@ -281,6 +281,8 @@ private slots:
     void snapshotWorkerDropsPacketsOfAnEarlierGeneration();
     void droppedQueueRowsAreFreedOnTheWorker();
     void largeSnapshotsApplyFromTheWorkerInOrder();
+    void libraryTreesWaitForTheWorkerSnapshotsBeforeThem();
+    void libraryTreesBehindWorkerSnapshotsDoNotSpinTheWakeUp();
     void realBridgeQueueEditsArriveAsRowSignals();
     void aSelectionFollowsAQueueChangeMadeBeforeItsEcho();
     void aRestoredRowSelectedOnUndoStaysSelected();
@@ -3307,9 +3309,9 @@ void BridgeClientTest::largeSnapshotsApplyFromTheWorkerInOrder() {
 
     // The small edit follows the large queue to the worker and applies
     // after it, so it fits the rows.
-    client.m_snapshotWorker->submit(full);
+    client.submitWorkerSnapshot(full);
     QVERIFY(client.workerSnapshotsPending());
-    client.m_snapshotWorker->submit(insert);
+    client.submitWorkerSnapshot(insert);
     QTRY_VERIFY(!client.workerSnapshotsPending());
     QTRY_COMPARE(client.queueLength(), kRows + 2);
     QCOMPARE(client.m_queueRevision, quint64(2));
@@ -3324,19 +3326,104 @@ void BridgeClientTest::largeSnapshotsApplyFromTheWorkerInOrder() {
     QSignalSpy errors(&client, &BridgeClient::bridgeError);
     QByteArray broken = fullQueuePacket(3, kRows);
     broken.chop(1);
-    client.m_snapshotWorker->submit(broken);
+    client.submitWorkerSnapshot(broken);
     QTRY_COMPARE(errors.count(), 1);
     QVERIFY(errors.at(0).at(0).toString().contains(QStringLiteral("invalid bridge packet")));
     QCOMPARE(client.m_queueRevision, quint64(2));
 
     // A packet of an earlier generation is not applied.
-    client.m_snapshotWorker->submit(fullQueuePacket(3, kRows));
+    client.submitWorkerSnapshot(fullQueuePacket(3, kRows));
     client.m_snapshotWorker->invalidate();
     QVERIFY(!client.workerSnapshotsPending());
     QTest::qWait(100);
     QCoreApplication::processEvents();
     QCOMPARE(client.m_queueRevision, quint64(2));
     QCOMPARE(client.queueLength(), kRows + 2);
+}
+
+void BridgeClientTest::libraryTreesWaitForTheWorkerSnapshotsBeforeThem() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QStringList order;
+    connect(model, &QAbstractItemModel::modelReset, &client, [&]() {
+        order.push_back(QStringLiteral("queue %1").arg(client.m_queueRevision + 1));
+    });
+    connect(&client, &BridgeClient::libraryTreeFrameReceived, &client, [&](int version, const QByteArray &) {
+        order.push_back(QStringLiteral("tree %1").arg(version));
+    });
+    // As the drain defers them: a tree after the first snapshot, two after
+    // the second, and none waits for a snapshot after it.
+    constexpr int kRows = 6000;
+    client.submitWorkerSnapshot(fullQueuePacket(1, kRows));
+    client.m_deferredTreeFrames.push_back({1, QByteArray("a"), client.m_workerSnapshotsSubmitted});
+    client.submitWorkerSnapshot(fullQueuePacket(2, kRows + 1));
+    client.m_deferredTreeFrames.push_back({2, QByteArray("b"), client.m_workerSnapshotsSubmitted});
+    client.m_deferredTreeFrames.push_back({3, QByteArray("c"), client.m_workerSnapshotsSubmitted});
+    // Both snapshots may come out of the worker together.
+    QTRY_VERIFY(!client.workerSnapshotsPending());
+    QTRY_VERIFY(client.m_deferredTreeFrames.empty());
+    QCOMPARE(order, (QStringList{QStringLiteral("queue 1"), QStringLiteral("tree 1"),
+                                 QStringLiteral("queue 2"), QStringLiteral("tree 2"),
+                                 QStringLiteral("tree 3")}));
+    QCOMPARE(client.libraryVersion(), 3);
+
+    // Trees still wait after a generation is dropped, until nothing is
+    // pending; then they apply.
+    client.submitWorkerSnapshot(fullQueuePacket(3, kRows));
+    client.m_deferredTreeFrames.push_back({4, QByteArray("d"), client.m_workerSnapshotsSubmitted});
+    client.m_snapshotWorker->invalidate();
+    client.applyWorkerSnapshots();
+    QVERIFY(client.m_deferredTreeFrames.empty());
+    QCOMPARE(client.libraryVersion(), 4);
+}
+
+void BridgeClientTest::libraryTreesBehindWorkerSnapshotsDoNotSpinTheWakeUp() {
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    BridgeClient bridge;
+    QVERIFY(bridge.m_ffiBridge != nullptr);
+    QVERIFY(bridge.m_bridgeWakeNotifier != nullptr);
+    // A worker whose results wait until the test applies them, which keeps
+    // its snapshot pending while the bridge runs.
+    bridge.m_snapshotWorker->stop();
+    bridge.m_snapshotWorker = std::make_unique<QueueSnapshotWorker>([]() {});
+    bridge.m_queueRowsModel.setRowReleaser([worker = bridge.m_snapshotWorker.get()](QVector<QueueRowData> &&rows) {
+        worker->release(std::move(rows));
+    });
+    QTest::qWait(300);
+
+    auto *model = qobject_cast<QueueRowsModel *>(bridge.queueRows());
+    QStringList order;
+    connect(model, &QAbstractItemModel::modelReset, &bridge, [&]() { order.push_back(QStringLiteral("queue")); });
+    connect(&bridge, &BridgeClient::libraryTreeFrameReceived, &bridge,
+            [&](int, const QByteArray &) { order.push_back(QStringLiteral("tree")); });
+    int wakeUps = 0;
+    connect(bridge.m_bridgeWakeNotifier, &QSocketNotifier::activated, &bridge, [&]() { ++wakeUps; });
+
+    bridge.submitWorkerSnapshot(fullQueuePacket(1, 6000));
+    QVERIFY(bridge.workerSnapshotsPending());
+    // A new library folder makes the bridge send a library tree.
+    bridge.addLibraryRoot(root.path(), QString());
+    // Until the tree is taken, the bridge wakes the client again each time
+    // round the event loop.
+    QTRY_VERIFY_WITH_TIMEOUT(!bridge.m_deferredTreeFrames.empty() || wakeUps > 1000, 15000);
+    QVERIFY2(!bridge.m_deferredTreeFrames.empty(),
+             qPrintable(QStringLiteral("%1 wake-ups and no tree taken").arg(wakeUps)));
+    // Taken, it wakes the client only for new traffic: a few times.
+    const int wakeUpsBefore = wakeUps;
+    QTest::qWait(300);
+    QVERIFY2(wakeUps - wakeUpsBefore < 30, qPrintable(QString::number(wakeUps - wakeUpsBefore)));
+    QVERIFY2(wakeUps < 100, qPrintable(QString::number(wakeUps)));
+    QVERIFY(order.isEmpty());
+    QVERIFY(bridge.workerSnapshotsPending());
+
+    // Once the snapshot applies, the tree follows it.
+    QTRY_VERIFY((bridge.applyWorkerSnapshots(), !bridge.workerSnapshotsPending()));
+    QVERIFY(bridge.m_deferredTreeFrames.empty());
+    QVERIFY(order.size() >= 2);
+    QCOMPARE(order.first(), QStringLiteral("queue"));
+    QVERIFY(order.contains(QStringLiteral("tree")));
 }
 
 void BridgeClientTest::gaplessAndRepeatOneMoveOnlyThePlayingRow() {

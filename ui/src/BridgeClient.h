@@ -22,6 +22,7 @@
 #include <QVector>
 
 #include <condition_variable>
+#include <deque>
 #include <limits>
 #include <functional>
 #include <memory>
@@ -633,6 +634,10 @@ private:
     // Whether snapshot packets wait in the worker; until they are applied,
     // later packets go there too, and library tree frames wait.
     bool workerSnapshotsPending() const;
+    void submitWorkerSnapshot(QByteArray packet);
+    // Apply the library trees whose snapshots before them were applied, or
+    // with `all`, every one.
+    void applyDeferredTreeFrames(bool all);
     void resetPollChanges();
     void schedulePollChanges();
     void processAnalysisBytes(const QByteArray &chunk);
@@ -702,6 +707,19 @@ private:
     // Decodes large snapshots and frees dropped queue rows off the GUI
     // thread; stopped first when the client goes.
     std::unique_ptr<QueueSnapshotWorker> m_snapshotWorker;
+    // A library tree frame taken while snapshots before it were on the
+    // worker, which waits until the first `afterSnapshots` submitted there
+    // are applied.
+    struct DeferredTreeFrame {
+        int version{0};
+        QByteArray bytes;
+        quint64 afterSnapshots{0};
+    };
+    std::deque<DeferredTreeFrame> m_deferredTreeFrames;
+    // Snapshot packets submitted to the worker, and of those, the ones
+    // applied (or reported as not decoding).
+    quint64 m_workerSnapshotsSubmitted{0};
+    quint64 m_workerSnapshotsApplied{0};
     // The backend's revision of the rows, which commands naming rows carry;
     // 0 while the rows match none.
     quint64 m_queueRevision{0};

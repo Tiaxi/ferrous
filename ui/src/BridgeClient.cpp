@@ -1375,7 +1375,7 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         // the worker; the packets after it follow it there, so that the
         // snapshots apply in their order.
         if (packet.size() >= QueueSnapshotWorker::kMinPacketBytes || workerSnapshotsPending()) {
-            m_snapshotWorker->submit(packet);
+            submitWorkerSnapshot(packet);
             continue;
         }
 
@@ -1396,11 +1396,8 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
     // Apply snapshots before their separately queued tree frame. The library
     // frame signal can synchronously start QML model parsing, so its companion
     // expanded keys and viewport anchor must already be visible to QML.
-    // A tree frame waits for the snapshots before it that the worker
-    // decodes; applyWorkerSnapshots polls again once they are applied.
     constexpr int kMaxTreeFramesPerPass = 4;
-    while (!result.budgetExhausted && !workerSnapshotsPending()
-           && result.processedTreeFrames < kMaxTreeFramesPerPass) {
+    while (!result.budgetExhausted && result.processedTreeFrames < kMaxTreeFramesPerPass) {
         if (markBudgetExhaustedIfNeeded()) {
             break;
         }
@@ -1418,7 +1415,15 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         const int versionInt = version > static_cast<std::uint32_t>(std::numeric_limits<int>::max())
             ? std::numeric_limits<int>::max()
             : static_cast<int>(version);
-        applyLibraryTreeFrame(versionInt, treeBytes);
+        // A tree frame taken while snapshots before it decode on the worker
+        // waits here for them. It is taken all the same: the bridge signals
+        // its wake-up again for as long as a frame is left in its queues.
+        if (workerSnapshotsPending() || !m_deferredTreeFrames.empty()) {
+            m_deferredTreeFrames.push_back(
+                DeferredTreeFrame{versionInt, treeBytes, m_workerSnapshotsSubmitted});
+        } else {
+            applyLibraryTreeFrame(versionInt, treeBytes);
+        }
     }
     result.treeCapSaturated = result.processedTreeFrames >= kMaxTreeFramesPerPass;
 
@@ -1669,28 +1674,44 @@ bool BridgeClient::workerSnapshotsPending() const {
     return m_snapshotWorker->pendingCount() > 0;
 }
 
+void BridgeClient::submitWorkerSnapshot(QByteArray packet) {
+    ++m_workerSnapshotsSubmitted;
+    m_snapshotWorker->submit(std::move(packet));
+}
+
+void BridgeClient::applyDeferredTreeFrames(bool all) {
+    while (!m_deferredTreeFrames.empty()
+           && (all || m_deferredTreeFrames.front().afterSnapshots <= m_workerSnapshotsApplied)) {
+        DeferredTreeFrame frame = std::move(m_deferredTreeFrames.front());
+        m_deferredTreeFrames.pop_front();
+        applyLibraryTreeFrame(frame.version, frame.bytes);
+    }
+}
+
 void BridgeClient::applyWorkerSnapshots() {
     std::vector<QueueSnapshotWorker::Result> ready = m_snapshotWorker->takeReady();
-    if (!ready.empty()) {
-        resetPollChanges();
-        for (QueueSnapshotWorker::Result &result : ready) {
-            if (!result.ok) {
-                logDiagnostic(
-                    QStringLiteral("bridge"),
-                    QStringLiteral("snapshot decode error: %1").arg(result.error));
-                reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                            i18nc("@info", "invalid bridge packet: %1", result.error));
-                continue;
-            }
+    if (ready.empty() && m_deferredTreeFrames.empty()) {
+        return;
+    }
+    resetPollChanges();
+    for (QueueSnapshotWorker::Result &result : ready) {
+        if (!result.ok) {
+            logDiagnostic(
+                QStringLiteral("bridge"),
+                QStringLiteral("snapshot decode error: %1").arg(result.error));
+            reportError(BinaryBridgeCodec::ErrorCategorySystem,
+                        i18nc("@info", "invalid bridge packet: %1", result.error));
+        } else {
             processBinarySnapshot(result.snapshot, &result.rows);
         }
-        schedulePollChanges();
+        ++m_workerSnapshotsApplied;
+        // The library trees that came after this snapshot, before the next.
+        applyDeferredTreeFrames(false);
     }
-    // The bridge's wake-up was taken when these packets were, so poll for
-    // what waited behind them, such as library tree frames.
-    if (!workerSnapshotsPending()) {
-        scheduleBridgePoll(0);
-    }
+    // Once none is pending, every snapshot submitted before the trees was
+    // applied, or dropped with its generation.
+    applyDeferredTreeFrames(!workerSnapshotsPending());
+    schedulePollChanges();
 }
 
 void BridgeClient::pollInProcessBridge() {
